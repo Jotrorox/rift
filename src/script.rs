@@ -61,7 +61,7 @@ impl RouteScript {
     }
 }
 
-fn check_deadline(deadline: Instant) -> mlua::Result<()> {
+pub(crate) fn check_deadline(deadline: Instant) -> mlua::Result<()> {
     if Instant::now() >= deadline {
         return Err(mlua::Error::runtime("script deadline exceeded"));
     }

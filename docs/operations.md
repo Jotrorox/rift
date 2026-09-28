@@ -87,8 +87,9 @@ On `rift: reload rejected`, the old configuration is still active; inspect the
 error, restore the backup or fix the file, and reload again. `--check` cannot
 detect changes that are incompatible with the running process.
 
-Listener names/addresses and the metrics bind address require a restart.
-Routes, backends, limits and the shutdown deadline can reload. Existing sessions
+TCP listener names/addresses require a restart. HTTP admin, status and metrics
+services can be enabled, disabled or moved on reload. Routes, backends, limits
+and the shutdown deadline can reload. Existing sessions
 keep their original sockets and routing; new sessions use the new settings.
 Outside systemd, use `kill -HUP <pid>` on Unix or Ctrl-Break on Windows.
 
@@ -126,3 +127,11 @@ token bucket.
 
 Service behavior follows systemd's
 [`ExecReload` and `TimeoutStopSec` documentation](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html).
+
+## HTTP administration
+
+The optional [admin and status services](http.md) provide a bundled website,
+revision-checked configuration API, separate read-only status/metrics, and Lua
+HTTP extensions. Start with `examples/admin.lua`. All are disabled unless
+configured. Website saves and API/signal reloads use the same validation and
+configuration swap; the Lua file stays the source of truth.

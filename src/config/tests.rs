@@ -78,6 +78,15 @@ fn startup_execution_and_source_size_are_bounded() {
 }
 
 #[test]
+fn generated_configuration_errors_are_bounded_for_http_and_logs() {
+    let error = Config::from_lua("error(string.rep('x', 1024 * 1024))", "bad.lua")
+        .unwrap_err()
+        .to_string();
+    assert!(error.starts_with("bad.lua:"));
+    assert!(error.len() <= 2048);
+}
+
+#[test]
 fn malformed_lua_and_wrong_shapes_have_context() {
     for (source, expected) in [
         ("return {", "syntax error"),
@@ -317,4 +326,145 @@ fn operational_options_are_validated_with_context() {
             "{error}"
         );
     }
+}
+
+fn with_options(options: &str) -> String {
+    format!(
+        "return {{ listeners = {{ public = '127.0.0.1:25565' }}, backends = {{ lobby = '127.0.0.1:25566' }}, routes = {{ public = 'lobby' }}, {options} }}"
+    )
+}
+
+#[test]
+fn http_services_are_independently_optional_and_have_loopback_defaults() {
+    for options in [
+        "",
+        "web = false, status = false, metrics = false",
+        "web = { enabled = false }, status = { enabled = false }",
+    ] {
+        let config = Config::from_lua(&with_options(options), "services.lua").unwrap();
+        assert!(config.web.is_none());
+        assert!(config.status.is_none());
+        assert!(config.metrics.is_none());
+        assert!(config.on_http.is_none());
+    }
+    let config = Config::from_lua(&with_options("web = {}, status = {}"), "services.lua").unwrap();
+    assert_eq!(config.web.unwrap(), WebConfig::default());
+    assert_eq!(config.status.unwrap(), StatusConfig::default());
+    let config = Config::from_lua(&with_options("web = { listen = '[::1]:8081', api = false, ui = false }, status = { listen = '0.0.0.0:9091', metrics = false, ui = false }, on_http = function(req) return nil end"), "services.lua").unwrap();
+    assert_eq!(
+        config.web.unwrap(),
+        WebConfig {
+            listen: "[::1]:8081".parse().unwrap(),
+            api: false,
+            ui: false,
+            token: None
+        }
+    );
+    assert_eq!(
+        config.status.unwrap(),
+        StatusConfig {
+            listen: "0.0.0.0:9091".parse().unwrap(),
+            metrics: false,
+            ui: false
+        }
+    );
+    assert!(config.on_http.is_some());
+}
+
+#[test]
+fn administration_tokens_and_service_field_types_are_validated() {
+    for (options, expected) in [
+        ("web = true", "web: expected a table"),
+        ("status = true", "status: expected a table"),
+        ("web = { api = 1 }", "web.api"),
+        ("status = { enabled = 'false' }", "status.enabled"),
+        ("status = { metrics = 1 }", "status.metrics"),
+        ("web = { ui = 'yes' }", "web.ui"),
+        ("web = { unknown = false }", "web.unknown"),
+        ("status = { token = 'some-token' }", "status.token"),
+        ("web = { listen = 'localhost:8080' }", "web.listen"),
+        ("web = { listen = '0.0.0.0:8080' }", "web.token"),
+        ("web = { listen = '[::]:8080' }", "web.token"),
+        ("web = { token = 'short' }", "web.token"),
+        (
+            "web = { token = '0123456789abcdef\\r\\nHeader' }",
+            "web.token",
+        ),
+        ("web = { token = '0123456789abcdef space' }", "web.token"),
+        ("web = { token = 1234567890123456 }", "web.token"),
+        ("on_http = true", "on_http: expected a function"),
+    ] {
+        let error = Config::from_lua(&with_options(options), "services.lua")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(expected), "{options}: {error}");
+    }
+    let config = Config::from_lua(
+        &with_options("web = { listen = '0.0.0.0:8080', token = '0123456789abcdef' }"),
+        "services.lua",
+    )
+    .unwrap();
+    assert_eq!(
+        config.web.unwrap().token.as_deref(),
+        Some("0123456789abcdef")
+    );
+    assert!(
+        Config::from_lua(
+            &with_options("web = { enabled = false, listen = '0.0.0.0:8080' }"),
+            "services.lua"
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn services_cannot_collide_with_listeners_each_other_or_backend_targets() {
+    for options in [
+        "web = { listen = '127.0.0.1:25565' }",
+        "web = {}, metrics = '127.0.0.1:8080'",
+        "web = {}, status = { listen = '0.0.0.0:8080' }",
+        "status = {}, metrics = '[::]:9090'",
+        "status = { listen = '0.0.0.0:25565' }",
+        "web = { listen = '127.0.0.1:25566' }",
+        "status = { listen = '0.0.0.0:25566' }",
+        "metrics = '[::]:25566'",
+    ] {
+        let error = Config::from_lua(&with_options(options), "services.lua")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("duplicate address") || error.contains("same socket"),
+            "{options}: {error}"
+        );
+    }
+    assert!(Config::from_lua(&with_options("web = { listen = '127.0.0.1:0' }, status = { listen = '127.0.0.1:0' }, metrics = '127.0.0.1:0'"), "services.lua").is_ok());
+    for backend in [
+        "localhost:8080",
+        "LOCALHOST.:8080",
+        "[::ffff:127.0.0.1]:8080",
+    ] {
+        let source = with_options("web = {}").replace("127.0.0.1:25566", backend);
+        let error = Config::from_lua(&source, "services.lua").unwrap_err();
+        assert!(error.to_string().contains("same socket"), "{error}");
+    }
+}
+
+#[test]
+fn programmatic_web_options_cannot_bypass_token_validation() {
+    let mut config = Config {
+        web: Some(WebConfig {
+            listen: "0.0.0.0:8080".parse().unwrap(),
+            ..WebConfig::default()
+        }),
+        ..Config::default()
+    };
+    assert!(
+        config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("web.token")
+    );
+    config.web.as_mut().unwrap().token = Some("0123456789abcdef".into());
+    config.validate().unwrap();
 }
