@@ -1,5 +1,5 @@
 [Unit]
-Description=Rift Minecraft TCP proxy
+Description=Rift Minecraft session proxy
 After=network.target
 StartLimitIntervalSec=60
 StartLimitBurst=5
@@ -9,9 +9,11 @@ Type=exec
 User=rift
 Group=rift
 WorkingDirectory=/etc/rift
-ExecStartPre=/usr/local/bin/rift --check /etc/rift/rift.lua
+# Optional, root-readable file containing RIFT_ADMIN_TOKEN=... when admin is enabled.
+EnvironmentFile=-/etc/rift/admin.env
+ExecStartPre=/usr/local/bin/rift check /etc/rift/rift.lua
 ExecStart=/usr/local/bin/rift --config /etc/rift/rift.lua
-ExecReload=/usr/local/bin/rift --check /etc/rift/rift.lua
+ExecReload=/usr/local/bin/rift check /etc/rift/rift.lua
 ExecReload=/bin/kill -HUP $MAINPID
 KillSignal=SIGTERM
 # Must exceed shutdown_timeout_ms (30 seconds by default).

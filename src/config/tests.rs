@@ -318,3 +318,186 @@ fn operational_options_are_validated_with_context() {
         );
     }
 }
+
+fn with_admin_options(options: &str) -> String {
+    format!(
+        "return {{
+        listeners = {{ public = '0.0.0.0:25565' }},
+        backends = {{ lobby = '127.0.0.1:25566' }},
+        routes = {{ public = 'lobby' }},
+        {options}
+    }}"
+    )
+}
+
+#[test]
+fn administrator_options_have_explicit_permissions_and_no_environment_dependency() {
+    let defaults = Config::from_lua(&with_admin_options(""), "admin.lua").unwrap();
+    assert!(!defaults.maintenance);
+    assert!(defaults.draining.is_empty());
+    assert!(defaults.admin.is_none());
+    assert!(defaults.login_rate_limit.is_none());
+
+    let config = Config::from_lua(
+        &with_admin_options(
+            "
+        maintenance = true,
+        draining = { 'lobby' },
+        login_rate_limit = { per_ip_per_second = 3, per_ip_burst = 6 },
+        admin = {
+            listen = '127.0.0.1:9091',
+            token_env = 'RIFT_TEST_TOKEN_NOT_SET',
+            permissions = { 'status', 'reload' },
+        },
+    ",
+        ),
+        "admin.lua",
+    )
+    .unwrap();
+    assert!(config.maintenance);
+    assert_eq!(config.draining, BTreeSet::from(["lobby".into()]));
+    assert_eq!(config.login_rate_limit.unwrap().per_ip_burst, 6);
+    let admin = config.admin.unwrap();
+    assert_eq!(admin.token_env, "RIFT_TEST_TOKEN_NOT_SET");
+    assert_eq!(
+        admin.permissions,
+        BTreeSet::from(["status".into(), "reload".into()])
+    );
+
+    let config = Config::from_lua(
+        &with_admin_options("admin = { listen = '[::1]:9091', permissions = { 'status' } }"),
+        "admin.lua",
+    )
+    .unwrap();
+    assert_eq!(config.admin.unwrap().token_env, "RIFT_ADMIN_TOKEN");
+}
+
+#[test]
+fn malformed_administrator_options_are_actionable() {
+    for (options, expected) in [
+        ("maintenance = 'true'", "maintenance: expected a boolean"),
+        ("draining = { 'missing' }", "draining: unknown backend"),
+        (
+            "draining = { 'lobby', 'lobby' }",
+            "draining: duplicate name",
+        ),
+        (
+            "draining = { [2] = 'lobby' }",
+            "draining: expected a dense array",
+        ),
+        (
+            "draining = { lobby = true }",
+            "draining: expected a dense array",
+        ),
+        (
+            "login_rate_limit = { per_ip_burst = 0 }",
+            "login_rate_limit.per_ip_burst",
+        ),
+        (
+            "login_rate_limit = { surprise = true }",
+            "login_rate_limit.surprise",
+        ),
+        ("admin = {}", "admin.listen"),
+        (
+            "admin = { listen = '0.0.0.0:9091', permissions = { 'status' } }",
+            "admin.listen: use a loopback",
+        ),
+        ("admin = { listen = '127.0.0.1:9091' }", "admin.permissions"),
+        (
+            "admin = { listen = '127.0.0.1:9091', permissions = {} }",
+            "explicitly grant at least one permission",
+        ),
+        (
+            "admin = { listen = '127.0.0.1:9091', permissions = { '*' } }",
+            "unknown permission",
+        ),
+        (
+            "admin = { listen = '127.0.0.1:9091', permissions = { 'status', 'status' } }",
+            "duplicate name",
+        ),
+        (
+            "admin = { listen = '127.0.0.1:9091', permissions = { [2] = 'status' } }",
+            "dense array",
+        ),
+        (
+            "admin = { listen = '127.0.0.1:9091', permissions = { 'status' }, token_env = 'TOKEN=secret' }",
+            "admin.token_env",
+        ),
+        (
+            "admin = { listen = '127.0.0.1:9091', permissions = { 'status' }, token_env = '' }",
+            "admin.token_env",
+        ),
+        (
+            "admin = { listen = '127.0.0.1:9091', permissions = { 'status' }, token_env = '1TOKEN' }",
+            "admin.token_env",
+        ),
+        (
+            "admin = { listen = '127.0.0.1:25565', permissions = { 'status' } }",
+            "conflicts with listeners.public",
+        ),
+        (
+            "admin = { listen = '127.0.0.1:25566', permissions = { 'status' } }",
+            "admin.listen and backends.lobby",
+        ),
+        (
+            "metrics = '0.0.0.0:9091', admin = { listen = '127.0.0.1:9091', permissions = { 'status' } }",
+            "conflicts with metrics",
+        ),
+    ] {
+        let error = Config::from_lua(&with_admin_options(options), "admin.lua")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("admin.lua") && error.contains(expected),
+            "{options}: {error}"
+        );
+    }
+}
+
+#[test]
+fn programmatic_administrator_configs_receive_the_same_validation() {
+    let mut config = Config::default();
+    config.draining.insert("unknown".into());
+    assert!(
+        config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("draining")
+    );
+    config.draining.clear();
+    config.admin = Some(Admin {
+        listen: "127.0.0.1:9091".parse().unwrap(),
+        token_env: "RIFT_ADMIN_TOKEN".into(),
+        permissions: BTreeSet::from(["status".into()]),
+    });
+    config.validate().unwrap();
+    config
+        .admin
+        .as_mut()
+        .unwrap()
+        .permissions
+        .insert("unknown".into());
+    assert!(
+        config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("unknown permission")
+    );
+    config.admin.as_mut().unwrap().permissions.remove("unknown");
+    config.login_rate_limit = Some(RateLimit {
+        per_ip_per_second: 1,
+        per_ip_burst: 1,
+        global_per_second: 1,
+        global_burst: 1,
+        max_ips: 0,
+    });
+    assert!(
+        config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("login_rate_limit.max_ips")
+    );
+}

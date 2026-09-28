@@ -9,17 +9,24 @@ separate Lua installation. Building requires a C toolchain (MSVC on Windows).
 
 Download a native archive from [Releases](https://github.com/Jotrorox/rift/releases)
 and follow the [operator guide](docs/operations.md) for installation, the supplied
-systemd service, reloads, shutdown and upgrades. Archives include the examples and
-operating docs. Rift is released under the [BSD-2-Clause License](LICENSE).
+systemd/container examples, administration, reloads, shutdown and upgrades.
+Archives include the examples and operating docs. Rift is released under the
+[BSD-2-Clause License](LICENSE).
 
 ## Run
 
 ```sh
 cargo build --release --locked
-./target/release/rift 0.0.0.0:25565 127.0.0.1:25566
+./target/release/rift init rift.lua
+# Edit rift.lua for your network, then validate it before starting.
+./target/release/rift check rift.lua
+./target/release/rift --config rift.lua
 ```
 
-Players connect to port `25565`; Rift connects to the server on `25566`.
+The generated defaults accept players on port `25565` and connect to the server
+on `25566`. `rift init [path]` writes a commented configuration and refuses to
+overwrite existing files. For an immediate run without a file, use
+`rift 0.0.0.0:25565 127.0.0.1:25566`.
 With no arguments, Rift loads `./rift.lua` if present, otherwise it uses those
 same addresses. Explicit CLI addresses or routing options override the file.
 The listener must be an IP literal with a port. Backends accept IP literals or DNS hostnames with ports;
@@ -93,7 +100,7 @@ authentication are not implemented.
 
 ## Lua configuration
 
-Copy [`examples/rift.lua`](examples/rift.lua) to `rift.lua` in the working directory,
+Generate a starter with `rift init`, adapt [`examples/rift.lua`](examples/rift.lua),
 or select a file explicitly:
 
 ```sh
@@ -178,12 +185,13 @@ are disabled unless their corresponding fields are present.
 ### Validate and reload
 
 ```sh
-./target/release/rift --check ./rift.lua
+./target/release/rift check ./rift.lua
 kill -HUP <rift-pid>
 ```
 
-`--check` evaluates the script and validates its configuration without binding
-sockets or contacting backends. It checks syntax, top-level execution budgets,
+`rift check [path]` (default `./rift.lua`; also spelled `--check path`) evaluates
+the script and validates its configuration without binding sockets or contacting
+backends. It checks syntax, top-level execution budgets,
 types, routes and backend references. Hook results remain validated per invocation,
 since they can depend on connection metadata.
 
@@ -195,8 +203,9 @@ while it is running are coalesced. CLI-only invocations have no file to reload.
 An implicitly loaded `./rift.lua` can be reloaded too.
 
 Routes, backends, fallback lists, scripts, limits, health checks, status-cache
-settings and the shutdown deadline can change live. **Listener names/addresses
-and the metrics bind address require a restart**; changing them rejects the
+settings, maintenance/draining policy and the shutdown deadline can change live.
+**Listener names/addresses, the metrics bind address and admin configuration
+require a restart**; changing them rejects the
 entire reload. Configured port `0` retains the original assigned port. All
 listener and metrics sockets bind successfully before traffic is accepted.
 
@@ -206,6 +215,9 @@ players or retain old caches for the lifetime of a session. Lowering
 `max_connections` preserves current sessions and rejects new ones until the total
 falls below the new limit. The Lua worker limit remains shared across generations.
 Every successful reload invalidates status caches and starts fresh health checks.
+Route changes affect new connections while existing sessions continue. Runtime
+maintenance/draining overrides survive reload; a later admin command can change
+them, and a restart restores the configured policy.
 
 On Windows, Ctrl-Break reloads and Ctrl-C drains connections. On Unix, SIGINT or
 SIGTERM drains; SIGHUP reloads. The startup log advertises readiness after signal
@@ -234,6 +246,53 @@ The IP table is bounded by `max_ips`. When full, only completely replenished
 buckets can be evicted; new IPs otherwise close. Cleanup runs at most once per
 second. Unchanged rate settings preserve balances on reload; changed settings
 start fresh buckets. All five values accept integers in 1–1,000,000.
+
+`login_rate_limit` accepts the same fields and defaults, using separate buckets
+after handshake parsing for login/transfer admission. Status requests do not
+spend login tokens. `maintenance = true` rejects new logins while existing players
+and server-list status remain available. `draining = { "survival" }` prevents new
+attachments to named backends, including fallback and explicit transfers, while
+preserving existing sessions. All three options are disabled by default.
+
+### Administrator controls
+
+```lua
+admin = {
+    listen = "127.0.0.1:9091",
+    token_env = "RIFT_ADMIN_TOKEN",
+    permissions = { "status", "maintenance", "drain", "transfer", "reload", "shutdown" },
+},
+```
+
+Administration is opt-in and loopback-only. Set the named environment variable
+to a random secret of 32–1024 bytes without control characters before starting; `rift check` validates
+the configuration without requiring the runtime secret. Each operation requires
+both the token and its explicit permission. There is one credential/permission
+set; `{ "status" }` makes it read-only. The endpoint uses JSON lines over TCP.
+Admin bind, token-variable and permission changes require restart.
+
+With the same token in the CLI's `RIFT_ADMIN_TOKEN` environment variable:
+
+```sh
+rift admin status
+rift admin drain survival on
+rift admin transfer 42 lobby
+rift admin maintenance on
+rift admin reload
+rift admin drain survival off
+rift admin maintenance off
+rift admin shutdown
+```
+
+Use a `connection_id` from `status` for transfers; status also lists backend health
+and draining state. The default endpoint is `127.0.0.1:9091`; select another using
+`rift admin --address 127.0.0.1:9092 status`. Transfer requires a settled online
+player on 1.20.2+, a configured eligible target and matching UUID/name at backend
+login. Unsupported clients and invalid targets stay attached to their original
+backend. Once transfer has altered client protocol state, failure disconnects
+the session. The operation is capped at 30 seconds and reports success when play
+resumes. See the [operator guide](docs/operations.md) for secret handling,
+maintenance windows, reload confirmation and service/container procedures.
 
 ### Backend outages and fallback
 
@@ -271,8 +330,10 @@ a primary silently drops packets. Resolution and all returned addresses are
 included in that attempt. If no candidate is reachable, the client receives an unavailable-server message.
 Fallback happens only while connecting, before any client bytes are forwarded.
 The executable disconnects with a useful message if its backend fails; automatic
-migration of players is not configured. The library's `Session::connect_backend`
-operation can attach a replacement backend to an established client on 1.20.2+.
+migration of players is not configured. Administrators can explicitly transfer
+an online player with `rift admin transfer <connection-id> <backend>`. The
+library's `Session::connect_backend` operation attaches a replacement backend to
+an established client on 1.20.2+.
 It re-enters client configuration, logs into the replacement independently, checks
 the UUID/name, and retains the original client socket and compression settings.
 Callers must give that operation a deadline and disconnect after an interrupted
@@ -328,10 +389,24 @@ handlers, independent of gameplay admission. Other paths return 404.
 Metrics include `rift_connections_active`, `rift_players_online`, accepted/completed/rejected connection
 counters, connection errors, backend connect failures, fallback selections,
 cache hits/misses, successful/failed reloads, health probes, forced shutdowns,
-and client bytes read/written. `rift_backend_up{backend="name"}` reports each
+and client bytes read/written. `rift_backend_players_online{backend="name"}`
+counts players attached to each backend. `rift_backend_up{backend="name"}` reports each
 configured backend's eligibility (initially 1; always 1 when checks are disabled).
+This is health status, separate from administrative draining.
+`rift_backend_draining{backend="name"}` and `rift_maintenance_mode` report the
+effective administrative state, including runtime overrides.
 Counters survive reloads. Bytes update during live sessions and include failed
 sessions; no peer-address or hostname labels create unbounded metric cardinality.
+
+`rift_login_duration_seconds` is a histogram from TCP acceptance through first
+settled play, including routing, handshake and login/configuration. Interpret its
+buckets/sum/count with errors: failed logins do not contribute successful latency.
+`rift_logins_rate_limited_total` and `rift_connections_access_rejected_total`
+track login admission and maintenance rejection. Transfer results use
+`rift_player_transfers_total` and `rift_player_transfer_failures_total`.
+`rift_process_resident_memory_bytes` reports Linux process RSS;
+`rift_process_resident_memory_available` indicates whether sampling is supported
+and succeeded. When unavailable, the byte gauge is omitted.
 
 Shutdown closes gameplay listeners and stops health probes, then drains all
 accepted sessions, including pending hooks and handshakes. The metrics listener
@@ -368,12 +443,14 @@ the backup actually used.
 | `on_route` | `unknown_backend` | The hook returned an unconfigured backend name |
 | `dns` | `dns_error` | Backend resolution failed, returned no addresses or timed out |
 | `connect` | `connect_error` | TCP connection or loop protection failed, or connect timed out |
-| `connect` | `no_healthy_backend` | No primary or fallback was eligible |
+| `connect` | `no_eligible_backend` | No primary or fallback was eligible |
 | `admission` | `rate_limited`, `capacity_exhausted` | Admission closed the connection |
+| `login_admission` | `login_rate_limited`, `maintenance` | Login was denied before contacting a backend |
+| `transfer` | `transfer_failed` | Replacement backend login/configuration failed; the session closed |
 | `on_route` | `route_rejected` | The hook explicitly rejected the connection |
 
 Other I/O failures use `failure="io_error"` with `stage` set to `client_setup`,
-`backend_setup`, `handshake_write`, `session`, `status_request`, `status_cache_wait`,
+`backend_setup`, `handshake_write`, `login`, `configuration`, `play`, `status_request`, `status_cache_wait`,
 `status_upstream` or `status_response`. `error_kind="TimedOut"` distinguishes I/O
 deadlines from other errors at the same stage. Lua diagnostics retain the script
 filename and hook context. Messages are capped at 2,048 characters and JSON
@@ -385,6 +462,8 @@ recovered by a fallback. Only `connection_failed` means the session ended in an
 error. Policy/admission closures use `connection_rejected`; hook rejection
 reasons appear in `message`. These events preserve the existing error/rejection
 counters and do not log successful sessions or individual traffic packets.
+`admin_command` records completed or rejected administrator operations with
+`permission`, `outcome` and a bounded diagnostic message; credentials are omitted.
 For example, filter a combined stderr log with
 `jq -R 'fromjson? | select(.event == "connection_failed")' rift.log`.
 
@@ -660,9 +739,11 @@ macOS and Windows archives with `SHA256SUMS` to a GitHub Release. Only the final
 publishing job receives write permission; it uses the workflow's built-in token.
 This distributes the standalone proxy; running servers are managed separately.
 Each archive includes the binary, BSD-2-Clause license, third-party notices, README,
-all three Lua examples, the systemd unit and operator/pilot documentation. Packaging extracts the archive,
+all three Lua examples, the systemd unit, Dockerfile/Compose examples and
+operator/pilot documentation. Packaging extracts the archive,
 checks `--version` against `Cargo.toml`, runs `--help`, verifies `--license` without
-external license files, and validates every bundled configuration with `--check`.
+external license files, validates every bundled configuration with `--check`,
+and smoke-tests generated configuration and overwrite protection with `init`/`check`.
 Build the same archive locally after a release build:
 `python3 scripts/package.py --platform linux-x86_64` (or `macos-aarch64` /
 `windows-x86_64` on the matching native host).

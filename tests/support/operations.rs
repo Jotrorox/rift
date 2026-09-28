@@ -429,8 +429,7 @@ fn answer_status(backend: &TcpListener, packet: &[u8], description: u8) {
         b'}',
     ];
     server.write_all(&response).unwrap();
-    // Let the independent probe close first. Closing the fixture first can put
-    // its listening port in TIME_WAIT and race the outage/rebind test below.
+    // Let the independent probe finish and close its side of the exchange.
     assert_closed(&mut server);
 }
 
@@ -490,8 +489,14 @@ fn status_cache_is_invalidated_on_reload_and_can_cover_a_brief_backend_outage() 
     let response = first.join().unwrap();
     drop(backend);
     assert_eq!(query(front, packet.clone(), 2).join().unwrap(), response);
-    let backend = TcpListener::bind(address).unwrap();
-    fixture.write(&source);
+    // The OS can reuse the released port for a concurrent test or a status
+    // client's ephemeral socket. Restore on a fresh port; the backend name and
+    // cache key stay the same, so this still verifies reload invalidation.
+    let backend = TcpListener::bind("127.0.0.1:0").unwrap();
+    fixture.write(&source.replace(
+        &address.to_string(),
+        &backend.local_addr().unwrap().to_string(),
+    ));
     process.signal("-HUP");
     process.message("configuration reloaded");
     let next = query(front, packet.clone(), 3);
