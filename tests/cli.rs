@@ -33,6 +33,8 @@ fn help_is_successful_and_describes_the_interface() {
         let text = String::from_utf8(output.stdout).unwrap();
         assert!(text.contains("<listen-ip:port> <backend-ip:port>"));
         assert!(text.contains("25565"));
+        assert!(text.contains("--route"));
+        assert!(text.contains("--default"));
         assert!(output.stderr.is_empty());
     }
 }
@@ -48,6 +50,24 @@ fn malformed_arguments_and_proxy_loops_are_rejected() {
         vec!["0.0.0.0:25565", "127.0.0.1:25565"],
         vec!["[::1]:25565", "[::1]:25565"],
         vec!["[::]:25565", "[::1]:25565"],
+        vec!["127.0.0.1:25565", "--route"],
+        vec!["127.0.0.1:25565", "--route", "example.com"],
+        vec!["127.0.0.1:25565", "--route", "example.com=127.0.0.1:25565"],
+        vec![
+            "127.0.0.1:25565",
+            "--route",
+            "*.example.com=127.0.0.1:25565",
+        ],
+        vec!["127.0.0.1:25565", "--default", "127.0.0.1:25565"],
+        vec![
+            "127.0.0.1:25565",
+            "--route",
+            "*=host:1",
+            "--default",
+            "other:2",
+        ],
+        vec!["127.0.0.1:25565", "--unknown", "host:1"],
+        vec!["127.0.0.1:25565", "host:1", "--route", "example.com=host:2"],
     ] {
         let output = run(&args);
         assert!(!output.status.success(), "accepted {args:?}");
