@@ -1,7 +1,8 @@
 # Rift
 
-A small TCP reverse proxy for Minecraft Java Edition. Rust, Tokio, configurable listeners and backends.
-No Minecraft packet parsing: the backend handles login, encryption, compression,
+A small TCP reverse proxy for Minecraft Java Edition. Route multiple hostnames
+through one port, or forward all traffic to one backend. In routing mode Rift
+reads the initial handshake; the backend handles login, encryption, compression,
 and gameplay. LuaJIT is embedded through `mlua`; the binary needs no Java or
 separate Lua installation. Building requires a C toolchain (MSVC on Windows).
 
@@ -14,9 +15,46 @@ cargo build --release --locked
 
 Players connect to port `25565`; Rift connects to the server on `25566`.
 With no arguments, Rift loads `./rift.lua` if present, otherwise it uses those
-same addresses. Explicit CLI addresses override the file. Addresses must be IP literals
-with ports; IPv6 works too: `rift '[::]:25565' '[::1]:25566'`.
+same addresses. Explicit CLI addresses or routing options override the file.
+The listener must be an IP literal with a port. Backends accept IP literals or DNS hostnames with ports;
+IPv6 works too: `rift '[::]:25565' '[::1]:25566'`.
 Use `--help` for usage. Stop with Ctrl-C (active connections close).
+
+### Hostname routing
+
+```sh
+./target/release/rift 0.0.0.0:25565 \
+  --route survival.example.com=127.0.0.1:25566 \
+  --route creative.example.com=localhost:25567 \
+  --route '*.games.example.com=mc-backend.internal:25565' \
+  --default 127.0.0.1:25566
+```
+
+Point the public DNS records for both player-facing domains at Rift. Players
+enter `survival.example.com` or `creative.example.com`, using the same port, and
+reach different servers. Backend DNS is resolved for each connection; all
+returned addresses are tried in order within one deadline (five seconds by default) covering
+resolution, connection and handshake forwarding. DNS uses the system resolver
+and explicit ports; Rift does not look up backend SRV records.
+
+Routing prefers an exact hostname, then the longest matching wildcard suffix,
+then the optional default. `*.games.example.com` matches one or more subdomain
+labels, but not `games.example.com` itself. Names are case-insensitive and one
+trailing dot is ignored. Quote wildcard arguments to avoid shell expansion.
+`--route '*=host:port'` is an alternative to `--default host:port`. Duplicate
+patterns or defaults are rejected. Without a default, unmatched clients close.
+
+Routing mode requires a modern Java Edition handshake within five seconds total.
+The initial packet body is limited to 2 KiB and the address to 1020 UTF-8 bytes
+and 255 UTF-16 code units. Malformed, oversized, truncated or late handshakes
+close without contacting a backend. Only the hostname before any NUL-delimited
+mod metadata is used for matching; the entire handshake is forwarded unchanged.
+Status, login and transfer handshakes all enter the same transparent relay.
+Legacy pre-1.7 server-list pings cannot select a hostname route.
+
+The positional single-backend command remains a transparent TCP relay and does
+not require a Minecraft handshake. Do not mix a positional backend with routing
+options.
 
 For a backend on the same machine, set these in `server.properties`:
 
@@ -29,7 +67,7 @@ prevent-proxy-connections=false
 
 Keep Paper's BungeeCord/Velocity forwarding disabled. This is transparent TCP:
 the backend sees Rift's IP address, with no player IP forwarding. There is no
-routing by Minecraft hostname, protocol translation, or Bedrock/UDP support.
+protocol translation or Bedrock/UDP support.
 
 ## Lua configuration
 
@@ -66,9 +104,25 @@ return {
 ```
 
 `listeners`, `backends`, and `routes` are required, nonempty tables with string
-names and string values. Each listener must have exactly one route to an existing
-backend; multiple listeners may share a backend. Addresses use the same IP-literal
-syntax as the CLI. Listener port `0` asks the OS to choose an available port.
+names. Listeners require IP literals with ports; backends also accept DNS
+hostnames with ports. Listener port `0` asks the OS to choose an available port.
+Each listener needs a route. A string value selects one backend and preserves
+transparent TCP forwarding. A table enables Minecraft hostname routing:
+
+```lua
+routes = {
+    public = {
+        ["survival.example.com"] = "lobby",
+        ["creative.example.com"] = "creative",
+        ["*.games.example.com"] = "creative",
+        ["*"] = "lobby", -- Optional default.
+    },
+    creative = "creative", -- Existing single-backend listener.
+},
+```
+
+Every route target must name a configured backend. Matching and handshake
+limits are the same as for CLI routes. Multiple listeners may share backends.
 
 `limits` and each of its fields are optional and default to the values above.
 `max_connections` is shared across all listeners and must be a positive integer
@@ -89,8 +143,10 @@ All listeners bind before Rift begins accepting connections.
 - One async task per connection on Tokio's multithreaded runtime.
 - `TCP_NODELAY` on both sockets for small-packet latency.
 - By default, two reusable 32 KiB relay buffers per connection, with backpressure and half-close support.
-- By default, a five-second backend connection timeout. No idle timeout for established sessions.
-- By default, at most 4,096 active connections, including pending backend connections;
+- Five-second handshake deadline in routing mode; a separate backend
+  DNS/connect/forward deadline (five seconds by default). No idle timeout for established sessions.
+- By default, at most 4,096 active connections across all listeners, including
+  pending handshakes and backend connections;
   excess clients are immediately closed. The OS file descriptor limit must allow
   two sockets per client plus headroom.
 - No per-packet logging, serialization, shared traffic lock, or unbounded queue.
@@ -129,6 +185,9 @@ Each run creates a fresh world under `target/minecraft/runs/`, retains logs and 
 - Direct and proxied login, compression in both directions, configuration,
   teleport acknowledgement, world chunks, and two play keepalive exchanges.
 - Recovery when the backend starts after Rift, and clean handling of its shutdown.
+- Two servers with distinct MOTDs behind one routing listener: both domains,
+  backend DNS, wildcard/default routes, concurrent status requests and full
+  gameplay through each domain. Each test job briefly runs two server processes.
 
 Use `--server paper` to select one backend (repeat the option to select several),
 `--binary /path/to/rift` to test an existing build, and `--report path.json` to
@@ -139,7 +198,9 @@ which disables test assertions; the scripts reject it.
 
 Rust tests additionally check simultaneous bulk transfer byte for byte, slow
 readers, fragmented concurrent sessions, half-closes in both directions, connection
-refusal, and CLI startup failures. Microsoft account authentication and
+refusal, CLI startup failures, bounded handshake parsing and deadlines, and
+hostname routing against two independent Minecraft status fixtures.
+Microsoft account authentication and
 encrypted gameplay are not exercised by the offline integration fixtures.
 
 ## CI and releases

@@ -7,7 +7,7 @@ fn lua_expressions_produce_typed_config_with_original_defaults() {
     let config = Config::from_lua(VALID, "test.lua").unwrap();
     assert_eq!(config.listeners["public"], "0.0.0.0:25565".parse().unwrap());
     assert_eq!(config.backends["lobby"], "127.0.0.1:25566".parse().unwrap());
-    assert_eq!(config.routes["public"], "lobby");
+    assert_eq!(config.routes["public"], Route::Direct("lobby".into()));
     assert_eq!(config.limits, Limits::default());
     assert_eq!(Config::default().limits, config.limits);
     let source = VALID
@@ -73,8 +73,8 @@ fn invalid_values_and_references_are_rejected() {
         ),
         (
             "127.0.0.1:25566",
-            "localhost:25566",
-            "backends.lobby: invalid socket address",
+            "bad backend:25566",
+            "backends.lobby: invalid backend",
         ),
         ("127.0.0.1:25566", "127.0.0.1:25565", "same socket"),
         (
@@ -143,5 +143,58 @@ fn multiple_listeners_cannot_loop_through_each_other_or_share_an_address() {
     ] {
         let error = Config::from_lua(&source.replace(from, to), "test.lua").unwrap_err();
         assert!(error.to_string().contains(expected), "{error}");
+    }
+}
+
+#[test]
+fn hostname_tables_accept_dns_backends_and_reject_invalid_routes() {
+    let source = "return {
+        listeners = { public = '127.0.0.1:0' },
+        backends = { lobby = 'localhost:25566', creative = '127.0.0.1:25567' },
+        routes = { public = { ['play.example.com'] = 'lobby', ['*.example.com'] = 'creative', ['*'] = 'lobby' } }
+    }";
+    let config = Config::from_lua(source, "routes.lua").unwrap();
+    let Mode::Routed(routes) = config.mode("public").unwrap() else {
+        panic!("expected hostname routes")
+    };
+    assert_eq!(
+        routes.select("play.example.com").unwrap(),
+        &Backend::parse("localhost:25566").unwrap()
+    );
+    assert_eq!(
+        routes.select("other.example.com").unwrap(),
+        &Backend::parse("127.0.0.1:25567").unwrap()
+    );
+    assert_eq!(
+        routes.select("unknown.test").unwrap(),
+        &Backend::parse("localhost:25566").unwrap()
+    );
+    for (from, to, expected) in [
+        (
+            "['play.example.com'] = 'lobby'",
+            "['play.example.com'] = 'missing'",
+            "unknown backend",
+        ),
+        (
+            "['play.example.com']",
+            "['foo.*.example.com']",
+            "invalid route hostname",
+        ),
+        (
+            "['play.example.com'] = 'lobby'",
+            "['play.example.com'] = 42",
+            "expected a string",
+        ),
+        (
+            "['play.example.com'] = 'lobby'",
+            "['play.example.com'] = 'lobby', ['PLAY.EXAMPLE.COM.'] = 'creative'",
+            "duplicate route",
+        ),
+    ] {
+        let error = Config::from_lua(&source.replace(from, to), "routes.lua")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("routes.lua"), "{error}");
+        assert!(error.contains(expected), "{error}");
     }
 }

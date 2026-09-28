@@ -1,9 +1,12 @@
 mod config;
+mod handshake;
+mod routing;
 
 use config::{Config, Limits};
+use routing::{Backend, Routes};
 use std::{env, io, net::SocketAddr, path::Path, process::ExitCode, sync::Arc, time::Duration};
 use tokio::{
-    io::copy_bidirectional_with_sizes,
+    io::{AsyncWriteExt, copy_bidirectional_with_sizes},
     net::{TcpListener, TcpStream},
     sync::Semaphore,
     task::JoinSet,
@@ -11,11 +14,21 @@ use tokio::{
 };
 
 const USAGE: &str = "Usage: rift [<listen-ip:port> <backend-ip:port>]\n\
+    Backend may also be a DNS hostname with a port.\n\
     rift --config <path>\n\
+    Routing: rift <listen-ip:port> [--route <hostname=backend:port>]... [--default <backend:port>]\n\
+    Routes: exact hostname, '*.example.com', or '*' (default).\n\
+    Priority: exact, longest wildcard suffix, default. Unmatched clients close.\n\
     No arguments: load ./rift.lua if present, otherwise use defaults.\n\
     Defaults: 0.0.0.0:25565 127.0.0.1:25566\n\
-    Explicit addresses override ./rift.lua.\n\
+    Explicit addresses and routing options override ./rift.lua.\n\
     IPv6: rift '[::]:25565' '[::1]:25566'";
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+
+enum Mode {
+    Direct(Backend),
+    Routed(Routes),
+}
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -42,34 +55,64 @@ async fn start() -> io::Result<()> {
         }
         [flag, path] if flag == "--config" => Config::load(Path::new(path))?,
         [listen, backend] => Config::from_addresses(listen, backend)?,
+        [listen, options @ ..] if !options.is_empty() && options.len().is_multiple_of(2) => {
+            let listen = listen
+                .parse::<SocketAddr>()
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+            let mut routes = Routes::default();
+            for option in options.as_chunks::<2>().0 {
+                match option[0].as_str() {
+                    "--route" => routes.add(&option[1])?,
+                    "--default" => routes.set_default(Backend::parse(&option[1])?)?,
+                    _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, USAGE)),
+                }
+            }
+            routes.check_loops(listen)?;
+            return serve(
+                vec![("default".into(), listen, Mode::Routed(routes))],
+                Limits::default(),
+            )
+            .await;
+        }
         _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, USAGE)),
     };
-    serve(config).await
+    let listeners = config
+        .listeners
+        .iter()
+        .map(|(name, address)| Ok((name.clone(), *address, config.mode(name)?)))
+        .collect::<io::Result<Vec<_>>>()?;
+    serve(listeners, config.limits).await
 }
 
-async fn serve(config: Config) -> io::Result<()> {
+async fn serve(configured: Vec<(String, SocketAddr, Mode)>, limits: Limits) -> io::Result<()> {
     // Bind everything before accepting clients, so partial startup fails cleanly.
     let mut listeners = Vec::new();
-    for (name, address) in &config.listeners {
+    for (name, address, mode) in configured {
         let listener = TcpListener::bind(address).await.map_err(|error| {
             io::Error::new(
                 error.kind(),
                 format!("listeners.{name} ({address}): {error}"),
             )
         })?;
-        let backend = config.backends[&config.routes[name]];
-        listeners.push((listener, backend));
+        listeners.push((listener, mode));
     }
+    let addresses = Arc::new(
+        listeners
+            .iter()
+            .map(|(listener, _)| listener.local_addr())
+            .collect::<io::Result<Vec<_>>>()?,
+    );
     // One shared limit bounds sockets, tasks and buffers across all listeners.
-    let connections = Arc::new(Semaphore::new(config.limits.max_connections));
+    let connections = Arc::new(Semaphore::new(limits.max_connections));
     let mut tasks = JoinSet::new();
-    for (listener, backend) in listeners {
-        eprintln!("rift: {} -> {backend}", listener.local_addr()?);
+    for (listener, mode) in listeners {
+        eprintln!("rift: listening on {}", listener.local_addr()?);
         tasks.spawn(accept(
             listener,
-            backend,
-            config.limits,
+            Arc::new(mode),
+            limits,
             connections.clone(),
+            addresses.clone(),
         ));
     }
     if let Some(result) = tasks.join_next().await {
@@ -80,9 +123,10 @@ async fn serve(config: Config) -> io::Result<()> {
 
 async fn accept(
     listener: TcpListener,
-    backend: SocketAddr,
+    mode: Arc<Mode>,
     limits: Limits,
     connections: Arc<Semaphore>,
+    addresses: Arc<Vec<SocketAddr>>,
 ) {
     loop {
         let (client, peer) = match listener.accept().await {
@@ -98,31 +142,47 @@ async fn accept(
             // Reject overload immediately instead of queuing unbounded work.
             continue;
         };
+        let mode = Arc::clone(&mode);
+        let addresses = Arc::clone(&addresses);
         tokio::spawn(async move {
             let _permit = permit;
-            if let Err(error) = relay(client, backend, limits).await {
+            if let Err(error) = handle(client, &mode, &addresses, limits).await {
                 eprintln!("rift: {peer}: {error}");
             }
         });
     }
 }
 
-async fn relay(
+async fn handle(
     mut client: TcpStream,
-    backend: SocketAddr,
+    mode: &Mode,
+    listeners: &[SocketAddr],
     limits: Limits,
 ) -> io::Result<(u64, u64)> {
     client.set_nodelay(true)?;
-    let mut upstream = timeout(limits.connect_timeout, TcpStream::connect(backend)).await??;
-    upstream.set_nodelay(true)?;
+    let (backend, packet) = match mode {
+        Mode::Direct(backend) => (backend, Vec::new()),
+        Mode::Routed(routes) => {
+            let (host, packet) = timeout(HANDSHAKE_TIMEOUT, handshake::read(&mut client)).await??;
+            (routes.select(&host)?, packet)
+        }
+    };
+    let mut upstream = timeout(limits.connect_timeout, async {
+        let mut upstream = backend.connect(listeners).await?;
+        upstream.set_nodelay(true)?;
+        upstream.write_all(&packet).await?;
+        Ok::<_, io::Error>(upstream)
+    })
+    .await??;
     // Fixed buffers bound memory and preserve backpressure and TCP half-closes.
-    copy_bidirectional_with_sizes(
+    let (sent, received) = copy_bidirectional_with_sizes(
         &mut client,
         &mut upstream,
         limits.buffer_size,
         limits.buffer_size,
     )
-    .await
+    .await?;
+    Ok((sent + packet.len() as u64, received))
 }
 
 #[cfg(test)]
