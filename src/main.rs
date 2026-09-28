@@ -1,45 +1,89 @@
-use std::{env, io, net::SocketAddr, time::Duration};
+mod config;
+
+use config::{Config, Limits};
+use std::{env, io, net::SocketAddr, path::Path, process::ExitCode, sync::Arc, time::Duration};
 use tokio::{
     io::copy_bidirectional_with_sizes,
     net::{TcpListener, TcpStream},
     sync::Semaphore,
+    task::JoinSet,
     time::{sleep, timeout},
 };
 
 const USAGE: &str = "Usage: rift [<listen-ip:port> <backend-ip:port>]\n\
+    rift --config <path>\n\
+    No arguments: load ./rift.lua if present, otherwise use defaults.\n\
     Defaults: 0.0.0.0:25565 127.0.0.1:25566\n\
+    Explicit addresses override ./rift.lua.\n\
     IPv6: rift '[::]:25565' '[::1]:25566'";
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const BUFFER_SIZE: usize = 32 * 1024;
-// Bound sockets, tasks and relay buffers, including while the backend is down.
-static CONNECTIONS: Semaphore = Semaphore::const_new(4096);
 
 #[tokio::main]
-async fn main() -> io::Result<()> {
+async fn main() -> ExitCode {
+    match start().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("rift: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn start() -> io::Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
-    let (listen, backend) = match args.as_slice() {
-        [] => ("0.0.0.0:25565", "127.0.0.1:25566"),
+    let config = match args.as_slice() {
+        [] => match Config::load(Path::new("rift.lua")) {
+            Ok(config) => config,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Config::default(),
+            Err(error) => return Err(error),
+        },
         [help] if help == "--help" || help == "-h" => {
             println!("{USAGE}");
             return Ok(());
         }
-        [listen, backend] => (listen.as_str(), backend.as_str()),
+        [flag, path] if flag == "--config" => Config::load(Path::new(path))?,
+        [listen, backend] => Config::from_addresses(listen, backend)?,
         _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, USAGE)),
     };
-    let listen = parse_address(listen)?;
-    let backend = parse_address(backend)?;
-    if listen.port() == backend.port()
-        && (listen.ip() == backend.ip()
-            || (listen.ip().is_unspecified() && backend.ip().is_loopback()))
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "listen and backend must not point to the same socket",
+    serve(config).await
+}
+
+async fn serve(config: Config) -> io::Result<()> {
+    // Bind everything before accepting clients, so partial startup fails cleanly.
+    let mut listeners = Vec::new();
+    for (name, address) in &config.listeners {
+        let listener = TcpListener::bind(address).await.map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("listeners.{name} ({address}): {error}"),
+            )
+        })?;
+        let backend = config.backends[&config.routes[name]];
+        listeners.push((listener, backend));
+    }
+    // One shared limit bounds sockets, tasks and buffers across all listeners.
+    let connections = Arc::new(Semaphore::new(config.limits.max_connections));
+    let mut tasks = JoinSet::new();
+    for (listener, backend) in listeners {
+        eprintln!("rift: {} -> {backend}", listener.local_addr()?);
+        tasks.spawn(accept(
+            listener,
+            backend,
+            config.limits,
+            connections.clone(),
         ));
     }
+    if let Some(result) = tasks.join_next().await {
+        result.map_err(io::Error::other)?;
+    }
+    Err(io::Error::other("listener stopped unexpectedly"))
+}
 
-    let listener = TcpListener::bind(listen).await?;
-    eprintln!("rift: {} -> {backend}", listener.local_addr()?);
+async fn accept(
+    listener: TcpListener,
+    backend: SocketAddr,
+    limits: Limits,
+    connections: Arc<Semaphore>,
+) {
     loop {
         let (client, peer) = match listener.accept().await {
             Ok(connection) => connection,
@@ -50,31 +94,35 @@ async fn main() -> io::Result<()> {
                 continue;
             }
         };
-        let Ok(permit) = CONNECTIONS.try_acquire() else {
+        let Ok(permit) = connections.clone().try_acquire_owned() else {
             // Reject overload immediately instead of queuing unbounded work.
             continue;
         };
         tokio::spawn(async move {
             let _permit = permit;
-            if let Err(error) = relay(client, backend).await {
+            if let Err(error) = relay(client, backend, limits).await {
                 eprintln!("rift: {peer}: {error}");
             }
         });
     }
 }
 
-fn parse_address(value: &str) -> io::Result<SocketAddr> {
-    value
-        .parse()
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, format!("{value}: {error}")))
-}
-
-async fn relay(mut client: TcpStream, backend: SocketAddr) -> io::Result<(u64, u64)> {
+async fn relay(
+    mut client: TcpStream,
+    backend: SocketAddr,
+    limits: Limits,
+) -> io::Result<(u64, u64)> {
     client.set_nodelay(true)?;
-    let mut upstream = timeout(CONNECT_TIMEOUT, TcpStream::connect(backend)).await??;
+    let mut upstream = timeout(limits.connect_timeout, TcpStream::connect(backend)).await??;
     upstream.set_nodelay(true)?;
     // Fixed buffers bound memory and preserve backpressure and TCP half-closes.
-    copy_bidirectional_with_sizes(&mut client, &mut upstream, BUFFER_SIZE, BUFFER_SIZE).await
+    copy_bidirectional_with_sizes(
+        &mut client,
+        &mut upstream,
+        limits.buffer_size,
+        limits.buffer_size,
+    )
+    .await
 }
 
 #[cfg(test)]

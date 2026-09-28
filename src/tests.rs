@@ -13,7 +13,7 @@ async fn connection() -> (TcpStream, TcpStream, JoinHandle<io::Result<(u64, u64)
         .await
         .unwrap();
     let (accepted, _) = frontend.accept().await.unwrap();
-    let proxy = tokio::spawn(relay(accepted, backend_addr));
+    let proxy = tokio::spawn(relay(accepted, backend_addr, Limits::default()));
     let (server, _) = backend.accept().await.unwrap();
     (client, server, proxy)
 }
@@ -98,28 +98,31 @@ async fn backend_half_close_still_accepts_client_data() {
 
 #[tokio::test]
 async fn unavailable_backend_closes_the_client() {
-    timeout(CONNECT_TIMEOUT + Duration::from_secs(5), async {
-        // Reserve the port to prevent another test from listening on it.
-        // Connecting may be refused or time out, as on the macOS runner.
-        let reserved = tokio::net::TcpSocket::new_v4().unwrap();
-        reserved.bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        let frontend = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let mut client = TcpStream::connect(frontend.local_addr().unwrap())
-            .await
-            .unwrap();
-        let (accepted, _) = frontend.accept().await.unwrap();
-        let error = relay(accepted, reserved.local_addr().unwrap())
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(
-                error.kind(),
-                io::ErrorKind::ConnectionRefused | io::ErrorKind::TimedOut
-            ),
-            "unexpected backend connection error: {error}"
-        );
-        assert_eq!(client.read(&mut [0]).await.unwrap(), 0);
-    })
+    timeout(
+        Limits::default().connect_timeout + Duration::from_secs(5),
+        async {
+            // Reserve the port to prevent another test from listening on it.
+            // Connecting may be refused or time out, as on the macOS runner.
+            let reserved = tokio::net::TcpSocket::new_v4().unwrap();
+            reserved.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+            let frontend = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mut client = TcpStream::connect(frontend.local_addr().unwrap())
+                .await
+                .unwrap();
+            let (accepted, _) = frontend.accept().await.unwrap();
+            let error = relay(accepted, reserved.local_addr().unwrap(), Limits::default())
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(
+                    error.kind(),
+                    io::ErrorKind::ConnectionRefused | io::ErrorKind::TimedOut
+                ),
+                "unexpected backend connection error: {error}"
+            );
+            assert_eq!(client.read(&mut [0]).await.unwrap(), 0);
+        },
+    )
     .await
     .unwrap();
 }
