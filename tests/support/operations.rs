@@ -286,7 +286,10 @@ fn reloads_are_atomic_validate_scripts_and_preserve_sessions_and_capacity() {
         ),
         updated.replace("l0 = 'b0'", "l0 = 'missing'"),
         updated.replace("l0 = '127.0.0.1:0'", "l0 = '127.0.0.1:1'"),
-        updated.replace("metrics = '127.0.0.1:0'", "metrics = '127.0.0.1:1'"),
+        updated.replace(
+            "metrics = '127.0.0.1:0'",
+            &format!("metrics = '{}'", first.local_addr().unwrap()),
+        ),
         updated.replace(&first.local_addr().unwrap().to_string(), &front.to_string()),
     ] {
         fixture.write(&invalid);
