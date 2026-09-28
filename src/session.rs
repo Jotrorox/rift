@@ -4,10 +4,16 @@ use crate::protocol::{
     self, Codec, ConnectionState, Direction, Handshake, NextState, Packet, PacketKind,
     PlayerIdentity, ProtocolVersion, Reader, State, read_varint, write_varint,
 };
+use crate::{
+    auth::{AuthenticatedProfile, Authenticator, CryptoStream},
+    forwarding::{self, Forwarding, LoginPlugins},
+};
 use std::{
     future::{Future, poll_fn},
     io,
+    net::IpAddr,
     pin::Pin,
+    sync::Arc,
     task::Poll,
 };
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
@@ -18,6 +24,7 @@ pub struct Connection<S> {
     pub codec: Codec,
     reader: Reader,
     pending: Option<PendingWrite>,
+    login_plugins: LoginPlugins,
 }
 
 struct PendingWrite {
@@ -39,6 +46,7 @@ impl<S> Connection<S> {
             codec: Codec::default(),
             reader: Reader::default(),
             pending: None,
+            login_plugins: LoginPlugins::default(),
         }
     }
 }
@@ -120,12 +128,14 @@ pub enum SessionEvent {
 }
 
 pub struct Session<C, B> {
-    pub client: Connection<C>,
+    pub client: Connection<CryptoStream<C>>,
     backend: Option<Connection<B>>,
     pub handshake: Handshake,
     version: Option<ProtocolVersion>,
     login_start: Option<Packet>,
     identity: Option<PlayerIdentity>,
+    authenticated_profile: Option<AuthenticatedProfile>,
+    forwarding: Option<Forwarding>,
     network: bool,
     joined: bool,
     pending_join_valid: bool,
@@ -146,7 +156,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             .await?
             .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "missing handshake"))?;
         let handshake = Handshake::decode(&Packet::from_body(&body)?)?;
-        let mut client = Connection::new(client, State::Handshake);
+        let mut client = Connection::new(CryptoStream::new(client), State::Handshake);
         client.state.accept_handshake(&handshake)?;
         Ok(Self {
             client,
@@ -155,6 +165,8 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             handshake,
             login_start: None,
             identity: None,
+            authenticated_profile: None,
+            forwarding: None,
             network: false,
             joined: false,
             pending_join_valid: false,
@@ -193,8 +205,11 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         self.backend.as_ref()
     }
 
-    /// The validated login name, for operator display; it is not authenticated.
+    /// Mojang's account name after authentication, otherwise the client claim.
     pub fn player_name(&self) -> Option<&str> {
+        if let Some(profile) = &self.authenticated_profile {
+            return Some(&profile.name);
+        }
         self.login_start
             .as_ref()
             .and_then(|packet| protocol::read_string(&mut packet.data.as_slice(), 16).ok())
@@ -219,6 +234,51 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         self.identity.clone()
     }
 
+    pub fn authenticated_profile(&self) -> Option<&AuthenticatedProfile> {
+        self.authenticated_profile.as_ref()
+    }
+
+    /// Authenticate before opening any backend. The caller bounds the entire
+    /// exchange with a deadline and disconnects on error or cancellation.
+    pub async fn authenticate(&mut self, authenticator: &Authenticator) -> io::Result<()> {
+        if self.backend.is_some()
+            || self.authenticated_profile.is_some()
+            || self.identity.is_some()
+            || !self.client.state.settled(State::Login)
+        {
+            return Err(protocol::invalid(
+                "authentication must precede backend login",
+            ));
+        }
+        let requested = self.read_login_start().await?;
+        let version = self.version()?;
+        let profile = authenticator
+            .authenticate(&mut self.client.io, version, &requested.name)
+            .await?;
+        self.login_start = Some(forwarding::login_start(&profile, version));
+        self.authenticated_profile = Some(profile);
+        Ok(())
+    }
+
+    pub fn set_forwarding(&mut self, secret: Arc<[u8]>, address: IpAddr) -> io::Result<()> {
+        if self.backend.is_some() || self.identity.is_some() {
+            return Err(protocol::invalid(
+                "forwarding must be configured before backend login",
+            ));
+        }
+        if self.version()?.number() < 761 {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Velocity forwarding requires Minecraft 1.19.3 or newer in Rift.",
+            ));
+        }
+        let profile = self.authenticated_profile.clone().ok_or_else(|| {
+            protocol::invalid("Velocity forwarding requires an authenticated profile")
+        })?;
+        self.forwarding = Some(Forwarding::new(secret, address, profile)?);
+        Ok(())
+    }
+
     pub fn can_switch(&self) -> bool {
         self.switch_supported()
             && self.joined
@@ -236,7 +296,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
     }
 
     /// Read Login Start before choosing a backend. The UUID is an untrusted
-    /// client claim; the confirmed offline backend identity arrives at success.
+    /// client claim until authenticate() replaces it with Mojang's identity.
     pub async fn read_login_start(&mut self) -> io::Result<PlayerIdentity> {
         let version = self.version()?;
         if let Some(packet) = &self.login_start {
@@ -286,6 +346,11 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
     /// direct transition writes may be partial. Callers must supply a deadline.
     pub async fn connect_backend(&mut self, stream: B) -> io::Result<()> {
         let version = self.version()?;
+        if self.authenticated_profile.is_some() && self.forwarding.is_none() {
+            return Err(protocol::invalid(
+                "Authenticated backend login requires Velocity forwarding.",
+            ));
+        }
         if self.handshake.next_state == NextState::Status {
             return Err(protocol::invalid(
                 "status sessions do not attach gameplay backends",
@@ -304,7 +369,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         let mut backend = Connection::new(stream, State::Login);
         backend.reader.set_read_chunk_size(self.read_chunk_size);
         let mut handshake = self.handshake.clone();
-        if replacing {
+        if replacing || self.authenticated_profile.is_some() {
             handshake.next_state = NextState::Login;
         }
         backend
@@ -319,8 +384,10 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         }
         if replacing {
             let expected = self.identity.clone().unwrap();
+            let forwarding = self.forwarding.clone();
             {
-                let login = Self::login_replacement(&mut backend, version, &expected);
+                let login =
+                    Self::login_replacement(&mut backend, version, &expected, forwarding.as_ref());
                 tokio::pin!(login);
                 loop {
                     tokio::select! {
@@ -484,6 +551,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         backend: &mut Connection<B>,
         version: ProtocolVersion,
         expected: &PlayerIdentity,
+        forwarding: Option<&Forwarding>,
     ) -> io::Result<()> {
         loop {
             let packet = backend
@@ -504,6 +572,9 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                     .codec
                     .set_compression(read_varint(&mut packet.data.as_slice())?),
                 PacketKind::LoginSuccess => {
+                    backend
+                        .login_plugins
+                        .require_forwarded(forwarding.is_some())?;
                     if protocol::success_identity(version, &packet)? != *expected {
                         return Err(protocol::invalid(
                             "replacement backend changed the player identity",
@@ -525,14 +596,18 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                     return Err(io::Error::new(io::ErrorKind::PermissionDenied, reason));
                 }
                 PacketKind::LoginPluginRequest => {
-                    let id = read_varint(&mut packet.data.as_slice())?;
-                    let mut data = Vec::new();
-                    write_varint(id, &mut data);
-                    data.push(0);
-                    backend
-                        .codec
-                        .write(&mut backend.io, &Packet::new(2, data))
-                        .await?;
+                    let response = if let Some(response) =
+                        backend.login_plugins.request(&packet, forwarding)?
+                    {
+                        response
+                    } else {
+                        let id = read_varint(&mut packet.data.as_slice())?;
+                        let mut data = Vec::new();
+                        write_varint(id, &mut data);
+                        data.push(0);
+                        Packet::new(2, data)
+                    };
+                    backend.codec.write(&mut backend.io, &response).await?;
                 }
                 PacketKind::EncryptionRequest => return Err(encryption_unsupported()),
                 _ => return Err(protocol::invalid("unsupported replacement login exchange")),
@@ -602,7 +677,11 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                 Backend(io::Result<ConnectionEvent>),
             }
             let read_client = !self.client_eof && backend.pending.is_none();
-            let read_backend = self.client.pending.is_none();
+            // Login plugin requests can queue proxy-owned backend writes. Do
+            // not consume another request/success until that write completes.
+            let read_backend = self.client.pending.is_none()
+                && (backend.state.phase(Direction::Clientbound) != State::Login
+                    || backend.pending.is_none());
             let incoming = tokio::select! {
                 event = self.client.next(read_client) => Incoming::Client(event),
                 event = backend.next(read_backend) => Incoming::Backend(event),
@@ -647,6 +726,12 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                     }
                     self.remember_client_packet(phase, &packet)?;
                     let backend = self.backend.as_mut().unwrap();
+                    if kind == PacketKind::LoginPluginResponse {
+                        backend.login_plugins.client_response(&packet)?;
+                    }
+                    if kind == PacketKind::EncryptionResponse {
+                        return Err(protocol::invalid("unexpected client encryption response"));
+                    }
                     if self.network
                         && phase == State::Play
                         && self.joined
@@ -664,13 +749,22 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                     let kind = backend
                         .state
                         .observe(version, Direction::Clientbound, &packet)?;
-                    if matches!(
-                        kind,
-                        PacketKind::LoginPluginRequest | PacketKind::CookieRequest
-                    ) {
+                    if kind == PacketKind::CookieRequest {
                         self.initial_retry_safe = false;
                     }
                     match kind {
+                        PacketKind::LoginPluginRequest => {
+                            if let Some(response) = backend
+                                .login_plugins
+                                .request(&packet, self.forwarding.as_ref())?
+                            {
+                                backend.queue(version, Direction::Serverbound, &response)?;
+                            } else {
+                                self.initial_retry_safe = false;
+                                self.client
+                                    .queue(version, Direction::Clientbound, &packet)?;
+                            }
+                        }
                         PacketKind::SetCompression => {
                             let threshold = read_varint(&mut packet.data.as_slice())?;
                             backend.codec.set_compression(threshold);
@@ -686,6 +780,9 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                         }
                         PacketKind::EncryptionRequest => return Err(encryption_unsupported()),
                         PacketKind::LoginSuccess => {
+                            backend
+                                .login_plugins
+                                .require_forwarded(self.forwarding.is_some())?;
                             let identity = protocol::success_identity(version, &packet)?;
                             let requested = protocol::start_identity(
                                 version,
@@ -696,12 +793,27 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                             if identity.name != requested.name {
                                 return Err(protocol::invalid("backend changed the player name"));
                             }
+                            let packet = if let Some(profile) = &self.authenticated_profile {
+                                if identity.uuid != Some(profile.uuid)
+                                    || identity.name != profile.name
+                                {
+                                    return Err(protocol::invalid(
+                                        "backend changed the authenticated player identity",
+                                    ));
+                                }
+                                forwarding::login_success(profile, version, &packet)?
+                            } else {
+                                packet
+                            };
                             self.identity = Some(identity);
                             self.client
                                 .queue(version, Direction::Clientbound, &packet)?;
                         }
                         PacketKind::JoinGame => {
-                            let validation = protocol::validate_network_join(&packet);
+                            let validation = protocol::validate_network_join(
+                                &packet,
+                                self.authenticated_profile.is_some(),
+                            );
                             self.pending_join_valid = validation.is_ok();
                             // Opaque ordinary relays keep forwarding, but only a
                             // valid supported world can become transfer-ready.

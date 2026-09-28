@@ -231,10 +231,10 @@ def unused_port():
 
 
 @contextmanager
-def process(command, directory, log_name, server=False):
+def process(command, directory, log_name, server=False, env=None):
     with (directory / log_name).open("w") as log:
         proc = subprocess.Popen(command, cwd=directory, stdin=subprocess.PIPE,
-                                stdout=log, stderr=subprocess.STDOUT, text=True)
+                                stdout=log, stderr=subprocess.STDOUT, text=True, env=env)
         try:
             yield proc
         finally:
@@ -255,8 +255,8 @@ def process(command, directory, log_name, server=False):
             proc.stdin.close()
 
 
-def wait_ready(proc, ready, log):
-    deadline = time.monotonic() + 180
+def wait_ready(proc, ready, log, timeout=180):
+    deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if proc.poll() is not None:
             raise RuntimeError(f"process exited ({proc.returncode}): {log}\n{log.read_text()[-4000:]}")

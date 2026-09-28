@@ -390,7 +390,7 @@ fn boolean(bytes: &mut &[u8]) -> io::Result<bool> {
 /// The network contract is deliberately pinned to 1.21.11 (774). See the
 /// Minecraft-data 1.21.11 layout and Mojang ClientPacketListener.handleLogin:
 /// a fresh Join Game after reconfiguration resets world and secure-chat state.
-pub(crate) fn validate_network_join(packet: &Packet) -> io::Result<()> {
+pub(crate) fn validate_network_join(packet: &Packet, authenticated: bool) -> io::Result<()> {
     let mut bytes = packet.data.as_slice();
     take(&mut bytes, 4)?; // entity id
     boolean(&mut bytes)?;
@@ -422,10 +422,12 @@ pub(crate) fn validate_network_join(packet: &Packet) -> io::Result<()> {
     if !bytes.is_empty() {
         return Err(invalid("trailing Join Game data"));
     }
-    if secure {
+    // Modern online forwarding preserves the Mojang UUID used to validate the
+    // client's secure chat key. Offline network sessions have no such identity.
+    if secure && !authenticated {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "Rift network backends must use enforce-secure-profile=false.",
+            "Unauthenticated Rift network sessions require enforce-secure-profile=false on backends.",
         ));
     }
     Ok(())

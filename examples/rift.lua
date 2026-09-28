@@ -21,6 +21,12 @@ return {
         buffer_size = 32 * 1024,
     },
 
+    -- Recommended for public Paper networks: enable both settings and configure
+    -- Paper Velocity forwarding as described in README.md / examples/online.lua.
+    -- Export the matching secret before starting; omitted settings are OFFLINE.
+    -- authentication = { online_mode = true, timeout_ms = 10000 },
+    -- forwarding = { mode = "velocity", secret_env = "RIFT_FORWARDING_SECRET" },
+
     -- Maintenance and draining reject new logins; existing players stay connected.
     maintenance = false,
     draining = {}, -- For example: { "lobby" }. Use configured backend names.
