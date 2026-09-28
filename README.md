@@ -579,18 +579,115 @@ Update `rust-toolchain.toml` explicitly when upgrading Rust, then run the full s
 
 ## Benchmark
 
-The benchmark compares direct TCP with Rift using a local Python echo server.
-It reports median/p95 round-trip latency and median throughput over three runs
-with one and sixteen clients. Throughput counts echoed payload once, although it
-travels in both directions. These are loopback measurements including Python
-overhead, not a Minecraft player-capacity estimate.
+```sh
+python3 tests/bench.py --report target/benchmark.json
+# Longer connection-only sweep using an already built release binary:
+python3 tests/bench.py --binary target/release/rift --skip-throughput \
+  --attempts 8192 --burst-sizes 1,4,16,64,256 --report target/benchmark-bursts.json
+```
 
-Example release-build results from the development machine (Linux, 2026-09-28):
+The standard-library harness runs a separate asynchronous Python backend process
+and measures six paths:
 
-| Route | RTT median / p95 | 1 client | 16 clients combined |
-| --- | --- | --- | --- |
-| Direct | 12.5 / 19.5 µs | 2,180 MiB/s | 1,957 MiB/s |
-| Rift | 32.0 / 36.8 µs | 1,200 MiB/s | 1,204 MiB/s |
+| Scenario | Connection path |
+| --- | --- |
+| `direct` | TCP straight to the echo fixture |
+| `rift` | Rift's transparent single-backend relay |
+| `hostname` | Minecraft login handshake, exact hostname match, then relay |
+| `lua` | Fresh Lua VM/config evaluation, a minimal `on_route` returning `nil`, then hostname routing |
+| `lua_init` | Same hook and route, with a 10,000-entry table rebuilt during each config evaluation |
+| `status_cached` | Hostname status request served from a primed cache; separate ping/pong per client |
 
-That run added 19.5 µs to median round-trip latency. Results vary with the host
-and other running workloads.
+Use `--scenarios` to select paths and `--lua-init-iterations` to vary initialization
+work within the existing script budget. The benchmark uses the existing four Lua
+job slots, immediate overload rejection, fresh VM per invocation, and 50 ms
+execution deadline. It does not alter the routing implementation.
+
+By default each path attempts 2,048 connections at each burst size: 1, 4, 16, 64
+and 256. Clients are released together at an asyncio gate; the next wave starts
+when the entire previous wave finishes. The final wave can be smaller. There are
+no retries. Sixteen sequential warmup connections precede each measurement, and
+each proxy scenario starts a fresh process. Rate limits and health probes are
+disabled; the normal 4,096-connection admission limit remains in place.
+
+Setup latency starts before TCP connect and ends at a verified echo of the
+Minecraft handshake plus a probe, establishing that routing and backend setup
+completed. This is not a full Minecraft login. Cached-status latency ends at the
+complete expected status response; success additionally requires the correct
+client-specific ping reply. Cache counters must confirm zero measured misses and
+at least one hit per successful exchange. Cache priming is excluded and the
+fixture uses a one-day TTL so expiration does not mix fills into this measurement.
+
+The console reports success counts/rate, p95/p99 setup latency, successful setups
+per second, Rift CPU, sampled peak RSS and Lua capacity rejections. JSON also
+records p50, failures by category, failed-attempt p95, attempts per second,
+successes per wave, client launch spread, proxy counter deltas, Lua error counts,
+generated configs, binary/harness hashes, and platform/settings metadata.
+Percentiles use nearest rank over **successful connections only**; an entirely
+failed measurement has null latency percentiles. Read latency alongside success
+rate: rejecting more connections can make the remaining successes look faster.
+
+CPU and memory collection uses Linux `/proc`; unsupported platforms emit null
+resource values. CPU is process user+system time over the measurement window,
+with 100% representing one core. CPU time has the kernel's clock-tick resolution
+(recorded in JSON), so very short runs can show zero or noisy utilization. RSS
+is sampled every 5 ms, including the start and end; brief peaks can be missed.
+JSON separates Rift, the Python backend and the Python driver. The direct path
+has no Rift process. RSS reflects the entire process, including allocations
+retained from earlier burst sizes and, for `rift`, the throughput test.
+
+The original established-connection RTT and throughput measurements remain for
+`direct` and `rift`: median/p95 RTT and median throughput over three runs with
+one and sixteen clients. Throughput counts echoed payload once, although it
+travels in both directions. `--skip-throughput` omits these tests.
+
+These are loopback measurements including Python scheduling, socket and backend
+overhead, not a Minecraft player-capacity estimate or an isolated Lua microbenchmark.
+The backend has no fixed worker pool limiting burst concurrency. The driver is
+single-threaded asyncio, so gate release does not mean simultaneous arrival at
+Rift; inspect launch spread and driver CPU when comparing runs. Repeat on the same
+hardware under comparable load before choosing a Lua architecture. CI archives
+the report without timing thresholds on shared runners.
+
+Example baseline on 2026-09-28: Intel Core Ultra 5 125U, 14 available logical
+CPUs, Linux x86-64, Python 3.14.7, Rust 1.98.1 release build of `55a0298`.
+The default command above measured 61,440 attempts in total. At burst size 256
+(2,048 attempts per scenario), it produced:
+
+| Scenario | Success | Setup p95 / p99 (ms) | Successful setups/s | Rift CPU | Peak Rift RSS (MiB) |
+| --- | --- | --- | --- | --- | --- |
+| `direct` | 100.00% | 82.59 / 83.07 | 5,028 | — | — |
+| `rift` | 100.00% | 55.93 / 58.02 | 1,429 | 26.5% | 39.24 |
+| `hostname` | 100.00% | 64.75 / 67.70 | 3,735 | 94.6% | 30.18 |
+| `lua` | 52.78% | 70.42 / 85.90 | 2,026 | 162.9% | 17.94 |
+| `lua_init` | 45.12% | 62.04 / 65.57 | 2,061 | 191.7% | 17.99 |
+| `status_cached` | 100.00% | 77.88 / 87.84 | 1,140 | 12.8% | 5.79 |
+
+All non-Lua scenarios succeeded at every measured burst size. Both Lua scenarios
+succeeded at sizes 1 and 4; at size 16, success fell to 74.12% (`lua`) and
+58.59% (`lua_init`). Every failed Lua attempt matched a logged capacity rejection
+and a route-rejection counter increment; there were no script budget errors.
+All 10,240 measured status exchanges were cache hits, with zero misses.
+
+A second connection-only run used 8,192 attempts per size:
+
+```sh
+python3 tests/bench.py --binary target/release/rift --skip-throughput \
+  --scenarios lua lua_init --attempts 8192 --burst-sizes 4,16,64,256 \
+  --report target/benchmark-lua-repeat.json
+```
+
+| Scenario | Success at 4 | At 16 | At 64 | At 256 |
+| --- | --- | --- | --- | --- |
+| `lua` | 100.00% | 59.27% | 63.59% | 64.99% |
+| `lua_init` | 100.00% | 55.58% | 42.70% | 45.21% |
+
+Again, every failure was a Lua capacity rejection. Across the two runs, size-256
+`lua` measured 47.53–70.42 ms p95, 85.90–110.49 ms p99, 163–195% CPU and
+17.94–26.52 MiB sampled peak RSS. `lua_init` measured 62.04–83.52 ms p95,
+65.57–102.67 ms p99, 179–192% CPU and 17.99–21.62 MiB RSS.
+The default run’s p95 client launch spread at size 256 was 29.7–63.4 ms across
+scenarios, so these tails include substantial driver/host scheduling delay.
+The evidence supports overload at the existing four-job admission gate; it
+does not establish a maximum sustainable arrival rate or a Lua-only latency.
+The original VM lifecycle and concurrency limit remain unchanged.
