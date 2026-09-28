@@ -21,6 +21,7 @@ const USAGE: &str = "Usage: rift [<listen-ip:port> <backend-ip:port>]\n\
     rift --config <path>\n\
     rift --check <path> (validate configuration and scripts without binding)\n\
     rift --version (print package version)\n\
+    rift --license (print project license and third-party notices)\n\
     Routing: rift <listen-ip:port> [--route <hostname=backend:port>]... [--default <backend:port>]\n\
     Routes: exact hostname, '*.example.com', or '*' (default).\n\
     Priority: exact, longest wildcard suffix, default. Unmatched clients get a message.\n\
@@ -55,6 +56,14 @@ async fn start() -> io::Result<()> {
         }
         [version] if version == "--version" || version == "-V" => {
             println!("rift {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        [license] if license == "--license" => {
+            print!(
+                "{}\n{}",
+                include_str!("../LICENSE"),
+                include_str!("../THIRD_PARTY_NOTICES")
+            );
             return Ok(());
         }
         [flag, path] if flag == "--check" => {

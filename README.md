@@ -25,6 +25,8 @@ same addresses. Explicit CLI addresses or routing options override the file.
 The listener must be an IP literal with a port. Backends accept IP literals or DNS hostnames with ports;
 IPv6 works too: `rift '[::]:25565' '[::1]:25566'`.
 Use `--help` for usage and `--version` (or `-V`) for the package version.
+Use `--license` to print the project license and [third-party notices](THIRD_PARTY_NOTICES).
+Both files are embedded at compile time, so the command works with just the binary.
 Ctrl-C stops accepting connections and lets active sessions
 drain for up to 30 seconds by default; a second Ctrl-C closes them immediately.
 
@@ -548,6 +550,32 @@ Each run creates a fresh world under `target/minecraft/runs/`, retains logs and 
 - Two servers with distinct MOTDs behind one routing listener: both domains,
   backend DNS, wildcard/default routes, concurrent status requests and full
   gameplay through each domain. Each test job briefly runs two server processes.
+- On Linux, a combined operational scenario with health probes, fallback, rate
+  limits, status caching, metrics and reloadable Lua configuration enabled:
+  12 route reloads interleaved with invalid candidates and 256 status requests per
+  round (16 concurrent, including unique cache keys and distinct ping payloads).
+  Two established gameplay sessions receive and acknowledge teleports after
+  every round and continue exchanging keepalives without reconnecting.
+- Capacity reduction and rate-limit bursts while established players continue;
+  real primary shutdown, fallback login, health recovery and fresh primary login
+  while the lobby session survives; gameplay through graceful drain, shutdown
+  deadline and a second shutdown signal. A player on the stopped backend is
+  expected to disconnect; established sessions are never migrated.
+
+The operational scenario samples **Rift's process**, excluding the game servers,
+every 50 ms using Linux `/proc`. After warmup, every quiet sample must stay within
+8 file descriptors and 6 sockets of baseline; all samples must stay within
+16 MiB RSS and 148 descriptors/sockets of baseline. The peak socket allowance
+covers 64 admitted connections with two sockets each, metrics and health probes.
+These are fixed regression budgets for this workload, allowing allocator retention;
+they do not establish an arbitrary-duration or player-capacity bound. Reports
+include baseline, peak and settled measurements, gameplay checkpoints and metrics;
+`operations/resources.jsonl` retains the sample timeline even on failure.
+Use `--operation-rounds 100` for a longer run (minimum 4, default 12).
+Non-Linux runs explicitly report the operational scenario as skipped; all six
+Linux CI Minecraft jobs require it in both compression modes.
+See the [recorded operational results](tests/OPERATIONS_RESULTS.md) for the local
+six-case matrix and an additional 100-reload run.
 
 Use `--server paper` to select one backend (repeat the option to select several),
 `--binary /path/to/rift` to test an existing build, and `--report path.json` to
@@ -569,8 +597,19 @@ capacity across reloads, primary outage/fallback/recovery, health transitions,
 status TTL and concurrent fills, malformed status responses, metrics, graceful
 drain and forced shutdown. Signal-driven executable tests run on Unix; the other
 regressions also run on Windows.
-Microsoft account authentication and
-encrypted gameplay are not exercised by the offline integration fixtures.
+Microsoft account authentication and encrypted gameplay require the separate
+[manual online-mode check](tests/MANUAL_ONLINE.md). Run it with a licensed Java
+client signed in through its launcher:
+
+```sh
+python3 tests/manual_online.py --accept-eula --server paper
+```
+
+It starts two temporary online-mode servers, verifies encryption/authentication
+challenges, and guides an operator through gameplay, reload/status stress,
+outage/fallback/recovery and graceful drain. It records server-verified profile
+UUIDs and explicit operator observations in a separate `manual-online-*/result.json`.
+An offline suite passing does not count as this check passing.
 
 ## CI and releases
 
@@ -605,10 +644,11 @@ It reruns the entire CI workflow on that tag, then publishes the tested Linux,
 macOS and Windows archives with `SHA256SUMS` to a GitHub Release. Only the final
 publishing job receives write permission; it uses the workflow's built-in token.
 This distributes the standalone proxy; running servers are managed separately.
-Each archive includes the binary, BSD-2-Clause license, README, all three Lua examples,
-the systemd unit and operator/pilot documentation. Packaging extracts the archive,
-checks `--version` against `Cargo.toml`, runs `--help`, and validates every bundled
-configuration with `--check`. Build the same archive locally after a release build:
+Each archive includes the binary, BSD-2-Clause license, third-party notices, README,
+all three Lua examples, the systemd unit and operator/pilot documentation. Packaging extracts the archive,
+checks `--version` against `Cargo.toml`, runs `--help`, verifies `--license` without
+external license files, and validates every bundled configuration with `--check`.
+Build the same archive locally after a release build:
 `python3 scripts/package.py --platform linux-x86_64` (or `macos-aarch64` /
 `windows-x86_64` on the matching native host).
 

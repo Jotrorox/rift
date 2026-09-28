@@ -85,8 +85,11 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.12'
-      - run: cargo test --locked --all-targets
-      - run: cargo test --locked --all-targets --release
+      # Concurrent test cases can consume the 50 ms Lua execution budget on
+      # shared runners before validation runs. Each concurrency test still
+      # exercises its own parallel clients/workers.
+      - run: cargo test --locked --all-targets -- --test-threads=1
+      - run: cargo test --locked --all-targets --release -- --test-threads=1
       - run: cargo build --locked --release
       - name: Verify protocol and zlib interoperability
         run: python tests/protocol_wire.py --binary target/release/rift
@@ -145,6 +148,8 @@ jobs:
             target/minecraft/report.json
             target/minecraft/runs/*/result.json
             target/minecraft/runs/**/*.log
+            target/minecraft/runs/**/resources.jsonl
+            target/minecraft/runs/**/rift.lua
             target/minecraft/runs/**/crash-reports/**
           if-no-files-found: warn
           retention-days: 14
