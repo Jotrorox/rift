@@ -8,7 +8,6 @@ other platforms still run the traffic benchmark and report null resource values.
 import argparse
 import asyncio
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
@@ -254,36 +253,78 @@ def latency(port):
     return statistics.median(samples), percentile(samples, 0.95)
 
 
-def transfer(port, size):
-    with connect(port) as sock:
-        sent = 0
-        def send():
-            nonlocal sent
-            for _ in range(size // len(BLOCK)):
-                sock.sendall(BLOCK)
-                sent += len(BLOCK)
-            sock.shutdown(socket.SHUT_WR)
+async def transfer_async(port, size):
+    """One event loop owns both directions; failure cancels its blocked peer task."""
+    name = new_player_name()
+    sent = received = 0
+    reader, writer = await asyncio.wait_for(asyncio.open_connection("127.0.0.1", port), 30)
+    writer.get_extra_info("socket").setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    completed = False
 
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            sender = pool.submit(send)
-            received = 0
-            try:
-                while data := sock.recv(65536):
-                    received += len(data)
-            except (OSError, ValueError) as error:
-                if sender.done():
-                    sender.result()
-                raise RuntimeError(
-                    f"transfer failed: player={sock.name}, sent={sent}/{size}, received={received}/{size}, "
-                    f"sender_done={sender.done()}") from error
-            sender.result()
-        assert received == size, (received, size)
+    async def send():
+        nonlocal sent
+        for offset in range(0, size, len(BLOCK)):
+            data = BLOCK[:min(len(BLOCK), size - offset)]
+            writer.write(packet(b"\x7f" + data))
+            await asyncio.wait_for(writer.drain(), 30)
+            sent += len(data)
+        writer.write_eof()
+        await asyncio.wait_for(writer.drain(), 30)
+
+    async def receive():
+        nonlocal received
+        while received < size:
+            body = await asyncio.wait_for(read_frame(reader), 30)
+            data = body[1:]
+            if body[0] != 0x7f or not data or data != BLOCK[:len(data)]:
+                raise ValueError("invalid throughput echo")
+            received += len(data)
+            if received > size:
+                raise ValueError("extra throughput payload")
+        # A complete transfer includes the backend's close after our write EOF;
+        # neither trailing frames nor a truncated final frame count as success.
+        if await asyncio.wait_for(reader.read(1), 30):
+            raise ValueError("trailing throughput data")
+
+    try:
+        writer.write(handshake(port) + login_start(name))
+        await asyncio.wait_for(writer.drain(), 30)
+        if packet(await asyncio.wait_for(read_frame(reader), 30)) != login_success(name):
+            raise ValueError("unexpected login response")
+        async with asyncio.TaskGroup() as tasks:
+            tasks.create_task(send())
+            tasks.create_task(receive())
+        completed = True
+        return received
+    except Exception as error:
+        raise RuntimeError(
+            f"transfer failed: player={name}, sent={sent}/{size}, received={received}/{size}"
+        ) from error
+    finally:
+        if completed:
+            writer.close()
+        else:
+            # Do not wait for unsent output after a failed reader/writer. The
+            # TaskGroup has already cancelled and awaited the other direction.
+            writer.transport.abort()
+        try:
+            await writer.wait_closed()
+        except OSError:
+            pass
+
+
+def transfer(port, size):
+    return asyncio.run(transfer_async(port, size))
 
 
 def throughput(port, clients, size):
+    async def transfers():
+        async with asyncio.TaskGroup() as tasks:
+            for _ in range(clients):
+                tasks.create_task(transfer_async(port, size))
+
     start = time.perf_counter()
-    with ThreadPoolExecutor(max_workers=clients) as pool:
-        list(pool.map(lambda _: transfer(port, size), range(clients)))
+    asyncio.run(transfers())
     return clients * size / MIB / (time.perf_counter() - start)
 
 
@@ -597,6 +638,7 @@ def main():
                      "cpu_clock_ticks_per_s": os.sysconf("SC_CLK_TCK") if sys.platform == "linux" else None},
         "method": {
             "setup": "TCP connect through verified login+play-packet echo, or complete cached status response",
+            "throughput": "one asyncio event loop owns every connection with concurrent send/receive tasks; verifies payload and EOF; replaces threaded buffered socket driver",
             "status_success": "also requires a correct per-client ping/pong after the status response",
             "percentiles": "nearest rank over successful attempts only; no retries",
             "bursts": "gate-released asyncio clients; wait for the entire wave before releasing the next",

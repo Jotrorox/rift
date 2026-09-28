@@ -4,6 +4,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 import io
+import socket
 import unittest
 from unittest.mock import patch
 
@@ -73,8 +74,8 @@ class SummaryTests(unittest.TestCase):
 
 
 class BurstTests(unittest.IsolatedAsyncioTestCase):
-    async def start_server(self, callback):
-        server = await asyncio.start_server(callback, "127.0.0.1", 0)
+    async def start_server(self, callback, **options):
+        server = await asyncio.start_server(callback, "127.0.0.1", 0, **options)
         self.addAsyncCleanup(server.wait_closed)
         self.addCleanup(server.close)
         return server.sockets[0].getsockname()[1]
@@ -146,6 +147,113 @@ class BurstTests(unittest.IsolatedAsyncioTestCase):
         result = await self.attempt(port)
         self.assertEqual(result["error"], "ValueError")
         self.assertIsNone(result["setup_ms"])
+
+    async def test_throughput_drains_both_directions_with_small_buffers_and_fragmented_echo(self):
+        received = []
+        truncated_uploads = []
+
+        async def fragmented(reader, writer):
+            writer.get_extra_info("socket").setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+            writer.transport.set_write_buffer_limits(high=1024, low=512)
+            count = 0
+            try:
+                await bench.read_frame(reader)
+                name = bench.login_name(await bench.read_frame(reader))
+                writer.write(bench.login_success(name))
+                await writer.drain()
+                while True:
+                    body = await bench.read_frame(reader)
+                    count += len(body) - 1
+                    framed = bench.packet(body)
+                    # Split both the three-byte frame length and the payload.
+                    for part in [framed[:1], framed[1:2], framed[2:1024], framed[1024:]]:
+                        writer.write(part)
+                        await writer.drain()
+                        await asyncio.sleep(0)
+            except asyncio.IncompleteReadError as error:
+                if error.partial:
+                    truncated_uploads.append(error.partial)
+            finally:
+                received.append(count)
+                writer.close()
+                await writer.wait_closed()
+
+        port = await self.start_server(fragmented, limit=4096)
+        open_connection = asyncio.open_connection
+
+        async def constrained_connection(*args, **kwargs):
+            reader, writer = await open_connection(*args, limit=4096, **kwargs)
+            writer.get_extra_info("socket").setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+            writer.transport.set_write_buffer_limits(high=1024, low=512)
+            return reader, writer
+
+        with patch("bench.asyncio.open_connection", side_effect=constrained_connection):
+            sizes = [2 * bench.MIB, 2 * bench.MIB + 17, 2 * bench.MIB, 2 * bench.MIB + 1]
+            actual = await asyncio.wait_for(asyncio.gather(
+                *(bench.transfer_async(port, size) for size in sizes)), 10)
+        self.assertEqual(actual, sizes)
+        self.assertEqual(sorted(received), sorted(sizes))
+        self.assertEqual(truncated_uploads, [])
+
+    async def test_throughput_rejects_corruption_truncation_extra_data_and_early_eof(self):
+        size = 1024
+        for response in [bench.packet(b"\x7f" + b"y" * size),
+                         bench.varint(size + 1) + b"\x7f" + b"x" * 15,
+                         bench.packet(b"\x7f" + b"x" * size) + b"\0", b""]:
+            async def invalid_echo(reader, writer):
+                try:
+                    await bench.read_frame(reader)
+                    name = bench.login_name(await bench.read_frame(reader))
+                    writer.write(bench.login_success(name) + response)
+                    await writer.drain()
+                    # Consume the finite upload so a reset cannot hide trailing
+                    # bytes from the client during an otherwise graceful close.
+                    await reader.read()
+                except (OSError, asyncio.IncompleteReadError):
+                    pass
+                finally:
+                    writer.close()
+                    try:
+                        await writer.wait_closed()
+                    except OSError:
+                        pass
+
+            with self.subTest(response=response[:16]):
+                port = await self.start_server(invalid_echo)
+                with self.assertRaises(RuntimeError):
+                    await asyncio.wait_for(bench.transfer_async(port, size), 1)
+
+    async def test_bad_echo_cancels_a_sender_blocked_by_a_backend_that_stops_reading(self):
+        closed = asyncio.Event()
+
+        async def refuses_upload(reader, writer):
+            try:
+                await bench.read_frame(reader)
+                name = bench.login_name(await bench.read_frame(reader))
+                writer.write(bench.login_success(name))
+                await writer.drain()
+                # Let the large upload fill bounded socket and StreamReader
+                # buffers, then fail the independent receiving direction.
+                await asyncio.sleep(0.02)
+                writer.write(bench.packet(b"\x7fwrong"))
+                await writer.drain()
+                await reader.read()
+            except (OSError, asyncio.IncompleteReadError):
+                pass
+            finally:
+                writer.close()
+                try:
+                    await writer.wait_closed()
+                except OSError:
+                    pass
+                closed.set()
+
+        port = await self.start_server(refuses_upload, limit=4096)
+        size = 64 * bench.MIB
+        with self.assertRaises(RuntimeError) as failure:
+            await asyncio.wait_for(bench.transfer_async(port, size), 1)
+        self.assertNotIn(f"sent={size}/{size}", str(failure.exception))
+        await asyncio.wait_for(closed.wait(), 1)
 
     async def test_tcp_accept_followed_by_eof_is_not_success(self):
         def close(reader, writer):
