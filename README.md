@@ -169,6 +169,25 @@ and execution errors include the filename and Lua diagnostics. A missing explici
 `--config` file is an error; only a missing implicit `./rift.lua` uses the defaults.
 All listeners bind before Rift begins accepting connections.
 
+## Web administration and status
+
+Rift includes an optional Axum API and bundled admin website, a separate status
+website/JSON endpoint, and Prometheus metrics. Edit and validate the full Lua
+configuration in the browser; saves apply live with conflict detection and
+atomic file replacement. Extend the website and API with sandboxed `on_http`
+Lua handlers under `/ext/*`.
+
+```sh
+./target/release/rift --config examples/admin.lua
+# Admin: http://127.0.0.1:8080   Status: http://127.0.0.1:9090
+```
+
+All HTTP servers are disabled by default and independently configurable.
+The admin API supports bearer tokens, required for non-loopback binds. HTML,
+CSS and JavaScript are embedded at compile time; no frontend build is needed.
+See the [HTTP guide](docs/http.md) for configuration, API examples, Lua extension
+contracts and live enable/disable behavior.
+
 ## Operating a network
 
 [`examples/network.lua`](examples/network.lua) enables all operational features
@@ -194,11 +213,12 @@ replacement before signaling. Only one reload runs at a time; additional signals
 while it is running are coalesced. CLI-only invocations have no file to reload.
 An implicitly loaded `./rift.lua` can be reloaded too.
 
-Routes, backends, fallback lists, network settings, scripts, limits, health checks, status-cache
-settings and the shutdown deadline can change live. **Listener names/addresses
-and the metrics bind address require a restart**; changing them rejects the
-entire reload. Configured port `0` retains the original assigned port. All
-listener and metrics sockets bind successfully before traffic is accepted.
+Routes, backends, fallback lists, network settings, scripts, limits, health checks,
+status-cache settings, HTTP services and the shutdown deadline can change live.
+**TCP listener names/addresses require a restart**; changing them rejects the entire reload.
+Web, status and metrics servers can be enabled, disabled or moved on reload.
+An unchanged configured port `0` retains the original assigned port. All new
+service sockets bind successfully before a change is applied.
 
 Already accepted connections finish using their original routing snapshot.
 Established sessions retain their sockets, buffers and original snapshot, so reloads
@@ -383,8 +403,9 @@ shutdown_timeout_ms = 30000,
 
 The optional HTTP listener serves Prometheus text at `GET /metrics`. Bind it to
 loopback or a trusted monitoring interface: it has no authentication. Scrapes
-have a two-second deadline, a 4 KiB header bound and at most 16 concurrent
-handlers, independent of gameplay admission. Other paths return 404.
+use Axum with bounded HTTP requests, independent of gameplay admission. Other
+paths return 404. The separate status server can also expose `/metrics`; see
+the [HTTP guide](docs/http.md).
 
 Metrics include `rift_connections_active`, `rift_players_online`, accepted/completed/rejected connection
 counters, connection errors, backend connect failures, fallback selections,

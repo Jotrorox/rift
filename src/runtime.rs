@@ -39,6 +39,11 @@ enum Policy {
 
 pub struct Snapshot {
     pub config: Config,
+    pub source: Option<Arc<str>>,
+    pub revision: String,
+    pub listener_addresses: BTreeMap<String, SocketAddr>,
+    pub service_addresses: BTreeMap<String, SocketAddr>,
+    pub addresses: Arc<Vec<SocketAddr>>,
     policies: BTreeMap<String, Policy>,
     router: Router,
     pub health: Health,
@@ -69,6 +74,11 @@ impl Snapshot {
         );
         let health = Health::new(&config);
         Ok(Self {
+            source: None,
+            revision: "runtime".into(),
+            listener_addresses: config.listeners.clone(),
+            service_addresses: BTreeMap::new(),
+            addresses: Arc::new(config.listeners.values().copied().collect()),
             config,
             policies,
             router,
@@ -527,7 +537,6 @@ pub(crate) async fn accept(
     name: String,
     current: watch::Receiver<Arc<Snapshot>>,
     mut stop: watch::Receiver<bool>,
-    addresses: Arc<Vec<SocketAddr>>,
     metrics: Arc<Metrics>,
     admission: Arc<Mutex<Admission>>,
 ) {
@@ -562,7 +571,7 @@ pub(crate) async fn accept(
                     continue;
                 };
                 let name = name.clone();
-                let addresses = addresses.clone();
+                let addresses = snapshot.addresses.clone();
                 let metrics = metrics.clone();
                 sessions.spawn(async move {
                     let mut client = client;
@@ -621,39 +630,111 @@ fn health_worker(
     }))
 }
 
+/// Every accepted configuration follows the same transaction, regardless of
+/// whether it came from a signal, the website, or an API client.
+async fn reconfigure(
+    operation: crate::control::Operation,
+    app: &crate::web::App,
+    snapshot: &Arc<Snapshot>,
+    services: &crate::web::Services,
+) -> Result<(Arc<Snapshot>, crate::web::Prepared), crate::control::Error> {
+    use crate::control::{self, Error};
+    let path = app
+        .path
+        .clone()
+        .ok_or_else(|| Error::conflict("no configuration file selected"))?;
+    let active = snapshot
+        .source
+        .clone()
+        .ok_or_else(|| Error::conflict("no configuration source available"))?;
+    let path_for_prepare = path.clone();
+    let candidate = tokio::task::spawn_blocking(move || {
+        control::prepare(&path_for_prepare, &active, operation)
+    })
+    .await
+    .map_err(Error::invalid)??;
+    if candidate.config.listeners != snapshot.config.listeners {
+        return Err(Error::invalid("listener names/addresses require a restart"));
+    }
+    let prepared = services.prepare(&candidate.config).await?;
+    let service_addresses = services.addresses(&candidate.config, &prepared)?;
+    let addresses: Vec<_> = snapshot
+        .listener_addresses
+        .values()
+        .chain(service_addresses.values())
+        .copied()
+        .collect();
+    check_bound_loops(&candidate.config, &addresses)?;
+    let mut next = Snapshot::new(candidate.config, Some(snapshot))?;
+    next.revision = control::revision(&candidate.source);
+    next.source = Some(Arc::from(candidate.source.as_str()));
+    next.listener_addresses = snapshot.listener_addresses.clone();
+    next.service_addresses = service_addresses;
+    next.addresses = Arc::new(addresses);
+    if candidate.save {
+        tokio::task::spawn_blocking(move || {
+            control::persist(&path, &candidate.source, &candidate.previous_disk)
+        })
+        .await
+        .map_err(Error::invalid)??;
+    }
+    Ok((Arc::new(next), prepared))
+}
+
 pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
-    // Install handlers before advertising readiness.
+    use crate::{control, web};
+    // Install handlers before advertising readiness and resolve the selected
+    // file once, so saving through a symlink updates its target atomically.
     let mut signals = Signals::new()?;
-    let mut snapshot = Arc::new(Snapshot::new(config, None)?);
+    let source = source.map(std::fs::canonicalize).transpose()?;
+    let (config, document) = if let Some(path) = source.clone() {
+        tokio::task::spawn_blocking(move || -> io::Result<_> {
+            let text = control::read_source(&path)?;
+            let config = Config::from_lua(&text, &path.display().to_string())?;
+            Ok((config, Some(text)))
+        })
+        .await
+        .map_err(io::Error::other)??
+    } else {
+        (config, None)
+    };
+    let mut initial = Snapshot::new(config, None)?;
+    if let Some(document) = document {
+        initial.revision = control::revision(&document);
+        initial.source = Some(Arc::from(document));
+    }
     let mut listeners = Vec::new();
-    for (name, address) in &snapshot.config.listeners {
+    for (name, address) in &initial.config.listeners {
         let listener = TcpListener::bind(address).await.map_err(|error| {
             io::Error::new(
                 error.kind(),
                 format!("listeners.{name} ({address}): {error}"),
             )
         })?;
+        initial
+            .listener_addresses
+            .insert(name.clone(), listener.local_addr()?);
         listeners.push((name.clone(), listener));
     }
-    let metrics_listener = match snapshot.config.metrics {
-        Some(address) => Some(TcpListener::bind(address).await.map_err(|error| {
-            io::Error::new(error.kind(), format!("metrics ({address}): {error}"))
-        })?),
-        None => None,
-    };
-    let mut addresses = listeners
-        .iter()
-        .map(|(_, listener)| listener.local_addr())
-        .collect::<io::Result<Vec<_>>>()?;
-    if let Some(listener) = &metrics_listener {
-        addresses.push(listener.local_addr()?);
-    }
-    check_bound_loops(&snapshot.config, &addresses)?;
-    let addresses = Arc::new(addresses);
+    let mut services = web::Services::default();
+    let prepared = services.prepare(&initial.config).await?;
+    initial.service_addresses = services.addresses(&initial.config, &prepared)?;
+    initial.addresses = Arc::new(
+        initial
+            .listener_addresses
+            .values()
+            .chain(initial.service_addresses.values())
+            .copied()
+            .collect(),
+    );
+    check_bound_loops(&initial.config, &initial.addresses)?;
+    let mut snapshot = Arc::new(initial);
     let metrics = Arc::new(Metrics::default());
     let admission = Arc::new(Mutex::new(Admission::default()));
     let (current, receiver) = watch::channel(snapshot.clone());
     let (stop, stopping) = watch::channel(false);
+    let (commands, mut requests) = tokio::sync::mpsc::channel::<control::Command>(8);
+    let app = web::App::new(receiver.clone(), metrics.clone(), commands, source);
     let mut tasks = JoinSet::new();
     for (name, listener) in listeners {
         eprintln!("rift: listening on {}", listener.local_addr()?);
@@ -662,60 +743,77 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
             name,
             receiver.clone(),
             stopping.clone(),
-            addresses.clone(),
             metrics.clone(),
             admission.clone(),
         ));
     }
-    let mut background = JoinSet::new();
-    if let Some(listener) = metrics_listener {
-        eprintln!("rift: metrics on {}", listener.local_addr()?);
-        background.spawn(crate::metrics::serve(listener, receiver, metrics.clone()));
-    }
-    let mut health = health_worker(snapshot.clone(), addresses.clone(), metrics.clone());
-    let mut reloads = JoinSet::new();
+    services.commit(&snapshot.config, prepared, &app);
+    let mut health = health_worker(
+        snapshot.clone(),
+        snapshot.addresses.clone(),
+        metrics.clone(),
+    );
     let mut failure = None;
+    let mut service_check = tokio::time::interval(Duration::from_secs(1));
     loop {
-        tokio::select! {
+        let (operation, reply) = tokio::select! {
             event = signals.next() => match event {
                 Event::Shutdown => break,
                 Event::Reload => {
-                    if let Some(path) = source.clone() {
-                        if reloads.is_empty() { reloads.spawn_blocking(move || Config::load(&path)); }
-                    } else { eprintln!("rift: reload ignored: no configuration file selected"); }
+                    if app.path.is_none() { eprintln!("rift: reload ignored: no configuration file selected"); continue; }
+                    (control::Operation::Reload, None)
                 }
             },
-            result = reloads.join_next(), if !reloads.is_empty() => {
-                let candidate = result.expect("reload task").map_err(io::Error::other).and_then(|r| r)
-                    .and_then(|config| {
-                        if config.listeners != snapshot.config.listeners || config.metrics != snapshot.config.metrics {
-                            return Err(io::Error::new(io::ErrorKind::InvalidInput, "listener names/addresses and metrics address require a restart"));
-                        }
-                        check_bound_loops(&config, &addresses)?;
-                        Snapshot::new(config, Some(&snapshot))
-                    });
-                match candidate {
-                    Ok(candidate) => {
-                        snapshot.health.retire();
-                        snapshot = Arc::new(candidate);
-                        current.send_replace(snapshot.clone());
-                        if let Some(task) = health.take() { task.abort(); let _ = task.await; }
-                        health = health_worker(snapshot.clone(), addresses.clone(), metrics.clone());
-                        metrics.reloads.inc();
-                        eprintln!("rift: configuration reloaded");
-                    }
-                    Err(error) => { metrics.reload_failures.inc(); eprintln!("rift: reload rejected: {error}"); }
-                }
-            }
+            Some(command) = requests.recv() => (command.operation, Some(command.reply)),
             result = tasks.join_next() => {
                 failure = Some(io::Error::other(format!("listener stopped unexpectedly: {result:?}")));
                 break;
             }
-            result = background.join_next(), if !background.is_empty() => {
-                failure = Some(io::Error::other(format!("metrics listener stopped unexpectedly: {result:?}")));
-                break;
+            _ = service_check.tick() => {
+                if let Some(name) = services.failed() {
+                    failure = Some(io::Error::other(format!("{name} listener stopped unexpectedly")));
+                    break;
+                }
+                continue;
             }
+        };
+        let result = reconfigure(operation, &app, &snapshot, &services).await;
+        let response = match result {
+            Ok((next, prepared)) => {
+                snapshot.health.retire();
+                snapshot = next;
+                current.send_replace(snapshot.clone());
+                services.commit(&snapshot.config, prepared, &app);
+                if let Some(task) = health.take() {
+                    task.abort();
+                    let _ = task.await;
+                }
+                health = health_worker(
+                    snapshot.clone(),
+                    snapshot.addresses.clone(),
+                    metrics.clone(),
+                );
+                metrics.reloads.inc();
+                eprintln!("rift: configuration reloaded");
+                Ok(snapshot.revision.clone())
+            }
+            Err(error) => {
+                metrics.reload_failures.inc();
+                eprintln!("rift: reload rejected: {}", error.message);
+                Err(error)
+            }
+        };
+        if let Some(reply) = reply {
+            let _ = reply.send(response);
         }
+    }
+    // Stop accepting configuration commands before draining proxy sessions.
+    requests.close();
+    while let Ok(command) = requests.try_recv() {
+        let _ = command.reply.send(Err(control::Error {
+            status: 503,
+            message: "proxy shutting down".into(),
+        }));
     }
     stop.send_replace(true);
     snapshot.health.retire();
@@ -738,7 +836,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         }
     }
     tasks.shutdown().await;
-    background.shutdown().await;
+    services.shutdown().await;
     eprintln!("rift: shutdown complete");
     match failure {
         Some(error) => Err(error),

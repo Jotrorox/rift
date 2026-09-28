@@ -11,7 +11,7 @@ use crate::routing::{Backend, Mode, Routes};
 use mlua::{Table, Value};
 use tokio::sync::Semaphore;
 
-pub use crate::script::RouteScript;
+pub use crate::{http_script::HttpScript, script::RouteScript};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -20,12 +20,15 @@ pub struct Config {
     pub routes: BTreeMap<String, Route>,
     pub limits: Limits,
     pub on_route: Option<RouteScript>,
+    pub on_http: Option<HttpScript>,
     pub fallbacks: BTreeMap<String, Vec<String>>,
     pub network: Network,
     pub rate_limit: Option<RateLimit>,
     pub health_check: Option<HealthCheck>,
     pub status_cache: Option<StatusCache>,
     pub metrics: Option<SocketAddr>,
+    pub web: Option<WebConfig>,
+    pub status: Option<StatusConfig>,
     pub shutdown_timeout: Duration,
 }
 
@@ -59,6 +62,44 @@ impl ServerAccess {
                 .allow
                 .as_ref()
                 .is_none_or(|names| names.iter().any(|name| name.eq_ignore_ascii_case(username)))
+    }
+}
+
+/// Optional administration service. A token is mandatory for non-loopback binds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebConfig {
+    pub listen: SocketAddr,
+    pub token: Option<String>,
+    pub api: bool,
+    pub ui: bool,
+}
+
+impl Default for WebConfig {
+    fn default() -> Self {
+        Self {
+            listen: "127.0.0.1:8080".parse().unwrap(),
+            token: None,
+            api: true,
+            ui: true,
+        }
+    }
+}
+
+/// Optional read-only status service, independent of the administration service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StatusConfig {
+    pub listen: SocketAddr,
+    pub ui: bool,
+    pub metrics: bool,
+}
+
+impl Default for StatusConfig {
+    fn default() -> Self {
+        Self {
+            listen: "127.0.0.1:9090".parse().unwrap(),
+            ui: true,
+            metrics: true,
+        }
     }
 }
 
@@ -125,12 +166,15 @@ impl Config {
             routes: BTreeMap::from([("default".into(), Route::Direct("default".into()))]),
             limits: Limits::default(),
             on_route: None,
+            on_http: None,
             fallbacks: BTreeMap::new(),
             network: Network::default(),
             rate_limit: None,
             health_check: None,
             status_cache: None,
             metrics: None,
+            web: None,
+            status: None,
             shutdown_timeout: Duration::from_secs(30),
         };
         config.validate()?;
@@ -171,12 +215,15 @@ impl Config {
                     "routes",
                     "limits",
                     "on_route",
+                    "on_http",
                     "fallbacks",
                     "network",
                     "rate_limit",
                     "health_check",
                     "status_cache",
                     "metrics",
+                    "web",
+                    "status",
                     "shutdown_timeout_ms",
                 ],
                 "config",
@@ -225,6 +272,14 @@ impl Config {
                 Value::Nil => None,
                 Value::Function(_) => Some(RouteScript::new(source, name)),
                 _ => return Err("config.on_route: expected a function".into()),
+            };
+            let on_http = match root
+                .raw_get::<Value>("on_http")
+                .map_err(|e| e.to_string())?
+            {
+                Value::Nil => None,
+                Value::Function(_) => Some(HttpScript::new(source, name)),
+                _ => return Err("config.on_http: expected a function".into()),
             };
             let rate_limit = options(
                 &root,
@@ -322,11 +377,13 @@ impl Config {
             })
             .transpose()?;
             let metrics = match root.get::<Value>("metrics").map_err(|e| e.to_string())? {
-                Value::Nil => None,
+                Value::Nil | Value::Boolean(false) => None,
                 value => Some(
                     address(&string(value, "metrics")?, "metrics").map_err(|e| e.to_string())?,
                 ),
             };
+            let web = web_options(&root)?;
+            let status = status_options(&root)?;
             let shutdown_timeout = Duration::from_millis(integer(
                 &root,
                 "config",
@@ -367,12 +424,15 @@ impl Config {
                 routes,
                 limits,
                 on_route,
+                on_http,
                 fallbacks,
                 network,
                 rate_limit,
                 health_check,
                 status_cache,
                 metrics,
+                web,
+                status,
                 shutdown_timeout,
             })
         };
@@ -436,14 +496,19 @@ impl Config {
             }
         }
         // Lists are deliberately flat: fallback targets' own lists are not followed.
-        if let Some(metrics) = self.metrics {
-            for listen in self.listeners.values() {
-                if metrics.port() != 0 && metrics == *listen {
-                    return Err(invalid("metrics: address duplicates a listener"));
+        if let Some(web) = &self.web {
+            if let Some(token) = &web.token {
+                if !(16..=4096).contains(&token.len())
+                    || !token.bytes().all(|byte| byte.is_ascii_graphic())
+                {
+                    return Err(invalid(
+                        "web.token: expected 16..=4096 printable ASCII bytes without whitespace",
+                    ));
                 }
-            }
-            for backend in self.backends.values() {
-                backend.check_loop(metrics)?;
+            } else if !web.listen.ip().is_loopback() {
+                return Err(invalid(
+                    "web.token: required when web.listen is not loopback",
+                ));
             }
         }
         for (name, listen) in &self.listeners {
@@ -453,7 +518,7 @@ impl Config {
                 )));
             }
             for (other_name, other) in self.listeners.range(..name.clone()) {
-                if listen.port() != 0 && listen == other {
+                if addresses_overlap(*listen, *other) {
                     return Err(invalid(format!(
                         "listeners.{name}: duplicate address {listen} (also listeners.{other_name})"
                     )));
@@ -475,6 +540,35 @@ impl Config {
                 )));
             }
             self.mode(listener)?;
+        }
+        let services = [
+            ("metrics", self.metrics),
+            ("web.listen", self.web.as_ref().map(|web| web.listen)),
+            ("status.listen", self.status.map(|status| status.listen)),
+        ];
+        for (index, (name, listen)) in services.iter().enumerate() {
+            let Some(listen) = listen else { continue };
+            for (listener_name, other) in &self.listeners {
+                if addresses_overlap(*listen, *other) {
+                    return Err(invalid(format!(
+                        "{name}: duplicate address {listen} (also listeners.{listener_name})"
+                    )));
+                }
+            }
+            for (other_name, other) in &services[..index] {
+                if other.is_some_and(|other| addresses_overlap(*listen, other)) {
+                    return Err(invalid(format!(
+                        "{name}: duplicate address {listen} (also {other_name})"
+                    )));
+                }
+            }
+            for (backend_name, backend) in &self.backends {
+                if service_backend_loop(*listen, backend) {
+                    return Err(invalid(format!(
+                        "{name} and backends.{backend_name} must not point to the same socket"
+                    )));
+                }
+            }
         }
         Ok(())
     }
@@ -572,6 +666,100 @@ fn string_list(value: Value, path: &str, maximum: usize) -> Result<Vec<String>, 
     Ok(ordered.into_values().collect())
 }
 
+/// Port zero requests an independently assigned port, so it never overlaps.
+fn addresses_overlap(a: SocketAddr, b: SocketAddr) -> bool {
+    if a.port() == 0 || a.port() != b.port() {
+        return false;
+    }
+    let a = a.ip().to_canonical();
+    let b = b.ip().to_canonical();
+    a == b
+        || (a.is_ipv4() == b.is_ipv4() && (a.is_unspecified() || b.is_unspecified()))
+        // Tokio's IPv6 wildcard may also accept IPv4 on dual-stack systems.
+        || (a.is_ipv6() && a.is_unspecified())
+        || (b.is_ipv6() && b.is_unspecified())
+}
+
+fn service_backend_loop(listen: SocketAddr, backend: &Backend) -> bool {
+    if let Ok(target) = backend.address().parse::<SocketAddr>() {
+        return addresses_overlap(listen, target);
+    }
+    // Reject the standard loopback DNS name without resolving arbitrary hosts
+    // during configuration evaluation. Runtime loop checks still guard DNS.
+    let Some((host, port)) = backend.address().rsplit_once(':') else {
+        return false;
+    };
+    listen.port() != 0
+        && port.parse::<u16>().ok() == Some(listen.port())
+        && host.trim_end_matches('.').eq_ignore_ascii_case("localhost")
+        && (listen.ip().is_loopback() || listen.ip().is_unspecified())
+}
+
+fn service_options(root: &Table, key: &str, allowed: &[&str]) -> Result<Option<Table>, String> {
+    match root.raw_get::<Value>(key).map_err(|e| e.to_string())? {
+        Value::Nil | Value::Boolean(false) => Ok(None),
+        value => {
+            let values = table(value, key)?;
+            fields(&values, allowed, key)?;
+            Ok(Some(values))
+        }
+    }
+}
+
+fn boolean(table: &Table, path: &str, key: &str, default: bool) -> Result<bool, String> {
+    match table.raw_get::<Value>(key).map_err(|e| e.to_string())? {
+        Value::Nil => Ok(default),
+        Value::Boolean(value) => Ok(value),
+        _ => Err(format!("{path}.{key}: expected a boolean")),
+    }
+}
+
+fn service_listen(table: &Table, path: &str, default: SocketAddr) -> Result<SocketAddr, String> {
+    match table
+        .raw_get::<Value>("listen")
+        .map_err(|e| e.to_string())?
+    {
+        Value::Nil => Ok(default),
+        value => {
+            let path = format!("{path}.listen");
+            address(&string(value, &path)?, &path).map_err(|error| error.to_string())
+        }
+    }
+}
+
+fn web_options(root: &Table) -> Result<Option<WebConfig>, String> {
+    let Some(table) = service_options(root, "web", &["enabled", "listen", "token", "api", "ui"])?
+    else {
+        return Ok(None);
+    };
+    let enabled = boolean(&table, "web", "enabled", true)?;
+    let token = match table.raw_get::<Value>("token").map_err(|e| e.to_string())? {
+        Value::Nil => None,
+        value => Some(string(value, "web.token")?),
+    };
+    let config = WebConfig {
+        listen: service_listen(&table, "web", WebConfig::default().listen)?,
+        token,
+        api: boolean(&table, "web", "api", true)?,
+        ui: boolean(&table, "web", "ui", true)?,
+    };
+    Ok(enabled.then_some(config))
+}
+
+fn status_options(root: &Table) -> Result<Option<StatusConfig>, String> {
+    let Some(table) = service_options(root, "status", &["enabled", "listen", "ui", "metrics"])?
+    else {
+        return Ok(None);
+    };
+    let enabled = boolean(&table, "status", "enabled", true)?;
+    let config = StatusConfig {
+        listen: service_listen(&table, "status", StatusConfig::default().listen)?,
+        ui: boolean(&table, "status", "ui", true)?,
+        metrics: boolean(&table, "status", "metrics", true)?,
+    };
+    Ok(enabled.then_some(config))
+}
+
 fn routes(value: Value) -> Result<BTreeMap<String, Route>, String> {
     let mut routes = BTreeMap::new();
     for pair in table(value, "routes")?.pairs::<Value, Value>() {
@@ -594,7 +782,13 @@ fn routes(value: Value) -> Result<BTreeMap<String, Route>, String> {
 }
 
 fn invalid(message: impl Into<String>) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidInput, message.into())
+    // Script-created diagnostics may be much larger than the source text.
+    // Keep errors safe to return through HTTP and to print in server logs.
+    let message = message.into();
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        message.chars().take(2048).collect::<String>(),
+    )
 }
 
 fn address(value: &str, path: &str) -> io::Result<SocketAddr> {
