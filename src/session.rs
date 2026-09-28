@@ -4,7 +4,12 @@ use crate::protocol::{
     self, Codec, ConnectionState, Direction, Handshake, NextState, Packet, PacketKind,
     ProtocolVersion, Reader, State, read_varint, write_varint,
 };
-use std::io;
+use std::{
+    future::{Future, poll_fn},
+    io,
+    pin::Pin,
+    task::Poll,
+};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 
 pub struct Connection<S> {
@@ -12,6 +17,18 @@ pub struct Connection<S> {
     pub state: ConnectionState,
     pub codec: Codec,
     reader: Reader,
+    pending: Option<PendingWrite>,
+}
+
+struct PendingWrite {
+    frame: Vec<u8>,
+    offset: usize,
+    kind: PacketKind,
+}
+
+enum ConnectionEvent {
+    Read(Option<Packet>),
+    Written(PacketKind),
 }
 
 impl<S> Connection<S> {
@@ -21,7 +38,74 @@ impl<S> Connection<S> {
             state: ConnectionState::new(state),
             codec: Codec::default(),
             reader: Reader::default(),
+            pending: None,
         }
+    }
+}
+
+impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
+    fn queue(
+        &mut self,
+        version: ProtocolVersion,
+        direction: Direction,
+        packet: &Packet,
+    ) -> io::Result<PacketKind> {
+        debug_assert!(self.pending.is_none());
+        let mut state = self.state.clone();
+        let kind = state.observe(version, direction, packet)?;
+        let frame = self.codec.encode(packet)?;
+        self.pending = Some(PendingWrite {
+            frame,
+            offset: 0,
+            kind,
+        });
+        self.state = state;
+        Ok(kind)
+    }
+
+    // Poll writes and reads on the same socket without holding one direction
+    // hostage to the other's backpressure. Each endpoint buffers one write.
+    async fn next(&mut self, read: bool) -> io::Result<ConnectionEvent> {
+        poll_fn(|cx| {
+            if let Some(pending) = &mut self.pending {
+                while pending.offset < pending.frame.len() {
+                    match Pin::new(&mut self.io).poll_write(cx, &pending.frame[pending.offset..]) {
+                        Poll::Ready(Ok(0)) => {
+                            return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
+                        }
+                        Poll::Ready(Ok(size)) => pending.offset += size,
+                        Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                        Poll::Pending => break,
+                    }
+                }
+                if pending.offset == pending.frame.len() {
+                    let kind = self.pending.take().unwrap().kind;
+                    return Poll::Ready(Ok(ConnectionEvent::Written(kind)));
+                }
+            }
+            // Control changes become visible to incoming packets only after
+            // their frame is delivered, including compression and phase changes.
+            if read
+                && self
+                    .pending
+                    .as_ref()
+                    .is_none_or(|pending| pending.kind == PacketKind::Unknown)
+            {
+                let read = self.reader.read(&mut self.io, self.codec);
+                return std::pin::pin!(read)
+                    .poll(cx)
+                    .map(|result| result.map(ConnectionEvent::Read));
+            }
+            Poll::Pending
+        })
+        .await
+    }
+
+    async fn flush_pending(&mut self) -> io::Result<()> {
+        if self.pending.is_some() {
+            self.next(false).await?;
+        }
+        Ok(())
     }
 }
 
@@ -111,6 +195,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                     "Backend switching requires a client in play on Minecraft 1.20.2 or newer.",
                 ));
             }
+            self.client.flush_pending().await?;
             let start = Packet::empty(version.start_configuration().unwrap());
             self.send_client(&start).await?;
             loop {
@@ -227,73 +312,79 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         Ok(())
     }
 
-    /// Forward one packet. Partial reads survive cancellation. A backend EOF is
-    /// returned to the owner so it can attach another backend or disconnect.
-    /// Do not cancel this future during writes and then resume the session.
+    /// Complete one forwarded packet. Partial reads and writes survive cancellation.
+    /// A backend EOF returns to the owner to attach another backend or disconnect.
     pub async fn forward(&mut self) -> io::Result<SessionEvent> {
         let version = self.version()?;
-        let backend = self
-            .backend
-            .as_mut()
-            .ok_or_else(|| protocol::invalid("no backend attached"))?;
-        enum Incoming {
-            Client(Option<Packet>),
-            Backend(Option<Packet>),
-        }
-        let incoming = tokio::select! {
-            packet = self.client.reader.read(&mut self.client.io, self.client.codec), if !self.client_eof => Incoming::Client(packet?),
-            packet = backend.reader.read(&mut backend.io, backend.codec) => Incoming::Backend(packet?),
-        };
-        match incoming {
-            Incoming::Client(None) => {
-                self.client_eof = true;
-                backend.io.shutdown().await?;
-                Ok(SessionEvent::ClientClosed)
+        loop {
+            let backend = self
+                .backend
+                .as_mut()
+                .ok_or_else(|| protocol::invalid("no backend attached"))?;
+            enum Incoming {
+                Client(ConnectionEvent),
+                Backend(ConnectionEvent),
             }
-            Incoming::Backend(None) => {
-                self.backend = None;
-                Ok(SessionEvent::BackendClosed)
-            }
-            Incoming::Client(Some(packet)) => {
-                let kind = self
-                    .client
-                    .state
-                    .observe(version, Direction::Serverbound, &packet)?;
-                if kind == PacketKind::LoginStart {
-                    self.login_start = Some(packet.clone());
+            let read_client = !self.client_eof && backend.pending.is_none();
+            let read_backend = self.client.pending.is_none();
+            let incoming = tokio::select! {
+                event = self.client.next(read_client) => Incoming::Client(event?),
+                event = backend.next(read_backend) => Incoming::Backend(event?),
+            };
+            match incoming {
+                Incoming::Client(ConnectionEvent::Written(PacketKind::Disconnect)) => {
+                    self.backend = None;
+                    return Ok(SessionEvent::Disconnected);
                 }
-                backend
-                    .state
-                    .observe(version, Direction::Serverbound, &packet)?;
-                backend.codec.write(&mut backend.io, &packet).await?;
-                Ok(SessionEvent::Packet)
-            }
-            Incoming::Backend(Some(packet)) => {
-                let kind = backend
-                    .state
-                    .observe(version, Direction::Clientbound, &packet)?;
-                match kind {
-                    PacketKind::SetCompression => {
-                        let threshold = read_varint(&mut packet.data.as_slice())?;
-                        backend.codec.set_compression(threshold);
-                        // Negotiate once on initial login. Later backends have
-                        // independent settings and are transcoded to this codec.
-                        self.send_client(&packet).await?;
-                        self.client.codec.set_compression(threshold);
-                    }
-                    PacketKind::EncryptionRequest => return Err(encryption_unsupported()),
-                    PacketKind::LoginSuccess => {
-                        self.identity = Some(protocol::login_identity(version, &packet)?);
-                        self.send_client(&packet).await?;
-                    }
-                    PacketKind::Disconnect => {
-                        self.send_client(&packet).await?;
-                        self.backend = None;
-                        return Ok(SessionEvent::Disconnected);
-                    }
-                    _ => self.send_client(&packet).await?,
+                Incoming::Client(ConnectionEvent::Written(_))
+                | Incoming::Backend(ConnectionEvent::Written(_)) => {
+                    return Ok(SessionEvent::Packet);
                 }
-                Ok(SessionEvent::Packet)
+                Incoming::Client(ConnectionEvent::Read(None)) => {
+                    self.client_eof = true;
+                    backend.io.shutdown().await?;
+                    return Ok(SessionEvent::ClientClosed);
+                }
+                Incoming::Backend(ConnectionEvent::Read(None)) => {
+                    self.backend = None;
+                    return Ok(SessionEvent::BackendClosed);
+                }
+                Incoming::Client(ConnectionEvent::Read(Some(packet))) => {
+                    let kind =
+                        self.client
+                            .state
+                            .observe(version, Direction::Serverbound, &packet)?;
+                    if kind == PacketKind::LoginStart {
+                        self.login_start = Some(packet.clone());
+                    }
+                    backend.queue(version, Direction::Serverbound, &packet)?;
+                }
+                Incoming::Backend(ConnectionEvent::Read(Some(packet))) => {
+                    let kind = backend
+                        .state
+                        .observe(version, Direction::Clientbound, &packet)?;
+                    match kind {
+                        PacketKind::SetCompression => {
+                            let threshold = read_varint(&mut packet.data.as_slice())?;
+                            backend.codec.set_compression(threshold);
+                            // Negotiate once on initial login. Later backends have
+                            // independent settings and are transcoded to this codec.
+                            self.client
+                                .queue(version, Direction::Clientbound, &packet)?;
+                            self.client.codec.set_compression(threshold);
+                        }
+                        PacketKind::EncryptionRequest => return Err(encryption_unsupported()),
+                        PacketKind::LoginSuccess => {
+                            self.identity = Some(protocol::login_identity(version, &packet)?);
+                            self.client
+                                .queue(version, Direction::Clientbound, &packet)?;
+                        }
+                        _ => {
+                            self.client
+                                .queue(version, Direction::Clientbound, &packet)?;
+                        }
+                    }
+                }
             }
         }
     }
@@ -308,6 +399,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
     }
 
     pub async fn disconnect(&mut self, reason: &str) -> io::Result<()> {
+        self.client.flush_pending().await?;
         let state = self.client.state.phase(Direction::Clientbound);
         if state != State::Closed {
             let packet = protocol::disconnect(self.version, state, reason)?;

@@ -208,16 +208,26 @@ def latency(port):
 
 def transfer(port, size):
     with connect(port) as sock:
+        sent = 0
         def send():
+            nonlocal sent
             for _ in range(size // len(BLOCK)):
                 sock.sendall(BLOCK)
+                sent += len(BLOCK)
             sock.shutdown(socket.SHUT_WR)
 
         with ThreadPoolExecutor(max_workers=1) as pool:
             sender = pool.submit(send)
             received = 0
-            while data := sock.recv(65536):
-                received += len(data)
+            try:
+                while data := sock.recv(65536):
+                    received += len(data)
+            except (OSError, ValueError) as error:
+                if sender.done():
+                    sender.result()
+                raise RuntimeError(
+                    f"transfer failed: sent={sent}/{size}, received={received}/{size}, "
+                    f"sender_done={sender.done()}") from error
             sender.result()
         assert received == size, (received, size)
 

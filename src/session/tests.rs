@@ -77,6 +77,83 @@ async fn play(
 }
 
 #[tokio::test]
+async fn cancelled_forward_resumes_partial_writes_without_duplicating_bytes() {
+    timeout(Duration::from_secs(3), async {
+        let (mut session, mut client, mut backend) = session().await;
+        play(&mut session, &mut client, &mut backend, Codec::default()).await;
+        let packet = Packet::new(0x7f, vec![42; 262144]);
+        let ((), stalled) = tokio::join!(
+            async {
+                Codec::default().write(&mut client, &packet).await.unwrap();
+            },
+            timeout(Duration::from_millis(20), session.forward()),
+        );
+        assert!(stalled.is_err());
+        let pending = session.backend.as_ref().unwrap().pending.as_ref().unwrap();
+        assert!(pending.offset > 0 && pending.offset < pending.frame.len());
+        let (event, received) =
+            tokio::join!(session.forward(), receive(&mut backend, Codec::default()),);
+        assert_eq!(event.unwrap(), SessionEvent::Packet);
+        assert_eq!(received, packet);
+        // Verify the following frame still starts at the correct byte.
+        Codec::default()
+            .write(&mut client, &Packet::empty(0x7e))
+            .await
+            .unwrap();
+        session.forward().await.unwrap();
+        assert_eq!(
+            receive(&mut backend, Codec::default()).await,
+            Packet::empty(0x7e)
+        );
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn echo_backpressure_does_not_block_the_opposite_direction() {
+    timeout(Duration::from_secs(3), async {
+        let (mut session, mut client, mut backend) = session().await;
+        play(&mut session, &mut client, &mut backend, Codec::default()).await;
+        let packet = Packet::new(0x7f, vec![17; 262144]);
+        let relay = async {
+            for _ in 0..64 {
+                assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+            }
+        };
+        let (mut read, mut write) = tokio::io::split(&mut client);
+        let send = async {
+            for _ in 0..32 {
+                Codec::default().write(&mut write, &packet).await.unwrap();
+            }
+        };
+        let receive = async {
+            let mut reader = Reader::default();
+            for _ in 0..32 {
+                assert_eq!(
+                    reader.read(&mut read, Codec::default()).await.unwrap(),
+                    Some(packet.clone())
+                );
+            }
+        };
+        let backend_peer = async {
+            let mut reader = Reader::default();
+            for _ in 0..32 {
+                let echo = reader
+                    .read(&mut backend, Codec::default())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                Codec::default().write(&mut backend, &echo).await.unwrap();
+            }
+        };
+        tokio::join!(relay, send, receive, backend_peer);
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn compressed_login_configuration_play_and_backend_loss_keep_client_owned() {
     timeout(Duration::from_secs(3), async {
         let (mut session, mut client, mut backend) = session().await;
