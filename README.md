@@ -3,7 +3,8 @@
 A small TCP reverse proxy for Minecraft Java Edition. Route multiple hostnames
 through one port, or forward all traffic to one backend. In routing mode Rift
 reads the initial handshake; the backend handles login, encryption, compression,
-and gameplay. Tokio is the only direct dependency; the binary needs no Java.
+and gameplay. LuaJIT is embedded through `mlua`; the binary needs no Java or
+separate Lua installation. Building requires a C toolchain (MSVC on Windows).
 
 ## Run
 
@@ -13,8 +14,9 @@ cargo build --release --locked
 ```
 
 Players connect to port `25565`; Rift connects to the server on `25566`.
-With no arguments, Rift uses those same addresses. The listener must be an IP
-literal with a port. Backends accept IP literals or DNS hostnames with ports;
+With no arguments, Rift loads `./rift.lua` if present, otherwise it uses those
+same addresses. Explicit CLI addresses or routing options override the file.
+The listener must be an IP literal with a port. Backends accept IP literals or DNS hostnames with ports;
 IPv6 works too: `rift '[::]:25565' '[::1]:25566'`.
 Use `--help` for usage. Stop with Ctrl-C (active connections close).
 
@@ -31,7 +33,7 @@ Use `--help` for usage. Stop with Ctrl-C (active connections close).
 Point the public DNS records for both player-facing domains at Rift. Players
 enter `survival.example.com` or `creative.example.com`, using the same port, and
 reach different servers. Backend DNS is resolved for each connection; all
-returned addresses are tried in order within one five-second deadline covering
+returned addresses are tried in order within one deadline (five seconds by default) covering
 resolution, connection and handshake forwarding. DNS uses the system resolver
 and explicit ports; Rift does not look up backend SRV records.
 
@@ -67,14 +69,84 @@ Keep Paper's BungeeCord/Velocity forwarding disabled. This is transparent TCP:
 the backend sees Rift's IP address, with no player IP forwarding. There is no
 protocol translation or Bedrock/UDP support.
 
+## Lua configuration
+
+Copy [`examples/rift.lua`](examples/rift.lua) to `rift.lua` in the working directory,
+or select a file explicitly:
+
+```sh
+./target/release/rift --config examples/rift.lua
+```
+
+The file is a Lua script returning a table. For example, two listeners can route to
+different servers:
+
+```lua
+return {
+    listeners = {
+        public = "0.0.0.0:25565",
+        creative = "0.0.0.0:25567",
+    },
+    backends = {
+        lobby = "127.0.0.1:25566",
+        creative = "127.0.0.1:25568",
+    },
+    routes = {
+        public = "lobby",
+        creative = "creative",
+    },
+    limits = {
+        max_connections = 4096,
+        connect_timeout_ms = 5000,
+        buffer_size = 32 * 1024,
+    },
+}
+```
+
+`listeners`, `backends`, and `routes` are required, nonempty tables with string
+names. Listeners require IP literals with ports; backends also accept DNS
+hostnames with ports. Listener port `0` asks the OS to choose an available port.
+Each listener needs a route. A string value selects one backend and preserves
+transparent TCP forwarding. A table enables Minecraft hostname routing:
+
+```lua
+routes = {
+    public = {
+        ["survival.example.com"] = "lobby",
+        ["creative.example.com"] = "creative",
+        ["*.games.example.com"] = "creative",
+        ["*"] = "lobby", -- Optional default.
+    },
+    creative = "creative", -- Existing single-backend listener.
+},
+```
+
+Every route target must name a configured backend. Matching and handshake
+limits are the same as for CLI routes. Multiple listeners may share backends.
+
+`limits` and each of its fields are optional and default to the values above.
+`max_connections` is shared across all listeners and must be a positive integer
+within Tokio's semaphore capacity. `connect_timeout_ms` accepts 1–86,400,000
+milliseconds; `buffer_size` accepts 1–16,777,216 bytes per direction. All three
+reject fractions, strings, and nonfinite numbers.
+
+Lua runs once during startup and produces a typed Rust `Config`; changing the file
+requires a restart. Treat configuration scripts as trusted local code. Unknown
+fields, invalid types or addresses, missing references, duplicate listener
+addresses, and direct proxy loops fail startup with a contextual error. Syntax
+and execution errors include the filename and Lua diagnostics. A missing explicit
+`--config` file is an error; only a missing implicit `./rift.lua` uses the defaults.
+All listeners bind before Rift begins accepting connections.
+
 ## Implementation
 
 - One async task per connection on Tokio's multithreaded runtime.
 - `TCP_NODELAY` on both sockets for small-packet latency.
-- Two reusable 32 KiB relay buffers per connection, with backpressure and half-close support.
-- Five-second handshake deadline in routing mode; a separate five-second backend
-  DNS/connect/forward deadline. No idle timeout for established sessions.
-- At most 4,096 active connections, including pending handshakes and backend connections;
+- By default, two reusable 32 KiB relay buffers per connection, with backpressure and half-close support.
+- Five-second handshake deadline in routing mode; a separate backend
+  DNS/connect/forward deadline (five seconds by default). No idle timeout for established sessions.
+- By default, at most 4,096 active connections across all listeners, including
+  pending handshakes and backend connections;
   excess clients are immediately closed. The OS file descriptor limit must allow
   two sockets per client plus headroom.
 - No per-packet logging, serialization, shared traffic lock, or unbounded queue.
