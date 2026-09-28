@@ -597,19 +597,12 @@ capacity across reloads, primary outage/fallback/recovery, health transitions,
 status TTL and concurrent fills, malformed status responses, metrics, graceful
 drain and forced shutdown. Signal-driven executable tests run on Unix; the other
 regressions also run on Windows.
-Microsoft account authentication and encrypted gameplay require the separate
-[manual online-mode check](tests/MANUAL_ONLINE.md). Run it with a licensed Java
-client signed in through its launcher:
-
-```sh
-python3 tests/manual_online.py --accept-eula --server paper
-```
-
-It starts two temporary online-mode servers, verifies encryption/authentication
-challenges, and guides an operator through gameplay, reload/status stress,
-outage/fallback/recovery and graceful drain. It records server-verified profile
-UUIDs and explicit operator observations in a separate `manual-online-*/result.json`.
-An offline suite passing does not count as this check passing.
+Microsoft account authentication and encrypted gameplay are not supported by this
+session layer. The [manual online-mode procedure](tests/MANUAL_ONLINE.md) and its
+recorded results apply to the earlier transparent relay. Keep that procedure as
+historical validation; it must be revisited when proxy-owned authentication and
+encryption are implemented. The current offline and wire suites do not establish
+online-mode support.
 
 ## CI and releases
 
