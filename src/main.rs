@@ -2,6 +2,7 @@ mod admission;
 mod events;
 mod health;
 mod metrics;
+mod network;
 mod runtime;
 mod status;
 

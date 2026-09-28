@@ -144,6 +144,8 @@ jobs:
       - run: cargo build --locked --release
       - name: Verify protocol and zlib interoperability
         run: python tests/protocol_wire.py --binary target/release/rift
+      - name: Verify server switching and recovery
+        run: python tests/network_wire.py --binary target/release/rift
       - name: Package and smoke-test executable
         run: python scripts/package.py --platform ${{ matrix.platform }}
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -235,6 +237,9 @@ jobs:
           --server ${{ matrix.server }}
           --compression ${{ matrix.compression }}
           --report target/minecraft/report.json
+      - name: Test lobby switching and backend crash recovery
+        if: matrix.server == 'vanilla' && matrix.compression == 'enabled'
+        run: python tests/network_minecraft.py --accept-eula --binary target/release/rift
       - name: Save verified server download
         if: >-
           steps.server-cache.outputs.cache-hit != 'true' && matrix.compression == 'enabled' &&

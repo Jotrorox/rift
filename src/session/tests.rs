@@ -74,6 +74,22 @@ async fn play(
     session.forward().await.unwrap();
     assert_eq!(receive(backend, codec).await, Packet::empty(3));
     assert!(session.client.state.settled(State::Play));
+    let join = join_game(1);
+    codec.write(backend, &join).await.unwrap();
+    session.forward().await.unwrap();
+    assert_eq!(receive(client, codec).await, join);
+}
+
+fn join_game(entity: i32) -> Packet {
+    let mut data = entity.to_be_bytes().to_vec();
+    data.push(0); // hardcore
+    data.push(1);
+    write_string("minecraft:overworld", &mut data);
+    data.extend([20, 8, 8, 0, 1, 0, 0]); // limits, flags, dimension type
+    write_string("minecraft:overworld", &mut data);
+    data.extend([0; 8]); // seed
+    data.extend([0, 255, 0, 0, 0, 0, 63, 0]); // game modes, flags, death, cooldown, sea level, secure
+    Packet::new(0x30, data)
 }
 
 #[tokio::test]
@@ -204,14 +220,6 @@ async fn backend_switch_relogs_backend_and_retains_client_socket_and_compression
         let (replacement, mut second) = tokio::io::duplex(65536);
         let switch = session.connect_backend(replacement);
         let peers = async {
-            assert_eq!(
-                receive(&mut client, client_codec).await,
-                Packet::empty(0x74)
-            );
-            client_codec
-                .write(&mut client, &Packet::empty(0x0f))
-                .await
-                .unwrap();
             let handshake = receive(&mut second, Codec::default()).await;
             assert_eq!(
                 Handshake::decode(&handshake).unwrap().next_state,
@@ -225,6 +233,18 @@ async fn backend_switch_relogs_backend_and_retains_client_socket_and_compression
             assert_eq!(
                 receive(&mut second, Codec::default()).await,
                 Packet::empty(3)
+            );
+            assert_eq!(
+                receive(&mut client, client_codec).await,
+                Packet::empty(0x74)
+            );
+            client_codec
+                .write(&mut client, &Packet::empty(0x0f))
+                .await
+                .unwrap();
+            assert_eq!(
+                receive(&mut client, client_codec).await,
+                Packet::new(8, vec![0])
             );
         };
         let (result, ()) = tokio::join!(switch, peers);
@@ -305,18 +325,13 @@ async fn pipelined_compression_and_login_success_use_the_new_codec() {
 }
 
 #[tokio::test]
-async fn replacement_failure_can_disconnect_in_the_clients_configuration_state() {
+async fn replacement_preflight_failure_preserves_the_old_backend_and_world() {
     timeout(Duration::from_secs(3), async {
         let (mut session, mut client, mut backend) = session().await;
         play(&mut session, &mut client, &mut backend, Codec::default()).await;
         let (replacement, mut second) = tokio::io::duplex(65536);
         let operation = session.connect_backend(replacement);
         let peers = async {
-            assert_eq!(receive(&mut client, Codec::default()).await.id, 0x74);
-            Codec::default()
-                .write(&mut client, &Packet::empty(0x0f))
-                .await
-                .unwrap();
             receive(&mut second, Codec::default()).await;
             receive(&mut second, Codec::default()).await;
             Codec::default()
@@ -326,20 +341,26 @@ async fn replacement_failure_can_disconnect_in_the_clients_configuration_state()
         };
         let (result, ()) = tokio::join!(operation, peers);
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Unsupported);
-        assert!(session.client.state.settled(State::Configuration));
-        assert!(session.backend().unwrap().state.settled(State::Login));
+        assert!(session.client.state.settled(State::Play));
+        assert!(session.backend().unwrap().state.settled(State::Play));
+        assert!(!session.switch_in_progress());
+        Codec::default()
+            .write(&mut backend, &Packet::new(0x7e, vec![42]))
+            .await
+            .unwrap();
+        session.forward().await.unwrap();
+        assert_eq!(
+            receive(&mut client, Codec::default()).await,
+            Packet::new(0x7e, vec![42])
+        );
         session
             .disconnect("Unable to join replacement")
             .await
             .unwrap();
         assert_eq!(
             receive(&mut client, Codec::default()).await,
-            protocol::disconnect(
-                session.version,
-                State::Configuration,
-                "Unable to join replacement"
-            )
-            .unwrap()
+            protocol::disconnect(session.version, State::Play, "Unable to join replacement")
+                .unwrap()
         );
     })
     .await
@@ -411,4 +432,156 @@ async fn simultaneous_large_packets_and_slow_reads_preserve_both_directions() {
     })
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn replacement_login_ban_does_not_transition_or_detach_player() {
+    timeout(Duration::from_secs(3), async {
+        let (mut session, mut client, mut backend) = session().await;
+        session.enable_network().unwrap();
+        play(&mut session, &mut client, &mut backend, Codec::default()).await;
+        let (replacement, mut second) = tokio::io::duplex(65536);
+        let (result, ()) = tokio::join!(session.connect_backend(replacement), async {
+            receive(&mut second, Codec::default()).await;
+            receive(&mut second, Codec::default()).await;
+            let rejection = protocol::disconnect(
+                Some(ProtocolVersion::new(774).unwrap()),
+                State::Login,
+                "Banned from survival",
+            )
+            .unwrap();
+            Codec::default()
+                .write(&mut second, &rejection)
+                .await
+                .unwrap();
+        });
+        let error = result.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("Banned from survival"));
+        assert!(session.can_switch());
+        assert!(!session.switch_in_progress());
+        assert!(
+            timeout(
+                Duration::from_millis(10),
+                receive(&mut client, Codec::default())
+            )
+            .await
+            .is_err()
+        );
+        Codec::default()
+            .write(&mut backend, &Packet::new(0x7f, vec![42]))
+            .await
+            .unwrap();
+        session.forward().await.unwrap();
+        assert_eq!(
+            receive(&mut client, Codec::default()).await,
+            Packet::new(0x7f, vec![42])
+        );
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn replacement_timeout_keeps_forwarding_old_backend_and_can_resume() {
+    timeout(Duration::from_secs(3), async {
+        let (mut session, mut client, mut backend) = session().await;
+        play(&mut session, &mut client, &mut backend, Codec::default()).await;
+        let (replacement, mut second) = tokio::io::duplex(65536);
+        let (result, ()) = tokio::join!(
+            timeout(
+                Duration::from_millis(40),
+                session.connect_backend(replacement)
+            ),
+            async {
+                receive(&mut second, Codec::default()).await;
+                receive(&mut second, Codec::default()).await;
+                let keepalive = Packet::new(0x2b, 123_i64.to_be_bytes().to_vec());
+                Codec::default()
+                    .write(&mut backend, &keepalive)
+                    .await
+                    .unwrap();
+                assert_eq!(receive(&mut client, Codec::default()).await, keepalive);
+            }
+        );
+        assert!(result.is_err());
+        assert!(session.can_switch());
+        assert!(session.backend().is_some());
+        assert!(!session.switch_in_progress());
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn current_backend_ban_during_preflight_is_terminal() {
+    timeout(Duration::from_secs(3), async {
+        let (mut session, mut client, mut backend) = session().await;
+        play(&mut session, &mut client, &mut backend, Codec::default()).await;
+        let (replacement, mut second) = tokio::io::duplex(65536);
+        let banned = protocol::disconnect(session.version, State::Play, "Banned").unwrap();
+        let (result, ()) = tokio::join!(session.connect_backend(replacement), async {
+            receive(&mut second, Codec::default()).await;
+            receive(&mut second, Codec::default()).await;
+            Codec::default().write(&mut backend, &banned).await.unwrap();
+            assert_eq!(receive(&mut client, Codec::default()).await, banned);
+        });
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert!(session.client.state.settled(State::Closed));
+        assert!(!session.can_switch());
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn commands_are_intercepted_only_in_network_mode_without_signed_arguments() {
+    let (mut session, mut client, mut backend) = session().await;
+    session.enable_network().unwrap();
+    play(&mut session, &mut client, &mut backend, Codec::default()).await;
+    let mut command = Vec::new();
+    write_string("server survival", &mut command);
+    Codec::default()
+        .write(&mut client, &Packet::new(6, command.clone()))
+        .await
+        .unwrap();
+    assert_eq!(
+        session.forward().await.unwrap(),
+        SessionEvent::ProxyCommand("server survival".into())
+    );
+    assert!(
+        timeout(
+            Duration::from_millis(10),
+            receive(&mut backend, Codec::default())
+        )
+        .await
+        .is_err()
+    );
+    command.extend([0; 16]);
+    command.push(1);
+    write_string("message", &mut command);
+    command.extend([42; 256]);
+    command.extend([0; 5]);
+    let signed = Packet::new(7, command);
+    Codec::default().write(&mut client, &signed).await.unwrap();
+    assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+    assert_eq!(receive(&mut backend, Codec::default()).await, signed);
+}
+
+#[tokio::test]
+async fn initial_retry_is_disabled_after_backend_login_plugin_exchange() {
+    let (mut session, mut client, mut backend) = session().await;
+    let request = Packet::new(4, vec![1, 0]);
+    Codec::default()
+        .write(&mut backend, &request)
+        .await
+        .unwrap();
+    session.forward().await.unwrap();
+    assert_eq!(receive(&mut client, Codec::default()).await, request);
+    drop(backend);
+    assert_eq!(
+        session.forward().await.unwrap(),
+        SessionEvent::BackendClosed
+    );
+    assert!(!session.reset_initial_backend());
 }

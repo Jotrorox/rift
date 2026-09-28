@@ -2,7 +2,7 @@
 //! with their own framing, compression and protocol phases.
 use crate::protocol::{
     self, Codec, ConnectionState, Direction, Handshake, NextState, Packet, PacketKind,
-    ProtocolVersion, Reader, State, read_varint, write_varint,
+    PlayerIdentity, ProtocolVersion, Reader, State, read_varint, write_varint,
 };
 use std::{
     future::{Future, poll_fn},
@@ -109,11 +109,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionEvent {
     Packet,
     ClientClosed,
     BackendClosed,
+    BackendFailed,
+    ProxyCommand(String),
     Disconnected,
 }
 
@@ -123,7 +125,15 @@ pub struct Session<C, B> {
     pub handshake: Handshake,
     version: Option<ProtocolVersion>,
     login_start: Option<Packet>,
-    identity: Option<Vec<u8>>,
+    identity: Option<PlayerIdentity>,
+    network: bool,
+    joined: bool,
+    switch_in_progress: bool,
+    backend_error: Option<io::Error>,
+    client_information: Option<Packet>,
+    client_brand: Option<Packet>,
+    bundle_open: bool,
+    initial_retry_safe: bool,
     client_eof: bool,
     read_chunk_size: usize,
 }
@@ -144,6 +154,14 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             handshake,
             login_start: None,
             identity: None,
+            network: false,
+            joined: false,
+            switch_in_progress: false,
+            backend_error: None,
+            client_information: None,
+            client_brand: None,
+            bundle_open: false,
+            initial_retry_safe: true,
             client_eof: false,
             read_chunk_size: 32 * 1024,
         })
@@ -173,10 +191,90 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         self.backend.as_ref()
     }
 
-    /// Attach a connected backend without surrendering ownership of the client.
-    /// A replacement logs in independently while the client re-enters
-    /// configuration. Callers must bound this operation with a deadline; on a
-    /// timeout the session must be disconnected, since a write may be partial.
+    pub fn switch_supported(&self) -> bool {
+        self.handshake.protocol == 774
+    }
+
+    pub fn enable_network(&mut self) -> io::Result<()> {
+        if !self.switch_supported() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Network switching requires Minecraft 1.21.11.",
+            ));
+        }
+        self.network = true;
+        Ok(())
+    }
+
+    pub fn identity(&self) -> Option<PlayerIdentity> {
+        self.identity.clone()
+    }
+
+    pub fn can_switch(&self) -> bool {
+        self.switch_supported()
+            && self.joined
+            && !self.switch_in_progress
+            && !self.client_eof
+            && self.client.state.settled(State::Play)
+    }
+
+    pub fn switch_in_progress(&self) -> bool {
+        self.switch_in_progress
+    }
+
+    pub fn last_backend_error(&self) -> Option<&io::Error> {
+        self.backend_error.as_ref()
+    }
+
+    /// Read Login Start before choosing a backend. The UUID is an untrusted
+    /// client claim; the confirmed offline backend identity arrives at success.
+    pub async fn read_login_start(&mut self) -> io::Result<PlayerIdentity> {
+        let version = self.version()?;
+        if let Some(packet) = &self.login_start {
+            return protocol::start_identity(version, packet);
+        }
+        if !self.client.state.settled(State::Login) {
+            return Err(protocol::invalid("not in login"));
+        }
+        let packet = self
+            .client
+            .reader
+            .read(&mut self.client.io, self.client.codec)
+            .await?
+            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "missing login start"))?;
+        if self
+            .client
+            .state
+            .observe(version, Direction::Serverbound, &packet)?
+            != PacketKind::LoginStart
+        {
+            return Err(protocol::invalid("expected Login Start"));
+        }
+        let identity = protocol::start_identity(version, &packet)?;
+        self.login_start = Some(packet);
+        Ok(identity)
+    }
+
+    /// Only a transport failure before Login Success can retry initial login.
+    /// A backend's explicit Disconnect closes client state and is never retried.
+    pub fn reset_initial_backend(&mut self) -> bool {
+        if self.identity.is_none()
+            && !self.client_eof
+            && self.initial_retry_safe
+            && self.client.state.settled(State::Login)
+            && !self.switch_in_progress
+        {
+            self.backend = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Preflight replacement login while preserving the current backend. A
+    /// timeout before switch_in_progress() becomes true can safely resume play.
+    /// Once the transition starts the owner must disconnect on cancellation:
+    /// direct transition writes may be partial. Callers must supply a deadline.
     pub async fn connect_backend(&mut self, stream: B) -> io::Result<()> {
         let version = self.version()?;
         if self.handshake.next_state == NextState::Status {
@@ -185,19 +283,68 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             ));
         }
         let replacing = self.identity.is_some();
+        if replacing && !self.can_switch() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Backend switching requires a joined Minecraft 1.21.11 player.",
+            ));
+        }
+        if !replacing && (self.backend.is_some() || !self.client.state.settled(State::Login)) {
+            return Err(protocol::invalid("backend login is already in progress"));
+        }
+        let mut backend = Connection::new(stream, State::Login);
+        backend.reader.set_read_chunk_size(self.read_chunk_size);
+        let mut handshake = self.handshake.clone();
         if replacing {
-            if !version.has_configuration()
-                || !self.client.state.settled(State::Play)
-                || self.client_eof
+            handshake.next_state = NextState::Login;
+        }
+        backend
+            .codec
+            .write(&mut backend.io, &handshake.packet())
+            .await?;
+        if let Some(start) = &self.login_start {
+            backend
+                .state
+                .observe(version, Direction::Serverbound, start)?;
+            backend.codec.write(&mut backend.io, start).await?;
+        }
+        if replacing {
+            let expected = self.identity.clone().unwrap();
             {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "Backend switching requires a client in play on Minecraft 1.20.2 or newer.",
+                let login = Self::login_replacement(&mut backend, version, &expected);
+                tokio::pin!(login);
+                loop {
+                    tokio::select! {
+                        result = &mut login => { result?; break; }
+                        event = self.forward(), if self.backend.is_some() => match event? {
+                            SessionEvent::Packet | SessionEvent::ProxyCommand(_) => {}
+                            SessionEvent::BackendClosed | SessionEvent::BackendFailed => {}
+                            SessionEvent::ClientClosed => return Err(io::Error::new(
+                                io::ErrorKind::UnexpectedEof, "client closed during replacement login")),
+                            SessionEvent::Disconnected => return Err(io::Error::new(
+                                io::ErrorKind::PermissionDenied, "The current backend disconnected the player.")),
+                        }
+                    }
+                }
+            }
+            // The old server can initiate its own configuration while login is
+            // in flight; never splice a second transition into that exchange.
+            if !self.can_switch() {
+                return Err(protocol::invalid(
+                    "client state changed during replacement login",
                 ));
             }
+            // All errors above leave the old attachment and client world intact.
+            self.switch_in_progress = true;
             self.client.flush_pending().await?;
-            let start = Packet::empty(version.start_configuration().unwrap());
-            self.send_client(&start).await?;
+            // A failed backend may have left an unfinished bundle on the wire.
+            // Close it before the unbundled configuration transition.
+            if self.bundle_open {
+                self.send_client(&Packet::empty(0)).await?;
+                self.bundle_open = false;
+            }
+            self.send_client(&Packet::empty(version.start_configuration().unwrap()))
+                .await?;
             loop {
                 let packet = self
                     .client
@@ -217,39 +364,37 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                 if kind == PacketKind::ConfigurationAcknowledged {
                     break;
                 }
-                // Drain old-world packets up to the transition acknowledgement.
+                // All old-world packets, including chat/session updates and
+                // acknowledgements, belong to the retired backend. Never replay
+                // them to a new chat chain. Cache only persistent client options.
+                self.remember_client_packet(State::Play, &packet)?;
             }
-        } else if self.backend.is_some() || !self.client.state.settled(State::Login) {
-            return Err(protocol::invalid("backend login is already in progress"));
-        }
-        // Dropping a backend never drops, resets or replaces the client codec.
-        self.backend = None;
-        let mut backend = Connection::new(stream, State::Login);
-        backend.reader.set_read_chunk_size(self.read_chunk_size);
-        let mut handshake = self.handshake.clone();
-        if replacing {
-            handshake.next_state = NextState::Login;
-        }
-        backend
-            .codec
-            .write(&mut backend.io, &handshake.packet())
-            .await?;
-        if let Some(start) = &self.login_start {
-            backend
-                .state
-                .observe(version, Direction::Serverbound, start)?;
-            backend.codec.write(&mut backend.io, start).await?;
+            // New play listener + Join Game reset entities, chunks, scoreboard,
+            // tab list, bossbars, signed-message encoder and last-seen tracker.
+            // Mojang 1.21.11 ClientPacketListener.handleConfigurationStart /
+            // handleLogin; ClientConfigurationPacketListenerImpl.finish.
+            self.joined = false;
+            if let Some(settings) = &self.client_information {
+                backend.codec.write(&mut backend.io, settings).await?;
+            }
+            if let Some(brand) = &self.client_brand {
+                backend.codec.write(&mut backend.io, brand).await?;
+            }
+            // Resource packs are common-listener state and survive a fresh play
+            // listener. Pop the old server's stack before new configuration.
+            self.send_client(&Packet::new(0x08, vec![0])).await?;
         }
         self.backend = Some(backend);
-        if replacing {
-            self.login_replacement(version).await?;
-        }
+        self.backend_error = None;
         Ok(())
     }
 
-    async fn login_replacement(&mut self, version: ProtocolVersion) -> io::Result<()> {
+    async fn login_replacement(
+        backend: &mut Connection<B>,
+        version: ProtocolVersion,
+        expected: &PlayerIdentity,
+    ) -> io::Result<()> {
         loop {
-            let backend = self.backend.as_mut().unwrap();
             let packet = backend
                 .reader
                 .read(&mut backend.io, backend.codec)
@@ -268,7 +413,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                     .codec
                     .set_compression(read_varint(&mut packet.data.as_slice())?),
                 PacketKind::LoginSuccess => {
-                    if Some(protocol::login_identity(version, &packet)?) != self.identity {
+                    if protocol::success_identity(version, &packet)? != *expected {
                         return Err(protocol::invalid(
                             "replacement backend changed the player identity",
                         ));
@@ -280,9 +425,15 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                     backend.codec.write(&mut backend.io, &acknowledged).await?;
                     return Ok(());
                 }
+                PacketKind::Disconnect => {
+                    // A ban/whitelist rejection is authoritative. Preserve its
+                    // text for the requesting player and do not try another hub.
+                    let reason = protocol::read_string(&mut packet.data.as_slice(), 32767)
+                        .unwrap_or("The destination server denied access.")
+                        .to_owned();
+                    return Err(io::Error::new(io::ErrorKind::PermissionDenied, reason));
+                }
                 PacketKind::LoginPluginRequest => {
-                    // Login plugins cannot be forwarded to a client already in
-                    // configuration. Explicitly report unsupported to the backend.
                     let id = read_varint(&mut packet.data.as_slice())?;
                     let mut data = Vec::new();
                     write_varint(id, &mut data);
@@ -293,13 +444,45 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                         .await?;
                 }
                 PacketKind::EncryptionRequest => return Err(encryption_unsupported()),
-                _ => {
-                    return Err(protocol::invalid(
-                        "replacement backend rejected login or requested an unsupported login exchange",
-                    ));
-                }
+                _ => return Err(protocol::invalid("unsupported replacement login exchange")),
             }
         }
+    }
+
+    fn remember_client_packet(&mut self, state: State, packet: &Packet) -> io::Result<()> {
+        if !self.network {
+            return Ok(());
+        }
+        if matches!(
+            (state, packet.id),
+            (State::Configuration, 0) | (State::Play, 0x0d)
+        ) {
+            self.client_information = Some(Packet::new(0, packet.data.clone()));
+        }
+        if matches!(
+            (state, packet.id),
+            (State::Configuration, 2) | (State::Play, 0x15)
+        ) {
+            let mut bytes = packet.data.as_slice();
+            if protocol::read_string(&mut bytes, 32767)? == "minecraft:brand" {
+                // Avoid retaining arbitrary large mod payloads across backends.
+                protocol::read_string(&mut bytes, 32767)?;
+                if !bytes.is_empty() {
+                    return Err(protocol::invalid("invalid client brand"));
+                }
+                self.client_brand = Some(Packet::new(2, packet.data.clone()));
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn send_system_message(&mut self, message: &str) -> io::Result<()> {
+        self.client.flush_pending().await?;
+        if !self.client.state.settled(State::Play) {
+            return Err(protocol::invalid("system messages require play state"));
+        }
+        self.send_client(&protocol::system_message(self.version()?, message)?)
+            .await
     }
 
     async fn send_client(&mut self, packet: &Packet) -> io::Result<()> {
@@ -322,34 +505,46 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                 .as_mut()
                 .ok_or_else(|| protocol::invalid("no backend attached"))?;
             enum Incoming {
-                Client(ConnectionEvent),
-                Backend(ConnectionEvent),
+                Client(io::Result<ConnectionEvent>),
+                Backend(io::Result<ConnectionEvent>),
             }
             let read_client = !self.client_eof && backend.pending.is_none();
             let read_backend = self.client.pending.is_none();
             let incoming = tokio::select! {
-                event = self.client.next(read_client) => Incoming::Client(event?),
-                event = backend.next(read_backend) => Incoming::Backend(event?),
+                event = self.client.next(read_client) => Incoming::Client(event),
+                event = backend.next(read_backend) => Incoming::Backend(event),
             };
             match incoming {
-                Incoming::Client(ConnectionEvent::Written(PacketKind::Disconnect)) => {
+                Incoming::Client(Err(error)) => return Err(error),
+                Incoming::Backend(Err(error)) => {
+                    self.backend_error = Some(error);
+                    self.backend = None;
+                    return Ok(SessionEvent::BackendFailed);
+                }
+                Incoming::Client(Ok(ConnectionEvent::Written(PacketKind::Disconnect))) => {
                     self.backend = None;
                     return Ok(SessionEvent::Disconnected);
                 }
-                Incoming::Client(ConnectionEvent::Written(_))
-                | Incoming::Backend(ConnectionEvent::Written(_)) => {
+                Incoming::Client(Ok(ConnectionEvent::Written(PacketKind::JoinGame))) => {
+                    self.joined = true;
+                    self.switch_in_progress = false;
                     return Ok(SessionEvent::Packet);
                 }
-                Incoming::Client(ConnectionEvent::Read(None)) => {
+                Incoming::Client(Ok(ConnectionEvent::Written(_)))
+                | Incoming::Backend(Ok(ConnectionEvent::Written(_))) => {
+                    return Ok(SessionEvent::Packet);
+                }
+                Incoming::Client(Ok(ConnectionEvent::Read(None))) => {
                     self.client_eof = true;
-                    backend.io.shutdown().await?;
+                    let _ = backend.io.shutdown().await;
                     return Ok(SessionEvent::ClientClosed);
                 }
-                Incoming::Backend(ConnectionEvent::Read(None)) => {
+                Incoming::Backend(Ok(ConnectionEvent::Read(None))) => {
                     self.backend = None;
                     return Ok(SessionEvent::BackendClosed);
                 }
-                Incoming::Client(ConnectionEvent::Read(Some(packet))) => {
+                Incoming::Client(Ok(ConnectionEvent::Read(Some(packet)))) => {
+                    let phase = self.client.state.phase(Direction::Serverbound);
                     let kind =
                         self.client
                             .state
@@ -357,29 +552,86 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                     if kind == PacketKind::LoginStart {
                         self.login_start = Some(packet.clone());
                     }
+                    self.remember_client_packet(phase, &packet)?;
+                    let backend = self.backend.as_mut().unwrap();
+                    if self.network
+                        && phase == State::Play
+                        && self.joined
+                        && let Some((command, acknowledgement)) = protocol::proxy_command(&packet)?
+                    {
+                        if let Some(acknowledgement) = acknowledgement {
+                            backend.queue(version, Direction::Serverbound, &acknowledgement)?;
+                        }
+                        return Ok(SessionEvent::ProxyCommand(command));
+                    }
                     backend.queue(version, Direction::Serverbound, &packet)?;
                 }
-                Incoming::Backend(ConnectionEvent::Read(Some(packet))) => {
+                Incoming::Backend(Ok(ConnectionEvent::Read(Some(packet)))) => {
+                    let phase = backend.state.phase(Direction::Clientbound);
                     let kind = backend
                         .state
                         .observe(version, Direction::Clientbound, &packet)?;
+                    if matches!(
+                        kind,
+                        PacketKind::LoginPluginRequest | PacketKind::CookieRequest
+                    ) {
+                        self.initial_retry_safe = false;
+                    }
                     match kind {
                         PacketKind::SetCompression => {
                             let threshold = read_varint(&mut packet.data.as_slice())?;
                             backend.codec.set_compression(threshold);
-                            // Negotiate once on initial login. Later backends have
-                            // independent settings and are transcoded to this codec.
-                            self.client
-                                .queue(version, Direction::Clientbound, &packet)?;
-                            self.client.codec.set_compression(threshold);
+                            // Initial retries may use another compression threshold.
+                            // The client's negotiated codec belongs to the session.
+                            if self.client.codec.threshold().is_none() {
+                                self.client
+                                    .queue(version, Direction::Clientbound, &packet)?;
+                                self.client.codec.set_compression(threshold);
+                            } else {
+                                return Ok(SessionEvent::Packet);
+                            }
                         }
                         PacketKind::EncryptionRequest => return Err(encryption_unsupported()),
                         PacketKind::LoginSuccess => {
-                            self.identity = Some(protocol::login_identity(version, &packet)?);
+                            let identity = protocol::success_identity(version, &packet)?;
+                            let requested = protocol::start_identity(
+                                version,
+                                self.login_start
+                                    .as_ref()
+                                    .ok_or_else(|| protocol::invalid("missing login start"))?,
+                            )?;
+                            if identity.name != requested.name {
+                                return Err(protocol::invalid("backend changed the player name"));
+                            }
+                            self.identity = Some(identity);
+                            self.client
+                                .queue(version, Direction::Clientbound, &packet)?;
+                        }
+                        PacketKind::JoinGame => {
+                            if self.network {
+                                protocol::validate_network_join(&packet)?;
+                            }
+                            self.client
+                                .queue(version, Direction::Clientbound, &packet)?;
+                        }
+                        PacketKind::StartConfiguration => {
+                            self.joined = false;
                             self.client
                                 .queue(version, Direction::Clientbound, &packet)?;
                         }
                         _ => {
+                            let packet =
+                                if self.network && phase == State::Play && packet.id == 0x10 {
+                                    protocol::network_commands(&packet)?
+                                } else {
+                                    packet
+                                };
+                            if self.network && phase == State::Play && packet.id == 0 {
+                                if !packet.data.is_empty() {
+                                    return Err(protocol::invalid("invalid bundle delimiter"));
+                                }
+                                self.bundle_open = !self.bundle_open;
+                            }
                             self.client
                                 .queue(version, Direction::Clientbound, &packet)?;
                         }

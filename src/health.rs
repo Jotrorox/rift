@@ -2,7 +2,15 @@ use rift::{
     config::{Config, HealthCheck},
     routing::ConnectStage,
 };
-use std::{collections::BTreeMap, io, net::SocketAddr, sync::Mutex};
+use std::{
+    collections::BTreeMap,
+    io,
+    net::SocketAddr,
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 use tokio::{net::TcpStream, time::Instant};
 
 #[derive(Clone, Copy)]
@@ -15,12 +23,14 @@ struct State {
 pub struct Health {
     settings: Option<HealthCheck>,
     states: Mutex<BTreeMap<String, State>>,
+    retired: AtomicBool,
 }
 
 impl Health {
     pub fn new(config: &Config) -> Self {
         Self {
             settings: config.health_check,
+            retired: AtomicBool::new(false),
             states: Mutex::new(
                 config
                     .backends
@@ -41,7 +51,14 @@ impl Health {
     }
 
     pub fn available(&self, name: &str) -> bool {
-        self.states.lock().unwrap()[name].up
+        self.retired.load(Ordering::Relaxed) || self.states.lock().unwrap()[name].up
+    }
+
+    /// Established sessions retain their configuration after reload, but its
+    /// health worker stops. Stale failures must not permanently exclude a
+    /// recovered destination: those sessions now use bounded connection attempts.
+    pub fn retire(&self) {
+        self.retired.store(true, Ordering::Relaxed);
     }
 
     pub fn record(&self, name: &str, success: bool) {
@@ -84,8 +101,6 @@ pub async fn connect(
     deadline: Instant,
     event: &mut crate::events::Connection,
 ) -> io::Result<TcpStream> {
-    event.stage = "connect";
-    event.failure = "no_healthy_backend";
     let candidates: Vec<&str> = std::iter::once(primary)
         .chain(
             config
@@ -95,6 +110,36 @@ pub async fn connect(
                 .flatten()
                 .map(String::as_str),
         )
+        .collect();
+    connect_candidates(
+        config,
+        health,
+        &candidates,
+        listeners,
+        metrics,
+        deadline,
+        event,
+    )
+    .await
+}
+
+/// Connect only to the supplied, policy-checked candidates, in their given order.
+/// In particular this must not expand another backend's fallback list.
+pub async fn connect_candidates(
+    config: &Config,
+    health: &Health,
+    candidates: &[&str],
+    listeners: &[SocketAddr],
+    metrics: &crate::metrics::Metrics,
+    deadline: Instant,
+    event: &mut crate::events::Connection,
+) -> io::Result<TcpStream> {
+    event.stage = "connect";
+    event.failure = "no_healthy_backend";
+    let primary = candidates.first().copied();
+    let candidates: Vec<&str> = candidates
+        .iter()
+        .copied()
         .filter(|name| health.available(name))
         .collect();
     let mut last_error =
@@ -111,7 +156,7 @@ pub async fn connect(
         {
             Ok(stream) => {
                 health.record(name, true);
-                if *name != primary {
+                if Some(*name) != primary {
                     metrics.fallbacks.inc();
                 }
                 return Ok(stream);
@@ -161,6 +206,33 @@ mod tests {
         assert!(!health.available("default"));
         health.record("default", true);
         assert!(health.available("default"));
+    }
+
+    #[test]
+    fn retired_health_does_not_strand_players_with_stale_failures() {
+        let config = Config {
+            health_check: Some(HealthCheck {
+                interval: std::time::Duration::from_secs(1),
+                timeout: std::time::Duration::from_secs(1),
+                unhealthy_threshold: 1,
+                healthy_threshold: 1,
+            }),
+            ..Config::default()
+        };
+        let health = Health::new(&config);
+        health.record("default", false);
+        assert!(!health.available("default"));
+        health.retire();
+        assert!(health.available("default"));
+        // Connection failures after the worker stops must remain retryable too.
+        health.record("default", false);
+        assert!(health.available("default"));
+        health.record("default", true);
+        assert!(health.available("default"));
+        // A replacement configuration still uses ordinary health policy.
+        let replacement = Health::new(&config);
+        replacement.record("default", false);
+        assert!(!replacement.available("default"));
     }
 }
 
