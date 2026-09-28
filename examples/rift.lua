@@ -1,5 +1,6 @@
 -- Copy to ./rift.lua, or run: rift --config examples/rift.lua
--- Routes map listener names to backend names. Lua runs once at startup.
+-- Routes map listener names to backend names. This config runs only at startup.
+-- See routing.lua for an optional per-connection on_route hook.
 return {
     listeners = {
         public = "0.0.0.0:25565",

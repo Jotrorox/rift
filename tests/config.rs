@@ -295,41 +295,165 @@ fn failure_to_bind_any_listener_aborts_startup() {
 
 #[test]
 fn lua_hostname_routes_reach_two_backends_on_one_listener() {
-    let fixture = Fixture::new();
-    let backends: Vec<_> = (0..2)
-        .map(|_| TcpListener::bind("127.0.0.1:0").unwrap())
-        .collect();
-    fixture.write(&format!("return {{
+    for hook in [
+        "",
+        "on_route = function(connection) assert(connection.default_backend == 'survival'); return nil end,",
+    ] {
+        let fixture = Fixture::new();
+        let backends: Vec<_> = (0..2)
+            .map(|_| TcpListener::bind("127.0.0.1:0").unwrap())
+            .collect();
+        fixture.write(&format!("return {{{hook}
         listeners = {{ public = '127.0.0.1:0' }},
         backends = {{ survival = '{}', creative = 'localhost:{}' }},
         routes = {{ public = {{ ['survival.example.test'] = 'survival', ['creative.example.test'] = 'creative', ['*.games.example.test'] = 'creative', ['*'] = 'survival' }} }},
         limits = {{ buffer_size = 3 }}
     }}", backends[0].local_addr().unwrap(), backends[1].local_addr().unwrap().port()));
-    let process = fixture.spawn(&[]);
-    let address = process.listener();
-    for (host, index) in [
-        ("survival.example.test", 0),
-        ("creative.example.test", 1),
-        ("pvp.games.example.test", 1),
-        ("unmatched.test", 0),
-    ] {
-        let mut client = connect(address);
-        let mut body = vec![0, 0x86, 0x06, host.len() as u8];
-        body.extend(host.as_bytes());
-        body.extend([0x63, 0xdd, 1]);
-        let mut request = vec![body.len() as u8];
-        request.extend(body);
-        request.extend([1, 0]); // Pipelined Minecraft status request.
-        client.write_all(&request).unwrap();
+        let process = fixture.spawn(&[]);
+        let address = process.listener();
+        for (host, index) in [
+            ("survival.example.test", 0),
+            ("creative.example.test", 1),
+            ("pvp.games.example.test", 1),
+            ("unmatched.test", 0),
+        ] {
+            let mut client = connect(address);
+            let mut body = vec![0, 0x86, 0x06, host.len() as u8];
+            body.extend(host.as_bytes());
+            body.extend([0x63, 0xdd, 1]);
+            let mut request = vec![body.len() as u8];
+            request.extend(body);
+            request.extend([1, 0]); // Pipelined Minecraft status request.
+            client.write_all(&request).unwrap();
+            client.shutdown(std::net::Shutdown::Write).unwrap();
+            let mut server = accept(&backends[index]);
+            let mut received = Vec::new();
+            server.read_to_end(&mut received).unwrap();
+            assert_eq!(received, request);
+            server.write_all(&[index as u8]).unwrap();
+            server.shutdown(std::net::Shutdown::Write).unwrap();
+            let mut response = Vec::new();
+            client.read_to_end(&mut response).unwrap();
+            assert_eq!(response, [index as u8]);
+        }
+    }
+}
+
+fn assert_closed(client: &mut TcpStream) {
+    match client.read(&mut [0]) {
+        Ok(0) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
+        result => panic!("connection was not closed: {result:?}"),
+    }
+}
+
+fn assert_no_connection(backend: &TcpListener) {
+    backend.set_nonblocking(true).unwrap();
+    assert_eq!(
+        backend.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+}
+
+#[test]
+fn lua_selects_a_backend_or_rejects_before_connecting_upstream() {
+    for hostname_routes in [false, true] {
+        let fixture = Fixture::new();
+        let default = TcpListener::bind("127.0.0.1:0").unwrap();
+        let selected = TcpListener::bind("127.0.0.1:0").unwrap();
+        let source = config(
+            &[
+                default.local_addr().unwrap(),
+                selected.local_addr().unwrap(),
+            ],
+            "",
+        )
+        .replace("b1 = '127.0.0.1:", "b1 = 'localhost:");
+        let source = if hostname_routes {
+            source
+                .replace("l0 = 'b0'", "l0 = { ['example.test'] = 'b0' }")
+                .replace("l1 = 'b1'", "l1 = { ['example.test'] = 'b1' }")
+        } else {
+            source
+        };
+        let source = source.replacen(
+            "return {",
+            "return { on_route = function(connection)
+        assert(connection.peer_ip == '127.0.0.1')
+        assert(connection.peer_port > 0 and connection.local_port > 0)
+        if connection.listener == 'l0' then
+            assert(connection.default_backend == 'b0')
+            return { backend = 'b1' }
+        end
+        return { reject = true, reason = 'closed' }
+    end,",
+            1,
+        );
+        fixture.write(&if hostname_routes {
+            source.replace(
+                "assert(connection.default_backend == 'b0')",
+                "assert(connection.default_backend == nil)",
+            )
+        } else {
+            source
+        });
+        let process = fixture.spawn(&[]);
+        let first = process.listener();
+        let second = process.listener();
+        // The source snapshot remains usable after the file changes.
+        fixture.write("error('must not reread the configuration')");
+        let mut client = connect(first);
+        let mut server = accept(&selected);
+        client.write_all(b"routed").unwrap();
         client.shutdown(std::net::Shutdown::Write).unwrap();
-        let mut server = accept(&backends[index]);
-        let mut received = Vec::new();
-        server.read_to_end(&mut received).unwrap();
-        assert_eq!(received, request);
-        server.write_all(&[index as u8]).unwrap();
+        let mut bytes = Vec::new();
+        server.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"routed");
+        server.write_all(b"reply").unwrap();
         server.shutdown(std::net::Shutdown::Write).unwrap();
-        let mut response = Vec::new();
-        client.read_to_end(&mut response).unwrap();
-        assert_eq!(response, [index as u8]);
+        bytes.clear();
+        client.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"reply");
+        assert_closed(&mut connect(second));
+        assert_no_connection(&default);
+        assert_no_connection(&selected);
+    }
+}
+
+#[test]
+fn hook_failures_close_only_the_affected_connection_and_release_its_permit() {
+    for failing_hook in [
+        "error('broken hook')",
+        "return { backend = 'missing' }",
+        "return { backend = false }",
+        "while true do end",
+        "return { reject = true }",
+    ] {
+        let fixture = Fixture::new();
+        let backend = TcpListener::bind("127.0.0.1:0").unwrap();
+        let source = config(&[backend.local_addr().unwrap(); 2], "max_connections = 1");
+        fixture.write(&source.replacen(
+            "return {",
+            &format!(
+                "return {{ on_route = function(connection)
+            if connection.listener == 'l0' then {failing_hook} end
+            return nil
+        end,"
+            ),
+            1,
+        ));
+        let process = fixture.spawn(&[]);
+        let failing = process.listener();
+        let healthy = process.listener();
+        for _ in 0..6 {
+            assert_closed(&mut connect(failing));
+        }
+        assert_no_connection(&backend);
+        let mut client = connect(healthy);
+        let mut server = accept(&backend);
+        server.write_all(b"healthy").unwrap();
+        let mut response = [0; 7];
+        client.read_exact(&mut response).unwrap();
+        assert_eq!(&response, b"healthy");
     }
 }
