@@ -625,7 +625,8 @@ and 256. Clients are released together at an asyncio gate; the next wave starts
 when the entire previous wave finishes. The final wave can be smaller. There are
 no retries. Sixteen sequential warmup connections precede each measurement, and
 each proxy scenario starts a fresh process. Rate limits and health probes are
-disabled; the normal 4,096-connection admission limit remains in place.
+disabled; the normal 1,024-connection admission limit remains in place. Larger
+custom bursts can exercise admission rejection; the driver allows up to 4,096.
 
 Setup latency starts before TCP connect and ends at a verified echo of the
 Minecraft handshake plus a probe, establishing that routing and backend setup
