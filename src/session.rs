@@ -128,6 +128,7 @@ pub struct Session<C, B> {
     identity: Option<PlayerIdentity>,
     network: bool,
     joined: bool,
+    pending_join_valid: bool,
     switch_in_progress: bool,
     backend_error: Option<io::Error>,
     client_information: Option<Packet>,
@@ -156,6 +157,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             identity: None,
             network: false,
             joined: false,
+            pending_join_valid: false,
             switch_in_progress: false,
             backend_error: None,
             client_information: None,
@@ -189,6 +191,13 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
 
     pub fn backend(&self) -> Option<&Connection<B>> {
         self.backend.as_ref()
+    }
+
+    /// The validated login name, for operator display; it is not authenticated.
+    pub fn player_name(&self) -> Option<&str> {
+        self.login_start
+            .as_ref()
+            .and_then(|packet| protocol::read_string(&mut packet.data.as_slice(), 16).ok())
     }
 
     pub fn switch_supported(&self) -> bool {
@@ -532,7 +541,9 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
     }
 
     fn remember_client_packet(&mut self, state: State, packet: &Packet) -> io::Result<()> {
-        if !self.network {
+        // Administrator transfers also need client options, even when player
+        // commands are disabled by omitting the network configuration.
+        if !self.switch_supported() {
             return Ok(());
         }
         if matches!(
@@ -608,7 +619,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                     return Ok(SessionEvent::Disconnected);
                 }
                 Incoming::Client(Ok(ConnectionEvent::Written(PacketKind::JoinGame))) => {
-                    self.joined = true;
+                    self.joined = self.pending_join_valid;
                     self.switch_in_progress = false;
                     return Ok(SessionEvent::Packet);
                 }
@@ -690,8 +701,12 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                                 .queue(version, Direction::Clientbound, &packet)?;
                         }
                         PacketKind::JoinGame => {
-                            if self.network {
-                                protocol::validate_network_join(&packet)?;
+                            let validation = protocol::validate_network_join(&packet);
+                            self.pending_join_valid = validation.is_ok();
+                            // Opaque ordinary relays keep forwarding, but only a
+                            // valid supported world can become transfer-ready.
+                            if self.network || self.switch_in_progress {
+                                validation?;
                             }
                             self.client
                                 .queue(version, Direction::Clientbound, &packet)?;
@@ -708,7 +723,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                                 } else {
                                     packet
                                 };
-                            if self.network && phase == State::Play && packet.id == 0 {
+                            if version.number() == 774 && phase == State::Play && packet.id == 0 {
                                 if !packet.data.is_empty() {
                                     return Err(protocol::invalid("invalid bundle delimiter"));
                                 }

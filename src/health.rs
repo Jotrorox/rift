@@ -7,7 +7,7 @@ use std::{
     io,
     net::SocketAddr,
     sync::{
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -22,13 +22,20 @@ struct State {
 
 pub struct Health {
     settings: Option<HealthCheck>,
+    control: Arc<crate::admin::Control>,
     states: Mutex<BTreeMap<String, State>>,
     retired: AtomicBool,
 }
 
 impl Health {
+    #[cfg(test)]
     pub fn new(config: &Config) -> Self {
+        Self::with_control(config, Arc::default())
+    }
+
+    pub fn with_control(config: &Config, control: Arc<crate::admin::Control>) -> Self {
         Self {
+            control,
             settings: config.health_check,
             retired: AtomicBool::new(false),
             states: Mutex::new(
@@ -135,16 +142,21 @@ pub async fn connect_candidates(
     event: &mut crate::events::Connection,
 ) -> io::Result<TcpStream> {
     event.stage = "connect";
-    event.failure = "no_healthy_backend";
+    event.failure = "no_eligible_backend";
     let primary = candidates.first().copied();
     let candidates: Vec<&str> = candidates
         .iter()
         .copied()
-        .filter(|name| health.available(name))
+        .filter(|name| health.available(name) && !health.control.draining(config, name))
         .collect();
-    let mut last_error =
-        io::Error::new(io::ErrorKind::NotConnected, "no healthy backend available");
+    let mut last_error = io::Error::new(
+        io::ErrorKind::NotConnected,
+        "no eligible backend available: all candidates are unhealthy or draining",
+    );
     for (index, name) in candidates.iter().enumerate() {
+        if health.control.draining(config, name) {
+            continue;
+        }
         // Reserve time for every fallback even when a primary silently drops SYNs.
         let budget =
             deadline.saturating_duration_since(Instant::now()) / (candidates.len() - index) as u32;
@@ -155,6 +167,9 @@ pub async fn connect_candidates(
             .await
         {
             Ok(stream) => {
+                if health.control.draining(config, name) {
+                    continue;
+                }
                 health.record(name, true);
                 if Some(*name) != primary {
                     metrics.fallbacks.inc();

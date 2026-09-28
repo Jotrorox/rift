@@ -101,6 +101,7 @@ fn setup_for(name: &str) -> Vec<u8> {
     bytes.extend(Codec::default().encode(&Packet::new(0, data)).unwrap());
     bytes
 }
+#[allow(dead_code)] // Shared fixtures are compiled by several integration suites.
 pub fn success() -> Vec<u8> {
     success_for("Player", 1)
 }

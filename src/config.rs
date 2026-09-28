@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::{self, Read},
     net::SocketAddr,
@@ -24,9 +24,13 @@ pub struct Config {
     pub fallbacks: BTreeMap<String, Vec<String>>,
     pub network: Network,
     pub rate_limit: Option<RateLimit>,
+    pub login_rate_limit: Option<RateLimit>,
     pub health_check: Option<HealthCheck>,
     pub status_cache: Option<StatusCache>,
     pub metrics: Option<SocketAddr>,
+    pub admin: Option<Admin>,
+    pub maintenance: bool,
+    pub draining: BTreeSet<String>,
     pub web: Option<WebConfig>,
     pub status: Option<StatusConfig>,
     pub shutdown_timeout: Duration,
@@ -64,6 +68,22 @@ impl ServerAccess {
                 .is_none_or(|names| names.iter().any(|name| name.eq_ignore_ascii_case(username)))
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Admin {
+    pub listen: SocketAddr,
+    pub token_env: String,
+    pub permissions: BTreeSet<String>,
+}
+
+pub const ADMIN_PERMISSIONS: &[&str] = &[
+    "status",
+    "maintenance",
+    "drain",
+    "transfer",
+    "reload",
+    "shutdown",
+];
 
 /// Optional administration service. A token is mandatory for non-loopback binds.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -170,9 +190,13 @@ impl Config {
             fallbacks: BTreeMap::new(),
             network: Network::default(),
             rate_limit: None,
+            login_rate_limit: None,
             health_check: None,
             status_cache: None,
             metrics: None,
+            admin: None,
+            maintenance: false,
+            draining: BTreeSet::new(),
             web: None,
             status: None,
             shutdown_timeout: Duration::from_secs(30),
@@ -219,9 +243,13 @@ impl Config {
                     "fallbacks",
                     "network",
                     "rate_limit",
+                    "login_rate_limit",
                     "health_check",
                     "status_cache",
                     "metrics",
+                    "admin",
+                    "maintenance",
+                    "draining",
                     "web",
                     "status",
                     "shutdown_timeout_ms",
@@ -281,39 +309,8 @@ impl Config {
                 Value::Function(_) => Some(HttpScript::new(source, name)),
                 _ => return Err("config.on_http: expected a function".into()),
             };
-            let rate_limit = options(
-                &root,
-                "rate_limit",
-                &[
-                    "per_ip_per_second",
-                    "per_ip_burst",
-                    "global_per_second",
-                    "global_burst",
-                    "max_ips",
-                ],
-            )?
-            .map(|t| {
-                Ok::<_, String>(RateLimit {
-                    per_ip_per_second: integer(
-                        &t,
-                        "rate_limit",
-                        "per_ip_per_second",
-                        20,
-                        1_000_000,
-                    )?,
-                    per_ip_burst: integer(&t, "rate_limit", "per_ip_burst", 40, 1_000_000)?,
-                    global_per_second: integer(
-                        &t,
-                        "rate_limit",
-                        "global_per_second",
-                        200,
-                        1_000_000,
-                    )?,
-                    global_burst: integer(&t, "rate_limit", "global_burst", 400, 1_000_000)?,
-                    max_ips: integer(&t, "rate_limit", "max_ips", 65536, 1_000_000)?,
-                })
-            })
-            .transpose()?;
+            let connection_rate_limit = rate_limit(&root, "rate_limit")?;
+            let login_rate_limit = rate_limit(&root, "login_rate_limit")?;
             let health_check = options(
                 &root,
                 "health_check",
@@ -382,6 +379,40 @@ impl Config {
                     address(&string(value, "metrics")?, "metrics").map_err(|e| e.to_string())?,
                 ),
             };
+            let admin = options(&root, "admin", &["listen", "token_env", "permissions"])?
+                .map(|t| {
+                    let listen = address(
+                        &string(t.get("listen").map_err(|e| e.to_string())?, "admin.listen")?,
+                        "admin.listen",
+                    )
+                    .map_err(|e| e.to_string())?;
+                    let token_env = match t.get::<Value>("token_env").map_err(|e| e.to_string())? {
+                        Value::Nil => "RIFT_ADMIN_TOKEN".to_owned(),
+                        value => string(value, "admin.token_env")?,
+                    };
+                    let permissions = string_set(
+                        t.get("permissions").map_err(|e| e.to_string())?,
+                        "admin.permissions",
+                    )?;
+                    Ok::<_, String>(Admin {
+                        listen,
+                        token_env,
+                        permissions,
+                    })
+                })
+                .transpose()?;
+            let maintenance = match root
+                .get::<Value>("maintenance")
+                .map_err(|e| e.to_string())?
+            {
+                Value::Nil => false,
+                Value::Boolean(value) => value,
+                _ => return Err("maintenance: expected a boolean".into()),
+            };
+            let draining = match root.get::<Value>("draining").map_err(|e| e.to_string())? {
+                Value::Nil => BTreeSet::new(),
+                value => string_set(value, "draining")?,
+            };
             let web = web_options(&root)?;
             let status = status_options(&root)?;
             let shutdown_timeout = Duration::from_millis(integer(
@@ -427,10 +458,14 @@ impl Config {
                 on_http,
                 fallbacks,
                 network,
-                rate_limit,
+                rate_limit: connection_rate_limit,
+                login_rate_limit,
                 health_check,
                 status_cache,
                 metrics,
+                admin,
+                maintenance,
+                draining,
                 web,
                 status,
                 shutdown_timeout,
@@ -444,6 +479,105 @@ impl Config {
     }
 
     pub fn validate(&self) -> io::Result<()> {
+        for (path, empty, blank_name) in [
+            (
+                "listeners",
+                self.listeners.is_empty(),
+                self.listeners.keys().any(|name| name.trim().is_empty()),
+            ),
+            (
+                "backends",
+                self.backends.is_empty(),
+                self.backends.keys().any(|name| name.trim().is_empty()),
+            ),
+        ] {
+            if empty {
+                return Err(invalid(format!("{path}: must not be empty")));
+            }
+            if blank_name {
+                return Err(invalid(format!("{path}: names must not be empty")));
+            }
+        }
+        for name in &self.draining {
+            if !self.backends.contains_key(name) {
+                return Err(invalid(format!("draining: unknown backend {name:?}")));
+            }
+        }
+        for (path, limits) in [
+            ("rate_limit", self.rate_limit),
+            ("login_rate_limit", self.login_rate_limit),
+        ] {
+            if let Some(limits) = limits {
+                for (field, value) in [
+                    ("per_ip_per_second", limits.per_ip_per_second),
+                    ("per_ip_burst", limits.per_ip_burst),
+                    ("global_per_second", limits.global_per_second),
+                    ("global_burst", limits.global_burst),
+                    ("max_ips", limits.max_ips),
+                ] {
+                    if !(1..=1_000_000).contains(&value) {
+                        return Err(invalid(format!(
+                            "{path}.{field}: expected an integer in 1..=1000000"
+                        )));
+                    }
+                }
+            }
+        }
+        if let Some(admin) = &self.admin {
+            if !admin.listen.ip().is_loopback() {
+                return Err(invalid(
+                    "admin.listen: use a loopback IP address (127.0.0.1 or ::1)",
+                ));
+            }
+            let mut bytes = admin.token_env.bytes();
+            if !bytes
+                .next()
+                .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+                || !bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            {
+                return Err(invalid(
+                    "admin.token_env: expected an environment variable name such as RIFT_ADMIN_TOKEN",
+                ));
+            }
+            if admin.permissions.is_empty() {
+                return Err(invalid(
+                    "admin.permissions: explicitly grant at least one permission",
+                ));
+            }
+            for permission in &admin.permissions {
+                if !ADMIN_PERMISSIONS.contains(&permission.as_str()) {
+                    return Err(invalid(format!(
+                        "admin.permissions: unknown permission {permission:?} (expected {})",
+                        ADMIN_PERMISSIONS.join(", ")
+                    )));
+                }
+            }
+            for (name, listen) in &self.listeners {
+                if addresses_overlap(admin.listen, *listen) {
+                    return Err(invalid(format!(
+                        "admin.listen: address conflicts with listeners.{name}; choose another port"
+                    )));
+                }
+            }
+            for (name, listen) in [
+                ("metrics", self.metrics),
+                ("web.listen", self.web.as_ref().map(|web| web.listen)),
+                ("status.listen", self.status.map(|status| status.listen)),
+            ] {
+                if listen.is_some_and(|listen| addresses_overlap(admin.listen, listen)) {
+                    return Err(invalid(format!(
+                        "admin.listen: address conflicts with {name}; choose another port"
+                    )));
+                }
+            }
+            for (name, backend) in &self.backends {
+                if service_backend_loop(admin.listen, backend) {
+                    return Err(invalid(format!(
+                        "admin.listen and backends.{name} must not point to the same socket"
+                    )));
+                }
+            }
+        }
         for (label, names) in [
             ("network.initial", &self.network.initial),
             ("network.hubs", &self.network.hubs),
@@ -789,6 +923,51 @@ fn invalid(message: impl Into<String>) -> io::Error {
         io::ErrorKind::InvalidInput,
         message.chars().take(2048).collect::<String>(),
     )
+}
+
+fn string_set(value: Value, path: &str) -> Result<BTreeSet<String>, String> {
+    let mut ordered = BTreeMap::new();
+    for pair in table(value, path)?.pairs::<Value, Value>() {
+        let (index, value) = pair.map_err(|e| e.to_string())?;
+        let Value::Integer(index) = index else {
+            return Err(format!("{path}: expected a dense array of distinct names"));
+        };
+        ordered.insert(index, string(value, path)?);
+    }
+    if ordered.keys().copied().ne(1..=ordered.len() as i64) {
+        return Err(format!("{path}: expected a dense array of distinct names"));
+    }
+    let mut result = BTreeSet::new();
+    for name in ordered.into_values() {
+        if !result.insert(name.clone()) {
+            return Err(format!("{path}: duplicate name {name:?}"));
+        }
+    }
+    Ok(result)
+}
+
+fn rate_limit(root: &Table, path: &str) -> Result<Option<RateLimit>, String> {
+    options(
+        root,
+        path,
+        &[
+            "per_ip_per_second",
+            "per_ip_burst",
+            "global_per_second",
+            "global_burst",
+            "max_ips",
+        ],
+    )?
+    .map(|t| {
+        Ok(RateLimit {
+            per_ip_per_second: integer(&t, path, "per_ip_per_second", 20, 1_000_000)?,
+            per_ip_burst: integer(&t, path, "per_ip_burst", 40, 1_000_000)?,
+            global_per_second: integer(&t, path, "global_per_second", 200, 1_000_000)?,
+            global_burst: integer(&t, path, "global_burst", 400, 1_000_000)?,
+            max_ips: integer(&t, path, "max_ips", 65536, 1_000_000)?,
+        })
+    })
+    .transpose()
 }
 
 fn address(value: &str, path: &str) -> io::Result<SocketAddr> {

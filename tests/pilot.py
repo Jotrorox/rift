@@ -21,6 +21,7 @@ import time
 
 from bench import MIB, connect, latency, throughput, socket_frame, packet, login_name, login_success
 from minecraft import ROOT, process
+from prometheus import parse_metrics
 
 
 @contextmanager
@@ -106,9 +107,7 @@ def scrape(port):
         connection.request("GET", "/metrics")
         response = connection.getresponse()
         assert response.status == 200
-        return {name: int(value) for line in response.read().decode().splitlines()
-                if line and not line.startswith("#") and "{" not in line
-                for name, value in [line.split()]}
+        return parse_metrics(response.read().decode())
     finally:
         connection.close()
 

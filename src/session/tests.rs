@@ -856,3 +856,26 @@ async fn initial_backend_write_failure_retries_with_the_cached_login_start() {
     play(&mut session, &mut client, &mut peer, Codec::default()).await;
     assert!(session.can_switch());
 }
+
+#[tokio::test]
+async fn ordinary_relay_forwards_opaque_join_but_does_not_make_it_transfer_ready() {
+    let (mut session, mut client, mut backend) = session().await;
+    play(&mut session, &mut client, &mut backend, Codec::default()).await;
+    assert!(session.can_switch());
+    let mut secure_join = join_game(21);
+    *secure_join.data.last_mut().unwrap() = 1;
+    for opaque_join in [Packet::new(0x30, vec![42]), secure_join] {
+        Codec::default()
+            .write(&mut backend, &opaque_join)
+            .await
+            .unwrap();
+        session.forward().await.unwrap();
+        assert_eq!(receive(&mut client, Codec::default()).await, opaque_join);
+        assert!(!session.can_switch());
+        let join = join_game(22);
+        Codec::default().write(&mut backend, &join).await.unwrap();
+        session.forward().await.unwrap();
+        assert_eq!(receive(&mut client, Codec::default()).await, join);
+        assert!(session.can_switch());
+    }
+}

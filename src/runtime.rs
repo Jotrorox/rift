@@ -1,4 +1,5 @@
 use crate::{
+    admin::{self, Control},
     admission::Admission,
     events::Connection,
     health::{self, Health},
@@ -25,7 +26,7 @@ use std::{
 use tokio::{
     io::AsyncWriteExt,
     net::{TcpListener, TcpStream},
-    sync::watch,
+    sync::{mpsc, watch},
     task::{JoinHandle, JoinSet},
     time::{Instant as Deadline, sleep, timeout, timeout_at},
 };
@@ -39,6 +40,8 @@ enum Policy {
 
 pub struct Snapshot {
     pub config: Config,
+    generation: u64,
+    pub control: Arc<Control>,
     pub source: Option<Arc<str>>,
     pub revision: String,
     pub listener_addresses: BTreeMap<String, SocketAddr>,
@@ -72,7 +75,9 @@ impl Snapshot {
             || Router::new(&config),
             |old| old.router.reconfigured(&config),
         );
-        let health = Health::new(&config);
+        let control =
+            previous.map_or_else(|| Arc::new(Control::default()), |old| old.control.clone());
+        let health = Health::with_control(&config, control.clone());
         Ok(Self {
             source: None,
             revision: "runtime".into(),
@@ -80,6 +85,8 @@ impl Snapshot {
             service_addresses: BTreeMap::new(),
             addresses: Arc::new(config.listeners.values().copied().collect()),
             config,
+            generation: previous.map_or(1, |old| old.generation + 1),
+            control,
             policies,
             router,
             health,
@@ -135,6 +142,29 @@ pub async fn handle(
     .await??;
     session.set_read_chunk_size(snapshot.config.limits.buffer_size);
     let is_status = session.handshake.next_state == NextState::Status;
+    if !is_status {
+        event.stage = "login_admission";
+        let maintenance = snapshot.control.maintenance(&snapshot.config);
+        let login_allowed = snapshot.control.logins.lock().unwrap().allow_generation(
+            session.client.io.stream.peer_addr()?.ip(),
+            snapshot.config.login_rate_limit,
+            snapshot.generation,
+            Instant::now(),
+        );
+        if maintenance || !login_allowed {
+            let reason = if maintenance {
+                metrics.access_rejected.inc();
+                event.reject("maintenance", "network is in maintenance mode");
+                "The network is under maintenance. Please try again later."
+            } else {
+                metrics.login_rejected.inc();
+                event.reject("login_rate_limited", "login rate limit exceeded");
+                "Too many login attempts. Please wait before reconnecting."
+            };
+            let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect(reason)).await;
+            return Ok((session.client.io.sent, session.client.io.received));
+        }
+    }
     event.stage = "route";
     event.failure = "no_route";
     let use_initial = selected.is_none()
@@ -179,9 +209,17 @@ pub async fn handle(
             session.handshake.protocol,
             metrics.players.get(),
             snapshot.config.limits.max_connections,
-            "Rift",
+            if snapshot.control.maintenance(&snapshot.config) {
+                "The network is under maintenance."
+            } else {
+                "Rift"
+            },
         );
-        if let Some(settings) = snapshot.config.status_cache {
+        if let Some(settings) = snapshot
+            .config
+            .status_cache
+            .filter(|_| !snapshot.control.maintenance(&snapshot.config))
+        {
             let packet = Codec::default().encode(&session.handshake.packet())?;
             let deadline = Deadline::now() + snapshot.config.limits.connect_timeout;
             event.stage = "status_cache_wait";
@@ -338,32 +376,141 @@ pub async fn handle(
         };
         let mut login_complete = false;
         let mut client_closed = false;
-        let mut player = None;
+        let mut player: Option<Player> = None;
         let mut registration = None;
         let mut registered_backend = String::new();
+        let control = snapshot.control.clone();
+        let mut admin_registration = None;
+        let mut transfers: Option<mpsc::Receiver<admin::Transfer>> = None;
+        let mut transfer_reply: Option<admin::Reply> = None;
+        // An administrator may select a backend added after this session's
+        // snapshot. Keep its address without indexing the older configuration.
+        let mut current_address = snapshot.config.backends[&current_backend]
+            .address()
+            .to_owned();
         loop {
-            event.stage = "session";
+            event.stage = if transfer_reply.is_some() {
+                "transfer"
+            } else {
+                match session
+                    .client
+                    .state
+                    .phase(rift::protocol::Direction::Clientbound)
+                {
+                    rift::protocol::State::Login => "login",
+                    rift::protocol::State::Configuration => "configuration",
+                    _ => "play",
+                }
+            };
             event.failure = "io_error";
             event.backend = Some(current_backend.clone());
-            event.backend_address = Some(
-                snapshot.config.backends[&current_backend]
-                    .address()
-                    .to_owned(),
-            );
+            event.backend_address = Some(current_address.clone());
             // Reaching configuration's finish acknowledgement alone is not enough:
             // a network player must receive the new world's Join Game as well.
             let playing = !client_closed
                 && session.client.state.settled(rift::protocol::State::Play)
-                && (!network_enabled || session.can_switch());
-            let result = if playing {
-                session.forward().await
-            } else {
-                match timeout_at(phase_deadline, session.forward()).await {
-                    Ok(result) => result,
-                    Err(_) if network_configured && !login_complete => {
-                        Ok(SessionEvent::BackendFailed)
+                && (!network_enabled || session.can_switch())
+                && !session.switch_in_progress();
+            let forward = async {
+                if playing {
+                    session.forward().await
+                } else {
+                    match timeout_at(phase_deadline, session.forward()).await {
+                        Ok(result) => result,
+                        Err(_) if network_configured && !login_complete => {
+                            Ok(SessionEvent::BackendFailed)
+                        }
+                        Err(error) => Err(error.into()),
                     }
-                    Err(error) => Err(error.into()),
+                }
+            };
+            let result = tokio::select! {
+                result = forward => result,
+                request = async { transfers.as_mut().expect("registered player").recv().await },
+                    if playing && transfers.is_some() && transfer_reply.is_none() => {
+                    let Some(request) = request else { transfers = None; continue; };
+                    // The cancelled forward poll may already have queued the
+                    // backend's Start Configuration behind client backpressure.
+                    if !session.client.state.settled(rift::protocol::State::Play) {
+                        phase_deadline = Deadline::now() + Duration::from_secs(30);
+                    }
+                    if request.reply.is_closed() { continue; }
+                    let target = &request.backend;
+                    if !session.can_switch() || current_backend == *target {
+                        let _ = request.reply.send(Err("transfer requires a joined Minecraft 1.21.11 player and a different backend".into()));
+                        continue;
+                    }
+                    let name = session.player_name().unwrap_or_default();
+                    if snapshot.config.network.access.get(target).is_some_and(|access| !access.permits(name))
+                        || !request.snapshot.config.can_access(target, name)
+                        || control.draining(&request.snapshot.config, target)
+                        || !request.snapshot.health.available(target)
+                    {
+                        metrics.transfer_failures.inc();
+                        let _ = request.reply.send(Err("target backend is unavailable or the player does not have access".into()));
+                        continue;
+                    }
+                    let deadline = Deadline::now() + Duration::from_secs(30);
+                    let connect_deadline = deadline.min(Deadline::now() + request.snapshot.config.limits.connect_timeout);
+                    let upstream = match request.snapshot.config.backends[target].connect_until(&request.snapshot.addresses, connect_deadline).await {
+                        Ok(upstream) => upstream,
+                        Err(error) => {
+                            metrics.transfer_failures.inc();
+                            metrics.backend_failures.inc();
+                            request.snapshot.health.record(target, false);
+                            event.backend = Some(target.clone());
+                            event.backend_address = Some(request.snapshot.config.backends[target].address().to_owned());
+                            (event.stage, event.failure) = match error.stage {
+                                rift::routing::ConnectStage::Dns => ("dns", "dns_error"),
+                                rift::routing::ConnectStage::Connect => ("connect", "connect_error"),
+                            };
+                            event.emit("backend_attempt_failed", &error.error, Some(error.error.kind()));
+                            let _ = request.reply.send(Err(format!("target connection failed: {}; player remains on the original backend", error.error)));
+                            continue;
+                        }
+                    };
+                    if control.draining(&request.snapshot.config, target) {
+                        metrics.transfer_failures.inc();
+                        let _ = request.reply.send(Err("target backend started draining; player remains on the original backend".into()));
+                        continue;
+                    }
+                    request.snapshot.health.record(target, true);
+                    if let Err(error) = upstream.set_nodelay(true) {
+                        metrics.transfer_failures.inc();
+                        let _ = request.reply.send(Err(format!("target socket setup failed; player remains on the original backend: {error}")));
+                        continue;
+                    }
+                    event.stage = "transfer";
+                    event.failure = "transfer_failed";
+                    let result = timeout_at(deadline, session.connect_backend(upstream)).await;
+                    match result {
+                        Ok(Ok(())) => {
+                            current_backend = target.clone();
+                            current_address = request.snapshot.config.backends[target].address().to_owned();
+                            transfer_reply = Some(request.reply);
+                            phase_deadline = deadline;
+                            continue;
+                        }
+                        result => {
+                            let error = match result { Ok(Err(error)) => error, Err(error) => error.into(), _ => unreachable!() };
+                            metrics.transfer_failures.inc();
+                            if !session.switch_in_progress() && session.can_switch() {
+                                let _ = request.reply.send(Err(format!("transfer failed: {error}")));
+                                if session.backend().is_some() { continue; }
+                                if error.kind() != io::ErrorKind::PermissionDenied {
+                                    // The old backend failed during preflight. Let
+                                    // the ordinary recovery path choose an allowed hub.
+                                    Ok(SessionEvent::BackendFailed)
+                                } else {
+                                    return Err(error);
+                                }
+                            } else {
+                                let _ = request.reply.send(Err(format!("transfer failed; session closed: {error}")));
+                                // Transition writes may be partial; close directly.
+                                return Err(error);
+                            }
+                        }
+                    }
                 }
             };
             match result {
@@ -396,16 +543,40 @@ pub async fn handle(
                         }
                     }
                     let ready = session.client.state.settled(rift::protocol::State::Play)
-                        && (!network_enabled || session.can_switch());
+                        && (!network_enabled || session.can_switch())
+                        && !session.switch_in_progress();
                     if ready {
-                        if player.is_none() {
-                            player = Some(Player::new(metrics.clone()));
+                        if let Some(player) = &mut player {
+                            if registered_backend != current_backend {
+                                player.move_backend(current_backend.clone());
+                                control.moved(event.id(), &current_backend);
+                                metrics.transfers.inc();
+                            }
+                        } else {
+                            player = Some(Player::new_on_backend(
+                                metrics.clone(),
+                                current_backend.clone(),
+                            ));
+                            metrics.observe_login(event.elapsed());
+                            let (guard, receiver) = control.register(
+                                event.id(),
+                                current_backend.clone(),
+                                session.handshake.protocol,
+                                session.player_name().unwrap_or_default().to_owned(),
+                            );
+                            admin_registration = Some(guard);
+                            transfers = Some(receiver);
                         }
-                        if registered_backend != current_backend
-                            && let Some(registration) = &registration
-                        {
-                            registration.set_server(&current_backend);
+                        if registered_backend != current_backend {
+                            if let Some(registration) = &registration {
+                                registration.set_server(&current_backend);
+                            }
                             registered_backend.clone_from(&current_backend);
+                        }
+                        if let Some(reply) = transfer_reply.take() {
+                            let _ = reply.send(Ok(serde_json::json!({
+                                "connection_id": event.id(), "backend": current_backend,
+                            })));
                         }
                     }
                     if playing && !ready {
@@ -445,6 +616,8 @@ pub async fn handle(
                     }
                     match result {
                         Ok(Some(target)) => {
+                            current_address =
+                                snapshot.config.backends[&target].address().to_owned();
                             current_backend = target;
                             phase_deadline = Deadline::now() + Duration::from_secs(30);
                         }
@@ -480,6 +653,8 @@ pub async fn handle(
                                 .await
                         {
                             metrics.fallbacks.inc();
+                            current_address =
+                                snapshot.config.backends[&target].address().to_owned();
                             current_backend = target;
                             phase_deadline = entry_deadline(&current_backend);
                             continue;
@@ -493,6 +668,8 @@ pub async fn handle(
                         {
                             Ok(target) => {
                                 metrics.fallbacks.inc();
+                                current_address =
+                                    snapshot.config.backends[&target].address().to_owned();
                                 current_backend = target;
                                 phase_deadline = Deadline::now() + Duration::from_secs(30);
                                 continue;
@@ -518,6 +695,11 @@ pub async fn handle(
                     break;
                 }
                 Err(error) => {
+                    if let Some(reply) = transfer_reply.take() {
+                        metrics.transfer_failures.inc();
+                        let _ =
+                            reply.send(Err(format!("transfer failed; session closed: {error}")));
+                    }
                     let reason = if error.kind() == io::ErrorKind::Unsupported {
                         error.to_string()
                     } else {
@@ -528,6 +710,12 @@ pub async fn handle(
                 }
             }
         }
+        drop(admin_registration);
+        if let Some(reply) = transfer_reply {
+            metrics.transfer_failures.inc();
+            let _ = reply.send(Err("player disconnected during transfer".into()));
+        }
+        drop(registration);
     }
     Ok((session.client.io.sent, session.client.io.received))
 }
@@ -653,11 +841,18 @@ async fn reconfigure(
     })
     .await
     .map_err(Error::invalid)??;
-    if candidate.config.listeners != snapshot.config.listeners {
-        return Err(Error::invalid("listener names/addresses require a restart"));
+    if candidate.config.listeners != snapshot.config.listeners
+        || candidate.config.admin != snapshot.config.admin
+    {
+        return Err(Error::invalid(
+            "listener names/addresses and admin settings require a restart",
+        ));
     }
     let prepared = services.prepare(&candidate.config).await?;
-    let service_addresses = services.addresses(&candidate.config, &prepared)?;
+    let mut service_addresses = services.addresses(&candidate.config, &prepared)?;
+    if let Some(address) = snapshot.service_addresses.get("admin") {
+        service_addresses.insert("admin".into(), *address);
+    }
     let addresses: Vec<_> = snapshot
         .listener_addresses
         .values()
@@ -699,6 +894,12 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         (config, None)
     };
     let mut initial = Snapshot::new(config, None)?;
+    let admin_secret = initial
+        .config
+        .admin
+        .as_ref()
+        .map(admin::token)
+        .transpose()?;
     if let Some(document) = document {
         initial.revision = control::revision(&document);
         initial.source = Some(Arc::from(document));
@@ -716,9 +917,26 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
             .insert(name.clone(), listener.local_addr()?);
         listeners.push((name.clone(), listener));
     }
+    let admin_listener = match &initial.config.admin {
+        Some(settings) => Some(TcpListener::bind(settings.listen).await.map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "admin.listen ({}): {error}; choose an unused loopback port",
+                    settings.listen
+                ),
+            )
+        })?),
+        None => None,
+    };
     let mut services = web::Services::default();
     let prepared = services.prepare(&initial.config).await?;
     initial.service_addresses = services.addresses(&initial.config, &prepared)?;
+    if let Some(listener) = &admin_listener {
+        initial
+            .service_addresses
+            .insert("admin".into(), listener.local_addr()?);
+    }
     initial.addresses = Arc::new(
         initial
             .listener_addresses
@@ -747,6 +965,19 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
             admission.clone(),
         ));
     }
+    let mut background = JoinSet::new();
+    let (admin_commands, mut admin_requests) = mpsc::channel(16);
+    if let Some(listener) = admin_listener {
+        eprintln!("rift: admin on {}", listener.local_addr()?);
+        background.spawn(admin::serve(
+            listener,
+            snapshot.config.admin.clone().unwrap(),
+            admin_secret.unwrap(),
+            receiver.clone(),
+            metrics.clone(),
+            admin_commands,
+        ));
+    }
     services.commit(&snapshot.config, prepared, &app);
     let mut health = health_worker(
         snapshot.clone(),
@@ -756,15 +987,23 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     let mut failure = None;
     let mut service_check = tokio::time::interval(Duration::from_secs(1));
     loop {
-        let (operation, reply) = tokio::select! {
+        let (operation, reply, admin_reply) = tokio::select! {
             event = signals.next() => match event {
                 Event::Shutdown => break,
                 Event::Reload => {
                     if app.path.is_none() { eprintln!("rift: reload ignored: no configuration file selected"); continue; }
-                    (control::Operation::Reload, None)
+                    (control::Operation::Reload, None, None)
                 }
             },
-            Some(command) = requests.recv() => (command.operation, Some(command.reply)),
+            Some(command) = requests.recv() => (command.operation, Some(command.reply), None),
+            Some(command) = admin_requests.recv() => match command {
+                admin::Command::Reload(reply) => (control::Operation::Reload, None, Some(reply)),
+                admin::Command::Shutdown(ack) => { let _ = timeout(Duration::from_secs(2), ack).await; break; }
+            },
+            result = background.join_next(), if !background.is_empty() => {
+                failure = Some(io::Error::other(format!("administrator listener stopped unexpectedly: {result:?}")));
+                break;
+            }
             result = tasks.join_next() => {
                 failure = Some(io::Error::other(format!("listener stopped unexpectedly: {result:?}")));
                 break;
@@ -803,11 +1042,23 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                 Err(error)
             }
         };
+        if let Some(reply) = admin_reply {
+            let response = response.as_ref()
+                .map(|revision| serde_json::json!({"reloaded":true,"revision":revision,"existing_sessions":"preserved"}))
+                .map_err(|error| format!("reload rejected; previous configuration retained: {}", error.message));
+            let _ = reply.send(response);
+        }
         if let Some(reply) = reply {
             let _ = reply.send(response);
         }
     }
     // Stop accepting configuration commands before draining proxy sessions.
+    admin_requests.close();
+    while let Ok(command) = admin_requests.try_recv() {
+        if let admin::Command::Reload(reply) = command {
+            let _ = reply.send(Err("proxy is shutting down".into()));
+        }
+    }
     requests.close();
     while let Ok(command) = requests.try_recv() {
         let _ = command.reply.send(Err(control::Error {
@@ -836,6 +1087,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         }
     }
     tasks.shutdown().await;
+    background.shutdown().await;
     services.shutdown().await;
     eprintln!("rift: shutdown complete");
     match failure {

@@ -1,4 +1,4 @@
-//! One JSON line per failed connection or backend attempt; no traffic logging.
+//! JSON diagnostics for failed connections, backend attempts and administration.
 use rift::hooks::RouteError;
 use serde_json::{Value, json};
 use std::{
@@ -6,7 +6,7 @@ use std::{
     io::{self, Write},
     net::SocketAddr,
     sync::atomic::{AtomicU64, Ordering},
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 pub struct Connection {
@@ -33,6 +33,14 @@ impl Connection {
             stage: "admission",
             failure: "io_error",
         }
+    }
+
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    pub fn elapsed(&self) -> Duration {
+        self.started.elapsed()
     }
 
     pub fn route_error(&mut self, error: &RouteError) {
@@ -81,6 +89,24 @@ impl Connection {
     }
 }
 
+fn admin_value(event: &str, outcome: &str, permission: &str, message: &dyn Display) -> Value {
+    json!({
+        "event": event,
+        "timestamp_unix_ms": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
+        "stage": "administration",
+        "outcome": outcome,
+        "permission": permission,
+        "message": message.to_string().chars().take(2048).collect::<String>(),
+    })
+}
+
+/// Emit an administration result without recording request headers or credentials.
+/// Callers provide a public diagnostic message, never the submitted authorization.
+pub fn admin(event: &str, outcome: &str, permission: &str, message: &dyn Display) {
+    let line = admin_value(event, outcome, permission, message).to_string();
+    let _ = writeln!(io::stderr().lock(), "{line}");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -116,5 +142,21 @@ mod tests {
             serde_json::from_str::<Value>(&line).unwrap()["message"],
             value["message"]
         );
+    }
+
+    #[test]
+    fn admin_diagnostics_are_bounded_single_line_json() {
+        let message = format!("invalid \"backend\"\n{}", "é".repeat(4096));
+        let value = admin_value("reload", "rejected", "reload", &message);
+        assert_eq!(value["stage"], "administration");
+        assert_eq!(value["outcome"], "rejected");
+        assert_eq!(value["permission"], "reload");
+        assert_eq!(value["message"].as_str().unwrap().chars().count(), 2048);
+        assert_eq!(value.to_string().lines().count(), 1);
+        assert_eq!(
+            serde_json::from_str::<Value>(&value.to_string()).unwrap(),
+            value
+        );
+        assert!(value.get("authorization").is_none());
     }
 }

@@ -1,4 +1,4 @@
-# Administration, status and Lua HTTP extensions
+# Web administration, status and Lua HTTP extensions
 
 Run `rift --config examples/admin.lua`, then open <http://127.0.0.1:8080>.
 The admin website shows listeners, backends, routes and live counters, edits the
@@ -8,6 +8,14 @@ HTML, CSS and JavaScript are bundled with `include_str!`: no asset directory,
 Node, package manager, CDN or separate frontend server is needed at runtime.
 Axum is the only additional direct Rust dependency, with its `http1`, `json` and
 `tokio` features enabled and default features disabled.
+
+This guide covers `web` and `status` HTTP services. The operational `admin`
+endpoint used by `rift admin` is a separate loopback JSON-line protocol with an
+environment-provided secret and explicit operation permissions; see the
+[operator guide](operations.md#enable-operational-administration). Both can run
+on distinct ports. `admin.permissions` do not govern HTTP requests: the web
+credential grants the enabled HTTP API capabilities, including configuration
+editing. Changes to the operational `admin` configuration require restart.
 
 ## Configuration
 
@@ -27,7 +35,7 @@ status = {
     ui = true,
     metrics = true,
 },
-metrics = false, -- Or "127.0.0.1:9091" for a separate metrics-only server.
+metrics = false, -- Or "127.0.0.1:9092" for a separate metrics-only server.
 ```
 
 Each server is disabled when omitted or set to `false`. `web` and `status` also
@@ -41,13 +49,16 @@ Prometheus endpoint. The status JSON endpoint stays available whenever its
 server is enabled. `metrics = false` disables the standalone metrics listener;
 internal traffic counters and authenticated `/api/metrics` remain available.
 
-These settings, addresses and the bearer token can change through hot reload.
+The `web`, `status` and `metrics` settings, their addresses and `web.token` can
+change through hot reload.
 An unchanged address with port `0` keeps its assigned port; actual bound
 addresses appear in logs and status JSON. New service sockets bind before a
-change is committed. A collision, invalid source or write failure retains the
-previous file, runtime configuration and services. Moving a service onto a port
+change is committed. A failed HTTP save retains the previous file, runtime
+configuration and services. A rejected reload preserves runtime and services
+without undoing a file already edited externally. Moving a service onto a port
 still occupied by another Rift service is rejected; use a spare port or separate
-reloads. TCP proxy listener names/addresses require a restart.
+reloads. Gameplay listener names/addresses and the separate operational `admin`
+bind, token-variable and permissions require a restart.
 
 Turning off or moving the admin server may make the current browser connection
 unavailable. Re-enable it by editing the Lua file and sending SIGHUP (Unix) or
@@ -82,8 +93,11 @@ The separate status and metrics servers are read-only and unauthenticated. Their
 JSON includes backend/listener addresses, health eligibility, counters and
 service settings, but no Lua source, token or configuration filesystem path.
 Bind these servers to the monitoring interface appropriate for that information.
-A backend marked available is eligible for routing; with health checks disabled
-it does not imply a successful probe. `health_checks_enabled` reports the policy.
+A healthy backend may still be administratively draining and reject new
+attachments. With health checks disabled, an up value does not imply a successful
+probe. `health_checks_enabled` reports the policy; the operational CLI and
+`rift_backend_draining`/`rift_maintenance_mode` metrics expose effective maintenance
+state, including runtime overrides.
 
 ## API
 
@@ -116,15 +130,17 @@ disabled endpoints return `404`, oversized bodies return `413`, and incorrect
 mutation content types return `415`. Busy HTTP/configuration/Lua capacity returns
 `503`. Lua execution errors return `500`, and an async Lua deadline returns `504`.
 
-For example, using Python's standard library (set `RIFT_ADMIN_TOKEN` if needed):
+For example, using Python's standard library (set `RIFT_WEB_TOKEN` to the
+configured `web.token` value if needed; the server does not read this environment
+variable automatically):
 
 ```python
 import json, os, urllib.request
 
 base = "http://127.0.0.1:8080"
 headers = {"Content-Type": "application/json"}
-if os.environ.get("RIFT_ADMIN_TOKEN"):
-    headers["Authorization"] = "Bearer " + os.environ["RIFT_ADMIN_TOKEN"]
+if os.environ.get("RIFT_WEB_TOKEN"):
+    headers["Authorization"] = "Bearer " + os.environ["RIFT_WEB_TOKEN"]
 
 def api(method, path, value=None):
     body = None if value is None else json.dumps(value).encode()
@@ -141,12 +157,16 @@ print(api("PUT", "/api/config", {
 }))
 ```
 
-A save writes a new sibling file, preserves the original access permissions,
+A save needs write access to the configuration file and its parent directory.
+The supplied systemd and Compose examples default to read-only configuration;
+see the [operator guide](operations.md#http-administration) before enabling
+browser saves in those environments. A save writes a new sibling file, preserves the original access permissions,
 flushes it and atomically replaces the selected file. Configuration evaluation
 and disk work run on blocking workers, outside gameplay I/O. The selected path
 is canonicalized at startup, so a symlink selects its target. Source size is
 limited to 256 KiB; the JSON envelope allows escaped source bytes. Saves and
-signal/API reloads share one serialized transaction path with a bounded queue.
+signal, HTTP API and `rift admin reload` requests share one serialized
+transaction path with a bounded queue.
 Each HTTP server admits at most 64 open connections, with a 10-second socket
 lifetime covering headers, request bodies and response writes. Retiring servers
 allow up to three seconds for existing responses to finish. Gameplay admission
