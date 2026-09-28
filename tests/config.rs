@@ -457,3 +457,6 @@ fn hook_failures_close_only_the_affected_connection_and_release_its_permit() {
         assert_eq!(&response, b"healthy");
     }
 }
+
+#[path = "support/operations.rs"]
+mod operations;

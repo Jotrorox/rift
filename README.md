@@ -18,7 +18,8 @@ With no arguments, Rift loads `./rift.lua` if present, otherwise it uses those
 same addresses. Explicit CLI addresses or routing options override the file.
 The listener must be an IP literal with a port. Backends accept IP literals or DNS hostnames with ports;
 IPv6 works too: `rift '[::]:25565' '[::1]:25566'`.
-Use `--help` for usage. Stop with Ctrl-C (active connections close).
+Use `--help` for usage. Ctrl-C stops accepting connections and lets active sessions
+drain for up to 30 seconds by default; a second Ctrl-C closes them immediately.
 
 ### Hostname routing
 
@@ -130,14 +131,177 @@ within Tokio's semaphore capacity. `connect_timeout_ms` accepts 1–86,400,000
 milliseconds; `buffer_size` accepts 1–16,777,216 bytes per direction. All three
 reject fractions, strings, and nonfinite numbers.
 
-Lua evaluates during startup and produces a typed Rust `Config`; changing the file
-requires a restart. An optional `on_route` function also runs for each connection,
+Lua evaluates during startup and produces a typed Rust `Config`. Send SIGHUP on
+Unix or Ctrl-Break on Windows to validate and reload the selected file. An optional `on_route` function also runs for each connection,
 as described below. Treat configuration scripts as trusted local code. Unknown
 fields, invalid types or addresses, missing references, duplicate listener
 addresses, and direct proxy loops fail startup with a contextual error. Syntax
 and execution errors include the filename and Lua diagnostics. A missing explicit
 `--config` file is an error; only a missing implicit `./rift.lua` uses the defaults.
 All listeners bind before Rift begins accepting connections.
+
+## Operating a network
+
+[`examples/network.lua`](examples/network.lua) enables all operational features
+for a primary server and a fallback lobby. Existing configurations keep their
+previous behavior: rate limits, health probes, status caching and the metrics
+listener are disabled unless their corresponding fields are present.
+
+### Validate and reload
+
+```sh
+./target/release/rift --check ./rift.lua
+kill -HUP <rift-pid>
+```
+
+`--check` evaluates the script and validates its configuration without binding
+sockets or contacting backends. It checks syntax, top-level execution budgets,
+types, routes and backend references. Hook results remain validated per invocation,
+since they can depend on connection metadata.
+
+A reload reads and validates the complete file on a blocking worker, then swaps
+one immutable configuration snapshot for all listeners. An invalid candidate is
+logged and counted; the previous configuration stays active. Save files by atomic
+replacement before signaling. Only one reload runs at a time; additional signals
+while it is running are coalesced. CLI-only invocations have no file to reload.
+An implicitly loaded `./rift.lua` can be reloaded too.
+
+Routes, backends, fallback lists, scripts, limits, health checks, status-cache
+settings and the shutdown deadline can change live. **Listener names/addresses
+and the metrics bind address require a restart**; changing them rejects the
+entire reload. Configured port `0` retains the original assigned port. All
+listener and metrics sockets bind successfully before traffic is accepted.
+
+Already accepted connections finish using their original routing snapshot.
+Established relays retain their sockets and buffers, so reloads do not disconnect
+players or retain old caches for the lifetime of a session. Lowering
+`max_connections` preserves current sessions and rejects new ones until the total
+falls below the new limit. The Lua worker limit remains shared across generations.
+Every successful reload invalidates status caches and starts fresh health checks.
+
+On Windows, Ctrl-Break reloads and Ctrl-C drains connections. On Unix, SIGINT or
+SIGTERM drains; SIGHUP reloads. The startup log advertises readiness after signal
+handlers are installed.
+
+### Connection admission
+
+```lua
+rate_limit = {
+    per_ip_per_second = 20,
+    per_ip_burst = 40,
+    global_per_second = 200,
+    global_burst = 400,
+    max_ips = 65536,
+},
+```
+
+These are the defaults when `rate_limit = {}` is present. Token buckets refill
+continuously and apply across every listener, before Lua, handshake parsing or
+backend connection attempts. Excess connections close immediately. Every attempt
+that passes the global bucket spends a global token, including per-IP denials.
+IPv4 and its IPv4-mapped IPv6 form share one bucket. Established traffic is never
+rate limited. Users behind the same NAT share their IP allowance.
+
+The IP table is bounded by `max_ips`. When full, only completely replenished
+buckets can be evicted; new IPs otherwise close. Cleanup runs at most once per
+second. Unchanged rate settings preserve balances on reload; changed settings
+start fresh buckets. All five values accept integers in 1–1,000,000.
+
+### Backend outages and fallback
+
+```lua
+fallbacks = {
+    survival = { "lobby", "maintenance" },
+},
+health_check = {
+    interval_ms = 5000,
+    timeout_ms = 1000,
+    unhealthy_threshold = 2,
+    healthy_threshold = 1,
+},
+```
+
+Fallback lists contain 1–16 distinct configured backend names, excluding their
+own primary. They are flat and ordered: a fallback's own list is not followed.
+Direct routes, hostname routes and successful Lua backend selections all use the
+selected primary's list. Unmatched routes, hook rejection and hook errors close
+without attempting fallback. With no list, only the selected backend is tried.
+
+Health checking is optional and uses a TCP connect followed by close, including
+DNS resolution and proxy-loop checks. It checks reachability, not Minecraft
+application readiness. There are at most 16 concurrent probes, each bounded by
+`timeout_ms`; the next cycle waits `interval_ms` after all probes finish. Initially
+backends are eligible while the first probes run. Consecutive failures mark a
+backend down, and consecutive successes restore it. Connection attempts also
+feed those thresholds. Down backends are skipped until probes recover them.
+With probing disabled, each new connection tries its configured candidates again.
+The durations accept 1–86,400,000 ms and thresholds accept 1–1,000.
+
+All candidate connections share `limits.connect_timeout_ms`. Each attempt gets
+a share of the remaining deadline, reserving time for later candidates even if
+a primary silently drops packets. Resolution and all returned addresses are
+included in that attempt. If no candidate is reachable, the client closes.
+Fallback happens only while connecting, before any client bytes are forwarded.
+Once a backend is connected, handshake-write errors and relay failures close that
+session; Rift never replays client bytes or migrates a logged-in player.
+
+### Server-list status cache
+
+```lua
+status_cache = {
+    ttl_ms = 1000,
+    max_entries = 1024,
+    max_response_bytes = 65536,
+},
+```
+
+Caching applies only to status handshakes on hostname-routing listeners. Direct
+listeners and explicit Lua backend selections remain transparent; login and
+transfer sessions always relay unchanged. Disable caching if a backend generates
+personalized status responses using information outside the handshake.
+
+Rift caches only complete, valid JSON-object responses. Keys include the listener
+and complete original handshake, separating hostnames, protocol versions, ports
+and mod metadata. Concurrent misses for the same key share a fill while the
+bounded fill index has capacity. Responses expire after their fixed TTL; failed
+fills do not populate the cache. A valid entry can answer through a brief outage,
+but stale entries are never served after expiration. Each client's ping payload
+is echoed independently and is never cached.
+
+Both the cache and fill index are capped by `max_entries` (1–65,536). Cached
+response and key bytes have an additional 64 MiB ceiling per generation; at
+capacity, responses are forwarded without insertion. Individual response packet
+bodies are bounded by `max_response_bytes` (1–1,048,576). TTL accepts
+1–86,400,000 ms. Status request and ping phases each have a five-second deadline;
+the fill, including waiting for a concurrent fill, connecting and reading the
+backend response, shares `connect_timeout_ms`. Successful reloads clear the cache.
+
+### Metrics and shutdown
+
+```lua
+metrics = "127.0.0.1:9090",
+shutdown_timeout_ms = 30000,
+```
+
+The optional HTTP listener serves Prometheus text at `GET /metrics`. Bind it to
+loopback or a trusted monitoring interface: it has no authentication. Scrapes
+have a two-second deadline, a 4 KiB header bound and at most 16 concurrent
+handlers, independent of gameplay admission. Other paths return 404.
+
+Metrics include `rift_connections_active`, accepted/completed/rejected connection
+counters, connection errors, backend connect failures, fallback selections,
+cache hits/misses, successful/failed reloads, health probes, forced shutdowns,
+and client bytes read/written. `rift_backend_up{backend="name"}` reports each
+configured backend's eligibility (initially 1; always 1 when checks are disabled).
+Counters survive reloads. Bytes update during live sessions and include failed
+sessions; no peer-address or hostname labels create unbounded metric cardinality.
+
+Shutdown closes gameplay listeners and stops health probes, then drains all
+accepted sessions, including pending hooks and handshakes. The metrics listener
+stays available during the drain. The default deadline is 30 seconds; set
+`shutdown_timeout_ms` to an integer in 1–86,400,000 ms. On expiry, or a second
+shutdown signal, remaining sessions close and the process exits. TCP half-close
+behavior is preserved throughout a normal drain.
 
 ## Routing hook
 
@@ -193,10 +357,10 @@ the configured policy. Displayed script diagnostics are capped at 2,048 characte
 and unknown backend names at 256 characters. Backend connection failures retain the
 usual connection timeout.
 
-Each invocation creates a fresh Lua state and re-evaluates the startup source
-snapshot, including its top-level code, before calling the hook. Globals and
+Each invocation creates a fresh Lua state and re-evaluates the active configuration
+source snapshot, including its top-level code, before calling the hook. Globals and
 closure upvalues are private to that invocation and never persist across clients.
-The file is not read again. Keep top-level initialization small and deterministic.
+The file is read again only on an explicit reload. Keep top-level initialization small and deterministic.
 Independent calls can run concurrently, and their completion order is unspecified.
 
 The initial limits are fixed in the implementation:
@@ -250,7 +414,9 @@ Rust structs and enum are not a stable C layout; no C ABI is exported yet.
   pending script calls, handshakes and backend connections;
   excess clients are immediately closed. The OS file descriptor limit must allow
   two sockets per client plus headroom.
-- No per-packet logging, serialization, shared traffic lock, or unbounded queue.
+- No per-packet logging, shared traffic lock, or unbounded queue. Traffic metrics
+  use relaxed atomic counters per socket I/O; status JSON is parsed only when
+  status caching is enabled.
 
 ## Tests
 
@@ -302,7 +468,12 @@ readers, fragmented concurrent sessions, half-closes in both directions, connect
 refusal, CLI startup failures, bounded handshake parsing and deadlines, and
 hostname routing against two independent Minecraft status fixtures. Hook tests cover
 backend selection/rejection, malformed results, execution limits and cancellation,
-state isolation, and traffic continuing alongside a runaway hook.
+state isolation, and traffic continuing alongside a runaway hook. Operational tests
+cover failed and successful reloads with live sessions, shared admission and Lua
+capacity across reloads, primary outage/fallback/recovery, health transitions,
+status TTL and concurrent fills, malformed status responses, metrics, graceful
+drain and forced shutdown. Signal-driven executable tests run on Unix; the other
+regressions also run on Windows.
 Microsoft account authentication and
 encrypted gameplay are not exercised by the offline integration fixtures.
 

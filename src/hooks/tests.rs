@@ -271,3 +271,25 @@ fn timeout_and_cancellation_keep_the_permit_until_the_worker_finishes() {
         }
     });
 }
+
+#[tokio::test]
+async fn reloads_share_script_capacity_with_old_generations() {
+    let old = Router::new(&config("return nil"));
+    let permit = old
+        .slots
+        .clone()
+        .acquire_many_owned(crate::script::MAX_CONCURRENT as u32)
+        .await
+        .unwrap();
+    let new = old.reconfigured(&config("return { backend = 'creative' }"));
+    assert_eq!(new.route(connection()).await.unwrap_err(), RouteError::Busy);
+    drop(permit);
+    assert_eq!(
+        new.route(connection()).await.unwrap(),
+        RouteDecision::Backend("creative".into())
+    );
+    assert_eq!(
+        old.route(connection()).await.unwrap(),
+        RouteDecision::Default
+    );
+}

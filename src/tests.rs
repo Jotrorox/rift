@@ -1,8 +1,10 @@
 use super::*;
+use std::sync::{Arc, Mutex};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     task::JoinHandle,
 };
+use tokio::{sync::watch, task::JoinSet};
 
 // Exercise real sockets so EOF propagation and backpressure are covered.
 async fn connection() -> (TcpStream, TcpStream, JoinHandle<io::Result<(u64, u64)>>) {
@@ -233,20 +235,24 @@ async fn runaway_hook_does_not_block_existing_or_new_traffic_on_a_single_runtime
             "isolation.lua",
         )
         .unwrap();
-        let router = Router::new(&config);
-        let connections = Arc::new(Semaphore::new(8));
+        let snapshot = Arc::new(runtime::Snapshot::new(config, None).unwrap());
+        let (_current, current) = watch::channel(snapshot);
+        let (_stop, stop) = watch::channel(false);
+        let metrics = Arc::new(metrics::Metrics::default());
+        let admission = Arc::new(Mutex::new(admission::Admission::default()));
         let mut tasks = JoinSet::new();
         let mut addresses = Vec::new();
         for name in ["healthy", "runaway"] {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             addresses.push(listener.local_addr().unwrap());
-            tasks.spawn(accept(
+            tasks.spawn(runtime::accept(
                 listener,
-                Arc::new(config.mode(name).unwrap()),
-                config.limits,
-                connections.clone(),
+                name.into(),
+                current.clone(),
+                stop.clone(),
                 Arc::new(Vec::new()),
-                Some((name.into(), router.clone())),
+                metrics.clone(),
+                admission.clone(),
             ));
         }
         let mut established = TcpStream::connect(addresses[0]).await.unwrap();
@@ -277,7 +283,7 @@ async fn runaway_hook_does_not_block_existing_or_new_traffic_on_a_single_runtime
         drop(established);
         drop(existing_backend);
         drop(new_client);
-        while connections.available_permits() != 8 {
+        while metrics.active.get() != 0 {
             tokio::task::yield_now().await;
         }
     })

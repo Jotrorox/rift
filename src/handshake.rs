@@ -10,7 +10,7 @@ fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
-fn varint(bytes: &mut &[u8]) -> io::Result<u32> {
+pub(crate) fn varint(bytes: &mut &[u8]) -> io::Result<u32> {
     let mut value = 0;
     for shift in (0..35).step_by(7) {
         let (&byte, rest) = bytes.split_first().ok_or_else(|| invalid("short VarInt"))?;
@@ -26,7 +26,7 @@ fn varint(bytes: &mut &[u8]) -> io::Result<u32> {
     Err(invalid("invalid VarInt"))
 }
 
-fn hostname(mut body: &[u8]) -> io::Result<String> {
+fn parse(mut body: &[u8]) -> io::Result<(String, u32)> {
     if varint(&mut body)? != 0 {
         return Err(invalid("expected handshake packet"));
     }
@@ -44,7 +44,8 @@ fn hostname(mut body: &[u8]) -> io::Result<String> {
     body = body
         .get(2..)
         .ok_or_else(|| invalid("missing handshake port"))?;
-    if !matches!(varint(&mut body)?, 1..=3) || !body.is_empty() {
+    let state = varint(&mut body)?;
+    if !matches!(state, 1..=3) || !body.is_empty() {
         return Err(invalid("invalid handshake state or trailing data"));
     }
     // Modded clients can append NUL-delimited metadata. Only the hostname is
@@ -54,12 +55,29 @@ fn hostname(mut body: &[u8]) -> io::Result<String> {
     if host.is_empty() {
         return Err(invalid("empty handshake hostname"));
     }
-    Ok(host)
+    Ok((host, state))
+}
+
+#[cfg(test)]
+fn hostname(body: &[u8]) -> io::Result<String> {
+    parse(body).map(|(host, _)| host)
 }
 
 /// Read precisely one frame without consuming any pipelined login/status data.
 /// The caller applies a single deadline across the length prefix and body.
+pub struct Handshake {
+    pub host: String,
+    pub state: u32,
+    pub packet: Vec<u8>,
+}
+
+#[cfg(test)]
 pub async fn read(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<(String, Vec<u8>)> {
+    let handshake = read_handshake(reader).await?;
+    Ok((handshake.host, handshake.packet))
+}
+
+pub async fn read_handshake(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<Handshake> {
     let mut packet = Vec::with_capacity(5);
     loop {
         let byte = reader.read_u8().await?;
@@ -78,7 +96,12 @@ pub async fn read(reader: &mut (impl AsyncRead + Unpin)) -> io::Result<(String, 
     let prefix = packet.len();
     packet.resize(prefix + size, 0);
     reader.read_exact(&mut packet[prefix..]).await?;
-    Ok((hostname(&packet[prefix..])?, packet))
+    let (host, state) = parse(&packet[prefix..])?;
+    Ok(Handshake {
+        host,
+        state,
+        packet,
+    })
 }
 
 #[cfg(test)]
