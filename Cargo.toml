@@ -2,7 +2,7 @@
 name = "rift"
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
+license = "BSD-2-Clause"
 
 [dependencies]
 mlua = { version = "0.12", features = ["luajit", "vendored"] }

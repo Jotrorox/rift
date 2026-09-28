@@ -9,7 +9,7 @@ separate Lua installation. Building requires a C toolchain (MSVC on Windows).
 Download a native archive from [Releases](https://github.com/Jotrorox/rift/releases)
 and follow the [operator guide](docs/operations.md) for installation, the supplied
 systemd service, reloads, shutdown and upgrades. Archives include the examples and
-operating docs. Rift is released under the [MIT License](LICENSE).
+operating docs. Rift is released under the [BSD-2-Clause License](LICENSE).
 
 ## Run
 
@@ -568,7 +568,7 @@ It reruns the entire CI workflow on that tag, then publishes the tested Linux,
 macOS and Windows archives with `SHA256SUMS` to a GitHub Release. Only the final
 publishing job receives write permission; it uses the workflow's built-in token.
 This distributes the standalone proxy; running servers are managed separately.
-Each archive includes the binary, MIT license, README, all three Lua examples,
+Each archive includes the binary, BSD-2-Clause license, README, all three Lua examples,
 the systemd unit and operator/pilot documentation. Packaging extracts the archive,
 checks `--version` against `Cargo.toml`, runs `--help`, and validates every bundled
 configuration with `--check`. Build the same archive locally after a release build:

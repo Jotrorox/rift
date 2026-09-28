@@ -1,7 +1,7 @@
 # Operating a Rift release
 
 The archives contain `rift` (`rift.exe` on Windows), `LICENSE`, `README.md`,
-`examples/` and `docs/`. Rift is licensed under the [MIT License](../LICENSE).
+`examples/` and `docs/`. Rift is licensed under the [BSD-2-Clause License](../LICENSE).
 Keep the examples alongside these documents so relative links keep working.
 
 ## First start
