@@ -24,6 +24,7 @@ impl Bucket {
 
 #[derive(Default)]
 pub struct Admission {
+    generation: u64,
     settings: Option<RateLimit>,
     global: Option<Bucket>,
     ips: HashMap<IpAddr, Bucket>,
@@ -31,6 +32,23 @@ pub struct Admission {
 }
 
 impl Admission {
+    /// Pending handshakes from an older snapshot must not reset newer buckets.
+    pub fn allow_generation(
+        &mut self,
+        ip: IpAddr,
+        settings: Option<RateLimit>,
+        generation: u64,
+        now: Instant,
+    ) -> bool {
+        let settings = if generation < self.generation {
+            self.settings
+        } else {
+            self.generation = generation;
+            settings
+        };
+        self.allow(ip, settings, now)
+    }
+
     pub fn allow(&mut self, ip: IpAddr, settings: Option<RateLimit>, now: Instant) -> bool {
         // Retain balances across unchanged reloads. A changed policy starts a new
         // set of buckets; established connections never use this lock.
@@ -132,5 +150,24 @@ mod tests {
         assert!(!limiter.allow("::ffff:127.0.0.1".parse().unwrap(), settings, now));
         assert!(limiter.allow("127.0.0.2".parse().unwrap(), settings, now));
         assert!(!limiter.allow("127.0.0.3".parse().unwrap(), settings, now));
+    }
+
+    #[test]
+    fn old_handshakes_cannot_reset_new_login_buckets() {
+        let now = Instant::now();
+        let ip = "127.0.0.1".parse().unwrap();
+        let settings = Some(RateLimit {
+            per_ip_per_second: 1,
+            per_ip_burst: 1,
+            global_per_second: 1,
+            global_burst: 1,
+            max_ips: 8,
+        });
+        let mut limiter = Admission::default();
+        assert!(limiter.allow_generation(ip, None, 1, now));
+        assert!(limiter.allow_generation(ip, settings, 2, now));
+        assert!(!limiter.allow_generation(ip, None, 1, now));
+        assert!(!limiter.allow_generation(ip, settings, 3, now));
+        assert!(limiter.allow_generation(ip, settings, 3, now + Duration::from_secs(1)));
     }
 }

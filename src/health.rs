@@ -2,7 +2,12 @@ use rift::{
     config::{Config, HealthCheck},
     routing::ConnectStage,
 };
-use std::{collections::BTreeMap, io, net::SocketAddr, sync::Mutex};
+use std::{
+    collections::BTreeMap,
+    io,
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+};
 use tokio::{net::TcpStream, time::Instant};
 
 #[derive(Clone, Copy)]
@@ -14,12 +19,19 @@ struct State {
 
 pub struct Health {
     settings: Option<HealthCheck>,
+    control: Arc<crate::admin::Control>,
     states: Mutex<BTreeMap<String, State>>,
 }
 
 impl Health {
+    #[cfg(test)]
     pub fn new(config: &Config) -> Self {
+        Self::with_control(config, Arc::default())
+    }
+
+    pub fn with_control(config: &Config, control: Arc<crate::admin::Control>) -> Self {
         Self {
+            control,
             settings: config.health_check,
             states: Mutex::new(
                 config
@@ -85,7 +97,7 @@ pub async fn connect(
     event: &mut crate::events::Connection,
 ) -> io::Result<TcpStream> {
     event.stage = "connect";
-    event.failure = "no_healthy_backend";
+    event.failure = "no_eligible_backend";
     let candidates: Vec<&str> = std::iter::once(primary)
         .chain(
             config
@@ -95,11 +107,16 @@ pub async fn connect(
                 .flatten()
                 .map(String::as_str),
         )
-        .filter(|name| health.available(name))
+        .filter(|name| health.available(name) && !health.control.draining(config, name))
         .collect();
-    let mut last_error =
-        io::Error::new(io::ErrorKind::NotConnected, "no healthy backend available");
+    let mut last_error = io::Error::new(
+        io::ErrorKind::NotConnected,
+        "no eligible backend available: all candidates are unhealthy or draining",
+    );
     for (index, name) in candidates.iter().enumerate() {
+        if health.control.draining(config, name) {
+            continue;
+        }
         // Reserve time for every fallback even when a primary silently drops SYNs.
         let budget =
             deadline.saturating_duration_since(Instant::now()) / (candidates.len() - index) as u32;
@@ -110,6 +127,9 @@ pub async fn connect(
             .await
         {
             Ok(stream) => {
+                if health.control.draining(config, name) {
+                    continue;
+                }
                 health.record(name, true);
                 if *name != primary {
                     metrics.fallbacks.inc();

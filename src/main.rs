@@ -1,3 +1,4 @@
+mod admin;
 mod admission;
 mod control;
 mod events;
@@ -14,7 +15,8 @@ use rift::{
 };
 use std::{
     collections::BTreeMap,
-    env, io,
+    env, fs, io,
+    io::Write,
     path::{Path, PathBuf},
     process::ExitCode,
 };
@@ -22,7 +24,10 @@ use std::{
 const USAGE: &str = "Usage: rift [<listen-ip:port> <backend-ip:port>]\n\
     Backend may also be a DNS hostname with a port.\n\
     rift --config <path>\n\
+    rift init [path] (generate configuration; default ./rift.lua)\n\
+    rift check [path] (validate configuration; default ./rift.lua)\n\
     rift --check <path> (validate configuration and scripts without binding)\n\
+    rift admin [--address <loopback-ip:port>] <command> (run an authenticated administrator command)\n\
     rift --version (print package version)\n\
     rift --license (print project license and third-party notices)\n\
     Routing: rift <listen-ip:port> [--route <hostname=backend:port>]... [--default <backend:port>]\n\
@@ -31,7 +36,8 @@ const USAGE: &str = "Usage: rift [<listen-ip:port> <backend-ip:port>]\n\
     No arguments: load ./rift.lua if present, otherwise use defaults.\n\
     Defaults: 0.0.0.0:25565 127.0.0.1:25566\n\
     Explicit addresses and routing options override ./rift.lua.\n\
-    Reload: SIGHUP (Unix), Ctrl-Break (Windows). Stop and drain: Ctrl-C or SIGTERM.\n\
+    Reload: SIGHUP (Unix), Ctrl-Break (Windows); new connections use new routes, existing sessions continue.\n\
+    Invalid reloads retain the working configuration. Stop and drain: Ctrl-C or SIGTERM.\n\
     IPv6: rift '[::]:25565' '[::1]:25566'";
 
 #[tokio::main]
@@ -47,6 +53,39 @@ async fn main() -> ExitCode {
 
 async fn start() -> io::Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
+    if args.first().is_some_and(|arg| arg == "admin") {
+        return crate::admin::client(&args[1..]).await;
+    }
+    if args
+        .first()
+        .is_some_and(|arg| arg == "init" || arg == "check")
+    {
+        if args.len() > 2 {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, USAGE));
+        }
+        let path = args.get(1).map(String::as_str).unwrap_or("rift.lua");
+        if args[0] == "init" {
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .map_err(|error| {
+                    let detail = if error.kind() == io::ErrorKind::AlreadyExists {
+                        "already exists; choose a new path or edit the existing configuration"
+                            .to_owned()
+                    } else {
+                        error.to_string()
+                    };
+                    io::Error::new(error.kind(), format!("{path}: {detail}"))
+                })?;
+            file.write_all(include_bytes!("../examples/rift.lua"))?;
+            println!("rift: created {path}; edit your backends, then run: rift check {path}");
+        } else {
+            Config::load(Path::new(path))?;
+            println!("rift: configuration valid: {path}");
+        }
+        return Ok(());
+    }
     let (config, path) = match args.as_slice() {
         [] => match Config::load(Path::new("rift.lua")) {
             Ok(config) => (config, Some(PathBuf::from("rift.lua"))),

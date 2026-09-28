@@ -233,3 +233,36 @@ fn admission_rejections_are_logged_without_changing_error_metrics() {
     assert_eq!(metric(metrics, "connection_errors_total"), 0);
     assert_eq!(metric(metrics, "connections_capacity_rejected_total"), 1);
 }
+
+#[test]
+fn completed_login_exposes_latency_backend_players_and_memory() {
+    let fixture = Fixture::new();
+    let backend = TcpListener::bind("127.0.0.1:0").unwrap();
+    fixture.write(&options(
+        &config(&[backend.local_addr().unwrap()], ""),
+        "metrics = '127.0.0.1:0'",
+    ));
+    let process = fixture.spawn(&[]);
+    let front = process.listener();
+    let metrics = process.metrics_address();
+    let mut client = connect_game(front);
+    let mut server = accept_game(&backend);
+    exchange(&mut client, &mut server);
+    await_metric(metrics, "login_duration_seconds_count", 1);
+    await_metric(metrics, "backend_players_online{backend=\"b0\"}", 1);
+    let text = scrape(metrics);
+    assert!(text.contains("# TYPE rift_login_duration_seconds histogram\n"));
+    assert!(text.contains("rift_login_duration_seconds_bucket{le=\"+Inf\"} 1\n"));
+    let available = metric(metrics, "process_resident_memory_available");
+    if available == 1 {
+        assert!(metric(metrics, "process_resident_memory_bytes") > 0);
+    } else {
+        assert_eq!(available, 0);
+        assert!(!text.contains("rift_process_resident_memory_bytes "));
+    }
+    drop(client);
+    drop(server);
+    await_metric(metrics, "players_online", 0);
+    await_metric(metrics, "backend_players_online{backend=\"b0\"}", 0);
+    assert_eq!(metric(metrics, "login_duration_seconds_count"), 1);
+}

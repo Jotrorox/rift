@@ -468,3 +468,241 @@ fn programmatic_web_options_cannot_bypass_token_validation() {
     config.web.as_mut().unwrap().token = Some("0123456789abcdef".into());
     config.validate().unwrap();
 }
+
+fn with_admin_options(options: &str) -> String {
+    format!(
+        "return {{
+        listeners = {{ public = '0.0.0.0:25565' }},
+        backends = {{ lobby = '127.0.0.1:25566' }},
+        routes = {{ public = 'lobby' }},
+        {options}
+    }}"
+    )
+}
+
+#[test]
+fn administrator_options_have_explicit_permissions_and_no_environment_dependency() {
+    let defaults = Config::from_lua(&with_admin_options(""), "admin.lua").unwrap();
+    assert!(!defaults.maintenance);
+    assert!(defaults.draining.is_empty());
+    assert!(defaults.admin.is_none());
+    assert!(defaults.login_rate_limit.is_none());
+
+    let config = Config::from_lua(
+        &with_admin_options(
+            "
+        maintenance = true,
+        draining = { 'lobby' },
+        login_rate_limit = { per_ip_per_second = 3, per_ip_burst = 6 },
+        admin = {
+            listen = '127.0.0.1:9091',
+            token_env = 'RIFT_TEST_TOKEN_NOT_SET',
+            permissions = { 'status', 'reload' },
+        },
+    ",
+        ),
+        "admin.lua",
+    )
+    .unwrap();
+    assert!(config.maintenance);
+    assert_eq!(config.draining, BTreeSet::from(["lobby".into()]));
+    assert_eq!(config.login_rate_limit.unwrap().per_ip_burst, 6);
+    let admin = config.admin.unwrap();
+    assert_eq!(admin.token_env, "RIFT_TEST_TOKEN_NOT_SET");
+    assert_eq!(
+        admin.permissions,
+        BTreeSet::from(["status".into(), "reload".into()])
+    );
+
+    let config = Config::from_lua(
+        &with_admin_options("admin = { listen = '[::1]:9091', permissions = { 'status' } }"),
+        "admin.lua",
+    )
+    .unwrap();
+    assert_eq!(config.admin.unwrap().token_env, "RIFT_ADMIN_TOKEN");
+}
+
+#[test]
+fn malformed_administrator_options_are_actionable() {
+    for (options, expected) in [
+        ("maintenance = 'true'", "maintenance: expected a boolean"),
+        ("draining = { 'missing' }", "draining: unknown backend"),
+        (
+            "draining = { 'lobby', 'lobby' }",
+            "draining: duplicate name",
+        ),
+        (
+            "draining = { [2] = 'lobby' }",
+            "draining: expected a dense array",
+        ),
+        (
+            "draining = { lobby = true }",
+            "draining: expected a dense array",
+        ),
+        (
+            "login_rate_limit = { per_ip_burst = 0 }",
+            "login_rate_limit.per_ip_burst",
+        ),
+        (
+            "login_rate_limit = { surprise = true }",
+            "login_rate_limit.surprise",
+        ),
+        ("admin = {}", "admin.listen"),
+        (
+            "admin = { listen = '0.0.0.0:9091', permissions = { 'status' } }",
+            "admin.listen: use a loopback",
+        ),
+        ("admin = { listen = '127.0.0.1:9091' }", "admin.permissions"),
+        (
+            "admin = { listen = '127.0.0.1:9091', permissions = {} }",
+            "explicitly grant at least one permission",
+        ),
+        (
+            "admin = { listen = '127.0.0.1:9091', permissions = { '*' } }",
+            "unknown permission",
+        ),
+        (
+            "admin = { listen = '127.0.0.1:9091', permissions = { 'status', 'status' } }",
+            "duplicate name",
+        ),
+        (
+            "admin = { listen = '127.0.0.1:9091', permissions = { [2] = 'status' } }",
+            "dense array",
+        ),
+        (
+            "admin = { listen = '127.0.0.1:9091', permissions = { 'status' }, token_env = 'TOKEN=secret' }",
+            "admin.token_env",
+        ),
+        (
+            "admin = { listen = '127.0.0.1:9091', permissions = { 'status' }, token_env = '' }",
+            "admin.token_env",
+        ),
+        (
+            "admin = { listen = '127.0.0.1:9091', permissions = { 'status' }, token_env = '1TOKEN' }",
+            "admin.token_env",
+        ),
+        (
+            "admin = { listen = '127.0.0.1:25565', permissions = { 'status' } }",
+            "conflicts with listeners.public",
+        ),
+        (
+            "admin = { listen = '127.0.0.1:25566', permissions = { 'status' } }",
+            "admin.listen and backends.lobby",
+        ),
+        (
+            "metrics = '0.0.0.0:9091', admin = { listen = '127.0.0.1:9091', permissions = { 'status' } }",
+            "conflicts with metrics",
+        ),
+    ] {
+        let error = Config::from_lua(&with_admin_options(options), "admin.lua")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("admin.lua") && error.contains(expected),
+            "{options}: {error}"
+        );
+    }
+}
+
+#[test]
+fn programmatic_administrator_configs_receive_the_same_validation() {
+    let mut config = Config::default();
+    config.draining.insert("unknown".into());
+    assert!(
+        config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("draining")
+    );
+    config.draining.clear();
+    config.admin = Some(Admin {
+        listen: "127.0.0.1:9091".parse().unwrap(),
+        token_env: "RIFT_ADMIN_TOKEN".into(),
+        permissions: BTreeSet::from(["status".into()]),
+    });
+    config.validate().unwrap();
+    config
+        .admin
+        .as_mut()
+        .unwrap()
+        .permissions
+        .insert("unknown".into());
+    assert!(
+        config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("unknown permission")
+    );
+    config.admin.as_mut().unwrap().permissions.remove("unknown");
+    config.login_rate_limit = Some(RateLimit {
+        per_ip_per_second: 1,
+        per_ip_burst: 1,
+        global_per_second: 1,
+        global_burst: 1,
+        max_ips: 0,
+    });
+    assert!(
+        config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("login_rate_limit.max_ips")
+    );
+}
+
+#[test]
+fn local_administration_and_http_services_keep_independent_options_and_safe_sockets() {
+    let source = with_admin_options(
+        "admin = { listen = '127.0.0.1:0', permissions = { 'status' } },
+        web = { listen = '127.0.0.1:0' },
+        status = { listen = '127.0.0.1:0' }, metrics = false,
+        on_http = function(request) return nil end,
+        maintenance = true, draining = { 'lobby' }, login_rate_limit = {}",
+    );
+    let config = Config::from_lua(&source, "combined.lua").unwrap();
+    assert!(config.admin.is_some() && config.web.is_some() && config.status.is_some());
+    assert!(config.metrics.is_none() && config.on_http.is_some());
+    assert!(config.maintenance && config.draining.contains("lobby"));
+    assert!(config.login_rate_limit.is_some());
+
+    for (service, expected) in [
+        ("web = { listen = '127.0.0.1:9091' }", "web.listen"),
+        (
+            "web = { listen = '[::ffff:127.0.0.1]:9091', token = '0123456789abcdef' }",
+            "web.listen",
+        ),
+        ("status = { listen = '127.0.0.1:9091' }", "status.listen"),
+        ("status = { listen = '0.0.0.0:9091' }", "status.listen"),
+        ("status = { listen = '[::]:9091' }", "status.listen"),
+    ] {
+        let source = with_admin_options(&format!(
+            "admin = {{ listen = '127.0.0.1:9091', permissions = {{ 'status' }} }}, {service}"
+        ));
+        let error = Config::from_lua(&source, "combined.lua")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(&format!("admin.listen: address conflicts with {expected}")),
+            "{error}"
+        );
+    }
+
+    for backend in [
+        "localhost:9091",
+        "LOCALHOST.:9091",
+        "[::ffff:127.0.0.1]:9091",
+    ] {
+        let source =
+            with_admin_options("admin = { listen = '127.0.0.1:9091', permissions = { 'status' } }")
+                .replace("127.0.0.1:25566", backend);
+        let error = Config::from_lua(&source, "combined.lua")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("admin.listen and backends.lobby must not point to the same socket"),
+            "{error}"
+        );
+    }
+}

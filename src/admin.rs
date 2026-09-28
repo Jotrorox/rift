@@ -1,0 +1,340 @@
+//! Bounded, authenticated local control plane. One JSON request/response per TCP connection.
+use crate::{admission::Admission, events, metrics::Metrics, runtime::Snapshot};
+use rift::config::{Admin, Config};
+use serde_json::{Value, json};
+use std::{
+    collections::BTreeMap,
+    io,
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{TcpListener, TcpStream},
+    sync::{mpsc, oneshot, watch},
+    task::JoinSet,
+    time::timeout,
+};
+
+pub type Reply = oneshot::Sender<Result<Value, String>>;
+pub enum Command {
+    Reload(Reply),
+    // The handler confirms that the response has been written before shutdown begins.
+    Shutdown(oneshot::Receiver<()>),
+}
+
+pub struct Transfer {
+    pub snapshot: Arc<Snapshot>,
+    pub backend: String,
+    pub reply: Reply,
+}
+
+struct Entry {
+    name: String,
+    backend: String,
+    protocol: i32,
+    transfer: mpsc::Sender<Transfer>,
+}
+
+#[derive(Default)]
+pub struct Control {
+    maintenance: Mutex<Option<bool>>,
+    draining: Mutex<BTreeMap<String, bool>>,
+    pub logins: Mutex<Admission>,
+    players: Mutex<BTreeMap<u64, Entry>>,
+}
+
+impl Control {
+    pub fn maintenance(&self, config: &Config) -> bool {
+        self.maintenance
+            .lock()
+            .unwrap()
+            .unwrap_or(config.maintenance)
+    }
+
+    pub fn draining(&self, config: &Config, backend: &str) -> bool {
+        self.draining
+            .lock()
+            .unwrap()
+            .get(backend)
+            .copied()
+            .unwrap_or_else(|| config.draining.contains(backend))
+    }
+
+    pub fn register(
+        self: &Arc<Self>,
+        id: u64,
+        backend: String,
+        protocol: i32,
+        name: String,
+    ) -> (Registration, mpsc::Receiver<Transfer>) {
+        let (transfer, receiver) = mpsc::channel(1);
+        self.players.lock().unwrap().insert(
+            id,
+            Entry {
+                name,
+                backend,
+                protocol,
+                transfer,
+            },
+        );
+        (
+            Registration {
+                control: self.clone(),
+                id,
+            },
+            receiver,
+        )
+    }
+
+    pub fn moved(&self, id: u64, backend: &str) {
+        if let Some(entry) = self.players.lock().unwrap().get_mut(&id) {
+            entry.backend = backend.to_owned();
+        }
+    }
+
+    fn status(&self, snapshot: &Snapshot, metrics: &Metrics) -> Value {
+        let players: Vec<Value> = self.players.lock().unwrap().iter().map(|(id, entry)| json!({"connection_id":id,"name":entry.name,"backend":entry.backend,"protocol":entry.protocol})).collect();
+        let backends: Vec<Value> = snapshot.health.metrics().into_iter().map(|(name, up)| {
+            json!({"draining":self.draining(&snapshot.config, &name),"backend":name,"up":up})
+        }).collect();
+        json!({"maintenance":self.maintenance(&snapshot.config),"connections":metrics.active.get(),"players_online":metrics.players.get(),"players":players,"backends":backends})
+    }
+}
+
+pub struct Registration {
+    control: Arc<Control>,
+    id: u64,
+}
+impl Drop for Registration {
+    fn drop(&mut self) {
+        self.control.players.lock().unwrap().remove(&self.id);
+    }
+}
+
+pub fn token(settings: &Admin) -> io::Result<String> {
+    let token = std::env::var(&settings.token_env).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, format!("admin.token_env: set {} to a random secret of at least 32 bytes before starting Rift", settings.token_env)))?;
+    if token.len() < 32 || token.len() > 1024 || token.chars().any(char::is_control) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "admin.token_env: secret must contain 32..=1024 bytes without control characters",
+        ));
+    }
+    Ok(token)
+}
+
+fn authenticated(expected: &str, supplied: &str) -> bool {
+    let mut difference = expected.len() ^ supplied.len();
+    for (index, byte) in expected.bytes().enumerate() {
+        difference |= usize::from(byte ^ supplied.as_bytes().get(index).copied().unwrap_or(0));
+    }
+    difference == 0
+}
+
+async fn read_line(stream: &mut TcpStream, limit: usize) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    loop {
+        let byte = stream.read_u8().await?;
+        if byte == b'\n' {
+            return Ok(bytes);
+        }
+        if bytes.len() >= limit {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "admin request/response exceeds size limit",
+            ));
+        }
+        bytes.push(byte);
+    }
+}
+
+fn request(value: &Value, settings: &Admin, secret: &str) -> Result<Vec<String>, String> {
+    if !value
+        .get("token")
+        .and_then(Value::as_str)
+        .is_some_and(|s| authenticated(secret, s))
+    {
+        return Err("authentication failed; supply RIFT_ADMIN_TOKEN".into());
+    }
+    let args = value
+        .get("args")
+        .and_then(Value::as_array)
+        .ok_or("expected args array")?
+        .iter()
+        .map(|v| {
+            v.as_str()
+                .map(str::to_owned)
+                .ok_or("command arguments must be strings".to_owned())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let permission = args.first().ok_or("missing command")?;
+    if !settings.permissions.contains(permission) {
+        return Err(format!(
+            "permission denied: {permission}; grant it in admin.permissions and restart"
+        ));
+    }
+    Ok(args)
+}
+
+async fn execute(
+    args: &[String],
+    snapshot: Arc<Snapshot>,
+    metrics: &Metrics,
+    commands: &mpsc::Sender<Command>,
+) -> Result<Value, String> {
+    let control = &snapshot.control;
+    let enabled = |value: &str| match value {
+        "on" => Ok(true),
+        "off" => Ok(false),
+        _ => Err("expected on or off".to_owned()),
+    };
+    match args {
+        [command] if command == "status" => Ok(control.status(&snapshot, metrics)),
+        [command, value] if command == "maintenance" => {
+            let value = enabled(value)?;
+            *control.maintenance.lock().unwrap() = Some(value);
+            Ok(json!({"maintenance":value}))
+        }
+        [command, backend, value] if command == "drain" => {
+            if !snapshot.config.backends.contains_key(backend) { return Err(format!("unknown backend {backend:?}; use status to list backends")); }
+            let value = enabled(value)?;
+            control.draining.lock().unwrap().insert(backend.clone(), value);
+            Ok(json!({"backend":backend,"draining":value}))
+        }
+        [command, id, backend] if command == "transfer" => {
+            let id: u64 = id.parse().map_err(|_| "connection ID must be a positive integer")?;
+            if !snapshot.config.backends.contains_key(backend) { return Err(format!("unknown backend {backend:?}")); }
+            if control.draining(&snapshot.config, backend) || !snapshot.health.available(backend) { return Err("target backend is draining or unhealthy".into()); }
+            let sender = {
+                let players = control.players.lock().unwrap();
+                let entry = players.get(&id).ok_or("player is no longer online; refresh status")?;
+                if entry.protocol < 764 { return Err("player transfers require Minecraft 1.20.2 or newer".into()); }
+                if entry.backend == *backend { return Err("player is already on that backend".into()); }
+                entry.transfer.clone()
+            };
+            let (reply, receiver) = oneshot::channel();
+            sender.try_send(Transfer {snapshot: snapshot.clone(), backend: backend.clone(), reply}).map_err(|_| "player disconnected or already has a queued transfer")?;
+            receiver.await.map_err(|_| "player disconnected during transfer".to_owned())?
+        }
+        [command] if command == "reload" => {
+            let (reply, receiver) = oneshot::channel();
+            commands.try_send(Command::Reload(reply)).map_err(|_| "administrator command queue is full or shutting down")?;
+            receiver.await.map_err(|_| "proxy is shutting down".to_owned())?
+        }
+        _ => Err("usage: status | maintenance on/off | drain <backend> on/off | transfer <connection-id> <backend> | reload | shutdown".into()),
+    }
+}
+
+pub async fn serve(
+    listener: TcpListener,
+    settings: Admin,
+    secret: String,
+    current: watch::Receiver<Arc<Snapshot>>,
+    metrics: Arc<Metrics>,
+    commands: mpsc::Sender<Command>,
+) {
+    let settings = Arc::new(settings);
+    let secret = Arc::new(secret);
+    let mut handlers = JoinSet::new();
+    loop {
+        tokio::select! {
+            biased;
+            _ = handlers.join_next(), if !handlers.is_empty() => {},
+            result = listener.accept() => {
+                let (mut stream, _) = match result { Ok(result) => result, Err(_) => {tokio::time::sleep(Duration::from_millis(100)).await; continue;} };
+                if handlers.len() >= 16 { continue; }
+                let settings = settings.clone();
+                let secret = secret.clone();
+                let current = current.clone();
+                let metrics = metrics.clone();
+                let commands = commands.clone();
+                handlers.spawn(async move {
+                    let _ = timeout(Duration::from_secs(40), async {
+                        let bytes = timeout(Duration::from_secs(2), read_line(&mut stream, 8192)).await??;
+                        let parsed = serde_json::from_slice::<Value>(&bytes).map_err(|_| "invalid JSON request".to_owned()).and_then(|value| request(&value, &settings, &secret));
+                        let mut permission = String::new();
+                        let mut shutdown_ack = None;
+                        let result = match parsed {
+                            Ok(args) => {
+                                permission = args[0].clone();
+                                if args == ["shutdown"] {
+                                    let (ack, receiver) = oneshot::channel();
+                                    match commands.try_send(Command::Shutdown(receiver)) {
+                                        Ok(()) => {shutdown_ack = Some(ack); Ok(json!({"shutdown":"draining"}))}
+                                        Err(_) => Err("proxy is already shutting down or busy".into()),
+                                    }
+                                } else {
+                                    let snapshot = current.borrow().clone();
+                                    execute(&args, snapshot, &metrics, &commands).await
+                                }
+                            }
+                            Err(error) => Err(error),
+                        };
+                        let response = match result {
+                            Ok(data) => { events::admin("admin_command", "ok", &permission, &"command completed"); json!({"ok":true,"data":data}) }
+                            Err(error) => { events::admin("admin_command", "rejected", &permission, &error); json!({"ok":false,"error":error}) }
+                        };
+                        stream.write_all(format!("{response}\n").as_bytes()).await?;
+                        stream.shutdown().await?;
+                        if let Some(ack) = shutdown_ack { let _ = ack.send(()); }
+                        Ok::<_,io::Error>(())
+                    }).await;
+                });
+            }
+        }
+    }
+}
+
+pub async fn client(args: &[String]) -> io::Result<()> {
+    let (address, args) = match args {
+        [flag, address, args @ ..] if flag == "--address" => (address.as_str(), args),
+        _ => ("127.0.0.1:9091", args),
+    };
+    if args.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "usage: rift admin [--address 127.0.0.1:9091] status|maintenance on/off|drain <backend> on/off|transfer <connection-id> <backend>|reload|shutdown",
+        ));
+    }
+    let address: SocketAddr = address.parse().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "admin address requires a loopback IP and port",
+        )
+    })?;
+    if !address.ip().is_loopback() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "admin address must be loopback; run this command on the proxy host",
+        ));
+    }
+    let secret = std::env::var("RIFT_ADMIN_TOKEN").map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "set RIFT_ADMIN_TOKEN to the server's admin secret",
+        )
+    })?;
+    timeout(Duration::from_secs(40), async {
+        let mut stream = timeout(Duration::from_secs(2), TcpStream::connect(address)).await??;
+        stream
+            .write_all(format!("{}\n", json!({"token":secret,"args":args})).as_bytes())
+            .await?;
+        let response: Value =
+            serde_json::from_slice(&read_line(&mut stream, 16 * 1024 * 1024).await?)
+                .map_err(io::Error::other)?;
+        if response["ok"] != true {
+            return Err(io::Error::other(
+                response["error"]
+                    .as_str()
+                    .unwrap_or("invalid admin response"),
+            ));
+        }
+        println!("{}", serde_json::to_string_pretty(&response["data"])?);
+        Ok(())
+    })
+    .await?
+}
+
+#[cfg(test)]
+mod tests;
