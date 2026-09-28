@@ -45,7 +45,7 @@ public address. With metrics enabled,
 `curl --fail http://127.0.0.1:9090/metrics` should succeed. A successful config
 check does not establish backend reachability or application readiness.
 
-## Enable administration
+## Enable operational administration
 
 Add these fields to the returned Lua configuration table before starting:
 
@@ -78,13 +78,18 @@ export RIFT_ADMIN_TOKEN="$(openssl rand -hex 32)"
 ./rift admin status
 ```
 
-The endpoint speaks JSON lines over TCP, accepts only loopback bind addresses
+The `admin` endpoint speaks JSON lines over TCP, accepts only loopback bind addresses
 and requires the token on every request. Permissions are explicit: remove operations a credential must not
 perform, or use `{ "status" }` for a read-only endpoint. Permission and credential
 changes require a restart. There is one configured credential and permission set,
 not a multi-user identity store. `rift check` validates the configuration shape;
 the server verifies the environment secret when it starts. Keep secrets out of
 Lua files, command arguments and committed Compose files.
+
+This endpoint is separate from the optional `web` HTTP dashboard/API and its
+bearer token. They can run together on distinct ports. See
+[HTTP administration](#http-administration) for browser-based configuration
+editing and the separate read-only status website.
 
 The CLI always reads its secret from `RIFT_ADMIN_TOKEN`, even if the server uses
 a different `token_env` variable. It defaults to `127.0.0.1:9091`; use
@@ -269,7 +274,8 @@ isolation and cannot detect changes incompatible with an already running process
 | Connection/login limits, configured maintenance/draining | Apply to new admission/attachments; current sessions continue |
 | Health probes, status cache | Rebuilt after successful reload |
 | Shutdown deadline | New value applies to the later shutdown drain |
-| Gameplay listeners, metrics bind, admin bind/token variable/permissions | Restart required; incompatible reload rejects the entire candidate |
+| `web`, `status`, standalone `metrics`, web bearer token | Can enable, disable or move live; replacement sockets bind before commit |
+| Gameplay listeners, operational `admin` bind/token variable/permissions | Restart required; incompatible reload rejects the entire candidate |
 
 Already accepted connections keep their original configuration snapshot while
 initial login completes. A route edit never transfers a connected player.
@@ -278,6 +284,7 @@ and backend-drain overrides survive reloads until another admin command changes
 them or the process restarts. `off` is itself an override, not a reset to the
 configured value. Keep persistent policy in the Lua file. Lowering `max_connections` preserves
 sessions and rejects new admission until the total falls below the new limit.
+
 Outside systemd, use `kill -HUP <pid>` on Unix or Ctrl-Break on Windows.
 
 ## Maintenance and transfers
@@ -377,3 +384,34 @@ See the [local pilot and default rationale](pilot.md). It is a reproducible
 loopback exercise, not a production player-capacity claim. Monitor your own
 traffic before increasing limits. Packet buffers grow with packet sizes; memory,
 CPU, file descriptors and backend capacity all constrain safe player counts.
+
+## HTTP administration
+
+The optional [web dashboard and status services](http.md) provide a bundled
+website, revision-checked configuration API, separate read-only status/metrics,
+and Lua HTTP extensions. Start with `examples/admin.lua`. These HTTP services
+are separate from the `rift admin` JSON-line control endpoint; both can run
+simultaneously on distinct ports. Website saves, HTTP reloads, `rift admin reload`
+and signal reloads share one serialized configuration transaction path.
+
+The `web` configuration controls the dashboard and HTTP API, with its own
+`web.token` bearer credential. Operational `admin.permissions` do not restrict
+the HTTP API: a web credential grants the enabled HTTP API capabilities,
+including configuration editing. The `status` server is read-only and
+unauthenticated. All services are disabled unless configured.
+
+The supplied systemd and Compose examples intentionally keep configuration
+read-only to the process. Their dashboards can inspect and validate source and
+reload edits made by an external administrator, but browser saves need write
+access to both the selected file and its parent directory for atomic replacement.
+To enable browser saves, provision a dedicated writable configuration directory
+for the service account, allow that path through systemd's `ProtectSystem` with
+`ReadWritePaths`, or use a writable Compose directory mount. Keep the CLI token
+environment file outside a service-writable config directory.
+
+An HTTP save validates the complete candidate and reserves changed service
+sockets before committing the source and runtime. Invalid configuration, socket
+collisions, stale revisions and write failures retain the previous file and
+working runtime. A rejected reload preserves the runtime but does not undo an
+edit already written by an external editor. Changing routes affects new
+connections; existing sessions keep their sockets and backend attachment.

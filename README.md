@@ -176,6 +176,32 @@ and execution errors include the filename and Lua diagnostics. A missing explici
 `--config` file is an error; only a missing implicit `./rift.lua` uses the defaults.
 All listeners bind before Rift begins accepting connections.
 
+## Web administration and status
+
+Rift includes an optional Axum API and bundled admin website, a separate status
+website/JSON endpoint, and Prometheus metrics. Edit and validate the full Lua
+configuration in the browser; saves apply live with conflict detection and
+atomic file replacement. Extend the website and API with sandboxed `on_http`
+Lua handlers under `/ext/*`.
+
+```sh
+./target/release/rift --config examples/admin.lua
+# Admin: http://127.0.0.1:8080   Status: http://127.0.0.1:9090
+```
+
+All HTTP servers are disabled by default and independently configurable.
+The admin API supports bearer tokens, required for non-loopback binds. HTML,
+CSS and JavaScript are embedded at compile time; no frontend build is needed.
+See the [HTTP guide](docs/http.md) for configuration, API examples, Lua extension
+contracts and live enable/disable behavior.
+
+The `web` HTTP dashboard/API uses its own bearer token and is separate from the
+loopback JSON-line `admin` endpoint used by `rift admin`. Both can run together
+on different ports. Operational `admin.permissions` apply to the JSON-line
+endpoint; a web credential grants the enabled HTTP API capabilities, including
+configuration editing. The separate `status` HTTP service is unauthenticated
+and read-only.
+
 ## Operating a network
 
 [`examples/network.lua`](examples/network.lua) enables all operational features
@@ -195,19 +221,23 @@ backends. It checks syntax, top-level execution budgets,
 types, routes and backend references. Hook results remain validated per invocation,
 since they can depend on connection metadata.
 
-A reload reads and validates the complete file on a blocking worker, then swaps
-one immutable configuration snapshot for all listeners. An invalid candidate is
-logged and counted; the previous configuration stays active. Save files by atomic
-replacement before signaling. Only one reload runs at a time; additional signals
-while it is running are coalesced. CLI-only invocations have no file to reload.
-An implicitly loaded `./rift.lua` can be reloaded too.
+A reload reads and validates the complete file on a blocking worker, reserves
+changed HTTP/metrics sockets, then swaps one immutable configuration snapshot
+for all listeners. HTTP saves, HTTP/CLI reloads and signal reloads share a
+serialized transaction path. An invalid candidate is logged and counted; the
+previous configuration stays active. A failed HTTP save also retains the
+previous file; a rejected reload does not undo an external editor's disk changes.
+Save files by atomic replacement before signaling. CLI-only invocations have no
+file to reload. An implicitly loaded `./rift.lua` can be reloaded too.
 
 Routes, backends, fallback lists, scripts, limits, health checks, status-cache
-settings, maintenance/draining policy and the shutdown deadline can change live.
-**Listener names/addresses, the metrics bind address and admin configuration
-require a restart**; changing them rejects the
-entire reload. Configured port `0` retains the original assigned port. All
-listener and metrics sockets bind successfully before traffic is accepted.
+settings, maintenance/draining policy, HTTP services and the shutdown deadline
+can change live. **Gameplay listener names/addresses and the operational `admin`
+endpoint's bind, token-variable and permissions require a restart**; changing
+them rejects the entire reload. The `web`, `status` and standalone `metrics`
+servers can be enabled, disabled or moved on reload, including changes to
+`web.token`. An unchanged configured port `0` retains its assigned port. All new
+service sockets bind successfully before a change is applied.
 
 Already accepted connections finish using their original routing snapshot.
 Established relays retain their sockets and buffers, so reloads do not disconnect
@@ -264,12 +294,13 @@ admin = {
 },
 ```
 
-Administration is opt-in and loopback-only. Set the named environment variable
+This operational JSON-line endpoint is opt-in and loopback-only. Set the named environment variable
 to a random secret of 32–1024 bytes without control characters before starting; `rift check` validates
 the configuration without requiring the runtime secret. Each operation requires
 both the token and its explicit permission. There is one credential/permission
 set; `{ "status" }` makes it read-only. The endpoint uses JSON lines over TCP.
-Admin bind, token-variable and permission changes require restart.
+Its bind, token-variable and permission changes require restart. The separate
+`web` HTTP server and its bearer credential can change live.
 
 With the same token in the CLI's `RIFT_ADMIN_TOKEN` environment variable:
 
@@ -383,8 +414,9 @@ shutdown_timeout_ms = 30000,
 
 The optional HTTP listener serves Prometheus text at `GET /metrics`. Bind it to
 loopback or a trusted monitoring interface: it has no authentication. Scrapes
-have a two-second deadline, a 4 KiB header bound and at most 16 concurrent
-handlers, independent of gameplay admission. Other paths return 404.
+use Axum with bounded HTTP requests, independent of gameplay admission. Other
+paths return 404. The separate status server can also expose `/metrics`; see
+the [HTTP guide](docs/http.md).
 
 Metrics include `rift_connections_active`, `rift_players_online`, accepted/completed/rejected connection
 counters, connection errors, backend connect failures, fallback selections,
@@ -739,7 +771,7 @@ macOS and Windows archives with `SHA256SUMS` to a GitHub Release. Only the final
 publishing job receives write permission; it uses the workflow's built-in token.
 This distributes the standalone proxy; running servers are managed separately.
 Each archive includes the binary, BSD-2-Clause license, third-party notices, README,
-all three Lua examples, the systemd unit, Dockerfile/Compose examples and
+all bundled Lua examples, the systemd unit, Dockerfile/Compose examples and
 operator/pilot documentation. Packaging extracts the archive,
 checks `--version` against `Cargo.toml`, runs `--help`, verifies `--license` without
 external license files, validates every bundled configuration with `--check`,

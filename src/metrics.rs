@@ -10,11 +10,8 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf},
-    net::{TcpListener, TcpStream},
-    sync::watch,
-    task::JoinSet,
-    time::timeout,
+    io::{AsyncRead, AsyncWrite, ReadBuf},
+    net::TcpStream,
 };
 
 #[derive(Default)]
@@ -152,6 +149,34 @@ impl Metrics {
                 latency.buckets[index] += 1;
             }
         }
+    }
+
+    pub fn values(&self) -> serde_json::Value {
+        serde_json::json!({
+            "accepted": self.accepted.get(),
+            "active": self.active.get(),
+            "players": self.players.get(),
+            "completed": self.completed.get(),
+            "rate_rejected": self.rate_rejected.get(),
+            "login_rejected": self.login_rejected.get(),
+            "access_rejected": self.access_rejected.get(),
+            "capacity_rejected": self.capacity_rejected.get(),
+            "route_rejected": self.route_rejected.get(),
+            "errors": self.errors.get(),
+            "backend_failures": self.backend_failures.get(),
+            "fallbacks": self.fallbacks.get(),
+            "cache_hits": self.cache_hits.get(),
+            "cache_misses": self.cache_misses.get(),
+            "reloads": self.reloads.get(),
+            "reload_failures": self.reload_failures.get(),
+            "health_checks": self.health_checks.get(),
+            "health_failures": self.health_failures.get(),
+            "sent": self.sent.get(),
+            "received": self.received.get(),
+            "forced_shutdowns": self.forced_shutdowns.get(),
+            "transfers": self.transfers.get(),
+            "transfer_failures": self.transfer_failures.get(),
+        })
     }
 
     pub fn render(&self, snapshot: &crate::runtime::Snapshot) -> String {
@@ -368,45 +393,6 @@ impl AsyncWrite for Metered<'_> {
     }
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.stream).poll_shutdown(cx)
-    }
-}
-
-pub async fn serve(
-    listener: TcpListener,
-    current: watch::Receiver<Arc<crate::runtime::Snapshot>>,
-    metrics: Arc<Metrics>,
-) {
-    let mut tasks = JoinSet::new();
-    loop {
-        tokio::select! {
-            biased;
-            _ = tasks.join_next(), if !tasks.is_empty() => {},
-            accepted = listener.accept() => {
-                let (mut stream, _) = match accepted {
-                    Ok(value) => value,
-                    Err(_) => { tokio::time::sleep(Duration::from_millis(100)).await; continue; }
-                };
-                if tasks.len() >= 16 { continue; }
-                let snapshot = current.borrow().clone();
-                let metrics = metrics.clone();
-                tasks.spawn(async move {
-                    let _ = timeout(Duration::from_secs(2), async {
-                        let mut header = Vec::new();
-                        // A scrape is one bounded HTTP request, without keepalive.
-                        while !header.ends_with(b"\r\n\r\n") && header.len() < 4096 {
-                            header.push(stream.read_u8().await?);
-                        }
-                        let (status, body) = if !header.ends_with(b"\r\n\r\n") {
-                            ("431 Request Header Fields Too Large", String::new())
-                        } else if header.starts_with(b"GET /metrics HTTP/1.1\r\n") || header.starts_with(b"GET /metrics HTTP/1.0\r\n") {
-                            ("200 OK", metrics.render(&snapshot))
-                        } else { ("404 Not Found", String::new()) };
-                        stream.write_all(format!("HTTP/1.1 {status}\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await?;
-                        stream.shutdown().await
-                    }).await;
-                });
-            }
-        }
     }
 }
 

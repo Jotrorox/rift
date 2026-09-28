@@ -317,9 +317,11 @@ def test_operations(name, binary, directory, compression, rounds, result):
             after = metrics(monitor)
             assert after["status_cache_hits_total"] > before["status_cache_hits_total"]
             if index % 3 == 0:
+                # Metrics can move on reload, but sharing the primary backend's
+                # socket is invalid and must preserve the current configuration.
                 invalid = ["return {", candidate.replace("max_connections = 64", "max_connections = 0"),
                            candidate.replace(f"public = '127.0.0.1:{front}'", "public = '127.0.0.1:0'"),
-                           candidate.replace(f"metrics = '127.0.0.1:{monitor}'", "metrics = '127.0.0.1:0'")]
+                           candidate.replace(f"metrics = '127.0.0.1:{monitor}'", f"metrics = '127.0.0.1:{primary_port}'")]
                 reload_config(proxy, monitor, path, invalid[(index // 3) % len(invalid)], valid=False)
                 assert mc.status(front, protocol, "play.test")["description"] == descriptions[target]
             # Console teleports require the original sessions to receive and

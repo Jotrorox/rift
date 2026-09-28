@@ -40,6 +40,11 @@ pub struct Snapshot {
     pub config: Config,
     generation: u64,
     pub control: Arc<Control>,
+    pub source: Option<Arc<str>>,
+    pub revision: String,
+    pub listener_addresses: BTreeMap<String, SocketAddr>,
+    pub service_addresses: BTreeMap<String, SocketAddr>,
+    pub addresses: Arc<Vec<SocketAddr>>,
     policies: BTreeMap<String, Policy>,
     router: Router,
     pub health: Health,
@@ -71,6 +76,11 @@ impl Snapshot {
             previous.map_or_else(|| Arc::new(Control::default()), |old| old.control.clone());
         let health = Health::with_control(&config, control.clone());
         Ok(Self {
+            source: None,
+            revision: "runtime".into(),
+            listener_addresses: config.listeners.clone(),
+            service_addresses: BTreeMap::new(),
+            addresses: Arc::new(config.listeners.values().copied().collect()),
             config,
             generation: previous.map_or(1, |old| old.generation + 1),
             control,
@@ -364,7 +374,7 @@ pub async fn handle(
                     }
                     let deadline = Deadline::now() + Duration::from_secs(30);
                     let connect_deadline = deadline.min(Deadline::now() + request.snapshot.config.limits.connect_timeout);
-                    let upstream = match request.snapshot.config.backends[target].connect_until(addresses, connect_deadline).await {
+                    let upstream = match request.snapshot.config.backends[target].connect_until(&request.snapshot.addresses, connect_deadline).await {
                         Ok(upstream) => upstream,
                         Err(error) => {
                             metrics.transfer_failures.inc();
@@ -498,7 +508,6 @@ pub(crate) async fn accept(
     name: String,
     current: watch::Receiver<Arc<Snapshot>>,
     mut stop: watch::Receiver<bool>,
-    addresses: Arc<Vec<SocketAddr>>,
     metrics: Arc<Metrics>,
     admission: Arc<Mutex<Admission>>,
 ) {
@@ -533,7 +542,7 @@ pub(crate) async fn accept(
                     continue;
                 };
                 let name = name.clone();
-                let addresses = addresses.clone();
+                let addresses = snapshot.addresses.clone();
                 let metrics = metrics.clone();
                 sessions.spawn(async move {
                     let mut client = client;
@@ -592,33 +601,106 @@ fn health_worker(
     }))
 }
 
+/// Every accepted configuration follows the same transaction, regardless of
+/// whether it came from a signal, the website, or an API client.
+async fn reconfigure(
+    operation: crate::control::Operation,
+    app: &crate::web::App,
+    snapshot: &Arc<Snapshot>,
+    services: &crate::web::Services,
+) -> Result<(Arc<Snapshot>, crate::web::Prepared), crate::control::Error> {
+    use crate::control::{self, Error};
+    let path = app
+        .path
+        .clone()
+        .ok_or_else(|| Error::conflict("no configuration file selected"))?;
+    let active = snapshot
+        .source
+        .clone()
+        .ok_or_else(|| Error::conflict("no configuration source available"))?;
+    let path_for_prepare = path.clone();
+    let candidate = tokio::task::spawn_blocking(move || {
+        control::prepare(&path_for_prepare, &active, operation)
+    })
+    .await
+    .map_err(Error::invalid)??;
+    if candidate.config.listeners != snapshot.config.listeners
+        || candidate.config.admin != snapshot.config.admin
+    {
+        return Err(Error::invalid(
+            "listener names/addresses and admin settings require a restart",
+        ));
+    }
+    let prepared = services.prepare(&candidate.config).await?;
+    let mut service_addresses = services.addresses(&candidate.config, &prepared)?;
+    if let Some(address) = snapshot.service_addresses.get("admin") {
+        service_addresses.insert("admin".into(), *address);
+    }
+    let addresses: Vec<_> = snapshot
+        .listener_addresses
+        .values()
+        .chain(service_addresses.values())
+        .copied()
+        .collect();
+    check_bound_loops(&candidate.config, &addresses)?;
+    let mut next = Snapshot::new(candidate.config, Some(snapshot))?;
+    next.revision = control::revision(&candidate.source);
+    next.source = Some(Arc::from(candidate.source.as_str()));
+    next.listener_addresses = snapshot.listener_addresses.clone();
+    next.service_addresses = service_addresses;
+    next.addresses = Arc::new(addresses);
+    if candidate.save {
+        tokio::task::spawn_blocking(move || {
+            control::persist(&path, &candidate.source, &candidate.previous_disk)
+        })
+        .await
+        .map_err(Error::invalid)??;
+    }
+    Ok((Arc::new(next), prepared))
+}
+
 pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
-    // Install handlers before advertising readiness.
+    use crate::{control, web};
+    // Install handlers before advertising readiness and resolve the selected
+    // file once, so saving through a symlink updates its target atomically.
     let mut signals = Signals::new()?;
-    let mut snapshot = Arc::new(Snapshot::new(config, None)?);
-    let admin_secret = snapshot
+    let source = source.map(std::fs::canonicalize).transpose()?;
+    let (config, document) = if let Some(path) = source.clone() {
+        tokio::task::spawn_blocking(move || -> io::Result<_> {
+            let text = control::read_source(&path)?;
+            let config = Config::from_lua(&text, &path.display().to_string())?;
+            Ok((config, Some(text)))
+        })
+        .await
+        .map_err(io::Error::other)??
+    } else {
+        (config, None)
+    };
+    let mut initial = Snapshot::new(config, None)?;
+    let admin_secret = initial
         .config
         .admin
         .as_ref()
         .map(admin::token)
         .transpose()?;
+    if let Some(document) = document {
+        initial.revision = control::revision(&document);
+        initial.source = Some(Arc::from(document));
+    }
     let mut listeners = Vec::new();
-    for (name, address) in &snapshot.config.listeners {
+    for (name, address) in &initial.config.listeners {
         let listener = TcpListener::bind(address).await.map_err(|error| {
             io::Error::new(
                 error.kind(),
                 format!("listeners.{name} ({address}): {error}"),
             )
         })?;
+        initial
+            .listener_addresses
+            .insert(name.clone(), listener.local_addr()?);
         listeners.push((name.clone(), listener));
     }
-    let metrics_listener = match snapshot.config.metrics {
-        Some(address) => Some(TcpListener::bind(address).await.map_err(|error| {
-            io::Error::new(error.kind(), format!("metrics ({address}): {error}"))
-        })?),
-        None => None,
-    };
-    let admin_listener = match &snapshot.config.admin {
+    let admin_listener = match &initial.config.admin {
         Some(settings) => Some(TcpListener::bind(settings.listen).await.map_err(|error| {
             io::Error::new(
                 error.kind(),
@@ -630,22 +712,30 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         })?),
         None => None,
     };
-    let mut addresses = listeners
-        .iter()
-        .map(|(_, listener)| listener.local_addr())
-        .collect::<io::Result<Vec<_>>>()?;
-    if let Some(listener) = &metrics_listener {
-        addresses.push(listener.local_addr()?);
-    }
+    let mut services = web::Services::default();
+    let prepared = services.prepare(&initial.config).await?;
+    initial.service_addresses = services.addresses(&initial.config, &prepared)?;
     if let Some(listener) = &admin_listener {
-        addresses.push(listener.local_addr()?);
+        initial
+            .service_addresses
+            .insert("admin".into(), listener.local_addr()?);
     }
-    check_bound_loops(&snapshot.config, &addresses)?;
-    let addresses = Arc::new(addresses);
+    initial.addresses = Arc::new(
+        initial
+            .listener_addresses
+            .values()
+            .chain(initial.service_addresses.values())
+            .copied()
+            .collect(),
+    );
+    check_bound_loops(&initial.config, &initial.addresses)?;
+    let mut snapshot = Arc::new(initial);
     let metrics = Arc::new(Metrics::default());
     let admission = Arc::new(Mutex::new(Admission::default()));
     let (current, receiver) = watch::channel(snapshot.clone());
     let (stop, stopping) = watch::channel(false);
+    let (commands, mut requests) = tokio::sync::mpsc::channel::<control::Command>(8);
+    let app = web::App::new(receiver.clone(), metrics.clone(), commands, source);
     let mut tasks = JoinSet::new();
     for (name, listener) in listeners {
         eprintln!("rift: listening on {}", listener.local_addr()?);
@@ -654,13 +744,12 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
             name,
             receiver.clone(),
             stopping.clone(),
-            addresses.clone(),
             metrics.clone(),
             admission.clone(),
         ));
     }
     let mut background = JoinSet::new();
-    let (admin_commands, mut commands) = mpsc::channel(16);
+    let (admin_commands, mut admin_requests) = mpsc::channel(16);
     if let Some(listener) = admin_listener {
         eprintln!("rift: admin on {}", listener.local_addr()?);
         background.spawn(admin::serve(
@@ -672,75 +761,92 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
             admin_commands,
         ));
     }
-    if let Some(listener) = metrics_listener {
-        eprintln!("rift: metrics on {}", listener.local_addr()?);
-        background.spawn(crate::metrics::serve(listener, receiver, metrics.clone()));
-    }
-    let mut health = health_worker(snapshot.clone(), addresses.clone(), metrics.clone());
-    let mut reloads: JoinSet<(io::Result<Config>, Option<admin::Reply>)> = JoinSet::new();
+    services.commit(&snapshot.config, prepared, &app);
+    let mut health = health_worker(
+        snapshot.clone(),
+        snapshot.addresses.clone(),
+        metrics.clone(),
+    );
     let mut failure = None;
+    let mut service_check = tokio::time::interval(Duration::from_secs(1));
     loop {
-        tokio::select! {
+        let (operation, reply, admin_reply) = tokio::select! {
             event = signals.next() => match event {
                 Event::Shutdown => break,
                 Event::Reload => {
-                    if let Some(path) = source.clone() {
-                        if reloads.is_empty() { reloads.spawn_blocking(move || (Config::load(&path), None)); }
-                    } else { eprintln!("rift: reload ignored: no configuration file selected"); }
+                    if app.path.is_none() { eprintln!("rift: reload ignored: no configuration file selected"); continue; }
+                    (control::Operation::Reload, None, None)
                 }
             },
-            result = reloads.join_next(), if !reloads.is_empty() => {
-                let (loaded, reply) = match result.expect("reload task") {
-                    Ok(result) => result,
-                    Err(error) => (Err(io::Error::other(error)), None),
-                };
-                let candidate = loaded.and_then(|config| {
-                        if config.listeners != snapshot.config.listeners || config.metrics != snapshot.config.metrics || config.admin != snapshot.config.admin {
-                            return Err(io::Error::new(io::ErrorKind::InvalidInput, "listener names/addresses, metrics address and admin settings require a restart"));
-                        }
-                        check_bound_loops(&config, &addresses)?;
-                        Snapshot::new(config, Some(&snapshot))
-                    });
-                match candidate {
-                    Ok(candidate) => {
-                        snapshot = Arc::new(candidate);
-                        current.send_replace(snapshot.clone());
-                        if let Some(task) = health.take() { task.abort(); let _ = task.await; }
-                        health = health_worker(snapshot.clone(), addresses.clone(), metrics.clone());
-                        metrics.reloads.inc();
-                        eprintln!("rift: configuration reloaded");
-                        if let Some(reply) = reply { let _ = reply.send(Ok(serde_json::json!({"reloaded":true,"existing_sessions":"preserved"}))); }
-                    }
-                    Err(error) => {
-                        metrics.reload_failures.inc(); eprintln!("rift: reload rejected: {error}");
-                        if let Some(reply) = reply { let _ = reply.send(Err(format!("reload rejected; previous configuration retained: {error}"))); }
-                    }
-                }
-            }
-            Some(command) = commands.recv() => match command {
-                admin::Command::Reload(reply) => {
-                    if !reloads.is_empty() { let _ = reply.send(Err("reload already in progress; try again after it completes".into())); }
-                    else if let Some(path) = source.clone() { reloads.spawn_blocking(move || (Config::load(&path), Some(reply))); }
-                    else { let _ = reply.send(Err("no configuration file selected; start with --config <path>".into())); }
-                }
+            Some(command) = requests.recv() => (command.operation, Some(command.reply), None),
+            Some(command) = admin_requests.recv() => match command {
+                admin::Command::Reload(reply) => (control::Operation::Reload, None, Some(reply)),
                 admin::Command::Shutdown(ack) => { let _ = timeout(Duration::from_secs(2), ack).await; break; }
             },
+            result = background.join_next(), if !background.is_empty() => {
+                failure = Some(io::Error::other(format!("administrator listener stopped unexpectedly: {result:?}")));
+                break;
+            }
             result = tasks.join_next() => {
                 failure = Some(io::Error::other(format!("listener stopped unexpectedly: {result:?}")));
                 break;
             }
-            result = background.join_next(), if !background.is_empty() => {
-                failure = Some(io::Error::other(format!("operational listener stopped unexpectedly: {result:?}")));
-                break;
+            _ = service_check.tick() => {
+                if let Some(name) = services.failed() {
+                    failure = Some(io::Error::other(format!("{name} listener stopped unexpectedly")));
+                    break;
+                }
+                continue;
             }
+        };
+        let result = reconfigure(operation, &app, &snapshot, &services).await;
+        let response = match result {
+            Ok((next, prepared)) => {
+                snapshot = next;
+                current.send_replace(snapshot.clone());
+                services.commit(&snapshot.config, prepared, &app);
+                if let Some(task) = health.take() {
+                    task.abort();
+                    let _ = task.await;
+                }
+                health = health_worker(
+                    snapshot.clone(),
+                    snapshot.addresses.clone(),
+                    metrics.clone(),
+                );
+                metrics.reloads.inc();
+                eprintln!("rift: configuration reloaded");
+                Ok(snapshot.revision.clone())
+            }
+            Err(error) => {
+                metrics.reload_failures.inc();
+                eprintln!("rift: reload rejected: {}", error.message);
+                Err(error)
+            }
+        };
+        if let Some(reply) = admin_reply {
+            let response = response.as_ref()
+                .map(|revision| serde_json::json!({"reloaded":true,"revision":revision,"existing_sessions":"preserved"}))
+                .map_err(|error| format!("reload rejected; previous configuration retained: {}", error.message));
+            let _ = reply.send(response);
+        }
+        if let Some(reply) = reply {
+            let _ = reply.send(response);
         }
     }
-    drop(reloads);
-    commands.close();
-    while let Ok(command) = commands.try_recv() {
+    // Stop accepting configuration commands before draining proxy sessions.
+    admin_requests.close();
+    while let Ok(command) = admin_requests.try_recv() {
         if let admin::Command::Reload(reply) = command {
             let _ = reply.send(Err("proxy is shutting down".into()));
         }
+    }
+    requests.close();
+    while let Ok(command) = requests.try_recv() {
+        let _ = command.reply.send(Err(control::Error {
+            status: 503,
+            message: "proxy shutting down".into(),
+        }));
     }
     stop.send_replace(true);
     if let Some(task) = health {
@@ -763,6 +869,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     }
     tasks.shutdown().await;
     background.shutdown().await;
+    services.shutdown().await;
     eprintln!("rift: shutdown complete");
     match failure {
         Some(error) => Err(error),
