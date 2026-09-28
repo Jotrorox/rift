@@ -1,45 +1,64 @@
+mod config;
 mod handshake;
 mod routing;
 
+use config::{Config, Limits};
 use routing::{Backend, Routes};
-use std::{env, io, net::SocketAddr, sync::Arc, time::Duration};
+use std::{env, io, net::SocketAddr, path::Path, process::ExitCode, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncWriteExt, copy_bidirectional_with_sizes},
     net::{TcpListener, TcpStream},
     sync::Semaphore,
+    task::JoinSet,
     time::{sleep, timeout},
 };
 
 const USAGE: &str = "Usage: rift [<listen-ip:port> <backend-ip:port>]\n\
     Backend may also be a DNS hostname with a port.\n\
+    rift --config <path>\n\
     Routing: rift <listen-ip:port> [--route <hostname=backend:port>]... [--default <backend:port>]\n\
     Routes: exact hostname, '*.example.com', or '*' (default).\n\
     Priority: exact, longest wildcard suffix, default. Unmatched clients close.\n\
+    No arguments: load ./rift.lua if present, otherwise use defaults.\n\
     Defaults: 0.0.0.0:25565 127.0.0.1:25566\n\
+    Explicit addresses and routing options override ./rift.lua.\n\
     IPv6: rift '[::]:25565' '[::1]:25566'";
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
-const BUFFER_SIZE: usize = 32 * 1024;
-// Bound sockets, tasks and relay buffers, including while the backend is down.
-static CONNECTIONS: Semaphore = Semaphore::const_new(4096);
 
 enum Mode {
     Direct(Backend),
     Routed(Routes),
 }
 
-fn configuration(args: &[String]) -> io::Result<(SocketAddr, Mode)> {
-    match args {
-        [] => Ok((
-            parse_address("0.0.0.0:25565")?,
-            Mode::Direct(Backend::parse("127.0.0.1:25566")?),
-        )),
-        [listen, backend] => Ok((
-            parse_address(listen)?,
-            Mode::Direct(Backend::parse(backend)?),
-        )),
+#[tokio::main]
+async fn main() -> ExitCode {
+    match start().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("rift: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn start() -> io::Result<()> {
+    let args: Vec<String> = env::args().skip(1).collect();
+    let config = match args.as_slice() {
+        [] => match Config::load(Path::new("rift.lua")) {
+            Ok(config) => config,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Config::default(),
+            Err(error) => return Err(error),
+        },
+        [help] if help == "--help" || help == "-h" => {
+            println!("{USAGE}");
+            return Ok(());
+        }
+        [flag, path] if flag == "--config" => Config::load(Path::new(path))?,
+        [listen, backend] => Config::from_addresses(listen, backend)?,
         [listen, options @ ..] if !options.is_empty() && options.len().is_multiple_of(2) => {
-            let listen = parse_address(listen)?;
+            let listen = listen
+                .parse::<SocketAddr>()
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
             let mut routes = Routes::default();
             for option in options.as_chunks::<2>().0 {
                 match option[0].as_str() {
@@ -48,28 +67,67 @@ fn configuration(args: &[String]) -> io::Result<(SocketAddr, Mode)> {
                     _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, USAGE)),
                 }
             }
-            Ok((listen, Mode::Routed(routes)))
+            routes.check_loops(listen)?;
+            return serve(
+                vec![("default".into(), listen, Mode::Routed(routes))],
+                Limits::default(),
+            )
+            .await;
         }
-        _ => Err(io::Error::new(io::ErrorKind::InvalidInput, USAGE)),
-    }
+        _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, USAGE)),
+    };
+    let listeners = config
+        .listeners
+        .iter()
+        .map(|(name, address)| Ok((name.clone(), *address, config.mode(name)?)))
+        .collect::<io::Result<Vec<_>>>()?;
+    serve(listeners, config.limits).await
 }
 
-#[tokio::main]
-async fn main() -> io::Result<()> {
-    let args: Vec<String> = env::args().skip(1).collect();
-    if matches!(args.as_slice(), [help] if help == "--help" || help == "-h") {
-        println!("{USAGE}");
-        return Ok(());
+async fn serve(configured: Vec<(String, SocketAddr, Mode)>, limits: Limits) -> io::Result<()> {
+    // Bind everything before accepting clients, so partial startup fails cleanly.
+    let mut listeners = Vec::new();
+    for (name, address, mode) in configured {
+        let listener = TcpListener::bind(address).await.map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("listeners.{name} ({address}): {error}"),
+            )
+        })?;
+        listeners.push((listener, mode));
     }
-    let (listen, mode) = configuration(&args)?;
-    match &mode {
-        Mode::Direct(backend) => backend.check_loop(listen)?,
-        Mode::Routed(routes) => routes.check_loops(listen)?,
+    let addresses = Arc::new(
+        listeners
+            .iter()
+            .map(|(listener, _)| listener.local_addr())
+            .collect::<io::Result<Vec<_>>>()?,
+    );
+    // One shared limit bounds sockets, tasks and buffers across all listeners.
+    let connections = Arc::new(Semaphore::new(limits.max_connections));
+    let mut tasks = JoinSet::new();
+    for (listener, mode) in listeners {
+        eprintln!("rift: listening on {}", listener.local_addr()?);
+        tasks.spawn(accept(
+            listener,
+            Arc::new(mode),
+            limits,
+            connections.clone(),
+            addresses.clone(),
+        ));
     }
-    let mode = Arc::new(mode);
-    let listener = TcpListener::bind(listen).await?;
-    let listen = listener.local_addr()?;
-    eprintln!("rift: listening on {listen}");
+    if let Some(result) = tasks.join_next().await {
+        result.map_err(io::Error::other)?;
+    }
+    Err(io::Error::other("listener stopped unexpectedly"))
+}
+
+async fn accept(
+    listener: TcpListener,
+    mode: Arc<Mode>,
+    limits: Limits,
+    connections: Arc<Semaphore>,
+    addresses: Arc<Vec<SocketAddr>>,
+) {
     loop {
         let (client, peer) = match listener.accept().await {
             Ok(connection) => connection,
@@ -80,27 +138,27 @@ async fn main() -> io::Result<()> {
                 continue;
             }
         };
-        let Ok(permit) = CONNECTIONS.try_acquire() else {
+        let Ok(permit) = connections.clone().try_acquire_owned() else {
             // Reject overload immediately instead of queuing unbounded work.
             continue;
         };
         let mode = Arc::clone(&mode);
+        let addresses = Arc::clone(&addresses);
         tokio::spawn(async move {
             let _permit = permit;
-            if let Err(error) = handle(client, &mode, listen).await {
+            if let Err(error) = handle(client, &mode, &addresses, limits).await {
                 eprintln!("rift: {peer}: {error}");
             }
         });
     }
 }
 
-fn parse_address(value: &str) -> io::Result<SocketAddr> {
-    value
-        .parse()
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, format!("{value}: {error}")))
-}
-
-async fn handle(mut client: TcpStream, mode: &Mode, listen: SocketAddr) -> io::Result<(u64, u64)> {
+async fn handle(
+    mut client: TcpStream,
+    mode: &Mode,
+    listeners: &[SocketAddr],
+    limits: Limits,
+) -> io::Result<(u64, u64)> {
     client.set_nodelay(true)?;
     let (backend, packet) = match mode {
         Mode::Direct(backend) => (backend, Vec::new()),
@@ -109,22 +167,22 @@ async fn handle(mut client: TcpStream, mode: &Mode, listen: SocketAddr) -> io::R
             (routes.select(&host)?, packet)
         }
     };
-    let mut upstream = timeout(CONNECT_TIMEOUT, async {
-        let mut upstream = backend.connect(listen).await?;
+    let mut upstream = timeout(limits.connect_timeout, async {
+        let mut upstream = backend.connect(listeners).await?;
         upstream.set_nodelay(true)?;
         upstream.write_all(&packet).await?;
         Ok::<_, io::Error>(upstream)
     })
     .await??;
-    let (sent, received) = relay(&mut client, &mut upstream).await?;
-    Ok((sent + packet.len() as u64, received))
-}
-
-async fn relay(client: &mut TcpStream, upstream: &mut TcpStream) -> io::Result<(u64, u64)> {
-    client.set_nodelay(true)?;
-    upstream.set_nodelay(true)?;
     // Fixed buffers bound memory and preserve backpressure and TCP half-closes.
-    copy_bidirectional_with_sizes(client, upstream, BUFFER_SIZE, BUFFER_SIZE).await
+    let (sent, received) = copy_bidirectional_with_sizes(
+        &mut client,
+        &mut upstream,
+        limits.buffer_size,
+        limits.buffer_size,
+    )
+    .await?;
+    Ok((sent + packet.len() as u64, received))
 }
 
 #[cfg(test)]

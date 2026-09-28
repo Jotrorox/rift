@@ -19,8 +19,16 @@ fn dns_name(value: &str) -> bool {
         })
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Backend(String);
+
+impl std::str::FromStr for Backend {
+    type Err = io::Error;
+
+    fn from_str(value: &str) -> io::Result<Self> {
+        Self::parse(value)
+    }
+}
 
 impl Backend {
     pub fn parse(value: &str) -> io::Result<Self> {
@@ -44,11 +52,14 @@ impl Backend {
 
     // Resolution and every connection attempt share the caller's deadline.
     // Resolve per connection so DNS changes do not require a proxy restart.
-    pub async fn connect(&self, listen: SocketAddr) -> io::Result<TcpStream> {
+    pub async fn connect(&self, listeners: &[SocketAddr]) -> io::Result<TcpStream> {
         let addresses = lookup_host(self.0.as_str()).await?;
         let mut last_error = invalid("backend DNS returned no addresses");
         for address in addresses {
-            if let Err(error) = check_loop(listen, address) {
+            if let Err(error) = listeners
+                .iter()
+                .try_for_each(|listen| check_loop(*listen, address))
+            {
                 last_error = error;
                 continue;
             }
@@ -62,7 +73,8 @@ impl Backend {
 }
 
 fn check_loop(listen: SocketAddr, backend: SocketAddr) -> io::Result<()> {
-    if listen.port() == backend.port()
+    if listen.port() != 0
+        && listen.port() == backend.port()
         && (listen.ip() == backend.ip()
             || (listen.ip().is_unspecified() && backend.ip().is_loopback()))
     {
@@ -86,6 +98,10 @@ impl Routes {
             .split_once('=')
             .ok_or_else(|| invalid("route requires hostname=backend:port"))?;
         let backend = Backend::parse(target)?;
+        self.add_pattern(pattern, backend)
+    }
+
+    pub fn add_pattern(&mut self, pattern: &str, backend: Backend) -> io::Result<()> {
         if pattern == "*" {
             return self.set_default(backend);
         }
@@ -213,7 +229,7 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let listen = listener.local_addr().unwrap();
         let backend = Backend::parse(&format!("localhost:{}", listen.port())).unwrap();
-        assert!(backend.connect(listen).await.is_err());
+        assert!(backend.connect(&[listen]).await.is_err());
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(50), listener.accept())
                 .await
