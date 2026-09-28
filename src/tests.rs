@@ -98,8 +98,9 @@ async fn backend_half_close_still_accepts_client_data() {
 
 #[tokio::test]
 async fn unavailable_backend_closes_the_client() {
-    timeout(Duration::from_secs(5), async {
-        // Reserving a port without listening gives a deterministic refusal.
+    timeout(CONNECT_TIMEOUT + Duration::from_secs(5), async {
+        // Reserve the port to prevent another test from listening on it.
+        // Connecting may be refused or time out, as on the macOS runner.
         let reserved = tokio::net::TcpSocket::new_v4().unwrap();
         reserved.bind("127.0.0.1:0".parse().unwrap()).unwrap();
         let frontend = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -110,7 +111,13 @@ async fn unavailable_backend_closes_the_client() {
         let error = relay(accepted, reserved.local_addr().unwrap())
             .await
             .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::ConnectionRefused);
+        assert!(
+            matches!(
+                error.kind(),
+                io::ErrorKind::ConnectionRefused | io::ErrorKind::TimedOut
+            ),
+            "unexpected backend connection error: {error}"
+        );
         assert_eq!(client.read(&mut [0]).await.unwrap(), 0);
     })
     .await
