@@ -98,6 +98,12 @@ fn join_game(entity: i32) -> Packet {
     Packet::new(0x30, data)
 }
 
+fn secure_join_game(entity: i32) -> Packet {
+    let mut packet = join_game(entity);
+    *packet.data.last_mut().unwrap() = 1;
+    packet
+}
+
 #[tokio::test]
 async fn cancelled_forward_resumes_partial_writes_without_duplicating_bytes() {
     timeout(Duration::from_secs(3), async {
@@ -996,6 +1002,7 @@ async fn authenticated_session() -> (
             "203.0.113.9".parse().unwrap(),
         )
         .unwrap();
+    session.enable_network().unwrap();
     let (server, mut backend) = tokio::io::duplex(65536);
     session.connect_backend(server).await.unwrap();
     assert_eq!(
@@ -1071,9 +1078,9 @@ async fn verified_play(
     codec.write(client, &Packet::empty(3)).await.unwrap();
     session.forward().await.unwrap();
     assert_eq!(receive(backend, codec).await, Packet::empty(3));
-    codec.write(backend, &join_game(1)).await.unwrap();
+    codec.write(backend, &secure_join_game(1)).await.unwrap();
     session.forward().await.unwrap();
-    assert_eq!(receive(client, codec).await, join_game(1));
+    assert_eq!(receive(client, codec).await, secure_join_game(1));
     assert!(session.can_switch());
 }
 
@@ -1145,9 +1152,15 @@ async fn encrypted_authenticated_profile_and_velocity_forwarding_survive_switch(
             .unwrap();
         session.forward().await.unwrap();
         assert_eq!(receive(&mut second, codec).await, Packet::empty(3));
-        codec.write(&mut second, &join_game(2)).await.unwrap();
+        codec
+            .write(&mut second, &secure_join_game(2))
+            .await
+            .unwrap();
         session.forward().await.unwrap();
-        assert_eq!(receive(&mut client, client_codec).await, join_game(2));
+        assert_eq!(
+            receive(&mut client, client_codec).await,
+            secure_join_game(2)
+        );
         assert!(session.can_switch());
     })
     .await

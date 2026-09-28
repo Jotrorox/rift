@@ -6,6 +6,8 @@ compression, and handshake, status, login, configuration and play states. Client
 and backend connections have independent protocol state; a backend is an
 attachment within a player's session. LuaJIT is embedded through `mlua`; the binary needs no Java or
 separate Lua installation. Building requires a C toolchain (MSVC on Windows).
+Windows x86-64 builds use AWS-LC's bundled assembly objects if NASM is absent;
+when NASM is installed, AWS-LC assembles them from source.
 
 Download a native archive from [Releases](https://github.com/Jotrorox/rift/releases)
 and follow the [operator guide](docs/operations.md) for installation, the supplied

@@ -810,7 +810,10 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                                 .queue(version, Direction::Clientbound, &packet)?;
                         }
                         PacketKind::JoinGame => {
-                            let validation = protocol::validate_network_join(&packet);
+                            let validation = protocol::validate_network_join(
+                                &packet,
+                                self.authenticated_profile.is_some(),
+                            );
                             self.pending_join_valid = validation.is_ok();
                             // Opaque ordinary relays keep forwarding, but only a
                             // valid supported world can become transfer-ready.
