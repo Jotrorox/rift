@@ -39,23 +39,23 @@ socket buffers and the Python processes.
 
 | Buffer per direction | RTT p50 / p95 (µs) | One client (MiB/s) | 16 clients (MiB/s) | Rift RSS (KiB) |
 | --- | --- | --- | --- | --- |
-| 8 KiB | 24.1 / 32.9 | 1195 | 1477 | 5648 |
-| 16 KiB | 23.9 / 35.1 | 1126 | 1415 | 6148 |
-| 32 KiB | 24.9 / 52.4 | 1324 | 1289 | 7156 |
-| 64 KiB | 30.8 / 45.1 | 1145 | 907 | 8864 |
+| 8 KiB | 52.8 / 185.4 | 398 | 366 | 5596 |
+| 16 KiB | 55.4 / 103.9 | 482 | 356 | 6324 |
+| 32 KiB | 72.5 / 252.5 | 543 | 350 | 7292 |
+| 64 KiB | 62.2 / 186.1 | 562 | 408 | 8028 |
 
 The operational phase deliberately lowers admission to 16 connections. It checks
 that the seventeenth closes, an invalid reload preserves sessions, and a valid
 reload switches new connections to a distinct backend while old connections keep
-their original backend. During the ten-second soak it completed 14,016 checked
+their original backend. During the ten-second soak it completed 9,104 checked
 exchanges with zero connection errors or backend failures. Metrics recorded
 exactly one capacity rejection, one rejected reload and one successful reload.
 
 SIGTERM began a drain while all 16 connections were active. Existing traffic and
 metrics remained usable until clients closed, and the process exited successfully
-in 0.007 seconds without reaching its deadline. A separate run held a connection
+in 0.018 seconds without reaching its deadline. A separate run held a connection
 open with a 250 ms shutdown timeout: Rift logged the deadline, closed the session
-and exited successfully in 0.264 seconds. That short timeout only makes the pilot
+and exited successfully in 0.265 seconds. That short timeout only makes the pilot
 quick; it is not the release default.
 
 ## Decisions applied to the release
