@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real Minecraft 1.21.11 integration tests; Python standard library + Java 21.
+"""Real vanilla, Paper and Pumpkin integration tests; Python 3.11+ and Java 21.
 
 Downloads pinned official jars, verifies checksums, and runs isolated loopback
 servers. Packet layouts: https://github.com/PrismarineJS/minecraft-data/tree/master/data/pc/1.21.11
@@ -12,30 +12,34 @@ import hashlib
 import io
 import json
 from pathlib import Path
+import platform
 import socket
 import struct
 import subprocess
 import time
+import tempfile
+import traceback
 import urllib.request
 import uuid
 import zlib
 
 ROOT = Path(__file__).resolve().parents[1]
 CACHE = ROOT / "target" / "minecraft"
-PROTOCOL = 774
-JARS = {
-    "vanilla": (
-        "https://piston-data.mojang.com/v1/objects/64bb6d763bed0a9f1d632ec347938594144943ed/server.jar",
-        "sha1", "64bb6d763bed0a9f1d632ec347938594144943ed",
-    ),
-    "paper": (
-        "https://fill-data.papermc.io/v1/objects/5ffef465eeeb5f2a3c23a24419d97c51afd7dbb4923ff42df9a3f58bba1ccfba/paper-1.21.11-132.jar",
-        "sha256", "5ffef465eeeb5f2a3c23a24419d97c51afd7dbb4923ff42df9a3f58bba1ccfba",
-    ),
+SERVERS = json.loads((ROOT / "tests" / "servers.json").read_text())
+# Only packet IDs used by this client. Keep these explicit: an upstream protocol
+# change must fail visibly, not silently reduce the test to a status check.
+# 777: Pumpkin's pinned crates/pumpkin-data/src/generated/packet.rs.
+PROTOCOLS = {
+    774: dict(known_packs=0x0E, join=0x30, position=0x46, chunk=0x2C,
+              keepalive=0x2B, keepalive_reply=0x1B, loaded=0x2B, batch_reply=0x0A),
+    777: dict(known_packs=0x0F, join=0x32, position=0x49, chunk=0x2E,
+              keepalive=0x2D, keepalive_reply=0x1C, loaded=0x2C, batch_reply=0x0B),
 }
 
 
 def varint(value):
+    if not 0 <= value <= 0xFFFFFFFF:
+        raise ValueError("VarInt must be an unsigned 32-bit value")
     result = bytearray()
     while value > 127:
         result.append((value & 127) | 128)
@@ -51,6 +55,8 @@ def read_varint(stream):
         if not byte:
             raise EOFError("connection closed mid-packet")
         result |= (byte[0] & 127) << shift
+        if shift == 28 and byte[0] > 15:
+            raise ValueError("invalid VarInt")
         if not byte[0] & 128:
             return result
     raise ValueError("invalid VarInt")
@@ -61,14 +67,30 @@ def string(value):
     return varint(len(encoded)) + encoded
 
 
+def teleport_acknowledgement(body, protocol):
+    data = io.BytesIO(body)
+    reply = varint(read_varint(data))
+    if protocol == 777:
+        # 26.3 also requires the accepted position and rotation. These fixtures
+        # send an absolute spawn teleport; fail if that assumption changes.
+        position = data.read(24)
+        data.read(24)  # Velocity.
+        rotation = data.read(8)
+        assert data.read(4) == b"\0" * 4, "relative spawn teleport"
+        reply += position + rotation
+    return reply
+
+
 class Client:
-    def __init__(self, port, state):
+    def __init__(self, port, state, protocol=774):
         self.socket = socket.create_connection(("127.0.0.1", port), timeout=20)
         self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.reader = self.socket.makefile("rb")
         self.threshold = None
         self.compressed_packets = 0
-        self.send(0, varint(PROTOCOL) + string("localhost") + struct.pack(">H", port) + varint(state))
+        self.sent_compressed_packets = 0
+        self.deadline = time.monotonic() + 120
+        self.send(0, varint(protocol) + string("localhost") + struct.pack(">H", port) + varint(state))
 
     def __enter__(self):
         return self
@@ -80,11 +102,16 @@ class Client:
     def send(self, packet_id, body=b""):
         packet = varint(packet_id) + body
         if self.threshold is not None:
+            self.sent_compressed_packets += len(packet) >= self.threshold
             packet = (varint(len(packet)) + zlib.compress(packet)
                       if len(packet) >= self.threshold else b"\0" + packet)
         self.socket.sendall(varint(len(packet)) + packet)
 
     def receive(self):
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Minecraft session deadline exceeded")
+        self.socket.settimeout(min(20, remaining))
         length = read_varint(self.reader)
         assert 0 < length <= 8 * 1024 * 1024, length
         data = self.reader.read(length)
@@ -95,6 +122,7 @@ class Client:
             uncompressed = read_varint(framed)
             data = framed.read()
             if uncompressed:
+                assert uncompressed <= 8 * 1024 * 1024, uncompressed
                 data = zlib.decompress(data)
                 assert len(data) == uncompressed
                 self.compressed_packets += 1
@@ -103,8 +131,8 @@ class Client:
         return packet_id, packet.read()
 
 
-def status(port):
-    with Client(port, 1) as client:
+def status(port, protocol=774):
+    with Client(port, 1, protocol) as client:
         client.send(0)
         packet_id, body = client.receive()
         assert packet_id == 0
@@ -116,28 +144,36 @@ def status(port):
         return result
 
 
-def play(port, name):
+def play(port, name, protocol=774, compression=True, pumpkin=False):
+    packets = PROTOCOLS[protocol]
     # An offline-mode fixture avoids needing an actual Microsoft account/token.
     digest = hashlib.md5(f"OfflinePlayer:{name}".encode()).digest()
     player_id = uuid.UUID(bytes=digest, version=3)
-    with Client(port, 2) as client:
+    # Pumpkin's pinned net::offline_uuid uses the first 16 SHA-256 bytes.
+    if pumpkin:
+        player_id = uuid.UUID(bytes=hashlib.sha256(name.encode()).digest()[:16])
+    with Client(port, 2, protocol) as client:
         client.send(0, string(name) + player_id.bytes)
         while True:
             packet_id, body = client.receive()
             if packet_id == 3:
                 client.threshold = read_varint(io.BytesIO(body))
             elif packet_id == 2:
-                assert body[:16] == player_id.bytes
+                assert body[:16] == player_id.bytes, "login UUID changed"
+                profile = io.BytesIO(body[16:])
+                assert profile.read(read_varint(profile)).decode() == name
                 break
             else:
                 raise AssertionError(f"unexpected login packet {packet_id}: {body[:200]!r}")
         client.send(3)  # Login acknowledged; enter configuration.
         client.send(0, string("en_us") + bytes([2, 0, 1, 127, 1, 0, 1, 2]))
-        # This also exercises compression in the client -> server direction.
-        client.send(2, string("minecraft:brand") + string("rift-test" * 28))
+        client.send(2, string("minecraft:brand") + string("rift-test"))
+        # An opaque custom payload exercises client -> server compression without
+        # depending on a backend's interpretation of a long client brand.
+        client.send(2, string("rift:compression_test") + b"x" * 512)
         while True:
             packet_id, body = client.receive()
-            if packet_id == 0x0E:
+            if packet_id == packets["known_packs"]:
                 client.send(7, b"\0")  # No cached packs: request full registries.
             elif packet_id in (4, 5):
                 client.send(packet_id, body)  # Keepalive / ping.
@@ -147,25 +183,30 @@ def play(port, name):
             elif packet_id == 2:
                 raise AssertionError(f"configuration disconnect: {body[:200]!r}")
         joined = positioned = False
+        keepalives = 0
         chunks = 0
         deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
             packet_id, body = client.receive()
-            if packet_id == 0x30:
+            if packet_id == packets["join"]:
                 joined = True
-            elif packet_id == 0x46:
-                teleport = read_varint(io.BytesIO(body))
-                client.send(0, varint(teleport))
-                client.send(0x2B)  # Player loaded.
+            elif packet_id == packets["position"]:
+                client.send(0, teleport_acknowledgement(body, protocol))
+                client.send(packets["loaded"])
                 positioned = True
-            elif packet_id == 0x2C:
+            elif packet_id == packets["chunk"]:
                 chunks += 1
             elif packet_id == 0x0B:
-                client.send(0x0A, struct.pack(">f", 10.0))
-            elif packet_id == 0x2B:
-                client.send(0x1B, body)
-                if joined and positioned and chunks:
-                    assert client.compressed_packets > 0
+                client.send(packets["batch_reply"], struct.pack(">f", 10.0))
+            elif packet_id == packets["keepalive"]:
+                client.send(packets["keepalive_reply"], body)
+                keepalives += 1
+                # A second keepalive demonstrates that the server accepted our
+                # first reply and kept the session alive.
+                if joined and positioned and chunks and keepalives >= 2:
+                    assert (client.threshold is not None) == compression
+                    assert (client.compressed_packets > 0) == compression
+                    assert (client.sent_compressed_packets > 0) == compression
                     return chunks, client.compressed_packets
             elif packet_id == 0x20:
                 raise AssertionError(f"play disconnect: {body[:200]!r}")
@@ -215,32 +256,61 @@ def wait_ready(proc, ready, log):
 
 
 def download(name):
-    url, algorithm, expected = JARS[name]
-    jar = CACHE / f"{name}.jar"
-    if not jar.exists():
+    fixture = SERVERS[name]
+    directory = CACHE / "downloads"
+    directory.mkdir(parents=True, exist_ok=True)
+    artifact = directory / fixture["filename"]
+    if not artifact.exists():
         print(f"Downloading {name}...", flush=True)
-        request = urllib.request.Request(url, headers={
+        request = urllib.request.Request(fixture["url"], headers={
             "User-Agent": "rift-integration-tests/0.1.0 (https://github.com/Jotrorox/rift)"
         })
-        with urllib.request.urlopen(request, timeout=120) as response:
-            content = response.read()
-        assert hashlib.new(algorithm, content).hexdigest() == expected, "jar checksum mismatch"
-        jar.write_bytes(content)
-    assert hashlib.new(algorithm, jar.read_bytes()).hexdigest() == expected, "cached jar checksum mismatch"
-    return jar
+        # Atomic installation prevents interrupted downloads poisoning the cache.
+        with tempfile.TemporaryDirectory(dir=directory) as temporary:
+            pending = Path(temporary) / "download"
+            with pending.open("wb") as destination:
+                with urllib.request.urlopen(request, timeout=120) as response:
+                    while block := response.read(1024 * 1024):
+                        destination.write(block)
+            verify_checksum(pending, fixture)
+            pending.replace(artifact)
+    verify_checksum(artifact, fixture)
+    if name == "pumpkin":
+        artifact.chmod(0o755)
+    return artifact
 
 
-def test_server(name, binary):
-    jar = download(name)
-    directory = CACHE / name
-    directory.mkdir(exist_ok=True)
-    backend, frontend = unused_port(), unused_port()
-    while frontend == backend:
-        frontend = unused_port()
+def verify_checksum(path, fixture):
+    with path.open("rb") as source:
+        actual = hashlib.file_digest(source, fixture["algorithm"]).hexdigest()
+    if actual != fixture["checksum"]:
+        raise ValueError(f"checksum mismatch: {path}: {actual}")
+
+
+def configure_server(name, directory, backend, compression):
+    artifact = download(name)
+    if name == "pumpkin":
+        (directory / "pumpkin.toml").write_text(
+            'seed = "12345"\ndefault_gamemode = "Creative"\n'
+            'default_difficulty = "Peaceful"\nallow_nether = false\nallow_end = false\n'
+            '[telemetry]\nenabled = false\n[plugins]\nenabled = false\n'
+            '[commands]\nuse_console = true\nuse_tty = false\n'
+            '[networking.java]\nenabled = true\n'
+            f'address = "127.0.0.1:{backend}"\nmotd = "rift-pumpkin-test"\n'
+            'online_mode = false\nencryption = false\nview_distance = 2\n'
+            'simulation_distance = 2\nmax_players = 20\nkeep_alive_time = 3\n'
+            '[networking.java.authentication]\nenabled = false\n'
+            f'[networking.java.compression]\nenabled = {str(compression).lower()}\n'
+            'threshold = 256\n[networking.bedrock]\nenabled = false\n'
+            '[networking.bedrock.nethernet]\nenabled = false\n'
+        )
+        return [str(artifact)]
+
     (directory / "eula.txt").write_text("eula=true\n")
     (directory / "server.properties").write_text(
         f"server-ip=127.0.0.1\nserver-port={backend}\nmotd=rift-{name}-test\n"
-        "online-mode=false\nenforce-secure-profile=false\nnetwork-compression-threshold=256\n"
+        "online-mode=false\nenforce-secure-profile=false\n"
+        f"network-compression-threshold={256 if compression else -1}\n"
         "gamemode=creative\nforce-gamemode=true\ndifficulty=peaceful\n"
         "view-distance=2\nsimulation-distance=2\nmax-players=20\nlevel-type=minecraft:flat\n"
         'generator-settings={"layers":[{"block":"minecraft:bedrock","height":1},'
@@ -249,6 +319,25 @@ def test_server(name, binary):
         "generate-structures=false\nspawn-protection=0\nmax-tick-time=-1\n"
         "pause-when-empty-seconds=0\n"
     )
+    return ["java", "-XX:ActiveProcessorCount=2", "-Xms256M", "-Xmx768M",
+            "-jar", str(artifact), "nogui"]
+
+
+def status_ready(port, protocol):
+    try:
+        status(port, protocol)
+        return True
+    except (OSError, EOFError):
+        return False
+
+
+def test_server(name, binary, directory, compression):
+    fixture = SERVERS[name]
+    protocol = fixture["protocol"]
+    backend, frontend = unused_port(), unused_port()
+    while frontend == backend:
+        frontend = unused_port()
+    command = configure_server(name, directory, backend, compression)
     proxy_log = directory / "proxy.log"
     server_log = directory / "server.log"
     with process([str(binary), f"127.0.0.1:{frontend}", f"127.0.0.1:{backend}"],
@@ -257,42 +346,84 @@ def test_server(name, binary):
         # A failed backend connection must close the client and leave Rift alive.
         with socket.create_connection(("127.0.0.1", frontend), timeout=5) as client:
             assert client.recv(1) == b""
-        print(f"Starting {name} 1.21.11...", flush=True)
-        with process(["java", "-XX:ActiveProcessorCount=2", "-Xms256M", "-Xmx768M",
-                      "-jar", str(jar), "nogui"], directory, "server.log", server=True) as server:
-            wait_ready(server, lambda: 'Done (' in server_log.read_text(), server_log)
-            direct, proxied = status(backend), status(frontend)
+        print(f"Starting {name} {fixture['version']} (compression={compression})...", flush=True)
+        with process(command, directory, "server.log", server=True) as server:
+            wait_ready(server, lambda: status_ready(backend, protocol), server_log)
+            direct, proxied = status(backend, protocol), status(frontend, protocol)
             assert direct == proxied, (direct, proxied)
-            assert direct["version"]["protocol"] == PROTOCOL
+            assert direct["version"]["protocol"] == protocol
             assert f"rift-{name}-test" in json.dumps(proxied["description"])
             with ThreadPoolExecutor(max_workers=16) as pool:
-                responses = list(pool.map(status, [frontend] * 64))
+                responses = list(pool.map(lambda port: status(port, protocol), [frontend] * 64))
             assert all(item["version"] == direct["version"] for item in responses)
             print(f"PASS {name}: backend recovery, status equality, ping, 64 status requests (16 concurrent)", flush=True)
             # Fresh players avoid saved health/location affecting repeat runs.
             for port, prefix in [(backend, "RiftD"), (frontend, "RiftP")]:
                 player = prefix + uuid.uuid4().hex[:8]
-                chunks, compressed = play(port, player)
+                chunks, compressed = play(port, player, protocol, compression, name == "pumpkin")
                 route = "direct" if port == backend else "proxied"
-                print(f"PASS {name} {route}: login, compression, configuration, {chunks} chunks, keepalive ({compressed} compressed packets)", flush=True)
+                print(f"PASS {name} {route}: login, configuration, {chunks} chunks, two keepalives ({compressed} compressed packets)", flush=True)
             assert proxy.poll() is None
+        assert server.returncode == 0, f"server shutdown failed: {server.returncode}"
         assert proxy.poll() is None
         with socket.create_connection(("127.0.0.1", frontend), timeout=5) as client:
             assert client.recv(1) == b""
         print(f"PASS {name}: backend shutdown handled", flush=True)
 
 
+def run_server(name, binary, compression):
+    start = time.monotonic()
+    runs = CACHE / "runs"
+    runs.mkdir(parents=True, exist_ok=True)
+    directory = Path(tempfile.mkdtemp(prefix=f"{name}-", dir=runs))
+    result = dict(server=name, version=SERVERS[name]["version"], compression=compression,
+                  logs=str(directory), passed=False)
+    try:
+        test_server(name, binary, directory, compression)
+        result["passed"] = True
+    except Exception:
+        result["error"] = traceback.format_exc()
+        print(result["error"], flush=True)
+        for log in directory.glob("*.log"):
+            print(f"--- {log} ---\n{log.read_text(errors='replace')[-6000:]}", flush=True)
+    result["seconds"] = round(time.monotonic() - start, 2)
+    (directory / "result.json").write_text(json.dumps(result, indent=2) + "\n")
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--accept-eula", action="store_true",
                         help="accept https://aka.ms/MinecraftEULA for the local test servers")
+    parser.add_argument("--server", action="append", choices=SERVERS,
+                        help="server to test; repeat to select several (default: all)")
+    parser.add_argument("--jobs", type=int, choices=range(1, 4), default=1,
+                        help="number of server processes to test in parallel")
+    parser.add_argument("--compression", choices=["enabled", "disabled"], default="enabled")
+    parser.add_argument("--binary", type=Path, help="test this Rift binary instead of building")
+    parser.add_argument("--report", type=Path, help="write an aggregate JSON result, including failures")
     args = parser.parse_args()
+    if not __debug__:
+        parser.error("do not use python -O: integration assertions must be enabled")
     if not args.accept_eula:
         parser.error("--accept-eula is required to run the Minecraft servers")
+    names = list(dict.fromkeys(args.server or SERVERS))
+    if "pumpkin" in names and (platform.system() != "Linux" or platform.machine() != "x86_64"):
+        parser.error("the pinned Pumpkin binary requires Linux x86_64; select --server vanilla --server paper elsewhere")
     CACHE.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["cargo", "build", "--release", "--locked"], cwd=ROOT, check=True)
-    for name in JARS:
-        test_server(name, ROOT / "target" / "release" / "rift")
+    if args.binary:
+        binary = args.binary.resolve(strict=True)
+    else:
+        subprocess.run(["cargo", "build", "--release", "--locked"], cwd=ROOT, check=True)
+        binary = ROOT / "target" / "release" / ("rift.exe" if platform.system() == "Windows" else "rift")
+    with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+        results = list(pool.map(lambda name: run_server(
+            name, binary, args.compression == "enabled"), names))
+    if args.report:
+        args.report.parent.mkdir(parents=True, exist_ok=True)
+        args.report.write_text(json.dumps(results, indent=2) + "\n")
+    if not all(result["passed"] for result in results):
+        raise SystemExit("Minecraft integration failed; see logs and result.json in target/minecraft/runs/")
     print("All Minecraft integration tests passed.", flush=True)
 
 

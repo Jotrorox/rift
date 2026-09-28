@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Small loopback benchmark; Python echo/client overhead is included in both routes."""
 
+import argparse
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+import json
+import platform
 import socket
 import statistics
 import subprocess
@@ -83,6 +86,12 @@ def throughput(port, clients, size):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--report", type=Path, help="write machine-readable results for comparisons")
+    args = parser.parse_args()
+    if not __debug__:
+        parser.error("do not use python -O: transfer assertions must be enabled")
+    report = {"platform": platform.platform(), "routes": {}}
     subprocess.run(["cargo", "build", "--release", "--locked"], cwd=ROOT, check=True)
     with closing(socket.socket()) as listener, tempfile.TemporaryDirectory(prefix="rift-bench-") as temp:
         listener.bind(("127.0.0.1", 0))
@@ -103,10 +112,15 @@ def main():
                     p50, p95 = latency(port)
                     single = statistics.median(throughput(port, 1, 64 * MIB) for _ in range(3))
                     parallel = statistics.median(throughput(port, 16, 16 * MIB) for _ in range(3))
+                    report["routes"][name] = dict(rtt_p50_us=p50, rtt_p95_us=p95,
+                                                 single_mib_s=single, parallel_mib_s=parallel)
                     print(f"{name:8}  {p50:6.1f}/{p95:<6.1f}      {single:8.1f}             {parallel:8.1f}", flush=True)
         finally:
             stop.set()
             server.join()
+    if args.report:
+        args.report.parent.mkdir(parents=True, exist_ok=True)
+        args.report.write_text(json.dumps(report, indent=2) + "\n")
 
 
 if __name__ == "__main__":

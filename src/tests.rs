@@ -116,3 +116,76 @@ async fn unavailable_backend_closes_the_client() {
     .await
     .unwrap();
 }
+
+#[tokio::test]
+async fn slow_reader_preserves_data_across_buffer_boundaries() {
+    timeout(Duration::from_secs(15), async {
+        let (mut client, mut server, proxy) = connection().await;
+        // Larger than both relay buffers and typical socket buffers, with a
+        // non-divisible tail to catch truncation at buffer boundaries.
+        let payload: Vec<u8> = (0..8 * 1024 * 1024 + 17).map(|n| (n % 251) as u8).collect();
+        let expected = payload.clone();
+        let writer = tokio::spawn(async move {
+            client.write_all(&payload).await.unwrap();
+            client.shutdown().await.unwrap();
+            let mut reply = Vec::new();
+            client.read_to_end(&mut reply).await.unwrap();
+            assert_eq!(reply, b"received");
+        });
+        sleep(Duration::from_millis(100)).await;
+        let mut received = Vec::new();
+        let mut small_buffer = [0; 997];
+        loop {
+            let count = server.read(&mut small_buffer).await.unwrap();
+            if count == 0 {
+                break;
+            }
+            received.extend_from_slice(&small_buffer[..count]);
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(received, expected);
+        server.write_all(b"received").await.unwrap();
+        server.shutdown().await.unwrap();
+        writer.await.unwrap();
+        assert_eq!(proxy.await.unwrap().unwrap(), (expected.len() as u64, 8));
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_fragmented_sessions_remain_isolated() {
+    timeout(Duration::from_secs(15), async {
+        let mut sessions = tokio::task::JoinSet::new();
+        for id in 0..32u8 {
+            sessions.spawn(async move {
+                let (mut client, mut server, proxy) = connection().await;
+                // Deliberately split writes and leave the connection idle before
+                // the final response. TCP boundaries must not become messages.
+                let peer = tokio::spawn(async move {
+                    let mut data = Vec::new();
+                    server.read_to_end(&mut data).await.unwrap();
+                    assert_eq!(data, vec![id; 257]);
+                    sleep(Duration::from_millis(20)).await;
+                    server.write_all(&data).await.unwrap();
+                    server.shutdown().await.unwrap();
+                });
+                for _ in 0..257 {
+                    client.write_all(&[id]).await.unwrap();
+                    tokio::task::yield_now().await;
+                }
+                client.shutdown().await.unwrap();
+                let mut data = Vec::new();
+                client.read_to_end(&mut data).await.unwrap();
+                assert_eq!(data, vec![id; 257]);
+                peer.await.unwrap();
+                assert_eq!(proxy.await.unwrap().unwrap(), (257, 257));
+            });
+        }
+        while let Some(result) = sessions.join_next().await {
+            result.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+}
