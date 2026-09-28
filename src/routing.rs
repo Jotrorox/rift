@@ -1,5 +1,33 @@
 use std::{collections::HashMap, io, net::SocketAddr};
-use tokio::net::{TcpStream, lookup_host};
+use tokio::{
+    net::{TcpStream, lookup_host},
+    time::{Instant, timeout_at},
+};
+
+/// The phase in which backend establishment failed, including timeouts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectStage {
+    Dns,
+    Connect,
+}
+
+#[derive(Debug)]
+pub struct ConnectError {
+    pub stage: ConnectStage,
+    pub error: io::Error,
+}
+
+impl std::fmt::Display for ConnectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(f)
+    }
+}
+
+impl std::error::Error for ConnectError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
 
 pub enum Mode {
     Direct(Backend),
@@ -58,23 +86,66 @@ impl Backend {
     // Resolution and every connection attempt share the caller's deadline.
     // Resolve per connection so DNS changes do not require a proxy restart.
     pub async fn connect(&self, listeners: &[SocketAddr]) -> io::Result<TcpStream> {
-        let addresses = lookup_host(self.0.as_str()).await?;
-        let mut last_error = invalid("backend DNS returned no addresses");
-        for address in addresses {
-            if let Err(error) = listeners
-                .iter()
-                .try_for_each(|listen| check_loop(*listen, address))
-            {
-                last_error = error;
-                continue;
-            }
-            match TcpStream::connect(address).await {
-                Ok(stream) => return Ok(stream),
-                Err(error) => last_error = error,
-            }
-        }
-        Err(last_error)
+        connect_addresses(self.resolve().await?, listeners).await
     }
+
+    /// Resolution and TCP attempts share a deadline, with phase retained even
+    /// when a pending future times out.
+    pub async fn connect_until(
+        &self,
+        listeners: &[SocketAddr],
+        deadline: Instant,
+    ) -> Result<TcpStream, ConnectError> {
+        let addresses = timeout_at(deadline, self.resolve())
+            .await
+            .map_err(io::Error::from)
+            .and_then(|result| result)
+            .map_err(|error| ConnectError {
+                stage: ConnectStage::Dns,
+                error,
+            })?;
+        timeout_at(deadline, connect_addresses(addresses, listeners))
+            .await
+            .map_err(io::Error::from)
+            .and_then(|result| result)
+            .map_err(|error| ConnectError {
+                stage: ConnectStage::Connect,
+                error,
+            })
+    }
+
+    async fn resolve(&self) -> io::Result<Vec<SocketAddr>> {
+        let addresses: Vec<_> = lookup_host(self.0.as_str()).await?.collect();
+        if addresses.is_empty() {
+            return Err(invalid("backend DNS returned no addresses"));
+        }
+        Ok(addresses)
+    }
+
+    pub fn address(&self) -> &str {
+        &self.0
+    }
+}
+
+async fn connect_addresses(
+    addresses: Vec<SocketAddr>,
+    listeners: &[SocketAddr],
+) -> io::Result<TcpStream> {
+    let mut last_error = invalid("backend DNS returned no addresses");
+    for address in addresses {
+        if let Err(error) = listeners
+            .iter()
+            .try_for_each(|listen| check_loop(*listen, address))
+        {
+            last_error = error;
+            continue;
+        }
+        match TcpStream::connect(address).await {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last_error = error,
+        }
+    }
+    Err(last_error)
 }
 
 fn check_loop(listen: SocketAddr, backend: SocketAddr) -> io::Result<()> {
@@ -184,6 +255,36 @@ impl Routes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dns_timeout_retains_the_resolution_stage() {
+        use std::{sync::mpsc, time::Duration};
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        let (ready, started) = mpsc::channel();
+        let (release, held) = mpsc::channel();
+        let blocker = runtime.spawn_blocking(move || {
+            ready.send(()).unwrap();
+            held.recv_timeout(Duration::from_secs(5)).unwrap();
+        });
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        runtime.block_on(async {
+            // Hostname resolution needs the occupied blocking worker. No
+            // external DNS server or slow/unroutable network is required.
+            let error = Backend::parse("localhost:1")
+                .unwrap()
+                .connect_until(&[], Instant::now() + Duration::from_millis(20))
+                .await
+                .unwrap_err();
+            assert_eq!(error.stage, ConnectStage::Dns);
+            assert_eq!(error.error.kind(), io::ErrorKind::TimedOut);
+            release.send(()).unwrap();
+            blocker.await.unwrap();
+        });
+    }
 
     #[test]
     fn precedence_and_label_boundaries_are_independent_of_order() {
