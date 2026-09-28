@@ -131,20 +131,21 @@ class Client:
         return packet_id, packet.read()
 
 
-def status(port, protocol=774, hostname="localhost"):
+def status(port, protocol=774, hostname="localhost", ping=123456789012345):
     with Client(port, 1, protocol, hostname) as client:
         client.send(0)
         packet_id, body = client.receive()
         assert packet_id == 0
         data = io.BytesIO(body)
         result = json.loads(data.read(read_varint(data)))
-        payload = struct.pack(">q", 123456789012345)
+        payload = struct.pack(">q", ping)
         client.send(1, payload)
         assert client.receive() == (1, payload), "ping payload changed"
         return result
 
 
-def play(port, name, protocol=774, compression=True, pumpkin=False, hostname="localhost"):
+def play(port, name, protocol=774, compression=True, pumpkin=False, hostname="localhost",
+         observe=None):
     packets = PROTOCOLS[protocol]
     # An offline-mode fixture avoids needing an actual Microsoft account/token.
     digest = hashlib.md5(f"OfflinePlayer:{name}".encode()).digest()
@@ -153,6 +154,9 @@ def play(port, name, protocol=774, compression=True, pumpkin=False, hostname="lo
     if pumpkin:
         player_id = uuid.UUID(bytes=hashlib.sha256(name.encode()).digest()[:16])
     with Client(port, 2, protocol, hostname) as client:
+        if observe is not None:
+            client.deadline = time.monotonic() + 900
+            observe(client, {})
         client.send(0, string(name) + player_id.bytes)
         while True:
             packet_id, body = client.receive()
@@ -185,7 +189,8 @@ def play(port, name, protocol=774, compression=True, pumpkin=False, hostname="lo
         joined = positioned = False
         keepalives = 0
         chunks = 0
-        deadline = time.monotonic() + 60
+        teleports = 0
+        deadline = time.monotonic() + (900 if observe is not None else 60)
         while time.monotonic() < deadline:
             packet_id, body = client.receive()
             if packet_id == packets["join"]:
@@ -194,6 +199,7 @@ def play(port, name, protocol=774, compression=True, pumpkin=False, hostname="lo
                 client.send(0, teleport_acknowledgement(body, protocol))
                 client.send(packets["loaded"])
                 positioned = True
+                teleports += 1
             elif packet_id == packets["chunk"]:
                 chunks += 1
             elif packet_id == 0x0B:
@@ -207,9 +213,14 @@ def play(port, name, protocol=774, compression=True, pumpkin=False, hostname="lo
                     assert (client.threshold is not None) == compression
                     assert (client.compressed_packets > 0) == compression
                     assert (client.sent_compressed_packets > 0) == compression
-                    return chunks, client.compressed_packets
+                    if observe is None:
+                        return chunks, client.compressed_packets
             elif packet_id == 0x20:
                 raise AssertionError(f"play disconnect: {body[:200]!r}")
+            if observe is not None:
+                observe(client, dict(joined=joined, teleports=teleports, chunks=chunks,
+                                     keepalives=keepalives, compressed=client.compressed_packets,
+                                     sent_compressed=client.sent_compressed_packets))
         raise AssertionError(f"incomplete play: joined={joined}, positioned={positioned}, chunks={chunks}")
 
 
@@ -287,10 +298,12 @@ def verify_checksum(path, fixture):
         raise ValueError(f"checksum mismatch: {path}: {actual}")
 
 
-def configure_server(name, directory, backend, compression, motd=None):
+def configure_server(name, directory, backend, compression, motd=None, online=False):
     artifact = download(name)
     motd = motd or f"rift-{name}-test"
     if name == "pumpkin":
+        if online:
+            raise ValueError("the manual authenticated fixture uses vanilla or Paper")
         (directory / "pumpkin.toml").write_text(
             'seed = "12345"\ndefault_gamemode = "Creative"\n'
             'default_difficulty = "Peaceful"\nallow_nether = false\nallow_end = false\n'
@@ -310,7 +323,8 @@ def configure_server(name, directory, backend, compression, motd=None):
     (directory / "eula.txt").write_text("eula=true\n")
     (directory / "server.properties").write_text(
         f"server-ip=127.0.0.1\nserver-port={backend}\nmotd={motd}\n"
-        "online-mode=false\nenforce-secure-profile=false\n"
+        f"online-mode={str(online).lower()}\nenforce-secure-profile={str(online).lower()}\n"
+        "prevent-proxy-connections=false\n"
         f"network-compression-threshold={256 if compression else -1}\n"
         "gamemode=creative\nforce-gamemode=true\ndifficulty=peaceful\n"
         "view-distance=2\nsimulation-distance=2\nmax-players=20\nlevel-type=minecraft:flat\n"
@@ -413,7 +427,7 @@ def test_server(name, binary, directory, compression):
         print(f"PASS {name}: backend shutdown handled", flush=True)
 
 
-def run_server(name, binary, compression):
+def run_server(name, binary, compression, rounds=12):
     start = time.monotonic()
     runs = CACHE / "runs"
     runs.mkdir(parents=True, exist_ok=True)
@@ -422,11 +436,18 @@ def run_server(name, binary, compression):
                   logs=str(directory), passed=False)
     try:
         test_server(name, binary, directory, compression)
+        if platform.system() == "Linux":
+            from operations import test_operations
+            result["operations"] = {}
+            test_operations(name, binary, directory / "operations", compression,
+                            rounds, result["operations"])
+        else:
+            result["operations"] = {"skipped": "requires Linux signals and /proc resource accounting"}
         result["passed"] = True
     except Exception:
         result["error"] = traceback.format_exc()
         print(result["error"], flush=True)
-        for log in directory.glob("*.log"):
+        for log in directory.rglob("*.log"):
             print(f"--- {log} ---\n{log.read_text(errors='replace')[-6000:]}", flush=True)
     result["seconds"] = round(time.monotonic() - start, 2)
     (directory / "result.json").write_text(json.dumps(result, indent=2) + "\n")
@@ -444,11 +465,15 @@ def main():
     parser.add_argument("--compression", choices=["enabled", "disabled"], default="enabled")
     parser.add_argument("--binary", type=Path, help="test this Rift binary instead of building")
     parser.add_argument("--report", type=Path, help="write an aggregate JSON result, including failures")
+    parser.add_argument("--operation-rounds", type=int, default=12,
+                        help="reload/status stress rounds on Linux (minimum 4, default 12)")
     args = parser.parse_args()
     if not __debug__:
         parser.error("do not use python -O: integration assertions must be enabled")
     if not args.accept_eula:
         parser.error("--accept-eula is required to run the Minecraft servers")
+    if args.operation_rounds < 4:
+        parser.error("--operation-rounds must be at least 4")
     names = list(dict.fromkeys(args.server or SERVERS))
     if "pumpkin" in names and (platform.system() != "Linux" or platform.machine() != "x86_64"):
         parser.error("the pinned Pumpkin binary requires Linux x86_64; select --server vanilla --server paper elsewhere")
@@ -460,7 +485,7 @@ def main():
         binary = ROOT / "target" / "release" / ("rift.exe" if platform.system() == "Windows" else "rift")
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
         results = list(pool.map(lambda name: run_server(
-            name, binary, args.compression == "enabled"), names))
+            name, binary, args.compression == "enabled", args.operation_rounds), names))
     if args.report:
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(json.dumps(results, indent=2) + "\n")
