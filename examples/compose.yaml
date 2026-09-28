@@ -1,0 +1,36 @@
+# Run from an extracted Linux x86_64 release with a readable config/rift.lua:
+# docker compose -f examples/compose.yaml up --build -d
+services:
+  rift:
+    image: ${RIFT_IMAGE:-rift:local}
+    platform: linux/amd64
+    build:
+      context: ..
+      dockerfile: examples/Dockerfile
+      args:
+        RIFT_BINARY: ${RIFT_BINARY:-rift}
+    environment:
+      RIFT_ADMIN_TOKEN: ${RIFT_ADMIN_TOKEN:-}
+    volumes:
+      # Mount the directory so atomic config replacements are visible on reload.
+      - type: bind
+        source: ../config
+        target: /etc/rift
+        read_only: true
+        bind:
+          create_host_path: false
+    ports:
+      - "25565:25565"
+      # Set metrics = "0.0.0.0:9090" inside the container to use this mapping.
+      - "127.0.0.1:9090:9090"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: on-failure
+    stop_signal: SIGTERM
+    # Must exceed shutdown_timeout_ms (30 seconds by default).
+    stop_grace_period: 40s
+    ulimits:
+      nofile:
+        soft: 8192
+        hard: 8192

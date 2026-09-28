@@ -16,7 +16,8 @@ class PackageTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         required = {"README.md", "LICENSE", "THIRD_PARTY_NOTICES",
                     "examples/rift.lua", "examples/routing.lua",
-                    "examples/network.lua", "examples/rift.service", "docs/operations.md",
+                    "examples/network.lua", "examples/rift.service", "examples/Dockerfile",
+                    "examples/compose.yaml", "docs/operations.md",
                     "docs/pilot.md", "docs/pilot-results.json"}
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)

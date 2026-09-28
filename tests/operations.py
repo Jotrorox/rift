@@ -13,6 +13,7 @@ import time
 import uuid
 
 import minecraft as mc
+from prometheus import parse_metrics
 
 
 def eventually(predicate, description, timeout=40):
@@ -30,10 +31,8 @@ def metrics(port):
         connection.request("GET", "/metrics")
         response = connection.getresponse()
         assert response.status == 200, response.status
-        return {key.removeprefix("rift_"): int(value)
-                for line in response.read().decode().splitlines()
-                if line and not line.startswith("#")
-                for key, value in [line.rsplit(" ", 1)]}
+        return {key.removeprefix("rift_"): value
+                for key, value in parse_metrics(response.read().decode()).items()}
     finally:
         connection.close()
 

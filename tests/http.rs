@@ -16,6 +16,7 @@ use std::{
 };
 
 const TOKEN: &str = "test-administration-token";
+const ADMIN_TOKEN: &str = "test-local-administration-token-32-bytes";
 
 struct Fixture {
     directory: PathBuf,
@@ -76,6 +77,7 @@ impl Fixture {
         let mut child = Command::new(env!("CARGO_BIN_EXE_rift"))
             .current_dir(&self.directory)
             .args(["--config", "rift.lua"])
+            .env("RIFT_ADMIN_TOKEN", ADMIN_TOKEN)
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
@@ -829,4 +831,105 @@ fn saving_network_configuration_changes_routing_and_live_metrics() {
     let state = client.get("/api/status").expect(200).value();
     assert_eq!(state["metrics"]["accepted"], 2);
     assert_eq!(fixture.read(), updated);
+}
+
+#[test]
+fn http_and_cli_controls_share_revisions_and_preserve_runtime_overrides() {
+    let fixture = Fixture::new();
+    let source = fixture.source(
+        &format!("token = '{TOKEN}'"),
+        "admin = { listen = '127.0.0.1:0', permissions = { 'status', 'maintenance', 'drain', 'reload' } }, metrics = false,",
+    );
+    let process = fixture.start(&source);
+    let address: SocketAddr = process
+        .logs
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|line| line.strip_prefix("rift: admin on "))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let admin = |args: &[&str]| -> Value {
+        let mut stream = connect(address);
+        writeln!(stream, "{}", json!({"token":ADMIN_TOKEN,"args":args})).unwrap();
+        let mut line = String::new();
+        BufReader::new(stream).read_line(&mut line).unwrap();
+        serde_json::from_str(&line).unwrap()
+    };
+    let client = fixture.client().authenticated();
+    let original = client.get("/api/config").expect(200).value();
+    assert_eq!(admin(&["maintenance", "on"])["ok"], true);
+    assert_eq!(admin(&["drain", "primary", "on"])["ok"], true);
+
+    // HTTP commits hot-bind metrics while retaining the local control socket,
+    // its credentials and the operator's runtime maintenance/draining overrides.
+    let updated = source.replace("metrics = false", "metrics = '127.0.0.1:0'");
+    let saved = client
+        .json(
+            "PUT",
+            "/api/config",
+            json!({"source":updated,"revision":original["revision"]}),
+        )
+        .expect(200)
+        .value();
+    assert_eq!(fixture.read(), updated);
+    let status = admin(&["status"]);
+    assert_eq!(status["ok"], true);
+    assert_eq!(status["data"]["maintenance"], true);
+    assert_eq!(status["data"]["backends"][0]["draining"], true);
+    let metrics_address: SocketAddr =
+        client.get("/api/status").expect(200).value()["services"]["metrics"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+    let metrics = Client::new(metrics_address).get("/metrics").expect(200);
+    assert!(metrics.body.contains("rift_maintenance_mode 1"));
+    assert!(
+        metrics
+            .body
+            .contains("rift_backend_draining{backend=\"primary\"} 1")
+    );
+
+    // CLI reload updates the same active source/revision used by HTTP saves.
+    let next = format!("{updated}\n-- Edited on disk and reloaded through the CLI.\n");
+    fixture.write(&next);
+    let reloaded = admin(&["reload"]);
+    assert_eq!(reloaded["ok"], true, "{reloaded}");
+    let current = client.get("/api/config").expect(200).value();
+    assert_eq!(current["source"], next);
+    assert_eq!(current["revision"], reloaded["data"]["revision"]);
+    assert_ne!(current["revision"], saved["revision"]);
+    client
+        .json(
+            "PUT",
+            "/api/config",
+            json!({"source":updated,"revision":saved["revision"]}),
+        )
+        .expect(409);
+
+    // Both HTTP preflight and application reject restart-only CLI settings.
+    let invalid = next.replace("'status', 'maintenance', 'drain', 'reload'", "'status'");
+    client
+        .json("POST", "/api/config/validate", json!({"source":invalid}))
+        .expect(400);
+    client
+        .json(
+            "PUT",
+            "/api/config",
+            json!({"source":invalid,"revision":current["revision"]}),
+        )
+        .expect(400);
+    assert_eq!(fixture.read(), next);
+    assert_eq!(admin(&["status"])["data"]["maintenance"], true);
+
+    // A rejected file reload leaves the HTTP document and live controls intact.
+    fixture.write("return { broken = true }");
+    assert_eq!(admin(&["reload"])["ok"], false);
+    assert_eq!(
+        client.get("/api/config").expect(200).value()["source"],
+        next
+    );
+    assert_eq!(admin(&["maintenance", "off"])["ok"], true);
 }

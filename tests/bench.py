@@ -29,6 +29,7 @@ import threading
 import time
 
 from minecraft import ROOT, process, string, varint, read_varint, wait_ready
+from prometheus import parse_metrics
 
 BLOCK = b"x" * 65536
 MIB = 1024 * 1024
@@ -388,8 +389,7 @@ def metrics(port):
         response = connection.getresponse()
         if response.status != 200:
             raise RuntimeError(f"metrics returned {response.status}")
-        return {name: int(value) for name, value in re.findall(
-            r"^(rift_\w+) (\d+)$", response.read().decode(), re.MULTILINE)}
+        return parse_metrics(response.read().decode())
     finally:
         connection.close()
 

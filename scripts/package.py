@@ -25,6 +25,8 @@ def contents(root, binary):
         for path in [root / "README.md", root / "LICENSE", root / "THIRD_PARTY_NOTICES",
                      *sorted((root / "examples").glob("*.lua")),
                      root / "examples/rift.service",
+                     root / "examples/Dockerfile",
+                     root / "examples/compose.yaml",
                      *sorted((root / "docs").glob("*.md")),
                      *sorted((root / "docs").glob("*.json"))]
     ]
@@ -72,6 +74,16 @@ def smoke_test(archive, windows, version):
         for config in sorted((directory / "examples").glob("*.lua")):
             subprocess.run([str(binary), "--check", str(config)],
                            cwd=directory, check=True, timeout=10)
+        generated = directory / "generated.lua"
+        subprocess.run([str(binary), "init", str(generated)],
+                       cwd=directory, check=True, timeout=10)
+        subprocess.run([str(binary), "check", str(generated)],
+                       cwd=directory, check=True, timeout=10)
+        before = generated.read_bytes()
+        result = subprocess.run([str(binary), "init", str(generated)],
+                                cwd=directory, capture_output=True, timeout=10)
+        if result.returncode == 0 or generated.read_bytes() != before:
+            raise RuntimeError("rift init must refuse to overwrite an existing configuration")
 
 
 def main():

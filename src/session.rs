@@ -173,6 +173,13 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         self.backend.as_ref()
     }
 
+    /// The validated login name, for operator display; it is not authenticated.
+    pub fn player_name(&self) -> Option<&str> {
+        self.login_start
+            .as_ref()
+            .and_then(|packet| protocol::read_string(&mut packet.data.as_slice(), 16).ok())
+    }
+
     /// Attach a connected backend without surrendering ownership of the client.
     /// A replacement logs in independently while the client re-enters
     /// configuration. Callers must bound this operation with a deadline; on a

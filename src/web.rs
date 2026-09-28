@@ -547,10 +547,12 @@ async fn validate_config(
     .await
     {
         Ok(Ok(config)) => {
-            if config.listeners != snapshot.config.listeners {
+            if config.listeners != snapshot.config.listeners
+                || config.admin != snapshot.config.admin
+            {
                 return error(
                     StatusCode::BAD_REQUEST,
-                    "listener names/addresses require a restart",
+                    "listener names/addresses and admin settings require a restart",
                 );
             }
             Json(json!({"valid":true,"message":"Configuration valid; socket availability is checked when applying."})).into_response()
