@@ -168,10 +168,16 @@ async def read_frame(reader):
     raise ValueError("invalid VarInt")
 
 
-async def fixture_client(reader, writer, status=False):
+async def fixture_client(reader, writer, status=False, uppercase=False):
     """A separate process serves every client asynchronously, without a worker cap."""
     stage, received, sent = "login", 0, 0
     name = None
+    failed = False
+
+    def diagnostic(reason, error):
+        print(f"fixture {reason}: player={name}, stage={stage}, received={received}, sent={sent}, "
+              f"write_buffer={writer.transport.get_write_buffer_size()}, error={error}", flush=True)
+
     try:
         if status:
             async with asyncio.timeout(10):
@@ -187,10 +193,11 @@ async def fixture_client(reader, writer, status=False):
                 writer.write(varint(len(ping)) + ping)
                 await writer.drain()
         else:
-            await read_frame(reader)  # Handshake.
-            name = login_name(await read_frame(reader))
-            writer.write(login_success(name))
-            await writer.drain()
+            async with asyncio.timeout(15):
+                await read_frame(reader)  # Handshake.
+                name = login_name(await read_frame(reader))
+                writer.write(login_success(name))
+                await writer.drain()
             while True:
                 stage = "read"
                 async with asyncio.timeout(15):
@@ -198,24 +205,38 @@ async def fixture_client(reader, writer, status=False):
                 received += len(data)
                 stage = "write"
                 async with asyncio.timeout(15):
+                    if uppercase:
+                        data = data[:1] + data[1:].upper()
                     writer.write(packet(data))
                     await writer.drain()
                 sent += len(data)
-    except TimeoutError:
-        print(f"fixture timeout: player={name}, stage={stage}, received={received}, sent={sent}, "
-              f"write_buffer={writer.transport.get_write_buffer_size()}", flush=True)
-    except (OSError, EOFError, ValueError, asyncio.IncompleteReadError):
-        pass
+    except TimeoutError as error:
+        failed = True
+        diagnostic("timeout", error)
+    except asyncio.IncompleteReadError as error:
+        # EOF while waiting for the next frame is the normal close/health probe.
+        if error.partial or error.expected != 1:
+            failed = True
+            diagnostic("truncated frame", error)
+    except (OSError, EOFError, ValueError) as error:
+        failed = True
+        diagnostic("failure", error)
     finally:
-        writer.close()
+        if failed:
+            writer.transport.abort()
+        else:
+            writer.close()
         try:
             await writer.wait_closed()
         except OSError:
             pass
 
 
-async def fixture_main():
-    echo = await asyncio.start_server(fixture_client, "127.0.0.1", 0, backlog=4096)
+async def fixture_main(uppercase=False):
+    echo = await asyncio.start_server(
+        lambda reader, writer: fixture_client(reader, writer, uppercase=uppercase),
+        "127.0.0.1", 0, backlog=4096,
+    )
     status = await asyncio.start_server(
         lambda reader, writer: fixture_client(reader, writer, status=True),
         "127.0.0.1", 0, backlog=4096,
@@ -608,6 +629,7 @@ def main():
     parser.add_argument("--skip-throughput", action="store_true", help="only measure connection bursts")
     parser.add_argument("--binary", type=Path, help="use an existing Rift binary instead of building")
     parser.add_argument("--fixture", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--uppercase", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if not __debug__:
         parser.error("do not use python -O: transfer assertions must be enabled")
@@ -618,7 +640,7 @@ def main():
     if args.attempts < max(args.burst_sizes):
         parser.error("--attempts must cover the largest burst")
     if args.fixture:
-        asyncio.run(fixture_main())
+        asyncio.run(fixture_main(uppercase=args.uppercase))
         return
     binary = args.binary.resolve() if args.binary else ROOT / "target/release/rift"
     if not args.binary:

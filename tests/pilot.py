@@ -12,45 +12,34 @@ import os
 from pathlib import Path
 import platform
 import signal
-import socketserver
 import statistics
 import subprocess
+import sys
 import tempfile
-import threading
 import time
 
-from bench import MIB, connect, latency, throughput, socket_frame, packet, login_name, login_success
+from bench import MIB, connect, latency, throughput
 from minecraft import ROOT, process
 from prometheus import parse_metrics
 
 
 @contextmanager
 def backend(uppercase=False):
-    class Handler(socketserver.BaseRequestHandler):
-        def handle(self):
-            self.request.settimeout(15)
+    """Use the same independent async fixture process as the throughput benchmark."""
+    command = [sys.executable, str(Path(__file__).with_name("bench.py").resolve()), "--fixture"]
+    if uppercase:
+        command.append("--uppercase")
+    with tempfile.TemporaryDirectory(prefix="rift-pilot-backend-") as temporary:
+        directory = Path(temporary)
+        log = directory / "backend.log"
+        with process(command, directory, log.name) as fixture:
             try:
-                with self.request.makefile("rb") as reader:
-                    socket_frame(reader)  # Handshake.
-                    name = login_name(socket_frame(reader))
-                    self.request.sendall(login_success(name))
-                    while True:
-                        data = socket_frame(reader)
-                        self.request.sendall(packet(data[:1] + (data[1:].upper() if uppercase else data[1:])))
-            except (EOFError, OSError, ValueError):
-                pass
-
-    class Server(socketserver.ThreadingTCPServer):
-        daemon_threads = True
-
-    with Server(("127.0.0.1", 0), Handler) as server:
-        worker = threading.Thread(target=server.serve_forever)
-        worker.start()
-        try:
-            yield server.server_address[1]
-        finally:
-            server.shutdown()
-            worker.join()
+                wait_for(fixture, lambda: "\n" in log.read_text(), log)
+                yield json.loads(log.read_text().splitlines()[0])["echo"]
+            except BaseException:
+                print(f"Pilot backend log (uppercase={uppercase}):\n{log.read_text()[-8000:]}",
+                      file=sys.stderr, flush=True)
+                raise
 
 
 def wait_for(proxy, predicate, log, seconds=10):
@@ -98,7 +87,13 @@ def running(binary, directory, source):
         lines = log.read_text().splitlines()
         ports = [int(next(line for line in lines if line.startswith(prefix)).rsplit(":", 1)[1])
                  for prefix in ["rift: listening on ", "rift: metrics on "]]
-        yield proxy, path, log, *ports
+        try:
+            yield proxy, path, log, *ports
+        except BaseException:
+            # Print before the enclosing temporary directory is removed.
+            print(f"Pilot proxy configuration:\n{source}\nPilot proxy log:\n{log.read_text()[-16000:]}",
+                  file=sys.stderr, flush=True)
+            raise
 
 
 def scrape(port):
@@ -232,6 +227,8 @@ def main():
     report = dict(timestamp=datetime.now(timezone.utc).isoformat(),
                   platform=platform.platform(), cpu_count=os.cpu_count(),
                   python=platform.python_version(),
+                  method={"throughput": "asyncio-owned connections with concurrent send/receive tasks; verifies payload and EOF",
+                          "backend": "separate asyncio fixture process; replaces driver-local threaded buffered sockets; 15-second read/write deadlines"},
                   version=subprocess.check_output([str(binary), "--version"], text=True).strip(),
                   binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest())
     with tempfile.TemporaryDirectory(prefix="rift-pilot-") as temporary, backend() as first, backend(True) as second:

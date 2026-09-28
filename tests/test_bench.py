@@ -45,6 +45,17 @@ class IdentityTests(unittest.TestCase):
             for client in clients:
                 pilot.exchange(client)
 
+    def test_pilot_backends_preserve_distinct_echo_and_uppercase_routes(self):
+        with pilot.backend() as original, pilot.backend(uppercase=True) as updated:
+            with bench.connect(original) as first, bench.connect(updated) as second:
+                for _ in range(3):
+                    pilot.exchange(first)
+                    pilot.exchange(second, b"PILOT")
+
+    def test_pilot_backend_accepts_full_duplex_async_transfers(self):
+        with pilot.backend() as port:
+            self.assertGreater(bench.throughput(port, 4, bench.MIB), 0)
+
 
 class SummaryTests(unittest.TestCase):
     def test_rejections_stay_in_denominator_and_out_of_latency_percentiles(self):
