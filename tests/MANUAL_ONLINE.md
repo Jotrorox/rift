@@ -1,82 +1,91 @@
-# Authenticated, encrypted gameplay
+# Online authentication and Velocity forwarding acceptance
 
-**Historical procedure:** this harness targets the transparent relay before the
-client-owned session layer. Current Rift rejects backend encryption requests and
-requires offline-mode backends, so this procedure cannot pass against the current
-binary. The observations below apply only to the revisions recorded in
-[OPERATIONS_RESULTS.md](OPERATIONS_RESULTS.md). Revisit the harness when
-proxy-owned authentication and encryption are implemented.
+This procedure tests the current proxy-owned login and encrypted client stream
+against two pinned **Paper 1.21.11 build 132** servers. It requires a licensed
+Minecraft Java **1.21.11** client signed in through its launcher. No Microsoft
+password, access token, or refresh token is requested or stored.
 
-This check covers signed-in gameplay that the offline fixtures cannot verify.
-Paper coverage was completed on 2026-09-28 across two complementary runs; see
-[the recorded results](OPERATIONS_RESULTS.md). For new executions, require
-explicit operator confirmations and reviewed evidence for every claimed phase.
-A scoped recovery/drain pass does not substitute for the other phases.
-
-Requirements: Linux, Python 3.11+, Java 21, network access to Minecraft's session
-services, and a licensed Minecraft Java **1.21.11** client signed in through its
-launcher. Use a client on the harness machine, or forward the printed loopback
-port over SSH. The harness never requests or stores Microsoft passwords/tokens.
+Install Python 3.11+, Rust, and a Java **JDK 21+** (`java` and `javac` on `PATH`).
+Allow the proxy to reach Mojang's session service and the harness to reach the
+public Minecraft profile lookup service. Run from the repository root:
 
 ```sh
 python3 tests/manual_online.py --accept-eula --server paper
-# Repeat for vanilla when checking both server implementations:
-python3 tests/manual_online.py --accept-eula --server vanilla
+# Use an existing build and a fixed loopback port if preferred:
+python3 tests/manual_online.py --accept-eula --binary target/release/rift --port 25565 --profile YourName
 ```
 
-If an operator intentionally reconnects during the recovery-continuity phase,
-retain that run's partial evidence and repeat the remaining phases with
-`python3 tests/manual_online.py --accept-eula --server paper --recovery-only`.
-This creates a fresh lobby session and a report scoped to `recovery_and_drain`;
-its pass does not claim that the skipped reload/outage/fallback phases ran again.
-During recovery, stay connected until explicitly instructed to disconnect.
+`--accept-eula` accepts the [Minecraft EULA](https://aka.ms/MinecraftEULA) for the
+temporary servers. The harness prints the frontend address and retains its files
+under `target/minecraft/runs/manual-online-*`. Use a client on the harness machine,
+or forward that loopback port over SSH. With SSH, Paper should receive the tunnel's
+loopback peer address, not the address of the remote workstation.
 
-The EULA flag accepts the [Minecraft EULA](https://aka.ms/MinecraftEULA) for these
-temporary servers. The runner prints the randomly assigned Rift address and a
-results directory under `target/minecraft/runs/manual-online-*`. It enables all
-operational settings and keeps both game servers and metrics on loopback.
+The backend configuration follows [Paper's modern forwarding documentation](https://docs.papermc.io/velocity/player-information-forwarding/):
+`server.properties` uses `online-mode=false` and `enforce-secure-profile=true`;
+`spigot.yml` disables BungeeCord;
+`config/paper-global.yml` enables Velocity with `online-mode=true` and a shared
+secret. Rift enables online authentication and Velocity forwarding together.
+The random secret is provided to Rift through `RIFT_FORWARDING_SECRET` and is
+written only to disposable Paper configuration files inside the private run
+directory. Both backends and the metrics endpoint bind to loopback. Backend
+compression differs between the two servers to exercise independent framing.
 
-Both servers use `online-mode=true`, `enforce-secure-profile=true`,
-`prevent-proxy-connections=false`, and compression threshold 256. Paper forwarding
-is left disabled. See the [Paper server.properties reference](https://docs.papermc.io/paper/reference/server-properties/)
-for these settings. An unauthenticated login probe must receive an Encryption
-Request with `should_authenticate=true` directly and through Rift. This checks
-negotiation only; completing signed-in gameplay is the separate human check.
+A test-only plugin is compiled against API libraries embedded in the
+checksum-verified Paper jar. It records the UUID, name, forwarded IP, complete
+signed texture properties, and inventory that **Paper actually receives**.
+It does not modify profiles or authenticate players. The harness compares the
+backend UUID/name to Mojang's public account lookup, verifies the texture payload
+belongs to that UUID, and checks that the same properties survive every transfer.
+The local fixture expects `127.0.0.1`; `--expected-ip` changes the expected address.
 
-Follow the prompts; enter `PASS` only after observing the requested behavior:
+Follow each prompt and type `PASS` only after observing the requested behavior:
 
-1. Join the primary with the signed-in client. Move or fly into new chunks, place
-   and break blocks, and send chat. Record your profile name at the prompt. The
-   runner requires a completed login in the backend log and an authenticated UUID
-   different from the offline UUID.
-2. Stay connected and continue playing through 12 route reloads, four rejected
-   reloads and 3,072 status requests. Verify no kick, reconnect screen, rollback or
-   world switch. Continue moving and interacting afterward. The runner checks
-   that the primary logged no new login during stress and the lobby logged none, and saves
-   Rift memory/socket samples with the same budgets as the automated scenario.
-3. Disconnect and reconnect when instructed to enter the lobby. Keep playing
-   while the runner stops the primary and sends another status burst. The lobby
-   player must remain connected. Stopping a player's own backend would necessarily
-   disconnect that player; this is not a session migration test.
-4. Reconnect once while the primary is down. The same authenticated profile must
-   reach the fallback lobby. Keep playing during primary recovery; recovery must
-   leave the existing lobby session in place.
-5. After the shutdown signal, continue movement, block interactions and chat.
-   Confirm within the 120-second drain deadline while still connected. Rift must
-   refuse new connections, serve metrics and advance traffic counters for the
-   established encrypted session. Then disconnect normally when instructed;
-   Rift must exit successfully without forcing the shutdown.
+1. Join the lobby. Check your usual skin with F5, load chunks, move, place/break
+   blocks, and send chat. An earlier unauthenticated probe claiming your actual
+   UUID/name must still receive a mandatory encryption challenge. This probe
+   checks that claims do not bypass authentication; the cryptographic rejection
+   paths and session-service failures are covered by the automated Rust tests.
+2. The harness gives you **7 diamonds** in the lobby. Use `/server primary`
+   without disconnecting. Check your skin, fresh chunks, block interactions and
+   chat. The primary receives the same account UUID and signed properties.
+3. The harness gives you **11 emeralds** on primary. Use `/hub` and check that the
+   lobby's 7 diamonds return. Use `/server primary` again and check that primary's
+   11 emeralds return. Keep those items unchanged until the test ends. These are
+   two separate server inventories; this test does not claim inventory syncing
+   between worlds.
+4. Use `/hub`. The harness restarts the now-empty primary with an incorrect
+   forwarding secret. Try `/server primary`: expect a clear error, remain in the
+   lobby, and verify movement, blocks, chat and the 7 diamonds still work. The
+   runner checks that Paper logged no new successful join, Rift recorded a failed
+   transfer, and the original frontend connection remains open.
+5. The harness restores the correct secret and restarts primary. Use
+   `/server primary` and verify your 11 emeralds, usual skin and gameplay again.
+   Disconnect normally only at the final prompt.
 
-The runner records timestamped operator confirmations, profile UUID, encryption
-probe outcomes, resource budgets and drain metrics in `result.json`, alongside
-`resources.jsonl`, proxy logs, backend logs and configuration. Any failed prompt,
-assertion or interruption leaves `passed: false` and stops the fixture processes.
-Retain these artifacts and note client version, operator, date and any observed
-disconnects when reporting the result. Each `PASS` requires an explicit operator
-confirmation; an assistant may relay that confirmation to the runner but must
-never infer it from logs or supply it on the operator's behalf without confirmation.
+Rift's frontend accepted-connection counter must remain unchanged through all
+transfers, with one active client and the expected backend player count. Each
+world must save player data under the Mojang UUID. All visual/gameplay claims
+require timestamped operator confirmations; profile/inventory assertions use the
+Paper plugin's independently recorded data.
 
-The offline suite separately exercises rate/capacity rejection and forced drain
-deadline/second-signal paths with real logged-in clients. This manual check adds
-Microsoft authentication and an actual encrypted gameplay stream; it cannot be
-replaced by status pings, negotiation probes or an offline UUID.
+`result.json` records `passed: true` only when every phase completes. Any assertion,
+failed prompt, interruption, or unavailable public profile lookup leaves
+`passed: false` and stops the fixture processes. Evidence includes `proxy.log`,
+Paper logs, and `plugins/RiftOnlineProbe/profiles.jsonl` in each backend directory.
+These files include public profile data; Paper configuration files include the
+disposable secret. Share only the needed artifacts.
+
+An assistant may relay an operator's explicit `PASS` to the runner; it must not
+infer a visual result from logs or enter `PASS` on the operator's behalf. Preserve
+partial results if the operator reconnects or a phase fails, and repeat the full
+scenario after fixing the problem. A successful negotiation probe alone is not
+proof of account authentication, skins, or playable encrypted traffic.
+
+Authentication outages are tested deterministically by the Rust authentication
+suite using an injected local session-service fixture (timeouts, error statuses,
+malformed responses, and rejection). The production client uses Mojang's HTTPS
+endpoint. This manual harness never redirects real account authentication to a
+mock endpoint and does not require disrupting Mojang or the operator's network.
+Historical transparent-relay runs in [OPERATIONS_RESULTS.md](OPERATIONS_RESULTS.md)
+do not establish acceptance of this implementation.

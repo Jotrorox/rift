@@ -6,6 +6,8 @@ compression, and handshake, status, login, configuration and play states. Client
 and backend connections have independent protocol state; a backend is an
 attachment within a player's session. LuaJIT is embedded through `mlua`; the binary needs no Java or
 separate Lua installation. Building requires a C toolchain (MSVC on Windows).
+Windows x86-64 builds use AWS-LC's bundled assembly objects if NASM is absent;
+when NASM is installed, AWS-LC assembles them from source.
 
 Download a native archive from [Releases](https://github.com/Jotrorox/rift/releases)
 and follow the [operator guide](docs/operations.md) for installation, the supplied
@@ -91,12 +93,56 @@ online-mode=false
 prevent-proxy-connections=false
 ```
 
-Keep Paper's BungeeCord/Velocity forwarding disabled. This session layer requires
-offline-mode backends and does not authenticate player identities with Microsoft.
-An encryption request receives an explanatory disconnect before encryption starts.
-Use this setup only where unauthenticated identities are acceptable, and keep
-backend ports private. Backends see Rift's IP; player IP forwarding and online-mode
-authentication are not implemented.
+Rift can authenticate licensed Java accounts and forward their existing UUID,
+name, skin properties and player IP to Paper using Velocity modern forwarding.
+Enable both settings in the returned Lua configuration table:
+
+```lua
+authentication = { online_mode = true, timeout_ms = 10000 },
+forwarding = { mode = "velocity", secret_env = "RIFT_FORWARDING_SECRET" },
+```
+
+Set `RIFT_FORWARDING_SECRET` in Rift's process environment to your existing
+Velocity forwarding secret, then configure every Paper backend:
+
+```yaml
+# config/paper-global.yml
+proxies:
+  velocity:
+    enabled: true
+    online-mode: true
+    secret: "the same secret as RIFT_FORWARDING_SECRET"
+```
+
+Keep `server.properties`'s `online-mode=false` and `spigot.yml`'s
+`settings.bungeecord=false`. Restart Paper after changing these settings. This
+matches [Paper's Velocity forwarding setup](https://docs.papermc.io/velocity/player-information-forwarding/).
+Backend ports must remain private. See [`examples/online.lua`](examples/online.lua)
+for a two-Paper network; switching uses Minecraft **1.21.11**.
+
+Rift owns client encryption and verifies each login with Mojang's HTTPS session
+service before contacting a backend. It ignores the client's claimed UUID and
+retains the verified profile across backend replacements. A wrong secret, missing
+forwarding exchange, or mismatched backend identity rejects login; a rejected
+replacement leaves the current server attached. Verification failures and service
+timeouts never fall back to offline authentication. Inventories remain in each
+backend's existing UUID-based player data; Rift does not synchronize inventories
+between different worlds.
+
+Authentication and Velocity forwarding must be enabled together. They support
+Rift's modern login versions (761–775 and 777); protocol 47 requires offline
+configuration. The timeout covers the encryption exchange and session lookup,
+accepts 1–60,000 milliseconds and defaults to 10,000. The secret variable defaults
+to `RIFT_FORWARDING_SECRET`; its value must contain 1–1024 bytes without control
+characters. Use a randomly generated secret for new networks. `rift check`
+validates variable names without requiring the secret; startup and reload resolve
+the secret before applying the configuration. Established sessions retain their
+original authentication and forwarding settings.
+
+For backward compatibility, omitted authentication/forwarding settings use
+**unauthenticated offline identities**. In that mode keep Paper forwarding disabled;
+backends see Rift's IP. Use that configuration only where unauthenticated identities
+are acceptable. Backends requesting their own encryption are rejected in both modes.
 
 ## Lua configuration
 
@@ -366,11 +412,13 @@ honored; it never triggers automatic fallback.
 
 ### A lobby and survival network
 
-Use [`examples/two-server.lua`](examples/two-server.lua) for **Minecraft 1.21.11
+Use [`examples/online.lua`](examples/online.lua) for an authenticated Paper network,
+or [`examples/two-server.lua`](examples/two-server.lua) for offline fixtures, with **Minecraft 1.21.11
 (protocol 774)** clients and backends. Other supported protocols retain ordinary
 routing, initial fallback and access checks, but cannot switch within a session.
-Both backends need `online-mode=false` and `enforce-secure-profile=false`, with
-BungeeCord/Velocity forwarding disabled.
+Both backends need `online-mode=false`. The online example uses Velocity modern
+forwarding as described above. The offline example requires forwarding disabled
+and `enforce-secure-profile=false`.
 
 ```lua
 return {
@@ -400,10 +448,10 @@ ends login instead of trying a different server.
 
 Access rules match player names without case. Omitted rules allow access; an
 explicit `allow = {}` permits nobody; `deny` overrides `allow`. Rules apply to
-initial connections, server listings, commands and recovery. These names are
-**offline identities**, not authenticated Microsoft accounts. The backend also
-checks its own bans and whitelist on every login. This feature does not add
-online-mode authentication.
+initial connections, server listings, commands and recovery. With online mode
+enabled, names come from Mojang's verified profile. With security settings omitted,
+they are **unauthenticated offline identities**. The backend also checks its own
+bans and whitelist on every login.
 
 On backend EOF or socket failure, a player in the world tries `hubs` in order,
 then that backend's fallback list, excluding the failed server and duplicates.
@@ -421,9 +469,10 @@ replay old chat sessions or strip message signatures. Cached client settings and
 brand are sent to the new backend, and the old resource-pack stack is cleared.
 The proxy also advertises its commands in the client command tree. See the
 [protocol contract and source notes](docs/network-protocol.md) for the state sequence.
-Replacement login plugin requests receive an
-unsupported response; login cookies and encryption during replacement are
-unsupported. Connection and transition deadlines bound stalled switches.
+Rift answers Velocity forwarding requests from its retained authenticated profile
+during replacement. Other replacement login plugin requests receive an unsupported
+response; login cookies and backend encryption during replacement are unsupported.
+Connection and transition deadlines bound stalled switches.
 
 The player registry tracks UUID, name and current backend across listeners and
 reloads. Names are reserved before initial backend contact to prevent duplicate logins
@@ -781,12 +830,12 @@ capacity across reloads, primary outage/fallback/recovery, health transitions,
 status TTL and concurrent fills, malformed status responses, metrics, graceful
 drain and forced shutdown. Signal-driven executable tests run on Unix; the other
 regressions also run on Windows.
-Microsoft account authentication and encrypted gameplay are not supported by this
-session layer. The [manual online-mode procedure](tests/MANUAL_ONLINE.md) and its
-recorded results apply to the earlier transparent relay. Keep that procedure as
-historical validation; it must be revisited when proxy-owned authentication and
-encryption are implemented. The current offline and wire suites do not establish
-online-mode support.
+Authentication tests cover encrypted transport, Mojang response validation,
+authentication outages and rejection of unverified identities. Forwarding tests
+cover signed profiles, plugin-response spoofing, and initial/replacement login.
+The [manual online-mode procedure](tests/MANUAL_ONLINE.md) covers a licensed account
+joining and switching between two real Paper servers with UUID, skin and inventory
+checks. Its visual checks require a signed-in client and explicit operator evidence.
 
 ## CI and releases
 

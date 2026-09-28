@@ -383,3 +383,27 @@ fn signed_proxy_command_without_signatures_preserves_acknowledgement_offset() {
     assert_eq!(command, "hub");
     assert_eq!(acknowledgement, Some(Packet::new(5, vec![7])));
 }
+
+#[test]
+fn secure_profile_join_requires_authenticated_identity_and_valid_packet() {
+    let mut data = 1_i32.to_be_bytes().to_vec();
+    data.extend([0, 1]); // hardcore, world count
+    write_string("minecraft:overworld", &mut data);
+    data.extend([20, 8, 8, 0, 1, 0, 0]); // limits, flags, dimension type
+    write_string("minecraft:overworld", &mut data);
+    data.extend([0; 8]); // seed
+    data.extend([0, 255, 0, 0, 0, 0, 63, 1]); // game modes, flags, death, cooldown, sea level, secure
+    let mut packet = Packet::new(0x30, data);
+    validate_network_join(&packet, true).unwrap();
+    let denied = validate_network_join(&packet, false).unwrap_err();
+    assert_eq!(denied.kind(), std::io::ErrorKind::Unsupported);
+    assert!(denied.to_string().contains("Unauthenticated"));
+    *packet.data.last_mut().unwrap() = 0;
+    validate_network_join(&packet, false).unwrap();
+    validate_network_join(&packet, true).unwrap();
+    *packet.data.last_mut().unwrap() = 2;
+    assert!(validate_network_join(&packet, true).is_err());
+    assert!(validate_network_join(&packet, false).is_err());
+    packet.data.pop();
+    assert!(validate_network_join(&packet, true).is_err());
+}
