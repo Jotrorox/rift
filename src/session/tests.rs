@@ -29,6 +29,12 @@ async fn session() -> (
     DuplexStream,
     DuplexStream,
 ) {
+    session_with_backend(|stream| stream).await
+}
+
+async fn session_with_backend<B: AsyncRead + AsyncWrite + Unpin>(
+    wrap: impl FnOnce(DuplexStream) -> B,
+) -> (Session<DuplexStream, B>, DuplexStream, DuplexStream) {
     let (mut client, input) = tokio::io::duplex(65536);
     let handshake = Handshake {
         protocol: 774,
@@ -42,7 +48,7 @@ async fn session() -> (
         .unwrap();
     let mut session = Session::accept(input).await.unwrap();
     let (server, mut backend) = tokio::io::duplex(65536);
-    session.connect_backend(server).await.unwrap();
+    session.connect_backend(wrap(server)).await.unwrap();
     assert_eq!(
         receive(&mut backend, Codec::default()).await,
         handshake.packet()
@@ -55,8 +61,8 @@ async fn session() -> (
     assert_eq!(receive(&mut backend, Codec::default()).await, login_start());
     (session, client, backend)
 }
-async fn play(
-    session: &mut Session<DuplexStream, DuplexStream>,
+async fn play<B: AsyncRead + AsyncWrite + Unpin>(
+    session: &mut Session<DuplexStream, B>,
     client: &mut DuplexStream,
     backend: &mut DuplexStream,
     codec: Codec,
@@ -584,4 +590,269 @@ async fn initial_retry_is_disabled_after_backend_login_plugin_exchange() {
         SessionEvent::BackendClosed
     );
     assert!(!session.reset_initial_backend());
+}
+
+// Make the old backend's queued packet readable precisely when replacement
+// Login Acknowledged is written. Whichever select branch is polled first, login
+// completes before the old packet can be observed in that select. This makes
+// the cutover race deterministic instead of depending on Tokio's random order.
+struct CutoverStream {
+    io: DuplexStream,
+    read_gate: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    open_gate_on_login_ack: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+}
+impl AsyncRead for CutoverStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if self
+            .read_gate
+            .as_ref()
+            .is_some_and(|gate| !gate.load(std::sync::atomic::Ordering::SeqCst))
+        {
+            return Poll::Pending;
+        }
+        Pin::new(&mut self.io).poll_read(cx, buf)
+    }
+}
+impl AsyncWrite for CutoverStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let result = Pin::new(&mut self.io).poll_write(cx, buf);
+        if buf == [1, 3]
+            && matches!(result, Poll::Ready(Ok(2)))
+            && let Some(gate) = &self.open_gate_on_login_ack
+        {
+            gate.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        result
+    }
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.io).poll_flush(cx)
+    }
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.io).poll_shutdown(cx)
+    }
+}
+
+#[tokio::test]
+async fn ready_replacement_cannot_win_over_a_buffered_current_backend_ban() {
+    timeout(Duration::from_secs(3), async {
+        let gate = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let (mut session, mut client, mut old) = session_with_backend(|io| CutoverStream {
+            io,
+            read_gate: Some(gate.clone()),
+            open_gate_on_login_ack: None,
+        })
+        .await;
+        play(&mut session, &mut client, &mut old, Codec::default()).await;
+        gate.store(false, std::sync::atomic::Ordering::SeqCst);
+        let banned =
+            protocol::disconnect(session.version, State::Play, "Banned before cutover").unwrap();
+        Codec::default().write(&mut old, &banned).await.unwrap();
+        let (replacement, mut second) = tokio::io::duplex(65536);
+        Codec::default()
+            .write(&mut second, &login_success())
+            .await
+            .unwrap();
+        let replacement = CutoverStream {
+            io: replacement,
+            read_gate: None,
+            open_gate_on_login_ack: Some(gate),
+        };
+        let (result, received) = tokio::join!(session.connect_backend(replacement), async {
+            let first = receive(&mut client, Codec::default()).await;
+            if first.id == 0x74 {
+                // Let the broken implementation complete, so the assertion
+                // identifies ban bypass rather than a generic test timeout.
+                Codec::default()
+                    .write(&mut client, &Packet::empty(0x0f))
+                    .await
+                    .unwrap();
+                receive(&mut client, Codec::default()).await;
+            }
+            first
+        });
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(received, banned);
+        assert!(!session.switch_in_progress());
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn old_backend_eof_at_cutover_does_not_prevent_a_ready_replacement() {
+    timeout(Duration::from_secs(3), async {
+        let gate = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let (mut session, mut client, mut old) = session_with_backend(|io| CutoverStream {
+            io,
+            read_gate: Some(gate.clone()),
+            open_gate_on_login_ack: None,
+        })
+        .await;
+        play(&mut session, &mut client, &mut old, Codec::default()).await;
+        gate.store(false, std::sync::atomic::Ordering::SeqCst);
+        drop(old);
+        let (replacement, mut second) = tokio::io::duplex(65536);
+        Codec::default()
+            .write(&mut second, &login_success())
+            .await
+            .unwrap();
+        let replacement = CutoverStream {
+            io: replacement,
+            read_gate: None,
+            open_gate_on_login_ack: Some(gate),
+        };
+        let (result, ()) = tokio::join!(session.connect_backend(replacement), async {
+            assert_eq!(
+                receive(&mut client, Codec::default()).await,
+                Packet::empty(0x74)
+            );
+            Codec::default()
+                .write(&mut client, &Packet::empty(0x0f))
+                .await
+                .unwrap();
+            assert_eq!(
+                receive(&mut client, Codec::default()).await,
+                Packet::new(8, vec![0])
+            );
+        });
+        result.unwrap();
+        assert!(session.backend().is_some());
+        assert!(session.client.state.settled(State::Configuration));
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn busy_old_backend_bounds_cutover_work_and_remains_attached() {
+    let (mut session, mut client, mut old) = session().await;
+    play(&mut session, &mut client, &mut old, Codec::default()).await;
+    // More than one cooperative budget of packets must not be mistaken for
+    // quiescence, nor drained forever. Every byte fits in the duplex buffers.
+    for _ in 0..300 {
+        Codec::default()
+            .write(&mut old, &Packet::empty(0x7f))
+            .await
+            .unwrap();
+    }
+    let error = timeout(Duration::from_secs(1), session.drain_before_switch())
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+    assert!(session.can_switch());
+    assert!(session.backend().is_some());
+    assert!(!session.switch_in_progress());
+    assert_eq!(
+        receive(&mut client, Codec::default()).await,
+        Packet::empty(0x7f)
+    );
+}
+
+#[tokio::test]
+async fn partial_backend_packet_is_not_a_quiescent_cutover() {
+    let (mut session, mut client, mut old) = session().await;
+    play(&mut session, &mut client, &mut old, Codec::default()).await;
+    let banned = protocol::disconnect(session.version, State::Play, "Fragmented ban").unwrap();
+    let frame = Codec::default().encode(&banned).unwrap();
+    old.write_all(&frame[..2]).await.unwrap();
+    assert_eq!(
+        session.drain_before_switch().await.unwrap_err().kind(),
+        io::ErrorKind::WouldBlock
+    );
+    assert!(session.can_switch());
+    old.write_all(&frame[2..]).await.unwrap();
+    assert_eq!(session.forward().await.unwrap(), SessionEvent::Disconnected);
+    assert_eq!(receive(&mut client, Codec::default()).await, banned);
+}
+
+#[tokio::test]
+async fn backpressured_old_frame_does_not_hide_the_ban_behind_it() {
+    timeout(Duration::from_secs(3), async {
+        let (mut session, mut client, mut old) = session().await;
+        play(&mut session, &mut client, &mut old, Codec::default()).await;
+        let frame = Packet::new(0x7f, vec![42; 262144]);
+        let banned = protocol::disconnect(
+            session.version,
+            State::Play,
+            "Banned behind a pending frame",
+        )
+        .unwrap();
+        let ((), blocked) = tokio::join!(
+            async {
+                Codec::default().write(&mut old, &frame).await.unwrap();
+                Codec::default().write(&mut old, &banned).await.unwrap();
+            },
+            timeout(Duration::from_millis(10), session.forward())
+        );
+        assert!(blocked.is_err());
+        assert!(
+            session
+                .client
+                .pending
+                .as_ref()
+                .is_some_and(|write| write.offset < write.frame.len())
+        );
+        let (result, ()) = tokio::join!(session.drain_before_switch(), async {
+            assert_eq!(receive(&mut client, Codec::default()).await, frame);
+            assert_eq!(receive(&mut client, Codec::default()).await, banned);
+        });
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert!(!session.switch_in_progress());
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn initial_backend_write_failure_retries_with_the_cached_login_start() {
+    let (mut client, input) = tokio::io::duplex(65536);
+    let handshake = Handshake {
+        protocol: 774,
+        address: "play.test".into(),
+        port: 25565,
+        next_state: NextState::Login,
+    };
+    Codec::default()
+        .write(&mut client, &handshake.packet())
+        .await
+        .unwrap();
+    Codec::default()
+        .write(&mut client, &login_start())
+        .await
+        .unwrap();
+    let mut session = Session::accept(input).await.unwrap();
+    assert_eq!(session.read_login_start().await.unwrap().name, "Player");
+    let (failed, closed) = tokio::io::duplex(65536);
+    drop(closed);
+    assert_eq!(
+        session.connect_backend(failed).await.unwrap_err().kind(),
+        io::ErrorKind::BrokenPipe
+    );
+    assert!(session.reset_initial_backend());
+    assert!(session.client.state.settled(State::Login));
+    assert!(session.identity().is_none());
+    let (next, mut peer) = tokio::io::duplex(65536);
+    session.connect_backend(next).await.unwrap();
+    assert_eq!(
+        receive(&mut peer, Codec::default()).await,
+        handshake.packet()
+    );
+    assert_eq!(receive(&mut peer, Codec::default()).await, login_start());
+    play(&mut session, &mut client, &mut peer, Codec::default()).await;
+    assert!(session.can_switch());
 }

@@ -54,6 +54,54 @@ impl Network<'_> {
             .collect()
     }
 
+    /// A TCP accept alone does not establish a usable attachment. A failed
+    /// handshake/Login Start write can retry too: only the failed backend was
+    /// written, and the client's cached login and codec remain owned by Session.
+    pub async fn connect_initial<C: AsyncRead + AsyncWrite + Unpin>(
+        &self,
+        session: &mut Session<C, TcpStream>,
+        candidates: &[String],
+        deadline: Instant,
+        event: &mut Connection,
+    ) -> io::Result<String> {
+        let names: Vec<_> = candidates.iter().map(String::as_str).collect();
+        let mut next = 0;
+        loop {
+            let upstream = health::connect_candidates(
+                &self.snapshot.config,
+                &self.snapshot.health,
+                &names[next..],
+                self.addresses,
+                self.metrics,
+                deadline,
+                event,
+            )
+            .await?;
+            let current = event.backend.clone().expect("connected backend");
+            let index = names.iter().position(|name| *name == current).unwrap();
+            next = index + 1;
+            let budget =
+                deadline.saturating_duration_since(Instant::now()) / (names.len() - index) as u32;
+            let result = async {
+                event.stage = "backend_setup";
+                event.failure = "io_error";
+                upstream.set_nodelay(true)?;
+                event.stage = "handshake_write";
+                timeout_at(Instant::now() + budget, session.connect_backend(upstream)).await?
+            }
+            .await;
+            match result {
+                Ok(()) => return Ok(current),
+                Err(error) => {
+                    event.emit("backend_attempt_failed", &error, Some(error.kind()));
+                    if !session.reset_initial_backend() || next == names.len() {
+                        return Err(error);
+                    }
+                }
+            }
+        }
+    }
+
     /// Preflight each candidate independently. Once a client transition starts,
     /// any failure is terminal: retrying a possibly partial write is unsafe.
     /// Explicit backend rejections are never interpreted as outages.

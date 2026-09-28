@@ -327,6 +327,10 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                     }
                 }
             }
+            // A ready Login Success must not win the select and discard an
+            // already queued kick on the old connection. Establish a bounded
+            // quiescent cutover before changing the client's protocol state.
+            self.drain_before_switch().await?;
             // The old server can initiate its own configuration while login is
             // in flight; never splice a second transition into that exchange.
             if !self.can_switch() {
@@ -387,6 +391,84 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         self.backend = Some(backend);
         self.backend_error = None;
         Ok(())
+    }
+
+    async fn drain_before_switch(&mut self) -> io::Result<()> {
+        // Bound both work and CPU time. A continuously busy source keeps its
+        // attachment instead of starving preflight or hiding a queued ban.
+        const MAX_EVENTS: usize = 128;
+        let started = std::time::Instant::now();
+        for _ in 0..MAX_EVENTS {
+            if self.backend.is_none() {
+                return Ok(());
+            }
+            if started.elapsed() >= std::time::Duration::from_millis(20) {
+                break;
+            }
+            let ready = {
+                // Tokio's cooperative budget can return Pending with socket
+                // data still ready. It is not evidence of quiescence. This
+                // single bounded poll supplies its own work/time budget.
+                let forward = tokio::task::unconstrained(self.forward());
+                tokio::pin!(forward);
+                poll_fn(|cx| Poll::Ready(forward.as_mut().poll(cx))).await
+            };
+            match ready {
+                Poll::Ready(Ok(SessionEvent::Packet | SessionEvent::ProxyCommand(_))) => {}
+                Poll::Ready(Ok(SessionEvent::BackendClosed | SessionEvent::BackendFailed)) => {
+                    return Ok(());
+                }
+                Poll::Ready(Ok(SessionEvent::Disconnected)) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "The current backend disconnected the player.",
+                    ));
+                }
+                Poll::Ready(Ok(SessionEvent::ClientClosed)) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "client closed during replacement login",
+                    ));
+                }
+                Poll::Ready(Err(error)) => return Err(error),
+                Poll::Pending => {
+                    if self
+                        .client
+                        .pending
+                        .as_ref()
+                        .is_some_and(|pending| pending.kind == PacketKind::Disconnect)
+                    {
+                        // The decoded ban is authoritative even if delivering
+                        // it is backpressured. The owner will flush it on close.
+                        return Err(io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            "The current backend disconnected the player.",
+                        ));
+                    }
+                    if self.client.pending.is_some() {
+                        // Backpressure disables backend reads while this frame
+                        // is pending. Flush it, then inspect the backend again;
+                        // the caller's deadline bounds this cancel-safe write.
+                        self.client.flush_pending().await?;
+                        continue;
+                    }
+                    if self
+                        .backend
+                        .as_ref()
+                        .is_some_and(|backend| backend.reader.has_partial_frame())
+                    {
+                        // A partially received packet can itself be a ban. Leave
+                        // it with the old attachment until the next attempt.
+                        break;
+                    }
+                    return Ok(());
+                }
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "The current server is busy. Please retry the switch.",
+        ))
     }
 
     async fn login_replacement(

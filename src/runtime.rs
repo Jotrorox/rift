@@ -301,19 +301,11 @@ pub async fn handle(
             None
         };
         let deadline = Deadline::now() + snapshot.config.limits.connect_timeout;
-        let names: Vec<_> = candidates.iter().map(String::as_str).collect();
-        let upstream = match health::connect_candidates(
-            &snapshot.config,
-            &snapshot.health,
-            &names,
-            addresses,
-            &metrics,
-            deadline,
-            event,
-        )
-        .await
+        let mut current_backend = match network
+            .connect_initial(&mut session, &candidates, deadline, event)
+            .await
         {
-            Ok(upstream) => upstream,
+            Ok(name) => name,
             Err(error) => {
                 let _ = timeout(
                     HANDSHAKE_TIMEOUT,
@@ -324,21 +316,6 @@ pub async fn handle(
                 return Err(error);
             }
         };
-        let mut current_backend = event.backend.clone().expect("connected backend");
-        event.stage = "backend_setup";
-        event.failure = "io_error";
-        upstream.set_nodelay(true)?;
-        event.stage = "handshake_write";
-        if let Err(error) =
-            async { timeout_at(deadline, session.connect_backend(upstream)).await? }.await
-        {
-            let _ = timeout(
-                HANDSHAKE_TIMEOUT,
-                session.disconnect("Unable to connect to the server."),
-            )
-            .await;
-            return Err(error);
-        }
         let entry_deadline = |current: &str| {
             let remaining =
                 candidates.len() - candidates.iter().position(|name| name == current).unwrap();
@@ -487,29 +464,15 @@ pub async fn handle(
                             .position(|name| name == &current_backend)
                             .unwrap()
                             + 1;
-                        if next < names.len() {
-                            let retry = async {
-                                let upstream = health::connect_candidates(
-                                    &snapshot.config,
-                                    &snapshot.health,
-                                    &names[next..],
-                                    addresses,
-                                    &metrics,
-                                    deadline,
-                                    event,
-                                )
-                                .await?;
-                                upstream.set_nodelay(true)?;
-                                timeout_at(deadline, session.connect_backend(upstream)).await??;
-                                Ok::<_, io::Error>(())
-                            }
-                            .await;
-                            if retry.is_ok() {
-                                metrics.fallbacks.inc();
-                                current_backend = event.backend.clone().expect("connected backend");
-                                phase_deadline = entry_deadline(&current_backend);
-                                continue;
-                            }
+                        if next < candidates.len()
+                            && let Ok(target) = network
+                                .connect_initial(&mut session, &candidates[next..], deadline, event)
+                                .await
+                        {
+                            metrics.fallbacks.inc();
+                            current_backend = target;
+                            phase_deadline = entry_deadline(&current_backend);
+                            continue;
                         }
                     }
                     let candidates = network.recovery_candidates(&current_backend);

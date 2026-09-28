@@ -8,7 +8,12 @@ Mojang session authentication or secure-profile forwarding.
 A replacement performs an independent backend login before changing the client.
 The old backend continues processing packets during this preflight. Explicit
 login disconnects are access denials, and a disconnect from the current backend
-is terminal. Once the new backend confirms the same UUID and exact name, Rift
+is terminal. Before committing a ready replacement, Rift drains immediately ready
+old-server packets to a quiescent point so a simultaneously queued ban cannot lose
+a selection race. This drain is limited to 128 events and 20 ms of elapsed work;
+a busy stream or incomplete packet cancels preflight while keeping the old
+attachment. Backpressured client frames are completed before checking the old
+backend again, under the replacement deadline. Once the new backend confirms the same UUID and exact name, Rift
 sends Start Configuration, drains old play packets through Configuration
 Acknowledged, and forwards the new configuration exchange. Compression belongs
 to each connection independently. The new backend must send a fresh Join Game;
