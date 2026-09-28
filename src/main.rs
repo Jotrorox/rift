@@ -1,9 +1,10 @@
-mod config;
 mod handshake;
-mod routing;
 
-use config::{Config, Limits};
-use routing::{Backend, Routes};
+use rift::{
+    config::{Config, Limits},
+    hooks::{ConnectionInfo, RouteDecision, Router},
+    routing::{Backend, Mode, Routes},
+};
 use std::{env, io, net::SocketAddr, path::Path, process::ExitCode, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncWriteExt, copy_bidirectional_with_sizes},
@@ -24,11 +25,6 @@ const USAGE: &str = "Usage: rift [<listen-ip:port> <backend-ip:port>]\n\
     Explicit addresses and routing options override ./rift.lua.\n\
     IPv6: rift '[::]:25565' '[::1]:25566'";
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
-
-enum Mode {
-    Direct(Backend),
-    Routed(Routes),
-}
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -71,6 +67,7 @@ async fn start() -> io::Result<()> {
             return serve(
                 vec![("default".into(), listen, Mode::Routed(routes))],
                 Limits::default(),
+                None,
             )
             .await;
         }
@@ -81,10 +78,15 @@ async fn start() -> io::Result<()> {
         .iter()
         .map(|(name, address)| Ok((name.clone(), *address, config.mode(name)?)))
         .collect::<io::Result<Vec<_>>>()?;
-    serve(listeners, config.limits).await
+    let router = config.on_route.as_ref().map(|_| Router::new(&config));
+    serve(listeners, config.limits, router).await
 }
 
-async fn serve(configured: Vec<(String, SocketAddr, Mode)>, limits: Limits) -> io::Result<()> {
+async fn serve(
+    configured: Vec<(String, SocketAddr, Mode)>,
+    limits: Limits,
+    router: Option<Router>,
+) -> io::Result<()> {
     // Bind everything before accepting clients, so partial startup fails cleanly.
     let mut listeners = Vec::new();
     for (name, address, mode) in configured {
@@ -94,18 +96,18 @@ async fn serve(configured: Vec<(String, SocketAddr, Mode)>, limits: Limits) -> i
                 format!("listeners.{name} ({address}): {error}"),
             )
         })?;
-        listeners.push((listener, mode));
+        listeners.push((listener, name, mode));
     }
     let addresses = Arc::new(
         listeners
             .iter()
-            .map(|(listener, _)| listener.local_addr())
+            .map(|(listener, _, _)| listener.local_addr())
             .collect::<io::Result<Vec<_>>>()?,
     );
     // One shared limit bounds sockets, tasks and buffers across all listeners.
     let connections = Arc::new(Semaphore::new(limits.max_connections));
     let mut tasks = JoinSet::new();
-    for (listener, mode) in listeners {
+    for (listener, name, mode) in listeners {
         eprintln!("rift: listening on {}", listener.local_addr()?);
         tasks.spawn(accept(
             listener,
@@ -113,6 +115,7 @@ async fn serve(configured: Vec<(String, SocketAddr, Mode)>, limits: Limits) -> i
             limits,
             connections.clone(),
             addresses.clone(),
+            router.as_ref().map(|router| (name, router.clone())),
         ));
     }
     if let Some(result) = tasks.join_next().await {
@@ -127,6 +130,7 @@ async fn accept(
     limits: Limits,
     connections: Arc<Semaphore>,
     addresses: Arc<Vec<SocketAddr>>,
+    routing: Option<(String, Router)>,
 ) {
     loop {
         let (client, peer) = match listener.accept().await {
@@ -144,8 +148,37 @@ async fn accept(
         };
         let mode = Arc::clone(&mode);
         let addresses = Arc::clone(&addresses);
+        let routing = routing.clone();
         tokio::spawn(async move {
             let _permit = permit;
+            let mode = if let Some((listener, router)) = routing {
+                let local_addr = match client.local_addr() {
+                    Ok(address) => address,
+                    Err(error) => {
+                        eprintln!("rift: {peer}: local address: {error}");
+                        return;
+                    }
+                };
+                let connection = ConnectionInfo {
+                    default_backend: router.default_backend(&listener).map(str::to_owned),
+                    listener,
+                    peer_addr: peer,
+                    local_addr,
+                };
+                match router.route(connection).await {
+                    Ok(RouteDecision::Default) => mode,
+                    Ok(RouteDecision::Backend(name)) => Arc::new(Mode::Direct(
+                        router.backend(&name).expect("validated backend").clone(),
+                    )),
+                    Ok(RouteDecision::Reject { .. }) => return,
+                    Err(error) => {
+                        eprintln!("rift: {peer}: on_route: {error}");
+                        return;
+                    }
+                }
+            } else {
+                mode
+            };
             if let Err(error) = handle(client, &mode, &addresses, limits).await {
                 eprintln!("rift: {peer}: {error}");
             }

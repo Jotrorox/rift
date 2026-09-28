@@ -1,11 +1,17 @@
-use std::{collections::BTreeMap, fs, io, net::SocketAddr, path::Path, time::Duration};
-
-use crate::{
-    Mode,
-    routing::{Backend, Routes},
+use std::{
+    collections::BTreeMap,
+    fs,
+    io::{self, Read},
+    net::SocketAddr,
+    path::Path,
+    time::{Duration, Instant},
 };
-use mlua::{Lua, Table, Value};
+
+use crate::routing::{Backend, Mode, Routes};
+use mlua::{Table, Value};
 use tokio::sync::Semaphore;
+
+pub use crate::script::RouteScript;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -13,6 +19,7 @@ pub struct Config {
     pub backends: BTreeMap<String, Backend>,
     pub routes: BTreeMap<String, Route>,
     pub limits: Limits,
+    pub on_route: Option<RouteScript>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,31 +59,38 @@ impl Config {
             backends: BTreeMap::from([("default".into(), Backend::parse(backend)?)]),
             routes: BTreeMap::from([("default".into(), Route::Direct("default".into()))]),
             limits: Limits::default(),
+            on_route: None,
         };
         config.validate()?;
         Ok(config)
     }
 
     pub fn load(path: &Path) -> io::Result<Self> {
-        let source = fs::read_to_string(path).map_err(|error| {
+        let mut source = String::new();
+        let mut read = || -> io::Result<()> {
+            fs::File::open(path)?
+                .take(crate::script::MAX_SOURCE_BYTES as u64 + 1)
+                .read_to_string(&mut source)?;
+            Ok(())
+        };
+        read().map_err(|error| {
             io::Error::new(error.kind(), format!("{}: {error}", path.display()))
         })?;
         Self::from_lua(&source, &path.display().to_string())
     }
 
     pub fn from_lua(source: &str, name: &str) -> io::Result<Self> {
-        // Lua exists only during startup. The runtime receives owned Rust data.
-        let lua = Lua::new();
         let parse = || -> Result<Self, String> {
-            let value = lua
-                .load(source)
-                .set_name(name)
-                .eval::<Value>()
-                .map_err(|e| e.to_string())?;
+            let (_lua, value) = crate::script::load(
+                source,
+                name,
+                Instant::now() + crate::script::EXECUTION_TIMEOUT,
+            )
+            .map_err(|e| e.to_string())?;
             let root = table(value, "configuration (return a table)")?;
             fields(
                 &root,
-                &["listeners", "backends", "routes", "limits"],
+                &["listeners", "backends", "routes", "limits", "on_route"],
                 "config",
             )?;
             let listeners = addresses(
@@ -116,11 +130,20 @@ impl Config {
                     86_400_000,
                 )? as u64);
             }
+            let on_route = match root
+                .raw_get::<Value>("on_route")
+                .map_err(|e| e.to_string())?
+            {
+                Value::Nil => None,
+                Value::Function(_) => Some(RouteScript::new(source, name)),
+                _ => return Err("config.on_route: expected a function".into()),
+            };
             Ok(Self {
                 listeners,
                 backends,
                 routes,
                 limits,
+                on_route,
             })
         };
         let config = parse().map_err(|error| invalid(format!("{name}: {error}")))?;

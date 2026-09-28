@@ -212,3 +212,75 @@ async fn concurrent_fragmented_sessions_remain_isolated() {
     .await
     .unwrap();
 }
+
+#[tokio::test]
+async fn runaway_hook_does_not_block_existing_or_new_traffic_on_a_single_runtime_thread() {
+    timeout(Duration::from_secs(5), async {
+        let backend = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let config = Config::from_lua(
+            &format!(
+                "return {{
+            listeners = {{ healthy = '127.0.0.1:0', runaway = '127.0.0.1:0' }},
+            backends = {{ target = '{}' }},
+            routes = {{ healthy = 'target', runaway = 'target' }},
+            on_route = function(connection)
+                if connection.listener == 'runaway' then while true do end end
+                return {{ backend = 'target' }}
+            end,
+        }}",
+                backend.local_addr().unwrap()
+            ),
+            "isolation.lua",
+        )
+        .unwrap();
+        let router = Router::new(&config);
+        let connections = Arc::new(Semaphore::new(8));
+        let mut tasks = JoinSet::new();
+        let mut addresses = Vec::new();
+        for name in ["healthy", "runaway"] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            addresses.push(listener.local_addr().unwrap());
+            tasks.spawn(accept(
+                listener,
+                Arc::new(config.mode(name).unwrap()),
+                config.limits,
+                connections.clone(),
+                Arc::new(Vec::new()),
+                Some((name.into(), router.clone())),
+            ));
+        }
+        let mut established = TcpStream::connect(addresses[0]).await.unwrap();
+        let (mut existing_backend, _) = backend.accept().await.unwrap();
+        let mut runaway = TcpStream::connect(addresses[1]).await.unwrap();
+        let mut new_client = TcpStream::connect(addresses[0]).await.unwrap();
+        let existing = async {
+            established.write_all(b"still flowing").await.unwrap();
+            let mut bytes = [0; 13];
+            existing_backend.read_exact(&mut bytes).await.unwrap();
+            assert_eq!(&bytes, b"still flowing");
+            existing_backend.write_all(b"reply").await.unwrap();
+            let mut response = [0; 5];
+            established.read_exact(&mut response).await.unwrap();
+            assert_eq!(&response, b"reply");
+        };
+        let incoming = async {
+            let (mut new_backend, _) = backend.accept().await.unwrap();
+            new_backend.write_all(b"new traffic").await.unwrap();
+            let mut bytes = [0; 11];
+            new_client.read_exact(&mut bytes).await.unwrap();
+            assert_eq!(&bytes, b"new traffic");
+        };
+        let rejected = async {
+            assert_eq!(runaway.read(&mut [0]).await.unwrap(), 0);
+        };
+        tokio::join!(existing, incoming, rejected);
+        drop(established);
+        drop(existing_backend);
+        drop(new_client);
+        while connections.available_permits() != 8 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}

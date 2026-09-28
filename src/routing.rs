@@ -1,6 +1,11 @@
 use std::{collections::HashMap, io, net::SocketAddr};
 use tokio::net::{TcpStream, lookup_host};
 
+pub enum Mode {
+    Direct(Backend),
+    Routed(Routes),
+}
+
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.into())
 }
