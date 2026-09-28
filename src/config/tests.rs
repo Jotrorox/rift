@@ -38,6 +38,46 @@ fn limits_and_individual_limit_fields_are_optional() {
 }
 
 #[test]
+fn hook_is_optional_but_must_be_a_function() {
+    assert!(
+        Config::from_lua(VALID, "test.lua")
+            .unwrap()
+            .on_route
+            .is_none()
+    );
+    for value in ["true", "42", "'hook'", "{}"] {
+        let source = VALID.replacen("return {", &format!("return {{ on_route = {value},"), 1);
+        let error = Config::from_lua(&source, "bad.lua").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("bad.lua: config.on_route: expected a function"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn startup_execution_and_source_size_are_bounded() {
+    for (source, expected) in [
+        ("while true do end".to_owned(), "instruction limit"),
+        (
+            " ".repeat(crate::script::MAX_SOURCE_BYTES + 1),
+            "source limit",
+        ),
+    ] {
+        let error = Config::from_lua(&source, "bad.lua")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("bad.lua"), "{error}");
+        assert!(
+            error.contains(expected) || error.contains("deadline"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
 fn malformed_lua_and_wrong_shapes_have_context() {
     for (source, expected) in [
         ("return {", "syntax error"),

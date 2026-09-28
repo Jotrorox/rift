@@ -130,13 +130,114 @@ within Tokio's semaphore capacity. `connect_timeout_ms` accepts 1–86,400,000
 milliseconds; `buffer_size` accepts 1–16,777,216 bytes per direction. All three
 reject fractions, strings, and nonfinite numbers.
 
-Lua runs once during startup and produces a typed Rust `Config`; changing the file
-requires a restart. Treat configuration scripts as trusted local code. Unknown
+Lua evaluates during startup and produces a typed Rust `Config`; changing the file
+requires a restart. An optional `on_route` function also runs for each connection,
+as described below. Treat configuration scripts as trusted local code. Unknown
 fields, invalid types or addresses, missing references, duplicate listener
 addresses, and direct proxy loops fail startup with a contextual error. Syntax
 and execution errors include the filename and Lua diagnostics. A missing explicit
 `--config` file is an error; only a missing implicit `./rift.lua` uses the defaults.
 All listeners bind before Rift begins accepting connections.
+
+## Routing hook
+
+Add `on_route` to the returned configuration table. Rift calls it once after TCP
+accept and before connecting to any backend or reading client bytes:
+
+```lua
+on_route = function(connection)
+    if connection.peer_ip == "192.0.2.10" then
+        return { reject = true, reason = "Access denied" }
+    end
+    if connection.listener == "creative" then
+        return { backend = "creative" }
+    end
+    return nil -- Use routes[connection.listener].
+end,
+```
+
+[`examples/routing.lua`](examples/routing.lua) is a complete configuration. Every
+listener still needs a configured route. Omitting `on_route` keeps that policy and
+does not invoke Lua during connection handling.
+
+`connection` is a fresh table containing:
+
+| Field | Value |
+| --- | --- |
+| `listener` | Configured listener name |
+| `peer_addr`, `local_addr` | Actual accepted socket endpoints as IP:port strings; IPv6 uses brackets |
+| `peer_ip`, `local_ip` | IP strings without ports or brackets |
+| `peer_port`, `local_port` | Integer ports; local port reflects the OS-selected port when configured as `0` |
+| `default_backend` | Direct backend name, or the hostname table's `"*"` default; `nil` if absent |
+
+There is no Minecraft hostname, player identity, or packet data at this stage.
+Changing this table does not change the socket or configured route. A backend
+selection bypasses hostname matching and forwards all bytes unchanged. Returning
+`nil` preserves hostname parsing, matching, handshake deadlines and forwarding;
+it does not jump directly to the hostname table's `"*"` fallback. Script-selected
+backends retain DNS resolution, connection deadlines and proxy-loop checks.
+
+Return `nil` to continue the configured direct or hostname routing policy,
+`{ backend = "name" }` to select a configured backend, or `{ reject = true, reason = "optional explanation" }` to close TCP.
+Rejection reasons must be UTF-8 strings of at most 1,024 bytes; they are available
+in the Rust result but are not sent to the client. Rift sends no Minecraft
+disconnect packet. Unknown fields, conflicting choices, wrong types and unknown
+backend names are errors. Arbitrary backend addresses are not accepted.
+
+Startup syntax errors, invalid configuration, or a non-function `on_route` fail
+startup. During routing, script errors, invalid decisions, exceeded budgets and
+worker overload **fail closed**: only that connection closes, with an error on
+stderr. Lua errors include the script filename and hook context. There is no
+automatic fallback after an error; a successful `nil` result explicitly selects
+the configured policy. Displayed script diagnostics are capped at 2,048 characters,
+and unknown backend names at 256 characters. Backend connection failures retain the
+usual connection timeout.
+
+Each invocation creates a fresh Lua state and re-evaluates the startup source
+snapshot, including its top-level code, before calling the hook. Globals and
+closure upvalues are private to that invocation and never persist across clients.
+The file is not read again. Keep top-level initialization small and deterministic.
+Independent calls can run concurrently, and their completion order is unspecified.
+
+The initial limits are fixed in the implementation:
+
+| Resource | Limit |
+| --- | --- |
+| Script source | 256 KiB |
+| Lua allocator per state | 8 MiB |
+| Lua instructions per evaluation, including initialization and hook | 100,000, checked every 1,000 instructions |
+| Routing deadline, including blocking-worker scheduling and initialization | 50 ms |
+| Admitted script jobs across all listeners | 4; excess calls close immediately |
+
+Lua runs through Tokio's blocking pool, with admission acquired before scheduling.
+There is no application waiting queue. Timed-out or cancelled calls retain their
+worker permit until execution actually stops, so they cannot accumulate unlimited
+background jobs. Existing relays never acquire a script permit or access a Lua
+state. Pending routing also counts against `max_connections`.
+
+Startup evaluation uses the same instruction, memory and elapsed-time limits.
+LuaJIT compilation is disabled so instruction hooks remain effective. Deadlines
+are checked at hooks and when native operations return; they are not hard
+real-time preemption. The async caller also has a deadline. This is an in-process
+environment for trusted scripts, not process isolation for hostile code.
+
+Both startup and routing expose basic Lua operations (`assert`, `error`, `ipairs`,
+`next`, `pairs`, `select`, `tonumber`, `tostring`, `type`, `unpack`), `math`,
+`string.byte/char/len/lower/rep/reverse/sub/upper`, and
+`table.concat/insert/remove/maxn`, plus `_G` and `_VERSION`. File/process I/O,
+module and code loading, FFI, JIT controls, debug access, coroutines,
+`pcall`/`xpcall`, metatable manipulation and finalizers are unavailable. Native
+pattern matching and sorting are also omitted to avoid work outside instruction
+hooks. `table.insert` runs in Lua under the instruction budget and requires a
+position in `1..=#table+1`. A script cannot catch a budget error or replace the
+execution hook.
+
+The library exposes owned Rust `ConnectionInfo`, `RouteDecision` and `RouteError`
+types in [`src/hooks.rs`](src/hooks.rs), plus `Router::route` and backend lookup.
+The boundary carries no Lua values, VM handles, socket ownership, or borrowed
+strings. A future C ABI can marshal endpoints and UTF-8 strings into these types
+and expose a tagged backend/rejection result with explicit ownership. The current
+Rust structs and enum are not a stable C layout; no C ABI is exported yet.
 
 ## Implementation
 
@@ -146,7 +247,7 @@ All listeners bind before Rift begins accepting connections.
 - Five-second handshake deadline in routing mode; a separate backend
   DNS/connect/forward deadline (five seconds by default). No idle timeout for established sessions.
 - By default, at most 4,096 active connections across all listeners, including
-  pending handshakes and backend connections;
+  pending script calls, handshakes and backend connections;
   excess clients are immediately closed. The OS file descriptor limit must allow
   two sockets per client plus headroom.
 - No per-packet logging, serialization, shared traffic lock, or unbounded queue.
@@ -199,7 +300,9 @@ which disables test assertions; the scripts reject it.
 Rust tests additionally check simultaneous bulk transfer byte for byte, slow
 readers, fragmented concurrent sessions, half-closes in both directions, connection
 refusal, CLI startup failures, bounded handshake parsing and deadlines, and
-hostname routing against two independent Minecraft status fixtures.
+hostname routing against two independent Minecraft status fixtures. Hook tests cover
+backend selection/rejection, malformed results, execution limits and cancellation,
+state isolation, and traffic continuing alongside a runaway hook.
 Microsoft account authentication and
 encrypted gameplay are not exercised by the offline integration fixtures.
 
