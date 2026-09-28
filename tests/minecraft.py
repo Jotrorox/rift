@@ -82,7 +82,7 @@ def teleport_acknowledgement(body, protocol):
 
 
 class Client:
-    def __init__(self, port, state, protocol=774):
+    def __init__(self, port, state, protocol=774, hostname="localhost"):
         self.socket = socket.create_connection(("127.0.0.1", port), timeout=20)
         self.socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.reader = self.socket.makefile("rb")
@@ -90,7 +90,7 @@ class Client:
         self.compressed_packets = 0
         self.sent_compressed_packets = 0
         self.deadline = time.monotonic() + 120
-        self.send(0, varint(protocol) + string("localhost") + struct.pack(">H", port) + varint(state))
+        self.send(0, varint(protocol) + string(hostname) + struct.pack(">H", port) + varint(state))
 
     def __enter__(self):
         return self
@@ -131,8 +131,8 @@ class Client:
         return packet_id, packet.read()
 
 
-def status(port, protocol=774):
-    with Client(port, 1, protocol) as client:
+def status(port, protocol=774, hostname="localhost"):
+    with Client(port, 1, protocol, hostname) as client:
         client.send(0)
         packet_id, body = client.receive()
         assert packet_id == 0
@@ -144,7 +144,7 @@ def status(port, protocol=774):
         return result
 
 
-def play(port, name, protocol=774, compression=True, pumpkin=False):
+def play(port, name, protocol=774, compression=True, pumpkin=False, hostname="localhost"):
     packets = PROTOCOLS[protocol]
     # An offline-mode fixture avoids needing an actual Microsoft account/token.
     digest = hashlib.md5(f"OfflinePlayer:{name}".encode()).digest()
@@ -152,7 +152,7 @@ def play(port, name, protocol=774, compression=True, pumpkin=False):
     # Pumpkin's pinned net::offline_uuid uses the first 16 SHA-256 bytes.
     if pumpkin:
         player_id = uuid.UUID(bytes=hashlib.sha256(name.encode()).digest()[:16])
-    with Client(port, 2, protocol) as client:
+    with Client(port, 2, protocol, hostname) as client:
         client.send(0, string(name) + player_id.bytes)
         while True:
             packet_id, body = client.receive()
@@ -287,8 +287,9 @@ def verify_checksum(path, fixture):
         raise ValueError(f"checksum mismatch: {path}: {actual}")
 
 
-def configure_server(name, directory, backend, compression):
+def configure_server(name, directory, backend, compression, motd=None):
     artifact = download(name)
+    motd = motd or f"rift-{name}-test"
     if name == "pumpkin":
         (directory / "pumpkin.toml").write_text(
             'seed = "12345"\ndefault_gamemode = "Creative"\n'
@@ -296,7 +297,7 @@ def configure_server(name, directory, backend, compression):
             '[telemetry]\nenabled = false\n[plugins]\nenabled = false\n'
             '[commands]\nuse_console = true\nuse_tty = false\n'
             '[networking.java]\nenabled = true\n'
-            f'address = "127.0.0.1:{backend}"\nmotd = "rift-pumpkin-test"\n'
+            f'address = "127.0.0.1:{backend}"\nmotd = "{motd}"\n'
             'online_mode = false\nencryption = false\nview_distance = 2\n'
             'simulation_distance = 2\nmax_players = 20\nkeep_alive_time = 3\n'
             '[networking.java.authentication]\nenabled = false\n'
@@ -308,7 +309,7 @@ def configure_server(name, directory, backend, compression):
 
     (directory / "eula.txt").write_text("eula=true\n")
     (directory / "server.properties").write_text(
-        f"server-ip=127.0.0.1\nserver-port={backend}\nmotd=rift-{name}-test\n"
+        f"server-ip=127.0.0.1\nserver-port={backend}\nmotd={motd}\n"
         "online-mode=false\nenforce-secure-profile=false\n"
         f"network-compression-threshold={256 if compression else -1}\n"
         "gamemode=creative\nforce-gamemode=true\ndifficulty=peaceful\n"
@@ -329,6 +330,46 @@ def status_ready(port, protocol):
         return True
     except (OSError, EOFError):
         return False
+
+
+def test_hostname_routing(name, binary, directory, compression, first_backend):
+    """Two real servers with distinct MOTDs, addressed through one proxy port."""
+    protocol = SERVERS[name]["protocol"]
+    second_backend, frontend = unused_port(), unused_port()
+    while second_backend == frontend:
+        frontend = unused_port()
+    second_dir = directory / "routing-second"
+    second_dir.mkdir()
+    second_motd = f"rift-{name}-second-test"
+    command = configure_server(name, second_dir, second_backend, compression, second_motd)
+    with process(command, second_dir, "server.log", server=True) as server:
+        wait_ready(server, lambda: status_ready(second_backend, protocol), second_dir / "server.log")
+        with process([str(binary), f"127.0.0.1:{frontend}",
+                      "--route", f"survival.example.test=127.0.0.1:{first_backend}",
+                      "--route", f"creative.example.test=localhost:{second_backend}",
+                      "--route", f"*.games.example.test=localhost:{second_backend}",
+                      "--default", f"127.0.0.1:{first_backend}"],
+                     directory, "routing-proxy.log") as proxy:
+            wait_ready(proxy, lambda: "rift:" in (directory / "routing-proxy.log").read_text(),
+                       directory / "routing-proxy.log")
+            expected = {
+                "survival.example.test": status(first_backend, protocol),
+                "creative.example.test": status(second_backend, protocol),
+            }
+            assert expected["survival.example.test"]["description"] != expected["creative.example.test"]["description"]
+            hosts = list(expected) * 16
+            with ThreadPoolExecutor(max_workers=16) as pool:
+                replies = list(pool.map(lambda host: status(frontend, protocol, host), hosts))
+            for host, reply in zip(hosts, replies):
+                assert reply == expected[host], (host, reply)
+            assert status(frontend, protocol, "pvp.games.example.test") == expected["creative.example.test"]
+            assert status(frontend, protocol, "unmatched.example.test") == expected["survival.example.test"]
+            for host in expected:
+                play(frontend, "RiftR" + uuid.uuid4().hex[:8], protocol, compression,
+                     name == "pumpkin", hostname=host)
+            assert proxy.poll() is None
+            print(f"PASS {name}: two domains, two servers, one port; DNS, wildcard, default, concurrent status and gameplay", flush=True)
+    assert server.returncode == 0, f"routing server shutdown failed: {server.returncode}"
 
 
 def test_server(name, binary, directory, compression):
@@ -363,6 +404,7 @@ def test_server(name, binary, directory, compression):
                 chunks, compressed = play(port, player, protocol, compression, name == "pumpkin")
                 route = "direct" if port == backend else "proxied"
                 print(f"PASS {name} {route}: login, configuration, {chunks} chunks, two keepalives ({compressed} compressed packets)", flush=True)
+            test_hostname_routing(name, binary, directory, compression, backend)
             assert proxy.poll() is None
         assert server.returncode == 0, f"server shutdown failed: {server.returncode}"
         assert proxy.poll() is None

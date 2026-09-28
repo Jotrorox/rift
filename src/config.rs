@@ -1,15 +1,24 @@
 use std::{collections::BTreeMap, fs, io, net::SocketAddr, path::Path, time::Duration};
 
+use crate::{
+    Mode,
+    routing::{Backend, Routes},
+};
 use mlua::{Lua, Table, Value};
 use tokio::sync::Semaphore;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub listeners: BTreeMap<String, SocketAddr>,
-    pub backends: BTreeMap<String, SocketAddr>,
-    // Each listener has exactly one backend; traffic remains transparent TCP.
-    pub routes: BTreeMap<String, String>,
+    pub backends: BTreeMap<String, Backend>,
+    pub routes: BTreeMap<String, Route>,
     pub limits: Limits,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Route {
+    Direct(String),
+    Hostnames(BTreeMap<String, String>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,8 +49,8 @@ impl Config {
     pub fn from_addresses(listen: &str, backend: &str) -> io::Result<Self> {
         let config = Self {
             listeners: BTreeMap::from([("default".into(), address(listen, "listen")?)]),
-            backends: BTreeMap::from([("default".into(), address(backend, "backend")?)]),
-            routes: BTreeMap::from([("default".into(), "default".into())]),
+            backends: BTreeMap::from([("default".into(), Backend::parse(backend)?)]),
+            routes: BTreeMap::from([("default".into(), Route::Direct("default".into()))]),
             limits: Limits::default(),
         };
         config.validate()?;
@@ -74,8 +83,15 @@ impl Config {
                 root.get("listeners").map_err(|e| e.to_string())?,
                 "listeners",
             )?;
-            let backends = addresses(root.get("backends").map_err(|e| e.to_string())?, "backends")?;
-            let routes = strings(root.get("routes").map_err(|e| e.to_string())?, "routes")?;
+            let backends = strings(root.get("backends").map_err(|e| e.to_string())?, "backends")?
+                .into_iter()
+                .map(|(name, value)| {
+                    Backend::parse(&value)
+                        .map(|backend| (name.clone(), backend))
+                        .map_err(|error| format!("backends.{name}: {error}"))
+                })
+                .collect::<Result<_, _>>()?;
+            let routes = routes(root.get("routes").map_err(|e| e.to_string())?)?;
             let mut limits = Limits::default();
             let value: Value = root.get("limits").map_err(|e| e.to_string())?;
             if !value.is_nil() {
@@ -130,34 +146,65 @@ impl Config {
             }
             // Check every backend against every listener, including cross-listener loops.
             for (backend_name, backend) in &self.backends {
-                if same_socket(*listen, *backend) {
+                if backend.check_loop(*listen).is_err() {
                     return Err(invalid(format!(
-                        "listeners.{name} and backends.{backend_name} must not point to the same socket ({backend})"
+                        "listeners.{name} and backends.{backend_name} must not point to the same socket"
                     )));
                 }
             }
         }
-        for (listener, backend) in &self.routes {
+        for listener in self.routes.keys() {
             if !self.listeners.contains_key(listener) {
                 return Err(invalid(format!(
                     "routes.{listener}: unknown listener {listener:?}"
                 )));
             }
-            if !self.backends.contains_key(backend) {
-                return Err(invalid(format!(
-                    "routes.{listener}: unknown backend {backend:?}"
-                )));
-            }
+            self.mode(listener)?;
         }
         Ok(())
     }
+
+    pub fn mode(&self, listener: &str) -> io::Result<Mode> {
+        let backend = |name: &str| {
+            self.backends
+                .get(name)
+                .cloned()
+                .ok_or_else(|| invalid(format!("routes.{listener}: unknown backend {name:?}")))
+        };
+        match &self.routes[listener] {
+            Route::Direct(name) => Ok(Mode::Direct(backend(name)?)),
+            Route::Hostnames(patterns) => {
+                let mut routes = Routes::default();
+                for (pattern, name) in patterns {
+                    routes
+                        .add_pattern(pattern, backend(name)?)
+                        .map_err(|error| invalid(format!("routes.{listener}: {error}")))?;
+                }
+                Ok(Mode::Routed(routes))
+            }
+        }
+    }
 }
 
-fn same_socket(listen: SocketAddr, backend: SocketAddr) -> bool {
-    listen.port() != 0
-        && listen.port() == backend.port()
-        && (listen.ip() == backend.ip()
-            || (listen.ip().is_unspecified() && backend.ip().is_loopback()))
+fn routes(value: Value) -> Result<BTreeMap<String, Route>, String> {
+    let mut routes = BTreeMap::new();
+    for pair in table(value, "routes")?.pairs::<Value, Value>() {
+        let (key, value) = pair.map_err(|e| e.to_string())?;
+        let key = string(key, "routes key")?;
+        if key.trim().is_empty() {
+            return Err("routes: names must not be empty".into());
+        }
+        let path = format!("routes.{key}");
+        let route = match value {
+            Value::Table(_) => Route::Hostnames(strings(value, &path)?),
+            _ => Route::Direct(string(value, &path)?),
+        };
+        routes.insert(key, route);
+    }
+    if routes.is_empty() {
+        return Err("routes: must not be empty".into());
+    }
+    Ok(routes)
 }
 
 fn invalid(message: impl Into<String>) -> io::Error {

@@ -13,7 +13,15 @@ async fn connection() -> (TcpStream, TcpStream, JoinHandle<io::Result<(u64, u64)
         .await
         .unwrap();
     let (accepted, _) = frontend.accept().await.unwrap();
-    let proxy = tokio::spawn(relay(accepted, backend_addr, Limits::default()));
+    let proxy = tokio::spawn(async move {
+        handle(
+            accepted,
+            &Mode::Direct(Backend::parse(&backend_addr.to_string()).unwrap()),
+            &[frontend.local_addr().unwrap()],
+            Limits::default(),
+        )
+        .await
+    });
     let (server, _) = backend.accept().await.unwrap();
     (client, server, proxy)
 }
@@ -110,9 +118,14 @@ async fn unavailable_backend_closes_the_client() {
                 .await
                 .unwrap();
             let (accepted, _) = frontend.accept().await.unwrap();
-            let error = relay(accepted, reserved.local_addr().unwrap(), Limits::default())
-                .await
-                .unwrap_err();
+            let error = handle(
+                accepted,
+                &Mode::Direct(Backend::parse(&reserved.local_addr().unwrap().to_string()).unwrap()),
+                &[frontend.local_addr().unwrap()],
+                Limits::default(),
+            )
+            .await
+            .unwrap_err();
             assert!(
                 matches!(
                     error.kind(),

@@ -69,7 +69,7 @@ impl Process {
             .lines
             .recv_timeout(Duration::from_secs(10))
             .expect("startup log");
-        line.strip_prefix("rift: ")
+        line.strip_prefix("rift: listening on ")
             .unwrap()
             .split(" -> ")
             .next()
@@ -291,4 +291,45 @@ fn failure_to_bind_any_listener_aborts_startup() {
     let occupied = TcpListener::bind("127.0.0.1:0").unwrap();
     fixture.write(&format!("return {{ listeners = {{ a = '127.0.0.1:0', b = '{}' }}, backends = {{ target = '127.0.0.1:0' }}, routes = {{ a = 'target', b = 'target' }} }}", occupied.local_addr().unwrap()));
     fixture.spawn(&[]).failure("listeners.b");
+}
+
+#[test]
+fn lua_hostname_routes_reach_two_backends_on_one_listener() {
+    let fixture = Fixture::new();
+    let backends: Vec<_> = (0..2)
+        .map(|_| TcpListener::bind("127.0.0.1:0").unwrap())
+        .collect();
+    fixture.write(&format!("return {{
+        listeners = {{ public = '127.0.0.1:0' }},
+        backends = {{ survival = '{}', creative = 'localhost:{}' }},
+        routes = {{ public = {{ ['survival.example.test'] = 'survival', ['creative.example.test'] = 'creative', ['*.games.example.test'] = 'creative', ['*'] = 'survival' }} }},
+        limits = {{ buffer_size = 3 }}
+    }}", backends[0].local_addr().unwrap(), backends[1].local_addr().unwrap().port()));
+    let process = fixture.spawn(&[]);
+    let address = process.listener();
+    for (host, index) in [
+        ("survival.example.test", 0),
+        ("creative.example.test", 1),
+        ("pvp.games.example.test", 1),
+        ("unmatched.test", 0),
+    ] {
+        let mut client = connect(address);
+        let mut body = vec![0, 0x86, 0x06, host.len() as u8];
+        body.extend(host.as_bytes());
+        body.extend([0x63, 0xdd, 1]);
+        let mut request = vec![body.len() as u8];
+        request.extend(body);
+        request.extend([1, 0]); // Pipelined Minecraft status request.
+        client.write_all(&request).unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut server = accept(&backends[index]);
+        let mut received = Vec::new();
+        server.read_to_end(&mut received).unwrap();
+        assert_eq!(received, request);
+        server.write_all(&[index as u8]).unwrap();
+        server.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).unwrap();
+        assert_eq!(response, [index as u8]);
+    }
 }
