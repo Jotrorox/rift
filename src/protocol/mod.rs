@@ -6,8 +6,12 @@ mod packets;
 mod state;
 
 pub use framing::{Codec, MAX_FRAME_SIZE, MAX_PACKET_SIZE, Packet, Reader};
-pub(crate) use packets::login_identity;
 pub use packets::{Handshake, NextState, PacketKind, ProtocolVersion, disconnect, status_response};
+pub use packets::{PlayerIdentity, system_message};
+pub(crate) use packets::{
+    login_identity, network_commands, proxy_command, start_identity, success_identity,
+    validate_network_join,
+};
 pub use state::{ConnectionState, Direction, State};
 use std::io;
 

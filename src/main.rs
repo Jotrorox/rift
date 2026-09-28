@@ -4,6 +4,7 @@ mod control;
 mod events;
 mod health;
 mod metrics;
+mod network;
 mod runtime;
 mod status;
 mod web;

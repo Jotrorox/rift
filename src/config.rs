@@ -22,6 +22,7 @@ pub struct Config {
     pub on_route: Option<RouteScript>,
     pub on_http: Option<HttpScript>,
     pub fallbacks: BTreeMap<String, Vec<String>>,
+    pub network: Network,
     pub rate_limit: Option<RateLimit>,
     pub login_rate_limit: Option<RateLimit>,
     pub health_check: Option<HealthCheck>,
@@ -33,6 +34,39 @@ pub struct Config {
     pub web: Option<WebConfig>,
     pub status: Option<StatusConfig>,
     pub shutdown_timeout: Duration,
+}
+
+/// Gameplay destinations and access rules. An empty initial list retains the
+/// ordinary route and its fallbacks. `initial` replaces only a default direct
+/// route; hostname and explicit script selections retain their own policy.
+/// Hubs are explicit destinations for `/hub` and outage recovery.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Network {
+    pub initial: Vec<String>,
+    pub hubs: Vec<String>,
+    pub access: BTreeMap<String, ServerAccess>,
+}
+
+/// Names are matched without ASCII case. An absent allow list is public; an
+/// explicitly empty allow list denies everyone. A deny entry always wins.
+/// These are offline-mode player names, not proof of a Mojang identity.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ServerAccess {
+    pub allow: Option<Vec<String>>,
+    pub deny: Vec<String>,
+}
+
+impl ServerAccess {
+    pub fn permits(&self, username: &str) -> bool {
+        !self
+            .deny
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(username))
+            && self
+                .allow
+                .as_ref()
+                .is_none_or(|names| names.iter().any(|name| name.eq_ignore_ascii_case(username)))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,6 +188,7 @@ impl Config {
             on_route: None,
             on_http: None,
             fallbacks: BTreeMap::new(),
+            network: Network::default(),
             rate_limit: None,
             login_rate_limit: None,
             health_check: None,
@@ -206,6 +241,7 @@ impl Config {
                     "on_route",
                     "on_http",
                     "fallbacks",
+                    "network",
                     "rate_limit",
                     "login_rate_limit",
                     "health_check",
@@ -412,6 +448,7 @@ impl Config {
                     fallbacks.insert(key, ordered.into_values().collect());
                 }
             }
+            let network = network(&root)?;
             Ok(Self {
                 listeners,
                 backends,
@@ -420,6 +457,7 @@ impl Config {
                 on_route,
                 on_http,
                 fallbacks,
+                network,
                 rate_limit: connection_rate_limit,
                 login_rate_limit,
                 health_check,
@@ -540,6 +578,44 @@ impl Config {
                 }
             }
         }
+        for (label, names) in [
+            ("network.initial", &self.network.initial),
+            ("network.hubs", &self.network.hubs),
+        ] {
+            let mut seen = std::collections::HashSet::new();
+            if names.len() > 16 {
+                return Err(invalid(format!("{label}: at most 16 backend names")));
+            }
+            for name in names {
+                if !self.backends.contains_key(name) || !seen.insert(name) {
+                    return Err(invalid(format!(
+                        "{label}: unknown or duplicate backend {name:?}"
+                    )));
+                }
+            }
+        }
+        for (backend, access) in &self.network.access {
+            if !self.backends.contains_key(backend) {
+                return Err(invalid(format!(
+                    "network.access.{backend}: unknown backend"
+                )));
+            }
+            for (label, names) in [
+                ("allow", access.allow.as_deref().unwrap_or_default()),
+                ("deny", access.deny.as_slice()),
+            ] {
+                let mut seen = std::collections::HashSet::new();
+                for name in names {
+                    if !crate::players::valid_username(name)
+                        || !seen.insert(name.to_ascii_lowercase())
+                    {
+                        return Err(invalid(format!(
+                            "network.access.{backend}.{label}: invalid or duplicate player name {name:?}"
+                        )));
+                    }
+                }
+            }
+        }
         for (name, targets) in &self.fallbacks {
             if !self.backends.contains_key(name) {
                 return Err(invalid(format!("fallbacks.{name}: unknown backend")));
@@ -631,6 +707,17 @@ impl Config {
         Ok(())
     }
 
+    /// Apply the same rule to initial login, commands and failure recovery.
+    /// Unknown destinations are never permitted, even with no access entry.
+    pub fn can_access(&self, backend: &str, username: &str) -> bool {
+        self.backends.contains_key(backend)
+            && self
+                .network
+                .access
+                .get(backend)
+                .is_none_or(|access| access.permits(username))
+    }
+
     pub fn mode(&self, listener: &str) -> io::Result<Mode> {
         let backend = |name: &str| {
             self.backends
@@ -651,6 +738,66 @@ impl Config {
             }
         }
     }
+}
+
+fn network(root: &Table) -> Result<Network, String> {
+    let Some(values) = options(root, "network", &["initial", "hubs", "access"])? else {
+        return Ok(Network::default());
+    };
+    let mut network = Network::default();
+    for (key, destination) in [
+        ("initial", &mut network.initial),
+        ("hubs", &mut network.hubs),
+    ] {
+        let value: Value = values.get(key).map_err(|e| e.to_string())?;
+        if !value.is_nil() {
+            *destination = string_list(value, &format!("network.{key}"), 16)?;
+        }
+    }
+    if let Some(entries) = options_map(&values, "access")? {
+        for pair in entries.pairs::<Value, Value>() {
+            let (backend, value) = pair.map_err(|e| e.to_string())?;
+            let backend = string(backend, "network.access key")?;
+            let path = format!("network.access.{backend}");
+            let rule = table(value, &path)?;
+            fields(&rule, &["allow", "deny"], &path)?;
+            let allow: Value = rule.get("allow").map_err(|e| e.to_string())?;
+            let deny: Value = rule.get("deny").map_err(|e| e.to_string())?;
+            network.access.insert(
+                backend,
+                ServerAccess {
+                    allow: if allow.is_nil() {
+                        None
+                    } else {
+                        Some(string_list(allow, &format!("{path}.allow"), 65536)?)
+                    },
+                    deny: if deny.is_nil() {
+                        Vec::new()
+                    } else {
+                        string_list(deny, &format!("{path}.deny"), 65536)?
+                    },
+                },
+            );
+        }
+    }
+    Ok(network)
+}
+
+fn string_list(value: Value, path: &str, maximum: usize) -> Result<Vec<String>, String> {
+    let mut ordered = BTreeMap::new();
+    for pair in table(value, path)?.pairs::<Value, Value>() {
+        let (index, value) = pair.map_err(|e| e.to_string())?;
+        let Value::Integer(index) = index else {
+            return Err(format!("{path}: expected a dense array"));
+        };
+        ordered.insert(index, string(value, path)?);
+    }
+    if ordered.len() > maximum || ordered.keys().copied().ne(1..=ordered.len() as i64) {
+        return Err(format!(
+            "{path}: expected a dense array of at most {maximum} strings"
+        ));
+    }
+    Ok(ordered.into_values().collect())
 }
 
 /// Port zero requests an independently assigned port, so it never overlaps.

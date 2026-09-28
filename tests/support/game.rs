@@ -1,8 +1,11 @@
 //! A packet-aware fixture for the operational tests. Application test bytes are
 //! carried in opaque play packets after a real 1.8 handshake and offline login.
 use super::*;
-use rift::protocol::{Codec, Handshake, NextState, Packet, write_string};
-use std::collections::VecDeque;
+use rift::protocol::{Codec, Handshake, NextState, Packet, read_string, write_string};
+use std::{
+    collections::VecDeque,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 pub struct GameStream {
     socket: TcpStream,
@@ -82,6 +85,10 @@ pub fn read_packet(stream: &mut TcpStream) -> std::io::Result<Packet> {
 }
 
 pub fn setup() -> Vec<u8> {
+    setup_for("Player")
+}
+
+fn setup_for(name: &str) -> Vec<u8> {
     let handshake = Handshake {
         protocol: 47,
         address: "localhost".into(),
@@ -90,22 +97,37 @@ pub fn setup() -> Vec<u8> {
     };
     let mut bytes = Codec::default().encode(&handshake.packet()).unwrap();
     let mut data = Vec::new();
-    write_string("Player", &mut data);
+    write_string(name, &mut data);
     bytes.extend(Codec::default().encode(&Packet::new(0, data)).unwrap());
     bytes
 }
+#[allow(dead_code)] // Shared fixtures are compiled by several integration suites.
 pub fn success() -> Vec<u8> {
+    success_for("Player", 1)
+}
+
+fn success_for(name: &str, identity: u64) -> Vec<u8> {
+    assert!(identity < (1 << 48), "fixture UUID counter exhausted");
     let mut data = Vec::new();
-    write_string("00000000-0000-0000-0000-000000000001", &mut data);
-    write_string("Player", &mut data);
+    write_string(
+        &format!("00000000-0000-0000-0000-{identity:012x}"),
+        &mut data,
+    );
+    write_string(name, &mut data);
     Codec::default().encode(&Packet::new(2, data)).unwrap()
 }
 
 pub fn connect_game(address: SocketAddr) -> GameStream {
+    static NEXT_PLAYER: AtomicU64 = AtomicU64::new(1);
+    let identity = NEXT_PLAYER.fetch_add(1, Ordering::Relaxed);
+    assert!(identity < (1 << 20), "fixture name counter exhausted");
+    // Exactly six characters, like setup()'s Player, so wire-byte metrics keep
+    // their existing expectations while simultaneous sessions have unique names.
+    let name = format!("P{identity:05x}");
     let mut socket = connect(address);
     // Admission/hook rejections can close immediately; the read still observes
     // that outcome when the initial write races the rejection.
-    let _ = socket.write_all(&setup());
+    let _ = socket.write_all(&setup_for(&name));
     GameStream {
         socket,
         pending: VecDeque::new(),
@@ -118,14 +140,20 @@ pub fn accept_game(listener: &TcpListener) -> GameStream {
 }
 
 pub fn accept_socket(mut socket: TcpStream) -> GameStream {
+    static NEXT_IDENTITY: AtomicU64 = AtomicU64::new(1);
     assert_eq!(
         Handshake::decode(&read_packet(&mut socket).unwrap())
             .unwrap()
             .next_state,
         NextState::Login
     );
-    assert_eq!(read_packet(&mut socket).unwrap().id, 0);
-    socket.write_all(&success()).unwrap();
+    let login = read_packet(&mut socket).unwrap();
+    assert_eq!(login.id, 0);
+    let mut fields = login.data.as_slice();
+    let name = read_string(&mut fields, 16).unwrap();
+    assert!(fields.is_empty());
+    let identity = NEXT_IDENTITY.fetch_add(1, Ordering::Relaxed);
+    socket.write_all(&success_for(name, identity)).unwrap();
     GameStream {
         socket,
         pending: VecDeque::new(),

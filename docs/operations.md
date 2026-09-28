@@ -306,14 +306,19 @@ attachments to that backend (including fallback and explicit transfers), and
 allows eligible configured fallbacks to accept new players. Wait for the backend
 player count to reach zero or transfer supported clients before stopping it.
 
-Transfers retain the client socket on Minecraft 1.20.2+ while attaching the target
-backend and checking the same UUID/name. Completion means play has resumed, with
-a 30-second operation cap. Older clients and invalid targets are
-rejected without moving the player. Replacement login has a bounded deadline;
-if a transfer fails after client protocol state has changed or a write has been
-interrupted, Rift disconnects the player rather than continue a damaged session.
-Transfer success does not move inventories/world state between independent
-servers. There is no automatic migration after a backend failure.
+Transfers retain the client socket on Minecraft 1.21.11 (protocol 774) while
+attaching the target backend and checking the same UUID/name. Completion requires
+the replacement world's Join Game, with a 30-second operation cap. Other client
+versions and invalid targets are rejected without moving the player. The target
+must permit the player under both the session's original access rules and the
+current administrator-request configuration. A denied or failed replacement
+login leaves the original backend attached. If a transfer fails after the client
+transition begins, Rift disconnects the player to avoid continuing a damaged
+session. Transfer success does not move inventories between independent servers.
+
+With a [network configuration](../README.md#a-lobby-and-survival-network), a
+backend transport failure tries the configured hubs and fallbacks. Access rules,
+backend bans and draining still apply; explicit backend kicks are terminal.
 
 After backend work, inspect its health and reopen admission:
 

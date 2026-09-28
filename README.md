@@ -230,8 +230,8 @@ previous file; a rejected reload does not undo an external editor's disk changes
 Save files by atomic replacement before signaling. CLI-only invocations have no
 file to reload. An implicitly loaded `./rift.lua` can be reloaded too.
 
-Routes, backends, fallback lists, scripts, limits, health checks, status-cache
-settings, maintenance/draining policy, HTTP services and the shutdown deadline
+Routes, backends, fallback lists, network settings, scripts, limits, health checks,
+status-cache settings, maintenance/draining policy, HTTP services and the shutdown deadline
 can change live. **Gameplay listener names/addresses and the operational `admin`
 endpoint's bind, token-variable and permissions require a restart**; changing
 them rejects the entire reload. The `web`, `status` and standalone `metrics`
@@ -240,8 +240,8 @@ servers can be enabled, disabled or moved on reload, including changes to
 service sockets bind successfully before a change is applied.
 
 Already accepted connections finish using their original routing snapshot.
-Established relays retain their sockets and buffers, so reloads do not disconnect
-players or retain old caches for the lifetime of a session. Lowering
+Established sessions retain their sockets, buffers and original snapshot, so reloads
+do not disconnect players. The player registry is shared across snapshots. Lowering
 `max_connections` preserves current sessions and rejects new ones until the total
 falls below the new limit. The Lua worker limit remains shared across generations.
 Every successful reload invalidates status caches and starts fresh health checks.
@@ -318,8 +318,9 @@ rift admin shutdown
 Use a `connection_id` from `status` for transfers; status also lists backend health
 and draining state. The default endpoint is `127.0.0.1:9091`; select another using
 `rift admin --address 127.0.0.1:9092 status`. Transfer requires a settled online
-player on 1.20.2+, a configured eligible target and matching UUID/name at backend
-login. Unsupported clients and invalid targets stay attached to their original
+player on Minecraft 1.21.11 (protocol 774), a configured eligible target and
+matching UUID/name at backend login. Both the session's retained network access
+rules and the current administrator-request configuration must permit the target. Unsupported clients and invalid targets stay attached to their original
 backend. Once transfer has altered client protocol state, failure disconnects
 the session. The operation is capped at 30 seconds and reports success when play
 resumes. See the [operator guide](docs/operations.md) for secret handling,
@@ -359,17 +360,81 @@ All candidate connections share `limits.connect_timeout_ms`. Each attempt gets
 a share of the remaining deadline, reserving time for later candidates even if
 a primary silently drops packets. Resolution and all returned addresses are
 included in that attempt. If no candidate is reachable, the client receives an unavailable-server message.
-Fallback happens only while connecting, before any client bytes are forwarded.
-The executable disconnects with a useful message if its backend fails; automatic
-migration of players is not configured. Administrators can explicitly transfer
-an online player with `rift admin transfer <connection-id> <backend>`. The
-library's `Session::connect_backend` operation attaches a replacement backend to
-an established client on 1.20.2+.
-It re-enters client configuration, logs into the replacement independently, checks
-the UUID/name, and retains the original client socket and compression settings.
-Callers must give that operation a deadline and disconnect after an interrupted
-write. Replacement login plugin requests receive an unsupported response; login
-cookies and encryption during replacement are unsupported.
+Without a `network` configuration, fallback applies to the initial TCP connection.
+An explicit backend disconnect (including bans and whitelist rejections) is always
+honored; it never triggers automatic fallback.
+
+### A lobby and survival network
+
+Use [`examples/two-server.lua`](examples/two-server.lua) for **Minecraft 1.21.11
+(protocol 774)** clients and backends. Other supported protocols retain ordinary
+routing, initial fallback and access checks, but cannot switch within a session.
+Both backends need `online-mode=false` and `enforce-secure-profile=false`, with
+BungeeCord/Velocity forwarding disabled.
+
+```lua
+return {
+    listeners = { public = "0.0.0.0:25565" },
+    backends = {
+        lobby = "127.0.0.1:25566",
+        survival = "127.0.0.1:25567",
+    },
+    routes = { public = "lobby" },
+    network = {
+        initial = { "lobby" },
+        hubs = { "lobby" },
+        access = {
+            survival = { allow = { "Alice", "Bob" }, deny = { "Bob" } },
+        },
+    },
+}
+```
+
+Players join the lobby, use `/server` to list accessible servers and their current
+server, `/server survival` to switch, and `/hub` to return. These commands are local
+to Rift. Entry and hub lists are ordered, contain up to 16 distinct backend names,
+and skip unavailable or inaccessible candidates. `initial` replaces the default
+direct route's entry list; hostname routes and explicit Lua backend selections
+retain their selected primary and its `fallbacks`. Denial of that selected primary
+ends login instead of trying a different server.
+
+Access rules match player names without case. Omitted rules allow access; an
+explicit `allow = {}` permits nobody; `deny` overrides `allow`. Rules apply to
+initial connections, server listings, commands and recovery. These names are
+**offline identities**, not authenticated Microsoft accounts. The backend also
+checks its own bans and whitelist on every login. This feature does not add
+online-mode authentication.
+
+On backend EOF or socket failure, a player in the world tries `hubs` in order,
+then that backend's fallback list, excluding the failed server and duplicates.
+A rejected login, configuration disconnect or play kick is not an outage and
+never selects another fallback. If a requested switch fails before transition,
+the player stays on the old server and receives a message. If recovery exhausts
+its candidates, or a client transition fails, Rift disconnects with a reason.
+
+A replacement logs in before the client leaves its current world. Rift verifies
+the same UUID/name, re-enters configuration, forwards the replacement's registries
+and Join Game, and retains the frontend socket and compression settings. The
+1.21.11 client creates a fresh world, scoreboard and player list, resets its signed
+chat chain and creates a new chat session through this sequence. Rift does not
+replay old chat sessions or strip message signatures. Cached client settings and
+brand are sent to the new backend, and the old resource-pack stack is cleared.
+The proxy also advertises its commands in the client command tree. See the
+[protocol contract and source notes](docs/network-protocol.md) for the state sequence.
+Replacement login plugin requests receive an
+unsupported response; login cookies and encryption during replacement are
+unsupported. Connection and transition deadlines bound stalled switches.
+
+The player registry tracks UUID, name and current backend across listeners and
+reloads. Names are reserved before initial backend contact to prevent duplicate logins
+from evicting an existing player. Duplicate UUIDs are also rejected. Switches update presence after
+world entry, and disconnect/cancellation removes the registration. Existing
+sessions retain their original network policy until reconnecting.
+
+Administrators can also request an online player switch with
+`rift admin transfer <connection-id> <backend>`. The operational admin
+endpoint requires the explicit `transfer` permission; see
+[operator controls](docs/operations.md) for setup and authentication.
 
 ### Server-list status cache
 
@@ -625,13 +690,21 @@ cargo test --locked --all-targets
 cargo test --locked --all-targets --release
 cargo clippy --all-targets --locked -- -D warnings
 python3 tests/protocol_wire.py --binary target/release/rift
+python3 tests/network_wire.py --binary target/release/rift
+python3 tests/network_minecraft.py --accept-eula --binary target/release/rift
 python3 -m unittest discover -s tests -p 'test_*.py' -v
 python3 tests/minecraft.py --accept-eula --jobs 3
 python3 tests/minecraft.py --accept-eula --jobs 3 --compression disabled
 python3 tests/bench.py --report target/benchmark.json
 ```
 
-The wire test uses independent Python/zlib peers across ten protocol versions and
+The network wire test exercises lobby/survival/lobby and recovery on one client
+socket, access denials, explicit bans, configuration, independent compression,
+world entry and fresh chat sessions. The real network test runs two pinned vanilla
+1.21.11 servers, checks fresh world/chunk/teleport data and chat after each switch,
+kills survival to verify recovery, and checks actual login/play bans.
+
+The protocol wire test uses independent Python/zlib peers across ten protocol versions and
 four compression thresholds, without downloads or a Minecraft server. The control
 packet tables follow [minecraft-data](https://github.com/PrismarineJS/minecraft-data/tree/master/data/pc)
 and the pinned Pumpkin fixture; zlib follows [RFC 1950](https://www.rfc-editor.org/rfc/rfc1950)
