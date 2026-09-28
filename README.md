@@ -607,13 +607,16 @@ online-mode support.
 ## CI and releases
 
 [`CI`](.github/workflows/ci.yml) runs on pull requests, pushes to `master`, merge
-queues, manual dispatch, and weekly. Its independent jobs run in parallel:
+queues, manual dispatch, and weekly. Quality, dependency, regression and Linux
+build jobs run in parallel; Minecraft and benchmark jobs then share that run's
+Linux executable:
 
 | Job | Required checks |
 | --- | --- |
 | Quality | Rust formatting, Clippy with warnings denied, offline harness tests, actionlint |
 | Dependencies | `cargo audit --deny warnings` against the current RustSec database |
 | Regression | Debug and release tests on Linux x86_64, macOS ARM64, Windows x86_64; package smoke tests |
+| Linux build | Build one release executable for all Minecraft and benchmark jobs |
 | Minecraft | Six jobs: vanilla, Paper, Pumpkin × compression enabled/disabled |
 | Benchmark | Transfer correctness plus downloadable latency/throughput measurements |
 
@@ -624,9 +627,28 @@ cannot enable repository protection by themselves. Fork PRs need no custom secre
 or write token. Actions are pinned by commit, Cargo uses `--locked`, and Dependabot
 proposes weekly Cargo and action updates.
 
+Rust dependency caches include the runner OS/image, architecture, compiler,
+build environment, Cargo manifests and lockfile. Clippy has its own cache;
+regression jobs own the debug/release caches, with the Linux build restoring
+the Linux regression cache without competing to save an incomplete version.
+Cargo still checks and builds the current source on every run. The shared Linux
+executable is passed as an artifact from the same workflow run, with executable
+permissions preserved, so test jobs avoid seven separate builds and toolchain
+setups. Stable and nightly releases reuse this workflow and its caches.
+
+`cargo-audit` is cached by tool version, runner and pinned Rust toolchain,
+independently of Rift's dependencies; every audit fetches current advisories.
+The actionlint archive is cached by version and checksum and verified before
+execution, including on cache hits. Server downloads are cached separately by
+server checksum, shared across compression modes and verified on every use;
+updating one server leaves the other download caches usable. Only default-branch
+runs save caches, and only one compression mode saves each server download.
+Pull requests and tags restore those caches and can build/download normally
+on a miss. Test worlds, logs, reports and check results are never cached.
+
 The Minecraft jobs upload reports, proxy/server logs and crash reports even on
-failure. CI caches only verified server downloads, never test worlds. Logs,
-benchmark reports, and native release packages are retained for 14 days.
+failure. Logs, benchmark reports, the shared executable and native release
+packages are retained for 14 days.
 Benchmark numbers are informational because shared runners have variable load;
 functional assertions still fail the job. Compare JSON reports from repeated runs
 on the same hardware before setting a performance budget.
