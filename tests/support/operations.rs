@@ -134,7 +134,6 @@ fn fallback_reaches_backup_before_forwarding_and_does_not_migrate_sessions() {
     let fixture = Fixture::new();
     let primary = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = primary.local_addr().unwrap();
-    drop(primary);
     let backup = TcpListener::bind("127.0.0.1:0").unwrap();
     fixture.write(&options(
         &config(
@@ -147,6 +146,9 @@ fn fallback_reaches_backup_before_forwarding_and_does_not_migrate_sessions() {
     let front = process.listener();
     process.listener();
     let metrics = process.metrics_address();
+    // Reserve the unavailable backend's port until Rift has bound its own
+    // ephemeral listeners, or the OS can assign that port to the proxy itself.
+    drop(primary);
     let mut client = connect_game(front);
     let mut server = accept_game(&backup);
     exchange(&mut client, &mut server);
@@ -171,7 +173,6 @@ fn health_checks_detect_outage_skip_primary_and_recover() {
     let fixture = Fixture::new();
     let primary = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = primary.local_addr().unwrap();
-    drop(primary);
     let backup = TcpListener::bind("127.0.0.1:0").unwrap();
     fixture.write(&options(&config(&[address, backup.local_addr().unwrap()], "connect_timeout_ms = 1000"),
         "fallbacks = { b0 = { 'b1' } }, metrics = '127.0.0.1:0', health_check = { interval_ms = 40, timeout_ms = 100, unhealthy_threshold = 1, healthy_threshold = 1 }"));
@@ -179,6 +180,7 @@ fn health_checks_detect_outage_skip_primary_and_recover() {
     let front = process.listener();
     process.listener();
     let metrics = process.metrics_address();
+    drop(primary);
     await_metric(metrics, "backend_up{backend=\"b0\"}", 0);
     let mut client = connect_game(front);
     // Health probes connect and close without application bytes.

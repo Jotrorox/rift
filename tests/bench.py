@@ -132,6 +132,7 @@ async def read_frame(reader):
 
 async def fixture_client(reader, writer, status=False):
     """A separate process serves every client asynchronously, without a worker cap."""
+    stage, received, sent = "login", 0, 0
     try:
         if status:
             async with asyncio.timeout(10):
@@ -153,10 +154,19 @@ async def fixture_client(reader, writer, status=False):
             writer.write(LOGIN_SUCCESS)
             await writer.drain()
             while True:
-                data = await read_frame(reader)
-                writer.write(packet(data))
-                await writer.drain()
-    except (OSError, EOFError, ValueError, TimeoutError, asyncio.IncompleteReadError):
+                stage = "read"
+                async with asyncio.timeout(15):
+                    data = await read_frame(reader)
+                received += len(data)
+                stage = "write"
+                async with asyncio.timeout(15):
+                    writer.write(packet(data))
+                    await writer.drain()
+                sent += len(data)
+    except TimeoutError:
+        print(f"fixture timeout: stage={stage}, received={received}, sent={sent}, "
+              f"write_buffer={writer.transport.get_write_buffer_size()}", flush=True)
+    except (OSError, EOFError, ValueError, asyncio.IncompleteReadError):
         pass
     finally:
         writer.close()
@@ -563,23 +573,27 @@ def main():
         log = directory / "fixture.log"
         with process([sys.executable, str(Path(__file__).resolve()), "--fixture"],
                      directory, log.name) as fixture:
-            wait_ready(fixture, lambda: "\n" in log.read_text(), log)
-            ports = json.loads(log.read_text().splitlines()[0])
-            for scenario in args.scenarios:
-                backend = ports["status" if scenario == "status_cached" else "echo"]
-                pids = {"proxy": None, "fixture": fixture.pid, "driver": os.getpid()}
-                if scenario == "direct":
-                    route = measure_route(backend, scenario, pids, args)
-                else:
-                    with proxy_for(binary, directory, scenario, backend, args.lua_init_iterations) as proxy:
-                        pid, port, metrics_port, proxy_log, source = proxy
-                        pids["proxy"] = pid
-                        route = measure_route(port, scenario, pids, args, metrics_port, proxy_log)
-                        route["config_source"] = source
-                report["routes"][scenario] = route
-                if args.report:
-                    args.report.parent.mkdir(parents=True, exist_ok=True)
-                    args.report.write_text(json.dumps(report, indent=2) + "\n")
+            try:
+                wait_ready(fixture, lambda: "\n" in log.read_text(), log)
+                ports = json.loads(log.read_text().splitlines()[0])
+                for scenario in args.scenarios:
+                    backend = ports["status" if scenario == "status_cached" else "echo"]
+                    pids = {"proxy": None, "fixture": fixture.pid, "driver": os.getpid()}
+                    if scenario == "direct":
+                        route = measure_route(backend, scenario, pids, args)
+                    else:
+                        with proxy_for(binary, directory, scenario, backend, args.lua_init_iterations) as proxy:
+                            pid, port, metrics_port, proxy_log, source = proxy
+                            pids["proxy"] = pid
+                            route = measure_route(port, scenario, pids, args, metrics_port, proxy_log)
+                            route["config_source"] = source
+                    report["routes"][scenario] = route
+                    if args.report:
+                        args.report.parent.mkdir(parents=True, exist_ok=True)
+                        args.report.write_text(json.dumps(report, indent=2) + "\n")
+            except Exception:
+                print(f"Fixture log:\n{log.read_text()[-8000:]}", file=sys.stderr)
+                raise
 
 
 if __name__ == "__main__":
