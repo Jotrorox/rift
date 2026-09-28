@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
 import http.client
+import io
 import json
 import math
 import os
@@ -27,6 +28,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 
 from minecraft import ROOT, process, string, varint, read_varint, wait_ready
 
@@ -54,8 +56,43 @@ def packet(body):
     return varint(len(body)) + body
 
 
-LOGIN_START = packet(b"\0" + string("Benchmark"))
-LOGIN_SUCCESS = packet(b"\x02" + string("00000000-0000-0000-0000-000000000001") + string("Benchmark"))
+_identity_lock = threading.Lock()
+_next_identity = 0
+
+
+def new_player_name():
+    """Unique across threaded transfers, burst waves, warmups and scenarios."""
+    global _next_identity
+    with _identity_lock:
+        _next_identity += 1
+        identity = _next_identity
+    if identity >= 1 << 32:
+        raise OverflowError("benchmark player names exhausted")
+    # Nine characters, just like Benchmark: packet lengths stay comparable.
+    return f"B{identity:08x}"
+
+
+def login_start(name):
+    return packet(b"\0" + string(name))
+
+
+def login_name(body):
+    reader = io.BytesIO(body)
+    if read_varint(reader) != 0:
+        raise ValueError("invalid login start")
+    length = read_varint(reader)
+    if not 1 <= length <= 16:
+        raise ValueError("invalid login name length")
+    name = reader.read(length)
+    if len(name) != length or not re.fullmatch(rb"[A-Za-z0-9_]+", name) or reader.read(1):
+        raise ValueError("invalid login name")
+    return name.decode("ascii")
+
+
+def login_success(name):
+    digest = hashlib.md5(f"OfflinePlayer:{name}".encode(), usedforsecurity=False).digest()
+    identity = uuid.UUID(bytes=digest, version=3)
+    return packet(b"\x02" + string(str(identity)) + string(name))
 
 
 def socket_frame(reader):
@@ -75,9 +112,10 @@ class GameSocket:
         self.reader = sock.makefile("rb")
         self.pending = bytearray()
         self.closed = False
+        self.name = new_player_name()
         try:
-            sock.sendall(handshake(port) + LOGIN_START)
-            if packet(socket_frame(self.reader)) != LOGIN_SUCCESS:
+            sock.sendall(handshake(port) + login_start(self.name))
+            if packet(socket_frame(self.reader)) != login_success(self.name):
                 raise ValueError("unexpected login response")
         except (EOFError, ConnectionResetError, BrokenPipeError):
             self.closed = True
@@ -133,6 +171,7 @@ async def read_frame(reader):
 async def fixture_client(reader, writer, status=False):
     """A separate process serves every client asynchronously, without a worker cap."""
     stage, received, sent = "login", 0, 0
+    name = None
     try:
         if status:
             async with asyncio.timeout(10):
@@ -149,9 +188,8 @@ async def fixture_client(reader, writer, status=False):
                 await writer.drain()
         else:
             await read_frame(reader)  # Handshake.
-            if packet(await read_frame(reader)) != LOGIN_START:
-                raise ValueError("invalid login start")
-            writer.write(LOGIN_SUCCESS)
+            name = login_name(await read_frame(reader))
+            writer.write(login_success(name))
             await writer.drain()
             while True:
                 stage = "read"
@@ -164,7 +202,7 @@ async def fixture_client(reader, writer, status=False):
                     await writer.drain()
                 sent += len(data)
     except TimeoutError:
-        print(f"fixture timeout: stage={stage}, received={received}, sent={sent}, "
+        print(f"fixture timeout: player={name}, stage={stage}, received={received}, sent={sent}, "
               f"write_buffer={writer.transport.get_write_buffer_size()}", flush=True)
     except (OSError, EOFError, ValueError, asyncio.IncompleteReadError):
         pass
@@ -236,7 +274,7 @@ def transfer(port, size):
                 if sender.done():
                     sender.result()
                 raise RuntimeError(
-                    f"transfer failed: sent={sent}/{size}, received={received}/{size}, "
+                    f"transfer failed: player={sock.name}, sent={sent}/{size}, received={received}/{size}, "
                     f"sender_done={sender.done()}") from error
             sender.result()
         assert received == size, (received, size)
@@ -261,6 +299,8 @@ async def receive_exact(sock, size):
 
 
 async def setup_attempt(port, scenario, timeout, index, gate):
+    cached = scenario == "status_cached"
+    name = None if cached else new_player_name()
     await gate.wait()
     started = time.perf_counter()
     setup_ms = None
@@ -272,10 +312,9 @@ async def setup_attempt(port, scenario, timeout, index, gate):
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 loop = asyncio.get_running_loop()
                 await loop.sock_connect(sock, ("127.0.0.1", port))
-                cached = scenario == "status_cached"
-                payload = handshake(port, 1) + b"\x01\0" if cached else handshake(port) + LOGIN_START
+                payload = handshake(port, 1) + b"\x01\0" if cached else handshake(port) + login_start(name)
                 await loop.sock_sendall(sock, payload)
-                expected = STATUS_REPLY if cached else LOGIN_SUCCESS
+                expected = STATUS_REPLY if cached else login_success(name)
                 if await receive_exact(sock, len(expected)) != expected:
                     raise ValueError("response mismatch")
                 if not cached:

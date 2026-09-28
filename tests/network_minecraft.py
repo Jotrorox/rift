@@ -185,4 +185,4 @@ if __name__ == "__main__":
         parser.error("assertions must be enabled")
     if not args.accept_eula:
         parser.error("--accept-eula is required to run the Minecraft servers")
-    check(args.binary.resolve(strict=True))
+    check(args.binary.resolve())

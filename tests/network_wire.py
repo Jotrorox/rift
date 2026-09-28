@@ -473,4 +473,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if not __debug__:
         parser.error("assertions must be enabled")
-    check(args.binary.resolve(strict=True))
+    check(args.binary.resolve())

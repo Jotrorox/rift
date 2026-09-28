@@ -1,10 +1,48 @@
 """Check that burst measurements cannot turn failed routing into fast successes."""
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
+import io
 import unittest
 from unittest.mock import patch
 
 import bench
+import pilot
+
+
+class IdentityTests(unittest.TestCase):
+    def test_threaded_clients_have_unique_names_and_uuids_with_unchanged_wire_sizes(self):
+        with ThreadPoolExecutor(max_workers=8) as workers:
+            names = list(workers.map(lambda _: bench.new_player_name(), range(256)))
+        self.assertEqual(len(set(names)), len(names))
+        identities = set()
+        for name in names:
+            self.assertRegex(name, r"^[A-Za-z0-9_]{9}$")
+            start = bench.login_start(name)
+            success = bench.login_success(name)
+            self.assertEqual(len(start), 12)
+            self.assertEqual(len(success), 49)
+            self.assertEqual(bench.login_name(bench.socket_frame(io.BytesIO(start))), name)
+            fields = io.BytesIO(bench.socket_frame(io.BytesIO(success)))
+            self.assertEqual(bench.read_varint(fields), 2)
+            identities.add(fields.read(bench.read_varint(fields)))
+            self.assertEqual(fields.read(bench.read_varint(fields)).decode(), name)
+            self.assertEqual(fields.read(), b"")
+        self.assertEqual(len(identities), len(names))
+
+    def test_fixture_rejects_malformed_names_and_trailing_login_data(self):
+        for body in [b"\1\1A", b"\0", b"\0\0", b"\0\x11" + b"A" * 17,
+                     b"\0\x03A B", b"\0\x02A", b"\0\1A\0", b"\0\1\xff"]:
+            with self.subTest(body=body), self.assertRaises((ValueError, EOFError)):
+                bench.login_name(body)
+
+    def test_pilot_backend_accepts_distinct_simultaneous_socket_clients(self):
+        with pilot.backend() as port, ExitStack() as stack:
+            clients = [stack.enter_context(bench.connect(port)) for _ in range(4)]
+            self.assertEqual(len({client.name for client in clients}), len(clients))
+            for client in clients:
+                pilot.exchange(client)
 
 
 class SummaryTests(unittest.TestCase):
@@ -48,11 +86,66 @@ class BurstTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_valid_handshake_and_probe_echo_under_a_partial_final_burst(self):
         port = await self.start_server(bench.fixture_client)
-        samples, spreads, successes = await bench.run_bursts(port, "hostname", 4, 10, 1)
-        self.assertEqual(len(samples), 10)
-        self.assertEqual(len(spreads), 3)
-        self.assertEqual(successes, [4, 4, 2])
-        self.assertTrue(all(sample["setup_ms"] > 0 for sample in samples))
+        names = []
+        decode = bench.login_name
+
+        def record(body):
+            name = decode(body)
+            names.append(name)
+            return name
+
+        with patch("bench.login_name", side_effect=record):
+            for _ in range(2):  # Attempt indices repeat across warmups/scenarios.
+                samples, spreads, successes = await bench.run_bursts(port, "hostname", 4, 10, 1)
+                self.assertEqual(len(samples), 10)
+                self.assertEqual(len(spreads), 3)
+                self.assertEqual(successes, [4, 4, 2])
+                self.assertTrue(all(sample["setup_ms"] > 0 for sample in samples))
+        self.assertEqual(len(names), 20)
+        self.assertEqual(len(set(names)), len(names))
+
+    async def test_socket_clients_can_overlap_async_burst_clients(self):
+        port = await self.start_server(bench.fixture_client)
+
+        def exchange():
+            with bench.connect(port) as client:
+                client.sendall(b"threaded")
+                self.assertEqual(client.recv(8), b"threaded")
+                return client.name
+
+        names = []
+        decode = bench.login_name
+
+        def record(body):
+            name = decode(body)
+            names.append(name)
+            return name
+
+        with patch("bench.login_name", side_effect=record):
+            *socket_names, burst = await asyncio.gather(
+                *(asyncio.to_thread(exchange) for _ in range(8)),
+                bench.run_bursts(port, "rift", 4, 8, 1),
+            )
+        self.assertEqual(len(set(socket_names)), 8)
+        self.assertEqual(burst[2], [4, 4])
+        self.assertEqual(len(names), 16)
+        self.assertEqual(len(set(names)), len(names))
+
+    async def test_success_for_a_different_player_is_not_success(self):
+        async def wrong_identity(reader, writer):
+            try:
+                await bench.read_frame(reader)
+                await bench.read_frame(reader)
+                writer.write(bench.login_success("WrongName"))
+                await writer.drain()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        port = await self.start_server(wrong_identity)
+        result = await self.attempt(port)
+        self.assertEqual(result["error"], "ValueError")
+        self.assertIsNone(result["setup_ms"])
 
     async def test_tcp_accept_followed_by_eof_is_not_success(self):
         def close(reader, writer):
