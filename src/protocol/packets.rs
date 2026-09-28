@@ -301,6 +301,13 @@ pub(crate) fn login_identity(version: ProtocolVersion, packet: &Packet) -> io::R
                 _ => return Err(invalid("invalid profile signature flag")),
             }
         }
+        // 26.2 adds a backend session UUID after the profile properties.
+        // It is not part of the player's identity across backend connections.
+        if version.number() >= 777 {
+            bytes = bytes
+                .get(16..)
+                .ok_or_else(|| invalid("missing login session UUID"))?;
+        }
         if matches!(version.number(), 766..=767) {
             match bytes.split_first() {
                 Some((&(0 | 1), rest)) => bytes = rest,

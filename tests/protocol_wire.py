@@ -37,6 +37,8 @@ def backend_session(listener, protocol, threshold):
         peer.threshold = threshold if threshold >= 0 else None
         identity = string(str(PLAYER_ID)) if protocol == 47 else PLAYER_ID.bytes
         success = identity + string("Interop") + (b"\0" if protocol >= 761 else b"")
+        if protocol >= 777:
+            success += uuid.UUID(int=2).bytes  # Backend session UUID, added in 26.2.
         if protocol in (766, 767):
             success += b"\0"  # Strict error handling, only present in these versions.
         peer.send(2, success)

@@ -172,6 +172,38 @@ fn handshake_preserves_fields_and_bounds_utf16_address_length() {
 }
 
 #[test]
+fn login_success_validates_session_uuid_without_changing_player_identity() {
+    let version = ProtocolVersion::new(777).unwrap();
+    let mut identity = vec![1; 16];
+    write_string("Player", &mut identity);
+    let mut data = identity.clone();
+    data.push(0); // No profile properties.
+    let session_offset = data.len();
+    data.extend_from_slice(&[2; 16]);
+    for length in session_offset..data.len() {
+        assert!(login_identity(version, &Packet::new(2, data[..length].to_vec())).is_err());
+    }
+    assert_eq!(
+        login_identity(version, &Packet::new(2, data.clone())).unwrap(),
+        identity
+    );
+    data[session_offset..].fill(3);
+    assert_eq!(
+        login_identity(version, &Packet::new(2, data.clone())).unwrap(),
+        identity
+    );
+    assert!(
+        login_identity(
+            ProtocolVersion::new(775).unwrap(),
+            &Packet::new(2, data.clone())
+        )
+        .is_err()
+    );
+    data.push(0);
+    assert!(login_identity(version, &Packet::new(2, data)).is_err());
+}
+
+#[test]
 fn packet_ids_and_disconnect_encoding_follow_the_version_and_phase() {
     for (number, finish, kick, start, ack) in [
         (764, 2, 0x1b, 0x65, 0x0b),
