@@ -17,7 +17,7 @@ fn login_success() -> Packet {
     data.push(0);
     Packet::new(2, data)
 }
-async fn receive(stream: &mut DuplexStream, codec: Codec) -> Packet {
+async fn receive(stream: &mut (impl AsyncRead + Unpin), codec: Codec) -> Packet {
     Reader::default()
         .read(stream, codec)
         .await
@@ -878,4 +878,446 @@ async fn ordinary_relay_forwards_opaque_join_but_does_not_make_it_transfer_ready
         assert_eq!(receive(&mut client, Codec::default()).await, join);
         assert!(session.can_switch());
     }
+}
+
+fn velocity_request(id: i32) -> Packet {
+    let mut data = Vec::new();
+    write_varint(id, &mut data);
+    write_string(forwarding::CHANNEL, &mut data);
+    data.push(4);
+    Packet::new(4, data)
+}
+
+fn verified_profile() -> AuthenticatedProfile {
+    AuthenticatedProfile {
+        uuid: [7; 16],
+        name: "Player".into(),
+        properties: vec![crate::auth::ProfileProperty {
+            name: "textures".into(),
+            value: "authenticated-skin".into(),
+            signature: Some("mojang-signature".into()),
+        }],
+    }
+}
+
+/// Use the real authentication exchange with a local session-server fixture,
+/// then retain the resulting encryption and verified profile across both logins.
+async fn authenticated_session() -> (
+    Session<DuplexStream, DuplexStream>,
+    CryptoStream<DuplexStream>,
+    DuplexStream,
+) {
+    let (mut client, input) = tokio::io::duplex(65536);
+    let handshake = Handshake {
+        protocol: 774,
+        address: "play.test".into(),
+        port: 25565,
+        next_state: NextState::Login,
+    };
+    Codec::default()
+        .write(&mut client, &handshake.packet())
+        .await
+        .unwrap();
+    // This client-supplied UUID must never reach Paper.
+    let mut claimed = login_start();
+    claimed.data[7..].fill(99);
+    Codec::default().write(&mut client, &claimed).await.unwrap();
+    let mut session = Session::accept(input).await.unwrap();
+    assert_eq!(
+        session.read_login_start().await.unwrap().uuid,
+        Some([99; 16])
+    );
+    let mut client = CryptoStream::new(client);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let authenticator = Authenticator::for_test_session_server(
+        format!(
+            "http://{}/session/minecraft/hasJoined",
+            listener.local_addr().unwrap()
+        ),
+        Duration::from_secs(2),
+    );
+    let verify = async {
+        use tokio::io::AsyncReadExt;
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        loop {
+            request.push(socket.read_u8().await.unwrap());
+            if request.ends_with(b"\r\n\r\n") {
+                break;
+            }
+            assert!(request.len() < 8192);
+        }
+        let request = String::from_utf8(request).unwrap();
+        assert!(request.contains("username=Player"));
+        assert!(request.contains("serverId="));
+        let body = serde_json::json!({
+            "id": "07070707070707070707070707070707", "name": "Player",
+            "properties": [{"name": "textures", "value": "authenticated-skin", "signature": "mojang-signature"}],
+        }).to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    };
+    let peer = async {
+        use aws_lc_rs::rsa::{Pkcs1PublicEncryptingKey, PublicEncryptingKey};
+        let request = receive(&mut client, Codec::default()).await;
+        assert_eq!(request.id, 1);
+        let mut data = request.data.as_slice();
+        assert_eq!(read_string(&mut data, 20).unwrap(), "");
+        let size = read_varint(&mut data).unwrap() as usize;
+        let public =
+            Pkcs1PublicEncryptingKey::new(PublicEncryptingKey::from_der(&data[..size]).unwrap())
+                .unwrap();
+        data = &data[size..];
+        let size = read_varint(&mut data).unwrap() as usize;
+        let token = &data[..size];
+        assert_eq!(&data[size..], &[1]);
+        let mut response = Vec::new();
+        for plaintext in [&[42; 16][..], token] {
+            let mut encrypted = vec![0; public.ciphertext_size()];
+            let encrypted = public.encrypt(plaintext, &mut encrypted).unwrap();
+            write_varint(encrypted.len() as i32, &mut response);
+            response.extend_from_slice(encrypted);
+        }
+        Codec::default()
+            .write(&mut client, &Packet::new(1, response))
+            .await
+            .unwrap();
+        client.enable_encryption([42; 16]).unwrap();
+    };
+    let (result, (), ()) = tokio::join!(session.authenticate(&authenticator), peer, verify);
+    result.unwrap();
+    assert_eq!(session.authenticated_profile(), Some(&verified_profile()));
+    session
+        .set_forwarding(
+            Arc::from(&b"shared-secret"[..]),
+            "203.0.113.9".parse().unwrap(),
+        )
+        .unwrap();
+    let (server, mut backend) = tokio::io::duplex(65536);
+    session.connect_backend(server).await.unwrap();
+    assert_eq!(
+        receive(&mut backend, Codec::default()).await,
+        handshake.packet()
+    );
+    assert_eq!(receive(&mut backend, Codec::default()).await, login_start());
+    (session, client, backend)
+}
+
+fn validate_velocity_response(packet: &Packet, id: i32, secret: &[u8]) -> bool {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    assert_eq!(packet.id, 2);
+    let mut data = packet.data.as_slice();
+    assert_eq!(read_varint(&mut data).unwrap(), id);
+    assert_eq!(data[0], 1);
+    data = &data[1..];
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret).unwrap();
+    mac.update(&data[32..]);
+    let valid = mac.verify_slice(&data[..32]).is_ok();
+    data = &data[32..];
+    assert_eq!(read_varint(&mut data).unwrap(), 4);
+    assert_eq!(read_string(&mut data, 255).unwrap(), "203.0.113.9");
+    assert_eq!(&data[..16], &[7; 16]);
+    data = &data[16..];
+    assert_eq!(read_string(&mut data, 16).unwrap(), "Player");
+    assert_eq!(read_varint(&mut data).unwrap(), 1);
+    assert_eq!(read_string(&mut data, 32767).unwrap(), "textures");
+    assert_eq!(read_string(&mut data, 32767).unwrap(), "authenticated-skin");
+    assert_eq!(data[0], 1);
+    data = &data[1..];
+    assert_eq!(read_string(&mut data, 32767).unwrap(), "mojang-signature");
+    assert!(data.is_empty());
+    valid
+}
+
+async fn verified_play(
+    session: &mut Session<DuplexStream, DuplexStream>,
+    client: &mut CryptoStream<DuplexStream>,
+    backend: &mut DuplexStream,
+) {
+    let codec = session.client.codec;
+    // Paper uses a random signed Java int for every forwarding transaction.
+    let transaction_id = -1_204_442_331;
+    codec
+        .write(backend, &velocity_request(transaction_id))
+        .await
+        .unwrap();
+    session.forward().await.unwrap();
+    assert!(validate_velocity_response(
+        &receive(backend, codec).await,
+        transaction_id,
+        b"shared-secret"
+    ));
+    codec.write(backend, &login_success()).await.unwrap();
+    session.forward().await.unwrap();
+    assert_eq!(
+        receive(client, codec).await,
+        forwarding::login_success(
+            &verified_profile(),
+            session.version().unwrap(),
+            &login_success()
+        )
+        .unwrap()
+    );
+    codec.write(client, &Packet::empty(3)).await.unwrap();
+    session.forward().await.unwrap();
+    assert_eq!(receive(backend, codec).await, Packet::empty(3));
+    codec.write(backend, &Packet::empty(3)).await.unwrap();
+    session.forward().await.unwrap();
+    assert_eq!(receive(client, codec).await, Packet::empty(3));
+    codec.write(client, &Packet::empty(3)).await.unwrap();
+    session.forward().await.unwrap();
+    assert_eq!(receive(backend, codec).await, Packet::empty(3));
+    codec.write(backend, &join_game(1)).await.unwrap();
+    session.forward().await.unwrap();
+    assert_eq!(receive(client, codec).await, join_game(1));
+    assert!(session.can_switch());
+}
+
+#[tokio::test]
+async fn encrypted_authenticated_profile_and_velocity_forwarding_survive_switch() {
+    timeout(Duration::from_secs(3), async {
+        let (mut session, mut client, mut first) = authenticated_session().await;
+        let compression = Packet::new(3, vec![0]);
+        Codec::default()
+            .write(&mut first, &compression)
+            .await
+            .unwrap();
+        session.forward().await.unwrap();
+        assert_eq!(receive(&mut client, Codec::default()).await, compression);
+        verified_play(&mut session, &mut client, &mut first).await;
+        let (replacement, mut second) = tokio::io::duplex(65536);
+        let codec = Codec::default();
+        let client_codec = session.client.codec;
+        let (result, ()) = tokio::join!(session.connect_backend(replacement), async {
+            receive(&mut second, codec).await;
+            assert_eq!(receive(&mut second, codec).await, login_start());
+            // A replacement still answers unrelated plugins as unsupported.
+            let mut unknown = vec![17];
+            write_string("mod:hello", &mut unknown);
+            codec
+                .write(&mut second, &Packet::new(4, unknown))
+                .await
+                .unwrap();
+            assert_eq!(
+                receive(&mut second, codec).await,
+                Packet::new(2, vec![17, 0])
+            );
+            codec
+                .write(&mut second, &velocity_request(i32::MIN))
+                .await
+                .unwrap();
+            assert!(validate_velocity_response(
+                &receive(&mut second, codec).await,
+                i32::MIN,
+                b"shared-secret"
+            ));
+            codec.write(&mut second, &login_success()).await.unwrap();
+            assert_eq!(receive(&mut second, codec).await, Packet::empty(3));
+            assert_eq!(
+                receive(&mut client, client_codec).await,
+                Packet::empty(0x74)
+            );
+            client_codec
+                .write(&mut client, &Packet::empty(0x0f))
+                .await
+                .unwrap();
+            assert_eq!(
+                receive(&mut client, client_codec).await,
+                Packet::new(8, vec![0])
+            );
+        });
+        result.unwrap();
+        assert_eq!(session.identity().unwrap().uuid, Some([7; 16]));
+        assert_eq!(session.authenticated_profile(), Some(&verified_profile()));
+        assert!(session.client.io.is_encrypted());
+        assert_eq!(session.client.codec.threshold(), Some(0));
+        assert_eq!(session.backend().unwrap().codec.threshold(), None);
+        codec.write(&mut second, &Packet::empty(3)).await.unwrap();
+        session.forward().await.unwrap();
+        assert_eq!(receive(&mut client, client_codec).await, Packet::empty(3));
+        client_codec
+            .write(&mut client, &Packet::empty(3))
+            .await
+            .unwrap();
+        session.forward().await.unwrap();
+        assert_eq!(receive(&mut second, codec).await, Packet::empty(3));
+        codec.write(&mut second, &join_game(2)).await.unwrap();
+        session.forward().await.unwrap();
+        assert_eq!(receive(&mut client, client_codec).await, join_game(2));
+        assert!(session.can_switch());
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn bad_secret_or_missing_forwarding_on_replacement_preserves_old_world() {
+    timeout(Duration::from_secs(3), async {
+        for missing in [false, true] {
+            let (mut session, mut client, mut first) = authenticated_session().await;
+            verified_play(&mut session, &mut client, &mut first).await;
+            let (replacement, mut second) = tokio::io::duplex(65536);
+            let codec = Codec::default();
+            let (result, ()) = tokio::join!(session.connect_backend(replacement), async {
+                receive(&mut second, codec).await;
+                receive(&mut second, codec).await;
+                if missing {
+                    codec.write(&mut second, &login_success()).await.unwrap();
+                } else {
+                    codec
+                        .write(&mut second, &velocity_request(8))
+                        .await
+                        .unwrap();
+                    assert!(!validate_velocity_response(
+                        &receive(&mut second, codec).await,
+                        8,
+                        b"incorrect-secret"
+                    ));
+                    codec
+                        .write(
+                            &mut second,
+                            &protocol::disconnect(
+                                Some(ProtocolVersion::new(774).unwrap()),
+                                State::Login,
+                                "Unable to verify player details",
+                            )
+                            .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                }
+            });
+            assert!(result.is_err());
+            assert!(!session.switch_in_progress());
+            assert!(session.can_switch());
+            let packet = Packet::new(0x7f, vec![22; 100]);
+            codec.write(&mut first, &packet).await.unwrap();
+            session.forward().await.unwrap();
+            assert_eq!(receive(&mut client, codec).await, packet);
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn initial_login_rejects_missing_forwarding_and_changed_authenticated_uuid() {
+    for send_forwarding in [false, true] {
+        let (mut session, _client, mut backend) = authenticated_session().await;
+        if send_forwarding {
+            Codec::default()
+                .write(&mut backend, &velocity_request(1))
+                .await
+                .unwrap();
+            session.forward().await.unwrap();
+            receive(&mut backend, Codec::default()).await;
+        }
+        let mut success = login_success();
+        if send_forwarding {
+            success.data[0] ^= 1;
+        }
+        Codec::default()
+            .write(&mut backend, &success)
+            .await
+            .unwrap();
+        assert!(session.forward().await.is_err());
+        assert!(session.identity().is_none());
+        assert!(session.client.state.settled(State::Login));
+    }
+}
+
+#[tokio::test]
+async fn spoofed_client_forwarding_response_never_reaches_backend() {
+    let (mut session, mut client, mut backend) = authenticated_session().await;
+    Codec::default()
+        .write(&mut backend, &velocity_request(1))
+        .await
+        .unwrap();
+    session.forward().await.unwrap();
+    receive(&mut backend, Codec::default()).await;
+    Codec::default()
+        .write(&mut client, &Packet::new(2, vec![1, 1, 99]))
+        .await
+        .unwrap();
+    assert!(
+        session
+            .forward()
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("unsolicited")
+    );
+    assert!(
+        timeout(
+            Duration::from_millis(20),
+            receive(&mut backend, Codec::default())
+        )
+        .await
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn initial_secret_rejection_is_encrypted_and_authoritative() {
+    timeout(Duration::from_secs(3), async {
+        let (mut session, mut client, mut backend) = authenticated_session().await;
+        let codec = Codec::default();
+        codec
+            .write(&mut backend, &velocity_request(1))
+            .await
+            .unwrap();
+        session.forward().await.unwrap();
+        assert!(!validate_velocity_response(
+            &receive(&mut backend, codec).await,
+            1,
+            b"incorrect-secret"
+        ));
+        let denied = protocol::disconnect(
+            session.version,
+            State::Login,
+            "Unable to verify player details",
+        )
+        .unwrap();
+        codec.write(&mut backend, &denied).await.unwrap();
+        assert_eq!(session.forward().await.unwrap(), SessionEvent::Disconnected);
+        assert_eq!(receive(&mut client, codec).await, denied);
+        assert!(!session.reset_initial_backend());
+        assert!(session.identity().is_none());
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn proxy_owned_forwarding_allows_safe_initial_transport_retry() {
+    timeout(Duration::from_secs(3), async {
+        let (mut session, mut client, mut backend) = authenticated_session().await;
+        Codec::default()
+            .write(&mut backend, &velocity_request(23))
+            .await
+            .unwrap();
+        session.forward().await.unwrap();
+        assert!(validate_velocity_response(
+            &receive(&mut backend, Codec::default()).await,
+            23,
+            b"shared-secret"
+        ));
+        drop(backend);
+        assert_eq!(
+            session.forward().await.unwrap(),
+            SessionEvent::BackendClosed
+        );
+        assert!(session.reset_initial_backend());
+        let (replacement, mut backend) = tokio::io::duplex(65536);
+        session.connect_backend(replacement).await.unwrap();
+        receive(&mut backend, Codec::default()).await;
+        assert_eq!(receive(&mut backend, Codec::default()).await, login_start());
+        verified_play(&mut session, &mut client, &mut backend).await;
+    })
+    .await
+    .unwrap();
 }

@@ -36,7 +36,16 @@ impl Fixture {
     }
 
     fn spawn(&self, args: &[&str]) -> Process {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_rift"))
+        self.spawn_security(args, None)
+    }
+
+    fn spawn_security(&self, args: &[&str], secret: Option<&str>) -> Process {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_rift"));
+        command.env_remove("RIFT_TEST_FORWARDING_SECRET");
+        if let Some(secret) = secret {
+            command.env("RIFT_TEST_FORWARDING_SECRET", secret);
+        }
+        let mut child = command
             .current_dir(&self.0)
             .args(args)
             .stdout(Stdio::null())
@@ -53,6 +62,88 @@ impl Fixture {
             }
         });
         Process { child, lines }
+    }
+}
+
+fn online_config(backend: SocketAddr) -> String {
+    format!(
+        "return {{
+        listeners = {{ public = '127.0.0.1:0' }},
+        backends = {{ paper = '{backend}' }}, routes = {{ public = 'paper' }},
+        authentication = {{ online_mode = true, timeout_ms = 250 }},
+        forwarding = {{ mode = 'velocity', secret_env = 'RIFT_TEST_FORWARDING_SECRET' }},
+    }}"
+    )
+}
+
+#[test]
+fn online_startup_requires_a_runtime_secret_without_exposing_it() {
+    let fixture = Fixture::new();
+    fixture.write(&online_config("127.0.0.1:25566".parse().unwrap()));
+    let checked = Command::new(env!("CARGO_BIN_EXE_rift"))
+        .current_dir(&fixture.0)
+        .args(["check", "rift.lua"])
+        .env_remove("RIFT_TEST_FORWARDING_SECRET")
+        .output()
+        .unwrap();
+    assert!(checked.status.success(), "{:?}", checked.stderr);
+    fixture
+        .spawn(&[])
+        .failure("forwarding.secret_env: set RIFT_TEST_FORWARDING_SECRET");
+    for secret in ["", "invalid\nsecret"] {
+        fixture
+            .spawn_security(&[], Some(secret))
+            .failure("secret must contain 1..=1024 bytes");
+    }
+}
+
+#[test]
+fn unverified_claims_never_reach_a_backend_and_authentication_has_a_deadline() {
+    use rift::protocol::{Codec, Handshake, NextState, Packet, read_string, write_string};
+    let backend = TcpListener::bind("127.0.0.1:0").unwrap();
+    backend.set_nonblocking(true).unwrap();
+    let fixture = Fixture::new();
+    fixture.write(&online_config(backend.local_addr().unwrap()));
+    let process = fixture.spawn_security(&[], Some("velocity-fixture-secret"));
+    let listener = process.listener();
+    for malformed_response in [false, true] {
+        let mut client = TcpStream::connect(listener).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let codec = Codec::default();
+        let handshake = Handshake {
+            protocol: 774,
+            address: "localhost".into(),
+            port: listener.port(),
+            next_state: NextState::Login,
+        };
+        client
+            .write_all(&codec.encode(&handshake.packet()).unwrap())
+            .unwrap();
+        let mut login = Vec::new();
+        write_string("Notch", &mut login);
+        login.extend_from_slice(&[42; 16]); // An arbitrary claimed account UUID.
+        client
+            .write_all(&codec.encode(&Packet::new(0, login)).unwrap())
+            .unwrap();
+        assert_eq!(game::read_packet(&mut client).unwrap().id, 1);
+        if malformed_response {
+            client
+                .write_all(&codec.encode(&Packet::empty(1)).unwrap())
+                .unwrap();
+        }
+        let disconnect = game::read_packet(&mut client).unwrap();
+        assert_eq!(disconnect.id, 0);
+        let reason = read_string(&mut disconnect.data.as_slice(), 32767).unwrap();
+        assert!(
+            reason.contains("authentication") || reason.contains("verify your Minecraft account"),
+            "{reason}"
+        );
+        assert_eq!(
+            backend.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
     }
 }
 

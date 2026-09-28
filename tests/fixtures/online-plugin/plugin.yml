@@ -1,0 +1,9 @@
+name: RiftOnlineProbe
+version: '1.0'
+main: RiftOnlineProbe
+api-version: '1.21.11'
+description: Test-only observer for Rift online authentication acceptance.
+commands:
+  riftprobe:
+    description: Record a player profile and inventory from the server console.
+    usage: /riftprobe <player>

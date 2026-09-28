@@ -19,6 +19,8 @@ pub struct Config {
     pub backends: BTreeMap<String, Backend>,
     pub routes: BTreeMap<String, Route>,
     pub limits: Limits,
+    pub authentication: Authentication,
+    pub forwarding: Option<VelocityForwarding>,
     pub on_route: Option<RouteScript>,
     pub on_http: Option<HttpScript>,
     pub fallbacks: BTreeMap<String, Vec<String>>,
@@ -49,11 +51,34 @@ pub struct Network {
 
 /// Names are matched without ASCII case. An absent allow list is public; an
 /// explicitly empty allow list denies everyone. A deny entry always wins.
-/// These are offline-mode player names, not proof of a Mojang identity.
+/// Names are authenticated only when online mode is enabled.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ServerAccess {
     pub allow: Option<Vec<String>>,
     pub deny: Vec<String>,
+}
+
+/// Online authentication and Velocity forwarding are enabled together. Existing
+/// configurations retain their explicitly documented offline behavior.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Authentication {
+    pub online_mode: bool,
+    pub timeout: Duration,
+}
+
+impl Default for Authentication {
+    fn default() -> Self {
+        Self {
+            online_mode: false,
+            timeout: Duration::from_secs(10),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VelocityForwarding {
+    /// The configuration stores a variable name, never its secret value.
+    pub secret_env: String,
 }
 
 impl ServerAccess {
@@ -185,6 +210,8 @@ impl Config {
             backends: BTreeMap::from([("default".into(), Backend::parse(backend)?)]),
             routes: BTreeMap::from([("default".into(), Route::Direct("default".into()))]),
             limits: Limits::default(),
+            authentication: Authentication::default(),
+            forwarding: None,
             on_route: None,
             on_http: None,
             fallbacks: BTreeMap::new(),
@@ -238,6 +265,8 @@ impl Config {
                     "backends",
                     "routes",
                     "limits",
+                    "authentication",
+                    "forwarding",
                     "on_route",
                     "on_http",
                     "fallbacks",
@@ -449,11 +478,15 @@ impl Config {
                 }
             }
             let network = network(&root)?;
+            let authentication = authentication(&root)?;
+            let forwarding = forwarding(&root)?;
             Ok(Self {
                 listeners,
                 backends,
                 routes,
                 limits,
+                authentication,
+                forwarding,
                 on_route,
                 on_http,
                 fallbacks,
@@ -479,6 +512,28 @@ impl Config {
     }
 
     pub fn validate(&self) -> io::Result<()> {
+        if self.authentication.online_mode != self.forwarding.is_some() {
+            return Err(invalid(
+                "authentication.online_mode and forwarding.mode = 'velocity' must be enabled together",
+            ));
+        }
+        if self.authentication.timeout < Duration::from_millis(1)
+            || self.authentication.timeout > Duration::from_secs(60)
+        {
+            return Err(invalid("authentication.timeout_ms: expected 1..=60000"));
+        }
+        if let Some(forwarding) = &self.forwarding {
+            let mut bytes = forwarding.secret_env.bytes();
+            if !bytes
+                .next()
+                .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+                || !bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            {
+                return Err(invalid(
+                    "forwarding.secret_env: expected an environment variable name such as RIFT_FORWARDING_SECRET",
+                ));
+            }
+        }
         for (path, empty, blank_name) in [
             (
                 "listeners",
@@ -738,6 +793,43 @@ impl Config {
             }
         }
     }
+}
+
+fn authentication(root: &Table) -> Result<Authentication, String> {
+    let Some(values) = options(root, "authentication", &["online_mode", "timeout_ms"])? else {
+        return Ok(Authentication::default());
+    };
+    Ok(Authentication {
+        online_mode: boolean(&values, "authentication", "online_mode", false)?,
+        timeout: Duration::from_millis(integer(
+            &values,
+            "authentication",
+            "timeout_ms",
+            10_000,
+            60_000,
+        )? as u64),
+    })
+}
+
+fn forwarding(root: &Table) -> Result<Option<VelocityForwarding>, String> {
+    let Some(values) = options(root, "forwarding", &["mode", "secret_env"])? else {
+        return Ok(None);
+    };
+    let mode = string(
+        values.get("mode").map_err(|e| e.to_string())?,
+        "forwarding.mode",
+    )?;
+    if mode != "velocity" {
+        return Err("forwarding.mode: expected 'velocity' (omit forwarding to disable)".into());
+    }
+    let secret_env = match values
+        .get::<Value>("secret_env")
+        .map_err(|e| e.to_string())?
+    {
+        Value::Nil => "RIFT_FORWARDING_SECRET".into(),
+        value => string(value, "forwarding.secret_env")?,
+    };
+    Ok(Some(VelocityForwarding { secret_env }))
 }
 
 fn network(root: &Table) -> Result<Network, String> {

@@ -1,6 +1,8 @@
 """Failure-detection regressions for the real-server operational harness."""
 
-import hashlib
+import base64
+import copy
+import json
 from pathlib import Path
 import tempfile
 import subprocess
@@ -75,20 +77,37 @@ class OperationsHarnessTests(unittest.TestCase):
             receive.return_value = (1, body + b"\x01")
             self.assertTrue(manual_online.encryption_challenge(1, 774)["should_authenticate"])
 
-    def test_manual_profile_requires_online_uuid_and_completed_login(self):
+    def test_manual_profile_requires_mojang_uuid_ip_and_signed_textures(self):
         username = "RiftTester"
-        offline = uuid.UUID(bytes=hashlib.md5(f"OfflinePlayer:{username}".encode()).digest(), version=3)
-        online = uuid.uuid4()
-        with tempfile.TemporaryDirectory() as temporary:
-            log = Path(temporary) / "server.log"
-            for profile, joined in [(offline, True), (online, False)]:
-                log.write_text(f"UUID of player {username} is {profile}\n" +
-                               (f"{username}[/127.0.0.1:12345] logged in with entity id 1\n" if joined else ""))
-                with self.assertRaises(AssertionError):
-                    manual_online.authenticated_profile(log, username)
-            log.write_text(f"UUID of player {username} is {online}\n"
-                           f"{username}[/127.0.0.1:12345] logged in with entity id 1\n")
-            self.assertEqual(manual_online.authenticated_profile(log, username), str(online))
+        player_id = str(uuid.uuid4())
+        expected = dict(id=player_id, name=username)
+        texture = base64.b64encode(json.dumps(dict(profileId=player_id, profileName=username)).encode()).decode()
+        record = dict(uuid=player_id, name=username, ip="127.0.0.1", properties=[
+            dict(name="textures", value=texture, signature="fixture-signature")])
+        manual_online.verify_profile(record, expected, "127.0.0.1")
+        for key, value in [("uuid", str(uuid.uuid4())), ("name", "Impostor"),
+                           ("ip", "203.0.113.1"), ("properties", [])]:
+            with self.subTest(key=key), self.assertRaises(AssertionError):
+                manual_online.verify_profile(dict(record, **{key: value}), expected, "127.0.0.1")
+        unsigned = copy.deepcopy(record)
+        del unsigned["properties"][0]["signature"]
+        with self.assertRaisesRegex(AssertionError, "signature"):
+            manual_online.verify_profile(unsigned, expected, "127.0.0.1")
+        other_account = copy.deepcopy(record)
+        other_account["properties"][0]["value"] = base64.b64encode(json.dumps(
+            dict(profileId=str(uuid.uuid4()), profileName=username)).encode()).decode()
+        with self.assertRaises(AssertionError):
+            manual_online.verify_profile(other_account, expected, "127.0.0.1")
+
+    def test_manual_inventory_requires_preserved_marker_count(self):
+        record = dict(inventory=[dict(item="minecraft:diamond", count=3),
+                                 dict(item="minecraft:diamond", count=4),
+                                 dict(item="minecraft:emerald", count=11)])
+        manual_online.verify_inventory(record, "minecraft:diamond", 7)
+        with self.assertRaises(AssertionError):
+            manual_online.verify_inventory(record, "minecraft:diamond", 6)
+        with self.assertRaises(AssertionError):
+            manual_online.verify_inventory(record, "minecraft:gold_ingot", 7)
 
 
 if __name__ == "__main__":

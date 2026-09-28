@@ -2,6 +2,81 @@ use super::*;
 
 const VALID: &str = include_str!("../../examples/rift.lua");
 
+fn with_security(settings: &str) -> String {
+    VALID.replacen("return {", &format!("return {{ {settings},"), 1)
+}
+
+#[test]
+fn online_authentication_and_velocity_are_validated_together() {
+    let config = Config::from_lua(&with_security(
+        "authentication = { online_mode = true, timeout_ms = 2500 }, forwarding = { mode = 'velocity', secret_env = 'PAPER_SECRET' }",
+    ), "online.lua").unwrap();
+    assert!(config.authentication.online_mode);
+    assert_eq!(config.authentication.timeout, Duration::from_millis(2500));
+    assert_eq!(config.forwarding.unwrap().secret_env, "PAPER_SECRET");
+    let defaults = Config::from_lua(VALID, "offline.lua").unwrap();
+    assert!(!defaults.authentication.online_mode);
+    assert!(defaults.forwarding.is_none());
+    // Validation does not read environment secrets or contact authentication services.
+    let config = Config::from_lua(
+        &with_security(
+            "authentication = { online_mode = true }, forwarding = { mode = 'velocity' }",
+        ),
+        "online.lua",
+    )
+    .unwrap();
+    assert_eq!(
+        config.forwarding.unwrap().secret_env,
+        "RIFT_FORWARDING_SECRET"
+    );
+}
+
+#[test]
+fn insecure_or_misspelled_authentication_settings_are_rejected() {
+    for (settings, expected) in [
+        (
+            "authentication = { online_mode = true }",
+            "must be enabled together",
+        ),
+        (
+            "forwarding = { mode = 'velocity' }",
+            "must be enabled together",
+        ),
+        (
+            "authentication = { online_mode = 'true' }",
+            "authentication.online_mode",
+        ),
+        (
+            "authentication = { timeout_ms = 0 }",
+            "authentication.timeout_ms",
+        ),
+        (
+            "authentication = { timeout_ms = 60001 }",
+            "authentication.timeout_ms",
+        ),
+        (
+            "authentication = { timeout_ms = 1.5 }",
+            "authentication.timeout_ms",
+        ),
+        (
+            "authentication = { session_server = 'http://example.com' }",
+            "unknown field",
+        ),
+        ("forwarding = { mode = 'legacy' }", "forwarding.mode"),
+        (
+            "forwarding = { mode = 'velocity', secret = 'literal' }",
+            "unknown field",
+        ),
+        (
+            "authentication = { online_mode = true }, forwarding = { mode = 'velocity', secret_env = 'BAD-NAME' }",
+            "forwarding.secret_env",
+        ),
+    ] {
+        let error = Config::from_lua(&with_security(settings), "bad.lua").unwrap_err();
+        assert!(error.to_string().contains(expected), "{settings}: {error}");
+    }
+}
+
 #[test]
 fn lua_expressions_produce_typed_config_with_release_defaults() {
     let config = Config::from_lua(VALID, "test.lua").unwrap();

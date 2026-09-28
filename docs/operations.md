@@ -34,8 +34,12 @@ then use `Expand-Archive .\rift-windows-x86_64.zip` and run `rift.exe` inside it
 version, so retain the release tag and its `CHANGELOG.md` when reporting issues.
 
 The generated configuration forwards port 25565 to loopback port 25566.
-Configure that backend as described in the README. Rift currently requires
-private, offline-mode backends and does not authenticate Microsoft identities.
+Configure that backend as described in the README. For public Paper networks,
+enable online authentication and Velocity modern forwarding using
+[`examples/online.lua`](../examples/online.lua). Rift verifies accounts; private
+Paper backends run `online-mode=false` with `proxies.velocity.online-mode=true`.
+The generated starter retains unauthenticated offline behavior until these
+settings are enabled.
 [`examples/network.lua`](../examples/network.lua) adds hostname routing, fallback,
 admission controls, health probes, status caching and metrics. Adapt its hostnames
 and backend addresses before use.
@@ -103,8 +107,9 @@ Connection `rate_limit` runs before handshake parsing. `login_rate_limit` runs
 at login admission and has the same token-bucket fields and defaults; it allows
 status requests without spending login tokens. Both are opt-in, apply globally
 and per IP, and leave established traffic untouched. Clients sharing a NAT also
-share an IP allowance. A routing hook can enforce additional IP/listener policy;
-unauthenticated player names are not an access-control identity.
+share an IP allowance. A routing hook can enforce additional IP/listener policy.
+Online mode verifies player names before network access checks; offline-mode
+names are unauthenticated and cannot establish account ownership.
 
 ## Inspect health and failed connections
 
@@ -159,7 +164,7 @@ without logging credentials.
 | `connect` / `no_eligible_backend` | Check probes, fallback configuration and draining state |
 | `handshake` / `handshake_error` | Check client protocol, accidental health probes and connection deadlines |
 | `on_route` / script error or overload | Inspect the named script; simplify/bound the hook or reduce arrival rate |
-| Session/login failure | Check supported versions, offline-mode backend setup and the backend's own log |
+| Session/login failure | Check supported versions, authentication-service access, matching Velocity secrets on every Paper backend and the backend's own log |
 | Rate-limit/capacity rejection | Check legitimate player traffic and NAT concentration before changing limits |
 | Admin permission/authentication failure | Check the CLI secret and the configured operation permission |
 

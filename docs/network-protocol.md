@@ -1,9 +1,15 @@
 # Network protocol contract
 
 Network commands and backend replacement are pinned to Java 1.21.11, protocol
-774. Other accepted protocols retain ordinary forwarding. All network backends
-must run offline mode with `enforce-secure-profile=false`; Rift does not implement
-Mojang session authentication or secure-profile forwarding.
+774. Other accepted protocols retain ordinary forwarding. With online
+authentication enabled, Rift encrypts the client connection, verifies the Mojang
+session and retains its UUID, canonical name and signed profile properties.
+Paper backends run `online-mode=false` with Velocity modern forwarding enabled
+and `proxies.velocity.online-mode=true`; see the README for configuration.
+The backend login exchange receives the same verified profile and socket peer IP
+on initial login and every replacement. Authentication service failures never
+fall back to offline identities. Omitted security settings retain the original
+offline mode, which requires forwarding disabled and `enforce-secure-profile=false`.
 
 A replacement performs an independent backend login before changing the client.
 The old backend continues processing packets during this preflight. Explicit
@@ -46,8 +52,27 @@ replacement. Initial transport failures can retry before Login Success; a login
 plugin/cookie exchange disables such retries because its client responses cannot
 be replayed safely to another backend.
 
+Online mode completes a proxy-owned RSA challenge and AES-128/CFB8 transition
+before a fixed HTTPS `hasJoined` request to Mojang. The client-supplied UUID is
+never used as proof of identity. Encryption wraps the entire client byte stream,
+including packet lengths and compressed frames, and keeps independent read/write
+cipher state across cancellation and backend replacement.
+
+Velocity `velocity:player_info` requests stay inside the proxy. Their responses
+use HMAC-SHA256 over the negotiated version, socket peer IP, verified UUID, name
+and profile properties, including property signatures. Rift supports forwarding
+version 1 and the version 4 format used by modern Paper; versions 2/3's legacy
+1.19 player-key fields are outside Rift's supported client versions. Each backend
+must request forwarding before Login Success. Client responses can only answer
+plugin queries actually relayed to that client; they cannot answer a Velocity
+query or reuse a completed query ID. Proxy-owned forwarding can be repeated on
+a safe initial transport retry because it needs no new client exchange.
+
 Implementation references checked for this change:
 
+- [Velocity PlayerDataForwarding](https://github.com/PaperMC/Velocity/blob/dev/3.0.0/proxy/src/main/java/com/velocitypowered/proxy/connection/PlayerDataForwarding.java)
+  and [backend LoginSessionHandler](https://github.com/PaperMC/Velocity/blob/dev/3.0.0/proxy/src/main/java/com/velocitypowered/proxy/connection/backend/LoginSessionHandler.java):
+  modern forwarding payload, HMAC coverage and version negotiation.
 - [Mojang 1.21.11 client artifact](https://piston-data.mojang.com/v1/objects/ba2df812c2d12e0219c489c4cd9a5e1f0760f5bd/client.jar)
   and [official client mappings](https://piston-data.mojang.com/v1/objects/031a68bebf55d824f66d6573d8c752f0e1bf232a/client.txt):
   `ClientPacketListener.handleConfigurationStart`, `handleLogin`, `setKeyPair`,

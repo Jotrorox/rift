@@ -8,6 +8,7 @@ use crate::{
     status,
 };
 use rift::{
+    auth::Authenticator,
     config::{Config, Route},
     hooks::{ConnectionInfo, RouteDecision, Router},
     players::PlayerRegistry,
@@ -52,6 +53,8 @@ pub struct Snapshot {
     pub health: Health,
     cache: status::Cache,
     pub players: Arc<PlayerRegistry>,
+    authenticator: Option<Arc<Authenticator>>,
+    forwarding_secret: Option<Arc<[u8]>>,
 }
 
 impl Snapshot {
@@ -78,6 +81,30 @@ impl Snapshot {
         let control =
             previous.map_or_else(|| Arc::new(Control::default()), |old| old.control.clone());
         let health = Health::with_control(&config, control.clone());
+        let forwarding_secret = config.forwarding.as_ref().map(|settings| {
+            let secret = std::env::var(&settings.secret_env).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, format!(
+                    "forwarding.secret_env: set {} to the Paper Velocity secret before starting Rift",
+                    settings.secret_env,
+                ))
+            })?;
+            if secret.is_empty() || secret.len() > 1024 || secret.chars().any(char::is_control) {
+                return Err(io::Error::new(io::ErrorKind::InvalidInput,
+                    "forwarding.secret_env: secret must contain 1..=1024 bytes without control characters"));
+            }
+            Ok(Arc::<[u8]>::from(secret.into_bytes()))
+        }).transpose()?;
+        let authenticator = if config.authentication.online_mode {
+            match previous
+                .filter(|old| old.config.authentication == config.authentication)
+                .and_then(|old| old.authenticator.clone())
+            {
+                Some(authenticator) => Some(authenticator),
+                None => Some(Arc::new(Authenticator::new(config.authentication.timeout)?)),
+            }
+        } else {
+            None
+        };
         Ok(Self {
             source: None,
             revision: "runtime".into(),
@@ -85,6 +112,8 @@ impl Snapshot {
             service_addresses: BTreeMap::new(),
             addresses: Arc::new(config.listeners.values().copied().collect()),
             config,
+            authenticator,
+            forwarding_secret,
             generation: previous.map_or(1, |old| old.generation + 1),
             control,
             policies,
@@ -109,6 +138,7 @@ pub async fn handle(
 ) -> io::Result<(u64, u64)> {
     event.stage = "client_setup";
     client.set_nodelay(true)?;
+    let peer_ip = client.peer_addr()?.ip().to_canonical();
     let connection = ConnectionInfo {
         listener: listener.to_owned(),
         peer_addr: client.peer_addr()?,
@@ -295,12 +325,17 @@ pub async fn handle(
             let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect(&error.to_string())).await;
             return Err(error);
         }
+        if snapshot.authenticator.is_some() && session.handshake.protocol < 761 {
+            let reason = "Online authentication with Velocity forwarding requires Minecraft 1.19.3 or newer.";
+            let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect(reason)).await;
+            return Err(io::Error::new(io::ErrorKind::Unsupported, reason));
+        }
         let network_configured = snapshot.config.network != Default::default();
         let network_enabled = session.switch_supported() && network_configured;
         if network_enabled {
             session.enable_network()?;
         }
-        let login_name = if network_configured {
+        let mut login_name = if network_configured || snapshot.authenticator.is_some() {
             match timeout(HANDSHAKE_TIMEOUT, session.read_login_start()).await {
                 Ok(Ok(login)) => login.name,
                 result => {
@@ -320,6 +355,31 @@ pub async fn handle(
         } else {
             String::new()
         };
+        if let Some(authenticator) = &snapshot.authenticator {
+            // Authentication finishes before access rules, duplicate reservations,
+            // DNS or backend connection attempts can act on a claimed identity.
+            event.stage = "authentication";
+            event.failure = "authentication_failed";
+            let result = timeout(
+                snapshot.config.authentication.timeout,
+                session.authenticate(authenticator),
+            )
+            .await;
+            if let Err(error) = result.map_err(io::Error::from).and_then(|result| result) {
+                let reason = if error.kind() == io::ErrorKind::PermissionDenied {
+                    "Unable to verify your Minecraft account. Please sign in again."
+                } else if error.kind() == io::ErrorKind::InvalidData {
+                    "Invalid authentication response. Please reconnect."
+                } else {
+                    "Minecraft authentication is unavailable or timed out. Please try again later."
+                };
+                let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect(reason)).await;
+                return Err(error);
+            }
+            login_name = session.authenticated_profile().unwrap().name.clone();
+            session.set_forwarding(snapshot.forwarding_secret.clone().unwrap(), peer_ip)?;
+            event.failure = "io_error";
+        }
         let network = Network {
             snapshot: &snapshot,
             addresses,
@@ -333,10 +393,10 @@ pub async fn handle(
                 return Err(error);
             }
         };
-        // Reserve the name before contacting an offline backend, which might
+        // Reserve the name before contacting a backend, which might
         // otherwise evict the existing player as soon as a duplicate logs in.
         // The client's claimed UUID is never used as the confirmed identity.
-        let mut name_reservation = if network_configured {
+        let mut name_reservation = if network_configured || snapshot.authenticator.is_some() {
             match snapshot.players.reserve_name(&login_name) {
                 Ok(reservation) => Some(reservation),
                 Err(error) => {
