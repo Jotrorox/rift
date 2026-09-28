@@ -9,7 +9,7 @@ complementary runs on the same date. The runnable procedure is in
 Environment: Linux x86_64, Python 3.14.7, system OpenJDK 25.0.4.1, Rust 1.98.1.
 CI continues to use Java 21. Fixtures are the checksum-verified versions in
 `servers.json`: vanilla 1.21.11, Paper 1.21.11-132, Pumpkin 0.2.0+26.3-26.51.
-Rift runtime source is unchanged from `55a0298`; the tested release binary SHA-256
+These local runs used Rift runtime source at `55a0298`; the tested release binary SHA-256
 is `25d88b89d0064223e33844787fb1505c9846e999a9491e26884d35c8d8a85f3a`.
 
 Each default scenario performed 12 routing reloads, four rejected reloads, three
