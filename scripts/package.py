@@ -22,7 +22,7 @@ PLATFORMS = {
 def contents(root, binary):
     return [(binary, binary.name)] + [
         (path, path.relative_to(root).as_posix())
-        for path in [root / "README.md", root / "LICENSE",
+        for path in [root / "README.md", root / "LICENSE", root / "THIRD_PARTY_NOTICES",
                      *sorted((root / "examples").glob("*.lua")),
                      root / "examples/rift.service",
                      *sorted((root / "docs").glob("*.md")),
@@ -59,6 +59,16 @@ def smoke_test(archive, windows, version):
         if result.stdout.strip() != f"rift {version}" or result.stderr:
             raise RuntimeError(f"unexpected packaged version output: {result}")
         subprocess.run([str(binary), "--help"], cwd=directory, check=True, timeout=10)
+        license_files = [directory / "LICENSE", directory / "THIRD_PARTY_NOTICES"]
+        expected_license = "\n".join(path.read_text(encoding="utf-8") for path in license_files)
+        # The standalone binary must carry its notices without external files.
+        for path in license_files:
+            path.unlink()
+        result = subprocess.run([str(binary), "--license"], cwd=directory,
+                                check=True, capture_output=True, text=True,
+                                encoding="utf-8", timeout=10)
+        if result.stdout != expected_license or result.stderr:
+            raise RuntimeError("unexpected packaged license output")
         for config in sorted((directory / "examples").glob("*.lua")):
             subprocess.run([str(binary), "--check", str(config)],
                            cwd=directory, check=True, timeout=10)

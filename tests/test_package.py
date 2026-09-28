@@ -14,7 +14,8 @@ import package
 class PackageTests(unittest.TestCase):
     def test_archives_preserve_operator_files_and_binary(self):
         root = Path(__file__).resolve().parents[1]
-        required = {"README.md", "LICENSE", "examples/rift.lua", "examples/routing.lua",
+        required = {"README.md", "LICENSE", "THIRD_PARTY_NOTICES",
+                    "examples/rift.lua", "examples/routing.lua",
                     "examples/network.lua", "examples/rift.service", "docs/operations.md",
                     "docs/pilot.md", "docs/pilot-results.json"}
         with tempfile.TemporaryDirectory() as temporary:

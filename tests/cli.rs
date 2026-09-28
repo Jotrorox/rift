@@ -36,6 +36,7 @@ fn help_is_successful_and_describes_the_interface() {
         assert!(text.contains("--route"));
         assert!(text.contains("--default"));
         assert!(text.contains("--version"));
+        assert!(text.contains("--license"));
         assert!(output.stderr.is_empty());
     }
 }
