@@ -358,11 +358,15 @@ def test_hostname_routing(name, binary, directory, compression, first_backend):
     command = configure_server(name, second_dir, second_backend, compression, second_motd)
     with process(command, second_dir, "server.log", server=True) as server:
         wait_ready(server, lambda: status_ready(second_backend, protocol), second_dir / "server.log")
-        with process([str(binary), f"127.0.0.1:{frontend}",
-                      "--route", f"survival.example.test=127.0.0.1:{first_backend}",
-                      "--route", f"creative.example.test=localhost:{second_backend}",
-                      "--route", f"*.games.example.test=localhost:{second_backend}",
-                      "--default", f"127.0.0.1:{first_backend}"],
+        config_path = directory / "routing.lua"
+        config_path.write_text(f"""return {{
+            listeners = {{public = '127.0.0.1:{frontend}'}},
+            backends = {{first = '127.0.0.1:{first_backend}', second = 'localhost:{second_backend}'}},
+            routes = {{public = {{['survival.example.test']='first', ['creative.example.test']='second',
+                                 ['*.games.example.test']='second', ['*']='first'}}}},
+            status_cache = {{}},
+        }}""")
+        with process([str(binary), "--config", str(config_path)],
                      directory, "routing-proxy.log") as proxy:
             wait_ready(proxy, lambda: "rift:" in (directory / "routing-proxy.log").read_text(),
                        directory / "routing-proxy.log")
@@ -395,12 +399,18 @@ def test_server(name, binary, directory, compression):
     command = configure_server(name, directory, backend, compression)
     proxy_log = directory / "proxy.log"
     server_log = directory / "server.log"
-    with process([str(binary), f"127.0.0.1:{frontend}", f"127.0.0.1:{backend}"],
+    config_path = directory / "proxy.lua"
+    config_path.write_text(f"""return {{
+        listeners = {{public = '127.0.0.1:{frontend}'}},
+        backends = {{main = '127.0.0.1:{backend}'}}, routes = {{public = 'main'}}, status_cache = {{}},
+    }}""")
+    with process([str(binary), "--config", str(config_path)],
                  directory, "proxy.log") as proxy:
         wait_ready(proxy, lambda: "rift:" in proxy_log.read_text(), proxy_log)
-        # A failed backend connection must close the client and leave Rift alive.
-        with socket.create_connection(("127.0.0.1", frontend), timeout=5) as client:
-            assert client.recv(1) == b""
+        # An unavailable backend returns a readable login disconnect; status remains available.
+        with Client(frontend, 2, protocol) as client:
+            packet_id, body = client.receive()
+            assert packet_id == 0 and b"unavailable" in body
         print(f"Starting {name} {fixture['version']} (compression={compression})...", flush=True)
         with process(command, directory, "server.log", server=True) as server:
             wait_ready(server, lambda: status_ready(backend, protocol), server_log)
@@ -422,8 +432,9 @@ def test_server(name, binary, directory, compression):
             assert proxy.poll() is None
         assert server.returncode == 0, f"server shutdown failed: {server.returncode}"
         assert proxy.poll() is None
-        with socket.create_connection(("127.0.0.1", frontend), timeout=5) as client:
-            assert client.recv(1) == b""
+        with Client(frontend, 2, protocol) as client:
+            packet_id, body = client.receive()
+            assert packet_id == 0 and b"unavailable" in body
         print(f"PASS {name}: backend shutdown handled", flush=True)
 
 

@@ -12,7 +12,7 @@ return {
         public = "lobby",
     },
     limits = {
-        -- 64 MiB of relay buffers at capacity; budget extra for sockets/runtime.
+        -- Budget for packet buffers and sockets; buffer_size is read granularity.
         max_connections = 1024,
         connect_timeout_ms = 5000,
         buffer_size = 32 * 1024,

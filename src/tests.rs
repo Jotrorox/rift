@@ -1,10 +1,7 @@
 use super::*;
-use std::sync::{Arc, Mutex};
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    task::JoinHandle,
-};
-use tokio::{sync::watch, task::JoinSet};
+use rift::protocol::{Codec, Handshake, NextState, Packet, Reader, read_string};
+use std::sync::Arc;
+use tokio::io::AsyncWriteExt;
 
 #[test]
 fn lua_timeout_and_overload_retain_distinct_connection_diagnostics() {
@@ -67,287 +64,146 @@ fn lua_timeout_and_overload_retain_distinct_connection_diagnostics() {
     });
 }
 
-// Exercise real sockets so EOF propagation and backpressure are covered.
-async fn connection() -> (TcpStream, TcpStream, JoinHandle<io::Result<(u64, u64)>>) {
-    let backend = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let backend_addr = backend.local_addr().unwrap();
+async fn runtime_connection(
+    config: Config,
+) -> (TcpStream, tokio::task::JoinHandle<io::Result<(u64, u64)>>) {
     let frontend = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let client = TcpStream::connect(frontend.local_addr().unwrap())
-        .await
-        .unwrap();
-    let (accepted, _) = frontend.accept().await.unwrap();
+    let address = frontend.local_addr().unwrap();
+    let client = TcpStream::connect(address).await.unwrap();
+    let (mut accepted, peer) = frontend.accept().await.unwrap();
+    let snapshot = Arc::new(runtime::Snapshot::new(config, None).unwrap());
     let proxy = tokio::spawn(async move {
-        handle(
-            accepted,
-            &Mode::Direct(Backend::parse(&backend_addr.to_string()).unwrap()),
-            &[frontend.local_addr().unwrap()],
-            Limits::default(),
+        runtime::handle(
+            &mut accepted,
+            "default",
+            snapshot,
+            &[address],
+            Arc::new(metrics::Metrics::default()),
+            &mut events::Connection::new("default", peer),
         )
         .await
     });
-    let (server, _) = backend.accept().await.unwrap();
-    (client, server, proxy)
+    (client, proxy)
+}
+
+fn handshake(next_state: NextState, protocol: i32) -> Packet {
+    Handshake {
+        protocol,
+        address: "play.test".into(),
+        port: 25565,
+        next_state,
+    }
+    .packet()
 }
 
 #[tokio::test]
-async fn simultaneous_bulk_traffic_is_byte_exact() {
-    timeout(Duration::from_secs(10), async {
-        let (mut client, mut server, proxy) = connection().await;
-        let upload: Vec<u8> = (0..2 * 1024 * 1024).map(|n| (n % 251) as u8).collect();
-        let download: Vec<u8> = (0..3 * 1024 * 1024).map(|n| (n % 239) as u8).collect();
-        let (mut client_read, mut client_write) = client.split();
-        let (mut server_read, mut server_write) = server.split();
-        let mut received_upload = Vec::new();
-        let mut received_download = Vec::new();
-        tokio::join!(
-            async {
-                client_write.write_all(&upload).await.unwrap();
-                client_write.shutdown().await.unwrap();
-            },
-            async {
-                server_write.write_all(&download).await.unwrap();
-                server_write.shutdown().await.unwrap();
-            },
-            async { server_read.read_to_end(&mut received_upload).await.unwrap() },
-            async {
-                client_read
-                    .read_to_end(&mut received_download)
-                    .await
-                    .unwrap()
-            },
-        );
-        assert_eq!(received_upload, upload);
-        assert_eq!(received_download, download);
-        assert_eq!(
-            proxy.await.unwrap().unwrap(),
-            (upload.len() as u64, download.len() as u64)
-        );
-    })
-    .await
-    .unwrap();
-}
-
-#[tokio::test]
-async fn client_half_close_still_receives_the_backend_response() {
+async fn all_routing_modes_answer_status_locally_without_contacting_a_backend() {
     timeout(Duration::from_secs(5), async {
-        let (mut client, mut server, proxy) = connection().await;
-        client.write_all(b"request").await.unwrap();
-        client.shutdown().await.unwrap();
-        let mut request = Vec::new();
-        server.read_to_end(&mut request).await.unwrap();
-        assert_eq!(request, b"request");
-        server.write_all(b"response after EOF").await.unwrap();
-        server.shutdown().await.unwrap();
-        let mut response = Vec::new();
-        client.read_to_end(&mut response).await.unwrap();
-        assert_eq!(response, b"response after EOF");
-        assert_eq!(proxy.await.unwrap().unwrap(), (7, 18));
-    })
-    .await
-    .unwrap();
-}
-
-#[tokio::test]
-async fn backend_half_close_still_accepts_client_data() {
-    timeout(Duration::from_secs(5), async {
-        let (mut client, mut server, proxy) = connection().await;
-        server.write_all(b"hello").await.unwrap();
-        server.shutdown().await.unwrap();
-        let mut greeting = Vec::new();
-        client.read_to_end(&mut greeting).await.unwrap();
-        assert_eq!(greeting, b"hello");
-        client.write_all(b"reply after EOF").await.unwrap();
-        client.shutdown().await.unwrap();
-        let mut reply = Vec::new();
-        server.read_to_end(&mut reply).await.unwrap();
-        assert_eq!(reply, b"reply after EOF");
-        assert_eq!(proxy.await.unwrap().unwrap(), (15, 5));
-    })
-    .await
-    .unwrap();
-}
-
-#[tokio::test]
-async fn unavailable_backend_closes_the_client() {
-    timeout(
-        Limits::default().connect_timeout + Duration::from_secs(5),
-        async {
-            // Reserve the port to prevent another test from listening on it.
-            // Connecting may be refused or time out, as on the macOS runner.
-            let reserved = tokio::net::TcpSocket::new_v4().unwrap();
-            reserved.bind("127.0.0.1:0".parse().unwrap()).unwrap();
-            let frontend = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let mut client = TcpStream::connect(frontend.local_addr().unwrap())
-                .await
-                .unwrap();
-            let (accepted, _) = frontend.accept().await.unwrap();
-            let error = handle(
-                accepted,
-                &Mode::Direct(Backend::parse(&reserved.local_addr().unwrap().to_string()).unwrap()),
-                &[frontend.local_addr().unwrap()],
-                Limits::default(),
-            )
-            .await
-            .unwrap_err();
-            assert!(
-                matches!(
-                    error.kind(),
-                    io::ErrorKind::ConnectionRefused | io::ErrorKind::TimedOut
-                ),
-                "unexpected backend connection error: {error}"
-            );
-            assert_eq!(client.read(&mut [0]).await.unwrap(), 0);
-        },
-    )
-    .await
-    .unwrap();
-}
-
-#[tokio::test]
-async fn slow_reader_preserves_data_across_buffer_boundaries() {
-    timeout(Duration::from_secs(15), async {
-        let (mut client, mut server, proxy) = connection().await;
-        // Larger than both relay buffers and typical socket buffers, with a
-        // non-divisible tail to catch truncation at buffer boundaries.
-        let payload: Vec<u8> = (0..8 * 1024 * 1024 + 17).map(|n| (n % 251) as u8).collect();
-        let expected = payload.clone();
-        let writer = tokio::spawn(async move {
-            client.write_all(&payload).await.unwrap();
-            client.shutdown().await.unwrap();
-            let mut reply = Vec::new();
-            client.read_to_end(&mut reply).await.unwrap();
-            assert_eq!(reply, b"received");
-        });
-        sleep(Duration::from_millis(100)).await;
-        let mut received = Vec::new();
-        let mut small_buffer = [0; 997];
-        loop {
-            let count = server.read(&mut small_buffer).await.unwrap();
-            if count == 0 {
-                break;
+        for mode in ["direct", "hostname", "lua"] {
+            let backend = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mut config = Config::from_addresses("127.0.0.1:0", &backend.local_addr().unwrap().to_string()).unwrap();
+            if mode == "hostname" {
+                config.routes.insert("default".into(), Route::Hostnames(BTreeMap::from([("play.test".into(), "default".into())])));
+            } else if mode == "lua" {
+                config = Config::from_lua(&format!("return {{listeners={{default='127.0.0.1:0'}},backends={{target='{}'}},routes={{default='target'}},on_route=function() return {{backend='target'}} end}}", backend.local_addr().unwrap()), "test.lua").unwrap();
             }
-            received.extend_from_slice(&small_buffer[..count]);
-            tokio::task::yield_now().await;
+            let (mut client, proxy) = runtime_connection(config).await;
+            let codec = Codec::default();
+            codec.write(&mut client, &handshake(NextState::Status, -1)).await.unwrap();
+            codec.write(&mut client, &Packet::empty(0)).await.unwrap();
+            let ping = Packet::new(1, i64::MIN.to_be_bytes().to_vec());
+            codec.write(&mut client, &ping).await.unwrap();
+            let response = Reader::default().read(&mut client, codec).await.unwrap().unwrap();
+            assert_eq!(response.id, 0);
+            let json: serde_json::Value = serde_json::from_str(read_string(&mut response.data.as_slice(), 32767).unwrap()).unwrap();
+            assert_eq!(json["description"]["text"], "Rift");
+            assert_eq!(Reader::default().read(&mut client, codec).await.unwrap(), Some(ping));
+            proxy.await.unwrap().unwrap();
+            assert!(timeout(Duration::from_millis(50), backend.accept()).await.is_err());
         }
-        assert_eq!(received, expected);
-        server.write_all(b"received").await.unwrap();
-        server.shutdown().await.unwrap();
-        writer.await.unwrap();
-        assert_eq!(proxy.await.unwrap().unwrap(), (expected.len() as u64, 8));
-    })
-    .await
-    .unwrap();
+    }).await.unwrap();
 }
 
 #[tokio::test]
-async fn concurrent_fragmented_sessions_remain_isolated() {
-    timeout(Duration::from_secs(15), async {
-        let mut sessions = tokio::task::JoinSet::new();
-        for id in 0..32u8 {
-            sessions.spawn(async move {
-                let (mut client, mut server, proxy) = connection().await;
-                // Deliberately split writes and leave the connection idle before
-                // the final response. TCP boundaries must not become messages.
-                let peer = tokio::spawn(async move {
-                    let mut data = Vec::new();
-                    server.read_to_end(&mut data).await.unwrap();
-                    assert_eq!(data, vec![id; 257]);
-                    sleep(Duration::from_millis(20)).await;
-                    server.write_all(&data).await.unwrap();
-                    server.shutdown().await.unwrap();
-                });
-                for _ in 0..257 {
-                    client.write_all(&[id]).await.unwrap();
-                    tokio::task::yield_now().await;
-                }
-                client.shutdown().await.unwrap();
-                let mut data = Vec::new();
-                client.read_to_end(&mut data).await.unwrap();
-                assert_eq!(data, vec![id; 257]);
-                peer.await.unwrap();
-                assert_eq!(proxy.await.unwrap().unwrap(), (257, 257));
-            });
-        }
-        while let Some(result) = sessions.join_next().await {
-            result.unwrap();
-        }
-    })
-    .await
-    .unwrap();
-}
-
-#[tokio::test]
-async fn runaway_hook_does_not_block_existing_or_new_traffic_on_a_single_runtime_thread() {
+async fn unavailable_backend_returns_a_login_disconnect_and_status_stays_available() {
     timeout(Duration::from_secs(5), async {
-        let backend = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let config = Config::from_lua(
-            &format!(
-                "return {{
-            listeners = {{ healthy = '127.0.0.1:0', runaway = '127.0.0.1:0' }},
-            backends = {{ target = '{}' }},
-            routes = {{ healthy = 'target', runaway = 'target' }},
-            on_route = function(connection)
-                if connection.listener == 'runaway' then while true do end end
-                return {{ backend = 'target' }}
-            end,
-        }}",
-                backend.local_addr().unwrap()
-            ),
-            "isolation.lua",
-        )
-        .unwrap();
-        let snapshot = Arc::new(runtime::Snapshot::new(config, None).unwrap());
-        let (_current, current) = watch::channel(snapshot);
-        let (_stop, stop) = watch::channel(false);
-        let metrics = Arc::new(metrics::Metrics::default());
-        let admission = Arc::new(Mutex::new(admission::Admission::default()));
-        let mut tasks = JoinSet::new();
-        let mut addresses = Vec::new();
-        for name in ["healthy", "runaway"] {
-            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            addresses.push(listener.local_addr().unwrap());
-            tasks.spawn(runtime::accept(
-                listener,
-                name.into(),
-                current.clone(),
-                stop.clone(),
-                Arc::new(Vec::new()),
-                metrics.clone(),
-                admission.clone(),
-            ));
-        }
-        let mut established = TcpStream::connect(addresses[0]).await.unwrap();
-        let (mut existing_backend, _) = backend.accept().await.unwrap();
-        let mut runaway = TcpStream::connect(addresses[1]).await.unwrap();
-        let mut new_client = TcpStream::connect(addresses[0]).await.unwrap();
-        let existing = async {
-            established.write_all(b"still flowing").await.unwrap();
-            let mut bytes = [0; 13];
-            existing_backend.read_exact(&mut bytes).await.unwrap();
-            assert_eq!(&bytes, b"still flowing");
-            existing_backend.write_all(b"reply").await.unwrap();
-            let mut response = [0; 5];
-            established.read_exact(&mut response).await.unwrap();
-            assert_eq!(&response, b"reply");
-        };
-        let incoming = async {
-            let (mut new_backend, _) = backend.accept().await.unwrap();
-            new_backend.write_all(b"new traffic").await.unwrap();
-            let mut bytes = [0; 11];
-            new_client.read_exact(&mut bytes).await.unwrap();
-            assert_eq!(&bytes, b"new traffic");
-        };
-        let rejected = async {
-            assert_eq!(runaway.read(&mut [0]).await.unwrap(), 0);
-        };
-        tokio::join!(existing, incoming, rejected);
-        drop(established);
-        drop(existing_backend);
-        drop(new_client);
-        while metrics.active.get() != 0 {
-            tokio::task::yield_now().await;
-        }
+        let reserved = tokio::net::TcpSocket::new_v4().unwrap();
+        reserved.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let mut config =
+            Config::from_addresses("127.0.0.1:0", &reserved.local_addr().unwrap().to_string())
+                .unwrap();
+        config.limits.connect_timeout = Duration::from_millis(100);
+        let (mut client, proxy) = runtime_connection(config.clone()).await;
+        let codec = Codec::default();
+        codec
+            .write(&mut client, &handshake(NextState::Login, 774))
+            .await
+            .unwrap();
+        let packet = Reader::default()
+            .read(&mut client, codec)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(packet.id, 0);
+        assert!(
+            read_string(&mut packet.data.as_slice(), 32767)
+                .unwrap()
+                .contains("unavailable")
+        );
+        assert!(proxy.await.unwrap().is_err());
+        config.status_cache = Some(rift::config::StatusCache {
+            ttl: Duration::from_secs(1),
+            max_entries: 8,
+            max_response_bytes: 65536,
+        });
+        let (mut client, proxy) = runtime_connection(config).await;
+        codec
+            .write(&mut client, &handshake(NextState::Status, 774))
+            .await
+            .unwrap();
+        codec.write(&mut client, &Packet::empty(0)).await.unwrap();
+        client.shutdown().await.unwrap();
+        let packet = Reader::default()
+            .read(&mut client, codec)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            read_string(&mut packet.data.as_slice(), 32767)
+                .unwrap()
+                .contains("unavailable")
+        );
+        proxy.await.unwrap().unwrap();
     })
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn unsupported_version_gets_a_disconnect_before_any_backend_connection() {
+    let backend = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let config =
+        Config::from_addresses("127.0.0.1:0", &backend.local_addr().unwrap().to_string()).unwrap();
+    let (mut client, proxy) = runtime_connection(config).await;
+    Codec::default()
+        .write(&mut client, &handshake(NextState::Login, 9999))
+        .await
+        .unwrap();
+    let packet = Reader::default()
+        .read(&mut client, Codec::default())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(packet.id, 0);
+    assert!(
+        read_string(&mut packet.data.as_slice(), 32767)
+            .unwrap()
+            .contains("Unsupported Minecraft version")
+    );
+    assert!(proxy.await.unwrap().is_err());
+    assert!(
+        timeout(Duration::from_millis(50), backend.accept())
+            .await
+            .is_err()
+    );
 }

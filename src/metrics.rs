@@ -34,6 +34,7 @@ impl Counter {
 pub struct Metrics {
     pub accepted: Counter,
     pub active: Counter,
+    pub players: Counter,
     pub completed: Counter,
     pub rate_rejected: Counter,
     pub capacity_rejected: Counter,
@@ -72,12 +73,27 @@ impl Drop for Active {
     }
 }
 
+/// Counts logged-in sessions, excluding status probes and pending handshakes.
+pub struct Player(Arc<Metrics>);
+impl Player {
+    pub fn new(metrics: Arc<Metrics>) -> Self {
+        metrics.players.inc();
+        Self(metrics)
+    }
+}
+impl Drop for Player {
+    fn drop(&mut self) {
+        self.0.players.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 impl Metrics {
     pub fn render(&self, snapshot: &crate::runtime::Snapshot) -> String {
         let mut text = String::new();
         for (name, kind, value) in [
             ("connections_accepted_total", "counter", self.accepted.get()),
             ("connections_active", "gauge", self.active.get()),
+            ("players_online", "gauge", self.players.get()),
             (
                 "connections_completed_total",
                 "counter",

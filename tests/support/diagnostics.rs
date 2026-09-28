@@ -28,7 +28,7 @@ fn handshake_errors_and_missing_routes_have_no_selected_backend() {
         (vec![0], "handshake", "handshake_error", "InvalidData"),
         (vec![2, 0], "handshake", "handshake_error", "UnexpectedEof"),
         (
-            handshake("missing.example.com", 1, 2),
+            handshake("missing.example.com", 47, 2),
             "route",
             "no_route",
             "NotFound",
@@ -38,6 +38,10 @@ fn handshake_errors_and_missing_routes_have_no_selected_backend() {
         let peer = client.local_addr().unwrap();
         client.write_all(&packet).unwrap();
         client.shutdown(std::net::Shutdown::Write).unwrap();
+        if stage == "route" {
+            let packet = game::read_packet(&mut client).unwrap();
+            assert_eq!(packet.id, 0);
+        }
         assert_closed(&mut client);
         let failure_event = event(&process, "connection_failed", peer);
         assert_eq!(failure_event["stage"], stage);
@@ -85,6 +89,14 @@ fn dns_and_connect_failures_include_the_attempted_backend_and_correlate_with_the
         let process = fixture.spawn(&[]);
         let mut client = connect(process.listener());
         let peer = client.local_addr().unwrap();
+        client.write_all(&game::setup()).unwrap();
+        let packet = game::read_packet(&mut client).unwrap();
+        assert_eq!(packet.id, 0);
+        assert!(
+            rift::protocol::read_string(&mut packet.data.as_slice(), 32767)
+                .unwrap()
+                .contains("unavailable")
+        );
         assert_closed(&mut client);
         let attempt = event(&process, "backend_attempt_failed", peer);
         let failure = event(&process, "connection_failed", peer);
@@ -209,8 +221,8 @@ fn admission_rejections_are_logged_without_changing_error_metrics() {
     let process = fixture.spawn(&[]);
     let front = process.listener();
     let metrics = process.metrics_address();
-    let _allowed = connect(front);
-    let _server = accept(&backend);
+    let _allowed = connect_game(front);
+    let _server = accept_game(&backend);
     let mut rejected = connect(front);
     let peer = rejected.local_addr().unwrap();
     assert_closed(&mut rejected);

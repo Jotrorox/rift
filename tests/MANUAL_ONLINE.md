@@ -1,5 +1,12 @@
 # Authenticated, encrypted gameplay
 
+**Historical procedure:** this harness targets the transparent relay before the
+client-owned session layer. Current Rift rejects backend encryption requests and
+requires offline-mode backends, so this procedure cannot pass against the current
+binary. The observations below apply only to the revisions recorded in
+[OPERATIONS_RESULTS.md](OPERATIONS_RESULTS.md). Revisit the harness when
+proxy-owned authentication and encryption are implemented.
+
 This check covers signed-in gameplay that the offline fixtures cannot verify.
 Paper coverage was completed on 2026-09-28 across two complementary runs; see
 [the recorded results](OPERATIONS_RESULTS.md). For new executions, require

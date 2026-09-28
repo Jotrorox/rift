@@ -13,6 +13,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "support/game.rs"]
+mod game;
+use game::{accept_game, connect_game};
+
 struct Fixture(PathBuf);
 
 impl Fixture {
@@ -189,10 +193,10 @@ fn auto_loaded_and_explicit_configs_route_to_named_backends() {
         }
         let process = fixture.spawn(&args);
         for (i, backend) in backends.iter().enumerate() {
-            let mut client = connect(process.listener());
+            let mut client = connect_game(process.listener());
+            let mut server = accept_game(backend);
             client.write_all(&[i as u8; 17]).unwrap();
             client.shutdown(std::net::Shutdown::Write).unwrap();
-            let mut server = accept(backend);
             let mut bytes = Vec::new();
             server.read_to_end(&mut bytes).unwrap();
             assert_eq!(bytes, vec![i as u8; 17]);
@@ -216,8 +220,8 @@ fn connection_limit_is_shared_across_listeners_and_released() {
     let process = fixture.spawn(&[]);
     let first = process.listener();
     let second = process.listener();
-    let client = connect(first);
-    let server = accept(&backend);
+    let client = connect_game(first);
+    let server = accept_game(&backend);
     // Backend acceptance proves the first connection has acquired its permit.
     let mut excess = connect(second);
     match excess.read(&mut [0]) {
@@ -228,7 +232,7 @@ fn connection_limit_is_shared_across_listeners_and_released() {
     drop(client);
     drop(server);
     let responder = thread::spawn(move || {
-        let mut server = accept(&backend);
+        let mut server = accept_game(&backend);
         server.write_all(b"ready").unwrap();
         let mut bytes = [0; 5];
         server.read_exact(&mut bytes).unwrap();
@@ -236,7 +240,7 @@ fn connection_limit_is_shared_across_listeners_and_released() {
     });
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        let mut client = connect(second);
+        let mut client = connect_game(second);
         let mut bytes = [0; 5];
         match client.read_exact(&mut bytes) {
             Ok(()) => {
@@ -308,7 +312,7 @@ fn lua_hostname_routes_reach_two_backends_on_one_listener() {
         let backends: Vec<_> = (0..2)
             .map(|_| TcpListener::bind("127.0.0.1:0").unwrap())
             .collect();
-        fixture.write(&format!("return {{{hook}
+        fixture.write(&format!("return {{{hook} status_cache = {{}},
         listeners = {{ public = '127.0.0.1:0' }},
         backends = {{ survival = '{}', creative = 'localhost:{}' }},
         routes = {{ public = {{ ['survival.example.test'] = 'survival', ['creative.example.test'] = 'creative', ['*.games.example.test'] = 'creative', ['*'] = 'survival' }} }},
@@ -332,19 +336,23 @@ fn lua_hostname_routes_reach_two_backends_on_one_listener() {
             client.write_all(&request).unwrap();
             client.shutdown(std::net::Shutdown::Write).unwrap();
             let mut server = accept(&backends[index]);
-            let mut received = Vec::new();
-            server.read_to_end(&mut received).unwrap();
+            let mut received = vec![0; request.len()];
+            server.read_exact(&mut received).unwrap();
             assert_eq!(received, request);
-            server.write_all(&[index as u8]).unwrap();
+            let response_packet = rift::protocol::status_response(774, 0, 20, &index.to_string());
+            let encoded = rift::protocol::Codec::default()
+                .encode(&response_packet)
+                .unwrap();
+            server.write_all(&encoded).unwrap();
             server.shutdown(std::net::Shutdown::Write).unwrap();
             let mut response = Vec::new();
             client.read_to_end(&mut response).unwrap();
-            assert_eq!(response, [index as u8]);
+            assert_eq!(response, encoded);
         }
     }
 }
 
-fn assert_closed(client: &mut TcpStream) {
+fn assert_closed(client: &mut impl Read) {
     match client.read(&mut [0]) {
         Ok(0) => {}
         Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
@@ -407,8 +415,8 @@ fn lua_selects_a_backend_or_rejects_before_connecting_upstream() {
         let second = process.listener();
         // The source snapshot remains usable after the file changes.
         fixture.write("error('must not reread the configuration')");
-        let mut client = connect(first);
-        let mut server = accept(&selected);
+        let mut client = connect_game(first);
+        let mut server = accept_game(&selected);
         client.write_all(b"routed").unwrap();
         client.shutdown(std::net::Shutdown::Write).unwrap();
         let mut bytes = Vec::new();
@@ -454,8 +462,8 @@ fn hook_failures_close_only_the_affected_connection_and_release_its_permit() {
             assert_closed(&mut connect(failing));
         }
         assert_no_connection(&backend);
-        let mut client = connect(healthy);
-        let mut server = accept(&backend);
+        let mut client = connect_game(healthy);
+        let mut server = accept_game(&backend);
         server.write_all(b"healthy").unwrap();
         let mut response = [0; 7];
         client.read_exact(&mut response).unwrap();
