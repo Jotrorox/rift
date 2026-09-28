@@ -1,0 +1,87 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: '17 1 * * *'
+    - cron: '47 2 * * 1'
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Release cadence
+        type: choice
+        options: [daily, weekly]
+        default: daily
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-${{ github.event.schedule == '47 2 * * 1' && 'weekly' || inputs.channel || 'daily' }}
+  cancel-in-progress: false
+
+jobs:
+  changes:
+    name: Find changes since the previous nightly
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      changed: ${{ steps.notes.outputs.changed }}
+      tag: ${{ steps.notes.outputs.tag }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Generate changelog
+        id: notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHANNEL: ${{ github.event.schedule == '47 2 * * 1' && 'weekly' || inputs.channel || 'daily' }}
+        run: |
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" > "$RUNNER_TEMP/releases.json"
+          python3 scripts/nightly.py --channel "$CHANNEL" \
+            --repository "$GITHUB_REPOSITORY" --releases "$RUNNER_TEMP/releases.json" \
+            --notes "$RUNNER_TEMP/CHANGELOG.md" --output "$GITHUB_OUTPUT"
+          cat "$RUNNER_TEMP/CHANGELOG.md" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: steps.notes.outputs.changed == 'true'
+        with:
+          name: nightly-changelog
+          path: ${{ runner.temp }}/CHANGELOG.md
+          if-no-files-found: error
+          retention-days: 14
+
+  verify:
+    needs: changes
+    if: needs.changes.outputs.changed == 'true'
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Publish tested nightly artifacts and changelog
+    needs: [changes, verify]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: nightly-changelog
+          path: dist
+      - name: Verify packages and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.changes.outputs.tag }}
+        working-directory: dist
+        run: |
+          sha256sum --check rift-linux-x86_64.tar.gz.sha256 \
+            rift-macos-aarch64.tar.gz.sha256 rift-windows-x86_64.zip.sha256
+          cat ./*.sha256 > SHA256SUMS
+          gh release create "$RELEASE_TAG" ./*.tar.gz ./*.zip SHA256SUMS CHANGELOG.md \
+            --target "$GITHUB_SHA" --prerelease --latest=false \
+            --title "$RELEASE_TAG" --notes-file CHANGELOG.md

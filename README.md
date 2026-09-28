@@ -121,6 +121,18 @@ macOS and Windows archives with `SHA256SUMS` to a GitHub Release. Only the final
 publishing job receives write permission; it uses the workflow's built-in token.
 This distributes the standalone proxy; running servers are managed separately.
 
+[`Nightly`](.github/workflows/nightly.yml) checks for new commits daily at **01:17
+UTC** and weekly on **Monday at 02:47 UTC**. Each cadence tracks its own previous
+published nightly, skips builds and publication when no commits have changed,
+and runs the full CI workflow before publishing a GitHub prerelease. Releases use
+dated `nightly-daily-*` or `nightly-weekly-*` tags and include the tested Linux,
+macOS and Windows packages, `SHA256SUMS`, and `CHANGELOG.md`. The release notes and
+changelog list every new commit's subject and linked full hash. The first release
+for each cadence includes the entire commit history; failed runs leave those
+commits for the next successful release. Stable releases remain the latest release.
+You can also run Nightly manually and select either cadence. Scheduled runs use
+the default branch and become active once the workflow is merged there.
+
 When updating a server fixture, update its URL, version, checksum and protocol in
 `tests/servers.json`, adjust `PROTOCOLS` and packet handling in `tests/minecraft.py`
 against the upstream protocol/source, and run both compression modes locally.
