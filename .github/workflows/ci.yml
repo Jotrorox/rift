@@ -143,6 +143,8 @@ jobs:
             target/minecraft/report.json
             target/minecraft/runs/*/result.json
             target/minecraft/runs/**/*.log
+            target/minecraft/runs/**/resources.jsonl
+            target/minecraft/runs/**/rift.lua
             target/minecraft/runs/**/crash-reports/**
           if-no-files-found: warn
           retention-days: 14
