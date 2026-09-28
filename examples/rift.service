@@ -1,0 +1,29 @@
+[Unit]
+Description=Rift Minecraft TCP proxy
+After=network.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=rift
+Group=rift
+WorkingDirectory=/etc/rift
+ExecStartPre=/usr/local/bin/rift --check /etc/rift/rift.lua
+ExecStart=/usr/local/bin/rift --config /etc/rift/rift.lua
+ExecReload=/usr/local/bin/rift --check /etc/rift/rift.lua
+ExecReload=/bin/kill -HUP $MAINPID
+KillSignal=SIGTERM
+# Must exceed shutdown_timeout_ms (30 seconds by default).
+TimeoutStopSec=40s
+Restart=on-failure
+RestartSec=5s
+# Two sockets per relay, plus listeners, metrics and runtime overhead.
+LimitNOFILE=8192
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

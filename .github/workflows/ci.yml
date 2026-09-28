@@ -162,6 +162,8 @@ jobs:
         run: |
           mkdir -p target
           python tests/bench.py --report target/benchmark.json | tee target/benchmark.txt
+      - name: Exercise operational pilot and record buffer comparison
+        run: python tests/pilot.py --report target/pilot.json
       - name: Add benchmark to run summary
         run: |
           {
@@ -175,7 +177,9 @@ jobs:
         if: always()
         with:
           name: benchmark
-          path: target/benchmark.*
+          path: |
+            target/benchmark.*
+            target/pilot.json
           retention-days: 14
 
   ci-ready:
