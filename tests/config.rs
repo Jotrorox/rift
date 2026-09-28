@@ -65,17 +65,22 @@ struct Process {
 
 impl Process {
     fn listener(&self) -> SocketAddr {
-        let line = self
-            .lines
-            .recv_timeout(Duration::from_secs(10))
-            .expect("startup log");
-        line.strip_prefix("rift: listening on ")
-            .unwrap()
-            .split(" -> ")
-            .next()
-            .unwrap()
-            .parse()
-            .expect(&line)
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut output = Vec::new();
+        loop {
+            let line = self
+                .lines
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or_else(|error| {
+                    panic!("missing listener startup log ({error}); stderr: {output:?}")
+                });
+            // A previously started listener may log connection diagnostics
+            // before the next listener's readiness message reaches stderr.
+            if let Some(address) = line.strip_prefix("rift: listening on ") {
+                return address.split(" -> ").next().unwrap().parse().expect(&line);
+            }
+            output.push(line);
+        }
     }
 
     fn failure(&mut self, expected: &str) {

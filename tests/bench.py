@@ -414,7 +414,7 @@ def burst_sizes(value):
     except ValueError as exc:
         raise argparse.ArgumentTypeError("expected comma-separated positive integers") from exc
     if max(sizes) > 4096:
-        raise argparse.ArgumentTypeError("burst sizes must not exceed the 4096 connection limit")
+        raise argparse.ArgumentTypeError("burst sizes must not exceed 4096")
     return sizes
 
 

@@ -6,6 +6,11 @@ reads the initial handshake; the backend handles login, encryption, compression,
 and gameplay. LuaJIT is embedded through `mlua`; the binary needs no Java or
 separate Lua installation. Building requires a C toolchain (MSVC on Windows).
 
+Download a native archive from [Releases](https://github.com/Jotrorox/rift/releases)
+and follow the [operator guide](docs/operations.md) for installation, the supplied
+systemd service, reloads, shutdown and upgrades. Archives include the examples and
+operating docs. Rift is released under the [MIT License](LICENSE).
+
 ## Run
 
 ```sh
@@ -18,7 +23,8 @@ With no arguments, Rift loads `./rift.lua` if present, otherwise it uses those
 same addresses. Explicit CLI addresses or routing options override the file.
 The listener must be an IP literal with a port. Backends accept IP literals or DNS hostnames with ports;
 IPv6 works too: `rift '[::]:25565' '[::1]:25566'`.
-Use `--help` for usage. Ctrl-C stops accepting connections and lets active sessions
+Use `--help` for usage and `--version` (or `-V`) for the package version.
+Ctrl-C stops accepting connections and lets active sessions
 drain for up to 30 seconds by default; a second Ctrl-C closes them immediately.
 
 ### Hostname routing
@@ -97,7 +103,7 @@ return {
         creative = "creative",
     },
     limits = {
-        max_connections = 4096,
+        max_connections = 1024,
         connect_timeout_ms = 5000,
         buffer_size = 32 * 1024,
     },
@@ -130,6 +136,11 @@ limits are the same as for CLI routes. Multiple listeners may share backends.
 within Tokio's semaphore capacity. `connect_timeout_ms` accepts 1–86,400,000
 milliseconds; `buffer_size` accepts 1–16,777,216 bytes per direction. All three
 reject fractions, strings, and nonfinite numbers.
+
+The release default is 1024 connections (previously 4096), with 32 KiB of buffer
+space per direction: 64 MiB of relay buffers at capacity, plus sockets and runtime
+overhead. Explicit limits in existing configs remain unchanged. The
+[local pilot](docs/pilot.md) records the measurements and sizing rationale.
 
 Lua evaluates during startup and produces a typed Rust `Config`. Send SIGHUP on
 Unix or Ctrl-Break on Windows to validate and reload the selected file. An optional `on_route` function also runs for each connection,
@@ -557,6 +568,12 @@ It reruns the entire CI workflow on that tag, then publishes the tested Linux,
 macOS and Windows archives with `SHA256SUMS` to a GitHub Release. Only the final
 publishing job receives write permission; it uses the workflow's built-in token.
 This distributes the standalone proxy; running servers are managed separately.
+Each archive includes the binary, MIT license, README, all three Lua examples,
+the systemd unit and operator/pilot documentation. Packaging extracts the archive,
+checks `--version` against `Cargo.toml`, runs `--help`, and validates every bundled
+configuration with `--check`. Build the same archive locally after a release build:
+`python3 scripts/package.py --platform linux-x86_64` (or `macos-aarch64` /
+`windows-x86_64` on the matching native host).
 
 [`Nightly`](.github/workflows/nightly.yml) checks for new commits daily at **01:17
 UTC** and weekly on **Monday at 02:47 UTC**. Each cadence tracks its own previous
@@ -608,7 +625,8 @@ and 256. Clients are released together at an asyncio gate; the next wave starts
 when the entire previous wave finishes. The final wave can be smaller. There are
 no retries. Sixteen sequential warmup connections precede each measurement, and
 each proxy scenario starts a fresh process. Rate limits and health probes are
-disabled; the normal 4,096-connection admission limit remains in place.
+disabled; the normal 1,024-connection admission limit remains in place. Larger
+custom bursts can exercise admission rejection; the driver allows up to 4,096.
 
 Setup latency starts before TCP connect and ends at a verified echo of the
 Minecraft handshake plus a probe, establishing that routing and backend setup
