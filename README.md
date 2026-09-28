@@ -6,6 +6,11 @@ reads the initial handshake; the backend handles login, encryption, compression,
 and gameplay. LuaJIT is embedded through `mlua`; the binary needs no Java or
 separate Lua installation. Building requires a C toolchain (MSVC on Windows).
 
+Download a native archive from [Releases](https://github.com/Jotrorox/rift/releases)
+and follow the [operator guide](docs/operations.md) for installation, the supplied
+systemd service, reloads, shutdown and upgrades. Archives include the examples and
+operating docs. Rift is released under the [BSD-2-Clause License](LICENSE).
+
 ## Run
 
 ```sh
@@ -18,7 +23,8 @@ With no arguments, Rift loads `./rift.lua` if present, otherwise it uses those
 same addresses. Explicit CLI addresses or routing options override the file.
 The listener must be an IP literal with a port. Backends accept IP literals or DNS hostnames with ports;
 IPv6 works too: `rift '[::]:25565' '[::1]:25566'`.
-Use `--help` for usage. Ctrl-C stops accepting connections and lets active sessions
+Use `--help` for usage and `--version` (or `-V`) for the package version.
+Ctrl-C stops accepting connections and lets active sessions
 drain for up to 30 seconds by default; a second Ctrl-C closes them immediately.
 
 ### Hostname routing
@@ -97,7 +103,7 @@ return {
         creative = "creative",
     },
     limits = {
-        max_connections = 4096,
+        max_connections = 1024,
         connect_timeout_ms = 5000,
         buffer_size = 32 * 1024,
     },
@@ -130,6 +136,11 @@ limits are the same as for CLI routes. Multiple listeners may share backends.
 within Tokio's semaphore capacity. `connect_timeout_ms` accepts 1–86,400,000
 milliseconds; `buffer_size` accepts 1–16,777,216 bytes per direction. All three
 reject fractions, strings, and nonfinite numbers.
+
+The release default is 1024 connections (previously 4096), with 32 KiB of buffer
+space per direction: 64 MiB of relay buffers at capacity, plus sockets and runtime
+overhead. Explicit limits in existing configs remain unchanged. The
+[local pilot](docs/pilot.md) records the measurements and sizing rationale.
 
 Lua evaluates during startup and produces a typed Rust `Config`. Send SIGHUP on
 Unix or Ctrl-Break on Windows to validate and reload the selected file. An optional `on_route` function also runs for each connection,
@@ -303,6 +314,53 @@ stays available during the drain. The default deadline is 30 seconds; set
 shutdown signal, remaining sessions close and the process exits. TCP half-close
 behavior is preserved throughout a normal drain.
 
+### Connection failure events
+
+Connection failures and rejections emit one JSON object per line to stderr,
+without requiring the metrics listener. Startup, reload and shutdown messages
+remain plain text. For example:
+
+```json
+{"event":"connection_failed","timestamp_unix_ms":1790598574204,"connection_id":42,"listener":"public","peer":"192.0.2.10:51234","backend":"survival","backend_address":"127.0.0.1:25566","stage":"connect","failure":"connect_error","duration_ms":1.234,"error_kind":"ConnectionRefused","message":"Connection refused (os error 111)"}
+```
+
+`connection_id` correlates events within one process. `duration_ms` is elapsed
+monotonic time since TCP accept, including hook execution and all fallback
+attempts; `timestamp_unix_ms` is the event's wall-clock time. `backend` is the
+configured name of the selected or most recently attempted backend, with its
+configured target in `backend_address`. Both are `null` before selection, such
+as when a handshake or hook fails. After fallback, subsequent failures identify
+the backup actually used.
+
+| Stage | Failure | Meaning |
+| --- | --- | --- |
+| `handshake` | `handshake_error` | Invalid, truncated or timed-out client handshake |
+| `route` | `no_route` | No configured hostname route matched |
+| `on_route` | `lua_overload` | All Lua worker slots are occupied |
+| `on_route` | `script_timeout` | The asynchronous hook deadline expired |
+| `on_route` | `script_error` | Lua execution/budget error or malformed decision |
+| `on_route` | `unknown_backend` | The hook returned an unconfigured backend name |
+| `dns` | `dns_error` | Backend resolution failed, returned no addresses or timed out |
+| `connect` | `connect_error` | TCP connection or loop protection failed, or connect timed out |
+| `connect` | `no_healthy_backend` | No primary or fallback was eligible |
+| `admission` | `rate_limited`, `capacity_exhausted` | Admission closed the connection |
+| `on_route` | `route_rejected` | The hook explicitly rejected the connection |
+
+Other I/O failures use `failure="io_error"` with `stage` set to `client_setup`,
+`backend_setup`, `handshake_write`, `relay`, `status_request`, `status_cache_wait`,
+`status_upstream` or `status_response`. `error_kind="TimedOut"` distinguishes I/O
+deadlines from other errors at the same stage. Lua diagnostics retain the script
+filename and hook context. Messages are capped at 2,048 characters and JSON
+escapes embedded newlines and control characters; handshake payloads are not logged.
+
+`backend_attempt_failed` records each failed backend attempt, including attempts
+recovered by a fallback. Only `connection_failed` means the session ended in an
+error. Policy/admission closures use `connection_rejected`; hook rejection
+reasons appear in `message`. These events preserve the existing error/rejection
+counters and do not log successful sessions or individual traffic packets.
+For example, filter a combined stderr log with
+`jq -R 'fromjson? | select(.event == "connection_failed")' rift.log`.
+
 ## Routing hook
 
 Add `on_route` to the returned configuration table. Rift calls it once after TCP
@@ -344,14 +402,14 @@ backends retain DNS resolution, connection deadlines and proxy-loop checks.
 Return `nil` to continue the configured direct or hostname routing policy,
 `{ backend = "name" }` to select a configured backend, or `{ reject = true, reason = "optional explanation" }` to close TCP.
 Rejection reasons must be UTF-8 strings of at most 1,024 bytes; they are available
-in the Rust result but are not sent to the client. Rift sends no Minecraft
+in the Rust result and structured rejection event but are not sent to the client. Rift sends no Minecraft
 disconnect packet. Unknown fields, conflicting choices, wrong types and unknown
 backend names are errors. Arbitrary backend addresses are not accepted.
 
 Startup syntax errors, invalid configuration, or a non-function `on_route` fail
 startup. During routing, script errors, invalid decisions, exceeded budgets and
 worker overload **fail closed**: only that connection closes, with an error on
-stderr. Lua errors include the script filename and hook context. There is no
+stderr as a [structured event](#connection-failure-events). Lua errors include the script filename and hook context. There is no
 automatic fallback after an error; a successful `nil` result explicitly selects
 the configured policy. Displayed script diagnostics are capped at 2,048 characters,
 and unknown backend names at 256 characters. Backend connection failures retain the
@@ -547,6 +605,12 @@ It reruns the entire CI workflow on that tag, then publishes the tested Linux,
 macOS and Windows archives with `SHA256SUMS` to a GitHub Release. Only the final
 publishing job receives write permission; it uses the workflow's built-in token.
 This distributes the standalone proxy; running servers are managed separately.
+Each archive includes the binary, BSD-2-Clause license, README, all three Lua examples,
+the systemd unit and operator/pilot documentation. Packaging extracts the archive,
+checks `--version` against `Cargo.toml`, runs `--help`, and validates every bundled
+configuration with `--check`. Build the same archive locally after a release build:
+`python3 scripts/package.py --platform linux-x86_64` (or `macos-aarch64` /
+`windows-x86_64` on the matching native host).
 
 [`Nightly`](.github/workflows/nightly.yml) checks for new commits daily at **01:17
 UTC** and weekly on **Monday at 02:47 UTC**. Each cadence tracks its own previous
@@ -569,18 +633,116 @@ Update `rust-toolchain.toml` explicitly when upgrading Rust, then run the full s
 
 ## Benchmark
 
-The benchmark compares direct TCP with Rift using a local Python echo server.
-It reports median/p95 round-trip latency and median throughput over three runs
-with one and sixteen clients. Throughput counts echoed payload once, although it
-travels in both directions. These are loopback measurements including Python
-overhead, not a Minecraft player-capacity estimate.
+```sh
+python3 tests/bench.py --report target/benchmark.json
+# Longer connection-only sweep using an already built release binary:
+python3 tests/bench.py --binary target/release/rift --skip-throughput \
+  --attempts 8192 --burst-sizes 1,4,16,64,256 --report target/benchmark-bursts.json
+```
 
-Example release-build results from the development machine (Linux, 2026-09-28):
+The standard-library harness runs a separate asynchronous Python backend process
+and measures six paths:
 
-| Route | RTT median / p95 | 1 client | 16 clients combined |
-| --- | --- | --- | --- |
-| Direct | 12.5 / 19.5 µs | 2,180 MiB/s | 1,957 MiB/s |
-| Rift | 32.0 / 36.8 µs | 1,200 MiB/s | 1,204 MiB/s |
+| Scenario | Connection path |
+| --- | --- |
+| `direct` | TCP straight to the echo fixture |
+| `rift` | Rift's transparent single-backend relay |
+| `hostname` | Minecraft login handshake, exact hostname match, then relay |
+| `lua` | Fresh Lua VM/config evaluation, a minimal `on_route` returning `nil`, then hostname routing |
+| `lua_init` | Same hook and route, with a 10,000-entry table rebuilt during each config evaluation |
+| `status_cached` | Hostname status request served from a primed cache; separate ping/pong per client |
 
-That run added 19.5 µs to median round-trip latency. Results vary with the host
-and other running workloads.
+Use `--scenarios` to select paths and `--lua-init-iterations` to vary initialization
+work within the existing script budget. The benchmark uses the existing four Lua
+job slots, immediate overload rejection, fresh VM per invocation, and 50 ms
+execution deadline. It does not alter the routing implementation.
+
+By default each path attempts 2,048 connections at each burst size: 1, 4, 16, 64
+and 256. Clients are released together at an asyncio gate; the next wave starts
+when the entire previous wave finishes. The final wave can be smaller. There are
+no retries. Sixteen sequential warmup connections precede each measurement, and
+each proxy scenario starts a fresh process. Rate limits and health probes are
+disabled; the normal 1,024-connection admission limit remains in place. Larger
+custom bursts can exercise admission rejection; the driver allows up to 4,096.
+
+Setup latency starts before TCP connect and ends at a verified echo of the
+Minecraft handshake plus a probe, establishing that routing and backend setup
+completed. This is not a full Minecraft login. Cached-status latency ends at the
+complete expected status response; success additionally requires the correct
+client-specific ping reply. Cache counters must confirm zero measured misses and
+at least one hit per successful exchange. Cache priming is excluded and the
+fixture uses a one-day TTL so expiration does not mix fills into this measurement.
+
+The console reports success counts/rate, p95/p99 setup latency, successful setups
+per second, Rift CPU, sampled peak RSS and Lua capacity rejections. JSON also
+records p50, failures by category, failed-attempt p95, attempts per second,
+successes per wave, client launch spread, proxy counter deltas, Lua error counts,
+generated configs, binary/harness hashes, and platform/settings metadata.
+Percentiles use nearest rank over **successful connections only**; an entirely
+failed measurement has null latency percentiles. Read latency alongside success
+rate: rejecting more connections can make the remaining successes look faster.
+
+CPU and memory collection uses Linux `/proc`; unsupported platforms emit null
+resource values. CPU is process user+system time over the measurement window,
+with 100% representing one core. CPU time has the kernel's clock-tick resolution
+(recorded in JSON), so very short runs can show zero or noisy utilization. RSS
+is sampled every 5 ms, including the start and end; brief peaks can be missed.
+JSON separates Rift, the Python backend and the Python driver. The direct path
+has no Rift process. RSS reflects the entire process, including allocations
+retained from earlier burst sizes and, for `rift`, the throughput test.
+
+The original established-connection RTT and throughput measurements remain for
+`direct` and `rift`: median/p95 RTT and median throughput over three runs with
+one and sixteen clients. Throughput counts echoed payload once, although it
+travels in both directions. `--skip-throughput` omits these tests.
+
+These are loopback measurements including Python scheduling, socket and backend
+overhead, not a Minecraft player-capacity estimate or an isolated Lua microbenchmark.
+The backend has no fixed worker pool limiting burst concurrency. The driver is
+single-threaded asyncio, so gate release does not mean simultaneous arrival at
+Rift; inspect launch spread and driver CPU when comparing runs. Repeat on the same
+hardware under comparable load before choosing a Lua architecture. CI archives
+the report without timing thresholds on shared runners.
+
+Example baseline on 2026-09-28: Intel Core Ultra 5 125U, 14 available logical
+CPUs, Linux x86-64, Python 3.14.7, Rust 1.98.1 release build of `55a0298`.
+The default command above measured 61,440 attempts in total. At burst size 256
+(2,048 attempts per scenario), it produced:
+
+| Scenario | Success | Setup p95 / p99 (ms) | Successful setups/s | Rift CPU | Peak Rift RSS (MiB) |
+| --- | --- | --- | --- | --- | --- |
+| `direct` | 100.00% | 82.59 / 83.07 | 5,028 | — | — |
+| `rift` | 100.00% | 55.93 / 58.02 | 1,429 | 26.5% | 39.24 |
+| `hostname` | 100.00% | 64.75 / 67.70 | 3,735 | 94.6% | 30.18 |
+| `lua` | 52.78% | 70.42 / 85.90 | 2,026 | 162.9% | 17.94 |
+| `lua_init` | 45.12% | 62.04 / 65.57 | 2,061 | 191.7% | 17.99 |
+| `status_cached` | 100.00% | 77.88 / 87.84 | 1,140 | 12.8% | 5.79 |
+
+All non-Lua scenarios succeeded at every measured burst size. Both Lua scenarios
+succeeded at sizes 1 and 4; at size 16, success fell to 74.12% (`lua`) and
+58.59% (`lua_init`). Every failed Lua attempt matched a logged capacity rejection
+and a route-rejection counter increment; there were no script budget errors.
+All 10,240 measured status exchanges were cache hits, with zero misses.
+
+A second connection-only run used 8,192 attempts per size:
+
+```sh
+python3 tests/bench.py --binary target/release/rift --skip-throughput \
+  --scenarios lua lua_init --attempts 8192 --burst-sizes 4,16,64,256 \
+  --report target/benchmark-lua-repeat.json
+```
+
+| Scenario | Success at 4 | At 16 | At 64 | At 256 |
+| --- | --- | --- | --- | --- |
+| `lua` | 100.00% | 59.27% | 63.59% | 64.99% |
+| `lua_init` | 100.00% | 55.58% | 42.70% | 45.21% |
+
+Again, every failure was a Lua capacity rejection. Across the two runs, size-256
+`lua` measured 47.53–70.42 ms p95, 85.90–110.49 ms p99, 163–195% CPU and
+17.94–26.52 MiB sampled peak RSS. `lua_init` measured 62.04–83.52 ms p95,
+65.57–102.67 ms p99, 179–192% CPU and 17.99–21.62 MiB RSS.
+The default run’s p95 client launch spread at size 256 was 29.7–63.4 ms across
+scenarios, so these tails include substantial driver/host scheduling delay.
+The evidence supports overload at the existing four-job admission gate; it
+does not establish a maximum sustainable arrival rate or a Lua-only latency.
+The original VM lifecycle and concurrency limit remain unchanged.

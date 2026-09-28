@@ -68,7 +68,8 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            max_connections: 4096,
+            // 64 MiB of relay buffers at the default size, plus socket/runtime overhead.
+            max_connections: 1024,
             connect_timeout: Duration::from_secs(5),
             buffer_size: 32 * 1024,
         }
