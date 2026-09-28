@@ -35,6 +35,20 @@ fn help_is_successful_and_describes_the_interface() {
         assert!(text.contains("25565"));
         assert!(text.contains("--route"));
         assert!(text.contains("--default"));
+        assert!(text.contains("--version"));
+        assert!(output.stderr.is_empty());
+    }
+}
+
+#[test]
+fn version_matches_the_package_and_exits_successfully() {
+    for flag in ["--version", "-V"] {
+        let output = run(&[flag]);
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap().trim(),
+            concat!("rift ", env!("CARGO_PKG_VERSION"))
+        );
         assert!(output.stderr.is_empty());
     }
 }

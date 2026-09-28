@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Package the tested native executable and README with a SHA-256 sidecar."""
+"""Package and smoke-test an operator-ready native release with a SHA-256 sidecar."""
 
 import argparse
 import hashlib
@@ -7,6 +7,8 @@ from pathlib import Path
 import platform
 import subprocess
 import tarfile
+import tempfile
+import tomllib
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -17,6 +19,51 @@ PLATFORMS = {
 }
 
 
+def contents(root, binary):
+    return [(binary, binary.name)] + [
+        (path, path.relative_to(root).as_posix())
+        for path in [root / "README.md", root / "LICENSE",
+                     *sorted((root / "examples").glob("*.lua")),
+                     root / "examples/rift.service",
+                     *sorted((root / "docs").glob("*.md")),
+                     *sorted((root / "docs").glob("*.json"))]
+    ]
+
+
+def create_archive(archive, files, windows):
+    if windows:
+        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as package:
+            for path, name in files:
+                package.write(path, name)
+    else:
+        with tarfile.open(archive, "w:gz") as package:
+            for path, name in files:
+                package.add(path, arcname=name)
+
+
+def smoke_test(archive, windows, version):
+    # Run from the extracted archive, with no dependency on the source checkout.
+    with tempfile.TemporaryDirectory(prefix="rift-package-") as temporary:
+        directory = Path(temporary)
+        if windows:
+            with zipfile.ZipFile(archive) as package:
+                package.extractall(directory)
+        else:
+            with tarfile.open(archive) as package:
+                package.extractall(directory, filter="data")
+        binary = directory / ("rift.exe" if windows else "rift")
+        # Informational flags must not evaluate an implicit configuration.
+        (directory / "rift.lua").write_text("this is invalid Lua", encoding="utf-8")
+        result = subprocess.run([str(binary), "--version"], cwd=directory,
+                                check=True, capture_output=True, text=True, timeout=10)
+        if result.stdout.strip() != f"rift {version}" or result.stderr:
+            raise RuntimeError(f"unexpected packaged version output: {result}")
+        subprocess.run([str(binary), "--help"], cwd=directory, check=True, timeout=10)
+        for config in sorted((directory / "examples").glob("*.lua")):
+            subprocess.run([str(binary), "--check", str(config)],
+                           cwd=directory, check=True, timeout=10)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--platform", choices=PLATFORMS, required=True)
@@ -25,19 +72,13 @@ def main():
         parser.error("runner architecture does not match the release label")
     windows = args.platform.startswith("windows")
     binary = ROOT / "target" / "release" / ("rift.exe" if windows else "rift")
-    subprocess.run([str(binary), "--help"], check=True, timeout=10)
     output = ROOT / "dist"
     output.mkdir(exist_ok=True)
-    files = [binary, ROOT / "README.md"]
     archive = output / f"rift-{args.platform}{'.zip' if windows else '.tar.gz'}"
-    if windows:
-        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as package:
-            for path in files:
-                package.write(path, path.name)
-    else:
-        with tarfile.open(archive, "w:gz") as package:
-            for path in files:
-                package.add(path, arcname=path.name)
+    create_archive(archive, contents(ROOT, binary), windows)
+    with (ROOT / "Cargo.toml").open("rb") as manifest:
+        version = tomllib.load(manifest)["package"]["version"]
+    smoke_test(archive, windows, version)
     digest = hashlib.sha256(archive.read_bytes()).hexdigest()
     archive.with_name(archive.name + ".sha256").write_text(
         f"{digest}  {archive.name}\n", encoding="utf-8", newline="\n"

@@ -12,7 +12,8 @@ return {
         public = "lobby",
     },
     limits = {
-        max_connections = 4096,
+        -- 64 MiB of relay buffers at capacity; budget extra for sockets/runtime.
+        max_connections = 1024,
         connect_timeout_ms = 5000,
         buffer_size = 32 * 1024,
     },

@@ -1,0 +1,115 @@
+{
+  "timestamp": "2026-09-28T12:36:31.108176+00:00",
+  "platform": "Linux-7.1.13+deb14-amd64-x86_64-with-glibc2.43",
+  "cpu_count": 14,
+  "python": "3.14.7",
+  "version": "rift 0.1.0",
+  "binary_sha256": "a761d10a143cb068e2b8fefcf77590473f695c5e6d751ba9e921be50e32aa7c9",
+  "buffers": [
+    {
+      "buffer_size": 8192,
+      "rtt_p50_us": 24.066,
+      "rtt_p95_us": 32.88,
+      "single_mib_s": 1195.1008707100093,
+      "parallel_mib_s": 1477.3320933527816,
+      "single_samples": [
+        1225.733352445235,
+        1195.1008707100093,
+        1016.3610466299249
+      ],
+      "parallel_samples": [
+        1327.9210315133325,
+        1587.9466512442332,
+        1477.3320933527816
+      ],
+      "rss_with_16_sessions_kib": 5648
+    },
+    {
+      "buffer_size": 16384,
+      "rtt_p50_us": 23.874,
+      "rtt_p95_us": 35.08,
+      "single_mib_s": 1125.9962933504187,
+      "parallel_mib_s": 1415.02584102521,
+      "single_samples": [
+        1084.0256572958142,
+        1125.9962933504187,
+        1333.6671946252698
+      ],
+      "parallel_samples": [
+        1417.9526093503805,
+        1338.3714584240672,
+        1415.02584102521
+      ],
+      "rss_with_16_sessions_kib": 6148
+    },
+    {
+      "buffer_size": 32768,
+      "rtt_p50_us": 24.946,
+      "rtt_p95_us": 52.38,
+      "single_mib_s": 1323.6715239919845,
+      "parallel_mib_s": 1289.2096885830817,
+      "single_samples": [
+        1273.2741837414717,
+        1643.5522022855332,
+        1323.6715239919845
+      ],
+      "parallel_samples": [
+        244.5665868998031,
+        1289.2096885830817,
+        1350.4328445836813
+      ],
+      "rss_with_16_sessions_kib": 7156
+    },
+    {
+      "buffer_size": 65536,
+      "rtt_p50_us": 30.761499999999998,
+      "rtt_p95_us": 45.083,
+      "single_mib_s": 1144.6642406362837,
+      "parallel_mib_s": 906.7969511024272,
+      "single_samples": [
+        1184.2417392289863,
+        1144.6642406362837,
+        1016.1524577833093
+      ],
+      "parallel_samples": [
+        1114.7730340836192,
+        906.7969511024272,
+        801.8468939462638
+      ],
+      "rss_with_16_sessions_kib": 8864
+    }
+  ],
+  "operations": {
+    "sessions": 16,
+    "soak_seconds": 10,
+    "rounds": 876,
+    "successful_soak_exchanges": 14016,
+    "invalid_reload_kept_sessions": true,
+    "new_route_verified": true,
+    "drain_seconds": 0.007060364001517883,
+    "metrics": {
+      "rift_connections_accepted_total": 18,
+      "rift_connections_active": 16,
+      "rift_connections_completed_total": 1,
+      "rift_connections_rate_limited_total": 0,
+      "rift_connections_capacity_rejected_total": 1,
+      "rift_connections_route_rejected_total": 0,
+      "rift_connection_errors_total": 0,
+      "rift_backend_connect_failures_total": 0,
+      "rift_fallbacks_total": 0,
+      "rift_status_cache_hits_total": 0,
+      "rift_status_cache_misses_total": 0,
+      "rift_reloads_total": 1,
+      "rift_reload_failures_total": 1,
+      "rift_health_checks_total": 0,
+      "rift_health_check_failures_total": 0,
+      "rift_client_bytes_read_total": 70245,
+      "rift_client_bytes_written_total": 70245,
+      "rift_forced_shutdowns_total": 0
+    }
+  },
+  "forced_drain": {
+    "configured_timeout_ms": 250,
+    "elapsed_seconds": 0.2642571090000274
+  }
+}

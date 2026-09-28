@@ -3,7 +3,7 @@ use super::*;
 const VALID: &str = include_str!("../../examples/rift.lua");
 
 #[test]
-fn lua_expressions_produce_typed_config_with_original_defaults() {
+fn lua_expressions_produce_typed_config_with_release_defaults() {
     let config = Config::from_lua(VALID, "test.lua").unwrap();
     assert_eq!(config.listeners["public"], "0.0.0.0:25565".parse().unwrap());
     assert_eq!(config.backends["lobby"], "127.0.0.1:25566".parse().unwrap());
@@ -11,7 +11,7 @@ fn lua_expressions_produce_typed_config_with_original_defaults() {
     assert_eq!(config.limits, Limits::default());
     assert_eq!(Config::default().limits, config.limits);
     let source = VALID
-        .replace("max_connections = 4096", "max_connections = 7")
+        .replace("max_connections = 1024", "max_connections = 7")
         .replace("connect_timeout_ms = 5000", "connect_timeout_ms = 123")
         .replace("buffer_size = 32 * 1024", "buffer_size = 1024");
     assert_eq!(
@@ -144,7 +144,7 @@ fn invalid_values_and_references_are_rejected() {
         assert!(error.contains(expected), "{error}");
     }
     for field in [
-        "max_connections = 4096",
+        "max_connections = 1024",
         "connect_timeout_ms = 5000",
         "buffer_size = 32 * 1024",
     ] {
