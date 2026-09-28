@@ -28,7 +28,7 @@ import tempfile
 import threading
 import time
 
-from minecraft import ROOT, process, string, varint, wait_ready
+from minecraft import ROOT, process, string, varint, read_varint, wait_ready
 
 BLOCK = b"x" * 65536
 MIB = 1024 * 1024
@@ -46,8 +46,74 @@ SAMPLE_INTERVAL = 0.005
 
 
 def handshake(port, state=2):
-    body = b"\0" + varint(774) + string(HOSTNAME) + struct.pack(">H", port) + varint(state)
+    body = b"\0" + varint(47) + string(HOSTNAME) + struct.pack(">H", port) + varint(state)
     return varint(len(body)) + body
+
+
+def packet(body):
+    return varint(len(body)) + body
+
+
+LOGIN_START = packet(b"\0" + string("Benchmark"))
+LOGIN_SUCCESS = packet(b"\x02" + string("00000000-0000-0000-0000-000000000001") + string("Benchmark"))
+
+
+def socket_frame(reader):
+    length = read_varint(reader)
+    if not 0 < length <= 2 * MIB:
+        raise ValueError("invalid frame length")
+    body = reader.read(length)
+    if len(body) != length:
+        raise EOFError("truncated frame")
+    return body
+
+
+class GameSocket:
+    """Expose fixture payload bytes while carrying proper Minecraft play packets."""
+    def __init__(self, sock, port):
+        self.socket = sock
+        self.reader = sock.makefile("rb")
+        self.pending = bytearray()
+        self.closed = False
+        try:
+            sock.sendall(handshake(port) + LOGIN_START)
+            if packet(socket_frame(self.reader)) != LOGIN_SUCCESS:
+                raise ValueError("unexpected login response")
+        except (EOFError, ConnectionResetError, BrokenPipeError):
+            self.closed = True
+
+    def sendall(self, data):
+        for offset in range(0, len(data), 65536):
+            self.socket.sendall(packet(b"\x7f" + data[offset:offset + 65536]))
+
+    def recv(self, size):
+        while not self.pending and not self.closed:
+            try:
+                body = socket_frame(self.reader)
+                if body[0] == 0x40:
+                    self.closed = True
+                    break
+                if body[0] != 0x7f:
+                    raise ValueError("unexpected play packet")
+                self.pending.extend(body[1:])
+            except EOFError:
+                self.closed = True
+        result = bytes(self.pending[:size])
+        del self.pending[:size]
+        return result
+
+    def shutdown(self, how):
+        self.socket.shutdown(how)
+
+    def close(self):
+        self.reader.close()
+        self.socket.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
 
 
 async def read_frame(reader):
@@ -58,7 +124,7 @@ async def read_frame(reader):
             raise ValueError("invalid VarInt")
         length |= (byte & 127) << shift
         if not byte & 128:
-            if not 0 < length <= 65536:
+            if not 0 < length <= 2 * MIB:
                 raise ValueError("invalid frame length")
             return await reader.readexactly(length)
     raise ValueError("invalid VarInt")
@@ -66,6 +132,7 @@ async def read_frame(reader):
 
 async def fixture_client(reader, writer, status=False):
     """A separate process serves every client asynchronously, without a worker cap."""
+    stage, received, sent = "login", 0, 0
     try:
         if status:
             async with asyncio.timeout(10):
@@ -81,10 +148,25 @@ async def fixture_client(reader, writer, status=False):
                 writer.write(varint(len(ping)) + ping)
                 await writer.drain()
         else:
-            while data := await reader.read(65536):
-                writer.write(data)
-                await writer.drain()
-    except (OSError, EOFError, ValueError, TimeoutError):
+            await read_frame(reader)  # Handshake.
+            if packet(await read_frame(reader)) != LOGIN_START:
+                raise ValueError("invalid login start")
+            writer.write(LOGIN_SUCCESS)
+            await writer.drain()
+            while True:
+                stage = "read"
+                async with asyncio.timeout(15):
+                    data = await read_frame(reader)
+                received += len(data)
+                stage = "write"
+                async with asyncio.timeout(15):
+                    writer.write(packet(data))
+                    await writer.drain()
+                sent += len(data)
+    except TimeoutError:
+        print(f"fixture timeout: stage={stage}, received={received}, sent={sent}, "
+              f"write_buffer={writer.transport.get_write_buffer_size()}", flush=True)
+    except (OSError, EOFError, ValueError, asyncio.IncompleteReadError):
         pass
     finally:
         writer.close()
@@ -109,7 +191,7 @@ async def fixture_main():
 def connect(port):
     sock = socket.create_connection(("127.0.0.1", port), timeout=30)
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    return sock
+    return GameSocket(sock, port)
 
 
 def percentile(samples, fraction):
@@ -136,16 +218,26 @@ def latency(port):
 
 def transfer(port, size):
     with connect(port) as sock:
+        sent = 0
         def send():
+            nonlocal sent
             for _ in range(size // len(BLOCK)):
                 sock.sendall(BLOCK)
+                sent += len(BLOCK)
             sock.shutdown(socket.SHUT_WR)
 
         with ThreadPoolExecutor(max_workers=1) as pool:
             sender = pool.submit(send)
             received = 0
-            while data := sock.recv(65536):
-                received += len(data)
+            try:
+                while data := sock.recv(65536):
+                    received += len(data)
+            except (OSError, ValueError) as error:
+                if sender.done():
+                    sender.result()
+                raise RuntimeError(
+                    f"transfer failed: sent={sent}/{size}, received={received}/{size}, "
+                    f"sender_done={sender.done()}") from error
             sender.result()
         assert received == size, (received, size)
 
@@ -181,11 +273,16 @@ async def setup_attempt(port, scenario, timeout, index, gate):
                 loop = asyncio.get_running_loop()
                 await loop.sock_connect(sock, ("127.0.0.1", port))
                 cached = scenario == "status_cached"
-                payload = handshake(port, 1) + b"\x01\0" if cached else handshake(port) + PROBE
+                payload = handshake(port, 1) + b"\x01\0" if cached else handshake(port) + LOGIN_START
                 await loop.sock_sendall(sock, payload)
-                expected = STATUS_REPLY if cached else payload
+                expected = STATUS_REPLY if cached else LOGIN_SUCCESS
                 if await receive_exact(sock, len(expected)) != expected:
                     raise ValueError("response mismatch")
+                if not cached:
+                    probe = packet(b"\x7f" + PROBE)
+                    await loop.sock_sendall(sock, probe)
+                    if await receive_exact(sock, len(probe)) != probe:
+                        raise ValueError("probe mismatch")
                 setup_ms = (time.perf_counter() - started) * 1000
                 if cached:
                     ping = b"\x09\x01" + struct.pack(">Q", index)
@@ -460,7 +557,7 @@ def main():
                      "warmup_connections_per_size": 16, "resource_sample_interval_s": SAMPLE_INTERVAL,
                      "cpu_clock_ticks_per_s": os.sysconf("SC_CLK_TCK") if sys.platform == "linux" else None},
         "method": {
-            "setup": "TCP connect through verified handshake+probe echo, or complete cached status response",
+            "setup": "TCP connect through verified login+play-packet echo, or complete cached status response",
             "status_success": "also requires a correct per-client ping/pong after the status response",
             "percentiles": "nearest rank over successful attempts only; no retries",
             "bursts": "gate-released asyncio clients; wait for the entire wave before releasing the next",
@@ -476,23 +573,27 @@ def main():
         log = directory / "fixture.log"
         with process([sys.executable, str(Path(__file__).resolve()), "--fixture"],
                      directory, log.name) as fixture:
-            wait_ready(fixture, lambda: "\n" in log.read_text(), log)
-            ports = json.loads(log.read_text().splitlines()[0])
-            for scenario in args.scenarios:
-                backend = ports["status" if scenario == "status_cached" else "echo"]
-                pids = {"proxy": None, "fixture": fixture.pid, "driver": os.getpid()}
-                if scenario == "direct":
-                    route = measure_route(backend, scenario, pids, args)
-                else:
-                    with proxy_for(binary, directory, scenario, backend, args.lua_init_iterations) as proxy:
-                        pid, port, metrics_port, proxy_log, source = proxy
-                        pids["proxy"] = pid
-                        route = measure_route(port, scenario, pids, args, metrics_port, proxy_log)
-                        route["config_source"] = source
-                report["routes"][scenario] = route
-                if args.report:
-                    args.report.parent.mkdir(parents=True, exist_ok=True)
-                    args.report.write_text(json.dumps(report, indent=2) + "\n")
+            try:
+                wait_ready(fixture, lambda: "\n" in log.read_text(), log)
+                ports = json.loads(log.read_text().splitlines()[0])
+                for scenario in args.scenarios:
+                    backend = ports["status" if scenario == "status_cached" else "echo"]
+                    pids = {"proxy": None, "fixture": fixture.pid, "driver": os.getpid()}
+                    if scenario == "direct":
+                        route = measure_route(backend, scenario, pids, args)
+                    else:
+                        with proxy_for(binary, directory, scenario, backend, args.lua_init_iterations) as proxy:
+                            pid, port, metrics_port, proxy_log, source = proxy
+                            pids["proxy"] = pid
+                            route = measure_route(port, scenario, pids, args, metrics_port, proxy_log)
+                            route["config_source"] = source
+                    report["routes"][scenario] = route
+                    if args.report:
+                        args.report.parent.mkdir(parents=True, exist_ok=True)
+                        args.report.write_text(json.dumps(report, indent=2) + "\n")
+            except Exception:
+                print(f"Fixture log:\n{log.read_text()[-8000:]}", file=sys.stderr)
+                raise
 
 
 if __name__ == "__main__":

@@ -2,13 +2,15 @@ use crate::{
     admission::Admission,
     events::Connection,
     health::{self, Health},
-    metrics::{Active, Metered, Metrics},
+    metrics::{Active, Metered, Metrics, Player},
     status,
 };
 use rift::{
     config::{Config, Route},
     hooks::{ConnectionInfo, RouteDecision, Router},
+    protocol::{Codec, NextState, status_response},
     routing::Routes,
+    session::{Session, SessionEvent},
 };
 use std::{
     collections::BTreeMap,
@@ -19,7 +21,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::{
-    io::{AsyncWriteExt, copy_bidirectional_with_sizes},
+    io::AsyncWriteExt,
     net::{TcpListener, TcpStream},
     sync::watch,
     task::{JoinHandle, JoinSet},
@@ -107,89 +109,136 @@ pub async fn handle(
             return Err(io::Error::other(format!("on_route: {error}")));
         }
     };
-    let mut client = Metered::new(client, metrics.clone());
-    let mut packet = Vec::new();
-    let mut is_status = false;
+    event.stage = "handshake";
+    event.failure = "handshake_error";
+    let mut session: Session<_, TcpStream> = timeout(
+        HANDSHAKE_TIMEOUT,
+        Session::accept(Metered::new(client, metrics.clone())),
+    )
+    .await??;
+    session.set_read_chunk_size(snapshot.config.limits.buffer_size);
+    let is_status = session.handshake.next_state == NextState::Status;
+    event.stage = "route";
+    event.failure = "no_route";
     let primary = match selected {
-        Some(name) => name,
+        Some(name) => Ok(name),
         None => match &snapshot.policies[listener] {
-            Policy::Direct(name) => name.clone(),
-            Policy::Hostnames(routes) => {
-                event.stage = "handshake";
-                event.failure = "handshake_error";
-                let handshake = timeout(
-                    HANDSHAKE_TIMEOUT,
-                    crate::handshake::read_handshake(&mut client),
-                )
-                .await??;
-                is_status = handshake.state == 1;
-                packet = handshake.packet;
-                event.stage = "route";
-                event.failure = "no_route";
-                routes.select(&handshake.host)?.clone()
-            }
+            Policy::Direct(name) => Ok(name.clone()),
+            Policy::Hostnames(routes) => routes.select(&session.handshake.hostname()).cloned(),
         },
+    };
+    let primary = match primary {
+        Ok(primary) => primary,
+        Err(error) => {
+            if is_status {
+                timeout(HANDSHAKE_TIMEOUT, session.status_request()).await??;
+                let response = status_response(
+                    session.handshake.protocol,
+                    0,
+                    snapshot.config.limits.max_connections,
+                    "No server is configured for this hostname.",
+                );
+                timeout(HANDSHAKE_TIMEOUT, session.respond_status(&response)).await??;
+            } else {
+                let _ = timeout(
+                    HANDSHAKE_TIMEOUT,
+                    session.disconnect("No server is configured for this hostname."),
+                )
+                .await;
+            }
+            return Err(error);
+        }
     };
     event.backend = Some(primary.clone());
     event.backend_address = Some(snapshot.config.backends[&primary].address().to_owned());
     event.failure = "io_error";
-    if let Some(settings) = snapshot.config.status_cache.filter(|_| is_status) {
-        // Cached status is a bounded protocol exchange. Login and transfer never
-        // enter this path, and direct listeners remain byte-transparent.
+    if is_status {
         event.stage = "status_request";
-        timeout(HANDSHAKE_TIMEOUT, status::request(&mut client)).await??;
-        let deadline = Deadline::now() + snapshot.config.limits.connect_timeout;
-        event.stage = "status_cache_wait";
-        let response = async {
-            if let Some(response) = snapshot.cache.get(listener, &packet) {
-                metrics.cache_hits.inc();
-                return Ok::<_, io::Error>(response);
+        timeout(HANDSHAKE_TIMEOUT, session.status_request()).await??;
+        let mut response = status_response(
+            session.handshake.protocol,
+            metrics.players.get(),
+            snapshot.config.limits.max_connections,
+            "Rift",
+        );
+        if let Some(settings) = snapshot.config.status_cache {
+            let packet = Codec::default().encode(&session.handshake.packet())?;
+            let deadline = Deadline::now() + snapshot.config.limits.connect_timeout;
+            event.stage = "status_cache_wait";
+            let cached = async {
+                if let Some(response) = snapshot.cache.get(listener, &primary, &packet) {
+                    metrics.cache_hits.inc();
+                    return Ok::<_, io::Error>(response);
+                }
+                let _fill = match snapshot.cache.fill_lock(
+                    listener,
+                    &primary,
+                    &packet,
+                    settings.max_entries,
+                ) {
+                    Some(lock) => Some(timeout_at(deadline, lock.lock_owned()).await?),
+                    None => None,
+                };
+                if let Some(response) = snapshot.cache.get(listener, &primary, &packet) {
+                    metrics.cache_hits.inc();
+                    return Ok(response);
+                }
+                metrics.cache_misses.inc();
+                let mut upstream = health::connect(
+                    &snapshot.config,
+                    &snapshot.health,
+                    &primary,
+                    addresses,
+                    &metrics,
+                    deadline,
+                    event,
+                )
+                .await?;
+                event.stage = "backend_setup";
+                event.failure = "io_error";
+                upstream.set_nodelay(true)?;
+                let response = timeout_at(deadline, async {
+                    event.stage = "handshake_write";
+                    upstream.write_all(&packet).await?;
+                    event.stage = "status_upstream";
+                    upstream.write_all(&[1, 0]).await?;
+                    status::frame(&mut upstream, settings.max_response_bytes).await
+                })
+                .await??;
+                status::validate_response(&response)?;
+                snapshot
+                    .cache
+                    .insert(listener, &primary, &packet, response.clone(), settings);
+                Ok(Arc::new(response))
             }
-            let _fill = match snapshot
-                .cache
-                .fill_lock(listener, &packet, settings.max_entries)
-            {
-                Some(lock) => Some(timeout_at(deadline, lock.lock_owned()).await?),
-                None => None,
-            };
-            if let Some(response) = snapshot.cache.get(listener, &packet) {
-                metrics.cache_hits.inc();
-                return Ok(response);
+            .await;
+            match cached {
+                Ok(cached) => response = status::response_packet(&cached)?,
+                Err(error) if error.kind() != io::ErrorKind::InvalidData => {
+                    response = status_response(
+                        session.handshake.protocol,
+                        0,
+                        snapshot.config.limits.max_connections,
+                        "The server is currently unavailable. Please try again later.",
+                    );
+                    // Connection failures have per-attempt diagnostics. Reads and
+                    // timeouts are also reported, while the client gets a pong.
+                    if !matches!(event.stage, "connect" | "dns") {
+                        event.emit("backend_status_failed", &error, Some(error.kind()));
+                    }
+                }
+                Err(error) => return Err(error),
             }
-            metrics.cache_misses.inc();
-            let mut upstream = health::connect(
-                &snapshot.config,
-                &snapshot.health,
-                &primary,
-                addresses,
-                &metrics,
-                deadline,
-                event,
-            )
-            .await?;
-            event.stage = "backend_setup";
-            event.failure = "io_error";
-            upstream.set_nodelay(true)?;
-            let response = timeout_at(deadline, async {
-                event.stage = "handshake_write";
-                upstream.write_all(&packet).await?;
-                event.stage = "status_upstream";
-                upstream.write_all(&[1, 0]).await?;
-                status::frame(&mut upstream, settings.max_response_bytes).await
-            })
-            .await??;
-            status::validate_response(&response)?;
-            snapshot
-                .cache
-                .insert(listener, &packet, response.clone(), settings);
-            Ok(Arc::new(response))
         }
-        .await?;
         event.stage = "status_response";
-        timeout(HANDSHAKE_TIMEOUT, status::respond(&mut client, &response)).await??;
+        timeout(HANDSHAKE_TIMEOUT, session.respond_status(&response)).await??;
     } else {
+        if let Err(error) = session.version() {
+            let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect(&error.to_string())).await;
+            return Err(error);
+        }
         let deadline = Deadline::now() + snapshot.config.limits.connect_timeout;
-        let mut upstream = health::connect(
+        let upstream = match health::connect(
             &snapshot.config,
             &snapshot.health,
             &primary,
@@ -198,21 +247,90 @@ pub async fn handle(
             deadline,
             event,
         )
-        .await?;
+        .await
+        {
+            Ok(upstream) => upstream,
+            Err(error) => {
+                let _ = timeout(
+                    HANDSHAKE_TIMEOUT,
+                    session
+                        .disconnect("The server is currently unavailable. Please try again later."),
+                )
+                .await;
+                return Err(error);
+            }
+        };
         event.stage = "backend_setup";
         event.failure = "io_error";
         upstream.set_nodelay(true)?;
-        // Once any client bytes are sent, errors close this session. Never
-        // replay a partially forwarded handshake or migrate an active relay.
         event.stage = "handshake_write";
-        timeout_at(deadline, upstream.write_all(&packet)).await??;
-        let buffer_size = snapshot.config.limits.buffer_size;
-        // Active relays retain sockets and buffers, not old caches or scripts.
+        if let Err(error) =
+            async { timeout_at(deadline, session.connect_backend(upstream)).await? }.await
+        {
+            let _ = timeout(
+                HANDSHAKE_TIMEOUT,
+                session.disconnect("Unable to connect to the server."),
+            )
+            .await;
+            return Err(error);
+        }
         drop(snapshot);
-        event.stage = "relay";
-        copy_bidirectional_with_sizes(&mut client, &mut upstream, buffer_size, buffer_size).await?;
+        event.stage = "session";
+        // Login/configuration deadlines also bound stalled encryption and login
+        // exchanges. Play itself has no idle timeout.
+        let mut phase_deadline = Deadline::now() + Duration::from_secs(30);
+        let mut client_closed = false;
+        let mut player = None;
+        loop {
+            let playing =
+                !client_closed && session.client.state.settled(rift::protocol::State::Play);
+            let result = if playing {
+                session.forward().await
+            } else {
+                match timeout_at(phase_deadline, session.forward()).await {
+                    Ok(result) => result,
+                    Err(error) => Err(error.into()),
+                }
+            };
+            match result {
+                Ok(SessionEvent::Packet) => {
+                    if player.is_none() && session.client.state.settled(rift::protocol::State::Play)
+                    {
+                        player = Some(Player::new(metrics.clone()));
+                    }
+                    if playing && !session.client.state.settled(rift::protocol::State::Play) {
+                        phase_deadline = Deadline::now() + Duration::from_secs(30);
+                    }
+                }
+                Ok(SessionEvent::Disconnected) => break,
+                Ok(SessionEvent::ClientClosed) => {
+                    client_closed = true;
+                    phase_deadline = Deadline::now() + Duration::from_secs(30);
+                }
+                Ok(SessionEvent::BackendClosed) => {
+                    if client_closed {
+                        break;
+                    }
+                    timeout(
+                        HANDSHAKE_TIMEOUT,
+                        session.disconnect("The server connection was lost. Please reconnect."),
+                    )
+                    .await??;
+                    break;
+                }
+                Err(error) => {
+                    let reason = if error.kind() == io::ErrorKind::Unsupported {
+                        error.to_string()
+                    } else {
+                        "The server connection failed. Please reconnect.".to_owned()
+                    };
+                    let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect(&reason)).await;
+                    return Err(error);
+                }
+            }
+        }
     }
-    Ok((client.sent, client.received))
+    Ok((session.client.io.sent, session.client.io.received))
 }
 
 pub(crate) async fn accept(

@@ -1,0 +1,348 @@
+use super::*;
+use tokio::io::AsyncWriteExt;
+
+#[test]
+fn varints_cover_signed_values_and_reject_overflows() {
+    for value in [0, 127, 128, 255, i32::MAX, i32::MIN, -1] {
+        let mut bytes = Vec::new();
+        write_varint(value, &mut bytes);
+        let mut slice = bytes.as_slice();
+        assert_eq!(read_varint(&mut slice).unwrap(), value);
+        assert!(slice.is_empty());
+        for cut in 0..bytes.len() {
+            assert!(read_varint(&mut &bytes[..cut]).is_err());
+        }
+    }
+    for mut bytes in [&[0xff, 0xff, 0xff, 0xff, 0x10][..], &[0x80; 5]] {
+        assert!(read_varint(&mut bytes).is_err());
+    }
+}
+
+#[tokio::test]
+async fn framing_is_fragmented_cancel_safe_and_does_not_consume_the_next_packet() {
+    let packet = Packet::new(0x80, vec![42; 260]);
+    let frame = Codec::default().encode(&packet).unwrap();
+    let (mut writer, mut input) = tokio::io::duplex(1024);
+    let mut reader = Reader::default();
+    for &byte in &frame[..frame.len() - 1] {
+        writer.write_all(&[byte]).await.unwrap();
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(1),
+                reader.read(&mut input, Codec::default())
+            )
+            .await
+            .is_err()
+        );
+    }
+    writer.write_all(&frame[frame.len() - 1..]).await.unwrap();
+    writer.write_all(&[1, 0]).await.unwrap();
+    assert_eq!(
+        reader.read(&mut input, Codec::default()).await.unwrap(),
+        Some(packet)
+    );
+    assert_eq!(
+        reader.read(&mut input, Codec::default()).await.unwrap(),
+        Some(Packet::empty(0))
+    );
+    writer.shutdown().await.unwrap();
+    assert_eq!(
+        reader.read(&mut input, Codec::default()).await.unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn framing_bounds_lengths_and_distinguishes_clean_eof_from_truncation() {
+    for bytes in [
+        vec![0],
+        vec![0x80; 3],
+        vec![0xff; 5],
+        vec![0x80],
+        vec![3, 0, 1],
+    ] {
+        assert!(
+            Reader::default()
+                .read(&mut bytes.as_slice(), Codec::default())
+                .await
+                .is_err()
+        );
+    }
+    let mut bytes = Vec::new();
+    write_varint(2049, &mut bytes);
+    assert_eq!(
+        Reader::default()
+            .read_frame(&mut bytes.as_slice(), 2048)
+            .await
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::InvalidData
+    );
+}
+
+#[test]
+fn zlib_decodes_independent_stored_fixed_and_dynamic_streams() {
+    let raw: Vec<u8> = b"Minecraft compression fixture: "
+        .iter()
+        .copied()
+        .chain(0..=255)
+        .collect::<Vec<_>>()
+        .repeat(400);
+    for bytes in [
+        &include_bytes!("../../tests/fixtures/fixed.zlib")[..],
+        &include_bytes!("../../tests/fixtures/dynamic.zlib")[..],
+    ] {
+        assert_eq!(compression::inflate(bytes, raw.len()).unwrap(), raw);
+        assert!(compression::inflate(bytes, raw.len() - 1).is_err());
+        assert!(compression::inflate(bytes, raw.len() + 1).is_err());
+        let mut bad = bytes.to_vec();
+        *bad.last_mut().unwrap() ^= 1;
+        assert!(compression::inflate(&bad, raw.len()).is_err());
+        let mut trailing = bytes.to_vec();
+        trailing.insert(trailing.len() - 4, 0);
+        assert!(compression::inflate(&trailing, raw.len()).is_err());
+        for cut in [0, 1, 2, 5, bytes.len() - 1] {
+            assert!(compression::inflate(&bytes[..cut], raw.len()).is_err());
+        }
+    }
+    assert_eq!(
+        compression::inflate(include_bytes!("../../tests/fixtures/stored.zlib"), 256).unwrap(),
+        (0..=255).collect::<Vec<u8>>()
+    );
+    let encoded = compression::deflate(&raw);
+    assert!(encoded.len() < raw.len() / 10);
+    assert_eq!(compression::inflate(&encoded, raw.len()).unwrap(), raw);
+}
+
+#[tokio::test]
+async fn compression_thresholds_and_declared_lengths_are_enforced() {
+    for threshold in [-1, 0, 1, 32, 1024] {
+        let mut codec = Codec::default();
+        codec.set_compression(threshold);
+        for size in [0, 1, 30, 31, 32, 4096] {
+            let packet = Packet::new(0, vec![42; size]);
+            let encoded = codec.encode(&packet).unwrap();
+            assert_eq!(
+                Reader::default()
+                    .read(&mut encoded.as_slice(), codec)
+                    .await
+                    .unwrap(),
+                Some(packet)
+            );
+        }
+    }
+    let mut codec = Codec::default();
+    codec.set_compression(10);
+    assert!(codec.decode(&[0; 11]).is_err());
+    let mut bad = Vec::new();
+    write_varint(MAX_PACKET_SIZE as i32 + 1, &mut bad);
+    assert!(codec.decode(&bad).is_err());
+    bad.clear();
+    write_varint(-1, &mut bad);
+    assert!(codec.decode(&bad).is_err());
+    bad.clear();
+    write_varint(1, &mut bad);
+    bad.extend(compression::deflate(&[0]));
+    assert!(codec.decode(&bad).is_err());
+}
+
+#[test]
+fn handshake_preserves_fields_and_bounds_utf16_address_length() {
+    let handshake = Handshake {
+        protocol: 774,
+        address: "PLAY.Example.COM.\0FML3\0".into(),
+        port: 25565,
+        next_state: NextState::Transfer,
+    };
+    assert_eq!(Handshake::decode(&handshake.packet()).unwrap(), handshake);
+    assert_eq!(handshake.hostname(), "play.example.com");
+    for address in [
+        "".into(),
+        "\0metadata".into(),
+        "a".repeat(256),
+        "😀".repeat(128),
+    ] {
+        let mut bad = handshake.clone();
+        bad.address = address;
+        assert!(Handshake::decode(&bad.packet()).is_err());
+    }
+    let mut good = handshake;
+    good.address = "é".repeat(255);
+    assert!(Handshake::decode(&good.packet()).is_ok());
+}
+
+#[test]
+fn login_success_validates_session_uuid_without_changing_player_identity() {
+    let version = ProtocolVersion::new(777).unwrap();
+    let mut identity = vec![1; 16];
+    write_string("Player", &mut identity);
+    let mut data = identity.clone();
+    data.push(0); // No profile properties.
+    let session_offset = data.len();
+    data.extend_from_slice(&[2; 16]);
+    for length in session_offset..data.len() {
+        assert!(login_identity(version, &Packet::new(2, data[..length].to_vec())).is_err());
+    }
+    assert_eq!(
+        login_identity(version, &Packet::new(2, data.clone())).unwrap(),
+        identity
+    );
+    data[session_offset..].fill(3);
+    assert_eq!(
+        login_identity(version, &Packet::new(2, data.clone())).unwrap(),
+        identity
+    );
+    assert!(
+        login_identity(
+            ProtocolVersion::new(775).unwrap(),
+            &Packet::new(2, data.clone())
+        )
+        .is_err()
+    );
+    data.push(0);
+    assert!(login_identity(version, &Packet::new(2, data)).is_err());
+}
+
+#[test]
+fn packet_ids_and_disconnect_encoding_follow_the_version_and_phase() {
+    for (number, finish, kick, start, ack) in [
+        (764, 2, 0x1b, 0x65, 0x0b),
+        (765, 2, 0x1b, 0x67, 0x0b),
+        (767, 3, 0x1d, 0x69, 0x0c),
+        (774, 3, 0x20, 0x74, 0x0f),
+        (777, 3, 0x20, 0x78, 0x10),
+    ] {
+        let version = ProtocolVersion::new(number).unwrap();
+        assert_eq!(
+            version.kind(State::Configuration, Direction::Serverbound, finish),
+            PacketKind::FinishConfiguration
+        );
+        assert_eq!(
+            version.kind(State::Play, Direction::Clientbound, kick),
+            PacketKind::Disconnect
+        );
+        assert_eq!(version.start_configuration(), Some(start));
+        assert_eq!(version.configuration_acknowledged(), Some(ack));
+        let login = disconnect(Some(version), State::Login, "quoted \"message\"\n").unwrap();
+        let json = read_string(&mut login.data.as_slice(), 32767).unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(json).unwrap()["text"],
+            "quoted \"message\"\n"
+        );
+        let play = disconnect(Some(version), State::Play, "hello").unwrap();
+        if number >= 765 {
+            assert_eq!(play.data, b"\x08\x00\x05hello");
+        } else {
+            assert_eq!(
+                read_string(&mut play.data.as_slice(), 32767).unwrap(),
+                "{\"text\":\"hello\"}"
+            );
+        }
+    }
+    assert!(ProtocolVersion::new(-1).is_err());
+    assert!(ProtocolVersion::new(9999).is_err());
+    assert!(
+        ProtocolVersion::new(47)
+            .unwrap()
+            .start_configuration()
+            .is_none()
+    );
+}
+
+#[test]
+fn state_transitions_require_acknowledgements_and_track_each_direction() {
+    let version = ProtocolVersion::new(774).unwrap();
+    let mut state = ConnectionState::new(State::Login);
+    assert!(
+        state
+            .observe(version, Direction::Serverbound, &Packet::empty(3))
+            .is_err()
+    );
+    let mut data = Vec::new();
+    write_string("Player", &mut data);
+    data.extend([0; 16]);
+    state
+        .observe(version, Direction::Serverbound, &Packet::new(0, data))
+        .unwrap();
+    let mut success = vec![0; 16];
+    write_string("Player", &mut success);
+    success.push(0);
+    state
+        .observe(version, Direction::Clientbound, &Packet::new(2, success))
+        .unwrap();
+    assert_eq!(state.phase(Direction::Clientbound), State::Configuration);
+    assert_eq!(state.phase(Direction::Serverbound), State::Login);
+    state
+        .observe(version, Direction::Serverbound, &Packet::empty(3))
+        .unwrap();
+    assert!(state.settled(State::Configuration));
+    assert!(
+        state
+            .observe(version, Direction::Serverbound, &Packet::empty(3))
+            .is_err()
+    );
+    state
+        .observe(version, Direction::Clientbound, &Packet::empty(3))
+        .unwrap();
+    assert_eq!(state.phase(Direction::Serverbound), State::Configuration);
+    state
+        .observe(version, Direction::Serverbound, &Packet::empty(3))
+        .unwrap();
+    assert!(state.settled(State::Play));
+    state
+        .observe(version, Direction::Clientbound, &Packet::empty(0x74))
+        .unwrap();
+    assert_eq!(state.phase(Direction::Serverbound), State::Play);
+    state
+        .observe(version, Direction::Serverbound, &Packet::empty(0x0f))
+        .unwrap();
+    assert!(state.settled(State::Configuration));
+}
+
+#[test]
+fn handshake_and_legacy_login_have_explicit_transitions() {
+    let version = ProtocolVersion::new(47).unwrap();
+    let handshake = Handshake {
+        protocol: 47,
+        address: "test".into(),
+        port: 25565,
+        next_state: NextState::Login,
+    };
+    let mut state = ConnectionState::default();
+    state
+        .observe(version, Direction::Serverbound, &handshake.packet())
+        .unwrap();
+    assert!(state.settled(State::Login));
+    assert!(state.accept_handshake(&handshake).is_err());
+    let mut start = Vec::new();
+    write_string("Player", &mut start);
+    state
+        .observe(version, Direction::Serverbound, &Packet::new(0, start))
+        .unwrap();
+    let mut success = Vec::new();
+    write_string("00000000-0000-0000-0000-000000000001", &mut success);
+    write_string("Player", &mut success);
+    state
+        .observe(version, Direction::Clientbound, &Packet::new(2, success))
+        .unwrap();
+    assert!(state.settled(State::Play));
+}
+
+#[test]
+fn malformed_compression_streams_fail_without_panics_or_unbounded_output() {
+    for bytes in [
+        &[0x78, 0x01, 0x07, 0, 0, 0, 1][..], // Reserved DEFLATE block type.
+        &[0x78, 0x01, 0x01, 0x01, 0, 0, 0, 0, 0, 0, 1], // Bad stored-block complement.
+        &[0x78, 0x20, 0, 0, 0, 0, 0, 0, 0],  // Preset dictionary.
+    ] {
+        assert!(compression::inflate(bytes, 256).is_err());
+    }
+    let reference = include_bytes!("../../tests/fixtures/dynamic.zlib");
+    for index in 0..reference.len() {
+        let mut mutated = reference.to_vec();
+        mutated[index] ^= 0x80;
+        if let Ok(output) = compression::inflate(&mutated, 114400) {
+            assert_eq!(output.len(), 114400);
+        }
+    }
+}

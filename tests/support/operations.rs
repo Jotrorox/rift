@@ -89,7 +89,7 @@ fn await_metric(address: SocketAddr, name: &str, expected: u64) {
     }
 }
 
-fn exchange(client: &mut TcpStream, server: &mut TcpStream) {
+fn exchange(client: &mut game::GameStream, server: &mut game::GameStream) {
     client.write_all(b"hello").unwrap();
     let mut bytes = [0; 5];
     server.read_exact(&mut bytes).unwrap();
@@ -134,7 +134,6 @@ fn fallback_reaches_backup_before_forwarding_and_does_not_migrate_sessions() {
     let fixture = Fixture::new();
     let primary = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = primary.local_addr().unwrap();
-    drop(primary);
     let backup = TcpListener::bind("127.0.0.1:0").unwrap();
     fixture.write(&options(
         &config(
@@ -147,14 +146,17 @@ fn fallback_reaches_backup_before_forwarding_and_does_not_migrate_sessions() {
     let front = process.listener();
     process.listener();
     let metrics = process.metrics_address();
-    let mut client = connect(front);
-    let mut server = accept(&backup);
+    // Reserve the unavailable backend's port until Rift has bound its own
+    // ephemeral listeners, or the OS can assign that port to the proxy itself.
+    drop(primary);
+    let mut client = connect_game(front);
+    let mut server = accept_game(&backup);
     exchange(&mut client, &mut server);
     assert_eq!(metric(metrics, "fallbacks_total"), 1);
     assert_eq!(metric(metrics, "backend_connect_failures_total"), 1);
     let primary = TcpListener::bind(address).unwrap();
-    let mut new_client = connect(front);
-    let mut new_server = accept(&primary);
+    let mut new_client = connect_game(front);
+    let mut new_server = accept_game(&primary);
     exchange(&mut new_client, &mut new_server);
     // A recovered primary does not change the already established backup relay.
     exchange(&mut client, &mut server);
@@ -171,7 +173,6 @@ fn health_checks_detect_outage_skip_primary_and_recover() {
     let fixture = Fixture::new();
     let primary = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = primary.local_addr().unwrap();
-    drop(primary);
     let backup = TcpListener::bind("127.0.0.1:0").unwrap();
     fixture.write(&options(&config(&[address, backup.local_addr().unwrap()], "connect_timeout_ms = 1000"),
         "fallbacks = { b0 = { 'b1' } }, metrics = '127.0.0.1:0', health_check = { interval_ms = 40, timeout_ms = 100, unhealthy_threshold = 1, healthy_threshold = 1 }"));
@@ -179,35 +180,33 @@ fn health_checks_detect_outage_skip_primary_and_recover() {
     let front = process.listener();
     process.listener();
     let metrics = process.metrics_address();
+    drop(primary);
     await_metric(metrics, "backend_up{backend=\"b0\"}", 0);
-    let mut client = connect(front);
-    client.write_all(b"hello").unwrap();
+    let mut client = connect_game(front);
     // Health probes connect and close without application bytes.
     let mut server = loop {
-        let mut server = accept(&backup);
-        let mut bytes = [0; 5];
-        if server.read_exact(&mut bytes).is_ok() {
-            assert_eq!(&bytes, b"hello");
-            break server;
+        let server = accept(&backup);
+        let mut first = [0];
+        if server.peek(&mut first).unwrap_or(0) == 0 {
+            continue;
         }
+        break game::accept_socket(server);
     };
-    server.write_all(b"world").unwrap();
-    let mut bytes = [0; 5];
-    client.read_exact(&mut bytes).unwrap();
-    assert_eq!(&bytes, b"world");
+    exchange(&mut client, &mut server);
     assert_eq!(metric(metrics, "backend_connect_failures_total"), 0);
     assert_eq!(metric(metrics, "fallbacks_total"), 1);
     let primary = TcpListener::bind(address).unwrap();
     await_metric(metrics, "backend_up{backend=\"b0\"}", 1);
-    let mut recovered = connect(front);
-    recovered.write_all(b"again").unwrap();
-    loop {
-        let mut server = accept(&primary);
-        if server.read_exact(&mut bytes).is_ok() {
-            assert_eq!(&bytes, b"again");
-            break;
+    let mut recovered = connect_game(front);
+    let mut recovered_server = loop {
+        let server = accept(&primary);
+        let mut first = [0];
+        if server.peek(&mut first).unwrap_or(0) == 0 {
+            continue;
         }
-    }
+        break game::accept_socket(server);
+    };
+    exchange(&mut recovered, &mut recovered_server);
     exchange(&mut client, &mut server);
 }
 
@@ -221,18 +220,24 @@ fn rate_limits_are_shared_across_listeners_and_leave_active_traffic_alive() {
     let first = process.listener();
     let second = process.listener();
     let metrics = process.metrics_address();
-    let mut client = connect(first);
-    let mut server = accept(&backend);
+    let mut client = connect_game(first);
+    let mut server = accept_game(&backend);
     assert_closed(&mut connect(second));
     assert_eq!(metric(metrics, "connections_rate_limited_total"), 1);
     exchange(&mut client, &mut server);
     assert_eq!(metric(metrics, "connections_active"), 1);
     thread::sleep(Duration::from_millis(1100));
-    let mut allowed = connect(second);
-    let mut upstream = accept(&backend);
+    let mut allowed = connect_game(second);
+    let mut upstream = accept_game(&backend);
     exchange(&mut allowed, &mut upstream);
-    assert_eq!(metric(metrics, "client_bytes_read_total"), 10);
-    assert_eq!(metric(metrics, "client_bytes_written_total"), 10);
+    assert_eq!(
+        metric(metrics, "client_bytes_read_total"),
+        2 * (game::setup().len() as u64 + 7)
+    );
+    assert_eq!(
+        metric(metrics, "client_bytes_written_total"),
+        2 * (game::success().len() as u64 + 7)
+    );
     drop(allowed);
     drop(upstream);
     drop(client);
@@ -259,8 +264,8 @@ fn reloads_are_atomic_validate_scripts_and_preserve_sessions_and_capacity() {
     let front = process.listener();
     process.listener();
     let metrics = process.metrics_address();
-    let mut old_client = connect(front);
-    let mut old_server = accept(&first);
+    let mut old_client = connect_game(front);
+    let mut old_server = accept_game(&first);
     let updated = options(
         &source,
         "on_route = function(c) return { backend = 'b1' } end",
@@ -268,8 +273,8 @@ fn reloads_are_atomic_validate_scripts_and_preserve_sessions_and_capacity() {
     fixture.write(&updated);
     process.signal("-HUP");
     process.message("configuration reloaded");
-    let mut new_client = connect(front);
-    let mut new_server = accept(&second);
+    let mut new_client = connect_game(front);
+    let mut new_server = accept_game(&second);
     exchange(&mut old_client, &mut old_server);
     exchange(&mut new_client, &mut new_server);
     for invalid in [
@@ -307,8 +312,8 @@ fn reloads_are_atomic_validate_scripts_and_preserve_sessions_and_capacity() {
     drop(old_server);
     await_metric(metrics, "connections_active", 0);
     // Removing the script returns new sessions to the original route.
-    let mut restored = connect(front);
-    let mut upstream = accept(&first);
+    let mut restored = connect_game(front);
+    let mut upstream = accept_game(&first);
     exchange(&mut restored, &mut upstream);
 }
 
@@ -323,8 +328,8 @@ fn graceful_shutdown_stops_accepting_and_drains_live_sessions() {
     ));
     let mut process = fixture.spawn(&[]);
     let front = process.listener();
-    let mut client = connect(front);
-    let mut server = accept(&backend);
+    let mut client = connect_game(front);
+    let mut server = accept_game(&backend);
     process.signal("-TERM");
     process.message("draining 1 connections");
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -361,8 +366,8 @@ fn shutdown_deadline_and_second_signal_close_stalled_sessions() {
             ),
         ));
         let mut process = fixture.spawn(&[]);
-        let mut client = connect(process.listener());
-        let _server = accept(&backend);
+        let mut client = connect_game(process.listener());
+        let _server = accept_game(&backend);
         process.signal("-TERM");
         process.message("draining 1 connections");
         if second_signal {
@@ -424,6 +429,9 @@ fn answer_status(backend: &TcpListener, packet: &[u8], description: u8) {
         b'}',
     ];
     server.write_all(&response).unwrap();
+    // Let the independent probe close first. Closing the fixture first can put
+    // its listening port in TIME_WAIT and race the outage/rebind test below.
+    assert_closed(&mut server);
 }
 
 #[test]
@@ -456,17 +464,11 @@ fn status_cache_preserves_ping_isolates_protocol_and_host_and_expires() {
     answer_status(&backend, &packet, b'c');
     assert_ne!(next.join().unwrap(), response);
     assert_eq!(metric(metrics, "status_cache_misses_total"), 4);
-    // Login and transfer still preserve every byte and never use the status cache.
-    for state in [2, 3] {
-        let packet = handshake("play.test", 1, state);
-        let mut client = connect(front);
-        client.write_all(&packet).unwrap();
-        let mut server = accept(&backend);
-        let mut bytes = vec![0; packet.len()];
-        server.read_exact(&mut bytes).unwrap();
-        assert_eq!(bytes, packet);
-        exchange(&mut client, &mut server);
-    }
+    // Login sessions bypass status caching.
+    let mut client = connect_game(front);
+    let mut server = accept_game(&backend);
+    exchange(&mut client, &mut server);
+    assert_eq!(metric(metrics, "status_cache_misses_total"), 4);
 }
 
 #[cfg(unix)]
@@ -556,20 +558,21 @@ fn routed_fallback_preserves_handshake_and_fails_closed_when_all_backends_are_do
     let process = fixture.spawn(&[]);
     let front = process.listener();
     process.listener();
-    let mut packet = handshake("Play.Test.\0metadata", 1, 2);
-    packet.extend(b"pipelined login");
-    let mut client = connect(front);
-    client.write_all(&packet).unwrap();
-    let mut server = accept(&backup);
-    let mut bytes = vec![0; packet.len()];
-    server.read_exact(&mut bytes).unwrap();
-    assert_eq!(bytes, packet);
+    let mut client = connect_game(front);
+    let mut server = accept_game(&backup);
     exchange(&mut client, &mut server);
     drop(backup);
     drop(server);
     drop(client);
     let mut client = connect(front);
-    client.write_all(&packet).unwrap();
+    client.write_all(&game::setup()).unwrap();
+    let response = game::read_packet(&mut client).unwrap();
+    assert_eq!(response.id, 0);
+    assert!(
+        rift::protocol::read_string(&mut response.data.as_slice(), 32767)
+            .unwrap()
+            .contains("unavailable")
+    );
     assert_closed(&mut client);
 }
 
@@ -585,8 +588,8 @@ fn unchanged_rate_policy_keeps_depleted_buckets_across_reload() {
     fixture.write(&source);
     let process = fixture.spawn(&[]);
     let front = process.listener();
-    let mut client = connect(front);
-    let mut server = accept(&backend);
+    let mut client = connect_game(front);
+    let mut server = accept_game(&backend);
     process.signal("-HUP");
     process.message("configuration reloaded");
     assert_closed(&mut connect(front));
