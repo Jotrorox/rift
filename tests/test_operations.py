@@ -109,6 +109,19 @@ class OperationsHarnessTests(unittest.TestCase):
         with self.assertRaises(AssertionError):
             manual_online.verify_inventory(record, "minecraft:gold_ingot", 7)
 
+    def test_manual_wrong_secret_requires_a_switch_failure_for_the_target(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / "proxy.log"
+            unrelated = [dict(event="connection_failed", backend="primary"),
+                         dict(event="backend_switch_failed", backend="lobby")]
+            log.write_text("rift: listening\n" + "".join(json.dumps(event) + "\n" for event in unrelated))
+            self.assertEqual(manual_online.switch_failures(log, "primary"), [])
+            expected = dict(event="backend_switch_failed", backend="primary", connection_id=3,
+                            error_kind="PermissionDenied", message="Unable to verify player details")
+            with log.open("a") as output:
+                output.write(json.dumps(expected) + "\n" + '{"event":')
+            self.assertEqual(manual_online.switch_failures(log, "primary"), [expected])
+
 
 if __name__ == "__main__":
     unittest.main()

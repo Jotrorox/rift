@@ -153,6 +153,18 @@ def records(directory):
     return [json.loads(line) for line in path.read_text().splitlines(keepends=True) if line.endswith("\n")]
 
 
+def switch_failures(log, target):
+    """Native player commands report failed transfers through structured logs."""
+    failures = []
+    for line in log.read_text().splitlines(keepends=True):
+        if not line.startswith("{") or not line.endswith("\n"):
+            continue
+        event = json.loads(line)
+        if event.get("event") == "backend_switch_failed" and event.get("backend") == target:
+            failures.append(event)
+    return failures
+
+
 def snapshot(server, directory, name):
     before = len(records(directory))
     console(server, f"riftprobe {name}")
@@ -247,6 +259,7 @@ def run(args, binary, directory, result):
                 f"Join the lobby as {username}. Check your usual skin (F5), load chunks, move, place/break blocks, "
                 "and send chat. Keep this connection open until the final disconnect instruction.")
         baseline = op.metrics(monitor)
+        result["initial_metrics"] = baseline
         checkpoint(result, "lobby_initial", servers["lobby"], directories["lobby"], expected, args.expected_ip)
         console(servers["lobby"], f"give {username} minecraft:diamond 7")
         checkpoint(result, "lobby_inventory", servers["lobby"], directories["lobby"], expected, args.expected_ip,
@@ -281,12 +294,17 @@ def run(args, binary, directory, result):
         mc.wait_ready(bad_primary, lambda: mc.status_ready(primary_port, protocol),
                       directories["primary"] / "wrong-secret.log", timeout=600)
         primary_joins_before = sum(row["event"] == "join" for row in records(directories["primary"]))
-        failures_before = op.metrics(monitor)["player_transfer_failures_total"]
+        failures_before = len(switch_failures(directory / "proxy.log", "primary"))
         confirm(result, "bad_secret_retains_lobby",
                 "Primary now has an incorrect forwarding secret. Use /server primary. Expect a clear failure message "
                 "and stay in the lobby. Move, interact with blocks and chat; verify your 7 diamonds remain.")
-        current = assert_continuity(monitor, baseline, "lobby")
-        assert current["player_transfer_failures_total"] > failures_before
+        assert_continuity(monitor, baseline, "lobby")
+        failures = switch_failures(directory / "proxy.log", "primary")
+        assert len(failures) > failures_before, "Rift did not record a rejected transfer to primary"
+        rejection = failures[-1]
+        assert rejection["error_kind"] == "PermissionDenied", rejection
+        assert "Unable to verify player details" in rejection["message"], rejection
+        result["wrong_secret_rejection"] = rejection
         checkpoint(result, "bad_secret_lobby_survives", servers["lobby"], directories["lobby"], expected, args.expected_ip,
                    "minecraft:diamond", 7)
         assert sum(row["event"] == "join" for row in records(directories["primary"])) == primary_joins_before, "wrong-secret login reached play"
