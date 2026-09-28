@@ -1,9 +1,10 @@
 # Rift
 
-A small TCP reverse proxy for Minecraft Java Edition. Route multiple hostnames
-through one port, or forward all traffic to one backend. In routing mode Rift
-reads the initial handshake; the backend handles login, encryption, compression,
-and gameplay. LuaJIT is embedded through `mlua`; the binary needs no Java or
+A Minecraft Java Edition proxy with client-owned sessions. Route multiple
+hostnames through one port or select one backend. Rift handles packet framing,
+compression, and handshake, status, login, configuration and play states. Client
+and backend connections have independent protocol state; a backend is an
+attachment within a player's session. LuaJIT is embedded through `mlua`; the binary needs no Java or
 separate Lua installation. Building requires a C toolchain (MSVC on Windows).
 
 Download a native archive from [Releases](https://github.com/Jotrorox/rift/releases)
@@ -49,32 +50,44 @@ then the optional default. `*.games.example.com` matches one or more subdomain
 labels, but not `games.example.com` itself. Names are case-insensitive and one
 trailing dot is ignored. Quote wildcard arguments to avoid shell expansion.
 `--route '*=host:port'` is an alternative to `--default host:port`. Duplicate
-patterns or defaults are rejected. Without a default, unmatched clients close.
+patterns or defaults are rejected. Without a default, unmatched clients receive a missing-route message.
 
-Routing mode requires a modern Java Edition handshake within five seconds total.
-The initial packet body is limited to 2 KiB and the address to 1020 UTF-8 bytes
-and 255 UTF-16 code units. Malformed, oversized, truncated or late handshakes
-close without contacting a backend. Only the hostname before any NUL-delimited
-mod metadata is used for matching; the entire handshake is forwarded unchanged.
-Status, login and transfer handshakes all enter the same transparent relay.
-Legacy pre-1.7 server-list pings cannot select a hostname route.
+Every listener requires a Java Edition handshake within five seconds, including
+direct routes and Lua-selected backends. The initial packet body is limited to
+2 KiB and the address to 1020 UTF-8 bytes and 255 UTF-16 code units. Invalid or
+late handshakes close without contacting a backend. The hostname before any
+NUL-delimited mod metadata selects the route; all handshake fields, including
+metadata, are preserved. Packet lengths are encoded canonically.
 
-The positional single-backend command remains a transparent TCP relay and does
-not require a Minecraft handshake. Do not mix a positional backend with routing
-options.
+Login supports protocol 47 (1.8), 761–775 (1.19.3 through 26.1), and the pinned
+Pumpkin protocol 777. Unknown login versions receive an explanatory disconnect;
+status discovery works with any protocol number, including -1. Transfer
+handshakes require protocol 766 or newer. Legacy pre-1.7 pings and arbitrary TCP
+streams are unsupported. There is no protocol translation or Bedrock/UDP support.
+
+Rift answers server-list requests and ping payloads itself, even without a
+backend. By default it advertises `Rift`, the client's protocol, the number of
+sessions that have reached play, and the configured connection capacity. Enable
+`status_cache` below to use backend status documents. Missing routes and backend
+connection failures produce readable disconnect messages during login.
+
+Do not mix a positional backend with routing options.
 
 For a backend on the same machine, set these in `server.properties`:
 
 ```properties
 server-ip=127.0.0.1
 server-port=25566
-online-mode=true
+online-mode=false
 prevent-proxy-connections=false
 ```
 
-Keep Paper's BungeeCord/Velocity forwarding disabled. This is transparent TCP:
-the backend sees Rift's IP address, with no player IP forwarding. There is no
-protocol translation or Bedrock/UDP support.
+Keep Paper's BungeeCord/Velocity forwarding disabled. This session layer requires
+offline-mode backends and does not authenticate player identities with Microsoft.
+An encryption request receives an explanatory disconnect before encryption starts.
+Use this setup only where unauthenticated identities are acceptable, and keep
+backend ports private. Backends see Rift's IP; player IP forwarding and online-mode
+authentication are not implemented.
 
 ## Lua configuration
 
@@ -113,8 +126,7 @@ return {
 `listeners`, `backends`, and `routes` are required, nonempty tables with string
 names. Listeners require IP literals with ports; backends also accept DNS
 hostnames with ports. Listener port `0` asks the OS to choose an available port.
-Each listener needs a route. A string value selects one backend and preserves
-transparent TCP forwarding. A table enables Minecraft hostname routing:
+Each listener needs a route. A string value selects one backend for each session. A table enables Minecraft hostname routing:
 
 ```lua
 routes = {
@@ -134,13 +146,17 @@ limits are the same as for CLI routes. Multiple listeners may share backends.
 `limits` and each of its fields are optional and default to the values above.
 `max_connections` is shared across all listeners and must be a positive integer
 within Tokio's semaphore capacity. `connect_timeout_ms` accepts 1–86,400,000
-milliseconds; `buffer_size` accepts 1–16,777,216 bytes per direction. All three
+milliseconds; `buffer_size` accepts 1–16,777,216 bytes and controls socket read
+granularity (capped at the maximum wire frame size). All three
 reject fractions, strings, and nonfinite numbers.
 
-The release default is 1024 connections (previously 4096), with 32 KiB of buffer
-space per direction: 64 MiB of relay buffers at capacity, plus sockets and runtime
-overhead. Explicit limits in existing configs remain unchanged. The
-[local pilot](docs/pilot.md) records the measurements and sizing rationale.
+The default capacity is 1024 connections. Packet buffers grow as data arrives;
+wire frames are limited to 2,097,151 bytes and decompressed packets to 8 MiB.
+Compression thresholds, declared lengths, zlib checksums and string limits are
+validated before forwarding. `buffer_size` does not cap complete packet buffers;
+capacity planning must account for packet sizes as well as sockets and runtime.
+The earlier raw-relay measurements in the [local pilot](docs/pilot.md) predate
+this session layer.
 
 Lua evaluates during startup and produces a typed Rust `Config`. Send SIGHUP on
 Unix or Ctrl-Break on Windows to validate and reload the selected file. An optional `on_route` function also runs for each connection,
@@ -154,9 +170,8 @@ All listeners bind before Rift begins accepting connections.
 ## Operating a network
 
 [`examples/network.lua`](examples/network.lua) enables all operational features
-for a primary server and a fallback lobby. Existing configurations keep their
-previous behavior: rate limits, health probes, status caching and the metrics
-listener are disabled unless their corresponding fields are present.
+for a primary server and a fallback lobby. Rate limits, health probes, backend status caching and the metrics listener
+are disabled unless their corresponding fields are present.
 
 ### Validate and reload
 
@@ -251,10 +266,16 @@ The durations accept 1–86,400,000 ms and thresholds accept 1–1,000.
 All candidate connections share `limits.connect_timeout_ms`. Each attempt gets
 a share of the remaining deadline, reserving time for later candidates even if
 a primary silently drops packets. Resolution and all returned addresses are
-included in that attempt. If no candidate is reachable, the client closes.
+included in that attempt. If no candidate is reachable, the client receives an unavailable-server message.
 Fallback happens only while connecting, before any client bytes are forwarded.
-Once a backend is connected, handshake-write errors and relay failures close that
-session; Rift never replays client bytes or migrates a logged-in player.
+The executable disconnects with a useful message if its backend fails; automatic
+migration of players is not configured. The library's `Session::connect_backend`
+operation can attach a replacement backend to an established client on 1.20.2+.
+It re-enters client configuration, logs into the replacement independently, checks
+the UUID/name, and retains the original client socket and compression settings.
+Callers must give that operation a deadline and disconnect after an interrupted
+write. Replacement login plugin requests receive an unsupported response; login
+cookies and encryption during replacement are unsupported.
 
 ### Server-list status cache
 
@@ -266,17 +287,20 @@ status_cache = {
 },
 ```
 
-Caching applies only to status handshakes on hostname-routing listeners. Direct
-listeners and explicit Lua backend selections remain transparent; login and
-transfer sessions always relay unchanged. Disable caching if a backend generates
-personalized status responses using information outside the handshake.
+When enabled, backend status caching applies to direct, hostname and Lua-selected
+routes. Rift owns the client status exchange and queries the backend independently.
+Without this option, status is answered locally without a backend connection.
+Login and transfer sessions never use the cache. Disable caching if backend status
+depends on information outside the handshake.
 
-Rift caches only complete, valid JSON-object responses. Keys include the listener
-and complete original handshake, separating hostnames, protocol versions, ports
+Rift caches only complete, valid JSON-object responses. Keys include the listener, selected backend,
+and complete handshake fields, separating hostnames, protocol versions, ports
 and mod metadata. Concurrent misses for the same key share a fill while the
 bounded fill index has capacity. Responses expire after their fixed TTL; failed
 fills do not populate the cache. A valid entry can answer through a brief outage,
-but stale entries are never served after expiration. Each client's ping payload
+but stale entries are never served after expiration. If a backend connection, read or timeout
+fails, Rift returns a local unavailable-server status. Malformed upstream responses
+are rejected and never cached. Each client's ping payload
 is echoed independently and is never cached.
 
 Both the cache and fill index are capped by `max_entries` (1–65,536). Cached
@@ -299,7 +323,7 @@ loopback or a trusted monitoring interface: it has no authentication. Scrapes
 have a two-second deadline, a 4 KiB header bound and at most 16 concurrent
 handlers, independent of gameplay admission. Other paths return 404.
 
-Metrics include `rift_connections_active`, accepted/completed/rejected connection
+Metrics include `rift_connections_active`, `rift_players_online`, accepted/completed/rejected connection
 counters, connection errors, backend connect failures, fallback selections,
 cache hits/misses, successful/failed reloads, health probes, forced shutdowns,
 and client bytes read/written. `rift_backend_up{backend="name"}` reports each
@@ -347,13 +371,14 @@ the backup actually used.
 | `on_route` | `route_rejected` | The hook explicitly rejected the connection |
 
 Other I/O failures use `failure="io_error"` with `stage` set to `client_setup`,
-`backend_setup`, `handshake_write`, `relay`, `status_request`, `status_cache_wait`,
+`backend_setup`, `handshake_write`, `session`, `status_request`, `status_cache_wait`,
 `status_upstream` or `status_response`. `error_kind="TimedOut"` distinguishes I/O
 deadlines from other errors at the same stage. Lua diagnostics retain the script
 filename and hook context. Messages are capped at 2,048 characters and JSON
 escapes embedded newlines and control characters; handshake payloads are not logged.
 
-`backend_attempt_failed` records each failed backend attempt, including attempts
+`backend_status_failed` records a failed status read or timeout when a local
+status response is served instead. `backend_attempt_failed` records each failed backend attempt, including attempts
 recovered by a fallback. Only `connection_failed` means the session ended in an
 error. Policy/admission closures use `connection_rejected`; hook rejection
 reasons appear in `message`. These events preserve the existing error/rejection
@@ -394,7 +419,7 @@ does not invoke Lua during connection handling.
 
 There is no Minecraft hostname, player identity, or packet data at this stage.
 Changing this table does not change the socket or configured route. A backend
-selection bypasses hostname matching and forwards all bytes unchanged. Returning
+selection bypasses hostname matching; it still enters the Minecraft session layer. Returning
 `nil` preserves hostname parsing, matching, handshake deadlines and forwarding;
 it does not jump directly to the hostname table's `"*"` fallback. Script-selected
 backends retain DNS resolution, connection deadlines and proxy-loop checks.
@@ -465,16 +490,19 @@ Rust structs and enum are not a stable C layout; no C ABI is exported yet.
 
 - One async task per connection on Tokio's multithreaded runtime.
 - `TCP_NODELAY` on both sockets for small-packet latency.
-- By default, two reusable 32 KiB relay buffers per connection, with backpressure and half-close support.
-- Five-second handshake deadline in routing mode; a separate backend
-  DNS/connect/forward deadline (five seconds by default). No idle timeout for established sessions.
-- By default, at most 4,096 active connections across all listeners, including
+- Bounded packet buffers with 32 KiB socket read granularity by default, backpressure,
+  and client half-close draining. Partial reads survive `select!` cancellation.
+- Five-second handshake deadline on every listener; a separate backend
+  DNS/connect/handshake deadline (five seconds by default). Login/configuration
+  and client half-close draining have a 30-second deadline. No play idle timeout.
+- By default, at most 1,024 active connections across all listeners, including
   pending script calls, handshakes and backend connections;
   excess clients are immediately closed. The OS file descriptor limit must allow
   two sockets per client plus headroom.
 - No per-packet logging, shared traffic lock, or unbounded queue. Traffic metrics
   use relaxed atomic counters per socket I/O; status JSON is parsed only when
-  status caching is enabled.
+  status caching is enabled. Compression uses an in-tree safe Rust zlib codec,
+  with no added Cargo or native-library dependencies.
 
 ## Tests
 
@@ -483,11 +511,18 @@ cargo fmt --all --check
 cargo test --locked --all-targets
 cargo test --locked --all-targets --release
 cargo clippy --all-targets --locked -- -D warnings
+python3 tests/protocol_wire.py --binary target/release/rift
 python3 -m unittest discover -s tests -p 'test_*.py' -v
 python3 tests/minecraft.py --accept-eula --jobs 3
 python3 tests/minecraft.py --accept-eula --jobs 3 --compression disabled
 python3 tests/bench.py --report target/benchmark.json
 ```
+
+The wire test uses independent Python/zlib peers across ten protocol versions and
+four compression thresholds, without downloads or a Minecraft server. The control
+packet tables follow [minecraft-data](https://github.com/PrismarineJS/minecraft-data/tree/master/data/pc)
+and the pinned Pumpkin fixture; zlib follows [RFC 1950](https://www.rfc-editor.org/rfc/rfc1950)
+and [RFC 1951](https://www.rfc-editor.org/rfc/rfc1951).
 
 Rust is pinned in `rust-toolchain.toml`; install it with rustup. The Python scripts
 need Python 3.11+ and use only the standard library. Vanilla and Paper also need
@@ -524,7 +559,9 @@ which disables test assertions; the scripts reject it.
 Rust tests additionally check simultaneous bulk transfer byte for byte, slow
 readers, fragmented concurrent sessions, half-closes in both directions, connection
 refusal, CLI startup failures, bounded handshake parsing and deadlines, and
-hostname routing against two independent Minecraft status fixtures. Hook tests cover
+hostname routing against independent Minecraft login fixtures. Protocol tests
+cover fragmented/cancelled reads, compression against independent zlib streams,
+state acknowledgements, structured disconnects and backend replacement. Hook tests cover
 backend selection/rejection, malformed results, execution limits and cancellation,
 state isolation, and traffic continuing alongside a runaway hook. Operational tests
 cover failed and successful reloads with live sessions, shared admission and Lua
@@ -608,8 +645,8 @@ and measures six paths:
 
 | Scenario | Connection path |
 | --- | --- |
-| `direct` | TCP straight to the echo fixture |
-| `rift` | Rift's transparent single-backend relay |
+| `direct` | Minecraft login and play packets straight to the echo fixture |
+| `rift` | Rift's single-backend Minecraft session |
 | `hostname` | Minecraft login handshake, exact hostname match, then relay |
 | `lua` | Fresh Lua VM/config evaluation, a minimal `on_route` returning `nil`, then hostname routing |
 | `lua_init` | Same hook and route, with a 10,000-entry table rebuilt during each config evaluation |
@@ -628,9 +665,9 @@ each proxy scenario starts a fresh process. Rate limits and health probes are
 disabled; the normal 1,024-connection admission limit remains in place. Larger
 custom bursts can exercise admission rejection; the driver allows up to 4,096.
 
-Setup latency starts before TCP connect and ends at a verified echo of the
-Minecraft handshake plus a probe, establishing that routing and backend setup
-completed. This is not a full Minecraft login. Cached-status latency ends at the
+Setup latency starts before TCP connect and ends after an offline 1.8 login and
+a verified play-packet echo, establishing that routing and backend setup completed.
+The synthetic fixture does not send a world. Cached-status latency ends at the
 complete expected status response; success additionally requires the correct
 client-specific ping reply. Cache counters must confirm zero measured misses and
 at least one hit per successful exchange. Cache priming is excluded and the

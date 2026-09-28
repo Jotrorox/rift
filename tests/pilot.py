@@ -19,7 +19,7 @@ import tempfile
 import threading
 import time
 
-from bench import MIB, connect, latency, throughput
+from bench import MIB, connect, latency, throughput, socket_frame, packet, LOGIN_START, LOGIN_SUCCESS
 from minecraft import ROOT, process
 
 
@@ -28,8 +28,16 @@ def backend(uppercase=False):
     class Handler(socketserver.BaseRequestHandler):
         def handle(self):
             self.request.settimeout(15)
-            while data := self.request.recv(65536):
-                self.request.sendall(data.upper() if uppercase else data)
+            try:
+                with self.request.makefile("rb") as reader:
+                    socket_frame(reader)  # Handshake.
+                    assert packet(socket_frame(reader)) == LOGIN_START
+                    self.request.sendall(LOGIN_SUCCESS)
+                    while True:
+                        data = socket_frame(reader)
+                        self.request.sendall(packet(data[:1] + (data[1:].upper() if uppercase else data[1:])))
+            except (EOFError, OSError):
+                pass
 
     class Server(socketserver.ThreadingTCPServer):
         daemon_threads = True

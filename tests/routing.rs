@@ -1,4 +1,4 @@
-//! Black-box Minecraft status fixtures behind a single real Rift process.
+//! Black-box Minecraft login routing through a real Rift process.
 use std::{
     io::{BufRead, BufReader},
     net::SocketAddr,
@@ -90,40 +90,29 @@ async fn read_frame(stream: &mut TcpStream) -> Vec<u8> {
     body
 }
 
-fn status_response(name: &str) -> Vec<u8> {
-    let json = format!(
-        r#"{{"version":{{"name":"fixture","protocol":774}},"players":{{"max":20,"online":0}},"description":{{"text":"{name}"}}}}"#
-    );
+fn login_rejection(name: &str) -> Vec<u8> {
+    let json = serde_json::json!({"text": name}).to_string();
     let mut response = vec![0];
     response.extend(varint(json.len()));
     response.extend(json.as_bytes());
     response
 }
 
-async fn status_server(listener: TcpListener, name: &'static str, hosts: Vec<&'static str>) {
+async fn login_server(listener: TcpListener, name: &'static str, hosts: Vec<&'static str>) {
     for host in hosts {
         let (mut stream, _) = listener.accept().await.unwrap();
         let received = read_frame(&mut stream).await;
-        assert_eq!(frame(&received), handshake(host, 1), "handshake changed");
-        assert_eq!(read_frame(&mut stream).await, [0]);
+        assert_eq!(frame(&received), handshake(host, 2), "handshake changed");
         stream
-            .write_all(&frame(&status_response(name)))
+            .write_all(&frame(&login_rejection(name)))
             .await
             .unwrap();
-        let ping = read_frame(&mut stream).await;
-        assert_eq!(ping, [1, 0, 1, 2, 3, 4, 5, 6, 7]);
-        // Relay must propagate EOF while still delivering the pending reply.
-        assert_eq!(stream.read(&mut [0]).await.unwrap(), 0);
-        stream.write_all(&frame(&ping)).await.unwrap();
-        stream.shutdown().await.unwrap();
     }
 }
 
 async fn query(address: SocketAddr, host: &str, expected: &str, fragmented: bool) {
     let mut stream = TcpStream::connect(address).await.unwrap();
-    let mut request = handshake(host, 1);
-    request.extend([1, 0]); // Pipelined status request.
-    request.extend([9, 1, 0, 1, 2, 3, 4, 5, 6, 7]); // Pipelined ping.
+    let request = handshake(host, 2);
     if fragmented {
         for byte in request {
             stream.write_all(&[byte]).await.unwrap();
@@ -132,9 +121,7 @@ async fn query(address: SocketAddr, host: &str, expected: &str, fragmented: bool
     } else {
         stream.write_all(&request).await.unwrap();
     }
-    stream.shutdown().await.unwrap();
-    assert_eq!(read_frame(&mut stream).await, status_response(expected));
-    assert_eq!(read_frame(&mut stream).await, [1, 0, 1, 2, 3, 4, 5, 6, 7]);
+    assert_eq!(read_frame(&mut stream).await, login_rejection(expected));
     assert_eq!(stream.read(&mut [0]).await.unwrap(), 0);
 }
 
@@ -158,12 +145,12 @@ async fn two_domains_reach_different_minecraft_servers_through_one_port() {
             "--default".into(),
             second_addr,
         ]);
-        let server_a = tokio::spawn(status_server(
+        let server_a = tokio::spawn(login_server(
             first,
             "survival",
             vec!["SURVIVAL.Example.COM.\0FML3\0", "other.example.com"],
         ));
-        let server_b = tokio::spawn(status_server(
+        let server_b = tokio::spawn(login_server(
             second,
             "creative",
             vec![
@@ -210,16 +197,21 @@ async fn bad_or_unmatched_handshakes_never_connect_to_the_backend() {
         "--route".into(),
         format!("known.test={}", backend.local_addr().unwrap()),
     ]);
-    for bytes in [
-        handshake("unknown.test", 1),
-        vec![0x81, 0x10],
-        vec![0x80; 5],
-        vec![1, 1],
-    ] {
+    for bytes in [vec![0x81, 0x10], vec![0x80; 5], vec![1, 1]] {
         let mut client = TcpStream::connect(proxy.1).await.unwrap();
         client.write_all(&bytes).await.unwrap();
         assert_closed(&mut client).await;
     }
+    let mut client = TcpStream::connect(proxy.1).await.unwrap();
+    client
+        .write_all(&handshake("unknown.test", 2))
+        .await
+        .unwrap();
+    assert_eq!(
+        read_frame(&mut client).await,
+        login_rejection("No server is configured for this hostname.")
+    );
+    assert_closed(&mut client).await;
     assert!(
         timeout(Duration::from_millis(100), backend.accept())
             .await
@@ -256,7 +248,7 @@ async fn handshake_deadline_is_total_even_when_the_client_keeps_sending() {
 }
 
 #[tokio::test]
-async fn login_and_transfer_handshakes_enter_the_unmodified_relay() {
+async fn login_and_transfer_handshakes_start_independent_backend_connections() {
     timeout(Duration::from_secs(10), async {
         let backend = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let proxy = Proxy::start(&[
@@ -265,23 +257,27 @@ async fn login_and_transfer_handshakes_enter_the_unmodified_relay() {
         ]);
         for state in [2, 3] {
             let mut client = TcpStream::connect(proxy.1).await.unwrap();
-            let mut payload = handshake("login.test", state);
-            payload.extend((0..128 * 1024).map(|n| (n % 251) as u8));
-            let expected = payload.clone();
-            let task = tokio::spawn(async move {
-                client.write_all(&payload).await.unwrap();
-                client.shutdown().await.unwrap();
-                let mut response = Vec::new();
-                client.read_to_end(&mut response).await.unwrap();
-                assert_eq!(response, payload);
-            });
+            let mut payload = handshake("login.test\0metadata", state);
+            let mut start = vec![0, 6];
+            start.extend(b"Player");
+            start.extend([7; 16]);
+            payload.extend(frame(&start));
+            client.write_all(&payload).await.unwrap();
             let (mut upstream, _) = backend.accept().await.unwrap();
-            let mut received = Vec::new();
-            upstream.read_to_end(&mut received).await.unwrap();
-            assert_eq!(received, expected);
-            upstream.write_all(&received).await.unwrap();
-            upstream.shutdown().await.unwrap();
-            task.await.unwrap();
+            assert_eq!(
+                frame(&read_frame(&mut upstream).await),
+                handshake("login.test\0metadata", state)
+            );
+            assert_eq!(read_frame(&mut upstream).await, start);
+            upstream
+                .write_all(&frame(&login_rejection("maintenance")))
+                .await
+                .unwrap();
+            assert_eq!(
+                read_frame(&mut client).await,
+                login_rejection("maintenance")
+            );
+            assert_closed(&mut client).await;
         }
     })
     .await

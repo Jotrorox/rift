@@ -1,6 +1,5 @@
 mod admission;
 mod events;
-mod handshake;
 mod health;
 mod metrics;
 mod runtime;
@@ -24,7 +23,7 @@ const USAGE: &str = "Usage: rift [<listen-ip:port> <backend-ip:port>]\n\
     rift --version (print package version)\n\
     Routing: rift <listen-ip:port> [--route <hostname=backend:port>]... [--default <backend:port>]\n\
     Routes: exact hostname, '*.example.com', or '*' (default).\n\
-    Priority: exact, longest wildcard suffix, default. Unmatched clients close.\n\
+    Priority: exact, longest wildcard suffix, default. Unmatched clients get a message.\n\
     No arguments: load ./rift.lua if present, otherwise use defaults.\n\
     Defaults: 0.0.0.0:25565 127.0.0.1:25566\n\
     Explicit addresses and routing options override ./rift.lua.\n\
@@ -102,39 +101,12 @@ async fn start() -> io::Result<()> {
 
 #[cfg(test)]
 use {
-    rift::{config::Limits, routing::Mode},
-    std::{net::SocketAddr, time::Duration},
+    std::time::Duration,
     tokio::{
         net::{TcpListener, TcpStream},
-        time::{sleep, timeout},
+        time::timeout,
     },
 };
-
-#[cfg(test)]
-async fn handle(
-    mut client: TcpStream,
-    mode: &Mode,
-    listeners: &[SocketAddr],
-    limits: Limits,
-) -> io::Result<(u64, u64)> {
-    let Mode::Direct(backend) = mode else {
-        unreachable!("relay test helper expects a direct backend")
-    };
-    let mut config = Config::from_addresses("127.0.0.1:0", "127.0.0.1:1")?;
-    config.backends.insert("default".into(), backend.clone());
-    config.limits = limits;
-    let snapshot = runtime::Snapshot::new(config, None)?;
-    let mut event = events::Connection::new("default", client.peer_addr()?);
-    runtime::handle(
-        &mut client,
-        "default",
-        std::sync::Arc::new(snapshot),
-        listeners,
-        std::sync::Arc::new(metrics::Metrics::default()),
-        &mut event,
-    )
-    .await
-}
 
 #[cfg(test)]
 mod tests;
