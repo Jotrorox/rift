@@ -1,9 +1,9 @@
-use rift::config::{Config, HealthCheck};
-use std::{collections::BTreeMap, io, net::SocketAddr, sync::Mutex};
-use tokio::{
-    net::TcpStream,
-    time::{Instant, timeout},
+use rift::{
+    config::{Config, HealthCheck},
+    routing::ConnectStage,
 };
+use std::{collections::BTreeMap, io, net::SocketAddr, sync::Mutex};
+use tokio::{net::TcpStream, time::Instant};
 
 #[derive(Clone, Copy)]
 struct State {
@@ -82,7 +82,10 @@ pub async fn connect(
     listeners: &[SocketAddr],
     metrics: &crate::metrics::Metrics,
     deadline: Instant,
+    event: &mut crate::events::Connection,
 ) -> io::Result<TcpStream> {
+    event.stage = "connect";
+    event.failure = "no_healthy_backend";
     let candidates: Vec<&str> = std::iter::once(primary)
         .chain(
             config
@@ -100,22 +103,32 @@ pub async fn connect(
         // Reserve time for every fallback even when a primary silently drops SYNs.
         let budget =
             deadline.saturating_duration_since(Instant::now()) / (candidates.len() - index) as u32;
-        match timeout(budget, config.backends[*name].connect(listeners)).await {
-            Ok(Ok(stream)) => {
+        event.backend = Some((*name).to_owned());
+        event.backend_address = Some(config.backends[*name].address().to_owned());
+        match config.backends[*name]
+            .connect_until(listeners, Instant::now() + budget)
+            .await
+        {
+            Ok(stream) => {
                 health.record(name, true);
                 if *name != primary {
                     metrics.fallbacks.inc();
                 }
                 return Ok(stream);
             }
-            result => {
+            Err(error) => {
                 health.record(name, false);
                 metrics.backend_failures.inc();
-                last_error = match result {
-                    Ok(Err(error)) => error,
-                    Err(error) => error.into(),
-                    Ok(Ok(_)) => unreachable!(),
+                (event.stage, event.failure) = match error.stage {
+                    ConnectStage::Dns => ("dns", "dns_error"),
+                    ConnectStage::Connect => ("connect", "connect_error"),
                 };
+                event.emit(
+                    "backend_attempt_failed",
+                    &error.error,
+                    Some(error.error.kind()),
+                );
+                last_error = error.error;
             }
         }
     }
@@ -158,7 +171,10 @@ mod timeout_tests {
     use super::*;
     use crate::metrics::Metrics;
     use std::time::Duration;
-    use tokio::net::{TcpListener, TcpSocket};
+    use tokio::{
+        net::{TcpListener, TcpSocket},
+        time::timeout,
+    };
 
     #[tokio::test]
     async fn stalled_primary_reserves_remaining_deadline_for_fallback_and_records_timeouts() {
@@ -205,6 +221,7 @@ mod timeout_tests {
                 &[],
                 &metrics,
                 Instant::now() + Duration::from_millis(200),
+                &mut crate::events::Connection::new("default", "127.0.0.1:0".parse().unwrap()),
             ),
         )
         .await
@@ -217,6 +234,7 @@ mod timeout_tests {
         // With no fallback, the final timed-out attempt is still recorded.
         config.fallbacks.clear();
         let health = Health::new(&config);
+        let mut event = crate::events::Connection::new("default", "127.0.0.1:0".parse().unwrap());
         assert!(
             connect(
                 &config,
@@ -224,12 +242,16 @@ mod timeout_tests {
                 "default",
                 &[],
                 &metrics,
-                Instant::now() + Duration::from_millis(20)
+                Instant::now() + Duration::from_millis(20),
+                &mut event,
             )
             .await
             .is_err()
         );
         assert_eq!(metrics.backend_failures.get(), 2);
+        assert_eq!(event.stage, "connect");
+        assert_eq!(event.failure, "connect_error");
+        assert_eq!(event.backend.as_deref(), Some("default"));
         assert!(!health.available("default"));
     }
 }

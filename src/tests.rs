@@ -6,6 +6,67 @@ use tokio::{
 };
 use tokio::{sync::watch, task::JoinSet};
 
+#[test]
+fn lua_timeout_and_overload_retain_distinct_connection_diagnostics() {
+    // Queue Lua work behind one occupied worker. Timed-out jobs retain their
+    // permits, so overload is deterministic without a race between clients.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+        .unwrap();
+    let (ready, started) = std::sync::mpsc::channel();
+    let (release, held) = std::sync::mpsc::channel();
+    let blocker = runtime.spawn_blocking(move || {
+        ready.send(()).unwrap();
+        held.recv_timeout(Duration::from_secs(5)).unwrap();
+    });
+    started.recv_timeout(Duration::from_secs(5)).unwrap();
+    runtime.block_on(async {
+        let config = Config::from_lua(
+            "return { listeners = { public = '127.0.0.1:0' },
+            backends = { target = '127.0.0.1:1' }, routes = { public = 'target' },
+            on_route = function() return nil end }",
+            "overload.lua",
+        )
+        .unwrap();
+        let snapshot = Arc::new(runtime::Snapshot::new(config, None).unwrap());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let metrics = Arc::new(metrics::Metrics::default());
+        for expected in [
+            "script_timeout",
+            "script_timeout",
+            "script_timeout",
+            "script_timeout",
+            "lua_overload",
+        ] {
+            let _client = TcpStream::connect(listener.local_addr().unwrap())
+                .await
+                .unwrap();
+            let (mut accepted, peer) = listener.accept().await.unwrap();
+            let mut event = events::Connection::new("public", peer);
+            assert!(
+                runtime::handle(
+                    &mut accepted,
+                    "public",
+                    snapshot.clone(),
+                    &[],
+                    metrics.clone(),
+                    &mut event
+                )
+                .await
+                .is_err()
+            );
+            assert_eq!(event.stage, "on_route");
+            assert_eq!(event.failure, expected);
+            assert!(event.backend.is_none());
+        }
+        assert_eq!(metrics.route_rejected.get(), 5);
+        release.send(()).unwrap();
+        blocker.await.unwrap();
+    });
+}
+
 // Exercise real sockets so EOF propagation and backpressure are covered.
 async fn connection() -> (TcpStream, TcpStream, JoinHandle<io::Result<(u64, u64)>>) {
     let backend = TcpListener::bind("127.0.0.1:0").await.unwrap();

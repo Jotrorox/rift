@@ -303,6 +303,53 @@ stays available during the drain. The default deadline is 30 seconds; set
 shutdown signal, remaining sessions close and the process exits. TCP half-close
 behavior is preserved throughout a normal drain.
 
+### Connection failure events
+
+Connection failures and rejections emit one JSON object per line to stderr,
+without requiring the metrics listener. Startup, reload and shutdown messages
+remain plain text. For example:
+
+```json
+{"event":"connection_failed","timestamp_unix_ms":1790598574204,"connection_id":42,"listener":"public","peer":"192.0.2.10:51234","backend":"survival","backend_address":"127.0.0.1:25566","stage":"connect","failure":"connect_error","duration_ms":1.234,"error_kind":"ConnectionRefused","message":"Connection refused (os error 111)"}
+```
+
+`connection_id` correlates events within one process. `duration_ms` is elapsed
+monotonic time since TCP accept, including hook execution and all fallback
+attempts; `timestamp_unix_ms` is the event's wall-clock time. `backend` is the
+configured name of the selected or most recently attempted backend, with its
+configured target in `backend_address`. Both are `null` before selection, such
+as when a handshake or hook fails. After fallback, subsequent failures identify
+the backup actually used.
+
+| Stage | Failure | Meaning |
+| --- | --- | --- |
+| `handshake` | `handshake_error` | Invalid, truncated or timed-out client handshake |
+| `route` | `no_route` | No configured hostname route matched |
+| `on_route` | `lua_overload` | All Lua worker slots are occupied |
+| `on_route` | `script_timeout` | The asynchronous hook deadline expired |
+| `on_route` | `script_error` | Lua execution/budget error or malformed decision |
+| `on_route` | `unknown_backend` | The hook returned an unconfigured backend name |
+| `dns` | `dns_error` | Backend resolution failed, returned no addresses or timed out |
+| `connect` | `connect_error` | TCP connection or loop protection failed, or connect timed out |
+| `connect` | `no_healthy_backend` | No primary or fallback was eligible |
+| `admission` | `rate_limited`, `capacity_exhausted` | Admission closed the connection |
+| `on_route` | `route_rejected` | The hook explicitly rejected the connection |
+
+Other I/O failures use `failure="io_error"` with `stage` set to `client_setup`,
+`backend_setup`, `handshake_write`, `relay`, `status_request`, `status_cache_wait`,
+`status_upstream` or `status_response`. `error_kind="TimedOut"` distinguishes I/O
+deadlines from other errors at the same stage. Lua diagnostics retain the script
+filename and hook context. Messages are capped at 2,048 characters and JSON
+escapes embedded newlines and control characters; handshake payloads are not logged.
+
+`backend_attempt_failed` records each failed backend attempt, including attempts
+recovered by a fallback. Only `connection_failed` means the session ended in an
+error. Policy/admission closures use `connection_rejected`; hook rejection
+reasons appear in `message`. These events preserve the existing error/rejection
+counters and do not log successful sessions or individual traffic packets.
+For example, filter a combined stderr log with
+`jq -R 'fromjson? | select(.event == "connection_failed")' rift.log`.
+
 ## Routing hook
 
 Add `on_route` to the returned configuration table. Rift calls it once after TCP
@@ -344,14 +391,14 @@ backends retain DNS resolution, connection deadlines and proxy-loop checks.
 Return `nil` to continue the configured direct or hostname routing policy,
 `{ backend = "name" }` to select a configured backend, or `{ reject = true, reason = "optional explanation" }` to close TCP.
 Rejection reasons must be UTF-8 strings of at most 1,024 bytes; they are available
-in the Rust result but are not sent to the client. Rift sends no Minecraft
+in the Rust result and structured rejection event but are not sent to the client. Rift sends no Minecraft
 disconnect packet. Unknown fields, conflicting choices, wrong types and unknown
 backend names are errors. Arbitrary backend addresses are not accepted.
 
 Startup syntax errors, invalid configuration, or a non-function `on_route` fail
 startup. During routing, script errors, invalid decisions, exceeded budgets and
 worker overload **fail closed**: only that connection closes, with an error on
-stderr. Lua errors include the script filename and hook context. There is no
+stderr as a [structured event](#connection-failure-events). Lua errors include the script filename and hook context. There is no
 automatic fallback after an error; a successful `nil` result explicitly selects
 the configured policy. Displayed script diagnostics are capped at 2,048 characters,
 and unknown backend names at 256 characters. Backend connection failures retain the

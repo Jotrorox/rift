@@ -1,4 +1,5 @@
 mod admission;
+mod events;
 mod handshake;
 mod health;
 mod metrics;
@@ -118,12 +119,14 @@ async fn handle(
     config.backends.insert("default".into(), backend.clone());
     config.limits = limits;
     let snapshot = runtime::Snapshot::new(config, None)?;
+    let mut event = events::Connection::new("default", client.peer_addr()?);
     runtime::handle(
         &mut client,
         "default",
         std::sync::Arc::new(snapshot),
         listeners,
         std::sync::Arc::new(metrics::Metrics::default()),
+        &mut event,
     )
     .await
 }

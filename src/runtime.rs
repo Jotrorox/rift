@@ -1,5 +1,6 @@
 use crate::{
     admission::Admission,
+    events::Connection,
     health::{self, Health},
     metrics::{Active, Metered, Metrics},
     status,
@@ -78,7 +79,9 @@ pub async fn handle(
     snapshot: Arc<Snapshot>,
     addresses: &[SocketAddr],
     metrics: Arc<Metrics>,
+    event: &mut Connection,
 ) -> io::Result<(u64, u64)> {
+    event.stage = "client_setup";
     client.set_nodelay(true)?;
     let connection = ConnectionInfo {
         listener: listener.to_owned(),
@@ -86,15 +89,21 @@ pub async fn handle(
         local_addr: client.local_addr()?,
         default_backend: snapshot.router.default_backend(listener).map(str::to_owned),
     };
+    event.stage = "on_route";
     let selected = match snapshot.router.route(connection).await {
         Ok(RouteDecision::Default) => None,
         Ok(RouteDecision::Backend(name)) => Some(name),
-        Ok(RouteDecision::Reject { .. }) => {
+        Ok(RouteDecision::Reject { reason }) => {
             metrics.route_rejected.inc();
+            event.reject(
+                "route_rejected",
+                reason.as_deref().unwrap_or("rejected by on_route"),
+            );
             return Ok((0, 0));
         }
         Err(error) => {
             metrics.route_rejected.inc();
+            event.route_error(&error);
             return Err(io::Error::other(format!("on_route: {error}")));
         }
     };
@@ -106,6 +115,8 @@ pub async fn handle(
         None => match &snapshot.policies[listener] {
             Policy::Direct(name) => name.clone(),
             Policy::Hostnames(routes) => {
+                event.stage = "handshake";
+                event.failure = "handshake_error";
                 let handshake = timeout(
                     HANDSHAKE_TIMEOUT,
                     crate::handshake::read_handshake(&mut client),
@@ -113,16 +124,23 @@ pub async fn handle(
                 .await??;
                 is_status = handshake.state == 1;
                 packet = handshake.packet;
+                event.stage = "route";
+                event.failure = "no_route";
                 routes.select(&handshake.host)?.clone()
             }
         },
     };
+    event.backend = Some(primary.clone());
+    event.backend_address = Some(snapshot.config.backends[&primary].address().to_owned());
+    event.failure = "io_error";
     if let Some(settings) = snapshot.config.status_cache.filter(|_| is_status) {
         // Cached status is a bounded protocol exchange. Login and transfer never
         // enter this path, and direct listeners remain byte-transparent.
+        event.stage = "status_request";
         timeout(HANDSHAKE_TIMEOUT, status::request(&mut client)).await??;
         let deadline = Deadline::now() + snapshot.config.limits.connect_timeout;
-        let response = timeout_at(deadline, async {
+        event.stage = "status_cache_wait";
+        let response = async {
             if let Some(response) = snapshot.cache.get(listener, &packet) {
                 metrics.cache_hits.inc();
                 return Ok::<_, io::Error>(response);
@@ -131,7 +149,7 @@ pub async fn handle(
                 .cache
                 .fill_lock(listener, &packet, settings.max_entries)
             {
-                Some(lock) => Some(lock.lock_owned().await),
+                Some(lock) => Some(timeout_at(deadline, lock.lock_owned()).await?),
                 None => None,
             };
             if let Some(response) = snapshot.cache.get(listener, &packet) {
@@ -146,19 +164,28 @@ pub async fn handle(
                 addresses,
                 &metrics,
                 deadline,
+                event,
             )
             .await?;
+            event.stage = "backend_setup";
+            event.failure = "io_error";
             upstream.set_nodelay(true)?;
-            upstream.write_all(&packet).await?;
-            upstream.write_all(&[1, 0]).await?;
-            let response = status::frame(&mut upstream, settings.max_response_bytes).await?;
+            let response = timeout_at(deadline, async {
+                event.stage = "handshake_write";
+                upstream.write_all(&packet).await?;
+                event.stage = "status_upstream";
+                upstream.write_all(&[1, 0]).await?;
+                status::frame(&mut upstream, settings.max_response_bytes).await
+            })
+            .await??;
             status::validate_response(&response)?;
             snapshot
                 .cache
                 .insert(listener, &packet, response.clone(), settings);
             Ok(Arc::new(response))
-        })
-        .await??;
+        }
+        .await?;
+        event.stage = "status_response";
         timeout(HANDSHAKE_TIMEOUT, status::respond(&mut client, &response)).await??;
     } else {
         let deadline = Deadline::now() + snapshot.config.limits.connect_timeout;
@@ -169,15 +196,20 @@ pub async fn handle(
             addresses,
             &metrics,
             deadline,
+            event,
         )
         .await?;
+        event.stage = "backend_setup";
+        event.failure = "io_error";
         upstream.set_nodelay(true)?;
         // Once any client bytes are sent, errors close this session. Never
         // replay a partially forwarded handshake or migrate an active relay.
+        event.stage = "handshake_write";
         timeout_at(deadline, upstream.write_all(&packet)).await??;
         let buffer_size = snapshot.config.limits.buffer_size;
         // Active relays retain sockets and buffers, not old caches or scripts.
         drop(snapshot);
+        event.stage = "relay";
         copy_bidirectional_with_sizes(&mut client, &mut upstream, buffer_size, buffer_size).await?;
     }
     Ok((client.sent, client.received))
@@ -209,14 +241,17 @@ pub(crate) async fn accept(
                         continue;
                     }
                 };
+                let mut event = Connection::new(&name, peer);
                 metrics.accepted.inc();
                 let snapshot = current.borrow().clone();
                 if !admission.lock().unwrap().allow(peer.ip(), snapshot.config.rate_limit, Instant::now()) {
                     metrics.rate_rejected.inc();
+                    event.reject("rate_limited", "connection rate limit exceeded");
                     continue;
                 }
                 let Some(active) = Active::new(metrics.clone(), snapshot.config.limits.max_connections) else {
                     metrics.capacity_rejected.inc();
+                    event.reject("capacity_exhausted", "connection capacity exhausted");
                     continue;
                 };
                 let name = name.clone();
@@ -224,14 +259,14 @@ pub(crate) async fn accept(
                 let metrics = metrics.clone();
                 sessions.spawn(async move {
                     let mut client = client;
-                    let result = handle(&mut client, &name, snapshot, &addresses, metrics.clone()).await;
+                    let result = handle(&mut client, &name, snapshot, &addresses, metrics.clone(), &mut event).await;
                     // Make capacity available before the peer can observe EOF and
                     // reconnect. The handler borrows the socket until it returns.
                     drop(active);
                     drop(client);
                     if let Err(error) = result {
                         metrics.errors.inc();
-                        eprintln!("rift: {peer}: {error}");
+                        event.failed(&error);
                     }
                 });
             }

@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "diagnostics.rs"]
+mod diagnostics;
+
 fn options(source: &str, extra: &str) -> String {
     source.replacen("return {", &format!("return {{ {extra},"), 1)
 }
