@@ -238,3 +238,83 @@ fn hostname_tables_accept_dns_backends_and_reject_invalid_routes() {
         assert!(error.contains(expected), "{error}");
     }
 }
+
+#[test]
+fn operational_options_are_validated_with_context() {
+    let source = "return {
+        listeners = { public = '127.0.0.1:0' },
+        backends = { a = '127.0.0.1:1234', b = 'localhost:1235' },
+        routes = { public = 'a' },
+        fallbacks = { a = { 'b' } },
+        rate_limit = {}, health_check = {}, status_cache = {},
+        metrics = '127.0.0.1:9090', shutdown_timeout_ms = 1000,
+    }";
+    let config = Config::from_lua(source, "ops.lua").unwrap();
+    assert_eq!(config.fallbacks["a"], ["b"]);
+    assert_eq!(config.rate_limit.unwrap().per_ip_burst, 40);
+    assert_eq!(config.health_check.unwrap().unhealthy_threshold, 2);
+    assert_eq!(config.status_cache.unwrap().max_entries, 1024);
+    assert_eq!(config.shutdown_timeout, Duration::from_secs(1));
+    for (from, to, expected) in [
+        ("{ 'b' }", "{}", "fallbacks.a"),
+        ("{ 'b' }", "{ 'b', 'b' }", "fallbacks.a"),
+        ("{ 'b' }", "{ 'a' }", "fallbacks.a"),
+        ("{ 'b' }", "{ 'missing' }", "fallbacks.a"),
+        ("{ 'b' }", "{ [2] = 'b' }", "dense array"),
+        ("{ 'b' }", "{ name = 'b' }", "dense array"),
+        (
+            "fallbacks = { a",
+            "fallbacks = { missing",
+            "unknown backend",
+        ),
+        (
+            "rate_limit = {}",
+            "rate_limit = { per_ip_burst = 0 }",
+            "rate_limit.per_ip_burst",
+        ),
+        (
+            "health_check = {}",
+            "health_check = { timeout_ms = -1 }",
+            "health_check.timeout_ms",
+        ),
+        (
+            "status_cache = {}",
+            "status_cache = { max_entries = 1.5 }",
+            "status_cache.max_entries",
+        ),
+        (
+            "status_cache = {}",
+            "status_cache = { ttl_ms = '10' }",
+            "status_cache.ttl_ms",
+        ),
+        (
+            "health_check = {}",
+            "health_check = { unknown = 1 }",
+            "unknown field",
+        ),
+        (
+            "shutdown_timeout_ms = 1000",
+            "shutdown_timeout_ms = 0",
+            "shutdown_timeout_ms",
+        ),
+        ("metrics = '127.0.0.1:9090'", "metrics = true", "metrics"),
+        (
+            "metrics = '127.0.0.1:9090'",
+            "metrics = 'localhost:9090'",
+            "metrics",
+        ),
+        (
+            "metrics = '127.0.0.1:9090'",
+            "metrics = '127.0.0.1:1234'",
+            "same socket",
+        ),
+    ] {
+        let error = Config::from_lua(&source.replace(from, to), "ops.lua")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("ops.lua") && error.contains(expected),
+            "{error}"
+        );
+    }
+}

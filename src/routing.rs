@@ -90,11 +90,11 @@ fn check_loop(listen: SocketAddr, backend: SocketAddr) -> io::Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Default)]
-pub struct Routes {
-    exact: HashMap<String, Backend>,
-    wildcard: Vec<(String, Backend)>,
-    default: Option<Backend>,
+#[derive(Debug)]
+pub struct Routes<T = Backend> {
+    exact: HashMap<String, T>,
+    wildcard: Vec<(String, T)>,
+    default: Option<T>,
 }
 
 impl Routes {
@@ -105,8 +105,20 @@ impl Routes {
         let backend = Backend::parse(target)?;
         self.add_pattern(pattern, backend)
     }
+}
 
-    pub fn add_pattern(&mut self, pattern: &str, backend: Backend) -> io::Result<()> {
+impl<T> Default for Routes<T> {
+    fn default() -> Self {
+        Self {
+            exact: HashMap::new(),
+            wildcard: Vec::new(),
+            default: None,
+        }
+    }
+}
+
+impl<T> Routes<T> {
+    pub fn add_pattern(&mut self, pattern: &str, backend: T) -> io::Result<()> {
         if pattern == "*" {
             return self.set_default(backend);
         }
@@ -132,7 +144,7 @@ impl Routes {
         Ok(())
     }
 
-    pub fn set_default(&mut self, backend: Backend) -> io::Result<()> {
+    pub fn set_default(&mut self, backend: T) -> io::Result<()> {
         if self.default.is_some() {
             return Err(invalid("duplicate default route"));
         }
@@ -140,7 +152,7 @@ impl Routes {
         Ok(())
     }
 
-    pub fn select(&self, host: &str) -> io::Result<&Backend> {
+    pub fn select(&self, host: &str) -> io::Result<&T> {
         self.exact
             .get(host)
             .or_else(|| {
@@ -153,7 +165,9 @@ impl Routes {
                 io::Error::new(io::ErrorKind::NotFound, "no route for handshake hostname")
             })
     }
+}
 
+impl Routes {
     pub fn check_loops(&self, listen: SocketAddr) -> io::Result<()> {
         for backend in self
             .exact
@@ -199,7 +213,11 @@ mod tests {
                 assert_eq!(routes.select(host).unwrap().0, expected);
             }
         }
-        assert!(Routes::default().select("unmatched.test").is_err());
+        assert!(
+            Routes::<Backend>::default()
+                .select("unmatched.test")
+                .is_err()
+        );
     }
 
     #[test]
