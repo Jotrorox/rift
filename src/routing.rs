@@ -151,8 +151,8 @@ async fn connect_addresses(
 fn check_loop(listen: SocketAddr, backend: SocketAddr) -> io::Result<()> {
     if listen.port() != 0
         && listen.port() == backend.port()
-        && (listen.ip() == backend.ip()
-            || (listen.ip().is_unspecified() && backend.ip().is_loopback()))
+        && (listen.ip().to_canonical() == backend.ip().to_canonical()
+            || (listen.ip().is_unspecified() && backend.ip().to_canonical().is_loopback()))
     {
         return Err(invalid(
             "listen and backend must not point to the same socket",
@@ -255,6 +255,17 @@ impl Routes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mapped_loopback_cannot_route_back_into_a_local_service() {
+        for (listen, backend) in [
+            ("127.0.0.1:8080", "[::ffff:127.0.0.1]:8080"),
+            ("[::ffff:127.0.0.1]:8080", "127.0.0.1:8080"),
+            ("[::]:8080", "[::ffff:127.0.0.1]:8080"),
+        ] {
+            assert!(check_loop(listen.parse().unwrap(), backend.parse().unwrap()).is_err());
+        }
+    }
 
     #[test]
     fn dns_timeout_retains_the_resolution_stage() {
