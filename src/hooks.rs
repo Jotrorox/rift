@@ -70,6 +70,13 @@ pub struct Router {
 }
 
 impl Router {
+    /// Preserve the process-wide script job limit across configuration generations.
+    pub fn reconfigured(&self, config: &Config) -> Self {
+        let mut router = Self::new(config);
+        router.slots = self.slots.clone();
+        router
+    }
+
     pub fn new(config: &Config) -> Self {
         Self {
             script: config.on_route.clone(),
