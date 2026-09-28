@@ -346,3 +346,40 @@ fn malformed_compression_streams_fail_without_panics_or_unbounded_output() {
         }
     }
 }
+
+#[test]
+fn network_commands_preserve_redirects_and_override_signed_backend_literals() {
+    // root -> backend "server" -> signable minecraft:message, and root -> "help".
+    let mut data = vec![4, 0, 2, 1, 3, 5, 1, 2];
+    write_string("server", &mut data);
+    data.extend([6, 0]);
+    write_string("message", &mut data);
+    data.push(20);
+    data.extend([13, 0, 1]);
+    write_string("help", &mut data); // executable literal, redirects to server
+    data.push(0);
+    let expanded = super::packets::network_commands(&Packet::new(0x10, data.clone())).unwrap();
+    let mut bytes = expanded.data.as_slice();
+    assert_eq!(read_varint(&mut bytes).unwrap(), 7);
+    assert_eq!(&bytes[..5], &[0, 3, 3, 4, 6]); // help preserved; proxy server and hub appended
+    // Backend nodes and redirect index were copied unchanged.
+    assert_eq!(&bytes[5..5 + data.len() - 6], &data[5..data.len() - 1]);
+    assert!(expanded.data.windows(6).any(|b| b == b"server"));
+    assert!(expanded.data.windows(3).any(|b| b == b"hub"));
+    assert_eq!(*expanded.data.last().unwrap(), 0);
+}
+
+#[test]
+fn signed_proxy_command_without_signatures_preserves_acknowledgement_offset() {
+    let mut data = Vec::new();
+    write_string("hub", &mut data);
+    data.extend([0; 16]);
+    data.push(0);
+    write_varint(7, &mut data);
+    data.extend([0; 4]);
+    let (command, acknowledgement) = super::packets::proxy_command(&Packet::new(7, data))
+        .unwrap()
+        .unwrap();
+    assert_eq!(command, "hub");
+    assert_eq!(acknowledgement, Some(Packet::new(5, vec![7])));
+}

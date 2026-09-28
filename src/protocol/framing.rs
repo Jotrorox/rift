@@ -141,6 +141,10 @@ impl Reader {
         }
     }
 
+    pub(crate) fn has_partial_frame(&self) -> bool {
+        !self.prefix.is_empty()
+    }
+
     pub fn set_read_chunk_size(&mut self, size: usize) {
         self.read_chunk_size = size.clamp(1, MAX_FRAME_SIZE);
     }

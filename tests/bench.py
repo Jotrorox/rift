@@ -8,11 +8,11 @@ other platforms still run the traffic benchmark and report null resource values.
 import argparse
 import asyncio
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
 import http.client
+import io
 import json
 import math
 import os
@@ -27,6 +27,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 
 from minecraft import ROOT, process, string, varint, read_varint, wait_ready
 from prometheus import parse_metrics
@@ -55,8 +56,43 @@ def packet(body):
     return varint(len(body)) + body
 
 
-LOGIN_START = packet(b"\0" + string("Benchmark"))
-LOGIN_SUCCESS = packet(b"\x02" + string("00000000-0000-0000-0000-000000000001") + string("Benchmark"))
+_identity_lock = threading.Lock()
+_next_identity = 0
+
+
+def new_player_name():
+    """Unique across threaded transfers, burst waves, warmups and scenarios."""
+    global _next_identity
+    with _identity_lock:
+        _next_identity += 1
+        identity = _next_identity
+    if identity >= 1 << 32:
+        raise OverflowError("benchmark player names exhausted")
+    # Nine characters, just like Benchmark: packet lengths stay comparable.
+    return f"B{identity:08x}"
+
+
+def login_start(name):
+    return packet(b"\0" + string(name))
+
+
+def login_name(body):
+    reader = io.BytesIO(body)
+    if read_varint(reader) != 0:
+        raise ValueError("invalid login start")
+    length = read_varint(reader)
+    if not 1 <= length <= 16:
+        raise ValueError("invalid login name length")
+    name = reader.read(length)
+    if len(name) != length or not re.fullmatch(rb"[A-Za-z0-9_]+", name) or reader.read(1):
+        raise ValueError("invalid login name")
+    return name.decode("ascii")
+
+
+def login_success(name):
+    digest = hashlib.md5(f"OfflinePlayer:{name}".encode(), usedforsecurity=False).digest()
+    identity = uuid.UUID(bytes=digest, version=3)
+    return packet(b"\x02" + string(str(identity)) + string(name))
 
 
 def socket_frame(reader):
@@ -76,9 +112,10 @@ class GameSocket:
         self.reader = sock.makefile("rb")
         self.pending = bytearray()
         self.closed = False
+        self.name = new_player_name()
         try:
-            sock.sendall(handshake(port) + LOGIN_START)
-            if packet(socket_frame(self.reader)) != LOGIN_SUCCESS:
+            sock.sendall(handshake(port) + login_start(self.name))
+            if packet(socket_frame(self.reader)) != login_success(self.name):
                 raise ValueError("unexpected login response")
         except (EOFError, ConnectionResetError, BrokenPipeError):
             self.closed = True
@@ -131,9 +168,16 @@ async def read_frame(reader):
     raise ValueError("invalid VarInt")
 
 
-async def fixture_client(reader, writer, status=False):
+async def fixture_client(reader, writer, status=False, uppercase=False):
     """A separate process serves every client asynchronously, without a worker cap."""
     stage, received, sent = "login", 0, 0
+    name = None
+    failed = False
+
+    def diagnostic(reason, error):
+        print(f"fixture {reason}: player={name}, stage={stage}, received={received}, sent={sent}, "
+              f"write_buffer={writer.transport.get_write_buffer_size()}, error={error}", flush=True)
+
     try:
         if status:
             async with asyncio.timeout(10):
@@ -149,11 +193,11 @@ async def fixture_client(reader, writer, status=False):
                 writer.write(varint(len(ping)) + ping)
                 await writer.drain()
         else:
-            await read_frame(reader)  # Handshake.
-            if packet(await read_frame(reader)) != LOGIN_START:
-                raise ValueError("invalid login start")
-            writer.write(LOGIN_SUCCESS)
-            await writer.drain()
+            async with asyncio.timeout(15):
+                await read_frame(reader)  # Handshake.
+                name = login_name(await read_frame(reader))
+                writer.write(login_success(name))
+                await writer.drain()
             while True:
                 stage = "read"
                 async with asyncio.timeout(15):
@@ -161,24 +205,38 @@ async def fixture_client(reader, writer, status=False):
                 received += len(data)
                 stage = "write"
                 async with asyncio.timeout(15):
+                    if uppercase:
+                        data = data[:1] + data[1:].upper()
                     writer.write(packet(data))
                     await writer.drain()
                 sent += len(data)
-    except TimeoutError:
-        print(f"fixture timeout: stage={stage}, received={received}, sent={sent}, "
-              f"write_buffer={writer.transport.get_write_buffer_size()}", flush=True)
-    except (OSError, EOFError, ValueError, asyncio.IncompleteReadError):
-        pass
+    except TimeoutError as error:
+        failed = True
+        diagnostic("timeout", error)
+    except asyncio.IncompleteReadError as error:
+        # EOF while waiting for the next frame is the normal close/health probe.
+        if error.partial or error.expected != 1:
+            failed = True
+            diagnostic("truncated frame", error)
+    except (OSError, EOFError, ValueError) as error:
+        failed = True
+        diagnostic("failure", error)
     finally:
-        writer.close()
+        if failed:
+            writer.transport.abort()
+        else:
+            writer.close()
         try:
             await writer.wait_closed()
         except OSError:
             pass
 
 
-async def fixture_main():
-    echo = await asyncio.start_server(fixture_client, "127.0.0.1", 0, backlog=4096)
+async def fixture_main(uppercase=False):
+    echo = await asyncio.start_server(
+        lambda reader, writer: fixture_client(reader, writer, uppercase=uppercase),
+        "127.0.0.1", 0, backlog=4096,
+    )
     status = await asyncio.start_server(
         lambda reader, writer: fixture_client(reader, writer, status=True),
         "127.0.0.1", 0, backlog=4096,
@@ -217,36 +275,78 @@ def latency(port):
     return statistics.median(samples), percentile(samples, 0.95)
 
 
-def transfer(port, size):
-    with connect(port) as sock:
-        sent = 0
-        def send():
-            nonlocal sent
-            for _ in range(size // len(BLOCK)):
-                sock.sendall(BLOCK)
-                sent += len(BLOCK)
-            sock.shutdown(socket.SHUT_WR)
+async def transfer_async(port, size):
+    """One event loop owns both directions; failure cancels its blocked peer task."""
+    name = new_player_name()
+    sent = received = 0
+    reader, writer = await asyncio.wait_for(asyncio.open_connection("127.0.0.1", port), 30)
+    writer.get_extra_info("socket").setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    completed = False
 
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            sender = pool.submit(send)
-            received = 0
-            try:
-                while data := sock.recv(65536):
-                    received += len(data)
-            except (OSError, ValueError) as error:
-                if sender.done():
-                    sender.result()
-                raise RuntimeError(
-                    f"transfer failed: sent={sent}/{size}, received={received}/{size}, "
-                    f"sender_done={sender.done()}") from error
-            sender.result()
-        assert received == size, (received, size)
+    async def send():
+        nonlocal sent
+        for offset in range(0, size, len(BLOCK)):
+            data = BLOCK[:min(len(BLOCK), size - offset)]
+            writer.write(packet(b"\x7f" + data))
+            await asyncio.wait_for(writer.drain(), 30)
+            sent += len(data)
+        writer.write_eof()
+        await asyncio.wait_for(writer.drain(), 30)
+
+    async def receive():
+        nonlocal received
+        while received < size:
+            body = await asyncio.wait_for(read_frame(reader), 30)
+            data = body[1:]
+            if body[0] != 0x7f or not data or data != BLOCK[:len(data)]:
+                raise ValueError("invalid throughput echo")
+            received += len(data)
+            if received > size:
+                raise ValueError("extra throughput payload")
+        # A complete transfer includes the backend's close after our write EOF;
+        # neither trailing frames nor a truncated final frame count as success.
+        if await asyncio.wait_for(reader.read(1), 30):
+            raise ValueError("trailing throughput data")
+
+    try:
+        writer.write(handshake(port) + login_start(name))
+        await asyncio.wait_for(writer.drain(), 30)
+        if packet(await asyncio.wait_for(read_frame(reader), 30)) != login_success(name):
+            raise ValueError("unexpected login response")
+        async with asyncio.TaskGroup() as tasks:
+            tasks.create_task(send())
+            tasks.create_task(receive())
+        completed = True
+        return received
+    except Exception as error:
+        raise RuntimeError(
+            f"transfer failed: player={name}, sent={sent}/{size}, received={received}/{size}"
+        ) from error
+    finally:
+        if completed:
+            writer.close()
+        else:
+            # Do not wait for unsent output after a failed reader/writer. The
+            # TaskGroup has already cancelled and awaited the other direction.
+            writer.transport.abort()
+        try:
+            await writer.wait_closed()
+        except OSError:
+            pass
+
+
+def transfer(port, size):
+    return asyncio.run(transfer_async(port, size))
 
 
 def throughput(port, clients, size):
+    async def transfers():
+        async with asyncio.TaskGroup() as tasks:
+            for _ in range(clients):
+                tasks.create_task(transfer_async(port, size))
+
     start = time.perf_counter()
-    with ThreadPoolExecutor(max_workers=clients) as pool:
-        list(pool.map(lambda _: transfer(port, size), range(clients)))
+    asyncio.run(transfers())
     return clients * size / MIB / (time.perf_counter() - start)
 
 
@@ -262,6 +362,8 @@ async def receive_exact(sock, size):
 
 
 async def setup_attempt(port, scenario, timeout, index, gate):
+    cached = scenario == "status_cached"
+    name = None if cached else new_player_name()
     await gate.wait()
     started = time.perf_counter()
     setup_ms = None
@@ -273,10 +375,9 @@ async def setup_attempt(port, scenario, timeout, index, gate):
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 loop = asyncio.get_running_loop()
                 await loop.sock_connect(sock, ("127.0.0.1", port))
-                cached = scenario == "status_cached"
-                payload = handshake(port, 1) + b"\x01\0" if cached else handshake(port) + LOGIN_START
+                payload = handshake(port, 1) + b"\x01\0" if cached else handshake(port) + login_start(name)
                 await loop.sock_sendall(sock, payload)
-                expected = STATUS_REPLY if cached else LOGIN_SUCCESS
+                expected = STATUS_REPLY if cached else login_success(name)
                 if await receive_exact(sock, len(expected)) != expected:
                     raise ValueError("response mismatch")
                 if not cached:
@@ -528,6 +629,7 @@ def main():
     parser.add_argument("--skip-throughput", action="store_true", help="only measure connection bursts")
     parser.add_argument("--binary", type=Path, help="use an existing Rift binary instead of building")
     parser.add_argument("--fixture", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--uppercase", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if not __debug__:
         parser.error("do not use python -O: transfer assertions must be enabled")
@@ -538,7 +640,7 @@ def main():
     if args.attempts < max(args.burst_sizes):
         parser.error("--attempts must cover the largest burst")
     if args.fixture:
-        asyncio.run(fixture_main())
+        asyncio.run(fixture_main(uppercase=args.uppercase))
         return
     binary = args.binary.resolve() if args.binary else ROOT / "target/release/rift"
     if not args.binary:
@@ -558,6 +660,7 @@ def main():
                      "cpu_clock_ticks_per_s": os.sysconf("SC_CLK_TCK") if sys.platform == "linux" else None},
         "method": {
             "setup": "TCP connect through verified login+play-packet echo, or complete cached status response",
+            "throughput": "one asyncio event loop owns every connection with concurrent send/receive tasks; verifies payload and EOF; replaces threaded buffered socket driver",
             "status_success": "also requires a correct per-client ping/pong after the status response",
             "percentiles": "nearest rank over successful attempts only; no retries",
             "bursts": "gate-released asyncio clients; wait for the entire wave before releasing the next",

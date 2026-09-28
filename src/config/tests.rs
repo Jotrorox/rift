@@ -469,6 +469,159 @@ fn programmatic_web_options_cannot_bypass_token_validation() {
     config.validate().unwrap();
 }
 
+const NETWORK: &str = "return {
+    listeners = { public = '127.0.0.1:0' },
+    backends = { lobby = '127.0.0.1:25566', survival = '127.0.0.1:25567' },
+    routes = { public = 'lobby' },
+    network = {
+        initial = { 'lobby', 'survival' }, hubs = { 'lobby' },
+        access = { survival = { allow = { 'Alice', 'Bob' }, deny = { 'Bob' } } },
+    },
+}";
+
+#[test]
+fn network_order_and_explicit_access_rules_are_preserved() {
+    let config = Config::from_lua(NETWORK, "network.lua").unwrap();
+    assert_eq!(config.network.initial, ["lobby", "survival"]);
+    assert_eq!(config.network.hubs, ["lobby"]);
+    assert!(config.can_access("lobby", "Eve"));
+    assert!(config.can_access("survival", "aLiCe"));
+    assert!(!config.can_access("survival", "BOB"));
+    assert!(!config.can_access("survival", "Eve"));
+    assert!(!config.can_access("unknown", "Alice"));
+    let deny_only = NETWORK.replace("allow = { 'Alice', 'Bob' }, ", "");
+    let config = Config::from_lua(&deny_only, "network.lua").unwrap();
+    assert!(config.can_access("survival", "Eve"));
+    assert!(!config.can_access("survival", "Bob"));
+    let closed = NETWORK.replace("allow = { 'Alice', 'Bob' }", "allow = {}");
+    let config = Config::from_lua(&closed, "network.lua").unwrap();
+    assert!(!config.can_access("survival", "Alice"));
+    assert!(!config.can_access("survival", "Eve"));
+}
+
+#[test]
+fn omitted_network_fields_keep_ordinary_routes_public() {
+    let config = Config::from_lua(VALID, "network.lua").unwrap();
+    assert_eq!(config.network, Network::default());
+    assert!(config.can_access("lobby", "Alice"));
+    for body in ["{}", "{ initial = {}, hubs = {}, access = {} }"] {
+        let source = VALID.replacen("return {", &format!("return {{ network = {body},"), 1);
+        assert_eq!(
+            Config::from_lua(&source, "network.lua").unwrap().network,
+            Network::default()
+        );
+    }
+}
+
+#[test]
+fn network_rejects_ambiguous_or_unknown_destinations_and_permissions() {
+    for (from, to, expected) in [
+        (
+            "network = {",
+            "network = { unknown = {},",
+            "network.unknown",
+        ),
+        ("'lobby', 'survival'", "'lobby', 'lobby'", "network.initial"),
+        ("'lobby', 'survival'", "'missing'", "network.initial"),
+        ("'lobby', 'survival'", "[2] = 'lobby'", "dense array"),
+        ("hubs = { 'lobby' }", "hubs = { 'missing' }", "network.hubs"),
+        (
+            "hubs = { 'lobby' }",
+            "hubs = { 'lobby', 'lobby' }",
+            "network.hubs",
+        ),
+        (
+            "hubs = { 'lobby' }",
+            "hubs = { name = 'lobby' }",
+            "dense array",
+        ),
+        (
+            "access = { survival",
+            "access = { missing",
+            "network.access.missing",
+        ),
+        (
+            "allow = { 'Alice', 'Bob' }",
+            "allow = { 'Alice', 'ALICE' }",
+            "duplicate player",
+        ),
+        (
+            "allow = { 'Alice', 'Bob' }",
+            "allow = { '*' }",
+            "invalid or duplicate player",
+        ),
+        (
+            "allow = { 'Alice', 'Bob' }",
+            "allow = { 'Alice Bob' }",
+            "invalid or duplicate player",
+        ),
+        (
+            "allow = { 'Alice', 'Bob' }",
+            "allow = { '550e8400-e29b-41d4-a716-446655440000' }",
+            "invalid or duplicate player",
+        ),
+        (
+            "deny = { 'Bob' }",
+            "deny = { 'Bob', 'BOB' }",
+            "duplicate player",
+        ),
+        (
+            "deny = { 'Bob' }",
+            "deny = { 'too_long_username' }",
+            "invalid or duplicate player",
+        ),
+        ("deny = { 'Bob' }", "deny = { true }", "expected a string"),
+        ("deny = { 'Bob' }", "deny = false", "expected a table"),
+        ("deny = { 'Bob' }", "denied = { 'Bob' }", "unknown field"),
+    ] {
+        let error = Config::from_lua(&NETWORK.replace(from, to), "network.lua")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("network.lua") && error.contains(expected),
+            "{error}"
+        );
+    }
+    let too_many = (0..17)
+        .map(|index| format!("'lobby{index}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let error = Config::from_lua(
+        &NETWORK.replace("'lobby', 'survival'", &too_many),
+        "network.lua",
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("at most 16"));
+}
+
+#[test]
+fn programmatic_network_changes_receive_the_same_validation() {
+    let mut config = Config::from_lua(NETWORK, "network.lua").unwrap();
+    config.network.initial.push("lobby".into());
+    assert!(
+        config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("network.initial")
+    );
+    config.network.initial.pop();
+    config
+        .network
+        .access
+        .get_mut("survival")
+        .unwrap()
+        .deny
+        .push("*".into());
+    assert!(
+        config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("network.access.survival.deny")
+    );
+}
+
 fn with_admin_options(options: &str) -> String {
     format!(
         "return {{
@@ -705,4 +858,29 @@ fn local_administration_and_http_services_keep_independent_options_and_safe_sock
             "{error}"
         );
     }
+}
+
+#[test]
+fn network_and_administrative_controls_keep_independent_access_policies() {
+    let source = NETWORK.replacen(
+        "return {",
+        "return {
+            admin = { listen = '127.0.0.1:0', permissions = { 'status', 'transfer' } },
+            maintenance = true, draining = { 'survival' },
+            rate_limit = { per_ip_burst = 40 },
+            login_rate_limit = { per_ip_burst = 3 },",
+        1,
+    );
+    let config = Config::from_lua(&source, "combined-network.lua").unwrap();
+    assert_eq!(config.network.initial, ["lobby", "survival"]);
+    assert_eq!(config.network.hubs, ["lobby"]);
+    assert!(config.can_access("survival", "Alice"));
+    assert!(!config.can_access("survival", "Bob"));
+    assert!(config.maintenance && config.draining.contains("survival"));
+    assert_eq!(config.rate_limit.unwrap().per_ip_burst, 40);
+    assert_eq!(config.login_rate_limit.unwrap().per_ip_burst, 3);
+    assert_eq!(
+        config.admin.unwrap().permissions,
+        BTreeSet::from(["status".into(), "transfer".into()])
+    );
 }

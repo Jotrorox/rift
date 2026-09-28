@@ -175,6 +175,7 @@ impl ProtocolVersion {
             (State::Login, Clientbound, 5) if self.has_transfer() => CookieRequest,
             (State::Configuration, Clientbound, id) if id == self.config_disconnect() => Disconnect,
             (State::Configuration, _, id) if id == self.config_finish() => FinishConfiguration,
+            (State::Play, Clientbound, 0x30) if self.0 == 774 => JoinGame,
             (State::Play, Clientbound, id) if id == self.play_disconnect() => Disconnect,
             (State::Play, Clientbound, id) if Some(id) == self.start_configuration() => {
                 StartConfiguration
@@ -198,6 +199,7 @@ pub enum PacketKind {
     EncryptionRequest,
     EncryptionResponse,
     LoginSuccess,
+    JoinGame,
     SetCompression,
     LoginAcknowledged,
     LoginPluginRequest,
@@ -319,4 +321,307 @@ pub(crate) fn login_identity(version: ProtocolVersion, packet: &Packet) -> io::R
         return Err(invalid("trailing login success data"));
     }
     Ok(identity)
+}
+
+/// Identity used for registry bookkeeping. A Login Start UUID is only a client
+/// claim in offline mode; access grants must not trust it as authentication.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlayerIdentity {
+    pub name: String,
+    pub uuid: Option<[u8; 16]>,
+}
+
+pub(crate) fn start_identity(
+    version: ProtocolVersion,
+    packet: &Packet,
+) -> io::Result<PlayerIdentity> {
+    let mut bytes = packet.data.as_slice();
+    let name = read_string(&mut bytes, 16)?.to_owned();
+    let uuid = if version.number() >= 764 || (version.number() >= 761 && boolean(&mut bytes)?) {
+        Some(take(&mut bytes, 16)?.try_into().unwrap())
+    } else {
+        None
+    };
+    if name.is_empty() || !bytes.is_empty() {
+        return Err(invalid("invalid login identity"));
+    }
+    Ok(PlayerIdentity { name, uuid })
+}
+
+pub(crate) fn success_identity(
+    version: ProtocolVersion,
+    packet: &Packet,
+) -> io::Result<PlayerIdentity> {
+    login_identity(version, packet)?;
+    let mut bytes = packet.data.as_slice();
+    let uuid = if version.number() == 47 {
+        let value = read_string(&mut bytes, 36)?.replace('-', "");
+        if value.len() != 32 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(invalid("invalid login UUID"));
+        }
+        let mut uuid = [0; 16];
+        for (i, byte) in uuid.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&value[2 * i..2 * i + 2], 16)
+                .map_err(|_| invalid("invalid login UUID"))?;
+        }
+        Some(uuid)
+    } else {
+        Some(take(&mut bytes, 16)?.try_into().unwrap())
+    };
+    Ok(PlayerIdentity {
+        name: read_string(&mut bytes, 16)?.to_owned(),
+        uuid,
+    })
+}
+
+fn take<'a>(bytes: &mut &'a [u8], size: usize) -> io::Result<&'a [u8]> {
+    let result = bytes.get(..size).ok_or_else(|| invalid("short packet"))?;
+    *bytes = &bytes[size..];
+    Ok(result)
+}
+fn boolean(bytes: &mut &[u8]) -> io::Result<bool> {
+    match take(bytes, 1)?[0] {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(invalid("invalid boolean")),
+    }
+}
+
+/// The network contract is deliberately pinned to 1.21.11 (774). See the
+/// Minecraft-data 1.21.11 layout and Mojang ClientPacketListener.handleLogin:
+/// a fresh Join Game after reconfiguration resets world and secure-chat state.
+pub(crate) fn validate_network_join(packet: &Packet) -> io::Result<()> {
+    let mut bytes = packet.data.as_slice();
+    take(&mut bytes, 4)?; // entity id
+    boolean(&mut bytes)?;
+    let worlds = read_varint(&mut bytes)?;
+    if worlds < 0 || worlds as usize > bytes.len() {
+        return Err(invalid("invalid world count"));
+    }
+    for _ in 0..worlds {
+        read_string(&mut bytes, 32767)?;
+    }
+    for _ in 0..3 {
+        read_varint(&mut bytes)?;
+    } // max players, view/simulation distance
+    for _ in 0..3 {
+        boolean(&mut bytes)?;
+    }
+    read_varint(&mut bytes)?; // dimension registry id
+    read_string(&mut bytes, 32767)?; // world name
+    take(&mut bytes, 10)?; // seed and game modes
+    boolean(&mut bytes)?; // debug
+    boolean(&mut bytes)?; // flat
+    if boolean(&mut bytes)? {
+        read_string(&mut bytes, 32767)?;
+        take(&mut bytes, 8)?;
+    }
+    read_varint(&mut bytes)?; // portal cooldown
+    read_varint(&mut bytes)?; // sea level
+    let secure = boolean(&mut bytes)?;
+    if !bytes.is_empty() {
+        return Err(invalid("trailing Join Game data"));
+    }
+    if secure {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Rift network backends must use enforce-secure-profile=false.",
+        ));
+    }
+    Ok(())
+}
+
+/// Consume only proxy commands whose signature chain cannot be damaged. Signed
+/// arguments must reach their original backend unchanged. Empty signature lists
+/// may be consumed provided their last-seen offset is acknowledged separately,
+/// as in Velocity's SessionCommandHandler.consumeCommand.
+pub(crate) fn proxy_command(packet: &Packet) -> io::Result<Option<(String, Option<Packet>)>> {
+    if !matches!(packet.id, 0x06 | 0x07) {
+        return Ok(None);
+    }
+    let mut bytes = packet.data.as_slice();
+    let command = read_string(&mut bytes, 32767)?;
+    let root = command.split_ascii_whitespace().next().unwrap_or("");
+    if !matches!(root, "server" | "hub") {
+        return Ok(None);
+    }
+    let mut acknowledgement = None;
+    if packet.id == 0x07 {
+        take(&mut bytes, 16)?; // timestamp and salt
+        let count = read_varint(&mut bytes)?;
+        if !(0..=8).contains(&count) {
+            return Err(invalid("invalid command signature count"));
+        }
+        for _ in 0..count {
+            read_string(&mut bytes, 16)?;
+            take(&mut bytes, 256)?;
+        }
+        let offset = read_varint(&mut bytes)?;
+        if offset < 0 {
+            return Err(invalid("invalid chat acknowledgement offset"));
+        }
+        take(&mut bytes, 4)?; // 20-bit acknowledgement set and 1.21.5+ checksum
+        if !bytes.is_empty() {
+            return Err(invalid("trailing signed command data"));
+        }
+        if count != 0 {
+            return Ok(None);
+        }
+        if offset != 0 {
+            let mut data = Vec::new();
+            write_varint(offset, &mut data);
+            acknowledgement = Some(Packet::new(0x05, data));
+        }
+    }
+    if !bytes.is_empty() {
+        return Err(invalid("trailing command data"));
+    }
+    Ok(Some((command.to_owned(), acknowledgement)))
+}
+
+pub fn system_message(version: ProtocolVersion, message: &str) -> io::Result<Packet> {
+    if version.number() != 774 {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Network commands require Minecraft 1.21.11.",
+        ));
+    }
+    // Disconnect and system-chat use the same anonymous NBT component encoding.
+    let mut packet = disconnect(Some(version), State::Play, message)?;
+    packet.id = 0x77;
+    packet.data.push(0); // ordinary chat, not action bar
+    Ok(packet)
+}
+
+/// Append unsigned Brigadier proxy literals to the backend's 1.21.11 command
+/// tree. Existing node indexes and redirects stay valid; only root children
+/// with the same names are replaced. A brigadier:string argument is deliberately
+/// used instead of minecraft:message, which would require a signed argument.
+pub(crate) fn network_commands(packet: &Packet) -> io::Result<Packet> {
+    struct Node<'a> {
+        raw: &'a [u8],
+        flags: u8,
+        children: Vec<i32>,
+        tail: &'a [u8],
+        name: Option<&'a str>,
+    }
+    let mut bytes = packet.data.as_slice();
+    let count = read_varint(&mut bytes)?;
+    if !(1..=65536).contains(&count) || count as usize > bytes.len() / 2 {
+        return Err(invalid("invalid command node count"));
+    }
+    let index = |bytes: &mut &[u8]| -> io::Result<i32> {
+        let value = read_varint(bytes)?;
+        if value < 0 || value >= count {
+            return Err(invalid("invalid command node index"));
+        }
+        Ok(value)
+    };
+    let mut nodes = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        let start = bytes;
+        let flags = take(&mut bytes, 1)?[0];
+        let child_count = read_varint(&mut bytes)?;
+        if child_count < 0 || child_count as usize > bytes.len() {
+            return Err(invalid("invalid command child count"));
+        }
+        let mut children = Vec::with_capacity(child_count as usize);
+        for _ in 0..child_count {
+            children.push(index(&mut bytes)?);
+        }
+        let tail = bytes;
+        if flags & 8 != 0 {
+            index(&mut bytes)?;
+        }
+        let name = match flags & 3 {
+            0 => None,
+            1 => Some(read_string(&mut bytes, 32767)?),
+            2 => {
+                let name = read_string(&mut bytes, 32767)?;
+                match read_varint(&mut bytes)? {
+                    parser @ 1..=4 => {
+                        let bounds = take(&mut bytes, 1)?[0];
+                        if bounds & !3 != 0 {
+                            return Err(invalid("invalid command argument bounds"));
+                        }
+                        let width = if parser == 2 || parser == 4 { 8 } else { 4 };
+                        if bounds & 1 != 0 {
+                            take(&mut bytes, width)?;
+                        }
+                        if bounds & 2 != 0 {
+                            take(&mut bytes, width)?;
+                        }
+                    }
+                    5 => {
+                        if !(0..=2).contains(&read_varint(&mut bytes)?) {
+                            return Err(invalid("invalid string argument type"));
+                        }
+                    }
+                    6 | 31 => {
+                        take(&mut bytes, 1)?;
+                    }
+                    43 => {
+                        take(&mut bytes, 4)?;
+                    }
+                    44..=48 => {
+                        read_string(&mut bytes, 32767)?;
+                    }
+                    0..=56 => {}
+                    _ => return Err(invalid("unknown 1.21.11 command parser")),
+                }
+                if flags & 16 != 0 {
+                    read_string(&mut bytes, 32767)?;
+                }
+                Some(name)
+            }
+            _ => return Err(invalid("invalid command node type")),
+        };
+        nodes.push(Node {
+            raw: &start[..start.len() - bytes.len()],
+            flags,
+            children,
+            tail: &tail[..tail.len() - bytes.len()],
+            name,
+        });
+    }
+    let root = index(&mut bytes)? as usize;
+    if !bytes.is_empty() || nodes[root].flags & 3 != 0 {
+        return Err(invalid("invalid command root"));
+    }
+    let mut data = Vec::with_capacity(packet.data.len() + 40);
+    write_varint(count + 3, &mut data);
+    for (i, node) in nodes.iter().enumerate() {
+        if i != root {
+            data.extend_from_slice(node.raw);
+            continue;
+        }
+        let children: Vec<_> = node
+            .children
+            .iter()
+            .copied()
+            .filter(|child| !matches!(nodes[*child as usize].name, Some("server" | "hub")))
+            .collect();
+        data.push(node.flags);
+        write_varint(children.len() as i32 + 2, &mut data);
+        for child in children {
+            write_varint(child, &mut data);
+        }
+        write_varint(count, &mut data);
+        write_varint(count + 2, &mut data);
+        data.extend_from_slice(node.tail);
+    }
+    data.push(5);
+    write_varint(1, &mut data);
+    write_varint(count + 1, &mut data);
+    write_string("server", &mut data);
+    data.push(6);
+    write_varint(0, &mut data);
+    write_string("name", &mut data);
+    write_varint(5, &mut data);
+    write_varint(2, &mut data);
+    data.push(5);
+    write_varint(0, &mut data);
+    write_string("hub", &mut data);
+    write_varint(root as i32, &mut data);
+    Ok(Packet::new(packet.id, data))
 }

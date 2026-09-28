@@ -1,10 +1,60 @@
 """Check that burst measurements cannot turn failed routing into fast successes."""
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
+import io
+import socket
 import unittest
 from unittest.mock import patch
 
 import bench
+import pilot
+
+
+class IdentityTests(unittest.TestCase):
+    def test_threaded_clients_have_unique_names_and_uuids_with_unchanged_wire_sizes(self):
+        with ThreadPoolExecutor(max_workers=8) as workers:
+            names = list(workers.map(lambda _: bench.new_player_name(), range(256)))
+        self.assertEqual(len(set(names)), len(names))
+        identities = set()
+        for name in names:
+            self.assertRegex(name, r"^[A-Za-z0-9_]{9}$")
+            start = bench.login_start(name)
+            success = bench.login_success(name)
+            self.assertEqual(len(start), 12)
+            self.assertEqual(len(success), 49)
+            self.assertEqual(bench.login_name(bench.socket_frame(io.BytesIO(start))), name)
+            fields = io.BytesIO(bench.socket_frame(io.BytesIO(success)))
+            self.assertEqual(bench.read_varint(fields), 2)
+            identities.add(fields.read(bench.read_varint(fields)))
+            self.assertEqual(fields.read(bench.read_varint(fields)).decode(), name)
+            self.assertEqual(fields.read(), b"")
+        self.assertEqual(len(identities), len(names))
+
+    def test_fixture_rejects_malformed_names_and_trailing_login_data(self):
+        for body in [b"\1\1A", b"\0", b"\0\0", b"\0\x11" + b"A" * 17,
+                     b"\0\x03A B", b"\0\x02A", b"\0\1A\0", b"\0\1\xff"]:
+            with self.subTest(body=body), self.assertRaises((ValueError, EOFError)):
+                bench.login_name(body)
+
+    def test_pilot_backend_accepts_distinct_simultaneous_socket_clients(self):
+        with pilot.backend() as port, ExitStack() as stack:
+            clients = [stack.enter_context(bench.connect(port)) for _ in range(4)]
+            self.assertEqual(len({client.name for client in clients}), len(clients))
+            for client in clients:
+                pilot.exchange(client)
+
+    def test_pilot_backends_preserve_distinct_echo_and_uppercase_routes(self):
+        with pilot.backend() as original, pilot.backend(uppercase=True) as updated:
+            with bench.connect(original) as first, bench.connect(updated) as second:
+                for _ in range(3):
+                    pilot.exchange(first)
+                    pilot.exchange(second, b"PILOT")
+
+    def test_pilot_backend_accepts_full_duplex_async_transfers(self):
+        with pilot.backend() as port:
+            self.assertGreater(bench.throughput(port, 4, bench.MIB), 0)
 
 
 class SummaryTests(unittest.TestCase):
@@ -35,8 +85,8 @@ class SummaryTests(unittest.TestCase):
 
 
 class BurstTests(unittest.IsolatedAsyncioTestCase):
-    async def start_server(self, callback):
-        server = await asyncio.start_server(callback, "127.0.0.1", 0)
+    async def start_server(self, callback, **options):
+        server = await asyncio.start_server(callback, "127.0.0.1", 0, **options)
         self.addAsyncCleanup(server.wait_closed)
         self.addCleanup(server.close)
         return server.sockets[0].getsockname()[1]
@@ -48,11 +98,173 @@ class BurstTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_valid_handshake_and_probe_echo_under_a_partial_final_burst(self):
         port = await self.start_server(bench.fixture_client)
-        samples, spreads, successes = await bench.run_bursts(port, "hostname", 4, 10, 1)
-        self.assertEqual(len(samples), 10)
-        self.assertEqual(len(spreads), 3)
-        self.assertEqual(successes, [4, 4, 2])
-        self.assertTrue(all(sample["setup_ms"] > 0 for sample in samples))
+        names = []
+        decode = bench.login_name
+
+        def record(body):
+            name = decode(body)
+            names.append(name)
+            return name
+
+        with patch("bench.login_name", side_effect=record):
+            for _ in range(2):  # Attempt indices repeat across warmups/scenarios.
+                samples, spreads, successes = await bench.run_bursts(port, "hostname", 4, 10, 1)
+                self.assertEqual(len(samples), 10)
+                self.assertEqual(len(spreads), 3)
+                self.assertEqual(successes, [4, 4, 2])
+                self.assertTrue(all(sample["setup_ms"] > 0 for sample in samples))
+        self.assertEqual(len(names), 20)
+        self.assertEqual(len(set(names)), len(names))
+
+    async def test_socket_clients_can_overlap_async_burst_clients(self):
+        port = await self.start_server(bench.fixture_client)
+
+        def exchange():
+            with bench.connect(port) as client:
+                client.sendall(b"threaded")
+                self.assertEqual(client.recv(8), b"threaded")
+                return client.name
+
+        names = []
+        decode = bench.login_name
+
+        def record(body):
+            name = decode(body)
+            names.append(name)
+            return name
+
+        with patch("bench.login_name", side_effect=record):
+            *socket_names, burst = await asyncio.gather(
+                *(asyncio.to_thread(exchange) for _ in range(8)),
+                bench.run_bursts(port, "rift", 4, 8, 1),
+            )
+        self.assertEqual(len(set(socket_names)), 8)
+        self.assertEqual(burst[2], [4, 4])
+        self.assertEqual(len(names), 16)
+        self.assertEqual(len(set(names)), len(names))
+
+    async def test_success_for_a_different_player_is_not_success(self):
+        async def wrong_identity(reader, writer):
+            try:
+                await bench.read_frame(reader)
+                await bench.read_frame(reader)
+                writer.write(bench.login_success("WrongName"))
+                await writer.drain()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        port = await self.start_server(wrong_identity)
+        result = await self.attempt(port)
+        self.assertEqual(result["error"], "ValueError")
+        self.assertIsNone(result["setup_ms"])
+
+    async def test_throughput_drains_both_directions_with_small_buffers_and_fragmented_echo(self):
+        received = []
+        truncated_uploads = []
+
+        async def fragmented(reader, writer):
+            writer.get_extra_info("socket").setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+            writer.transport.set_write_buffer_limits(high=1024, low=512)
+            count = 0
+            try:
+                await bench.read_frame(reader)
+                name = bench.login_name(await bench.read_frame(reader))
+                writer.write(bench.login_success(name))
+                await writer.drain()
+                while True:
+                    body = await bench.read_frame(reader)
+                    count += len(body) - 1
+                    framed = bench.packet(body)
+                    # Split both the three-byte frame length and the payload.
+                    for part in [framed[:1], framed[1:2], framed[2:1024], framed[1024:]]:
+                        writer.write(part)
+                        await writer.drain()
+                        await asyncio.sleep(0)
+            except asyncio.IncompleteReadError as error:
+                if error.partial:
+                    truncated_uploads.append(error.partial)
+            finally:
+                received.append(count)
+                writer.close()
+                await writer.wait_closed()
+
+        port = await self.start_server(fragmented, limit=4096)
+        open_connection = asyncio.open_connection
+
+        async def constrained_connection(*args, **kwargs):
+            reader, writer = await open_connection(*args, limit=4096, **kwargs)
+            writer.get_extra_info("socket").setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+            writer.transport.set_write_buffer_limits(high=1024, low=512)
+            return reader, writer
+
+        with patch("bench.asyncio.open_connection", side_effect=constrained_connection):
+            sizes = [2 * bench.MIB, 2 * bench.MIB + 17, 2 * bench.MIB, 2 * bench.MIB + 1]
+            actual = await asyncio.wait_for(asyncio.gather(
+                *(bench.transfer_async(port, size) for size in sizes)), 10)
+        self.assertEqual(actual, sizes)
+        self.assertEqual(sorted(received), sorted(sizes))
+        self.assertEqual(truncated_uploads, [])
+
+    async def test_throughput_rejects_corruption_truncation_extra_data_and_early_eof(self):
+        size = 1024
+        for response in [bench.packet(b"\x7f" + b"y" * size),
+                         bench.varint(size + 1) + b"\x7f" + b"x" * 15,
+                         bench.packet(b"\x7f" + b"x" * size) + b"\0", b""]:
+            async def invalid_echo(reader, writer):
+                try:
+                    await bench.read_frame(reader)
+                    name = bench.login_name(await bench.read_frame(reader))
+                    writer.write(bench.login_success(name) + response)
+                    await writer.drain()
+                    # Consume the finite upload so a reset cannot hide trailing
+                    # bytes from the client during an otherwise graceful close.
+                    await reader.read()
+                except (OSError, asyncio.IncompleteReadError):
+                    pass
+                finally:
+                    writer.close()
+                    try:
+                        await writer.wait_closed()
+                    except OSError:
+                        pass
+
+            with self.subTest(response=response[:16]):
+                port = await self.start_server(invalid_echo)
+                with self.assertRaises(RuntimeError):
+                    await asyncio.wait_for(bench.transfer_async(port, size), 1)
+
+    async def test_bad_echo_cancels_a_sender_blocked_by_a_backend_that_stops_reading(self):
+        closed = asyncio.Event()
+
+        async def refuses_upload(reader, writer):
+            try:
+                await bench.read_frame(reader)
+                name = bench.login_name(await bench.read_frame(reader))
+                writer.write(bench.login_success(name))
+                await writer.drain()
+                # Let the large upload fill bounded socket and StreamReader
+                # buffers, then fail the independent receiving direction.
+                await asyncio.sleep(0.02)
+                writer.write(bench.packet(b"\x7fwrong"))
+                await writer.drain()
+                await reader.read()
+            except (OSError, asyncio.IncompleteReadError):
+                pass
+            finally:
+                writer.close()
+                try:
+                    await writer.wait_closed()
+                except OSError:
+                    pass
+                closed.set()
+
+        port = await self.start_server(refuses_upload, limit=4096)
+        size = 64 * bench.MIB
+        with self.assertRaises(RuntimeError) as failure:
+            await asyncio.wait_for(bench.transfer_async(port, size), 1)
+        self.assertNotIn(f"sent={size}/{size}", str(failure.exception))
+        await asyncio.wait_for(closed.wait(), 1)
 
     async def test_tcp_accept_followed_by_eof_is_not_success(self):
         def close(reader, writer):
