@@ -462,3 +462,59 @@ async fn remote_consumer_names_are_isolated_by_authenticated_identity() {
     assert!(first.fetch("events", "worker", 1).await.unwrap().is_empty());
     server.shutdown().await;
 }
+
+#[test]
+fn pem_helpers_preserve_certificate_chains_and_report_file_errors() {
+    struct Directory(std::path::PathBuf);
+    impl Drop for Directory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let mut random = [0u8; 8];
+    aws_lc_rs::rand::fill(&mut random).unwrap();
+    let directory = Directory(
+        std::env::temp_dir().join(format!("rift-quic-pem-{:016x}", u64::from_be_bytes(random))),
+    );
+    std::fs::create_dir(&directory.0).unwrap();
+    let certificate = directory.0.join("chain.pem");
+    let private_key = directory.0.join("key.pem");
+    let first = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    let second = rcgen::generate_simple_self_signed(vec!["other.localhost".into()]).unwrap();
+    std::fs::write(
+        &certificate,
+        format!("{}{}", first.cert.pem(), second.cert.pem()),
+    )
+    .unwrap();
+    std::fs::write(&private_key, first.signing_key.serialize_pem()).unwrap();
+    assert_eq!(
+        read_certificates(&certificate).unwrap(),
+        vec![first.cert.der().clone(), second.cert.der().clone()]
+    );
+    assert!(tls_server_config(&certificate, &private_key).is_ok());
+    assert!(tls_client_config(&certificate).is_ok());
+    assert_eq!(
+        read_certificates(&directory.0.join("missing.pem"))
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::NotFound
+    );
+    std::fs::write(&private_key, "").unwrap();
+    let error = tls_server_config(&certificate, &private_key).err().unwrap();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert!(error.to_string().contains("private key PEM"));
+    std::fs::write(
+        &certificate,
+        "-----BEGIN CERTIFICATE-----\n!!!\n-----END CERTIFICATE-----\n",
+    )
+    .unwrap();
+    assert_eq!(
+        read_certificates(&certificate).unwrap_err().kind(),
+        io::ErrorKind::InvalidData
+    );
+    std::fs::write(&certificate, "").unwrap();
+    assert_eq!(
+        read_certificates(&certificate).unwrap_err().kind(),
+        io::ErrorKind::InvalidData
+    );
+}

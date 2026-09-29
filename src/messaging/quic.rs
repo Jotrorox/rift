@@ -14,7 +14,10 @@ use std::{
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use hmac::{Hmac, Mac};
 use quinn::{Connection, Endpoint, RecvStream, SendStream};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::pki_types::{
+    CertificateDer, PrivateKeyDer,
+    pem::{self, PemObject},
+};
 use sha2::{Digest, Sha256};
 use tokio::{
     sync::{Mutex, Semaphore},
@@ -263,11 +266,10 @@ pub fn tls_server_config(
     certificate: impl AsRef<Path>,
     private_key: impl AsRef<Path>,
 ) -> Result<quinn::ServerConfig> {
-    let certs = rustls_pemfile::certs(&mut io::BufReader::new(std::fs::File::open(certificate)?))
-        .collect::<io::Result<Vec<_>>>()?;
-    let key =
-        rustls_pemfile::private_key(&mut io::BufReader::new(std::fs::File::open(private_key)?))?
-            .ok_or_else(|| invalid("private key PEM contains no supported key"))?;
+    let certs = read_certificates(certificate.as_ref())?;
+    let private_key = private_key.as_ref();
+    let key = PrivateKeyDer::from_pem_file(private_key)
+        .map_err(|error| pem_error("private key", private_key, error))?;
     server_config_from_der(certs, key)
 }
 /// Build TLS configuration from DER material, also useful with a certificate manager.
@@ -292,11 +294,31 @@ pub fn server_config_from_der(
 }
 /// Trust the given PEM CA/server certificates; DNS/IP name verification stays enabled.
 pub fn tls_client_config(ca_certificates: impl AsRef<Path>) -> Result<quinn::ClientConfig> {
-    let certs = rustls_pemfile::certs(&mut io::BufReader::new(std::fs::File::open(
-        ca_certificates,
-    )?))
-    .collect::<io::Result<Vec<_>>>()?;
+    let certs = read_certificates(ca_certificates.as_ref())?;
     client_config_from_der(certs)
+}
+fn read_certificates(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
+    let certs = CertificateDer::pem_file_iter(path)
+        .map_err(|error| pem_error("certificate", path, error))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| pem_error("certificate", path, error))?;
+    if certs.is_empty() {
+        return Err(invalid(format!(
+            "certificate PEM ({}): no certificates found",
+            path.display()
+        )));
+    }
+    Ok(certs)
+}
+fn pem_error(kind: &str, path: &Path, error: pem::Error) -> io::Error {
+    let error_kind = match &error {
+        pem::Error::Io(error) => error.kind(),
+        _ => io::ErrorKind::InvalidData,
+    };
+    io::Error::new(
+        error_kind,
+        format!("{kind} PEM ({}): {error}", path.display()),
+    )
 }
 pub fn client_config_from_der(certs: Vec<CertificateDer<'static>>) -> Result<quinn::ClientConfig> {
     let mut roots = rustls::RootCertStore::empty();
