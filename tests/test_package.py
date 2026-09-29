@@ -15,10 +15,12 @@ class PackageTests(unittest.TestCase):
     def test_archives_preserve_operator_files_and_binary(self):
         root = Path(__file__).resolve().parents[1]
         required = {"README.md", "LICENSE", "THIRD_PARTY_NOTICES",
-                    "examples/rift.lua", "examples/routing.lua",
+                    "examples/rift.lua", "examples/online.lua",
                     "examples/network.lua", "examples/rift.service", "examples/Dockerfile",
                     "examples/compose.yaml", "docs/operations.md",
-                    "docs/pilot.md", "docs/pilot-results.json", "docs/lua.md",
+                    "examples/admin.lua", "examples/messaging.lua", "docs/http.md",
+                    "docs/messaging.md", "docs/messaging-lua.md",
+                    "docs/messaging-protocol.md", "docs/network-protocol.md", "docs/lua.md",
                     "examples/modular/rift.lua", "examples/modular/lua/config/network.lua",
                     "examples/modular/plugins/greeting/init.lua",
                     "examples/modular/plugins/greeting/lua/greeting/init.lua"}
