@@ -4,10 +4,8 @@ Run `rift --config examples/admin.lua`, then open <http://127.0.0.1:8080>.
 The admin website shows listeners, backends, routes and live counters, edits the
 complete Lua source, validates changes, saves and applies them, and reloads edits
 made on disk. The status website runs separately at <http://127.0.0.1:9090>.
-HTML, CSS and JavaScript are bundled with `include_str!`: no asset directory,
-Node, package manager, CDN or separate frontend server is needed at runtime.
-Axum is the only additional direct Rust dependency, with its `http1`, `json` and
-`tokio` features enabled and default features disabled.
+The dashboard assets are embedded in the binary; no Node installation or
+separate frontend server is needed at runtime.
 
 This guide covers `web` and `status` HTTP services. The operational `admin`
 endpoint used by `rift admin` is a separate loopback JSON-line protocol with an
