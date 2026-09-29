@@ -115,7 +115,7 @@ impl Network<'_> {
         if !session.can_switch() {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "Server switching requires Minecraft 1.21.11 and a player in the world.",
+                "Server switching requires a switchable Minecraft version and a player in the world.",
             ));
         }
         let identity = session
