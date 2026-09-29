@@ -20,7 +20,10 @@ class PackageTests(unittest.TestCase):
                     "examples/compose.yaml", "docs/operations.md",
                     "examples/admin.lua", "examples/messaging.lua", "docs/http.md",
                     "docs/messaging.md", "docs/messaging-lua.md",
-                    "docs/messaging-protocol.md", "docs/network-protocol.md"}
+                    "docs/messaging-protocol.md", "docs/network-protocol.md", "docs/lua.md",
+                    "examples/modular/rift.lua", "examples/modular/lua/config/network.lua",
+                    "examples/modular/plugins/greeting/init.lua",
+                    "examples/modular/plugins/greeting/lua/greeting/init.lua"}
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             for windows in [False, True]:

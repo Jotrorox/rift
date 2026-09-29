@@ -1334,3 +1334,57 @@ async fn proxy_owned_forwarding_allows_safe_initial_transport_retry() {
     .await
     .unwrap();
 }
+
+#[tokio::test]
+async fn registered_extension_commands_reach_the_proxy_and_never_the_backend() {
+    let (mut session, mut client, mut backend) = session().await;
+    session.enable_network().unwrap();
+    let config = crate::config::Config::from_lua(r#"return {
+        listeners={public='127.0.0.1:0'}, backends={lobby='127.0.0.1:1'}, routes={public='lobby'},
+        authentication={online_mode=true}, forwarding={mode='velocity', secret_env='TEST_SECRET'},
+        extensions={api_version=1, commands={staff={permission='staff.route',run=function() error('permission bypass') end}}}
+    }"#, "wire.lua").unwrap();
+    let runtime = crate::extensions::Extensions::new(
+        &config,
+        crate::messaging::Broker::new(Default::default()).unwrap(),
+        None,
+    );
+    session.set_extension(
+        runtime
+            .session(crate::extensions::Context::authenticated(
+                1,
+                &AuthenticatedProfile {
+                    uuid: [7; 16],
+                    name: "Player".into(),
+                    properties: vec![],
+                },
+            ))
+            .unwrap(),
+    );
+    play(&mut session, &mut client, &mut backend, Codec::default()).await;
+    let mut command = Vec::new();
+    write_string("staff game", &mut command);
+    Codec::default()
+        .write(&mut client, &Packet::new(6, command))
+        .await
+        .unwrap();
+    let SessionEvent::ProxyCommand(command) = session.forward().await.unwrap() else {
+        panic!("command reached backend");
+    };
+    let action = session
+        .extension
+        .as_ref()
+        .unwrap()
+        .command(&command)
+        .await
+        .unwrap();
+    assert!(matches!(action, crate::extensions::Action::Message(_)));
+    assert!(
+        timeout(
+            Duration::from_millis(10),
+            receive(&mut backend, Codec::default())
+        )
+        .await
+        .is_err()
+    );
+}

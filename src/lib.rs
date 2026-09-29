@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod config;
+pub mod extensions;
 mod forwarding;
 pub mod hooks;
 pub mod http_script;

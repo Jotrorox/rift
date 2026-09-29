@@ -1,6 +1,5 @@
 use std::{
     cell::Cell,
-    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -9,6 +8,10 @@ use mlua::{
 };
 
 use crate::hooks::{ConnectionInfo, RouteDecision, RouteError};
+
+mod modules;
+mod source;
+pub(crate) use source::ScriptSource;
 
 pub(crate) const MAX_SOURCE_BYTES: usize = 256 * 1024;
 pub(crate) const MAX_CONCURRENT: usize = 4;
@@ -21,15 +24,13 @@ const MAX_REASON_BYTES: usize = 1024;
 /// Immutable source snapshot. No Lua handles escape into the async runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteScript {
-    source: Arc<str>,
-    name: Arc<str>,
+    source: ScriptSource,
 }
 
 impl RouteScript {
-    pub(crate) fn new(source: &str, name: &str) -> Self {
+    pub(crate) fn new(source: &ScriptSource) -> Self {
         Self {
-            source: source.into(),
-            name: name.into(),
+            source: source.clone(),
         }
     }
 
@@ -40,7 +41,7 @@ impl RouteScript {
         messaging: Option<crate::messaging::Broker>,
     ) -> Result<RouteDecision, RouteError> {
         let run = || -> mlua::Result<RouteDecision> {
-            let (lua, root) = load(&self.source, &self.name, deadline)?;
+            let (lua, root) = load(&self.source, deadline)?;
             install_messaging(&lua, messaging, deadline)?;
             let Value::Table(root) = root else {
                 return Err(mlua::Error::runtime("configuration must return a table"));
@@ -59,7 +60,9 @@ impl RouteScript {
             check_deadline(deadline)?;
             Ok(result)
         };
-        run().map_err(|error| RouteError::Script(format!("{}: on_route: {error}", self.name)))
+        run().map_err(|error| {
+            RouteError::Script(format!("{}: on_route: {error}", self.source.entry.name))
+        })
     }
 }
 
@@ -70,11 +73,12 @@ pub(crate) fn install_messaging(
     broker: Option<crate::messaging::Broker>,
     deadline: Instant,
 ) -> mlua::Result<()> {
-    let api = lua.create_table()?;
+    let api: Table = lua.named_registry_value("rift.api")?;
     api.raw_set("enabled", broker.is_some())?;
+    let runtime: Table = lua.named_registry_value("rift.runtime")?;
     let publications = Cell::new(0usize);
     let bytes = Cell::new(0usize);
-    api.raw_set(
+    runtime.raw_set(
         "publish",
         lua.create_function(
             move |lua,
@@ -111,8 +115,7 @@ pub(crate) fn install_messaging(
                 Ok(result)
             },
         )?,
-    )?;
-    lua.globals().raw_set("rift", api)
+    )
 }
 
 pub(crate) fn check_deadline(deadline: Instant) -> mlua::Result<()> {
@@ -123,8 +126,8 @@ pub(crate) fn check_deadline(deadline: Instant) -> mlua::Result<()> {
 }
 
 /// Configuration evaluation and routing share the same restricted environment.
-pub(crate) fn load(source: &str, name: &str, deadline: Instant) -> mlua::Result<(Lua, Value)> {
-    if source.len() > MAX_SOURCE_BYTES {
+pub(crate) fn load(source: &ScriptSource, deadline: Instant) -> mlua::Result<(Lua, Value)> {
+    if source.entry.source.len() > MAX_SOURCE_BYTES {
         return Err(mlua::Error::runtime("script exceeds 256 KiB source limit"));
     }
     check_deadline(deadline)?;
@@ -192,7 +195,7 @@ pub(crate) fn load(source: &str, name: &str, deadline: Instant) -> mlua::Result<
     globals
         .raw_get::<Table>("table")?
         .raw_set("insert", insert)?;
-    // pcall/xpcall, coroutines, loaders, metatables/finalizers, I/O, native
+    // pcall/xpcall, coroutines, dynamic loaders, metatables/finalizers, I/O, native
     // modules and debug access are deliberately absent. In particular a script
     // cannot catch a budget error or escape to a thread without an active hook.
     let instructions = Cell::new(0);
@@ -208,11 +211,13 @@ pub(crate) fn load(source: &str, name: &str, deadline: Instant) -> mlua::Result<
             Ok(VmState::Continue)
         },
     )?;
-    let root = lua
-        .load(source)
-        .set_name(name)
+    let finalize = modules::install(&lua, source, deadline)?;
+    let root: Value = lua
+        .load(source.entry.source.as_ref())
+        .set_name(source.entry.name.as_ref())
         .set_mode(ChunkMode::Text)
         .eval()?;
+    let root = finalize.call(root)?;
     check_deadline(deadline)?;
     Ok((lua, root))
 }

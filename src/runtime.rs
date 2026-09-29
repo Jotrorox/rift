@@ -54,6 +54,7 @@ pub struct Snapshot {
     pub health: Health,
     cache: status::Cache,
     pub players: Arc<PlayerRegistry>,
+    pub extensions: rift::extensions::Extensions,
     pub messaging: Broker,
     pub messaging_streams: Arc<HashMap<String, Stream>>,
     authenticator: Option<Arc<Authenticator>>,
@@ -123,7 +124,13 @@ impl Snapshot {
         } else {
             None
         };
+        let extensions = rift::extensions::Extensions::new(
+            &config,
+            messaging.clone(),
+            previous.map(|old| &old.extensions),
+        );
         Ok(Self {
+            extensions,
             source: None,
             revision: "runtime".into(),
             listener_addresses: config.listeners.clone(),
@@ -230,8 +237,12 @@ pub async fn handle(
             Policy::Hostnames(routes) => routes.select(&session.handshake.hostname()).cloned(),
         },
     };
+    let unmatched = primary.is_err();
     let primary = match primary {
         Ok(primary) => primary,
+        Err(_) if !is_status && snapshot.config.extensions.is_some() => {
+            snapshot.config.backends.keys().next().unwrap().clone()
+        }
         Err(error) => {
             if is_status {
                 timeout(HANDSHAKE_TIMEOUT, session.status_request()).await??;
@@ -353,7 +364,8 @@ pub async fn handle(
             let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect(reason)).await;
             return Err(io::Error::new(io::ErrorKind::Unsupported, reason));
         }
-        let network_configured = snapshot.config.network != Default::default();
+        let network_configured =
+            snapshot.config.network != Default::default() || snapshot.config.extensions.is_some();
         let network_enabled = session.switch_supported() && network_configured;
         if network_enabled {
             session.enable_network()?;
@@ -403,12 +415,74 @@ pub async fn handle(
             session.set_forwarding(snapshot.forwarding_secret.clone().unwrap(), peer_ip)?;
             event.failure = "io_error";
         }
+        let mut extension_selection = None;
+        if snapshot.config.extensions.is_some() {
+            if !session.switch_supported() {
+                let reason = "Extensions v1 requires Minecraft 1.21.8 or 1.21.11.";
+                let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect(reason)).await;
+                return Err(io::Error::new(io::ErrorKind::Unsupported, reason));
+            }
+            let mut context = rift::extensions::Context::authenticated(
+                event.id(),
+                session.authenticated_profile().unwrap(),
+            );
+            context.listener = listener.into();
+            context.hostname = session.handshake.hostname().to_owned();
+            context.peer_ip = peer_ip.to_string();
+            context.protocol = session.handshake.protocol;
+            context.default_server = (!unmatched).then(|| primary.clone());
+            session.set_extension(snapshot.extensions.session(context).unwrap());
+            let decisions = async {
+                use rift::extensions::Action;
+                let extension = session.extension.as_ref().unwrap();
+                if let Action::Deny(reason) = extension.decision("login").await? {
+                    return Err(io::Error::new(io::ErrorKind::PermissionDenied, reason));
+                }
+                match extension.decision("initial_server").await? {
+                    Action::Deny(reason) => {
+                        Err(io::Error::new(io::ErrorKind::PermissionDenied, reason))
+                    }
+                    Action::Server(server) => Ok(Some(server)),
+                    _ => Ok(None),
+                }
+            }
+            .await;
+            match decisions {
+                Ok(selected) => extension_selection = selected,
+                Err(error) => {
+                    let reason = if error.kind() == io::ErrorKind::PermissionDenied {
+                        error.to_string()
+                    } else {
+                        "Login extension failed. Please try again later.".into()
+                    };
+                    let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect(&reason)).await;
+                    return Err(error);
+                }
+            }
+        }
         let network = Network {
             snapshot: &snapshot,
             addresses,
             metrics: &metrics,
         };
-        let candidates = match network.initial_candidates(&primary, use_initial, &login_name) {
+        let candidate_result = if let Some(selected) = extension_selection {
+            if snapshot.config.can_access(&selected, &login_name) {
+                Ok(vec![selected])
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "You do not have access to this server.",
+                ))
+            }
+        } else if unmatched {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "No server is configured for this hostname.",
+            ))
+        } else {
+            network.initial_candidates(&primary, use_initial, &login_name)
+        };
+        let candidates = match candidate_result {
             Ok(candidates) => candidates,
             Err(error) => {
                 event.reject("access_denied", &error.to_string());
@@ -471,6 +545,8 @@ pub async fn handle(
         let mut current_address = snapshot.config.backends[&current_backend]
             .address()
             .to_owned();
+        let mut queue_tick = tokio::time::interval(Duration::from_secs(1));
+        queue_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             event.stage = if transfer_reply.is_some() {
                 "transfer"
@@ -494,6 +570,7 @@ pub async fn handle(
                 && session.client.state.settled(rift::protocol::State::Play)
                 && (!network_enabled || session.can_switch())
                 && !session.switch_in_progress();
+            let extension_enabled = session.extension.is_some();
             let forward = async {
                 if playing {
                     session.forward().await
@@ -509,6 +586,35 @@ pub async fn handle(
             };
             let result = tokio::select! {
                 result = forward => result,
+                _ = queue_tick.tick(), if playing && extension_enabled && transfer_reply.is_none() => {
+                    // The cancelled forward poll may already have observed a
+                    // backend configuration transition, just as for admin input.
+                    if !session.client.state.settled(rift::protocol::State::Play) {
+                        phase_deadline = Deadline::now() + Duration::from_secs(30);
+                    }
+                    if !session.can_switch() { continue; }
+                    let queued = session.extension.as_ref().unwrap().queued_target();
+                    match queued {
+                        Ok(Some(target)) => {
+                            match network.switch_for(&mut session, &current_backend, &[target], event, "queue").await {
+                                Ok(target) => {
+                                    current_address = snapshot.config.backends[&target].address().to_owned();
+                                    current_backend = target;
+                                    phase_deadline = Deadline::now() + Duration::from_secs(30);
+                                }
+                                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {},
+                                Err(error) => {
+                                    session.extension.as_ref().unwrap().leave_queue();
+                                    if session.switch_in_progress() || session.backend().is_none() { return Err(error); }
+                                    timeout(HANDSHAKE_TIMEOUT, session.send_system_message(&format!("Queue transfer failed: {error}"))).await??;
+                                }
+                            }
+                        }
+                        Ok(None) => {},
+                        Err(error) => { timeout(HANDSHAKE_TIMEOUT, session.send_system_message(&error.to_string())).await??; }
+                    }
+                    continue;
+                }
                 request = async { transfers.as_mut().expect("registered player").recv().await },
                     if playing && transfers.is_some() && transfer_reply.is_none() => {
                     let Some(request) = request else { transfers = None; continue; };
@@ -533,6 +639,12 @@ pub async fn handle(
                         let _ = request.reply.send(Err("target backend is unavailable or the player does not have access".into()));
                         continue;
                     }
+                    if let Some(extension) = &mut session.extension
+                        && let Err(error) = extension.before_transfer(target, "admin").await {
+                            metrics.transfer_failures.inc();
+                            let _ = request.reply.send(Err(error.to_string()));
+                            continue;
+                        }
                     let deadline = Deadline::now() + Duration::from_secs(30);
                     let connect_deadline = deadline.min(Deadline::now() + request.snapshot.config.limits.connect_timeout);
                     let upstream = match request.snapshot.config.backends[target].connect_until(&request.snapshot.addresses, connect_deadline).await {
@@ -540,6 +652,7 @@ pub async fn handle(
                         Err(error) => {
                             metrics.transfer_failures.inc();
                             metrics.backend_failures.inc();
+                            if let Some(extension) = &mut session.extension { extension.transfer_failed().await; }
                             request.snapshot.health.record(target, false);
                             event.backend = Some(target.clone());
                             event.backend_address = Some(request.snapshot.config.backends[target].address().to_owned());
@@ -553,12 +666,14 @@ pub async fn handle(
                         }
                     };
                     if control.draining(&request.snapshot.config, target) {
+                        if let Some(extension) = &mut session.extension { extension.transfer_failed().await; }
                         metrics.transfer_failures.inc();
                         let _ = request.reply.send(Err("target backend started draining; player remains on the original backend".into()));
                         continue;
                     }
                     request.snapshot.health.record(target, true);
                     if let Err(error) = upstream.set_nodelay(true) {
+                        if let Some(extension) = &mut session.extension { extension.transfer_failed().await; }
                         metrics.transfer_failures.inc();
                         let _ = request.reply.send(Err(format!("target socket setup failed; player remains on the original backend: {error}")));
                         continue;
@@ -576,6 +691,7 @@ pub async fn handle(
                         }
                         result => {
                             let error = match result { Ok(Err(error)) => error, Err(error) => error.into(), _ => unreachable!() };
+                            if let Some(extension) = &mut session.extension { extension.transfer_failed().await; }
                             metrics.transfer_failures.inc();
                             if !session.switch_in_progress() && session.can_switch() {
                                 let _ = request.reply.send(Err(format!("transfer failed: {error}")));
@@ -655,6 +771,9 @@ pub async fn handle(
                                 registration.set_server(&current_backend);
                             }
                             registered_backend.clone_from(&current_backend);
+                            if let Some(extension) = &mut session.extension {
+                                extension.ready(&current_backend).await;
+                            }
                         }
                         if let Some(reply) = transfer_reply.take() {
                             let _ = reply.send(Ok(serde_json::json!({
@@ -676,6 +795,11 @@ pub async fn handle(
                         Ok(result) => result,
                         Err(error) => Err(error.into()),
                     };
+                    if result.is_err()
+                        && let Some(extension) = &mut session.extension
+                    {
+                        extension.transfer_failed().await;
+                    }
                     // The old server can fail while a target is being preflighted.
                     // A failed target must not strand that player without recovery.
                     if result
@@ -725,6 +849,9 @@ pub async fn handle(
                         break;
                     }
                     if network_configured && !login_complete && session.reset_initial_backend() {
+                        if let Some(extension) = &session.extension {
+                            extension.release(&current_backend);
+                        }
                         let next = candidates
                             .iter()
                             .position(|name| name == &current_backend)
@@ -927,9 +1054,11 @@ async fn reconfigure(
     if candidate.config.listeners != snapshot.config.listeners
         || candidate.config.admin != snapshot.config.admin
         || candidate.config.messaging != snapshot.config.messaging
+        || candidate.config.extensions.as_ref().map(|e| &e.queues)
+            != snapshot.config.extensions.as_ref().map(|e| &e.queues)
     {
         return Err(Error::invalid(
-            "listener names/addresses, admin and messaging settings require a restart",
+            "listener names/addresses, admin, messaging, extension enablement and queue capacities require a restart",
         ));
     }
     let prepared = services.prepare(&candidate.config).await?;
@@ -969,7 +1098,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     let (config, document) = if let Some(path) = source.clone() {
         tokio::task::spawn_blocking(move || -> io::Result<_> {
             let text = control::read_source(&path)?;
-            let config = Config::from_lua(&text, &path.display().to_string())?;
+            let config = Config::from_lua_at(&text, &path)?;
             Ok((config, Some(text)))
         })
         .await
