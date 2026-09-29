@@ -18,7 +18,7 @@ import sys
 import tempfile
 import time
 
-from bench import MIB, connect, latency, throughput
+from bench import LOOPBACK_MSS, MIB, connect, latency, throughput
 from minecraft import ROOT, process
 from prometheus import parse_metrics
 
@@ -228,6 +228,7 @@ def main():
                   platform=platform.platform(), cpu_count=os.cpu_count(),
                   python=platform.python_version(),
                   method={"throughput": "asyncio-owned connections with concurrent send/receive tasks; verifies payload and EOF",
+                          "tcp_maxseg_bytes": LOOPBACK_MSS,
                           "backend": "separate asyncio fixture process; replaces driver-local threaded buffered sockets; 15-second read/write deadlines"},
                   version=subprocess.check_output([str(binary), "--version"], text=True).strip(),
                   binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest())
