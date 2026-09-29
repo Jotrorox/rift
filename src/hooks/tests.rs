@@ -293,3 +293,52 @@ async fn reloads_share_script_capacity_with_old_generations() {
         RouteDecision::Default
     );
 }
+
+#[tokio::test]
+async fn routing_hooks_publish_to_the_shared_broker_across_reloads() {
+    let broker = crate::messaging::Broker::default();
+    let mut subscription = broker.subscribe("connections.*", None).unwrap();
+    let config = config(
+        "assert(rift.enabled); local report = rift.publish('connections.accepted', string.char(0, 255) .. connection.peer_ip); assert(report.delivered == 1); return nil",
+    );
+    let router = Router::new(&config).with_messaging(broker);
+    for router in [router.clone(), router.reconfigured(&config)] {
+        assert_eq!(
+            router.route(connection()).await.unwrap(),
+            RouteDecision::Default
+        );
+        let message = tokio::time::timeout(Duration::from_secs(1), subscription.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&message.payload[..], b"\0\xff::1");
+    }
+}
+
+#[tokio::test]
+async fn hook_publications_are_bounded_and_disabled_without_context() {
+    let disabled = Router::new(&config(
+        "assert(not rift.enabled); rift.publish('events.x', 'x')",
+    ));
+    assert!(
+        disabled
+            .route(connection())
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("broker unavailable")
+    );
+    let broker = crate::messaging::Broker::default();
+    let router = Router::new(&config(
+        "for i = 1, 257 do rift.publish('events.x', 'x') end",
+    ))
+    .with_messaging(broker);
+    assert!(
+        router
+            .route(connection())
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("messaging budget")
+    );
+}

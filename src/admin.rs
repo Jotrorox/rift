@@ -177,7 +177,7 @@ fn request(value: &Value, settings: &Admin, secret: &str) -> Result<Vec<String>,
     Ok(args)
 }
 
-async fn execute(
+pub(crate) async fn execute(
     args: &[String],
     snapshot: Arc<Snapshot>,
     metrics: &Metrics,

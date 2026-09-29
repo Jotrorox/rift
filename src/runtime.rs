@@ -11,13 +11,14 @@ use rift::{
     auth::Authenticator,
     config::{Config, Route},
     hooks::{ConnectionInfo, RouteDecision, Router},
+    messaging::{Broker, BrokerConfig, Stream},
     players::PlayerRegistry,
     protocol::{Codec, NextState, status_response},
     routing::Routes,
     session::{Session, SessionEvent},
 };
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     io,
     net::SocketAddr,
     path::PathBuf,
@@ -53,6 +54,8 @@ pub struct Snapshot {
     pub health: Health,
     cache: status::Cache,
     pub players: Arc<PlayerRegistry>,
+    pub messaging: Broker,
+    pub messaging_streams: Arc<HashMap<String, Stream>>,
     authenticator: Option<Arc<Authenticator>>,
     forwarding_secret: Option<Arc<[u8]>>,
 }
@@ -74,10 +77,25 @@ impl Snapshot {
             };
             policies.insert(listener.clone(), policy);
         }
-        let router = previous.map_or_else(
-            || Router::new(&config),
-            |old| old.router.reconfigured(&config),
-        );
+        let messaging = match previous {
+            Some(old) => old.messaging.clone(),
+            None => Broker::new(config.messaging.as_ref().map_or_else(
+                BrokerConfig::default,
+                |settings| BrokerConfig {
+                    subscription_capacity: settings.subscription_capacity,
+                    max_payload_bytes: settings.max_payload_bytes,
+                    max_subject_bytes: settings.max_subject_bytes,
+                    max_subscriptions: settings.max_subscriptions,
+                },
+            ))
+            .map_err(io::Error::other)?,
+        };
+        let router = previous
+            .map_or_else(
+                || Router::new(&config),
+                |old| old.router.reconfigured(&config),
+            )
+            .with_messaging(messaging.clone());
         let control =
             previous.map_or_else(|| Arc::new(Control::default()), |old| old.control.clone());
         let health = Health::with_control(&config, control.clone());
@@ -118,6 +136,11 @@ impl Snapshot {
             control,
             policies,
             router,
+            messaging,
+            messaging_streams: previous.map_or_else(
+                || Arc::new(HashMap::new()),
+                |old| old.messaging_streams.clone(),
+            ),
             health,
             cache: status::Cache::default(),
             players: previous.map_or_else(
@@ -903,9 +926,10 @@ async fn reconfigure(
     .map_err(Error::invalid)??;
     if candidate.config.listeners != snapshot.config.listeners
         || candidate.config.admin != snapshot.config.admin
+        || candidate.config.messaging != snapshot.config.messaging
     {
         return Err(Error::invalid(
-            "listener names/addresses and admin settings require a restart",
+            "listener names/addresses, admin and messaging settings require a restart",
         ));
     }
     let prepared = services.prepare(&candidate.config).await?;
@@ -997,6 +1021,13 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
             .service_addresses
             .insert("admin".into(), listener.local_addr()?);
     }
+    initial.messaging_streams =
+        Arc::new(crate::messaging_runtime::open_streams(&initial.config).await?);
+    let messaging_server = crate::messaging_runtime::listen(&initial).await?;
+    let message_handler =
+        rift::message_script::MessageHandler::new(&initial.config, initial.messaging.clone())
+            .map_err(io::Error::other)?;
+    let messaging_controls = crate::messaging_runtime::Controls::new(initial.messaging.clone())?;
     initial.addresses = Arc::new(
         initial
             .listener_addresses
@@ -1027,6 +1058,21 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     }
     let mut background = JoinSet::new();
     let (admin_commands, mut admin_requests) = mpsc::channel(16);
+    background.spawn(messaging_controls.run(
+        receiver.clone(),
+        metrics.clone(),
+        admin_commands.clone(),
+    ));
+    let message_updates = message_handler
+        .as_ref()
+        .map(rift::message_script::MessageHandler::script_updates);
+    let message_task = message_handler.map(|handler| tokio::spawn(handler.run()));
+    if let Some(server) = &messaging_server {
+        eprintln!(
+            "rift: messaging QUIC on {}",
+            server.local_addr().map_err(io::Error::other)?
+        );
+    }
     if let Some(listener) = admin_listener {
         eprintln!("rift: admin on {}", listener.local_addr()?);
         background.spawn(admin::serve(
@@ -1039,6 +1085,11 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         ));
     }
     services.commit(&snapshot.config, prepared, &app);
+    crate::messaging_runtime::emit(
+        &snapshot.messaging,
+        "rift.events.lifecycle",
+        serde_json::json!({"state":"ready"}),
+    );
     let mut health = health_worker(
         snapshot.clone(),
         snapshot.addresses.clone(),
@@ -1061,7 +1112,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                 admin::Command::Shutdown(ack) => { let _ = timeout(Duration::from_secs(2), ack).await; break; }
             },
             result = background.join_next(), if !background.is_empty() => {
-                failure = Some(io::Error::other(format!("administrator listener stopped unexpectedly: {result:?}")));
+                failure = Some(io::Error::other(format!("control service stopped unexpectedly: {result:?}")));
                 break;
             }
             result = tasks.join_next() => {
@@ -1069,6 +1120,14 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                 break;
             }
             _ = service_check.tick() => {
+                if messaging_server.as_ref().is_some_and(rift::messaging::quic::Server::is_finished) {
+                    failure = Some(io::Error::other("QUIC messaging listener stopped unexpectedly"));
+                    break;
+                }
+                if message_task.as_ref().is_some_and(JoinHandle::is_finished) {
+                    failure = Some(io::Error::other("Lua message handler stopped unexpectedly"));
+                    break;
+                }
                 if let Some(name) = services.failed() {
                     failure = Some(io::Error::other(format!("{name} listener stopped unexpectedly")));
                     break;
@@ -1079,6 +1138,10 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         let result = reconfigure(operation, &app, &snapshot, &services).await;
         let response = match result {
             Ok((next, prepared)) => {
+                // Keep subscriptions and queued messages across script reloads.
+                if let (Some(updates), Some(script)) = (&message_updates, &next.config.on_message) {
+                    updates.send_replace(script.clone());
+                }
                 snapshot.health.retire();
                 snapshot = next;
                 current.send_replace(snapshot.clone());
@@ -1094,6 +1157,11 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                 );
                 metrics.reloads.inc();
                 eprintln!("rift: configuration reloaded");
+                crate::messaging_runtime::emit(
+                    &snapshot.messaging,
+                    "rift.events.reload",
+                    serde_json::json!({"revision":snapshot.revision}),
+                );
                 Ok(snapshot.revision.clone())
             }
             Err(error) => {
@@ -1127,6 +1195,18 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         }));
     }
     stop.send_replace(true);
+    crate::messaging_runtime::emit(
+        &snapshot.messaging,
+        "rift.events.lifecycle",
+        serde_json::json!({"state":"draining"}),
+    );
+    if let Some(task) = message_task {
+        task.abort();
+        let _ = task.await;
+    }
+    if let Some(server) = messaging_server {
+        server.shutdown().await;
+    }
     snapshot.health.retire();
     if let Some(task) = health {
         task.abort();
