@@ -144,6 +144,16 @@ For backward compatibility, omitted authentication/forwarding settings use
 backends see Rift's IP. Use that configuration only where unauthenticated identities
 are acceptable. Backends requesting their own encryption are rejected in both modes.
 
+## Authenticated extensions
+
+Lua extension API v1 adds authenticated login decisions, initial server selection,
+join/disconnect and transfer events, plus commands with UUID permission checks.
+[`examples/extensions.lua`](examples/extensions.lua) demonstrates a FIFO survival
+queue and a staff-only server. Read the [extension API contract](docs/extensions.md)
+for callback ordering, cancellation, deadlines, state ownership and reload behavior.
+Extensions require online authentication and a switchable client protocol (Java
+1.21.8 or 1.21.11); the legacy pre-handshake `on_route` hook remains available.
+
 ## Lua configuration
 
 Generate a starter with `rift init`, adapt [`examples/rift.lua`](examples/rift.lua),

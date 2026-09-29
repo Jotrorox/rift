@@ -26,6 +26,7 @@ pub struct Config {
     pub authentication: Authentication,
     pub forwarding: Option<VelocityForwarding>,
     pub on_route: Option<RouteScript>,
+    pub extensions: Option<crate::extensions::ExtensionScript>,
     pub on_http: Option<HttpScript>,
     pub on_message: Option<MessageScript>,
     pub messaging: Option<MessagingConfig>,
@@ -219,6 +220,7 @@ impl Config {
             authentication: Authentication::default(),
             forwarding: None,
             on_route: None,
+            extensions: None,
             on_http: None,
             on_message: None,
             messaging: None,
@@ -276,6 +278,7 @@ impl Config {
                     "authentication",
                     "forwarding",
                     "on_route",
+                    "extensions",
                     "on_http",
                     "on_message",
                     "messaging",
@@ -332,6 +335,8 @@ impl Config {
                     86_400_000,
                 )? as u64);
             }
+            let extensions = crate::extensions::ExtensionScript::parse(&root, source, name)
+                .map_err(|e| e.to_string())?;
             let on_route = match root
                 .raw_get::<Value>("on_route")
                 .map_err(|e| e.to_string())?
@@ -507,6 +512,7 @@ impl Config {
                 authentication,
                 forwarding,
                 on_route,
+                extensions,
                 on_http,
                 on_message,
                 messaging,
@@ -533,6 +539,19 @@ impl Config {
     }
 
     pub fn validate(&self) -> io::Result<()> {
+        if let Some(extensions) = &self.extensions {
+            if !self.authentication.online_mode {
+                return Err(invalid("extensions v1 requires authentication.online_mode"));
+            }
+            for (backend, capacity) in &extensions.queues {
+                if !(1..=100_000).contains(capacity) {
+                    return Err(invalid("extensions.queues: capacity must be 1..=100000"));
+                }
+                if !self.backends.contains_key(backend) {
+                    return Err(invalid("extensions.queues: unknown backend"));
+                }
+            }
+        }
         if let Some(messaging) = &self.messaging {
             messaging.validate().map_err(invalid)?;
         }
