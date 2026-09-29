@@ -720,9 +720,14 @@ fn open_state(directory: PathBuf, config: StreamConfig) -> Result<State> {
         valid_length += 8 + frame_length as u64;
     }
     if valid_length != length {
-        file.set_len(valid_length)?;
+        // Windows append handles cannot truncate. Keep the normal writer in
+        // append mode and recover through a separate handle under the same lock.
+        let recovery = OpenOptions::new()
+            .write(true)
+            .open(directory.join("stream.log"))?;
+        recovery.set_len(valid_length)?;
         if state.config.sync_on_write {
-            file.sync_all()?;
+            recovery.sync_all()?;
         }
     }
     // Smaller retention settings on reopen also remove obsolete pending state.
@@ -1121,12 +1126,27 @@ mod tests {
         file.write_all(&100u32.to_le_bytes()).unwrap();
         file.write_all(&[0; 9]).unwrap();
         drop(file);
-        let reopened = Stream::open(&directory.0, config).await.unwrap();
+        let reopened = Stream::open(&directory.0, config.clone()).await.unwrap();
         assert_eq!(
             reopened.replay(1, 10).await.unwrap()[0].message.payload,
             "saved"
         );
         assert_eq!(std::fs::metadata(&log).unwrap().len(), valid_length);
+        assert_eq!(
+            reopened
+                .publish("x", None, Bytes::from_static(b"after recovery"))
+                .await
+                .unwrap()
+                .sequence,
+            2
+        );
+        drop(reopened);
+        let reopened = Stream::open(&directory.0, config).await.unwrap();
+        let records = reopened.replay(1, 10).await.unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].message.payload, "saved");
+        assert_eq!(records[1].sequence, 2);
+        assert_eq!(records[1].message.payload, "after recovery");
     }
 
     #[tokio::test]
