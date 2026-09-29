@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 import io
 import socket
+import sys
 import unittest
 from unittest.mock import patch
 
@@ -95,6 +96,50 @@ class BurstTests(unittest.IsolatedAsyncioTestCase):
         gate = asyncio.Event()
         gate.set()
         return await bench.setup_attempt(port, scenario, timeout, 123, gate)
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux loopback TCP window regression")
+    async def test_throughput_with_receive_window_smaller_than_loopback_mss(self):
+        port = await self.start_server(bench.fixture_client)
+        open_connection = asyncio.open_connection
+
+        async def constrained_connection(*args, **kwargs):
+            reader, writer = await open_connection(*args, **kwargs)
+            # Shrink after the SYN, preserving the negotiated MSS. Linux's
+            # default loopback MSS can exceed this entire receive window.
+            writer.get_extra_info("socket").setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8192)
+            return reader, writer
+
+        size = 2 * bench.MIB + 17
+        with patch("bench.asyncio.open_connection", side_effect=constrained_connection):
+            self.assertEqual(await asyncio.wait_for(bench.transfer_async(port, size), 10), size)
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux TCP MSS negotiation")
+    async def test_fixture_caps_both_directions_for_an_untuned_client(self):
+        accepted_mss = []
+
+        async def fixture(reader, writer):
+            accepted_mss.append(writer.get_extra_info("socket").getsockopt(
+                socket.IPPROTO_TCP, socket.TCP_MAXSEG))
+            await bench.fixture_client(reader, writer)
+
+        server = await bench.fixture_server(fixture)
+        self.addAsyncCleanup(server.wait_closed)
+        self.addCleanup(server.close)
+        port = server.sockets[0].getsockname()[1]
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        try:
+            client_mss = writer.get_extra_info("socket").getsockopt(socket.IPPROTO_TCP, socket.TCP_MAXSEG)
+            name = bench.new_player_name()
+            writer.write(bench.handshake(port) + bench.login_start(name))
+            await writer.drain()
+            self.assertEqual(bench.packet(await bench.read_frame(reader)), bench.login_success(name))
+            for mss in [client_mss, *accepted_mss]:
+                self.assertGreater(mss, 0)
+                self.assertLessEqual(mss, bench.LOOPBACK_MSS)
+            self.assertEqual(len(accepted_mss), 1)
+        finally:
+            writer.close()
+            await writer.wait_closed()
 
     async def test_valid_handshake_and_probe_echo_under_a_partial_final_burst(self):
         port = await self.start_server(bench.fixture_client)
