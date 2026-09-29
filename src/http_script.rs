@@ -66,13 +66,29 @@ impl HttpScript {
     /// Run with process-wide admission control on a blocking worker. `None`
     /// means that the script declined the request (HTTP 404 at the adapter).
     pub async fn execute(&self, request: HttpRequest) -> Result<Option<HttpResponse>, HttpError> {
+        self.execute_inner(request, None).await
+    }
+
+    pub async fn execute_with_messaging(
+        &self,
+        request: HttpRequest,
+        broker: crate::messaging::Broker,
+    ) -> Result<Option<HttpResponse>, HttpError> {
+        self.execute_inner(request, Some(broker)).await
+    }
+
+    async fn execute_inner(
+        &self,
+        request: HttpRequest,
+        messaging: Option<crate::messaging::Broker>,
+    ) -> Result<Option<HttpResponse>, HttpError> {
         let permit = SLOTS.try_acquire().map_err(|_| HttpError::Busy)?;
         let script = self.clone();
         let deadline = Instant::now() + crate::script::EXECUTION_TIMEOUT;
         let task = spawn_blocking(move || {
             // Retain capacity until the VM stops, even after caller cancellation.
             let _permit = permit;
-            script.evaluate(&request, deadline)
+            script.evaluate_inner(&request, deadline, messaging)
         });
         timeout(crate::script::EXECUTION_TIMEOUT, task)
             .await
@@ -87,6 +103,15 @@ impl HttpScript {
         request: &HttpRequest,
         deadline: Instant,
     ) -> Result<Option<HttpResponse>, HttpError> {
+        self.evaluate_inner(request, deadline, None)
+    }
+
+    fn evaluate_inner(
+        &self,
+        request: &HttpRequest,
+        deadline: Instant,
+        messaging: Option<crate::messaging::Broker>,
+    ) -> Result<Option<HttpResponse>, HttpError> {
         let run = || -> mlua::Result<Option<HttpResponse>> {
             let input_bytes = request.method.len()
                 + request.path.len()
@@ -100,6 +125,7 @@ impl HttpScript {
                 return Err(mlua::Error::runtime("HTTP request exceeds 256 KiB limit"));
             }
             let (lua, root) = crate::script::load(&self.source, &self.name, deadline)?;
+            crate::script::install_messaging(&lua, messaging, deadline)?;
             let Value::Table(root) = root else {
                 return Err(mlua::Error::runtime("configuration must return a table"));
             };

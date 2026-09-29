@@ -167,3 +167,18 @@ async fn async_execution_rejects_overload_and_uses_shared_capacity() {
         "hello"
     );
 }
+
+#[tokio::test]
+async fn http_extensions_publish_binary_payloads_and_reply_subjects() {
+    let broker = crate::messaging::Broker::default();
+    let mut subscription = broker.subscribe("http.requests", None).unwrap();
+    let response = script("local sent = rift.publish('http.requests', string.char(0, 255) .. req.body, 'http.reply'); assert(sent.delivered == 1); return { status = 202, body = 'accepted' }")
+        .execute_with_messaging(request(), broker).await.unwrap().unwrap();
+    assert_eq!(response.status, 202);
+    let message = tokio::time::timeout(Duration::from_secs(1), subscription.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&message.payload[..], b"\0\xffhello");
+    assert_eq!(message.reply.as_deref(), Some("http.reply"));
+}
