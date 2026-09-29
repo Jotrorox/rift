@@ -18,7 +18,10 @@ class PackageTests(unittest.TestCase):
                     "examples/rift.lua", "examples/routing.lua",
                     "examples/network.lua", "examples/rift.service", "examples/Dockerfile",
                     "examples/compose.yaml", "docs/operations.md",
-                    "docs/pilot.md", "docs/pilot-results.json"}
+                    "docs/pilot.md", "docs/pilot-results.json", "docs/lua.md",
+                    "examples/modular/rift.lua", "examples/modular/lua/config/network.lua",
+                    "examples/modular/plugins/greeting/init.lua",
+                    "examples/modular/plugins/greeting/lua/greeting/init.lua"}
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             for windows in [False, True]:

@@ -23,7 +23,7 @@ def contents(root, binary):
     return [(binary, binary.name)] + [
         (path, path.relative_to(root).as_posix())
         for path in [root / "README.md", root / "LICENSE", root / "THIRD_PARTY_NOTICES",
-                     *sorted((root / "examples").glob("*.lua")),
+                     *sorted((root / "examples").rglob("*.lua")),
                      root / "examples/rift.service",
                      root / "examples/Dockerfile",
                      root / "examples/compose.yaml",
@@ -71,7 +71,9 @@ def smoke_test(archive, windows, version):
                                 encoding="utf-8", timeout=10)
         if result.stdout != expected_license or result.stderr:
             raise RuntimeError("unexpected packaged license output")
-        for config in sorted((directory / "examples").glob("*.lua")):
+        configs = [*sorted((directory / "examples").glob("*.lua")),
+                   directory / "examples/modular/rift.lua"]
+        for config in configs:
             subprocess.run([str(binary), "--check", str(config)],
                            cwd=directory, check=True, timeout=10)
         generated = directory / "generated.lua"

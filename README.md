@@ -95,11 +95,11 @@ prevent-proxy-connections=false
 
 Rift can authenticate licensed Java accounts and forward their existing UUID,
 name, skin properties and player IP to Paper using Velocity modern forwarding.
-Enable both settings in the returned Lua configuration table:
+Enable both settings in your Lua script:
 
 ```lua
-authentication = { online_mode = true, timeout_ms = 10000 },
-forwarding = { mode = "velocity", secret_env = "RIFT_FORWARDING_SECRET" },
+rift.config.authentication = { online_mode = true, timeout_ms = 10000 }
+rift.config.forwarding = { mode = "velocity", secret_env = "RIFT_FORWARDING_SECRET" }
 ```
 
 Set `RIFT_FORWARDING_SECRET` in Rift's process environment to your existing
@@ -163,30 +163,39 @@ or select a file explicitly:
 ./target/release/rift --config examples/rift.lua
 ```
 
-The file is a Lua script returning a table. For example, two listeners can route to
-different servers:
+Write an ordinary Lua script using `rift.config`; there is no outer return table:
 
 ```lua
-return {
-    listeners = {
-        public = "0.0.0.0:25565",
-        creative = "0.0.0.0:25567",
-    },
-    backends = {
-        lobby = "127.0.0.1:25566",
-        creative = "127.0.0.1:25568",
-    },
-    routes = {
-        public = "lobby",
-        creative = "creative",
-    },
-    limits = {
-        max_connections = 1024,
-        connect_timeout_ms = 5000,
-        buffer_size = 32 * 1024,
-    },
+local config = require("rift.config")
+
+config.listeners = {
+    public = "0.0.0.0:25565",
+    creative = "0.0.0.0:25567",
 }
+config.backends = {
+    lobby = "127.0.0.1:25566",
+    creative = "127.0.0.1:25568",
+}
+config.routes = { public = "lobby", creative = "creative" }
+config.limits.max_connections = 1024
+
+-- Split settings into lua/config/services.lua:
+-- require("config.services")
+-- Load plugins/greeting/init.lua and its lua/ modules:
+-- rift.plugin("greeting")
 ```
+
+Use `require("name")` for local modules and `rift.plugin("name")` for folder-based
+plugins. `rift.on(event, callback)` composes callbacks in registration order, and
+`rift.command(name, definition)` registers authenticated commands. See the
+[Lua API and folder layout](docs/lua.md) and [modular example](examples/modular/rift.lua).
+Paths resolve beside the configuration file. Modules and plugins are snapshotted
+on load/reload along with the entry script.
+
+`rift.setup({ ... })` also accepts configuration fields. Existing `return { ... }`
+configurations remain supported. The field fragments below can go inside a
+`rift.setup({ ... })` call or a legacy returned table; in a script, assign each
+field through `rift.config`.
 
 `listeners`, `backends`, and `routes` are required, nonempty tables with string
 names. Listeners require IP literals with ports; backends also accept DNS
@@ -625,11 +634,11 @@ For example, filter a combined stderr log with
 
 ## Routing hook
 
-Add `on_route` to the returned configuration table. Rift calls it once after TCP
+Register a `route` callback (or assign `rift.config.on_route`). Rift calls it once after TCP
 accept and before connecting to any backend or reading client bytes:
 
 ```lua
-on_route = function(connection)
+rift.on("route", function(connection)
     if connection.peer_ip == "192.0.2.10" then
         return { reject = true, reason = "Access denied" }
     end
@@ -637,7 +646,7 @@ on_route = function(connection)
         return { backend = "creative" }
     end
     return nil -- Use routes[connection.listener].
-end,
+end)
 ```
 
 [`examples/routing.lua`](examples/routing.lua) is a complete configuration. Every
@@ -680,14 +689,14 @@ usual connection timeout.
 Each invocation creates a fresh Lua state and re-evaluates the active configuration
 source snapshot, including its top-level code, before calling the hook. Globals and
 closure upvalues are private to that invocation and never persist across clients.
-The file is read again only on an explicit reload. Keep top-level initialization small and deterministic.
+The entry file and local modules are read again only on an explicit reload. Keep top-level initialization small and deterministic.
 Independent calls can run concurrently, and their completion order is unspecified.
 
 The initial limits are fixed in the implementation:
 
 | Resource | Limit |
 | --- | --- |
-| Script source | 256 KiB |
+| Entry script and all local Lua module/plugin sources combined | 256 KiB |
 | Lua allocator per state | 8 MiB |
 | Lua instructions per evaluation, including initialization and hook | 100,000, checked every 1,000 instructions |
 | Routing deadline, including blocking-worker scheduling and initialization | 50 ms |
@@ -708,8 +717,8 @@ environment for trusted scripts, not process isolation for hostile code.
 Both startup and routing expose basic Lua operations (`assert`, `error`, `ipairs`,
 `next`, `pairs`, `select`, `tonumber`, `tostring`, `type`, `unpack`), `math`,
 `string.byte/char/len/lower/rep/reverse/sub/upper`, and
-`table.concat/insert/remove/maxn`, plus `_G` and `_VERSION`. File/process I/O,
-module and code loading, FFI, JIT controls, debug access, coroutines,
+`table.concat/insert/remove/maxn`, plus `_G`, `_VERSION`, `rift` and snapshot-backed `require`. File/process I/O,
+arbitrary code loading, native modules, FFI, JIT controls, debug access, coroutines,
 `pcall`/`xpcall`, metatable manipulation and finalizers are unavailable. Native
 pattern matching and sorting are also omitted to avoid work outside instruction
 hooks. `table.insert` runs in Lua under the instruction budget and requires a

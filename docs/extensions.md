@@ -7,7 +7,9 @@ It uses the existing Paper/Velocity forwarding setup in
 examples/extensions.lua`, then start with `RIFT_FORWARDING_SECRET` set. Clients
 must use one of Rift's switchable protocols: Java 1.21.8 or 1.21.11.
 
-Add `extensions = { api_version = 1, ... }` to the returned configuration table.
+Set `rift.config.extensions = { api_version = 1, ... }`, or use
+`rift.on(event, callback)` and `rift.command(name, definition)` from a script or
+[folder-based plugin](lua.md). Existing returned configuration tables still work.
 Unknown versions, fields, invalid registrations and missing online authentication
 reject the configuration. The existing `on_route`, `on_http` and `on_message`
 interfaces remain available. `on_route` still runs before the handshake and has
@@ -58,8 +60,10 @@ For a new player the order is:
    Login Success may be visible before Join Game; the join hook waits for the world.
 
 Hooks execute serially within a session. Different sessions can run concurrently;
-there is no global event order. There is one callback per lifecycle name, not a
-plugin priority chain. Compose policies explicitly inside that callback.
+there is no global event order. A directly configured callback runs first,
+followed by `rift.on` handlers in registration order. The first non-nil result
+ends that event chain; observer callbacks must return nil. All handlers share
+one execution budget.
 
 Every transfer entry point uses `before_transfer`: `/server`, `/hub`, extension
 commands, queue admissions, outage recovery and administration (including its
@@ -96,7 +100,7 @@ not promise a detailed transport failure diagnosis.
 
 Each callback has a 50 ms wall deadline including blocking-worker scheduling and
 configuration evaluation, 100,000 Lua instructions, an 8 MiB VM limit and a
-256 KiB source limit. At most four extension jobs execute or wait for workers
+256 KiB combined entry/module/plugin source limit. At most four extension jobs execute or wait for workers
 per process, shared across reload generations. Saturation fails immediately.
 Workers retain permits until execution actually stops, including after caller
 cancellation. A cancelled callback may finish and publish within its remaining
@@ -107,9 +111,10 @@ worker limits.
 
 Every invocation evaluates the source in a fresh restricted VM. Globals,
 upvalues and context edits disappear when it finishes. Top-level configuration
-code must therefore be deterministic and free of runtime side effects. I/O,
-module loading, coroutine scheduling, arbitrary native calls and timers are
-unavailable. `rift.publish` is installed only after source evaluation and uses
+code must therefore be deterministic and free of runtime side effects. Local
+modules and plugins load from the saved snapshot. I/O, dynamic/native module
+loading, coroutine scheduling, arbitrary native calls and timers are unavailable.
+`rift.publish` becomes available only after source evaluation and uses
 the existing bounded, nonblocking broker API. Publications already delivered
 before a callback fails are not rolled back.
 
@@ -122,7 +127,7 @@ permission lookups.
 ## Permissions and commands
 
 ```lua
-extensions = {
+rift.config.extensions = {
     api_version = 1,
     permissions = {
         ["*"] = { ["network.queue"] = true },

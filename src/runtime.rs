@@ -1098,7 +1098,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     let (config, document) = if let Some(path) = source.clone() {
         tokio::task::spawn_blocking(move || -> io::Result<_> {
             let text = control::read_source(&path)?;
-            let config = Config::from_lua(&text, &path.display().to_string())?;
+            let config = Config::from_lua_at(&text, &path)?;
             Ok((config, Some(text)))
         })
         .await

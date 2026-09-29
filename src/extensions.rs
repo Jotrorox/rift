@@ -21,8 +21,7 @@ const HOOKS: &[&str] = &[
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtensionScript {
-    source: Arc<str>,
-    name: Arc<str>,
+    source: script::ScriptSource,
     hooks: BTreeSet<String>,
     commands: BTreeMap<String, String>,
     permissions: BTreeMap<String, BTreeSet<String>>,
@@ -51,7 +50,7 @@ fn token(value: &str) -> bool {
         })
 }
 impl ExtensionScript {
-    pub(crate) fn parse(root: &Table, source: &str, name: &str) -> mlua::Result<Option<Self>> {
+    pub(crate) fn parse(root: &Table, source: &script::ScriptSource) -> mlua::Result<Option<Self>> {
         let value: Value = root.raw_get("extensions")?;
         if value.is_nil() {
             return Ok(None);
@@ -153,8 +152,7 @@ impl ExtensionScript {
             }
         }
         Ok(Some(Self {
-            source: source.into(),
-            name: name.into(),
+            source: source.clone(),
             hooks,
             commands,
             permissions,
@@ -176,7 +174,7 @@ impl ExtensionScript {
         broker: Broker,
     ) -> io::Result<Action> {
         let run = || -> mlua::Result<Action> {
-            let (lua, root) = script::load(&self.source, &self.name, deadline)?;
+            let (lua, root) = script::load(&self.source, deadline)?;
             script::install_messaging(&lua, Some(broker), deadline)?;
             let Value::Table(root) = root else {
                 return Err(mlua::Error::runtime("configuration must return a table"));

@@ -256,18 +256,29 @@ impl Config {
         read().map_err(|error| {
             io::Error::new(error.kind(), format!("{}: {error}", path.display()))
         })?;
-        Self::from_lua(&source, &path.display().to_string())
+        Self::from_lua_at(&source, path)
     }
 
+    /// Evaluate an in-memory script without access to local modules or plugins.
     pub fn from_lua(source: &str, name: &str) -> io::Result<Self> {
+        Self::from_source(crate::script::ScriptSource::new(source, name))
+    }
+
+    /// Evaluate edited source with modules relative to its configuration path.
+    /// The entry file need not exist yet (for validation and atomic saves).
+    pub fn from_lua_at(source: &str, path: &Path) -> io::Result<Self> {
+        let source = crate::script::ScriptSource::from_path(source, path)
+            .map_err(|error| invalid(format!("{}: {error}", path.display())))?;
+        Self::from_source(source)
+    }
+
+    fn from_source(source: crate::script::ScriptSource) -> io::Result<Self> {
+        let name = source.entry.name.as_ref();
         let parse = || -> Result<Self, String> {
-            let (_lua, value) = crate::script::load(
-                source,
-                name,
-                Instant::now() + crate::script::EXECUTION_TIMEOUT,
-            )
-            .map_err(|e| e.to_string())?;
-            let root = table(value, "configuration (return a table)")?;
+            let (_lua, value) =
+                crate::script::load(&source, Instant::now() + crate::script::EXECUTION_TIMEOUT)
+                    .map_err(|e| e.to_string())?;
+            let root = table(value, "configuration")?;
             fields(
                 &root,
                 &[
@@ -335,14 +346,14 @@ impl Config {
                     86_400_000,
                 )? as u64);
             }
-            let extensions = crate::extensions::ExtensionScript::parse(&root, source, name)
+            let extensions = crate::extensions::ExtensionScript::parse(&root, &source)
                 .map_err(|e| e.to_string())?;
             let on_route = match root
                 .raw_get::<Value>("on_route")
                 .map_err(|e| e.to_string())?
             {
                 Value::Nil => None,
-                Value::Function(_) => Some(RouteScript::new(source, name)),
+                Value::Function(_) => Some(RouteScript::new(&source)),
                 _ => return Err("config.on_route: expected a function".into()),
             };
             let on_http = match root
@@ -350,7 +361,7 @@ impl Config {
                 .map_err(|e| e.to_string())?
             {
                 Value::Nil => None,
-                Value::Function(_) => Some(HttpScript::new(source, name)),
+                Value::Function(_) => Some(HttpScript::new(&source)),
                 _ => return Err("config.on_http: expected a function".into()),
             };
             let connection_rate_limit = rate_limit(&root, "rate_limit")?;
@@ -359,7 +370,7 @@ impl Config {
                 .map_err(|e| e.to_string())?
             {
                 Value::Nil => None,
-                Value::Function(_) => Some(MessageScript::new(source, name)),
+                Value::Function(_) => Some(MessageScript::new(&source)),
                 _ => return Err("config.on_message: expected a function".into()),
             };
             let messaging = messaging::parse(&root)?;

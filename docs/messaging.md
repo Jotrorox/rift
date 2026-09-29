@@ -76,7 +76,8 @@ messaging = {
 }
 ```
 
-This is a field inside Rift's returned configuration table. Tokens must contain
+Set this field as `rift.config.messaging = { ... }` in a script, or inside a
+legacy returned configuration table. Tokens must contain
 32–1024 bytes without control characters. An external principal needs explicit
 publish/subscribe grants. Control subjects additionally require `control = true`;
 external clients cannot forge `rift.events` publications. Certificate and storage

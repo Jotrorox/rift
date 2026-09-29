@@ -124,3 +124,8 @@ Rust embedders inject a broker with `Router::with_messaging` and
 synchronously, `script_updates()` returns a watch sender for hot reload, and
 `run()` drives bounded asynchronous workers. Dropping the run task closes its
 subscriptions; already-running Lua jobs finish within their sandbox budget.
+
+Local Lua modules and folder-based plugins can register this callback with
+`rift.on("message", function(message) ... end)`. Multiple message handlers run
+in registration order. See the [Lua API](lua.md) and
+[modular example](../examples/modular/rift.lua).
