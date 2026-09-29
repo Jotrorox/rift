@@ -118,7 +118,7 @@ Keep `server.properties`'s `online-mode=false` and `spigot.yml`'s
 `settings.bungeecord=false`. Restart Paper after changing these settings. This
 matches [Paper's Velocity forwarding setup](https://docs.papermc.io/velocity/player-information-forwarding/).
 Backend ports must remain private. See [`examples/online.lua`](examples/online.lua)
-for a two-Paper network; switching uses Minecraft **1.21.11**.
+for a two-Paper network; switching supports Minecraft **1.21.8 and 1.21.11**.
 
 Rift owns client encryption and verifies each login with Mojang's HTTPS session
 service before contacting a backend. It ignores the client's claimed UUID and
@@ -364,7 +364,7 @@ rift admin shutdown
 Use a `connection_id` from `status` for transfers; status also lists backend health
 and draining state. The default endpoint is `127.0.0.1:9091`; select another using
 `rift admin --address 127.0.0.1:9092 status`. Transfer requires a settled online
-player on Minecraft 1.21.11 (protocol 774), a configured eligible target and
+player on Minecraft 1.21.8 (protocol 772) or 1.21.11 (protocol 774), a configured eligible target and
 matching UUID/name at backend login. Both the session's retained network access
 rules and the current administrator-request configuration must permit the target. Unsupported clients and invalid targets stay attached to their original
 backend. Once transfer has altered client protocol state, failure disconnects
@@ -413,8 +413,8 @@ honored; it never triggers automatic fallback.
 ### A lobby and survival network
 
 Use [`examples/online.lua`](examples/online.lua) for an authenticated Paper network,
-or [`examples/two-server.lua`](examples/two-server.lua) for offline fixtures, with **Minecraft 1.21.11
-(protocol 774)** clients and backends. Other supported protocols retain ordinary
+or [`examples/two-server.lua`](examples/two-server.lua) for offline fixtures, with **Minecraft 1.21.8
+(protocol 772) or 1.21.11 (protocol 774)** clients and backends of the same version. Other supported protocols retain ordinary
 routing, initial fallback and access checks, but cannot switch within a session.
 Both backends need `online-mode=false`. The online example uses Velocity modern
 forwarding as described above. The offline example requires forwarding disabled
@@ -463,7 +463,7 @@ its candidates, or a client transition fails, Rift disconnects with a reason.
 A replacement logs in before the client leaves its current world. Rift verifies
 the same UUID/name, re-enters configuration, forwards the replacement's registries
 and Join Game, and retains the frontend socket and compression settings. The
-1.21.11 client creates a fresh world, scoreboard and player list, resets its signed
+client creates a fresh world, scoreboard and player list, resets its signed
 chat chain and creates a new chat session through this sequence. Rift does not
 replay old chat sessions or strip message signatures. Cached client settings and
 brand are sent to the new backend, and the old resource-pack stack is cleared.
@@ -749,9 +749,13 @@ python3 tests/bench.py --report target/benchmark.json
 
 The network wire test exercises lobby/survival/lobby and recovery on one client
 socket, access denials, explicit bans, configuration, independent compression,
-world entry and fresh chat sessions. The real network test runs two pinned vanilla
-1.21.11 servers, checks fresh world/chunk/teleport data and chat after each switch,
-kills survival to verify recovery, and checks actual login/play bans.
+world entry and fresh chat sessions. The real network test runs a pair of pinned vanilla
+servers for **each switchable version (1.21.8 and 1.21.11)**, checks fresh world,
+chunk, teleport and command-tree data plus chat after each switch, kills survival
+to verify recovery, and checks actual login/play bans. Both versions run by default
+and in CI; `--server vanilla-1.21.8` selects just the additional version.
+The fixture matrix in `tests/servers.json` is checked against the Rust switching
+capabilities. Adding relay support alone never enables switching.
 
 The protocol wire test uses independent Python/zlib peers across ten protocol versions and
 four compression thresholds, without downloads or a Minecraft server. The control
@@ -768,7 +772,7 @@ CI passes this flag for its disposable fixtures. Servers bind only to loopback,
 use offline mode, and stop with their proxies when testing finishes.
 
 The harness pins the [official Mojang server](https://www.minecraft.net/en-us/download/server)
-at **1.21.11** and [Paper](https://docs.papermc.io/misc/downloads-service/) at
+at **1.21.8 and 1.21.11** and [Paper](https://docs.papermc.io/misc/downloads-service/) at
 **1.21.11 build 132**, plus [Pumpkin **0.2.0+26.3-26.51**](https://github.com/Pumpkin-MC/Pumpkin/releases/tag/0.2.0%2B26.3-26.51)
 for Minecraft **26.3**. Versions, URLs and publisher checksums live in
 [`tests/servers.json`](tests/servers.json); every download and cache hit is verified.

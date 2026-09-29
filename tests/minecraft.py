@@ -30,6 +30,8 @@ SERVERS = json.loads((ROOT / "tests" / "servers.json").read_text())
 # change must fail visibly, not silently reduce the test to a status check.
 # 777: Pumpkin's pinned crates/pumpkin-data/src/generated/packet.rs.
 PROTOCOLS = {
+    772: dict(known_packs=0x0E, join=0x2B, position=0x41, chunk=0x27,
+              keepalive=0x26, keepalive_reply=0x1B, loaded=0x2B, batch_reply=0x0A),
     774: dict(known_packs=0x0E, join=0x30, position=0x46, chunk=0x2C,
               keepalive=0x2B, keepalive_reply=0x1B, loaded=0x2B, batch_reply=0x0A),
     777: dict(known_packs=0x0F, join=0x32, position=0x49, chunk=0x2E,

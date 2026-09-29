@@ -1,7 +1,8 @@
 # Network protocol contract
 
-Network commands and backend replacement are pinned to Java 1.21.11, protocol
-774. Other accepted protocols retain ordinary forwarding. With online
+Network commands and backend replacement support Java **1.21.8 (772)** and
+**1.21.11 (774)**. Clients and backends must use the same version; Rift does not
+translate protocols. Other accepted protocols retain ordinary forwarding. With online
 authentication enabled, Rift encrypts the client connection, verifies the Mojang
 session and retains its UUID, canonical name and signed profile properties.
 Paper backends run `online-mode=false` with Velocity modern forwarding enabled
@@ -10,6 +11,23 @@ The backend login exchange receives the same verified profile and socket peer IP
 on initial login and every replacement. Authentication service failures never
 fall back to offline identities. Omitted security settings retain the original
 offline mode, which requires forwarding disabled and `enforce-secure-profile=false`.
+
+Switching is an explicit capability in `src/protocol/switching.rs`, separate from
+relay and configuration-state support. These two versions share the Join Game,
+signed-command checksum and Brigadier parser layouts; clientbound Join Game and
+system-chat IDs differ. Session code selects the capability for command handling,
+world validation, client information/brand replay, resource-pack removal and
+bundle tracking.
+
+Every capability must have a pinned `switchable` fixture in `tests/servers.json`.
+A Rust test checks the two sets agree. `tests/network_minecraft.py --accept-eula`
+and CI run the entire fixture set through lobby → survival → lobby, target-ban
+rollback and recovery after killing survival. Each transition checks fresh world,
+chunks, teleport, command tree, game mode, border and accepted backend chat on the
+same compressed frontend socket. Expansion requires an explicit layout review,
+independent test-client mapping and a passing real-server switch/recovery run.
+These offline fixtures do not replace the authenticated Paper/client procedure
+in `tests/MANUAL_ONLINE.md`, which remains pinned to 1.21.11.
 
 A replacement performs an independent backend login before changing the client.
 The old backend continues processing packets during this preflight. Explicit
@@ -79,7 +97,8 @@ Implementation references checked for this change:
   `ClientConfigurationPacketListenerImpl.handleConfigurationFinished`, and
   `LastSeenMessages.computeChecksum` / `Update.verifyChecksum`. Methods were
   inspected using `javap -c -private`; no decompiled Mojang code is included.
-- [1.21.11 packet schema](https://github.com/PrismarineJS/minecraft-data/blob/master/data/pc/1.21.11/protocol.json):
+- [1.21.8 packet schema](https://github.com/PrismarineJS/minecraft-data/blob/master/data/pc/1.21.8/protocol.json)
+  and [1.21.11 packet schema](https://github.com/PrismarineJS/minecraft-data/blob/master/data/pc/1.21.11/protocol.json):
   control IDs, SpawnInfo, command-tree argument properties and chat checksums.
 - [Velocity ClientPlaySessionHandler](https://github.com/PaperMC/Velocity/blob/dev/3.0.0/proxy/src/main/java/com/velocitypowered/proxy/connection/client/ClientPlaySessionHandler.java):
   independent confirmation that configuration resets world/tab/bossbar state.
