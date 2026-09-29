@@ -216,14 +216,15 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
     }
 
     pub fn switch_supported(&self) -> bool {
-        self.handshake.protocol == 774
+        self.version()
+            .is_ok_and(ProtocolVersion::supports_switching)
     }
 
     pub fn enable_network(&mut self) -> io::Result<()> {
         if !self.switch_supported() {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "Network switching requires Minecraft 1.21.11.",
+                "Network switching is unavailable for this Minecraft version.",
             ));
         }
         self.network = true;
@@ -360,7 +361,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         if replacing && !self.can_switch() {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "Backend switching requires a joined Minecraft 1.21.11 player.",
+                "Backend switching requires a joined player on a switchable Minecraft version.",
             ));
         }
         if !replacing && (self.backend.is_some() || !self.client.state.settled(State::Login)) {
@@ -420,7 +421,10 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             // A failed backend may have left an unfinished bundle on the wire.
             // Close it before the unbundled configuration transition.
             if self.bundle_open {
-                self.send_client(&Packet::empty(0)).await?;
+                self.send_client(&Packet::empty(
+                    version.switching().unwrap().bundle_delimiter,
+                ))
+                .await?;
                 self.bundle_open = false;
             }
             self.send_client(&Packet::empty(version.start_configuration().unwrap()))
@@ -451,7 +455,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             }
             // New play listener + Join Game reset entities, chunks, scoreboard,
             // tab list, bossbars, signed-message encoder and last-seen tracker.
-            // Mojang 1.21.11 ClientPacketListener.handleConfigurationStart /
+            // Supported clients: ClientPacketListener.handleConfigurationStart /
             // handleLogin; ClientConfigurationPacketListenerImpl.finish.
             self.joined = false;
             if let Some(settings) = &self.client_information {
@@ -462,7 +466,11 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             }
             // Resource packs are common-listener state and survive a fresh play
             // listener. Pop the old server's stack before new configuration.
-            self.send_client(&Packet::new(0x08, vec![0])).await?;
+            self.send_client(&Packet::new(
+                version.switching().unwrap().config_pack_pop,
+                vec![0],
+            ))
+            .await?;
         }
         self.backend = Some(backend);
         self.backend_error = None;
@@ -618,19 +626,18 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
     fn remember_client_packet(&mut self, state: State, packet: &Packet) -> io::Result<()> {
         // Administrator transfers also need client options, even when player
         // commands are disabled by omitting the network configuration.
-        if !self.switch_supported() {
+        let Some(caps) = self.version()?.switching() else {
             return Ok(());
+        };
+        if (state == State::Configuration && packet.id == caps.config_information)
+            || (state == State::Play && packet.id == caps.play_information)
+        {
+            self.client_information =
+                Some(Packet::new(caps.config_information, packet.data.clone()));
         }
-        if matches!(
-            (state, packet.id),
-            (State::Configuration, 0) | (State::Play, 0x0d)
-        ) {
-            self.client_information = Some(Packet::new(0, packet.data.clone()));
-        }
-        if matches!(
-            (state, packet.id),
-            (State::Configuration, 2) | (State::Play, 0x15)
-        ) {
+        if (state == State::Configuration && packet.id == caps.config_payload)
+            || (state == State::Play && packet.id == caps.play_payload)
+        {
             let mut bytes = packet.data.as_slice();
             if protocol::read_string(&mut bytes, 32767)? == "minecraft:brand" {
                 // Avoid retaining arbitrary large mod payloads across backends.
@@ -638,7 +645,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                 if !bytes.is_empty() {
                     return Err(protocol::invalid("invalid client brand"));
                 }
-                self.client_brand = Some(Packet::new(2, packet.data.clone()));
+                self.client_brand = Some(Packet::new(caps.config_payload, packet.data.clone()));
             }
         }
         Ok(())
@@ -735,7 +742,8 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                     if self.network
                         && phase == State::Play
                         && self.joined
-                        && let Some((command, acknowledgement)) = protocol::proxy_command(&packet)?
+                        && let Some(caps) = version.switching()
+                        && let Some((command, acknowledgement)) = caps.proxy_command(&packet)?
                     {
                         if let Some(acknowledgement) = acknowledgement {
                             backend.queue(version, Direction::Serverbound, &acknowledgement)?;
@@ -810,10 +818,10 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                                 .queue(version, Direction::Clientbound, &packet)?;
                         }
                         PacketKind::JoinGame => {
-                            let validation = protocol::validate_network_join(
-                                &packet,
-                                self.authenticated_profile.is_some(),
-                            );
+                            let validation = version
+                                .switching()
+                                .unwrap()
+                                .validate_join(&packet, self.authenticated_profile.is_some());
                             self.pending_join_valid = validation.is_ok();
                             // Opaque ordinary relays keep forwarding, but only a
                             // valid supported world can become transfer-ready.
@@ -829,13 +837,20 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                                 .queue(version, Direction::Clientbound, &packet)?;
                         }
                         _ => {
-                            let packet =
-                                if self.network && phase == State::Play && packet.id == 0x10 {
-                                    protocol::network_commands(&packet)?
-                                } else {
-                                    packet
-                                };
-                            if version.number() == 774 && phase == State::Play && packet.id == 0 {
+                            let packet = if self.network
+                                && phase == State::Play
+                                && let Some(caps) = version.switching()
+                                && packet.id == caps.commands
+                            {
+                                caps.network_commands(&packet)?
+                            } else {
+                                packet
+                            };
+                            if phase == State::Play
+                                && version
+                                    .switching()
+                                    .is_some_and(|caps| packet.id == caps.bundle_delimiter)
+                            {
                                 if !packet.data.is_empty() {
                                     return Err(protocol::invalid("invalid bundle delimiter"));
                                 }

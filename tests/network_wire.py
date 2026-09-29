@@ -19,10 +19,22 @@ import threading
 import time
 import uuid
 
-from minecraft import (Client, ROOT, process, read_varint, string, teleport_acknowledgement,
+from minecraft import (Client, PROTOCOLS, ROOT, process, read_varint, string, teleport_acknowledgement,
                        unused_port, varint, wait_ready)
 
 PROTOCOL = 774
+# Independent client mappings, shared by fake-peer and real-server acceptance.
+# No range fallback: every advertised switchable version needs its own entry.
+NETWORK_PROTOCOLS = {
+    772: dict(PROTOCOLS[772], disconnect=0x1C, start_configuration=0x6F,
+              configuration_ack=0x0F, system_chat=0x72, border=0x25,
+              payload=0x18, command=0x06, signed_command=0x07, commands=0x10,
+              chat=0x08, chat_session=0x09, batch_finished=0x0B),
+    774: dict(PROTOCOLS[774], disconnect=0x20, start_configuration=0x74,
+              configuration_ack=0x0F, system_chat=0x77, border=0x2A,
+              payload=0x18, command=0x06, signed_command=0x07, commands=0x10,
+              chat=0x08, chat_session=0x09, batch_finished=0x0B),
+}
 SETTINGS = string("en_us") + bytes([2, 0, 1, 127, 1, 0, 1, 2])
 BRAND = string("minecraft:brand") + string("rift-network-test")
 
@@ -196,8 +208,10 @@ class Backend:
 
 
 class NetworkClient(Client):
-    def __init__(self, port, name="Alice", chat=True, bootstrap=True):
-        super().__init__(port, 2, PROTOCOL)
+    def __init__(self, port, name="Alice", chat=True, bootstrap=True, protocol=PROTOCOL):
+        self.protocol = protocol
+        self.packets = NETWORK_PROTOCOLS[protocol]
+        super().__init__(port, 2, protocol)
         self.name, self.chat = name, chat
         self.bootstrap = bootstrap
         self.phase = "login"
@@ -236,31 +250,31 @@ class NetworkClient(Client):
             elif packet_id == 8 and body == b"\0":
                 self.pack_pops += 1
         elif self.phase == "play":
-            if packet_id == 0x20:
+            if packet_id == self.packets["disconnect"]:
                 return "disconnect", body
-            if packet_id == 0x74:
+            if packet_id == self.packets["start_configuration"]:
                 assert body == b""
                 self.transitions += 1
                 # A legitimate in-flight packet must be drained before ack.
-                self.send(0x1B, struct.pack(">q", 999))
-                self.send(0x0F)
+                self.send(self.packets["keepalive_reply"], struct.pack(">q", 999))
+                self.send(self.packets["configuration_ack"])
                 self.phase = "configuration"
-            elif packet_id == 0x30:
+            elif packet_id == self.packets["join"]:
                 self.joins.append(struct.unpack(">i", body[:4])[0])
                 if self.chat:
-                    self.send(0x09, chat_session(len(self.joins)))
-            elif packet_id == 0x77:
+                    self.send(self.packets["chat_session"], chat_session(len(self.joins)))
+            elif packet_id == self.packets["system_chat"]:
                 self.messages.append(body)
                 return "message", body
-            elif packet_id == 0x18:
+            elif packet_id == self.packets["payload"]:
                 return "payload", body
-            elif packet_id == 0x2B:
-                self.send(0x1B, body)
-            elif packet_id == 0x46:
-                self.send(0, teleport_acknowledgement(body, PROTOCOL))
-                self.send(0x2B)
-            elif packet_id == 0x0B:
-                self.send(0x0A, struct.pack(">f", 10.0))
+            elif packet_id == self.packets["keepalive"]:
+                self.send(self.packets["keepalive_reply"], body)
+            elif packet_id == self.packets["position"]:
+                self.send(0, teleport_acknowledgement(body, self.protocol))
+                self.send(self.packets["loaded"])
+            elif packet_id == self.packets["batch_finished"]:
+                self.send(self.packets["batch_reply"], struct.pack(">f", 10.0))
         assert self.socket.getsockname() == self.frontend, "frontend socket replaced"
         return "packet", (packet_id, body)
 
@@ -276,8 +290,14 @@ class NetworkClient(Client):
     def joined(self, backend):
         self.until("payload", string("rift:joined") + string(backend))
 
-    def command(self, command):
-        self.send(0x06, string(command))
+    def command(self, command, signed=False):
+        if signed:
+            # Empty signature list and last-seen set; checksum for the empty set.
+            self.send(self.packets["signed_command"], string(command)
+                      + struct.pack(">qq", int(time.time() * 1000), 0)
+                      + b"\0\0\0\0\0\1")
+        else:
+            self.send(self.packets["command"], string(command))
 
     def probe(self, backend):
         payload = string("relay") + b"x" * 1024

@@ -5,7 +5,8 @@
     "url": "https://piston-data.mojang.com/v1/objects/64bb6d763bed0a9f1d632ec347938594144943ed/server.jar",
     "algorithm": "sha1",
     "checksum": "64bb6d763bed0a9f1d632ec347938594144943ed",
-    "filename": "vanilla-1.21.11.jar"
+    "filename": "vanilla-1.21.11.jar",
+    "switchable": true
   },
   "paper": {
     "version": "1.21.11-132",
@@ -23,5 +24,14 @@
     "algorithm": "sha256",
     "checksum": "68c4416ca9fbfb3f2aeb6a8ce1de0e3fb02c5a85a53c8ba59a27941d7e43d8cd",
     "filename": "pumpkin-0.2.0"
+  },
+  "vanilla-1.21.8": {
+    "version": "1.21.8",
+    "protocol": 772,
+    "switchable": true,
+    "url": "https://piston-data.mojang.com/v1/objects/6bce4ef400e4efaa63a13d5e6f6b500be969ef81/server.jar",
+    "algorithm": "sha1",
+    "checksum": "6bce4ef400e4efaa63a13d5e6f6b500be969ef81",
+    "filename": "vanilla-1.21.8.jar"
   }
 }

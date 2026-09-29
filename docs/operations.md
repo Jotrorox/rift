@@ -311,7 +311,8 @@ attachments to that backend (including fallback and explicit transfers), and
 allows eligible configured fallbacks to accept new players. Wait for the backend
 player count to reach zero or transfer supported clients before stopping it.
 
-Transfers retain the client socket on Minecraft 1.21.11 (protocol 774) while
+Transfers retain the client socket on Minecraft 1.21.8 (protocol 772) or
+1.21.11 (protocol 774) while
 attaching the target backend and checking the same UUID/name. Completion requires
 the replacement world's Join Game, with a 30-second operation cap. Other client
 versions and invalid targets are rejected without moving the player. The target

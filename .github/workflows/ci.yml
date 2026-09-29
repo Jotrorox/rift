@@ -239,7 +239,7 @@ jobs:
           --server ${{ matrix.server }}
           --compression ${{ matrix.compression }}
           --report target/minecraft/report.json
-      - name: Test lobby switching and backend crash recovery
+      - name: Test every switchable version for lobby switching and crash recovery
         if: matrix.server == 'vanilla' && matrix.compression == 'enabled'
         run: python tests/network_minecraft.py --accept-eula --binary target/release/rift
       - name: Save verified server download

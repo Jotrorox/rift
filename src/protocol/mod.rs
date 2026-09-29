@@ -4,14 +4,12 @@ mod compression;
 mod framing;
 mod packets;
 mod state;
+mod switching;
 
 pub use framing::{Codec, MAX_FRAME_SIZE, MAX_PACKET_SIZE, Packet, Reader};
 pub use packets::{Handshake, NextState, PacketKind, ProtocolVersion, disconnect, status_response};
 pub use packets::{PlayerIdentity, system_message};
-pub(crate) use packets::{
-    login_identity, network_commands, proxy_command, start_identity, success_identity,
-    validate_network_join,
-};
+pub(crate) use packets::{login_identity, start_identity, success_identity};
 pub use state::{ConnectionState, Direction, State};
 use std::io;
 

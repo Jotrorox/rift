@@ -349,61 +349,154 @@ fn malformed_compression_streams_fail_without_panics_or_unbounded_output() {
 
 #[test]
 fn network_commands_preserve_redirects_and_override_signed_backend_literals() {
-    // root -> backend "server" -> signable minecraft:message, and root -> "help".
-    let mut data = vec![4, 0, 2, 1, 3, 5, 1, 2];
-    write_string("server", &mut data);
-    data.extend([6, 0]);
-    write_string("message", &mut data);
-    data.push(20);
-    data.extend([13, 0, 1]);
-    write_string("help", &mut data); // executable literal, redirects to server
-    data.push(0);
-    let expanded = super::packets::network_commands(&Packet::new(0x10, data.clone())).unwrap();
-    let mut bytes = expanded.data.as_slice();
-    assert_eq!(read_varint(&mut bytes).unwrap(), 7);
-    assert_eq!(&bytes[..5], &[0, 3, 3, 4, 6]); // help preserved; proxy server and hub appended
-    // Backend nodes and redirect index were copied unchanged.
-    assert_eq!(&bytes[5..5 + data.len() - 6], &data[5..data.len() - 1]);
-    assert!(expanded.data.windows(6).any(|b| b == b"server"));
-    assert!(expanded.data.windows(3).any(|b| b == b"hub"));
-    assert_eq!(*expanded.data.last().unwrap(), 0);
+    for number in [772, 774] {
+        let caps = ProtocolVersion::new(number).unwrap().switching().unwrap();
+        // root -> backend "server" -> signable minecraft:message, and root -> "help".
+        let mut data = vec![4, 0, 2, 1, 3, 5, 1, 2];
+        write_string("server", &mut data);
+        data.extend([6, 0]);
+        write_string("message", &mut data);
+        data.push(20);
+        data.extend([13, 0, 1]);
+        write_string("help", &mut data); // executable literal, redirects to server
+        data.push(0);
+        let expanded = caps
+            .network_commands(&Packet::new(0x10, data.clone()))
+            .unwrap();
+        let mut bytes = expanded.data.as_slice();
+        assert_eq!(read_varint(&mut bytes).unwrap(), 7);
+        assert_eq!(&bytes[..5], &[0, 3, 3, 4, 6]); // help preserved; proxy server and hub appended
+        // Backend nodes and redirect index were copied unchanged.
+        assert_eq!(&bytes[5..5 + data.len() - 6], &data[5..data.len() - 1]);
+        assert!(expanded.data.windows(6).any(|b| b == b"server"));
+        assert!(expanded.data.windows(3).any(|b| b == b"hub"));
+        assert_eq!(*expanded.data.last().unwrap(), 0);
+    }
 }
 
 #[test]
 fn signed_proxy_command_without_signatures_preserves_acknowledgement_offset() {
-    let mut data = Vec::new();
-    write_string("hub", &mut data);
-    data.extend([0; 16]);
-    data.push(0);
-    write_varint(7, &mut data);
-    data.extend([0; 4]);
-    let (command, acknowledgement) = super::packets::proxy_command(&Packet::new(7, data))
-        .unwrap()
-        .unwrap();
-    assert_eq!(command, "hub");
-    assert_eq!(acknowledgement, Some(Packet::new(5, vec![7])));
+    for number in [772, 774] {
+        let caps = ProtocolVersion::new(number).unwrap().switching().unwrap();
+        let mut data = Vec::new();
+        write_string("hub", &mut data);
+        data.extend([0; 16]);
+        data.push(0);
+        write_varint(7, &mut data);
+        data.extend([0; 4]);
+        let (command, acknowledgement) =
+            caps.proxy_command(&Packet::new(7, data)).unwrap().unwrap();
+        assert_eq!(command, "hub");
+        assert_eq!(acknowledgement, Some(Packet::new(5, vec![7])));
+    }
 }
 
 #[test]
 fn secure_profile_join_requires_authenticated_identity_and_valid_packet() {
-    let mut data = 1_i32.to_be_bytes().to_vec();
-    data.extend([0, 1]); // hardcore, world count
-    write_string("minecraft:overworld", &mut data);
-    data.extend([20, 8, 8, 0, 1, 0, 0]); // limits, flags, dimension type
-    write_string("minecraft:overworld", &mut data);
-    data.extend([0; 8]); // seed
-    data.extend([0, 255, 0, 0, 0, 0, 63, 1]); // game modes, flags, death, cooldown, sea level, secure
-    let mut packet = Packet::new(0x30, data);
-    validate_network_join(&packet, true).unwrap();
-    let denied = validate_network_join(&packet, false).unwrap_err();
-    assert_eq!(denied.kind(), std::io::ErrorKind::Unsupported);
-    assert!(denied.to_string().contains("Unauthenticated"));
-    *packet.data.last_mut().unwrap() = 0;
-    validate_network_join(&packet, false).unwrap();
-    validate_network_join(&packet, true).unwrap();
-    *packet.data.last_mut().unwrap() = 2;
-    assert!(validate_network_join(&packet, true).is_err());
-    assert!(validate_network_join(&packet, false).is_err());
-    packet.data.pop();
-    assert!(validate_network_join(&packet, true).is_err());
+    for number in [772, 774] {
+        let caps = ProtocolVersion::new(number).unwrap().switching().unwrap();
+        let mut data = 1_i32.to_be_bytes().to_vec();
+        data.extend([0, 1]); // hardcore, world count
+        write_string("minecraft:overworld", &mut data);
+        data.extend([20, 8, 8, 0, 1, 0, 0]); // limits, flags, dimension type
+        write_string("minecraft:overworld", &mut data);
+        data.extend([0; 8]); // seed
+        data.extend([0, 255, 0, 0, 0, 0, 63, 1]); // game modes, flags, death, cooldown, sea level, secure
+        let mut packet = Packet::new(if number == 772 { 0x2b } else { 0x30 }, data);
+        caps.validate_join(&packet, true).unwrap();
+        let denied = caps.validate_join(&packet, false).unwrap_err();
+        assert_eq!(denied.kind(), std::io::ErrorKind::Unsupported);
+        assert!(denied.to_string().contains("Unauthenticated"));
+        *packet.data.last_mut().unwrap() = 0;
+        caps.validate_join(&packet, false).unwrap();
+        caps.validate_join(&packet, true).unwrap();
+        *packet.data.last_mut().unwrap() = 2;
+        assert!(caps.validate_join(&packet, true).is_err());
+        assert!(caps.validate_join(&packet, false).is_err());
+        packet.data.pop();
+        assert!(caps.validate_join(&packet, true).is_err());
+    }
+}
+
+#[test]
+fn switching_requires_an_explicit_capability_and_real_server_fixture() {
+    let fixtures: serde_json::Value =
+        serde_json::from_str(include_str!("../../tests/servers.json")).unwrap();
+    let tested: std::collections::BTreeSet<i32> = fixtures
+        .as_object()
+        .unwrap()
+        .values()
+        .filter(|fixture| fixture["switchable"] == true)
+        .map(|fixture| fixture["protocol"].as_i64().unwrap() as i32)
+        .collect();
+    let supported: std::collections::BTreeSet<i32> = (0..=800)
+        .filter(|number| {
+            ProtocolVersion::new(*number).is_ok_and(ProtocolVersion::supports_switching)
+        })
+        .collect();
+    assert_eq!(
+        supported, tested,
+        "every switching capability needs real-server switch/recovery coverage"
+    );
+    assert_eq!(supported, [772, 774].into_iter().collect());
+    for number in [47, 761, 764, 769, 770, 771, 773, 775, 777] {
+        let version = ProtocolVersion::new(number).unwrap();
+        assert!(version.switching().is_none());
+        assert!(system_message(version, "test").is_err());
+        for id in [0x2b, 0x30] {
+            assert_ne!(
+                version.kind(State::Play, Direction::Clientbound, id),
+                PacketKind::JoinGame
+            );
+        }
+    }
+    for (number, join, chat) in [(772, 0x2b, 0x72), (774, 0x30, 0x77)] {
+        let version = ProtocolVersion::new(number).unwrap();
+        assert_eq!(
+            version.kind(State::Play, Direction::Clientbound, join),
+            PacketKind::JoinGame
+        );
+        let message = system_message(version, "test").unwrap();
+        assert_eq!(message.id, chat);
+        assert_eq!(message.data, b"\x08\x00\x04test\x00");
+    }
+}
+
+#[test]
+fn switching_commands_reject_malformed_data_and_preserve_signed_arguments() {
+    for number in [772, 774] {
+        let caps = ProtocolVersion::new(number).unwrap().switching().unwrap();
+        assert!(
+            caps.proxy_command(&Packet::new(8, vec![]))
+                .unwrap()
+                .is_none()
+        );
+        let mut data = Vec::new();
+        write_string("server survival", &mut data);
+        data.extend([0; 16]);
+        data.push(1);
+        write_string("name", &mut data);
+        data.extend([0; 256]);
+        data.extend([7, 0, 0, 0, 1]);
+        assert!(
+            caps.proxy_command(&Packet::new(7, data.clone()))
+                .unwrap()
+                .is_none()
+        );
+        for cut in [data.len() - 1, data.len() - 4, 5] {
+            assert!(
+                caps.proxy_command(&Packet::new(7, data[..cut].to_vec()))
+                    .is_err()
+            );
+        }
+        let mut unsigned = Vec::new();
+        write_string("hub", &mut unsigned);
+        unsigned.push(0);
+        assert!(caps.proxy_command(&Packet::new(6, unsigned)).is_err());
+        // Unknown parser IDs must not be treated as property-free nodes.
+        let mut tree = vec![2, 0, 1, 1, 2, 0];
+        write_string("arg", &mut tree);
+        tree.extend([57, 0]);
+        assert!(caps.network_commands(&Packet::new(0x10, tree)).is_err());
+    }
 }
