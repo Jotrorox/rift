@@ -959,3 +959,121 @@ fn network_and_administrative_controls_keep_independent_access_policies() {
         BTreeSet::from(["status".into(), "transfer".into()])
     );
 }
+
+#[test]
+fn messaging_is_optional_and_supports_local_only_plugins() {
+    assert!(Config::default().messaging.is_none());
+    assert!(
+        Config::from_lua(&with_security("messaging = false"), "disabled.lua")
+            .unwrap()
+            .messaging
+            .is_none()
+    );
+    let config = Config::from_lua(&with_security("messaging = {}"), "local.lua").unwrap();
+    let messaging = config.messaging.unwrap();
+    assert!(messaging.listen.is_none());
+    assert!(messaging.principals.is_empty());
+    assert_eq!(
+        messaging.subscription_capacity,
+        crate::messaging::BrokerConfig::default().subscription_capacity
+    );
+    let config = Config::from_lua(&with_security("messaging = { subscription_capacity = 32, subscriptions = {{subject = 'plugin.*', queue = 'workers'}} }, on_message = function(message) rift.publish(message.reply, message.payload) end"), "plugin.lua").unwrap();
+    assert!(config.on_message.is_some());
+    assert_eq!(
+        config.messaging.unwrap().subscriptions[0].subject,
+        "plugin.*"
+    );
+}
+
+#[test]
+fn messaging_quic_requires_tls_and_explicit_principal_acls() {
+    let config = Config::from_lua(&with_security(r#"
+        messaging = {
+            listen = '127.0.0.1:4222', certificate = 'server.pem', private_key = 'server.key',
+            principals = {{name = 'paper', token_env = 'PAPER_MESSAGE_TOKEN', publish = {'server.>', 'rift.control.status'}, subscribe = {'reply.*'}, control = true}},
+            streams = {events = {storage_path = 'data/events', subjects = {'events.>'}, max_messages = 20, max_bytes = 2048, max_payload_bytes = 1024}},
+        }
+    "#), "quic.lua").unwrap();
+    let messaging = config.messaging.unwrap();
+    assert_eq!(messaging.listen.unwrap(), "127.0.0.1:4222".parse().unwrap());
+    assert!(messaging.principals[0].control);
+    assert_eq!(messaging.principals[0].token_env, "PAPER_MESSAGE_TOKEN");
+    assert_eq!(messaging.streams["events"].config.max_messages, 20);
+    assert!(messaging.streams["events"].config.sync_on_write);
+    // Loading configs does not read private files or resolve environment secrets.
+}
+
+#[test]
+fn messaging_malformed_settings_fail_closed() {
+    for (settings, expected) in [
+        ("messaging = true", "messaging"),
+        ("messaging = { typo = 1 }", "unknown field"),
+        (
+            "messaging = { listen = '127.0.0.1:4222' }",
+            "certificate and private_key",
+        ),
+        (
+            "messaging = { listen = '127.0.0.1:4222', certificate = 'cert', private_key = 'key' }",
+            "principals",
+        ),
+        ("messaging = { certificate = 'cert' }", "messaging.listen"),
+        (
+            "messaging = { subscription_capacity = 0 }",
+            "subscription_capacity",
+        ),
+        (
+            "messaging = { max_payload_bytes = 1.5 }",
+            "max_payload_bytes",
+        ),
+        (
+            "messaging = { subscriptions = {{subject = 'plugin.>'}} }",
+            "on_message",
+        ),
+        ("on_message = function(message) end", "subscriptions"),
+        ("on_message = 1", "expected a function"),
+        (
+            "messaging = { subscriptions = {{subject = 'plugin.>.bad'}} }, on_message = function(message) end",
+            "invalid subject",
+        ),
+        (
+            "messaging = { subscriptions = {{subject = 'plugin.*', queue = '*'}} }, on_message = function(message) end",
+            "queue",
+        ),
+        (
+            "messaging = { subscriptions = {{subject = 'plugin.*'}, {subject = 'plugin.*'}} }, on_message = function(message) end",
+            "duplicate subscription",
+        ),
+        (
+            "messaging = { subscriptions = {[2] = {subject = 'plugin.*'}} }, on_message = function(message) end",
+            "dense array",
+        ),
+        (
+            "messaging = { streams = {events = {subjects = {}}} }",
+            "at least one pattern",
+        ),
+        (
+            "messaging = { streams = {events = {max_bytes = 4, max_payload_bytes = 8}} }",
+            "must fit",
+        ),
+        (
+            "messaging = { streams = {events = {storage_path = ''}} }",
+            "paths must be",
+        ),
+        (
+            "messaging = { streams = {events = {unknown = true}} }",
+            "unknown field",
+        ),
+        (
+            "messaging = { listen = '127.0.0.1:4222', certificate = 'cert', private_key = 'key', principals = {{name = 'paper', token_env = 'BAD-NAME'}} }",
+            "token_env",
+        ),
+        (
+            "messaging = { listen = '127.0.0.1:4222', certificate = 'cert', private_key = 'key', principals = {{name = 'paper', token_env = 'PAPER_TOKEN', subscribe = {'foo.*bar'}}} }",
+            "invalid subject",
+        ),
+    ] {
+        let error =
+            Config::from_lua(&with_security(settings), "invalid-messaging.lua").unwrap_err();
+        assert!(error.to_string().contains(expected), "{settings}: {error}");
+    }
+}

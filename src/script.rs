@@ -37,9 +37,11 @@ impl RouteScript {
         &self,
         connection: &ConnectionInfo,
         deadline: Instant,
+        messaging: Option<crate::messaging::Broker>,
     ) -> Result<RouteDecision, RouteError> {
         let run = || -> mlua::Result<RouteDecision> {
             let (lua, root) = load(&self.source, &self.name, deadline)?;
+            install_messaging(&lua, messaging, deadline)?;
             let Value::Table(root) = root else {
                 return Err(mlua::Error::runtime("configuration must return a table"));
             };
@@ -59,6 +61,58 @@ impl RouteScript {
         };
         run().map_err(|error| RouteError::Script(format!("{}: on_route: {error}", self.name)))
     }
+}
+
+/// Install only after configuration evaluation: loading/validating a config
+/// must never send messages. Callback functions resolve this global at call time.
+pub(crate) fn install_messaging(
+    lua: &Lua,
+    broker: Option<crate::messaging::Broker>,
+    deadline: Instant,
+) -> mlua::Result<()> {
+    let api = lua.create_table()?;
+    api.raw_set("enabled", broker.is_some())?;
+    let publications = Cell::new(0usize);
+    let bytes = Cell::new(0usize);
+    api.raw_set(
+        "publish",
+        lua.create_function(
+            move |lua,
+                  (subject, payload, reply): (
+                mlua::LuaString,
+                mlua::LuaString,
+                Option<mlua::LuaString>,
+            )| {
+                check_deadline(deadline)?;
+                let broker = broker
+                    .as_ref()
+                    .ok_or_else(|| mlua::Error::runtime("messaging broker unavailable"))?;
+                let count = publications.get() + 1;
+                let total = bytes.get().saturating_add(payload.as_bytes().len());
+                if count > 256 || total > 1024 * 1024 {
+                    return Err(mlua::Error::runtime(
+                        "script messaging budget exceeded (256 messages / 1 MiB)",
+                    ));
+                }
+                publications.set(count);
+                bytes.set(total);
+                let subject = subject.to_str()?;
+                let reply = reply.as_ref().map(mlua::LuaString::to_str).transpose()?;
+                let report = broker
+                    .publish_with_reply(
+                        subject.as_ref(),
+                        reply.as_ref().map(|value| value.as_ref()),
+                        bytes::Bytes::copy_from_slice(payload.as_bytes().as_ref()),
+                    )
+                    .map_err(mlua::Error::external)?;
+                let result = lua.create_table()?;
+                result.raw_set("delivered", report.delivered)?;
+                result.raw_set("slow_consumers", report.slow_consumers)?;
+                Ok(result)
+            },
+        )?,
+    )?;
+    lua.globals().raw_set("rift", api)
 }
 
 pub(crate) fn check_deadline(deadline: Instant) -> mlua::Result<()> {

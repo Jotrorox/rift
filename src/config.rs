@@ -11,7 +11,11 @@ use crate::routing::{Backend, Mode, Routes};
 use mlua::{Table, Value};
 use tokio::sync::Semaphore;
 
+pub use crate::message_script::MessageScript;
 pub use crate::{http_script::HttpScript, script::RouteScript};
+pub use messaging::{MessagingConfig, MessagingPrincipal, MessagingStream, MessagingSubscription};
+
+mod messaging;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -23,6 +27,8 @@ pub struct Config {
     pub forwarding: Option<VelocityForwarding>,
     pub on_route: Option<RouteScript>,
     pub on_http: Option<HttpScript>,
+    pub on_message: Option<MessageScript>,
+    pub messaging: Option<MessagingConfig>,
     pub fallbacks: BTreeMap<String, Vec<String>>,
     pub network: Network,
     pub rate_limit: Option<RateLimit>,
@@ -214,6 +220,8 @@ impl Config {
             forwarding: None,
             on_route: None,
             on_http: None,
+            on_message: None,
+            messaging: None,
             fallbacks: BTreeMap::new(),
             network: Network::default(),
             rate_limit: None,
@@ -269,6 +277,8 @@ impl Config {
                     "forwarding",
                     "on_route",
                     "on_http",
+                    "on_message",
+                    "messaging",
                     "fallbacks",
                     "network",
                     "rate_limit",
@@ -339,6 +349,15 @@ impl Config {
                 _ => return Err("config.on_http: expected a function".into()),
             };
             let connection_rate_limit = rate_limit(&root, "rate_limit")?;
+            let on_message = match root
+                .raw_get::<Value>("on_message")
+                .map_err(|e| e.to_string())?
+            {
+                Value::Nil => None,
+                Value::Function(_) => Some(MessageScript::new(source, name)),
+                _ => return Err("config.on_message: expected a function".into()),
+            };
+            let messaging = messaging::parse(&root)?;
             let login_rate_limit = rate_limit(&root, "login_rate_limit")?;
             let health_check = options(
                 &root,
@@ -489,6 +508,8 @@ impl Config {
                 forwarding,
                 on_route,
                 on_http,
+                on_message,
+                messaging,
                 fallbacks,
                 network,
                 rate_limit: connection_rate_limit,
@@ -512,6 +533,18 @@ impl Config {
     }
 
     pub fn validate(&self) -> io::Result<()> {
+        if let Some(messaging) = &self.messaging {
+            messaging.validate().map_err(invalid)?;
+        }
+        let subscriptions = self
+            .messaging
+            .as_ref()
+            .is_some_and(|config| !config.subscriptions.is_empty());
+        if self.on_message.is_some() != subscriptions {
+            return Err(invalid(
+                "on_message and messaging.subscriptions must be configured together",
+            ));
+        }
         if self.authentication.online_mode != self.forwarding.is_some() {
             return Err(invalid(
                 "authentication.online_mode and forwarding.mode = 'velocity' must be enabled together",

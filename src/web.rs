@@ -549,10 +549,11 @@ async fn validate_config(
         Ok(Ok(config)) => {
             if config.listeners != snapshot.config.listeners
                 || config.admin != snapshot.config.admin
+                || config.messaging != snapshot.config.messaging
             {
                 return error(
                     StatusCode::BAD_REQUEST,
-                    "listener names/addresses and admin settings require a restart",
+                    "listener names/addresses, admin and messaging settings require a restart",
                 );
             }
             Json(json!({"valid":true,"message":"Configuration valid; socket availability is checked when applying."})).into_response()
@@ -657,7 +658,10 @@ async fn extension(State(app): State<App>, request: Request) -> Response {
         headers,
         context: app.status_snapshot(&snapshot, false),
     };
-    match script.execute(request).await {
+    match script
+        .execute_with_messaging(request, snapshot.messaging.clone())
+        .await
+    {
         Ok(Some(result)) => (
             StatusCode::from_u16(result.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
             [(header::CONTENT_TYPE, result.content_type)],

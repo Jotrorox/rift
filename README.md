@@ -713,6 +713,20 @@ strings. A future C ABI can marshal endpoints and UTF-8 strings into these types
 and expose a tagged backend/rejection result with explicit ownership. The current
 Rust structs and enum are not a stable C layout; no C ABI is exported yet.
 
+## Plugin messaging
+
+Rift includes a shared async pub/sub broker for native Rust components, Lua
+hooks and external server plugins over authenticated QUIC. It supports wildcard
+subjects, queue groups, request/reply, bounded subscriber queues and optional
+retained streams with durable consumers and acknowledgements. Control subjects
+expose status, maintenance, draining, player transfers and reloads.
+
+See the [messaging guide](docs/messaging.md), [Lua examples](docs/messaging-lua.md)
+and [QUIC wire protocol](docs/messaging-protocol.md). The UDP listener is opt-in;
+local messaging is available without opening a port. This is a Rift protocol
+inspired by NATS and JetStream, not a NATS-compatible server. Measure local and
+QUIC latency with `cargo run --release --example messaging_bench -- 20000`.
+
 ## Implementation
 
 - One async task per connection on Tokio's multithreaded runtime.

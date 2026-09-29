@@ -3,6 +3,7 @@ mod admission;
 mod control;
 mod events;
 mod health;
+mod messaging_runtime;
 mod metrics;
 mod network;
 mod runtime;

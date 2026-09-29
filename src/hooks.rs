@@ -67,6 +67,7 @@ pub struct Router {
     backends: Arc<BTreeMap<String, Backend>>,
     routes: Arc<BTreeMap<String, Route>>,
     slots: Arc<Semaphore>,
+    messaging: Option<crate::messaging::Broker>,
 }
 
 impl Router {
@@ -74,6 +75,7 @@ impl Router {
     pub fn reconfigured(&self, config: &Config) -> Self {
         let mut router = Self::new(config);
         router.slots = self.slots.clone();
+        router.messaging = self.messaging.clone();
         router
     }
 
@@ -83,7 +85,14 @@ impl Router {
             backends: Arc::new(config.backends.clone()),
             routes: Arc::new(config.routes.clone()),
             slots: Arc::new(Semaphore::new(crate::script::MAX_CONCURRENT)),
+            messaging: None,
         }
+    }
+
+    /// Give connection hooks access to the shared, nonblocking message broker.
+    pub fn with_messaging(mut self, broker: crate::messaging::Broker) -> Self {
+        self.messaging = Some(broker);
+        self
     }
 
     /// Run once per accepted connection. Overload is rejected without waiting.
@@ -95,13 +104,14 @@ impl Router {
                 .try_acquire_owned()
                 .map_err(|_| RouteError::Busy)?;
             let script = script.clone();
+            let messaging = self.messaging.clone();
             let deadline = Instant::now() + crate::script::EXECUTION_TIMEOUT;
             let task = spawn_blocking(move || {
                 // Keep the permit until execution actually stops, including if
                 // the async caller times out or is cancelled. Never share a VM
                 // or hold a lock on Tokio's traffic threads.
                 let _permit = permit;
-                script.evaluate(&connection, deadline)
+                script.evaluate(&connection, deadline, messaging)
             });
             timeout(crate::script::EXECUTION_TIMEOUT, task)
                 .await

@@ -3,6 +3,8 @@ pub mod config;
 mod forwarding;
 pub mod hooks;
 pub mod http_script;
+pub mod message_script;
+pub mod messaging;
 pub mod players;
 pub mod protocol;
 pub mod routing;
