@@ -3,7 +3,7 @@
 //! Each request evaluates the current immutable Lua source in a fresh VM.
 //! No Lua handles cross threads, and HTTP script capacity survives reloads.
 
-use std::{collections::BTreeMap, fmt, sync::Arc, time::Instant};
+use std::{collections::BTreeMap, fmt, time::Instant};
 
 use mlua::{Function, Lua, Table, Value};
 use tokio::{sync::Semaphore, task::spawn_blocking, time::timeout};
@@ -51,15 +51,13 @@ impl std::error::Error for HttpError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpScript {
-    source: Arc<str>,
-    name: Arc<str>,
+    source: crate::script::ScriptSource,
 }
 
 impl HttpScript {
-    pub(crate) fn new(source: &str, name: &str) -> Self {
+    pub(crate) fn new(source: &crate::script::ScriptSource) -> Self {
         Self {
-            source: source.into(),
-            name: name.into(),
+            source: source.clone(),
         }
     }
 
@@ -124,7 +122,7 @@ impl HttpScript {
             if request.body.len() > MAX_HTTP_BODY_BYTES || input_bytes > MAX_HTTP_BODY_BYTES {
                 return Err(mlua::Error::runtime("HTTP request exceeds 256 KiB limit"));
             }
-            let (lua, root) = crate::script::load(&self.source, &self.name, deadline)?;
+            let (lua, root) = crate::script::load(&self.source, deadline)?;
             crate::script::install_messaging(&lua, messaging, deadline)?;
             let Value::Table(root) = root else {
                 return Err(mlua::Error::runtime("configuration must return a table"));
@@ -146,7 +144,7 @@ impl HttpScript {
             Ok(result)
         };
         run().map_err(|error| {
-            let message = format!("{}: on_http: {error}", self.name);
+            let message = format!("{}: on_http: {error}", self.source.entry.name);
             HttpError::Script(message.chars().take(2048).collect())
         })
     }

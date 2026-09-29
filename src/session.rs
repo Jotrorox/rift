@@ -131,6 +131,8 @@ pub struct Session<C, B> {
     pub client: Connection<CryptoStream<C>>,
     backend: Option<Connection<B>>,
     pub handshake: Handshake,
+    pub extension: Option<crate::extensions::ExtensionSession>,
+    extension_commands: Vec<String>,
     version: Option<ProtocolVersion>,
     login_start: Option<Packet>,
     identity: Option<PlayerIdentity>,
@@ -162,6 +164,8 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             client,
             version: ProtocolVersion::new(handshake.protocol).ok(),
             backend: None,
+            extension: None,
+            extension_commands: Vec::new(),
             handshake,
             login_start: None,
             identity: None,
@@ -188,6 +192,11 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         if let Some(backend) = &mut self.backend {
             backend.reader.set_read_chunk_size(size);
         }
+    }
+
+    pub fn set_extension(&mut self, extension: crate::extensions::ExtensionSession) {
+        self.extension_commands = extension.commands();
+        self.extension = Some(extension);
     }
 
     pub fn version(&self) -> io::Result<ProtocolVersion> {
@@ -743,7 +752,8 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                         && phase == State::Play
                         && self.joined
                         && let Some(caps) = version.switching()
-                        && let Some((command, acknowledgement)) = caps.proxy_command(&packet)?
+                        && let Some((command, acknowledgement)) =
+                            caps.proxy_command_with(&packet, &self.extension_commands)?
                     {
                         if let Some(acknowledgement) = acknowledgement {
                             backend.queue(version, Direction::Serverbound, &acknowledgement)?;
@@ -842,7 +852,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                                 && let Some(caps) = version.switching()
                                 && packet.id == caps.commands
                             {
-                                caps.network_commands(&packet)?
+                                caps.network_commands_with(&packet, &self.extension_commands)?
                             } else {
                                 packet
                             };

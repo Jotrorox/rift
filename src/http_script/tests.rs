@@ -13,10 +13,10 @@ fn request() -> HttpRequest {
 }
 
 fn script(body: &str) -> HttpScript {
-    HttpScript::new(
+    HttpScript::new(&crate::script::ScriptSource::new(
         &format!("return {{ on_http = function(req) {body} end }}"),
         "http-test.lua",
-    )
+    ))
 }
 
 fn run(body: &str) -> Result<Option<HttpResponse>, HttpError> {
@@ -87,7 +87,7 @@ fn responses_reject_invalid_status_shape_headers_and_body() {
 fn restricted_sandbox_and_budgets_apply_to_http_extensions() {
     run(r#"
         assert(io == nil and os == nil and package == nil and debug == nil)
-        assert(load == nil and loadstring == nil and dofile == nil and require == nil)
+        assert(load == nil and loadstring == nil and dofile == nil and type(require) == 'function')
         assert(jit == nil and coroutine == nil and pcall == nil)
         assert(string.find == nil and string.match == nil)
         return nil
@@ -135,10 +135,10 @@ fn every_request_gets_a_fresh_vm_and_owned_types_are_send_sync() {
     assert_send_sync::<HttpScript>();
     assert_send_sync::<HttpRequest>();
     assert_send_sync::<HttpResponse>();
-    let script = HttpScript::new(
+    let script = HttpScript::new(&crate::script::ScriptSource::new(
         "local n = 0; return { on_http = function(req) n = n + 1; return { body = tostring(n) } end }",
         "test.lua",
-    );
+    ));
     for _ in 0..2 {
         assert_eq!(
             script

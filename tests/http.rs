@@ -483,6 +483,46 @@ fn configuration_roundtrips_exactly_and_rejects_invalid_or_stale_updates() {
 }
 
 #[test]
+fn modular_scripts_validate_save_and_reload_without_rereading_live_callback_files() {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.directory.join("lua")).unwrap();
+    fs::create_dir_all(fixture.directory.join("plugins/web")).unwrap();
+    fs::write(fixture.directory.join("lua/settings.lua"), format!(
+        "rift.setup {{ listeners = {{ main = '127.0.0.1:0' }}, backends = {{ primary = '127.0.0.1:1' }}, routes = {{ main = 'primary' }}, web = {{ listen = '{}' }} }}", fixture.web
+    )).unwrap();
+    let plugin = fixture.directory.join("plugins/web/init.lua");
+    fs::write(
+        &plugin,
+        "rift.on('http', function() return { body = 'original' } end)",
+    )
+    .unwrap();
+    let source = "require('settings')\nrift.plugin('web')\n";
+    let _process = fixture.start(source);
+    let client = fixture.client();
+    assert_eq!(client.get("/ext/plugin").expect(200).body, "original");
+    let edited = format!("{source}-- Saved through the editor.\n");
+    client
+        .json("POST", "/api/config/validate", json!({"source": edited}))
+        .expect(200);
+    save(client, &edited, &revision(client)).expect(200);
+    assert_eq!(fixture.read(), edited);
+    fs::write(
+        &plugin,
+        "rift.on('http', function() return { body = 'updated' } end)",
+    )
+    .unwrap();
+    assert_eq!(client.get("/ext/plugin").expect(200).body, "original");
+    client.json("POST", "/api/reload", json!({})).expect(200);
+    assert_eq!(client.get("/ext/plugin").expect(200).body, "updated");
+    fs::write(&plugin, "error('invalid plugin update')").unwrap();
+    client
+        .json("POST", "/api/config/validate", json!({"source": edited}))
+        .expect(400);
+    client.json("POST", "/api/reload", json!({})).expect(400);
+    assert_eq!(client.get("/ext/plugin").expect(200).body, "updated");
+}
+
+#[test]
 fn external_edits_conflict_until_reloaded_and_invalid_reload_preserves_runtime() {
     let fixture = Fixture::new();
     let source = fixture.source("", "");

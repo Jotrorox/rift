@@ -188,7 +188,7 @@ async fn runaway_scripts_and_allocations_stop_and_release_capacity() {
 async fn scripts_cannot_bypass_budgets_or_access_external_resources() {
     let router = Router::new(&config(
         "
-        assert(io == nil and os == nil and package == nil and require == nil)
+        assert(io == nil and os == nil and package == nil and type(require) == 'function')
         assert(jit == nil and debug == nil and ffi == nil)
         assert(pcall == nil and xpcall == nil and coroutine == nil)
         assert(load == nil and loadstring == nil and loadfile == nil and dofile == nil)

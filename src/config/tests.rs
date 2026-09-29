@@ -3,7 +3,7 @@ use super::*;
 const VALID: &str = include_str!("../../examples/rift.lua");
 
 fn with_security(settings: &str) -> String {
-    VALID.replacen("return {", &format!("return {{ {settings},"), 1)
+    format!("{VALID}\nrift.setup {{ {settings} }}")
 }
 
 #[test]
@@ -121,7 +121,7 @@ fn hook_is_optional_but_must_be_a_function() {
             .is_none()
     );
     for value in ["true", "42", "'hook'", "{}"] {
-        let source = VALID.replacen("return {", &format!("return {{ on_route = {value},"), 1);
+        let source = with_security(&format!("on_route = {value}"));
         let error = Config::from_lua(&source, "bad.lua").unwrap_err();
         assert!(
             error
@@ -580,7 +580,7 @@ fn omitted_network_fields_keep_ordinary_routes_public() {
     assert_eq!(config.network, Network::default());
     assert!(config.can_access("lobby", "Alice"));
     for body in ["{}", "{ initial = {}, hubs = {}, access = {} }"] {
-        let source = VALID.replacen("return {", &format!("return {{ network = {body},"), 1);
+        let source = with_security(&format!("network = {body}"));
         assert_eq!(
             Config::from_lua(&source, "network.lua").unwrap().network,
             Network::default()

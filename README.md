@@ -43,11 +43,11 @@ shown below. Offline backends should have forwarding disabled and
 ## Authentication
 
 Start from [examples/online.lua](examples/online.lua), which configures an
-authenticated lobby/survival network. Enable both fields in your Lua table:
+authenticated lobby/survival network. Enable both fields in your Lua script:
 
 ```lua
-authentication = { online_mode = true, timeout_ms = 10000 },
-forwarding = { mode = "velocity", secret_env = "RIFT_FORWARDING_SECRET" },
+rift.config.authentication = { online_mode = true, timeout_ms = 10000 }
+rift.config.forwarding = { mode = "velocity", secret_env = "RIFT_FORWARDING_SECRET" }
 ```
 
 Set `RIFT_FORWARDING_SECRET` in Rift's environment. On each Paper backend, keep
@@ -68,8 +68,27 @@ verification never falls back to offline authentication.
 
 ## Routing and configuration
 
-Lua configurations return a table of listeners, backends, routes and optional
-hooks. Generate a commented starter with `rift init`, or use the
+Write an ordinary Lua script using `rift.config`; no outer return table is needed:
+
+```lua
+local config = require("rift.config")
+config.listeners.public = "0.0.0.0:25565"
+config.backends.lobby = "127.0.0.1:25566"
+config.routes.public = "lobby"
+
+-- Import lua/config/services.lua:
+-- require("config.services")
+-- Load plugins/greeting/init.lua and its lua/ modules:
+-- rift.plugin("greeting")
+```
+
+`rift.on(event, callback)` composes callbacks in registration order, and
+`rift.command(name, definition)` registers authenticated commands. Local modules
+and folder-based plugins are captured on load/reload, with paths relative to the
+configuration file. Existing `return { ... }` configurations remain supported.
+See the [Lua API](docs/lua.md) and [modular example](examples/modular/rift.lua).
+
+Generate a commented starter with `rift init`, or use the
 [network example](examples/network.lua) for hostname routing, fallback, health
 checks, rate limits and metrics. Hostname routing also works from the CLI:
 
@@ -89,6 +108,15 @@ Invalid reloads retain the working configuration; existing sessions keep their
 routes. Gameplay listener changes require a restart. Ctrl-C drains active
 sessions for up to 30 seconds by default; a second Ctrl-C closes them immediately.
 
+## Authenticated extensions
+
+Lua extension API v1 provides login and transfer decisions, lifecycle events,
+commands with UUID permission checks, and FIFO server queues. The
+[extension example](examples/extensions.lua) demonstrates a survival queue and
+staff-only server. See the [extension API contract](docs/extensions.md) for
+ordering, deadlines, permissions and reload behavior. Extensions require online
+authentication and a switchable client protocol (Java 1.21.8 or 1.21.11).
+
 ## Compatibility
 
 Login supports protocol 47 (1.8), 761–775 (1.19.3–26.1), and the pinned Pumpkin
@@ -99,6 +127,8 @@ Bedrock/UDP, and legacy pre-1.7 pings are unsupported.
 
 ## Documentation
 
+- [Lua configuration and plugins](docs/lua.md): script-style settings, modules and folder plugins.
+- [Authenticated extensions](docs/extensions.md): lifecycle hooks, commands, permissions and queues.
 - [Operations](docs/operations.md): installation, systemd/containers, administration and upgrades.
 - [HTTP services](docs/http.md): web dashboard, status, API and Lua extensions.
 - [Messaging](docs/messaging.md): plugin messaging, [Lua API](docs/messaging-lua.md) and [QUIC protocol](docs/messaging-protocol.md).

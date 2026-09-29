@@ -4,45 +4,48 @@
 -- Reload with SIGHUP (Unix), Ctrl-Break (Windows), or rift admin reload.
 -- New connections use the new routes; existing sessions continue unchanged.
 -- Invalid reloads keep the working configuration. Listener changes need a restart.
-return {
-    listeners = {
-        public = "0.0.0.0:25565",
-    },
-    backends = {
-        lobby = "127.0.0.1:25566",
-    },
-    routes = {
-        public = "lobby",
-    },
-    limits = {
-        -- Budget for packet buffers and sockets; buffer_size is read granularity.
-        max_connections = 1024,
-        connect_timeout_ms = 5000,
-        buffer_size = 32 * 1024,
-    },
-
-    -- Recommended for public Paper networks: enable both settings and configure
-    -- Paper Velocity forwarding as described in README.md / examples/online.lua.
-    -- Export the matching secret before starting; omitted settings are OFFLINE.
-    -- authentication = { online_mode = true, timeout_ms = 10000 },
-    -- forwarding = { mode = "velocity", secret_env = "RIFT_FORWARDING_SECRET" },
-
-    -- Maintenance and draining reject new logins; existing players stay connected.
-    maintenance = false,
-    draining = {}, -- For example: { "lobby" }. Use configured backend names.
-    shutdown_timeout_ms = 30000, -- Wait for players before force-closing sessions.
-
-    -- Uncomment to enable health probes, connection/login limits, and metrics.
-    -- health_check = { interval_ms = 5000, timeout_ms = 1000 },
-    -- rate_limit = { per_ip_per_second = 20, per_ip_burst = 40 },
-    -- login_rate_limit = { per_ip_per_second = 5, per_ip_burst = 10 },
-    -- metrics = "127.0.0.1:9090", -- Prometheus endpoint: /metrics
-
-    -- Optional local administration. Export a strong RIFT_ADMIN_TOKEN before start.
-    -- Tokens stay in the environment; never put secrets in this file.
-    -- admin = {
-    --     listen = "127.0.0.1:9091", -- Loopback only; use an SSH tunnel remotely.
-    --     token_env = "RIFT_ADMIN_TOKEN",
-    --     permissions = { "status", "maintenance", "drain", "transfer", "reload", "shutdown" },
-    -- },
+rift.config.listeners = {
+    public = "0.0.0.0:25565",
 }
+rift.config.backends = {
+    lobby = "127.0.0.1:25566",
+}
+rift.config.routes = {
+    public = "lobby",
+}
+rift.config.limits = {
+    -- Budget for packet buffers and sockets; buffer_size is read granularity.
+    max_connections = 1024,
+    connect_timeout_ms = 5000,
+    buffer_size = 32 * 1024,
+}
+
+-- Recommended for public Paper networks: enable both settings and configure
+-- Paper Velocity forwarding as described in README.md / examples/online.lua.
+-- Export the matching secret before starting; omitted settings are OFFLINE.
+-- rift.config.authentication = { online_mode = true, timeout_ms = 10000 }
+-- rift.config.forwarding = { mode = "velocity", secret_env = "RIFT_FORWARDING_SECRET" }
+
+-- Maintenance and draining reject new logins; existing players stay connected.
+rift.config.maintenance = false
+rift.config.draining = {} -- For example: { "lobby" }. Use configured backend names.
+rift.config.shutdown_timeout_ms = 30000 -- Wait for players before force-closing sessions.
+
+-- Uncomment to enable health probes, connection/login limits, and metrics.
+-- rift.config.health_check = { interval_ms = 5000, timeout_ms = 1000 }
+-- rift.config.rate_limit = { per_ip_per_second = 20, per_ip_burst = 40 }
+-- rift.config.login_rate_limit = { per_ip_per_second = 5, per_ip_burst = 10 }
+-- rift.config.metrics = "127.0.0.1:9090" -- Prometheus endpoint: /metrics
+
+-- Optional local administration. Export a strong RIFT_ADMIN_TOKEN before start.
+-- Tokens stay in the environment; never put secrets in this file.
+-- rift.config.admin = {
+--     listen = "127.0.0.1:9091", -- Loopback only; use an SSH tunnel remotely.
+--     token_env = "RIFT_ADMIN_TOKEN",
+--     permissions = { "status", "maintenance", "drain", "transfer", "reload", "shutdown" },
+-- }
+
+-- Split configuration into lua/options.lua and plugins/welcome/init.lua:
+-- require("options")
+-- rift.plugin("welcome")
+-- See examples/modular/ and docs/lua.md for the complete folder layout.

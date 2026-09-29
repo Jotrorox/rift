@@ -108,9 +108,18 @@ impl SwitchingCapabilities {
     /// arguments must reach their original backend unchanged. Empty signature lists
     /// may be consumed provided their last-seen offset is acknowledged separately,
     /// as in Velocity's SessionCommandHandler.consumeCommand.
+    #[cfg(test)]
     pub(crate) fn proxy_command(
         self,
         packet: &Packet,
+    ) -> io::Result<Option<(String, Option<Packet>)>> {
+        self.proxy_command_with(packet, &[])
+    }
+
+    pub(crate) fn proxy_command_with(
+        self,
+        packet: &Packet,
+        commands: &[String],
     ) -> io::Result<Option<(String, Option<Packet>)>> {
         if packet.id != self.command && packet.id != self.signed_command {
             return Ok(None);
@@ -118,7 +127,7 @@ impl SwitchingCapabilities {
         let mut bytes = packet.data.as_slice();
         let command = read_string(&mut bytes, 32767)?;
         let root = command.split_ascii_whitespace().next().unwrap_or("");
-        if !matches!(root, "server" | "hub") {
+        if !matches!(root, "server" | "hub") && !commands.iter().any(|name| name == root) {
             return Ok(None);
         }
         let mut acknowledgement = None;
@@ -171,7 +180,16 @@ impl SwitchingCapabilities {
     /// tree. Existing node indexes and redirects stay valid; only root children
     /// with the same names are replaced. A brigadier:string argument is deliberately
     /// used instead of minecraft:message, which would require a signed argument.
+    #[cfg(test)]
     pub(crate) fn network_commands(self, packet: &Packet) -> io::Result<Packet> {
+        self.network_commands_with(packet, &[])
+    }
+
+    pub(crate) fn network_commands_with(
+        self,
+        packet: &Packet,
+        commands: &[String],
+    ) -> io::Result<Packet> {
         if packet.id != self.commands {
             return Err(invalid("expected command tree"));
         }
@@ -268,7 +286,7 @@ impl SwitchingCapabilities {
             return Err(invalid("invalid command root"));
         }
         let mut data = Vec::with_capacity(packet.data.len() + 40);
-        write_varint(count + 3, &mut data);
+        write_varint(count + 3 + commands.len() as i32 * 2, &mut data);
         for (i, node) in nodes.iter().enumerate() {
             if i != root {
                 data.extend_from_slice(node.raw);
@@ -278,15 +296,23 @@ impl SwitchingCapabilities {
                 .children
                 .iter()
                 .copied()
-                .filter(|child| !matches!(nodes[*child as usize].name, Some("server" | "hub")))
+                .filter(|child| {
+                    !matches!(nodes[*child as usize].name, Some("server" | "hub"))
+                        && !commands
+                            .iter()
+                            .any(|name| Some(name.as_str()) == nodes[*child as usize].name)
+                })
                 .collect();
             data.push(node.flags);
-            write_varint(children.len() as i32 + 2, &mut data);
+            write_varint(children.len() as i32 + 2 + commands.len() as i32, &mut data);
             for child in children {
                 write_varint(child, &mut data);
             }
             write_varint(count, &mut data);
             write_varint(count + 2, &mut data);
+            for i in 0..commands.len() {
+                write_varint(count + 3 + i as i32 * 2, &mut data);
+            }
             data.extend_from_slice(node.tail);
         }
         data.push(5);
@@ -301,6 +327,17 @@ impl SwitchingCapabilities {
         data.push(5);
         write_varint(0, &mut data);
         write_string("hub", &mut data);
+        for (i, name) in commands.iter().enumerate() {
+            data.push(5); // executable literal, optional greedy unsigned string
+            write_varint(1, &mut data);
+            write_varint(count + 4 + i as i32 * 2, &mut data);
+            write_string(name, &mut data);
+            data.push(6);
+            write_varint(0, &mut data);
+            write_string("args", &mut data);
+            write_varint(5, &mut data);
+            write_varint(2, &mut data);
+        }
         write_varint(root as i32, &mut data);
         Ok(Packet::new(packet.id, data))
     }

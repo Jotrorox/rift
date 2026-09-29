@@ -220,7 +220,9 @@ request-derived text before putting it into HTML.
 HTTP hooks reuse Rift's restricted Lua VM: fresh state per invocation, 8 MiB
 memory limit, 100,000-instruction budget and 50 ms deadline. Four HTTP script
 workers are shared across reloads, independently of routing hook capacity.
-Scripts have no filesystem, sockets, module loading, OS or debug access. They
+Scripts can import local modules and folder plugins from their saved snapshot
+(see [Lua API](lua.md)); they have no filesystem, sockets, dynamic/native module
+loading, OS or debug access. They
 cannot call arbitrary URLs or mutate the running configuration; configuration
 writes use the revision-checked admin API. Hook/source changes become visible
 on the next successful reload. The bundled admin extension console can exercise

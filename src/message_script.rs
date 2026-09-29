@@ -1,7 +1,7 @@
 //! Persistent async subscriptions dispatch into short-lived, sandboxed Lua VMs.
 //! Subscription queues and payload ownership remain in Rust across callbacks.
 
-use std::{sync::Arc, time::Instant};
+use std::time::Instant;
 
 use mlua::{Function, Value};
 use tokio::{
@@ -19,15 +19,13 @@ static SLOTS: Semaphore = Semaphore::const_new(crate::script::MAX_CONCURRENT);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageScript {
-    source: Arc<str>,
-    name: Arc<str>,
+    source: crate::script::ScriptSource,
 }
 
 impl MessageScript {
-    pub(crate) fn new(source: &str, name: &str) -> Self {
+    pub(crate) fn new(source: &crate::script::ScriptSource) -> Self {
         Self {
-            source: source.into(),
-            name: name.into(),
+            source: source.clone(),
         }
     }
 
@@ -49,7 +47,7 @@ impl MessageScript {
 
     fn evaluate(&self, message: Message, broker: Broker, deadline: Instant) -> Result<(), String> {
         let run = || -> mlua::Result<()> {
-            let (lua, root) = crate::script::load(&self.source, &self.name, deadline)?;
+            let (lua, root) = crate::script::load(&self.source, deadline)?;
             crate::script::install_messaging(&lua, Some(broker), deadline)?;
             let Value::Table(root) = root else {
                 return Err(mlua::Error::runtime("configuration must return a table"));
@@ -63,7 +61,7 @@ impl MessageScript {
             crate::script::check_deadline(deadline)
         };
         run().map_err(|error| {
-            format!("{}: on_message: {error}", self.name)
+            format!("{}: on_message: {error}", self.source.entry.name)
                 .chars()
                 .take(2048)
                 .collect()

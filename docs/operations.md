@@ -51,7 +51,8 @@ check does not establish backend reachability or application readiness.
 
 ## Enable operational administration
 
-Add these fields to the returned Lua configuration table before starting:
+Set these fields through `rift.config`, `rift.setup({ ... })`, or a legacy
+returned Lua configuration table before starting:
 
 ```lua
 admin = {

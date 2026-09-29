@@ -500,3 +500,47 @@ fn switching_commands_reject_malformed_data_and_preserve_signed_arguments() {
         assert!(caps.network_commands(&Packet::new(0x10, tree)).is_err());
     }
 }
+
+#[test]
+fn extension_commands_replace_backend_roots_and_keep_unsigned_arguments() {
+    for number in [772, 774] {
+        let caps = ProtocolVersion::new(number).unwrap().switching().unwrap();
+        let mut data = vec![2, 0, 1, 1, 5, 0];
+        write_string("queue", &mut data);
+        data.push(0);
+        let commands = vec!["queue".to_owned(), "staff".to_owned()];
+        let expanded = caps
+            .network_commands_with(&Packet::new(0x10, data.clone()), &commands)
+            .unwrap();
+        let mut bytes = expanded.data.as_slice();
+        assert_eq!(read_varint(&mut bytes).unwrap(), 9);
+        assert_eq!(&bytes[..6], &[0, 4, 2, 4, 5, 7]);
+        assert_eq!(&bytes[6..6 + data.len() - 5], &data[4..data.len() - 1]);
+        // An ordinary unsigned command is intercepted, while unknown commands
+        // and commands with signed arguments retain their backend semantics.
+        let mut unsigned = Vec::new();
+        write_string("queue game", &mut unsigned);
+        assert_eq!(
+            caps.proxy_command_with(&Packet::new(6, unsigned.clone()), &commands)
+                .unwrap()
+                .unwrap()
+                .0,
+            "queue game"
+        );
+        assert!(
+            caps.proxy_command_with(&Packet::new(6, unsigned.clone()), &[])
+                .unwrap()
+                .is_none()
+        );
+        unsigned.extend([0; 16]);
+        unsigned.push(1);
+        write_string("args", &mut unsigned);
+        unsigned.extend([42; 256]);
+        unsigned.extend([0; 5]);
+        assert!(
+            caps.proxy_command_with(&Packet::new(7, unsigned), &commands)
+                .unwrap()
+                .is_none()
+        );
+    }
+}

@@ -98,7 +98,7 @@ pub fn prepare(path: &Path, active_source: &str, operation: Operation) -> Result
             (source, true)
         }
     };
-    let config = Config::from_lua(&source, &path.display().to_string())?;
+    let config = Config::from_lua_at(&source, path)?;
     Ok(Candidate {
         source,
         config,

@@ -540,9 +540,13 @@ async fn validate_config(
         );
     };
     let snapshot = app.snapshot();
+    let path = app.path.clone();
     match tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        Config::from_lua(&source, "HTTP validation")
+        match path {
+            Some(path) => Config::from_lua_at(&source, &path),
+            None => Config::from_lua(&source, "HTTP validation"),
+        }
     })
     .await
     {
