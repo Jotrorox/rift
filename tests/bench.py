@@ -3,6 +3,8 @@
 
 Uses only the Python standard library. CPU/RSS collection requires Linux /proc;
 other platforms still run the traffic benchmark and report null resource values.
+Linux peers negotiate a 1460-byte TCP MSS to avoid giant loopback segments
+stalling behind a smaller advertised receive window under backpressure.
 """
 
 import argparse
@@ -45,6 +47,29 @@ STATUS_BODY = b"\0" + string(STATUS_JSON)
 STATUS_REPLY = varint(len(STATUS_BODY)) + STATUS_BODY
 SCENARIOS = ("direct", "rift", "hostname", "lua", "lua_init", "status_cached")
 SAMPLE_INTERVAL = 0.005
+LOOPBACK_MSS = 1460 if sys.platform == "linux" else None
+
+
+def tcp_socket():
+    """Set the MSS before connect/listen so both directions negotiate the cap."""
+    sock = socket.socket()
+    try:
+        if LOOPBACK_MSS is not None:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_MAXSEG, LOOPBACK_MSS)
+        return sock
+    except BaseException:
+        sock.close()
+        raise
+
+
+async def fixture_server(callback):
+    sock = tcp_socket()
+    try:
+        sock.bind(("127.0.0.1", 0))
+        return await asyncio.start_server(callback, sock=sock, backlog=4096)
+    except BaseException:
+        sock.close()
+        raise
 
 
 def handshake(port, state=2):
@@ -233,24 +258,29 @@ async def fixture_client(reader, writer, status=False, uppercase=False):
 
 
 async def fixture_main(uppercase=False):
-    echo = await asyncio.start_server(
-        lambda reader, writer: fixture_client(reader, writer, uppercase=uppercase),
-        "127.0.0.1", 0, backlog=4096,
-    )
-    status = await asyncio.start_server(
-        lambda reader, writer: fixture_client(reader, writer, status=True),
-        "127.0.0.1", 0, backlog=4096,
-    )
-    print(json.dumps({"echo": echo.sockets[0].getsockname()[1],
-                      "status": status.sockets[0].getsockname()[1]}), flush=True)
-    async with echo, status:
+    async with (
+        await fixture_server(
+            lambda reader, writer: fixture_client(reader, writer, uppercase=uppercase)
+        ) as echo,
+        await fixture_server(
+            lambda reader, writer: fixture_client(reader, writer, status=True)
+        ) as status,
+    ):
+        print(json.dumps({"echo": echo.sockets[0].getsockname()[1],
+                          "status": status.sockets[0].getsockname()[1]}), flush=True)
         await asyncio.Event().wait()
 
 
 def connect(port):
-    sock = socket.create_connection(("127.0.0.1", port), timeout=30)
-    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    return GameSocket(sock, port)
+    sock = tcp_socket()
+    try:
+        sock.settimeout(30)
+        sock.connect(("127.0.0.1", port))
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        return GameSocket(sock, port)
+    except BaseException:
+        sock.close()
+        raise
 
 
 def percentile(samples, fraction):
@@ -279,7 +309,15 @@ async def transfer_async(port, size):
     """One event loop owns both directions; failure cancels its blocked peer task."""
     name = new_player_name()
     sent = received = 0
-    reader, writer = await asyncio.wait_for(asyncio.open_connection("127.0.0.1", port), 30)
+    sock = tcp_socket()
+    sock.setblocking(False)
+    try:
+        async with asyncio.timeout(30):
+            await asyncio.get_running_loop().sock_connect(sock, ("127.0.0.1", port))
+            reader, writer = await asyncio.open_connection(sock=sock)
+    except BaseException:
+        sock.close()
+        raise
     writer.get_extra_info("socket").setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     completed = False
 
@@ -299,7 +337,10 @@ async def transfer_async(port, size):
             body = await asyncio.wait_for(read_frame(reader), 30)
             data = body[1:]
             if body[0] != 0x7f or not data or data != BLOCK[:len(data)]:
-                raise ValueError("invalid throughput echo")
+                raise ValueError(
+                    f"invalid throughput echo: packet_id={body[0]:#x}, "
+                    f"payload_length={len(data)}, prefix={data[:128]!r}"
+                )
             received += len(data)
             if received > size:
                 raise ValueError("extra throughput payload")
@@ -370,7 +411,7 @@ async def setup_attempt(port, scenario, timeout, index, gate):
     error = None
     try:
         async with asyncio.timeout(timeout):
-            with socket.socket() as sock:
+            with tcp_socket() as sock:
                 sock.setblocking(False)
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 loop = asyncio.get_running_loop()
@@ -657,6 +698,7 @@ def main():
                      "timeout_s": args.timeout, "lua_init_iterations": args.lua_init_iterations,
                      "lua_max_concurrent": 4, "lua_state": "fresh VM and config evaluation per connection",
                      "warmup_connections_per_size": 16, "resource_sample_interval_s": SAMPLE_INTERVAL,
+                     "tcp_maxseg_bytes": LOOPBACK_MSS,
                      "cpu_clock_ticks_per_s": os.sysconf("SC_CLK_TCK") if sys.platform == "linux" else None},
         "method": {
             "setup": "TCP connect through verified login+play-packet echo, or complete cached status response",

@@ -152,5 +152,9 @@ CI also runs release tests, wire-protocol checks, real-server integration tests,
 benchmarks and packaging smoke tests. See the [CI workflow](.github/workflows/ci.yml)
 and [manual online-mode procedure](tests/MANUAL_ONLINE.md) for those checks.
 
+On Linux, benchmark peers negotiate a 1460-byte TCP MSS to avoid loopback window
+stalls. Benchmark and pilot JSON reports record this cap; compare results with
+matching socket settings.
+
 [BSD-2-Clause](LICENSE). Run `rift --license` for the embedded license and
 [third-party notices](THIRD_PARTY_NOTICES), or `rift --help` for CLI usage.
