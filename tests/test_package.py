@@ -15,10 +15,12 @@ class PackageTests(unittest.TestCase):
     def test_archives_preserve_operator_files_and_binary(self):
         root = Path(__file__).resolve().parents[1]
         required = {"README.md", "LICENSE", "THIRD_PARTY_NOTICES",
-                    "examples/rift.lua", "examples/routing.lua",
+                    "examples/rift.lua", "examples/online.lua",
                     "examples/network.lua", "examples/rift.service", "examples/Dockerfile",
                     "examples/compose.yaml", "docs/operations.md",
-                    "docs/pilot.md", "docs/pilot-results.json"}
+                    "examples/admin.lua", "examples/messaging.lua", "docs/http.md",
+                    "docs/messaging.md", "docs/messaging-lua.md",
+                    "docs/messaging-protocol.md", "docs/network-protocol.md"}
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             for windows in [False, True]:

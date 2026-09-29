@@ -194,35 +194,18 @@ p50/p95/p99 latency for 64-byte payloads, plus pipelined throughput. These figur
 exclude connection/TLS setup and persistence and check delivered payloads.
 Separate measurements cover memory stream publish/fetch/ack and synchronized file
 publication in the OS temporary directory (whose storage may be memory-backed).
-Run repeatedly
-on the target hardware under representative fanout and payloads. It is
-informational, without fragile timing thresholds in CI. Network distance,
+Run repeatedly on the target hardware under representative fanout and payloads.
+The benchmark is informational, with no timing thresholds in CI. Network distance,
 scheduling, TLS, fanout and disk synchronization cannot have zero latency.
 
-### Recorded development run
-
-On 2026-09-29, Linux x86-64, Intel Core Ultra 5 125U, Rust 1.98.1, release build
-with two Tokio workers, 64-byte payloads, one subscriber and warm QUIC loopback:
-
-| Operation | p50 | p95 | p99 | Samples |
-| --- | ---: | ---: | ---: | ---: |
-| Local publish + receive, same task | 0.246 µs | 0.514 µs | 0.861 µs | 20,000 |
-| QUIC client → broker → client | 24.681 µs | 39.408 µs | 58.192 µs | 20,000 |
-| Memory stream publish + fetch + ack | 0.687 µs | 1.454 µs | 2.033 µs | 20,000 |
-| File stream publish + sync, ext4 | 364.236 µs | 465.361 µs | 677.724 µs | 1,000 |
-
-Pipelined QUIC delivery reached **545,886 messages/second**, in batches of 256.
-These are observations from one local run, not service-level guarantees. Other
-runs on the same machine had QUIC medians around 27–36 µs. There are no competing
-publisher, WAN, large-fanout or packet-loss measurements in this report.
-
-The default `/tmp` here is tmpfs, so the ext4 measurement redirected temporary
-storage to the project's filesystem:
+To measure file persistence on a specific filesystem instead of a potentially
+memory-backed OS temporary directory, point `TMPDIR` at a directory on that
+filesystem. For example, from a source checkout on Unix:
 
 ```sh
+mkdir -p target
 TMPDIR="$PWD/target" cargo run --locked --release --example messaging_bench -- 20000
 ```
 
-The file-store number includes disk synchronization and blocking-worker dispatch;
-the core/QUIC numbers exclude persistence. Measure on the storage device you will
-actually deploy with.
+File publication includes disk synchronization and blocking-worker dispatch;
+the core/QUIC numbers exclude persistence.

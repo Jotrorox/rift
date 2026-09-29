@@ -151,9 +151,8 @@ sudo journalctl -u rift --since '10 minutes ago' -o cat --no-pager \
 
 Use `connection_id` to join related events within one process. A
 `backend_attempt_failed` can be followed by successful fallback; it does not
-alone mean the player disconnected. The [event reference](../README.md#connection-failure-events)
-lists stages and failure reasons. `admin_command` events record operation results
-without logging credentials.
+alone mean the player disconnected. `admin_command` events record operation
+results without logging credentials.
 
 | Error/stage | Operator action |
 | --- | --- |
@@ -322,7 +321,7 @@ login leaves the original backend attached. If a transfer fails after the client
 transition begins, Rift disconnects the player to avoid continuing a damaged
 session. Transfer success does not move inventories between independent servers.
 
-With a [network configuration](../README.md#a-lobby-and-survival-network), a
+With a [network configuration](../examples/online.lua), a
 backend transport failure tries the configured hubs and fallbacks. Access rules,
 backend bans and draining still apply; explicit backend kicks are terminal.
 
@@ -391,10 +390,10 @@ disconnects sessions; configuration reload alone preserves them.
 
 ## Sizing
 
-See the [local pilot and default rationale](pilot.md). It is a reproducible
-loopback exercise, not a production player-capacity claim. Monitor your own
-traffic before increasing limits. Packet buffers grow with packet sizes; memory,
-CPU, file descriptors and backend capacity all constrain safe player counts.
+The default connection cap is 1024; it is not a measured player-capacity claim.
+Monitor your own traffic before increasing limits. Packet buffers grow with
+packet sizes; memory, CPU, file descriptors and backend capacity all constrain
+safe player counts.
 
 ## HTTP administration
 

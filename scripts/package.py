@@ -27,8 +27,7 @@ def contents(root, binary):
                      root / "examples/rift.service",
                      root / "examples/Dockerfile",
                      root / "examples/compose.yaml",
-                     *sorted((root / "docs").glob("*.md")),
-                     *sorted((root / "docs").glob("*.json"))]
+                     *sorted((root / "docs").glob("*.md"))]
     ]
 
 

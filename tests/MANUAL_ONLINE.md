@@ -87,5 +87,3 @@ suite using an injected local session-service fixture (timeouts, error statuses,
 malformed responses, and rejection). The production client uses Mojang's HTTPS
 endpoint. This manual harness never redirects real account authentication to a
 mock endpoint and does not require disrupting Mojang or the operator's network.
-Historical transparent-relay runs in [OPERATIONS_RESULTS.md](OPERATIONS_RESULTS.md)
-do not establish acceptance of this implementation.
