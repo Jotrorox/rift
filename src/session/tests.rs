@@ -5,6 +5,9 @@ use tokio::{
     time::{Duration, timeout},
 };
 
+#[path = "authenticated_tests.rs"]
+mod authenticated_tests;
+
 #[path = "bungeecord_tests.rs"]
 mod bungeecord_tests;
 
@@ -909,16 +912,26 @@ fn verified_profile() -> AuthenticatedProfile {
     }
 }
 
-/// Use the real authentication exchange with a local session-server fixture,
-/// then retain the resulting encryption and verified profile across both logins.
 async fn authenticated_session() -> (
+    Session<DuplexStream, DuplexStream>,
+    CryptoStream<DuplexStream>,
+    DuplexStream,
+) {
+    authenticated_session_for(774).await
+}
+
+/// Exercise RSA/AES and HTTP verification against a local session-server fixture.
+/// This is deterministic wire coverage, not a real Mojang/Paper login.
+async fn authenticated_session_for(
+    number: i32,
+) -> (
     Session<DuplexStream, DuplexStream>,
     CryptoStream<DuplexStream>,
     DuplexStream,
 ) {
     let (mut client, input) = tokio::io::duplex(65536);
     let handshake = Handshake {
-        protocol: 774,
+        protocol: number,
         address: "play.test".into(),
         port: 25565,
         next_state: NextState::Login,
@@ -930,6 +943,9 @@ async fn authenticated_session() -> (
     // This client-supplied UUID must never reach Paper.
     let mut claimed = login_start();
     claimed.data[7..].fill(99);
+    if number < 764 {
+        claimed.data.insert(7, 1); // optional UUID before 1.20.2
+    }
     Codec::default().write(&mut client, &claimed).await.unwrap();
     let mut session = Session::accept(input).await.unwrap();
     assert_eq!(
@@ -982,7 +998,7 @@ async fn authenticated_session() -> (
         data = &data[size..];
         let size = read_varint(&mut data).unwrap() as usize;
         let token = &data[..size];
-        assert_eq!(&data[size..], &[1]);
+        assert_eq!(&data[size..], if number >= 766 { &[1][..] } else { &[] });
         let mut response = Vec::new();
         for plaintext in [&[42; 16][..], token] {
             let mut encrypted = vec![0; public.ciphertext_size()];
@@ -1012,7 +1028,14 @@ async fn authenticated_session() -> (
         receive(&mut backend, Codec::default()).await,
         handshake.packet()
     );
-    assert_eq!(receive(&mut backend, Codec::default()).await, login_start());
+    let mut expected_start = login_start();
+    if number < 764 {
+        expected_start.data.insert(7, 1);
+    }
+    assert_eq!(
+        receive(&mut backend, Codec::default()).await,
+        expected_start
+    );
     (session, client, backend)
 }
 
@@ -1043,12 +1066,102 @@ fn validate_velocity_response(packet: &Packet, id: i32, secret: &[u8]) -> bool {
     valid
 }
 
+fn verified_login_success(number: i32) -> Packet {
+    let mut packet = login_success();
+    if matches!(number, 766..=767) {
+        packet.data.push(1); // strict error handling (1.20.5–1.21.1)
+    } else if number >= 776 {
+        packet.data.extend([19; 16]); // backend login session UUID
+    }
+    packet
+}
+
+fn assert_verified_login_success(number: i32, packet: &Packet) {
+    assert_eq!(packet.id, 2);
+    let mut bytes = packet.data.as_slice();
+    assert_eq!(&bytes[..16], &[7; 16]);
+    bytes = &bytes[16..];
+    assert_eq!(read_string(&mut bytes, 16).unwrap(), "Player");
+    assert_eq!(read_varint(&mut bytes).unwrap(), 1);
+    assert_eq!(read_string(&mut bytes, 32767).unwrap(), "textures");
+    assert_eq!(
+        read_string(&mut bytes, 32767).unwrap(),
+        "authenticated-skin"
+    );
+    assert_eq!(bytes[0], 1);
+    bytes = &bytes[1..];
+    assert_eq!(read_string(&mut bytes, 32767).unwrap(), "mojang-signature");
+    assert_eq!(
+        bytes,
+        match number {
+            766..=767 => &[1][..],
+            776..=777 => &[19; 16][..],
+            _ => &[],
+        }
+    );
+}
+
+fn verified_join_game(number: i32, entity: i32) -> Packet {
+    let id = match number {
+        761 => 0x24,
+        762..=763 => 0x28,
+        764..=765 => 0x29,
+        766..=767 | 770..=772 => 0x2b,
+        768..=769 => 0x2c,
+        773..=774 => 0x30,
+        775..=776 => 0x31,
+        777 => 0x32,
+        _ => panic!("unmapped authenticated fixture protocol"),
+    };
+    let mut data = entity.to_be_bytes().to_vec();
+    data.push(0); // hardcore
+    if number < 764 {
+        data.extend([0, 255]); // current/previous game mode
+    }
+    data.push(1);
+    write_string("minecraft:overworld", &mut data);
+    if number < 764 {
+        data.extend([10, 0, 0, 0]); // empty named compound registry fixture
+    } else {
+        data.extend([20, 8, 8, 0, 1, 0]); // limits and flags
+    }
+    if number < 766 {
+        write_string("minecraft:overworld", &mut data); // dimension key
+    } else {
+        data.push(0); // dimension registry ID
+    }
+    write_string("minecraft:overworld", &mut data);
+    data.extend([0; 8]); // seed
+    if number < 764 {
+        data.extend([20, 8, 8, 0, 1]); // limits and flags
+    } else {
+        data.extend([0, if number == 777 { 0 } else { 255 }]); // optional VarInt in 26.3
+    }
+    data.extend([0, 0, 0]); // debug, flat, last death absent
+    if number >= 763 {
+        data.push(0); // portal cooldown
+    }
+    if number >= 768 {
+        data.push(63); // sea level
+    }
+    if number >= 776 {
+        data.push(1); // online mode
+    }
+    if number >= 766 {
+        data.push(1); // enforce secure chat
+    }
+    Packet::new(id, data)
+}
+
 async fn verified_play(
     session: &mut Session<DuplexStream, DuplexStream>,
     client: &mut CryptoStream<DuplexStream>,
     backend: &mut DuplexStream,
 ) {
     let codec = session.client.codec;
+    let number = session.version().unwrap().number();
+    let success = verified_login_success(number);
+    let join = verified_join_game(number, 1);
     // Paper uses a random signed Java int for every forwarding transaction.
     let transaction_id = -1_204_442_331;
     codec
@@ -1061,29 +1174,24 @@ async fn verified_play(
         transaction_id,
         b"shared-secret"
     ));
-    codec.write(backend, &login_success()).await.unwrap();
+    codec.write(backend, &success).await.unwrap();
     session.forward().await.unwrap();
-    assert_eq!(
-        receive(client, codec).await,
-        forwarding::login_success(
-            &verified_profile(),
-            session.version().unwrap(),
-            &login_success()
-        )
-        .unwrap()
-    );
-    codec.write(client, &Packet::empty(3)).await.unwrap();
+    assert_verified_login_success(number, &receive(client, codec).await);
+    if number >= 764 {
+        codec.write(client, &Packet::empty(3)).await.unwrap();
+        session.forward().await.unwrap();
+        assert_eq!(receive(backend, codec).await, Packet::empty(3));
+        let finish = Packet::empty(if number < 766 { 2 } else { 3 });
+        codec.write(backend, &finish).await.unwrap();
+        session.forward().await.unwrap();
+        assert_eq!(receive(client, codec).await, finish);
+        codec.write(client, &finish).await.unwrap();
+        session.forward().await.unwrap();
+        assert_eq!(receive(backend, codec).await, finish);
+    }
+    codec.write(backend, &join).await.unwrap();
     session.forward().await.unwrap();
-    assert_eq!(receive(backend, codec).await, Packet::empty(3));
-    codec.write(backend, &Packet::empty(3)).await.unwrap();
-    session.forward().await.unwrap();
-    assert_eq!(receive(client, codec).await, Packet::empty(3));
-    codec.write(client, &Packet::empty(3)).await.unwrap();
-    session.forward().await.unwrap();
-    assert_eq!(receive(backend, codec).await, Packet::empty(3));
-    codec.write(backend, &secure_join_game(1)).await.unwrap();
-    session.forward().await.unwrap();
-    assert_eq!(receive(client, codec).await, secure_join_game(1));
+    assert_eq!(receive(client, codec).await, join);
     assert!(session.can_switch());
 }
 
