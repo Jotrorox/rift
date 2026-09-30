@@ -1392,7 +1392,7 @@ async fn registered_extension_commands_reach_the_proxy_and_never_the_backend() {
 #[tokio::test]
 async fn legacy_barrier_drains_old_input_and_keeps_busy_or_banned_cutovers_safe() {
     timeout(Duration::from_secs(3), async {
-        for outcome in ["switch", "busy", "ban"] {
+        for outcome in ["switch", "busy", "ban", "late_keepalive", "partial"] {
             let codec = Codec::default();
             let (mut client, input) = tokio::io::duplex(65536);
             let handshake = Handshake {
@@ -1471,6 +1471,16 @@ async fn legacy_barrier_drains_old_input_and_keeps_busy_or_banned_cutovers_safe(
                             .await
                             .unwrap();
                     }
+                    "late_keepalive" => {
+                        codec
+                            .write(&mut old, &Packet::new(0, vec![99]))
+                            .await
+                            .unwrap();
+                    }
+                    "partial" => {
+                        let frame = codec.encode(&Packet::new(0, vec![99])).unwrap();
+                        old.write_all(&frame[..1]).await.unwrap();
+                    }
                     _ => {}
                 }
                 codec.write(&mut client, &barrier).await.unwrap();
@@ -1504,6 +1514,36 @@ async fn legacy_barrier_drains_old_input_and_keeps_busy_or_banned_cutovers_safe(
                     assert!(session.can_switch());
                     assert!(session.backend().is_some());
                 }
+                "late_keepalive" | "partial" => {
+                    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::WouldBlock);
+                    assert!(!session.switch_in_progress());
+                    assert!(session.can_switch());
+                    assert!(
+                        timeout(Duration::from_millis(1), receive(&mut client, codec))
+                            .await
+                            .is_err(),
+                        "old-server packet was forwarded after the barrier"
+                    );
+                    let keepalive = Packet::new(0, vec![99]);
+                    if outcome == "partial" {
+                        let frame = codec.encode(&keepalive).unwrap();
+                        old.write_all(&frame[1..]).await.unwrap();
+                    }
+                    session.forward().await.unwrap();
+                    assert_eq!(receive(&mut client, codec).await, keepalive);
+                    codec.write(&mut client, &keepalive).await.unwrap();
+                    session.forward().await.unwrap();
+                    assert_eq!(receive(&mut old, codec).await, keepalive);
+                    // The cancelled replacement received neither persistent
+                    // settings nor a reply belonging to the old server.
+                    assert!(
+                        Reader::default()
+                            .read(&mut replacement, codec)
+                            .await
+                            .unwrap()
+                            .is_none()
+                    );
+                }
                 "ban" => assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied),
                 _ => unreachable!(),
             }
@@ -1514,12 +1554,12 @@ async fn legacy_barrier_drains_old_input_and_keeps_busy_or_banned_cutovers_safe(
 }
 
 #[tokio::test]
-async fn legacy_world_reset_closes_bundles_received_during_the_keepalive_barrier() {
+async fn legacy_barrier_preserves_late_bundles_for_rollback() {
     timeout(Duration::from_secs(3), async {
         let (mut session, mut client, mut old) = session().await;
         let version = ProtocolVersion::new(763).unwrap();
         let caps = version.switching().unwrap();
-        // Focus on an established 1.20.1 attachment inside an unfinished bundle.
+        // Focus on an established 1.20.1 attachment receiving a late bundle.
         session.version = Some(version);
         session.handshake.protocol = 763;
         session.client.state = ConnectionState::new(State::Play);
@@ -1529,7 +1569,6 @@ async fn legacy_world_reset_closes_bundles_received_during_the_keepalive_barrier
             uuid: Some([7; 16]),
         });
         session.joined = true;
-        session.bundle_open = true;
         let mut start = Vec::new();
         write_string("Player", &mut start);
         start.push(1);
@@ -1554,10 +1593,9 @@ async fn legacy_world_reset_closes_bundles_received_during_the_keepalive_barrier
                 .await
                 .unwrap();
             codec.write(&mut replacement, &join).await.unwrap();
-            assert_eq!(receive(&mut client, codec).await, Packet::empty(0));
             let barrier = receive(&mut client, codec).await;
             assert_eq!(barrier.id, 0x23);
-            // The retired backend's delayed delimiter opens another client bundle.
+            // This delimiter must remain on the old attachment until rollback.
             codec.write(&mut old, &Packet::empty(0)).await.unwrap();
             codec
                 .write(&mut client, &Packet::new(0x12, barrier.data))
@@ -1565,11 +1603,13 @@ async fn legacy_world_reset_closes_bundles_received_during_the_keepalive_barrier
                 .unwrap();
         };
         let (result, ()) = tokio::join!(session.connect_backend(server), peers);
-        result.unwrap();
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        assert!(!session.switch_in_progress());
+        assert!(session.can_switch());
         assert!(!session.bundle_open);
-        for id in [0, 0, 0x65, 0x0e, caps.join_game, 0x41] {
-            assert_eq!(receive(&mut client, codec).await.id, id);
-        }
+        session.forward().await.unwrap();
+        assert_eq!(receive(&mut client, codec).await, Packet::empty(0));
+        assert!(session.bundle_open);
     })
     .await
     .unwrap();

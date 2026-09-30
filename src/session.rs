@@ -23,6 +23,7 @@ pub struct Connection<S> {
     pub state: ConnectionState,
     pub codec: Codec,
     reader: Reader,
+    received: Option<Packet>,
     pending: Option<PendingWrite>,
     login_plugins: LoginPlugins,
 }
@@ -45,6 +46,7 @@ impl<S> Connection<S> {
             state: ConnectionState::new(state),
             codec: Codec::default(),
             reader: Reader::default(),
+            received: None,
             pending: None,
             login_plugins: LoginPlugins::default(),
         }
@@ -99,6 +101,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
                     .as_ref()
                     .is_none_or(|pending| pending.kind == PacketKind::Unknown)
             {
+                if let Some(packet) = self.received.take() {
+                    return Poll::Ready(Ok(ConnectionEvent::Read(Some(packet))));
+                }
                 let read = self.reader.read(&mut self.io, self.codec);
                 return std::pin::pin!(read)
                     .poll(cx)
@@ -486,20 +491,13 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                         }
                     }
                 }
-                if let Err(error) = self.drain_before_switch().await {
+                if let Err(error) = self.check_legacy_cutover().await {
                     // The keepalive did not change client state. A busy source
                     // can safely resume, including any cancel-safe queued frame.
                     if error.kind() == io::ErrorKind::WouldBlock && !closed_bundle {
                         self.switch_in_progress = false;
                     }
                     return Err(error);
-                }
-                // The second drain can have forwarded another partial bundle.
-                // World reset packets must be delivered outside that bundle.
-                if self.bundle_open {
-                    self.send_client(&Packet::empty(caps.bundle_delimiter))
-                        .await?;
-                    self.bundle_open = false;
                 }
                 for packet in self.legacy_state.reset(version)? {
                     self.send_client(&packet).await?;
@@ -566,6 +564,52 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         self.backend = Some(backend);
         self.backend_error = None;
         Ok(())
+    }
+
+    async fn check_legacy_cutover(&mut self) -> io::Result<()> {
+        let version = self.version()?;
+        let Some(old) = self.backend.as_mut() else {
+            return Ok(());
+        };
+        // Nothing may be forwarded to the client after its barrier reply:
+        // responses to those packets would belong to the retired backend.
+        // Retain a late packet without observing it so rollback can relay it
+        // exactly once, with its original compression and protocol state.
+        let ready = if let Some(packet) = old.received.take() {
+            Poll::Ready(Ok(Some(packet)))
+        } else {
+            let read = tokio::task::unconstrained(old.reader.read(&mut old.io, old.codec));
+            tokio::pin!(read);
+            poll_fn(|cx| Poll::Ready(read.as_mut().poll(cx))).await
+        };
+        match ready {
+            Poll::Ready(Ok(Some(packet))) => {
+                if version.kind(State::Play, Direction::Clientbound, packet.id)
+                    == PacketKind::Disconnect
+                {
+                    old.state
+                        .observe(version, Direction::Clientbound, &packet)?;
+                    self.client
+                        .queue(version, Direction::Clientbound, &packet)?;
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "The current backend disconnected the player.",
+                    ));
+                }
+                old.received = Some(packet);
+            }
+            Poll::Ready(result) => {
+                self.backend_error = result.err();
+                self.backend = None;
+                return Ok(());
+            }
+            Poll::Pending if !old.reader.has_partial_frame() => return Ok(()),
+            Poll::Pending => {}
+        }
+        Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "The current server is busy. Please retry the switch.",
+        ))
     }
 
     async fn drain_before_switch(&mut self) -> io::Result<()> {
