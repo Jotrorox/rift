@@ -1,29 +1,25 @@
 # Performance against Velocity
 
-The comparison runs Rift and Velocity sequentially against the same synthetic
-Minecraft backend on the same machine. It measures proxy process CPU, resident
-memory, successful-operation latency, delivered throughput and failures under
-the same offered workload. It is a loopback protocol benchmark, not a player
-capacity estimate.
+Rift and Velocity run one after the other against the same synthetic Minecraft
+backend on the same machine, under the same offered workload. The comparison
+records proxy CPU, resident memory, latency, throughput and failures. It is a
+loopback protocol benchmark, not a player capacity estimate.
 
-## Published measurements
+## Results
 
-Rift used less process CPU and resident memory in these runs. The echo p95
-ranges overlap; these measurements do not establish a meaningful echo-latency
-ranking. Both proxies completed **108,288 measured operations each with zero
-failures** across the two profiles.
+Rift used less CPU and memory in every profile. Echo latency ranges overlap, so
+these runs do not rank the proxies on echo latency. Both proxies completed all
+**108,288 measured operations with zero failures**.
 
-Variability matters: one 64-client Rift login trial had a **135.73 ms p99**
-(135.99 ms maximum), including a whole 64-login wave above 100 ms. One Velocity
-64-client warmup missed **7 scheduled echoes** out of 115,200 warmup echoes for
-that profile across all three trials. Those warmup failures remain in the raw
-reports but are excluded from measured-phase totals below. The measurements
-cannot identify whether the outliers originated in the proxy, driver or host.
+Two outliers are worth noting. One 64-client Rift login trial had a **135.73 ms
+p99** (135.99 ms maximum) from a single slow 64-login wave. One Velocity
+64-client warmup missed **7 of 115,200** scheduled echoes; warmup is excluded
+from the tables but kept in the raw reports. These measurements cannot tell
+whether the outliers came from the proxy, the load generator or the host.
 
-Measured September 30, 2026. Each profile uses three trials per proxy, 30 seconds
-of active echo warmup, 20 seconds of measured echo traffic, and 2,048 measured
-logins in waves matching the client count. A separate 2,048-login warmup precedes
-echo warmup. The offered echo rates are 320/s and 1,280/s, respectively.
+Each profile ran three trials per proxy: 2,048 warmup logins, 30 seconds of echo
+warmup, 20 seconds of measured echoes, then 2,048 measured logins in waves the
+size of the client count.
 
 ### 16 concurrent clients
 
@@ -55,66 +51,53 @@ Medians of per-trial values; parentheses show minimum–maximum. Failure counts 
 
 [Raw JSON, gzip compressed](performance/2026-09-30-loopback-64.json.gz).
 
-[Artifact checksums and settings](performance/2026-09-30-index.json) and
-[process logs and exact configurations](performance/2026-09-30-process-logs.tar.gz)
-accompany the raw samples. Regenerate either table with
-`python3 scripts/render_performance.py docs/performance/2026-09-30-loopback-16.json.gz`
-(or the 64-client report).
+Also published: [artifact checksums and settings](performance/2026-09-30-index.json),
+[process logs and generated configurations](performance/2026-09-30-process-logs.tar.gz)
+and [validation evidence](performance/2026-09-30-validation.json).
 
-The September 30, 2026 run uses an Intel Core Ultra 5 125U with 14 logical CPUs,
-15.1 GiB RAM, Debian Linux kernel `7.2.6+deb14-amd64`, and Python 3.14.7. This is a
-shared developer desktop with ordinary applications running; it is not an
-isolated performance lab. No compilation or test suites run during the measured
-windows. Both products inherit the same CPU affinity (logical CPUs 0–13).
+## Setup
 
-Rift is the locked release build of source commit
-`c1768262f010f331fec30ebe2f02f3417fa7cce3`, using Rust 1.98.1. The working tree
-contains the added benchmark, tests and documentation; the proxy source is
-unchanged. Velocity is **4.2.0 build 30**, using **Temurin 25.0.4.1+1** with
-`-Xms1024M -Xmx1024M -XX:ActiveProcessorCount=2 -Dio.netty.eventLoopThreads=2`.
-Rift uses `TOKIO_WORKER_THREADS=2`. These settings match event-loop workers;
-they do not cap either process to two CPUs or equalize auxiliary threads.
+Measured September 30, 2026 on a shared developer desktop, not an isolated lab:
+Intel Core Ultra 5 125U (14 logical CPUs), 15.1 GiB RAM, Debian kernel
+`7.2.6+deb14-amd64`, Python 3.14.7. No builds or tests ran during measurement.
 
-The Java runtime came from the official
-[Temurin release archive](https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.4.1%2B1/OpenJDK25U-jre_x64_linux_hotspot_25.0.4.1_1.tar.gz),
-verified with SHA-256
-`1731a34baadec5479258ea0202e4d5d865d2efeee60cb0c7d7eb056fe96ca219`.
-Raw reports include the executable hashes and the full Java release metadata.
+| | Rift | Velocity |
+|---|---|---|
+| Version | commit `c1768262`, locked release build, Rust 1.98.1 | 4.2.0 build 30 on [Temurin 25.0.4.1+1](https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.4.1%2B1/OpenJDK25U-jre_x64_linux_hotspot_25.0.4.1_1.tar.gz) |
+| Workers | `TOKIO_WORKER_THREADS=2` | `-XX:ActiveProcessorCount=2 -Dio.netty.eventLoopThreads=2` |
+| Other | | `-Xms1024M -Xmx1024M` |
 
-## What is equivalent
-
-- Minecraft Java 1.8.9 (protocol 47), offline login, one backend, no player
-  forwarding, encryption, compression, user plugins or Lua callbacks.
-- Both clients complete login and receive a valid Join Game packet before
-  exchanging custom plugin messages. Every echo is checked against its payload.
-- The same Python standard-library backend and load generator, loopback TCP,
-  `TCP_NODELAY` and a negotiated 1460-byte TCP MSS on Linux.
-- The same client count, message size, offered messages per client per second,
-  deadlines, connection-burst size and number of login attempts.
-- Login and packet rate limits are disabled. Velocity connection logging,
-  BungeeCord plugin-channel handling and bStats telemetry are disabled; Rift uses
-  no metrics listener. This isolates a common forwarding workload.
-
-Velocity normally enables compression and login throttling. These are deliberate
-benchmark settings, not deployment defaults. See the upstream
-[configuration reference](https://docs.papermc.io/velocity/configuration/).
-The exact generated Lua and TOML, commands and JVM options are retained in each
-report. The jar is pinned by version, build, size and SHA-256 in
-[tests/velocity.json](../tests/velocity.json), using the official
+The worker settings match event-loop threads only; neither process is limited
+to two CPUs. The Velocity jar is pinned by SHA-256 in
+[tests/velocity.json](../tests/velocity.json) and downloaded from the
 [PaperMC downloads service](https://docs.papermc.io/misc/downloads-service/).
+Raw reports record executable hashes, Java release metadata, commands and
+generated configuration.
+
+Both proxies run the same workload:
+
+- Minecraft Java 1.8.9 (protocol 47), offline login, one backend.
+- No player forwarding, encryption, compression, plugins or Lua callbacks.
+- Login and packet rate limits disabled. Velocity connection logging, BungeeCord
+  channel handling and bStats are disabled; Rift has no metrics listener.
+- The same Python backend and load generator over loopback TCP with
+  `TCP_NODELAY` and a 1460-byte MSS.
+- Each client logs in, receives Join Game, then exchanges plugin messages; every
+  echo is checked against its payload.
+
+Velocity enables compression and login throttling by default; they are disabled
+here to compare plain forwarding. See the
+[Velocity configuration reference](https://docs.papermc.io/velocity/configuration/).
 
 ## Reproduce
 
-Use Linux, Python 3.11 or newer, the pinned Rust toolchain and Java 25. Build and
-run the correctness checks before measurement, then stop other builds and tests.
-The downloader verifies cached files on every invocation and refuses a corrupt
-cache entry. The comparison verifies the jar again before starting it.
+Requires Linux, Python 3.11+, the pinned Rust toolchain and Java 25. Stop other
+builds and tests before measuring.
 
 ```sh
 cargo build --release --locked
 python3 scripts/fetch_velocity.py
 
-# Point this at the Java runtime being compared and retain its version.
 RIFT_BENCH_JAVA=/path/to/java25/bin/java
 for clients in 16 64; do
   python3 tests/compare_velocity.py \
@@ -130,85 +113,53 @@ for clients in 16 64; do
 done
 ```
 
-The work directory must be new; it preserves each process log and generated
-configuration. Failed requests remain in reports and are valid measurements.
-Use `--require-success` for a correctness check that must exit nonzero on any
-warmup or measured request failure. Infrastructure or configuration errors
-always fail the run and leave an incomplete report. The table renderer refuses
-incomplete reports. A quick CI run uses two clients, one trial and one second
-each of warmup and measurement; it cannot support performance conclusions.
+`fetch_velocity.py` verifies the cached jar on every run, and the comparison
+verifies it again before starting. `--work-dir` must not exist yet; it keeps
+every process log and generated configuration.
+
+Request failures are recorded as results, not errors. Add `--require-success` to
+exit nonzero on any failed request. Infrastructure or configuration errors abort
+the run, and the renderer refuses the resulting incomplete report.
+
+CI runs the same comparison with two clients, one trial and one second each of
+warmup and measurement, and uploads its report and logs. It checks correctness
+only; its numbers are not performance results.
 
 ## Reading the measurements
 
-CPU is the difference in the proxy's user plus system CPU time from Linux
-`/proc`, divided by the measured wall-clock interval. **100% is one logical CPU**;
-values can exceed 100%. Backend and load-generator CPU are recorded separately.
-Startup and warmup CPU are excluded.
-The table shows the median and range of each trial's mean CPU usage, not peak
-CPU. Login bursts finish much faster than the 20-second echo windows; their CPU
-values describe those short bursts. This host's process CPU counters advance
-in 10 ms units. Raw reports retain CPU seconds and the exact resource window.
+**CPU** is proxy user plus system time from `/proc` over the measured interval.
+100% is one logical CPU. The table shows the mean for each trial, not peak.
+Login bursts are much shorter than the 20-second echo windows, so their CPU
+figures describe short bursts. Counters advance in 10 ms steps. Backend and
+load-generator CPU are recorded separately in the raw reports.
 
-Memory is process RSS in MiB (1,048,576 bytes), including native JVM memory as well
-as Java heap. It is not allocated heap, an allocation count, or whole-machine
-memory. The sampled peak can miss spikes between samples. CPU and RSS require
-Linux; unsupported platforms must not be presented as zero resource usage.
-RSS includes memory retained from startup, warmup and earlier phases; excluding
-their CPU time does not subtract their memory footprint.
+**Memory** is peak sampled RSS in MiB, including JVM native memory. It includes
+memory retained from startup and warmup, and sampling can miss short spikes.
 
-Latency percentiles use nearest rank and include successful operations only.
-For echo traffic, the table measures time from the scheduled send slot to the
-verified reply, including load-generator dispatch delay. The raw reports also
-record send-to-reply RTT and dispatch delay separately. Login latency starts at
-TCP connection initiation and ends after Join Game and a verified echo.
-Failures and their reasons are recorded separately, including timeouts, rejected
-connections and incorrect echoes. A run with no successful operations has null
-latencies. Zero observed failures describes only the attempts in that run.
-Each client has at most one outstanding echo. Missed send slots and all
-remaining slots of a failed session count as failures rather than reducing the
-offered load. Echo connection setup is recorded separately and excluded from
-its measured resource window; connection bursts include setup and teardown.
-Read CPU alongside achieved throughput and failure rate: doing less successful
-work can reduce CPU consumption.
+**Latency** uses nearest-rank percentiles over successful operations. Echo
+latency runs from the scheduled send slot to the verified reply, so it includes
+load-generator dispatch delay; raw reports also record RTT and dispatch delay
+separately. Login latency runs from TCP connect to Join Game plus one verified
+echo.
 
-Each trial starts fresh proxy and backend processes. Both products receive the
-same active warmup; their order alternates between trials. Summary values must
-be interpreted alongside trial ranges, not as statistically significant rankings.
-CI runs a short correctness smoke test and saves its artifacts; its numbers are
-not substituted for the longer published measurements.
+**Failures** include timeouts, rejected connections, incorrect echoes and missed
+send slots. Each client has at most one outstanding echo, and a failed session
+counts all its remaining slots as failures, so offered load never drops. Read
+CPU alongside throughput and failures: doing less work uses less CPU.
 
-## Scope and limitations
+Each trial starts fresh proxy and backend processes, and the proxy order
+alternates between trials. Treat the results as medians with ranges, not
+statistically significant rankings.
 
-This fixture exercises login, the transition to play, and bidirectional plugin
-payload forwarding. It does not simulate terrain generation, chunk traffic,
-player movement, real-server tick scheduling, modern configuration phases,
-signed chat, Mojang authentication, encryption, compression, backend switching,
-or third-party plugins. A 1.8.9 loopback result cannot establish performance for
-those workloads or for a real network. Fixed-rate tests do not measure maximum
-throughput or maximum player count.
+## Limitations
 
-Login throughput can also be limited by the single Python load generator. Its
-resource measurements and those of the separate backend process are retained
-beside the proxy measurements. Small differences in scheduled echo latency
-should be read alongside dispatch-delay and RTT samples.
+The fixture covers login, the transition to play and plugin-message forwarding.
+It does not cover chunk traffic, movement, tick scheduling, configuration
+phases, signed chat, authentication, encryption, compression, backend switching
+or plugins, and loopback is not a real network. Fixed-rate tests measure neither
+maximum throughput nor maximum player count.
 
-JIT compilation, garbage collection, CPU frequency, operating-system scheduling
-and other applications can affect repeated measurements. The reports identify
-the CPU, operating system, runtime versions, worker settings, binary hashes and
-source revision so another machine can reproduce the methodology. Compare
-results only with matching workload and runtime settings, and run longer tests
-on deployment hardware before making capacity decisions.
-
-## Validation
-
-[Validation evidence](performance/2026-09-30-validation.json) records 114 Python
-tests passing under both 3.12 and 3.14, 346 Rust tests passing in each of debug
-and release mode, 15 frontend checks, 200 protocol sessions, switching/recovery,
-BungeeCord and Linux packaging checks. Formatting, Clippy and actionlint passed.
-The exact CI comparison smoke also passed locally under Python 3.12 with
-`--require-success` and the pinned Velocity jar. CI now runs that smoke and
-preserves its report, configurations and logs on every benchmark job.
-
-The existing Rift-only Lua burst smoke separately recorded 37 admission
-failures among 576 attempts at its tested loads. Those observations are retained
-in the validation evidence; the comparison above has no Lua callbacks.
+The single Python load generator may limit login throughput. JIT, garbage
+collection, CPU frequency scaling, scheduling and other applications all add
+variance. Compare only results with matching workload and runtime settings, and
+test on deployment hardware before making capacity decisions.
