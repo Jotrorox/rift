@@ -1,0 +1,12 @@
+{
+  "version": "4.2.0",
+  "build": 30,
+  "channel": "STABLE",
+  "released_at": "2026-09-14T16:50:54.749Z",
+  "source_commit": "c10b49255447694ad42c3c189d7a3f4ee3e73e5e",
+  "metadata_url": "https://fill.papermc.io/v3/projects/velocity/versions/4.2.0/builds/30",
+  "filename": "velocity-4.2.0-30.jar",
+  "url": "https://fill-data.papermc.io/v1/objects/35a5596a5468a035d8a32c8de5ebb0dc6b8d8f0cc3ff5169d514aca762af8aa8/velocity-4.2.0-30.jar",
+  "sha256": "35a5596a5468a035d8a32c8de5ebb0dc6b8d8f0cc3ff5169d514aca762af8aa8",
+  "size_bytes": 42163652
+}

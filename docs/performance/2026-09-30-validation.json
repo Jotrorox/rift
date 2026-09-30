@@ -1,0 +1,49 @@
+{
+  "cargo_fmt": "passed",
+  "cargo_clippy": "passed",
+  "cargo_test_debug": 346,
+  "cargo_test_release": 346,
+  "python_existing_tests": 82,
+  "velocity_download_tests": 5,
+  "frontend_tests": 15,
+  "protocol_wire_sessions": 200,
+  "protocol_versions": 50,
+  "compression_thresholds": 4,
+  "network_wire": "passed",
+  "bungeecord_wire": "passed",
+  "package_linux_x86_64": "passed",
+  "actionlint": "passed",
+  "existing_benchmark": {
+    "command": "python3 tests/bench.py --binary target/release/rift --skip-throughput --attempts 32 --burst-sizes 1,4,16 --report target/performance-validation/benchmark-existing.json",
+    "route_burst_combinations": 18,
+    "attempts": 576,
+    "observed_failures": 37,
+    "failures": "17 Lua busy in lua burst16;20 Lua busy in lua_init burst16; all others succeeded"
+  },
+  "notes": [
+    "Frontend requires installed explicit Node path because node is absent from shell PATH."
+  ],
+  "python_final_tests": 114,
+  "comparator_tests": 22,
+  "renderer_tests": 5,
+  "diff_check": "passed",
+  "python_312_tests": 114,
+  "python_314_tests": 114,
+  "python_312_live_ci_comparison": "passed with --require-success; both proxies, all warmup/measured requests",
+  "published_comparison": {
+    "profiles": [
+      16,
+      64
+    ],
+    "trials_per_proxy_per_profile": 3,
+    "measured_attempts_per_proxy": 108288,
+    "measured_failures_per_proxy": 0,
+    "scope": "offline protocol-47 synthetic loopback fixture; not a capacity estimate",
+    "warmup_failures": {
+      "rift": 0,
+      "velocity": 7,
+      "reason": "schedule_overrun in the second 64-client Velocity warmup; retained in raw report"
+    },
+    "tail_observation": "Second 64-client Rift login trial: one 64-login wave exceeded100ms; trial p99=135.73ms, maximum135.99ms. Cause cannot be determined from these measurements."
+  }
+}

@@ -415,6 +415,25 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.12'
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Download and verify pinned official Velocity
+        id: velocity
+        run: |
+          jar="$(python scripts/fetch_velocity.py)"
+          echo "jar=$jar" >> "$GITHUB_OUTPUT"
+      - name: Check equivalent Rift and Velocity workloads
+        # A correctness smoke test; shared-runner timings are not release claims.
+        env:
+          VELOCITY_JAR: ${{ steps.velocity.outputs.jar }}
+        run: >-
+          python tests/compare_velocity.py --binary target/release/rift
+          --velocity-jar "$VELOCITY_JAR"
+          --trials 1 --clients 2 --duration 1 --warmup 1
+          --attempts 8 --burst-size 2 --require-success
+          --report target/velocity-smoke.json --work-dir target/velocity-smoke-artifacts
       - name: Record performance (no timing thresholds on shared runners)
         run: |
           mkdir -p target
@@ -437,6 +456,7 @@ jobs:
           path: |
             target/benchmark.*
             target/pilot.json
+            target/velocity-smoke*
           retention-days: 14
 
   ci-ready:
