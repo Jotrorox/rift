@@ -152,6 +152,39 @@ impl ProtocolVersion {
     pub fn nbt_components(self) -> bool {
         self.0 >= 765
     }
+    /// Plugin-message packet IDs, independently mapped in each direction.
+    /// Checked against Velocity's StateRegistry and the pinned 26.2/26.3
+    /// Mojang GameProtocols artifacts (see docs/network-protocol.md).
+    pub fn custom_payload_id(self, state: State, direction: Direction) -> Option<i32> {
+        match (state, direction) {
+            (State::Play, Direction::Serverbound) => self.switching().map(|caps| caps.play_payload),
+            (State::Play, Direction::Clientbound) => Some(match self.0 {
+                47 => 0x3f,
+                107 | 108 | 109 | 110 | 210 | 315 | 316 | 335 | 338 | 340 => 0x18,
+                393 | 401 | 404 => 0x19,
+                477 | 480 | 485 | 490 | 498 => 0x18,
+                573 | 575 | 578 => 0x19,
+                735 | 736 => 0x18,
+                751 | 753 | 754 => 0x17,
+                755..=758 => 0x18,
+                759 => 0x15,
+                760 => 0x16,
+                761 => 0x15,
+                762 | 763 => 0x17,
+                764 | 765 => 0x18,
+                766..=769 => 0x19,
+                770..=777 => 0x18,
+                _ => return None,
+            }),
+            (State::Configuration, Direction::Serverbound) if self.has_configuration() => {
+                Some(if self.0 < 766 { 1 } else { 2 })
+            }
+            (State::Configuration, Direction::Clientbound) if self.has_configuration() => {
+                Some(if self.0 < 766 { 0 } else { 1 })
+            }
+            _ => None,
+        }
+    }
     fn config_finish(self) -> i32 {
         if self.0 < 766 { 2 } else { 3 }
     }

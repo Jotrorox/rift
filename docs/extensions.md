@@ -67,8 +67,9 @@ one execution budget.
 
 Every transfer entry point uses `before_transfer`: `/server`, `/hub`, extension
 commands, queue admissions, outage recovery and administration (including its
-HTTP/messaging entry points). Static access/health checks may eliminate a target
-before this hook. `reason` is `command`, `queue`, `recovery` or `admin`. A denial
+HTTP/messaging entry points), and BungeeCord `Connect`/`ConnectOther` requests.
+Static access/health checks may eliminate a target
+before this hook. `reason` is `command`, `queue`, `recovery`, `admin` or `bungeecord`. A denial
 prevents that target's connection; recovery may try another eligible candidate.
 A backend can still reject an allowed player.
 

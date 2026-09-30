@@ -5,6 +5,9 @@ use tokio::{
     time::{Duration, timeout},
 };
 
+#[path = "bungeecord_tests.rs"]
+mod bungeecord_tests;
+
 fn login_start() -> Packet {
     let mut data = Vec::new();
     write_string("Player", &mut data);

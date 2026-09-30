@@ -5,6 +5,10 @@ handlers, and external server plugins over QUIC. Native Rust components can also
 use `rift::messaging::Broker` directly. Payloads are arbitrary bytes, so plugins
 can choose JSON, protobuf, or their existing binary format.
 
+Existing Bukkit/Paper plugins that use the BungeeCord plugin channel can enable
+[BungeeCord compatibility](bungeecord.md) for player queries and transfers over
+Minecraft connections, independently of this broker.
+
 The API follows NATS-style subjects, queue groups and request/reply, with a
 separate retained-stream API for replay and acknowledgements. It uses Rift's own
 [documented wire protocol](messaging-protocol.md); existing NATS clients do not

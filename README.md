@@ -132,6 +132,10 @@ authenticated extensions require **1.19.3 or newer**; earlier versions use offli
 backends with forwarding disabled. Bedrock/UDP, unlisted snapshots and legacy
 pre-1.7 pings are unsupported.
 
+Set `rift.config.network = { bungeecord = true }` for existing backend plugins to
+request transfers and query players/servers over the BungeeCord plugin channel.
+See the [supported subchannels and configuration](docs/bungeecord.md).
+
 ## Documentation
 
 - [Lua configuration and plugins](docs/lua.md): script-style settings, modules and folder plugins.
@@ -139,6 +143,7 @@ pre-1.7 pings are unsupported.
 - [Operations](docs/operations.md): installation, systemd/containers, administration and upgrades.
 - [HTTP services](docs/http.md): web dashboard, status, API and Lua extensions.
 - [Messaging](docs/messaging.md): plugin messaging, [Lua API](docs/messaging-lua.md) and [QUIC protocol](docs/messaging-protocol.md).
+- [BungeeCord compatibility](docs/bungeecord.md): backend plugin transfers and player/server queries.
 - [Network protocol](docs/network-protocol.md): backend switching and recovery.
 
 ## Development

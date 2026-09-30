@@ -27,6 +27,7 @@ pub struct Connection<S> {
     received: VecDeque<Packet>,
     pending: Option<PendingWrite>,
     login_plugins: LoginPlugins,
+    bungeecord_registered: bool,
 }
 
 struct PendingWrite {
@@ -50,6 +51,7 @@ impl<S> Connection<S> {
             received: VecDeque::new(),
             pending: None,
             login_plugins: LoginPlugins::default(),
+            bungeecord_registered: false,
         }
     }
 }
@@ -130,6 +132,7 @@ pub enum SessionEvent {
     BackendClosed,
     BackendFailed,
     ProxyCommand(String),
+    BungeeCord(crate::bungeecord::Request),
     Disconnected,
 }
 
@@ -145,6 +148,7 @@ pub struct Session<C, B> {
     authenticated_profile: Option<AuthenticatedProfile>,
     forwarding: Option<Forwarding>,
     network: bool,
+    bungeecord: bool,
     joined: bool,
     pending_join_valid: bool,
     switch_in_progress: bool,
@@ -179,6 +183,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             authenticated_profile: None,
             forwarding: None,
             network: false,
+            bungeecord: false,
             joined: false,
             pending_join_valid: false,
             switch_in_progress: false,
@@ -246,6 +251,11 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         }
         self.network = true;
         Ok(())
+    }
+
+    /// Reserve the BungeeCord compatibility channel for trusted backend requests.
+    pub fn enable_bungeecord(&mut self) {
+        self.bungeecord = true;
     }
 
     pub fn identity(&self) -> Option<PlayerIdentity> {
@@ -404,14 +414,19 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             let expected = self.identity.clone().unwrap();
             let forwarding = self.forwarding.clone();
             let legacy_join = {
-                let login =
-                    Self::login_replacement(&mut backend, version, &expected, forwarding.as_ref());
+                let login = Self::login_replacement(
+                    &mut backend,
+                    version,
+                    &expected,
+                    forwarding.as_ref(),
+                    self.bungeecord,
+                );
                 tokio::pin!(login);
                 loop {
                     tokio::select! {
                         result = &mut login => { break result?; }
                         event = self.forward(), if self.backend.is_some() => match event? {
-                            SessionEvent::Packet | SessionEvent::ProxyCommand(_) => {}
+                            SessionEvent::Packet | SessionEvent::ProxyCommand(_) | SessionEvent::BungeeCord(_) => {}
                             SessionEvent::BackendClosed | SessionEvent::BackendFailed => {}
                             SessionEvent::ClientClosed => return Err(io::Error::new(
                                 io::ErrorKind::UnexpectedEof, "client closed during replacement login")),
@@ -647,7 +662,11 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                 poll_fn(|cx| Poll::Ready(forward.as_mut().poll(cx))).await
             };
             match ready {
-                Poll::Ready(Ok(SessionEvent::Packet | SessionEvent::ProxyCommand(_))) => {}
+                Poll::Ready(Ok(
+                    SessionEvent::Packet
+                    | SessionEvent::ProxyCommand(_)
+                    | SessionEvent::BungeeCord(_),
+                )) => {}
                 Poll::Ready(Ok(SessionEvent::BackendClosed | SessionEvent::BackendFailed)) => {
                     return Ok(());
                 }
@@ -709,6 +728,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         version: ProtocolVersion,
         expected: &PlayerIdentity,
         forwarding: Option<&Forwarding>,
+        bungeecord: bool,
     ) -> io::Result<Option<Packet>> {
         loop {
             let packet = backend
@@ -721,10 +741,17 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                         "replacement backend closed during login",
                     )
                 })?;
-            match backend
+            let phase = backend.state.phase(Direction::Clientbound);
+            let kind = backend
                 .state
-                .observe(version, Direction::Clientbound, &packet)?
+                .observe(version, Direction::Clientbound, &packet)?;
+            if bungeecord
+                && crate::bungeecord::payload(version, phase, Direction::Clientbound, &packet)
+                    .is_some()
             {
+                continue;
+            }
+            match kind {
                 PacketKind::SetCompression => backend
                     .codec
                     .set_compression(read_varint(&mut packet.data.as_slice())?),
@@ -835,6 +862,30 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             .await
     }
 
+    /// Return a compatibility response to the current backend. Queue the write
+    /// through its connection so cancellation cannot truncate or duplicate it.
+    pub async fn send_bungeecord(&mut self, payload: &[u8]) -> io::Result<()> {
+        if !self.bungeecord || !self.can_switch() {
+            return Err(protocol::invalid(
+                "BungeeCord responses require joined play state",
+            ));
+        }
+        if payload.len() > crate::bungeecord::MAX_PAYLOAD_SIZE {
+            return Err(protocol::invalid("BungeeCord payload exceeds size limit"));
+        }
+        let version = self.version()?;
+        let backend = self
+            .backend
+            .as_mut()
+            .filter(|backend| backend.state.settled(State::Play))
+            .ok_or_else(|| protocol::invalid("BungeeCord responses require a playing backend"))?;
+        backend.flush_pending().await?;
+        let packet =
+            crate::bungeecord::packet(version, crate::bungeecord::channel(version), payload);
+        backend.queue(version, Direction::Serverbound, &packet)?;
+        backend.flush_pending().await
+    }
+
     async fn send_client(&mut self, packet: &Packet) -> io::Result<()> {
         let version = self.version()?;
         // Commit the state only after the complete packet has been written.
@@ -854,6 +905,18 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                 .backend
                 .as_mut()
                 .ok_or_else(|| protocol::invalid("no backend attached"))?;
+            if self.bungeecord
+                && !backend.bungeecord_registered
+                && backend.pending.is_none()
+                && backend.state.settled(State::Play)
+            {
+                backend.queue(
+                    version,
+                    Direction::Serverbound,
+                    &crate::bungeecord::registration(version),
+                )?;
+                backend.bungeecord_registered = true;
+            }
             enum Incoming {
                 Client(io::Result<ConnectionEvent>),
                 Backend(io::Result<ConnectionEvent>),
@@ -906,6 +969,19 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                     if kind == PacketKind::LoginStart {
                         self.login_start = Some(packet.clone());
                     }
+                    if self.bungeecord
+                        && crate::bungeecord::payload(
+                            version,
+                            phase,
+                            Direction::Serverbound,
+                            &packet,
+                        )
+                        .is_some()
+                    {
+                        // Never allow a client to impersonate this proxy to a
+                        // backend, including during configuration or switching.
+                        return Ok(SessionEvent::Packet);
+                    }
                     self.remember_client_packet(phase, &packet)?;
                     let backend = self.backend.as_mut().unwrap();
                     if kind == PacketKind::LoginPluginResponse {
@@ -933,6 +1009,25 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                     let kind = backend
                         .state
                         .observe(version, Direction::Clientbound, &packet)?;
+                    if self.bungeecord
+                        && let Some(payload) = crate::bungeecord::payload(
+                            version,
+                            phase,
+                            Direction::Clientbound,
+                            &packet,
+                        )
+                    {
+                        let ready = backend.state.settled(State::Play) && self.can_switch();
+                        // The channel belongs to the proxy. Unknown, malformed
+                        // and premature requests must never leak to the client.
+                        return Ok(
+                            if ready && let Ok(Some(request)) = crate::bungeecord::decode(payload) {
+                                SessionEvent::BungeeCord(request)
+                            } else {
+                                SessionEvent::Packet
+                            },
+                        );
+                    }
                     if kind == PacketKind::CookieRequest {
                         self.initial_retry_safe = false;
                     }

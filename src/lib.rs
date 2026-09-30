@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod bungeecord;
 pub mod config;
 pub mod extensions;
 mod forwarding;

@@ -27,13 +27,41 @@ pub enum Command {
 pub struct Transfer {
     pub snapshot: Arc<Snapshot>,
     pub backend: String,
-    pub reply: Reply,
+    pub reply: TransferReply,
+}
+
+/// Backend plugin transfers have no wire acknowledgement. They still share the
+/// bounded per-player queue and the same completion and admission path as admin.
+pub enum TransferReply {
+    Admin(Reply),
+    BungeeCord,
+}
+
+impl TransferReply {
+    pub fn is_closed(&self) -> bool {
+        matches!(self, Self::Admin(reply) if reply.is_closed())
+    }
+
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Self::Admin(_) => "admin",
+            Self::BungeeCord => "bungeecord",
+        }
+    }
+
+    pub fn send(self, value: Result<Value, String>) -> Result<(), Result<Value, String>> {
+        match self {
+            Self::Admin(reply) => reply.send(value),
+            Self::BungeeCord => Ok(()),
+        }
+    }
 }
 
 struct Entry {
     name: String,
     backend: String,
     protocol: i32,
+    peer: SocketAddr,
     transfer: mpsc::Sender<Transfer>,
 }
 
@@ -68,6 +96,7 @@ impl Control {
         backend: String,
         protocol: i32,
         name: String,
+        peer: SocketAddr,
     ) -> (Registration, mpsc::Receiver<Transfer>) {
         let (transfer, receiver) = mpsc::channel(1);
         self.players.lock().unwrap().insert(
@@ -76,6 +105,7 @@ impl Control {
                 name,
                 backend,
                 protocol,
+                peer,
                 transfer,
             },
         );
@@ -91,6 +121,32 @@ impl Control {
     pub fn moved(&self, id: u64, backend: &str) {
         if let Some(entry) = self.players.lock().unwrap().get_mut(&id) {
             entry.backend = backend.to_owned();
+        }
+    }
+
+    pub fn player_peer(&self, name: &str) -> Option<SocketAddr> {
+        self.players
+            .lock()
+            .unwrap()
+            .values()
+            .find(|entry| entry.name.eq_ignore_ascii_case(name))
+            .map(|entry| entry.peer)
+    }
+
+    pub fn plugin_transfer(&self, name: &str, backend: &str, snapshot: Arc<Snapshot>) {
+        let players = self.players.lock().unwrap();
+        if let Some(entry) = players
+            .values()
+            .find(|entry| entry.name.eq_ignore_ascii_case(name))
+            && entry.backend != backend
+        {
+            // No task or unbounded queue per request, including self-transfers.
+            // The recipient rechecks access, health, draining and extensions.
+            let _ = entry.transfer.try_send(Transfer {
+                snapshot,
+                backend: backend.to_owned(),
+                reply: TransferReply::BungeeCord,
+            });
         }
     }
 
@@ -214,7 +270,7 @@ pub(crate) async fn execute(
                 entry.transfer.clone()
             };
             let (reply, receiver) = oneshot::channel();
-            sender.try_send(Transfer {snapshot: snapshot.clone(), backend: backend.clone(), reply}).map_err(|_| "player disconnected or already has a queued transfer")?;
+            sender.try_send(Transfer {snapshot: snapshot.clone(), backend: backend.clone(), reply: TransferReply::Admin(reply)}).map_err(|_| "player disconnected or already has a queued transfer")?;
             receiver.await.map_err(|_| "player disconnected during transfer".to_owned())?
         }
         [command] if command == "reload" => {

@@ -589,6 +589,55 @@ fn omitted_network_fields_keep_ordinary_routes_public() {
 }
 
 #[test]
+fn bungeecord_is_explicitly_enabled_and_requires_a_boolean() {
+    for (value, enabled) in [("true", true), ("false", false), ("nil", false)] {
+        let source = NETWORK.replace(
+            "network = {",
+            &format!("network = {{ bungeecord = {value},"),
+        );
+        let config = Config::from_lua(&source, "bungeecord.lua").unwrap();
+        assert_eq!(config.network.bungeecord, enabled);
+        assert_eq!(config.network.initial, ["lobby", "survival"]);
+    }
+    for value in ["1", "'true'", "{}"] {
+        let source = NETWORK.replace(
+            "network = {",
+            &format!("network = {{ bungeecord = {value},"),
+        );
+        assert!(
+            Config::from_lua(&source, "bungeecord.lua")
+                .unwrap_err()
+                .to_string()
+                .contains("network.bungeecord")
+        );
+    }
+}
+
+#[test]
+fn bungeecord_rejects_case_ambiguous_backend_names_only_when_enabled() {
+    let mut config = Config::from_lua(NETWORK, "bungeecord.lua").unwrap();
+    config
+        .backends
+        .insert("Lobby".into(), "127.0.0.1:25568".parse().unwrap());
+    config.validate().unwrap();
+    config.network.bungeecord = true;
+    assert!(
+        config
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("network.bungeecord")
+    );
+    config.backends.remove("lobby");
+    config.network.initial[0] = "Lobby".into();
+    config.network.hubs[0] = "Lobby".into();
+    config
+        .routes
+        .insert("public".into(), Route::Direct("Lobby".into()));
+    config.validate().unwrap();
+}
+
+#[test]
 fn network_rejects_ambiguous_or_unknown_destinations_and_permissions() {
     for (from, to, expected) in [
         (
