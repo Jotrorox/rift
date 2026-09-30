@@ -62,7 +62,7 @@ receives its import name as `...`.
 Use dotted names with letters, digits, `_` or `-` in each component, up to 128
 bytes. Filesystem paths, `..`, absolute paths, native libraries and `package.path`
 are not supported. Import errors identify the module and file; circular imports
-fail with an explicit diagnostic. `rift` and `rift.config` are reserved modules.
+fail with an explicit diagnostic. `rift`, `rift.config`, `rift.store`, `rift.http` and `rift.permissions` are reserved modules.
 
 ## Folder-based plugins
 
@@ -155,11 +155,14 @@ Each callback builds a fresh VM from that immutable snapshot. Even a `require`
 inside a callback uses the saved file contents; it never reads live files.
 Modules, globals and upvalues do not persist between callbacks. A successful
 reload captures edited modules and plugins even when `rift.lua` did not change.
-Existing player sessions retain their original code and permissions. A failed
-reload preserves the active configuration.
+Existing player sessions retain their original code. API v1 also pins permissions;
+API v2 supports live grants, durable state, jobs and HTTP integrations as described
+in the [extension API](extensions.md). A failed reload preserves the active
+configuration.
 
 All imports and handlers share the existing 8 MiB VM memory limit, 100,000
-instruction budget and 50 ms execution deadline. Filesystem/process I/O, native
+instruction budget and 50 ms execution deadline (v2 scheduled jobs have a five-second
+wall deadline). Direct filesystem/process I/O, native
 modules, arbitrary code loaders and the other restricted facilities remain
 unavailable. This is a local Lua plugin API, not the full Neovim runtime.
 

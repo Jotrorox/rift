@@ -1,13 +1,15 @@
-# Authenticated Lua extensions, API version 1
+# Authenticated Lua extensions, API versions 1 and 2
 
 [`examples/extensions.lua`](../examples/extensions.lua) is a runnable authenticated
-network with a FIFO survival queue, a staff-only server and registered commands.
+network with a FIFO survival queue, a staff-only server, durable visit counters,
+recurring jobs and optional HTTP permission refresh.
 It uses the existing Paper/Velocity forwarding setup in
 [`examples/online.lua`](../examples/online.lua). Run `rift --check
 examples/extensions.lua`, then start with `RIFT_FORWARDING_SECRET` set. Clients
 must use Java 1.19.3–26.3, which supports both switching and online authentication.
 
-Set `rift.config.extensions = { api_version = 1, ... }`, or use
+Set `rift.config.extensions = { api_version = 2, ... }` for the current API
+(or `api_version = 1` for the original contract), or use
 `rift.on(event, callback)` and `rift.command(name, definition)` from a script or
 [folder-based plugin](lua.md). Existing returned configuration tables still work.
 Unknown versions, fields, invalid registrations and missing online authentication
@@ -31,7 +33,7 @@ are errors; Rift never treats an error as permission to proceed.
 | `after_transfer(ctx)` | When an admitted transfer attempt completes or fails | `server` (source), `target`, `reason`, `success` | `nil` |
 | `disconnect(ctx)` | Session teardown, including an authenticated login that never joined | Last committed `server`, or nil; `reason = "session_closed"` | `nil` |
 
-Common context fields are `api_version = 1`, `authenticated = true`, `uuid`
+Common player context fields are `api_version` (1 or 2), `authenticated = true`, `uuid`
 (lowercase 32-digit hex, no hyphens), canonical Mojang `name`, `connection_id`
 (decimal string), `listener`, normalized `hostname`, `peer_ip`, and `protocol`.
 `ctx.has_permission("node")` returns a boolean. Call it with a dot, not a colon.
@@ -99,31 +101,33 @@ not promise a detailed transport failure diagnosis.
 
 ## Deadlines and state ownership
 
-Each callback has a 50 ms wall deadline including blocking-worker scheduling and
+Each player callback has a 50 ms wall deadline including blocking-worker scheduling and
 configuration evaluation, 100,000 Lua instructions, an 8 MiB VM limit and a
-256 KiB combined entry/module/plugin source limit. At most four extension jobs execute or wait for workers
+256 KiB combined entry/module/plugin source limit. At most four extension invocations execute or wait for workers
 per process, shared across reload generations. Saturation fails immediately.
 Workers retain permits until execution actually stops, including after caller
 cancellation. A cancelled callback may finish and publish within its remaining
 budget; its returned action is discarded. A per-session worker permit prevents
-later callbacks from overtaking it. No Lua VM, socket, mutable registry or lock crosses into a callback.
+later callbacks from overtaking it. No Lua VM or socket crosses between invocations. Host APIs serialize their own
+state access; callbacks never receive a Rust lock or mutable registry.
 This extension worker limit is separate from the existing route/HTTP/message
 worker limits.
 
 Every invocation evaluates the source in a fresh restricted VM. Globals,
 upvalues and context edits disappear when it finishes. Top-level configuration
 code must therefore be deterministic and free of runtime side effects. Local
-modules and plugins load from the saved snapshot. I/O, dynamic/native module
-loading, coroutine scheduling, arbitrary native calls and timers are unavailable.
+modules and plugins load from the saved snapshot. Direct I/O, dynamic/native module
+loading, coroutine scheduling and arbitrary native calls are unavailable. API v2
+exposes the bounded host services below, including host-scheduled jobs.
 `rift.publish` becomes available only after source evaluation and uses
 the existing bounded, nonblocking broker API. Publications already delivered
 before a callback fails are not rolled back.
 
-Rust owns session identity, committed server, pending transfer, permissions
-snapshot, capacity leases and FIFO tickets. The only shared mutable extension
-state in v1 is this host-owned admission state. Use the existing messaging API
-for external observations; v1 does not add arbitrary Lua persistence or remote
-permission lookups.
+Rust owns session identity, committed server, pending transfer, permissions,
+capacity leases and FIFO tickets. API v1 retains its original permission
+snapshot and admission state contract. API v2 also owns shared storage, live
+permission overrides and job scheduling. Each store/permission mutation and HTTP
+request takes effect independently; later callback failure does not roll it back.
 
 ## Permissions and commands
 
@@ -143,9 +147,10 @@ rift.config.extensions = {
 }
 ```
 
-Permissions are exact nodes, granted by authenticated UUID. `*` grants nodes to
-all authenticated players; there are no wildcard permission nodes, inheritance
-or deny precedence. An absent grant denies. Values must be `true`.
+Configured permissions are exact nodes, granted by authenticated UUID. `*` grants
+nodes to all authenticated players; there are no wildcard permission nodes or
+inheritance. These configuration tables accept grants (`true`) only. An absent
+grant denies. API v2 also supports live grant/deny overrides, described below.
 
 Register up to 64 lowercase command names using letters, digits, `_` or `-`
 (maximum 64 bytes). `server` and `hub` are reserved. Each registration must have
@@ -161,6 +166,149 @@ Commands may return nil, `{ message = "text" }`, `{ server = "name" }`,
 with their original backend; proxy arguments use unsigned Brigadier strings.
 Protect destinations in both `initial_server` and `before_transfer`: a command
 permission alone does not protect a server against `/server` or admin routing.
+
+## API v2 host services
+
+These APIs are available only in authenticated extension callbacks and scheduled
+jobs with `api_version = 2`. They are unavailable in legacy route/HTTP/message
+callbacks. Configuration loading, `rift check` and candidate reload validation
+never execute jobs, HTTP requests or storage operations. Capture API references
+in initialization freely (`local store = require("rift.store")`); calling them
+there is an error. `require("rift.http")` and `require("rift.permissions")` work
+in the same way. All methods use a dot, not a colon.
+
+### Persistent state
+
+```lua
+rift.config.extensions = {
+    api_version = 2,
+    storage = { path = "extensions.state" },
+    join = function(ctx)
+        local visits = rift.store.increment("visits", ctx.uuid, 1)
+        rift.store.set("last_server", ctx.uuid, ctx.server)
+        rift.publish("visits", ctx.uuid .. " " .. tostring(visits))
+    end,
+}
+```
+
+Storage is shared across sessions, jobs and reload generations. With `storage`,
+it survives process restarts in a versioned binary snapshot. Relative paths are
+resolved against the configuration file's directory; the parent directory must
+already exist and be writable. Startup loads or creates the snapshot and rejects
+corrupt or oversized files. Without `storage`, the same API uses memory and resets
+on restart. Each file belongs to one Rift process; it is not a distributed database.
+Namespaces organize data; they do not isolate mutually untrusted plugins.
+
+| Method | Result |
+| --- | --- |
+| `rift.store.get(namespace, key)` | Stored string, or nil when absent |
+| `rift.store.set(namespace, key, value)` | Store a binary-safe string |
+| `rift.store.delete(namespace, key)` | Boolean: whether an entry was removed |
+| `rift.store.increment(namespace, key, delta)` | Atomically add an integer and return the result; missing values start at zero |
+
+Increment stores a decimal string. The existing value, delta and result must be
+integers in −(2^53−1) through 2^53−1, ensuring exact LuaJIT numbers; invalid values
+or overflow fail without mutation.
+A read followed by a write is not atomic; use increment for concurrent counters.
+Namespaces and keys are UTF-8 strings of 1–128 bytes. Values have a 64 KiB limit;
+the entire store, including snapshot overhead, has a 1 MiB/4096-entry limit.
+Exceeding a limit fails without changing committed state. Durable mutations write
+and sync a temporary sibling file before atomic replacement; memory changes only
+after replacement succeeds. Unix directory syncing is best effort. Filesystem
+calls cannot be interrupted mid-operation; an expired worker retains its permit
+until it stops, and a committed mutation can outlive a timed-out callback.
+
+### Scheduled work
+
+```lua
+rift.config.extensions.jobs = {
+    heartbeat = {
+        every_ms = 60000,
+        run = function(ctx)
+            rift.publish("jobs." .. ctx.job, "alive")
+        end,
+    },
+}
+```
+
+Register up to 32 named jobs using lowercase letters, digits, `_`, `-` or `.`
+(1–64 bytes). Each requires `every_ms` (an integer from 100 to 86400000) and a
+`run` function. Its context contains only `api_version = 2` and `job`; it has no
+player identity. Return nil. The first run waits a full interval, and each next
+run waits a full interval after completion. Jobs never overlap by name, including
+across reloads. Missed intervals are skipped, never queued for catch-up.
+
+Jobs share the four-worker extension limit, 100,000 instructions and 8 MiB VM
+limit with player callbacks. Their wall deadline is five seconds including worker
+scheduling and HTTP requests; player callbacks still have only 50 ms. Exhausted
+capacity skips a tick. Errors are logged and the job retries at its next interval.
+Use jobs for external I/O and keep player policy checks local.
+
+Only the committed configuration schedules jobs. Successful reload replaces the
+schedule and job source; failed reload leaves both intact. Shutdown stops new
+jobs before draining players. An already running callback may finish within its
+remaining budget, keeping its permits and excluding the same job name in a new
+generation. Schedules are process-local and do not survive downtime or promise
+exactly-once execution; use idempotent external operations.
+
+### HTTP integrations
+
+```lua
+rift.config.extensions.integrations = {
+    directory = {
+        url = "https://directory.example.com/permissions/",
+        timeout_ms = 1000,
+        headers = { ["Accept"] = "text/plain" },
+    },
+}
+-- Inside a job:
+local response = rift.http.request("directory", {
+    method = "GET", path = "0123456789abcdef0123456789abcdef",
+})
+if response.status == 200 then
+    rift.permissions.set("0123456789abcdef0123456789abcdef",
+        "network.staff", response.body == "allow")
+end
+```
+
+Up to 16 named integrations authorize only their configured HTTP(S) origin and
+base path. Base URLs must have no embedded credentials, query or fragment; paths
+are treated as directories. Requests use a relative `path` (empty by default),
+`method` (GET by default), optional string `body`, and optional `headers` table.
+Absolute URLs/paths, traversal and encoded separators are rejected. Request
+headers override configured headers. Redirects are returned without following
+and environment HTTP proxies are disabled. Configured services may be private
+or loopback addresses; configuration authors choose the allowed endpoints.
+
+The result is `{ status = number, body = string, headers = table }`. HTTP error
+statuses are ordinary responses; transport errors, timeout, malformed options
+and oversized responses fail the callback. Header names in responses are
+lowercase. Bodies are limited to 64 KiB, headers to 32 entries/8 KiB. Configured
+`timeout_ms` defaults to 1000 and must be 1–5000; the enclosing callback's
+remaining deadline always takes precedence. There are no automatic retries.
+
+### Live permissions
+
+V2 `ctx.has_permission(node)` and command authorization consult current host
+permissions each time. `rift.permissions.has(uuid, node)` checks any UUID;
+`rift.permissions.set(uuid, node, true)` grants and `false` revokes, including a
+configured default grant. Set nil to remove the override and return to configured
+grants. UUIDs use lowercase 32-digit hex, or `*` for a default override.
+
+Precedence is the UUID override, then `*` override, then the union of configured
+UUID/default grants. At most 4096 `(UUID, node)` overrides can exist. Overrides
+survive reconnects and reloads within this process but reset on restart; persist
+application policy in the store or refresh it from a service when needed.
+
+A committed reload updates configured v2 grants for existing players while their
+callback source and command registrations stay pinned. Overrides continue to
+apply until explicitly reset. A candidate or rejected reload changes no live
+grants. Commands check permission before invoking Lua, including after worker
+scheduling; transfers and queue admission see updated permissions through their
+existing `before_transfer` policy. Revocation does not eject someone already on
+a server or undo an action whose authorization check has completed. The extension
+example optionally refreshes a staff grant from HTTP and revokes it before each
+request so a failed refresh leaves that grant denied.
 
 ## Queue behavior
 
@@ -196,13 +344,14 @@ hostname deny an account without `network.staff`.
 ## Reload behavior
 
 A validated reload is atomic for new accepted connections. Existing connections
-keep their source, command registrations, UUID grants and callback semantics for
-their entire lifetime, including future transfers. Permission changes therefore
-apply on reconnect; reload is not an immediate permission-revocation mechanism.
+keep their source, command registrations and callback semantics for their entire
+lifetime, including future transfers. V1 keeps its UUID grants until reconnect.
+V2 uses current configured grants and runtime overrides, as described above.
 Administrator transfers to newly added backends still run the player's pinned
 transfer policy. Failed reloads leave the active generation intact.
 
-Host leases, queue order and worker limits survive reload. Enabling/disabling
-extensions or changing queue destinations/capacities requires restart, avoiding
-conflicting capacity policies between live generations. Restart clears all
-in-memory state. There is no reload callback or arbitrary state migration in v1.
+Host leases, queue order, storage, permission overrides and worker limits survive
+reload. Enabling/disabling extensions, changing API version, storage path or queue
+destinations/capacities requires restart. Restart clears in-memory state and job
+schedules but preserves a configured storage snapshot. There is no automatic
+state migration or durable replay of callbacks.

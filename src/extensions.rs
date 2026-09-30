@@ -1,14 +1,20 @@
-//! Version 1 authenticated extensions. Lua owns no shared mutable state; Rust
-//! owns admission leases and FIFO tickets, whose lifetime is the client session.
+//! Authenticated extensions. Rust owns durable state, live permissions, scheduled
+//! work, admission leases and FIFO tickets; Lua invocations remain isolated.
 use crate::{auth::AuthenticatedProfile, config::Config, messaging::Broker, script};
 use mlua::{Function, Table, Value};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     io,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
     time::{Duration, Instant},
 };
 use tokio::sync::Semaphore;
+
+mod integrations;
+mod permissions;
+mod scheduler;
+mod storage;
+pub use scheduler::Scheduler;
 
 const HOOKS: &[&str] = &[
     "login",
@@ -22,6 +28,10 @@ const HOOKS: &[&str] = &[
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtensionScript {
     source: script::ScriptSource,
+    api_version: u8,
+    storage: Option<storage::StorageConfig>,
+    integrations: integrations::Integrations,
+    jobs: BTreeMap<String, Duration>,
     hooks: BTreeSet<String>,
     commands: BTreeMap<String, String>,
     permissions: BTreeMap<String, BTreeSet<String>>,
@@ -58,6 +68,15 @@ impl ExtensionScript {
         let Value::Table(table) = value else {
             return Err(mlua::Error::runtime("extensions must be a table"));
         };
+        let api_version = match table.raw_get::<Value>("api_version")? {
+            Value::Integer(1) => 1,
+            Value::Integer(2) => 2,
+            _ => {
+                return Err(mlua::Error::runtime(
+                    "extensions.api_version must be 1 or 2",
+                ));
+            }
+        };
         fields(
             &table,
             &[
@@ -71,11 +90,28 @@ impl ExtensionScript {
                 "commands",
                 "permissions",
                 "queues",
+                "storage",
+                "integrations",
+                "jobs",
             ],
         )?;
-        if table.raw_get::<Value>("api_version")? != Value::Integer(1) {
-            return Err(mlua::Error::runtime("extensions.api_version must be 1"));
+        if api_version == 1 {
+            for name in ["storage", "integrations", "jobs"] {
+                if !table.raw_get::<Value>(name)?.is_nil() {
+                    return Err(mlua::Error::runtime(format!(
+                        "extensions.{name} requires api_version = 2"
+                    )));
+                }
+            }
         }
+        let mut storage = storage::parse(table.raw_get("storage")?)?;
+        if let Some(storage) = &mut storage
+            && storage.path.is_relative()
+        {
+            storage.path = source.root.join(&storage.path);
+        }
+        let integrations = integrations::parse(table.raw_get("integrations")?)?;
+        let jobs = scheduler::parse(table.raw_get("jobs")?)?;
         let mut hooks = BTreeSet::new();
         for hook in HOOKS {
             match table.raw_get::<Value>(*hook)? {
@@ -153,6 +189,10 @@ impl ExtensionScript {
         }
         Ok(Some(Self {
             source: source.clone(),
+            api_version,
+            storage,
+            integrations,
+            jobs,
             hooks,
             commands,
             permissions,
@@ -171,11 +211,17 @@ impl ExtensionScript {
         hook: &str,
         input: &Context,
         deadline: Instant,
-        broker: Broker,
+        runtime: &Extensions,
     ) -> io::Result<Action> {
         let run = || -> mlua::Result<Action> {
             let (lua, root) = script::load(&self.source, deadline)?;
-            script::install_messaging(&lua, Some(broker), deadline)?;
+            script::install_messaging(&lua, Some(runtime.broker.clone()), deadline)?;
+            if self.api_version == 2 {
+                let api: Table = lua.named_registry_value("rift.runtime")?;
+                runtime.store.install(&lua, &api, deadline)?;
+                runtime.permissions.install(&lua, &api, deadline)?;
+                integrations::install(&lua, &api, &self.integrations, deadline)?;
+            }
             let Value::Table(root) = root else {
                 return Err(mlua::Error::runtime("configuration must return a table"));
             };
@@ -185,11 +231,33 @@ impl ExtensionScript {
                     .raw_get::<Table>("commands")?
                     .raw_get::<Table>(input.command.as_deref().unwrap())?
                     .raw_get("run")?
+            } else if hook == "job" {
+                extensions
+                    .raw_get::<Table>("jobs")?
+                    .raw_get::<Table>(input.command.as_deref().unwrap())?
+                    .raw_get("run")?
             } else {
                 extensions.raw_get(hook)?
             };
+            // Recheck after worker scheduling/source evaluation, before executing user code.
+            if hook == "command"
+                && !runtime.permits(
+                    &input.uuid,
+                    &self.commands[input.command.as_deref().unwrap()],
+                )
+            {
+                return Ok(Action::Message(
+                    "You do not have permission to use this command.".into(),
+                ));
+            }
             let ctx = lua.create_table()?;
-            ctx.set("api_version", 1)?;
+            ctx.set("api_version", self.api_version)?;
+            if hook == "job" {
+                ctx.set("job", input.command.as_deref())?;
+                let value: Value = callback.call(ctx)?;
+                script::check_deadline(deadline)?;
+                return parse_action(hook, value);
+            }
             ctx.set("connection_id", input.id.to_string())?;
             ctx.set("uuid", input.uuid.as_str())?;
             ctx.set("name", input.name.as_str())?;
@@ -205,15 +273,14 @@ impl ExtensionScript {
             ctx.set("success", input.success)?;
             ctx.set("command", input.command.as_deref())?;
             ctx.set("args", input.args.as_str())?;
-            let grants: BTreeSet<String> = ["*", input.uuid.as_str()]
-                .iter()
-                .filter_map(|key| self.permissions.get(*key))
-                .flatten()
-                .cloned()
-                .collect();
+            let permissions = runtime.clone();
+            let uuid = input.uuid.clone();
             ctx.set(
                 "has_permission",
-                lua.create_function(move |_, node: String| Ok(grants.contains(&node)))?,
+                lua.create_function(move |_, node: String| {
+                    script::check_deadline(deadline)?;
+                    Ok(permissions.permits(&uuid, &node))
+                })?,
             )?;
             let value: Value = callback.call(ctx)?;
             script::check_deadline(deadline)?;
@@ -319,13 +386,46 @@ pub struct Extensions {
     slots: Arc<Semaphore>,
     host: Arc<Mutex<HostState>>,
     broker: Broker,
+    store: storage::Store,
+    permissions: permissions::Permissions,
+    job_gates: Arc<Mutex<BTreeMap<String, Weak<Semaphore>>>>,
 }
 impl Extensions {
-    pub fn new(config: &Config, broker: Broker, previous: Option<&Self>) -> Self {
-        Self {
+    pub fn new(config: &Config, broker: Broker, previous: Option<&Self>) -> io::Result<Self> {
+        if let Some(previous) = previous {
+            match (&previous.script, &config.extensions) {
+                (Some(old), Some(new))
+                    if old.api_version == new.api_version
+                        && old.storage == new.storage
+                        && old.queues == new.queues => {}
+                (None, None) => {}
+                _ => {
+                    return Err(invalid(
+                        "extension enablement, API version, storage path and queue capacities require a restart",
+                    ));
+                }
+            }
+        }
+        let store = match previous {
+            Some(previous) => previous.store.clone(),
+            None => storage::Store::open(
+                config
+                    .extensions
+                    .as_ref()
+                    .and_then(|script| script.storage.as_ref()),
+            )?,
+        };
+        let runtime = Self {
             script: config.extensions.clone(),
             backends: Arc::new(config.backends.keys().cloned().collect()),
             broker,
+            store,
+            permissions: previous
+                .map_or_else(permissions::Permissions::default, |p| p.permissions.clone()),
+            job_gates: previous.map_or_else(
+                || Arc::new(Mutex::new(BTreeMap::new())),
+                |p| p.job_gates.clone(),
+            ),
             slots: previous.map_or_else(
                 || Arc::new(Semaphore::new(script::MAX_CONCURRENT)),
                 |p| p.slots.clone(),
@@ -334,7 +434,28 @@ impl Extensions {
                 || Arc::new(Mutex::new(HostState::default())),
                 |p| p.host.clone(),
             ),
+        };
+        if previous.is_none() {
+            runtime.activate();
         }
+        Ok(runtime)
+    }
+    /// Publish the permission baseline only after the configuration transaction commits.
+    pub fn activate(&self) {
+        if let Some(script) = &self.script
+            && script.api_version == 2
+        {
+            self.permissions.replace(&script.permissions);
+        }
+    }
+    fn permits(&self, uuid: &str, node: &str) -> bool {
+        self.script.as_ref().is_some_and(|script| {
+            if script.api_version == 2 {
+                self.permissions.has(uuid, node)
+            } else {
+                script.permits(uuid, node)
+            }
+        })
     }
     pub fn session(&self, context: Context) -> Option<ExtensionSession> {
         self.script.as_ref()?;
@@ -363,12 +484,12 @@ impl Extensions {
         let script = script.clone();
         let input = input.clone();
         let hook = hook.to_owned();
-        let broker = self.broker.clone();
+        let runtime = self.clone();
         let deadline = Instant::now() + script::EXECUTION_TIMEOUT;
         let task = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let _session_job = session_job;
-            script.evaluate(&hook, &input, deadline, broker)
+            script.evaluate(&hook, &input, deadline, &runtime)
         });
         let action = tokio::time::timeout(script::EXECUTION_TIMEOUT, task)
             .await
@@ -412,7 +533,7 @@ impl ExtensionSession {
             .commands
             .get(name)
             .ok_or_else(|| invalid("unknown extension command"))?;
-        if !script.permits(&self.context.uuid, permission) {
+        if !self.runtime.permits(&self.context.uuid, permission) {
             return Ok(Action::Message(
                 "You do not have permission to use this command.".into(),
             ));
@@ -592,7 +713,7 @@ impl Drop for ExtensionSession {
             return;
         };
         let deadline = Instant::now() + script::EXECUTION_TIMEOUT;
-        let broker = self.runtime.broker.clone();
+        let runtime = self.runtime.clone();
         let mut input = self.context.clone();
         let pending = self.pending.take();
         input.reason = Some("session_closed".into());
@@ -604,13 +725,13 @@ impl Drop for ExtensionSession {
                     transfer.success = Some(false);
                     if script.hooks.contains("after_transfer")
                         && let Err(error) =
-                            script.evaluate("after_transfer", &transfer, deadline, broker.clone())
+                            script.evaluate("after_transfer", &transfer, deadline, &runtime)
                     {
                         eprintln!("rift: {error}");
                     }
                 }
                 if script.hooks.contains("disconnect")
-                    && let Err(error) = script.evaluate("disconnect", &input, deadline, broker)
+                    && let Err(error) = script.evaluate("disconnect", &input, deadline, &runtime)
                 {
                     eprintln!("rift: {error}");
                 }
@@ -621,3 +742,5 @@ impl Drop for ExtensionSession {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod v2_tests;

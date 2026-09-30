@@ -110,10 +110,12 @@ sessions for up to 30 seconds by default; a second Ctrl-C closes them immediatel
 
 ## Authenticated extensions
 
-Lua extension API v1 provides login and transfer decisions, lifecycle events,
-commands with UUID permission checks, and FIFO server queues. The
-[extension example](examples/extensions.lua) demonstrates a survival queue and
-staff-only server. See the [extension API contract](docs/extensions.md) for
+Lua extensions provide login and transfer decisions, lifecycle events,
+commands with UUID permission checks, and FIFO server queues. API v2 adds
+durable namespaced state, recurring jobs, configured HTTP integrations and
+permissions that update during a session; v1 remains supported. The
+[extension example](examples/extensions.lua) demonstrates these APIs with a
+survival queue and staff-only server. See the [extension API contract](docs/extensions.md) for
 ordering, deadlines, permissions and reload behavior. Extensions require online
 authentication and Java 1.19.3–26.3 (the online authentication range).
 

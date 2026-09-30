@@ -15,6 +15,26 @@ api.enabled = false
 -- Keep captured function references usable when Rust attaches the runtime broker.
 api.publish = function(...) return runtime.publish(...) end
 
+-- Captured tables/functions keep working once the host attaches v2 services.
+-- Configuration evaluation (including rift check) never performs these effects.
+for namespace, methods in pairs({
+    store = { "get", "set", "delete", "increment" },
+    permissions = { "has", "set" },
+    http = { "request" },
+}) do
+    local proxy = {}
+    for _, method in ipairs(methods) do
+        proxy[method] = function(...)
+            local service = runtime[namespace]
+            if not service then
+                error("rift." .. namespace .. " is only available inside API v2 extension callbacks")
+            end
+            return service[method](...)
+        end
+    end
+    api[namespace] = proxy
+end
+
 local function configuring()
     if finished then error("configuration registration is only available during initialization") end
     if api.config ~= config then error("assign fields on rift.config instead of replacing it") end

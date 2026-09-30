@@ -1351,7 +1351,8 @@ async fn registered_extension_commands_reach_the_proxy_and_never_the_backend() {
         &config,
         crate::messaging::Broker::new(Default::default()).unwrap(),
         None,
-    );
+    )
+    .unwrap();
     session.set_extension(
         runtime
             .session(crate::extensions::Context::authenticated(

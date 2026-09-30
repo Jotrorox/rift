@@ -128,7 +128,7 @@ impl Snapshot {
             &config,
             messaging.clone(),
             previous.map(|old| &old.extensions),
-        );
+        )?;
         Ok(Self {
             extensions,
             source: None,
@@ -1185,6 +1185,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     );
     check_bound_loops(&initial.config, &initial.addresses)?;
     let mut snapshot = Arc::new(initial);
+    let mut extension_jobs = snapshot.extensions.scheduler();
     let metrics = Arc::new(Metrics::default());
     let admission = Arc::new(Mutex::new(Admission::default()));
     let (current, receiver) = watch::channel(snapshot.clone());
@@ -1285,6 +1286,9 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         let result = reconfigure(operation, &app, &snapshot, &services).await;
         let response = match result {
             Ok((next, prepared)) => {
+                extension_jobs.shutdown().await;
+                next.extensions.activate();
+                extension_jobs = next.extensions.scheduler();
                 // Keep subscriptions and queued messages across script reloads.
                 if let (Some(updates), Some(script)) = (&message_updates, &next.config.on_message) {
                     updates.send_replace(script.clone());
@@ -1328,6 +1332,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         }
     }
     // Stop accepting configuration commands before draining proxy sessions.
+    extension_jobs.shutdown().await;
     admin_requests.close();
     while let Ok(command) = admin_requests.try_recv() {
         if let admin::Command::Reload(reply) = command {

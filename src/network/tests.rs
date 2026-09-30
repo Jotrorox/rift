@@ -217,7 +217,7 @@ async fn queue_command_waits_for_capacity_and_transfer_policy_runs_before_target
                 after_transfer=function(ctx) rift.publish('observed', tostring(ctx.success)) end
             }
         }"#, "network-extensions.lua").unwrap();
-        let extensions = Extensions::new(&extension_config, snapshot.messaging.clone(), None);
+        let extensions = Extensions::new(&extension_config, snapshot.messaging.clone(), None).unwrap();
         let mut observations = snapshot.messaging.subscribe("observed", None).unwrap();
         let profile = AuthenticatedProfile { uuid: [7;16], name: "Player".into(), properties: vec![] };
         let mut occupant = extensions.session(Context::authenticated(2, &profile)).unwrap();
