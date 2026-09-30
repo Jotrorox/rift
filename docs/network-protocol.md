@@ -31,7 +31,11 @@ chunks, teleport, command tree (1.13+), game mode, border and accepted backend
 chat on the same compressed frontend socket. Expansion requires an explicit layout review,
 independent test-client mapping and a passing real-server switch/recovery run.
 These offline fixtures do not replace the authenticated Paper/client procedure
-in `tests/MANUAL_ONLINE.md`, which remains pinned to 1.21.11.
+in [tests/MANUAL_ONLINE.md](../tests/MANUAL_ONLINE.md), which remains pinned to
+1.21.11. Its baseline, LuckPerms/EssentialsX/EssentialsXChat and
+ViaVersion/ViaBackwards stacks record signed chat/command observations,
+resource-pack responses and UUID permission checks. Automated preflights prove
+startup and rejection behavior only; they never report authenticated acceptance.
 
 ## Release matrix
 
