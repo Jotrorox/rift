@@ -1388,3 +1388,189 @@ async fn registered_extension_commands_reach_the_proxy_and_never_the_backend() {
         .is_err()
     );
 }
+
+#[tokio::test]
+async fn legacy_barrier_drains_old_input_and_keeps_busy_or_banned_cutovers_safe() {
+    timeout(Duration::from_secs(3), async {
+        for outcome in ["switch", "busy", "ban"] {
+            let codec = Codec::default();
+            let (mut client, input) = tokio::io::duplex(65536);
+            let handshake = Handshake {
+                protocol: 47,
+                address: "play.test".into(),
+                port: 25565,
+                next_state: NextState::Login,
+            };
+            codec.write(&mut client, &handshake.packet()).await.unwrap();
+            let mut session = Session::accept(input).await.unwrap();
+            let (server, mut old) = tokio::io::duplex(65536);
+            session.connect_backend(server).await.unwrap();
+            receive(&mut old, codec).await;
+            let mut start = Vec::new();
+            write_string("Player", &mut start);
+            codec
+                .write(&mut client, &Packet::new(0, start))
+                .await
+                .unwrap();
+            session.forward().await.unwrap();
+            receive(&mut old, codec).await;
+            let mut profile = Vec::new();
+            write_string("00000000-0000-0000-0000-000000000007", &mut profile);
+            write_string("Player", &mut profile);
+            let success = Packet::new(2, profile);
+            let mut world = 1_i32.to_be_bytes().to_vec();
+            world.extend([1, 0, 0, 20]);
+            write_string("flat", &mut world);
+            world.push(0);
+            let join = Packet::new(1, world);
+            for packet in [&success, &join] {
+                codec.write(&mut old, packet).await.unwrap();
+                session.forward().await.unwrap();
+                assert_eq!(receive(&mut client, codec).await, *packet);
+            }
+            let settings = Packet::new(0x15, vec![1, 2, 3]);
+            codec.write(&mut client, &settings).await.unwrap();
+            session.forward().await.unwrap();
+            assert_eq!(receive(&mut old, codec).await, settings);
+            let (new_server, mut replacement) = tokio::io::duplex(65536);
+            let login = async {
+                receive(&mut replacement, codec).await;
+                receive(&mut replacement, codec).await;
+                codec.write(&mut replacement, &success).await.unwrap();
+                codec.write(&mut replacement, &join).await.unwrap();
+            };
+            let frontend = async {
+                let barrier = receive(&mut client, codec).await;
+                assert_eq!(barrier.id, 0); // 1.8 keepalive, echoed verbatim.
+                codec
+                    .write(&mut client, &Packet::new(1, vec![3, b'o', b'l', b'd']))
+                    .await
+                    .unwrap();
+                // A reply to the real old server must survive a busy rollback.
+                codec
+                    .write(&mut client, &Packet::new(0, vec![42]))
+                    .await
+                    .unwrap();
+                match outcome {
+                    "busy" => {
+                        for _ in 0..300 {
+                            codec.write(&mut old, &Packet::empty(0x7f)).await.unwrap();
+                        }
+                    }
+                    "ban" => {
+                        codec
+                            .write(
+                                &mut old,
+                                &protocol::disconnect(
+                                    Some(ProtocolVersion::new(47).unwrap()),
+                                    State::Play,
+                                    "banned",
+                                )
+                                .unwrap(),
+                            )
+                            .await
+                            .unwrap();
+                    }
+                    _ => {}
+                }
+                codec.write(&mut client, &barrier).await.unwrap();
+            };
+            let (result, (), ()) =
+                tokio::join!(session.connect_backend(new_server), login, frontend);
+            assert_eq!(receive(&mut old, codec).await, Packet::new(0, vec![42]));
+            match outcome {
+                "switch" => {
+                    result.unwrap();
+                    assert!(!session.switch_in_progress());
+                    assert!(session.can_switch());
+                    assert_eq!(receive(&mut replacement, codec).await, settings);
+                    // Header, title, then dimension-changing Join Game and Respawn.
+                    assert_eq!(receive(&mut client, codec).await.id, 0x47);
+                    assert_eq!(receive(&mut client, codec).await.id, 0x45);
+                    let joined = receive(&mut client, codec).await;
+                    assert_eq!(joined.id, 1);
+                    assert_eq!(joined.data[5], 255);
+                    assert_eq!(receive(&mut client, codec).await.id, 7);
+                    assert!(
+                        timeout(Duration::from_millis(1), receive(&mut replacement, codec))
+                            .await
+                            .is_err(),
+                        "stale chat crossed the switch"
+                    );
+                }
+                "busy" => {
+                    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::WouldBlock);
+                    assert!(!session.switch_in_progress());
+                    assert!(session.can_switch());
+                    assert!(session.backend().is_some());
+                }
+                "ban" => assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied),
+                _ => unreachable!(),
+            }
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn legacy_world_reset_closes_bundles_received_during_the_keepalive_barrier() {
+    timeout(Duration::from_secs(3), async {
+        let (mut session, mut client, mut old) = session().await;
+        let version = ProtocolVersion::new(763).unwrap();
+        let caps = version.switching().unwrap();
+        // Focus on an established 1.20.1 attachment inside an unfinished bundle.
+        session.version = Some(version);
+        session.handshake.protocol = 763;
+        session.client.state = ConnectionState::new(State::Play);
+        session.backend.as_mut().unwrap().state = ConnectionState::new(State::Play);
+        session.identity = Some(PlayerIdentity {
+            name: "Player".into(),
+            uuid: Some([7; 16]),
+        });
+        session.joined = true;
+        session.bundle_open = true;
+        let mut start = Vec::new();
+        write_string("Player", &mut start);
+        start.push(1);
+        start.extend([7; 16]);
+        session.login_start = Some(Packet::new(0, start));
+        let mut world = 2_i32.to_be_bytes().to_vec();
+        world.extend([0, 1, 255, 1]);
+        write_string("minecraft:overworld", &mut world);
+        world.extend([10, 0, 0, 0]); // Registry NBT.
+        write_string("minecraft:overworld", &mut world);
+        write_string("minecraft:overworld", &mut world);
+        world.extend([0; 8]);
+        world.extend([20, 2, 2, 0, 1, 0, 1, 0, 0]);
+        let join = Packet::new(caps.join_game, world);
+        let (server, mut replacement) = tokio::io::duplex(65536);
+        let codec = Codec::default();
+        let peers = async {
+            receive(&mut replacement, codec).await;
+            receive(&mut replacement, codec).await;
+            codec
+                .write(&mut replacement, &login_success())
+                .await
+                .unwrap();
+            codec.write(&mut replacement, &join).await.unwrap();
+            assert_eq!(receive(&mut client, codec).await, Packet::empty(0));
+            let barrier = receive(&mut client, codec).await;
+            assert_eq!(barrier.id, 0x23);
+            // The retired backend's delayed delimiter opens another client bundle.
+            codec.write(&mut old, &Packet::empty(0)).await.unwrap();
+            codec
+                .write(&mut client, &Packet::new(0x12, barrier.data))
+                .await
+                .unwrap();
+        };
+        let (result, ()) = tokio::join!(session.connect_backend(server), peers);
+        result.unwrap();
+        assert!(!session.bundle_open);
+        for id in [0, 0, 0x65, 0x0e, caps.join_game, 0x41] {
+            assert_eq!(receive(&mut client, codec).await.id, id);
+        }
+    })
+    .await
+    .unwrap();
+}

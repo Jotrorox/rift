@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real vanilla, Paper and Pumpkin integration tests; Python 3.11+ and Java 21.
+"""Real vanilla, Paper and Pumpkin integration tests; Python 3.11+ and the fixture-specific Java runtime.
 
 Downloads pinned official jars, verifies checksums, and runs isolated loopback
 servers. Packet layouts: https://github.com/PrismarineJS/minecraft-data/tree/master/data/pc/1.21.11
@@ -11,6 +11,7 @@ from contextlib import contextmanager
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import platform
 import socket
@@ -28,14 +29,385 @@ CACHE = ROOT / "target" / "minecraft"
 SERVERS = json.loads((ROOT / "tests" / "servers.json").read_text())
 # Only packet IDs used by this client. Keep these explicit: an upstream protocol
 # change must fail visibly, not silently reduce the test to a status check.
-# 777: Pumpkin's pinned crates/pumpkin-data/src/generated/packet.rs.
+# 26.2/26.3 IDs are checked against Mojang's pinned server artifacts.
 PROTOCOLS = {
-    772: dict(known_packs=0x0E, join=0x2B, position=0x41, chunk=0x27,
-              keepalive=0x26, keepalive_reply=0x1B, loaded=0x2B, batch_reply=0x0A),
-    774: dict(known_packs=0x0E, join=0x30, position=0x46, chunk=0x2C,
-              keepalive=0x2B, keepalive_reply=0x1B, loaded=0x2B, batch_reply=0x0A),
-    777: dict(known_packs=0x0F, join=0x32, position=0x49, chunk=0x2E,
-              keepalive=0x2D, keepalive_reply=0x1C, loaded=0x2C, batch_reply=0x0B),
+    47: dict(  # 1.8.9
+        known_packs=-1, join=0x1, respawn=0x7, position=0x8,
+        chunk=0x21, chunk_bulk=0x26, keepalive=0x0, disconnect=0x40,
+        start_configuration=-1, system_chat=0x2, border=0x44, payload=0x3f,
+        commands=-1, batch_finished=-1, keepalive_reply=0x0, loaded=None,
+        batch_reply=-1, configuration_ack=-1, command=0x1, signed_command=-1,
+        chat=0x1, chat_session=-1, settings=0x15, server_payload=0x17),
+
+    107: dict(  # 1.9
+        known_packs=-1, join=0x23, respawn=0x33, position=0x2e,
+        chunk=0x20, chunk_bulk=-1, keepalive=0x1f, disconnect=0x1a,
+        start_configuration=-1, system_chat=0xf, border=0x35, payload=0x18,
+        commands=-1, batch_finished=-1, keepalive_reply=0xb, loaded=None,
+        batch_reply=-1, configuration_ack=-1, command=0x2, signed_command=-1,
+        chat=0x2, chat_session=-1, settings=0x4, server_payload=0x9),
+
+    108: dict(  # 1.9.1
+        known_packs=-1, join=0x23, respawn=0x33, position=0x2e,
+        chunk=0x20, chunk_bulk=-1, keepalive=0x1f, disconnect=0x1a,
+        start_configuration=-1, system_chat=0xf, border=0x35, payload=0x18,
+        commands=-1, batch_finished=-1, keepalive_reply=0xb, loaded=None,
+        batch_reply=-1, configuration_ack=-1, command=0x2, signed_command=-1,
+        chat=0x2, chat_session=-1, settings=0x4, server_payload=0x9),
+
+    109: dict(  # 1.9.2
+        known_packs=-1, join=0x23, respawn=0x33, position=0x2e,
+        chunk=0x20, chunk_bulk=-1, keepalive=0x1f, disconnect=0x1a,
+        start_configuration=-1, system_chat=0xf, border=0x35, payload=0x18,
+        commands=-1, batch_finished=-1, keepalive_reply=0xb, loaded=None,
+        batch_reply=-1, configuration_ack=-1, command=0x2, signed_command=-1,
+        chat=0x2, chat_session=-1, settings=0x4, server_payload=0x9),
+
+    110: dict(  # 1.9.4
+        known_packs=-1, join=0x23, respawn=0x33, position=0x2e,
+        chunk=0x20, chunk_bulk=-1, keepalive=0x1f, disconnect=0x1a,
+        start_configuration=-1, system_chat=0xf, border=0x35, payload=0x18,
+        commands=-1, batch_finished=-1, keepalive_reply=0xb, loaded=None,
+        batch_reply=-1, configuration_ack=-1, command=0x2, signed_command=-1,
+        chat=0x2, chat_session=-1, settings=0x4, server_payload=0x9),
+
+    210: dict(  # 1.10.2
+        known_packs=-1, join=0x23, respawn=0x33, position=0x2e,
+        chunk=0x20, chunk_bulk=-1, keepalive=0x1f, disconnect=0x1a,
+        start_configuration=-1, system_chat=0xf, border=0x35, payload=0x18,
+        commands=-1, batch_finished=-1, keepalive_reply=0xb, loaded=None,
+        batch_reply=-1, configuration_ack=-1, command=0x2, signed_command=-1,
+        chat=0x2, chat_session=-1, settings=0x4, server_payload=0x9),
+
+    315: dict(  # 1.11
+        known_packs=-1, join=0x23, respawn=0x33, position=0x2e,
+        chunk=0x20, chunk_bulk=-1, keepalive=0x1f, disconnect=0x1a,
+        start_configuration=-1, system_chat=0xf, border=0x35, payload=0x18,
+        commands=-1, batch_finished=-1, keepalive_reply=0xb, loaded=None,
+        batch_reply=-1, configuration_ack=-1, command=0x2, signed_command=-1,
+        chat=0x2, chat_session=-1, settings=0x4, server_payload=0x9),
+
+    316: dict(  # 1.11.2
+        known_packs=-1, join=0x23, respawn=0x33, position=0x2e,
+        chunk=0x20, chunk_bulk=-1, keepalive=0x1f, disconnect=0x1a,
+        start_configuration=-1, system_chat=0xf, border=0x35, payload=0x18,
+        commands=-1, batch_finished=-1, keepalive_reply=0xb, loaded=None,
+        batch_reply=-1, configuration_ack=-1, command=0x2, signed_command=-1,
+        chat=0x2, chat_session=-1, settings=0x4, server_payload=0x9),
+
+    335: dict(  # 1.12
+        known_packs=-1, join=0x23, respawn=0x34, position=0x2e,
+        chunk=0x20, chunk_bulk=-1, keepalive=0x1f, disconnect=0x1a,
+        start_configuration=-1, system_chat=0xf, border=0x37, payload=0x18,
+        commands=-1, batch_finished=-1, keepalive_reply=0xc, loaded=None,
+        batch_reply=-1, configuration_ack=-1, command=0x3, signed_command=-1,
+        chat=0x3, chat_session=-1, settings=0x5, server_payload=0xa),
+
+    338: dict(  # 1.12.1
+        known_packs=-1, join=0x23, respawn=0x35, position=0x2f,
+        chunk=0x20, chunk_bulk=-1, keepalive=0x1f, disconnect=0x1a,
+        start_configuration=-1, system_chat=0xf, border=0x38, payload=0x18,
+        commands=-1, batch_finished=-1, keepalive_reply=0xb, loaded=None,
+        batch_reply=-1, configuration_ack=-1, command=0x2, signed_command=-1,
+        chat=0x2, chat_session=-1, settings=0x4, server_payload=0x9),
+
+    340: dict(  # 1.12.2
+        known_packs=-1, join=0x23, respawn=0x35, position=0x2f,
+        chunk=0x20, chunk_bulk=-1, keepalive=0x1f, disconnect=0x1a,
+        start_configuration=-1, system_chat=0xf, border=0x38, payload=0x18,
+        commands=-1, batch_finished=-1, keepalive_reply=0xb, loaded=None,
+        batch_reply=-1, configuration_ack=-1, command=0x2, signed_command=-1,
+        chat=0x2, chat_session=-1, settings=0x4, server_payload=0x9),
+
+    393: dict(  # 1.13
+        known_packs=-1, join=0x25, respawn=0x38, position=0x32,
+        chunk=0x22, chunk_bulk=-1, keepalive=0x21, disconnect=0x1b,
+        start_configuration=-1, system_chat=0xe, border=0x3b, payload=0x19,
+        commands=0x11, batch_finished=-1, keepalive_reply=0xe, loaded=None,
+        batch_reply=-1, configuration_ack=-1, command=0x2, signed_command=-1,
+        chat=0x2, chat_session=-1, settings=0x4, server_payload=0xa),
+
+    401: dict(  # 1.13.1
+        known_packs=-1, join=0x25, respawn=0x38, position=0x32,
+        chunk=0x22, chunk_bulk=-1, keepalive=0x21, disconnect=0x1b,
+        start_configuration=-1, system_chat=0xe, border=0x3b, payload=0x19,
+        commands=0x11, batch_finished=-1, keepalive_reply=0xe, loaded=None,
+        batch_reply=-1, configuration_ack=-1, command=0x2, signed_command=-1,
+        chat=0x2, chat_session=-1, settings=0x4, server_payload=0xa),
+
+    404: dict(  # 1.13.2
+        known_packs=-1, join=0x25, respawn=0x38, position=0x32,
+        chunk=0x22, chunk_bulk=-1, keepalive=0x21, disconnect=0x1b,
+        start_configuration=-1, system_chat=0xe, border=0x3b, payload=0x19,
+        commands=0x11, batch_finished=-1, keepalive_reply=0xe, loaded=None,
+        batch_reply=-1, configuration_ack=-1, command=0x2, signed_command=-1,
+        chat=0x2, chat_session=-1, settings=0x4, server_payload=0xa),
+
+    477: dict(  # 1.14
+        known_packs=-1, join=0x25, respawn=0x3a, position=0x35,
+        chunk=0x21, chunk_bulk=-1, keepalive=0x20, disconnect=0x1a,
+        start_configuration=-1, system_chat=0xe, border=0x3d, payload=0x18,
+        commands=0x11, batch_finished=-1, keepalive_reply=0xf, loaded=None,
+        batch_reply=-1, configuration_ack=-1, command=0x3, signed_command=-1,
+        chat=0x3, chat_session=-1, settings=0x5, server_payload=0xb),
+
+    480: dict(  # 1.14.1
+        known_packs=-1, join=0x25, respawn=0x3a, position=0x35,
+        chunk=0x21, chunk_bulk=-1, keepalive=0x20, disconnect=0x1a,
+        start_configuration=-1, system_chat=0xe, border=0x3d, payload=0x18,
+        commands=0x11, batch_finished=-1, keepalive_reply=0xf, loaded=None,
+        batch_reply=-1, configuration_ack=-1, command=0x3, signed_command=-1,
+        chat=0x3, chat_session=-1, settings=0x5, server_payload=0xb),
+
+    485: dict(  # 1.14.2
+        known_packs=-1, join=0x25, respawn=0x3a, position=0x35,
+        chunk=0x21, chunk_bulk=-1, keepalive=0x20, disconnect=0x1a,
+        start_configuration=-1, system_chat=0xe, border=0x3d, payload=0x18,
+        commands=0x11, batch_finished=-1, keepalive_reply=0xf, loaded=None,
+        batch_reply=-1, configuration_ack=-1, command=0x3, signed_command=-1,
+        chat=0x3, chat_session=-1, settings=0x5, server_payload=0xb),
+
+    490: dict(  # 1.14.3
+        known_packs=-1, join=0x25, respawn=0x3a, position=0x35,
+        chunk=0x21, chunk_bulk=-1, keepalive=0x20, disconnect=0x1a,
+        start_configuration=-1, system_chat=0xe, border=0x3d, payload=0x18,
+        commands=0x11, batch_finished=-1, keepalive_reply=0xf, loaded=None,
+        batch_reply=-1, configuration_ack=-1, command=0x3, signed_command=-1,
+        chat=0x3, chat_session=-1, settings=0x5, server_payload=0xb),
+
+    498: dict(  # 1.14.4
+        known_packs=-1, join=0x25, respawn=0x3a, position=0x35,
+        chunk=0x21, chunk_bulk=-1, keepalive=0x20, disconnect=0x1a,
+        start_configuration=-1, system_chat=0xe, border=0x3d, payload=0x18,
+        commands=0x11, batch_finished=-1, keepalive_reply=0xf, loaded=None,
+        batch_reply=-1, configuration_ack=-1, command=0x3, signed_command=-1,
+        chat=0x3, chat_session=-1, settings=0x5, server_payload=0xb),
+
+    573: dict(  # 1.15
+        known_packs=-1, join=0x26, respawn=0x3b, position=0x36,
+        chunk=0x22, chunk_bulk=-1, keepalive=0x21, disconnect=0x1b,
+        start_configuration=-1, system_chat=0xf, border=0x3e, payload=0x19,
+        commands=0x12, batch_finished=-1, keepalive_reply=0xf, loaded=None,
+        batch_reply=-1, configuration_ack=-1, command=0x3, signed_command=-1,
+        chat=0x3, chat_session=-1, settings=0x5, server_payload=0xb),
+
+    575: dict(  # 1.15.1
+        known_packs=-1, join=0x26, respawn=0x3b, position=0x36,
+        chunk=0x22, chunk_bulk=-1, keepalive=0x21, disconnect=0x1b,
+        start_configuration=-1, system_chat=0xf, border=0x3e, payload=0x19,
+        commands=0x12, batch_finished=-1, keepalive_reply=0xf, loaded=None,
+        batch_reply=-1, configuration_ack=-1, command=0x3, signed_command=-1,
+        chat=0x3, chat_session=-1, settings=0x5, server_payload=0xb),
+
+    578: dict(  # 1.15.2
+        known_packs=-1, join=0x26, respawn=0x3b, position=0x36,
+        chunk=0x22, chunk_bulk=-1, keepalive=0x21, disconnect=0x1b,
+        start_configuration=-1, system_chat=0xf, border=0x3e, payload=0x19,
+        commands=0x12, batch_finished=-1, keepalive_reply=0xf, loaded=None,
+        batch_reply=-1, configuration_ack=-1, command=0x3, signed_command=-1,
+        chat=0x3, chat_session=-1, settings=0x5, server_payload=0xb),
+
+    735: dict(  # 1.16
+        known_packs=-1, join=0x25, respawn=0x3a, position=0x35,
+        chunk=0x21, chunk_bulk=-1, keepalive=0x20, disconnect=0x1a,
+        start_configuration=-1, system_chat=0xe, border=0x3d, payload=0x18,
+        commands=0x11, batch_finished=-1, keepalive_reply=0x10, loaded=None,
+        batch_reply=-1, configuration_ack=-1, command=0x3, signed_command=-1,
+        chat=0x3, chat_session=-1, settings=0x5, server_payload=0xb),
+
+    736: dict(  # 1.16.1
+        known_packs=-1, join=0x25, respawn=0x3a, position=0x35,
+        chunk=0x21, chunk_bulk=-1, keepalive=0x20, disconnect=0x1a,
+        start_configuration=-1, system_chat=0xe, border=0x3d, payload=0x18,
+        commands=0x11, batch_finished=-1, keepalive_reply=0x10, loaded=None,
+        batch_reply=-1, configuration_ack=-1, command=0x3, signed_command=-1,
+        chat=0x3, chat_session=-1, settings=0x5, server_payload=0xb),
+
+    751: dict(  # 1.16.2
+        known_packs=-1, join=0x24, respawn=0x39, position=0x34,
+        chunk=0x20, chunk_bulk=-1, keepalive=0x1f, disconnect=0x19,
+        start_configuration=-1, system_chat=0xe, border=0x3d, payload=0x17,
+        commands=0x10, batch_finished=-1, keepalive_reply=0x10, loaded=None,
+        batch_reply=-1, configuration_ack=-1, command=0x3, signed_command=-1,
+        chat=0x3, chat_session=-1, settings=0x5, server_payload=0xb),
+
+    753: dict(  # 1.16.3
+        known_packs=-1, join=0x24, respawn=0x39, position=0x34,
+        chunk=0x20, chunk_bulk=-1, keepalive=0x1f, disconnect=0x19,
+        start_configuration=-1, system_chat=0xe, border=0x3d, payload=0x17,
+        commands=0x10, batch_finished=-1, keepalive_reply=0x10, loaded=None,
+        batch_reply=-1, configuration_ack=-1, command=0x3, signed_command=-1,
+        chat=0x3, chat_session=-1, settings=0x5, server_payload=0xb),
+
+    754: dict(  # 1.16.5
+        known_packs=-1, join=0x24, respawn=0x39, position=0x34,
+        chunk=0x20, chunk_bulk=-1, keepalive=0x1f, disconnect=0x19,
+        start_configuration=-1, system_chat=0xe, border=0x3d, payload=0x17,
+        commands=0x10, batch_finished=-1, keepalive_reply=0x10, loaded=None,
+        batch_reply=-1, configuration_ack=-1, command=0x3, signed_command=-1,
+        chat=0x3, chat_session=-1, settings=0x5, server_payload=0xb),
+
+    755: dict(  # 1.17
+        known_packs=-1, join=0x26, respawn=0x3d, position=0x38,
+        chunk=0x22, chunk_bulk=-1, keepalive=0x21, disconnect=0x1a,
+        start_configuration=-1, system_chat=0xf, border=0x20, payload=0x18,
+        commands=0x12, batch_finished=-1, keepalive_reply=0xf, loaded=None,
+        batch_reply=-1, configuration_ack=-1, command=0x3, signed_command=-1,
+        chat=0x3, chat_session=-1, settings=0x5, server_payload=0xa),
+
+    756: dict(  # 1.17.1
+        known_packs=-1, join=0x26, respawn=0x3d, position=0x38,
+        chunk=0x22, chunk_bulk=-1, keepalive=0x21, disconnect=0x1a,
+        start_configuration=-1, system_chat=0xf, border=0x20, payload=0x18,
+        commands=0x12, batch_finished=-1, keepalive_reply=0xf, loaded=None,
+        batch_reply=-1, configuration_ack=-1, command=0x3, signed_command=-1,
+        chat=0x3, chat_session=-1, settings=0x5, server_payload=0xa),
+
+    757: dict(  # 1.18.1
+        known_packs=-1, join=0x26, respawn=0x3d, position=0x38,
+        chunk=0x22, chunk_bulk=-1, keepalive=0x21, disconnect=0x1a,
+        start_configuration=-1, system_chat=0xf, border=0x20, payload=0x18,
+        commands=0x12, batch_finished=-1, keepalive_reply=0xf, loaded=None,
+        batch_reply=-1, configuration_ack=-1, command=0x3, signed_command=-1,
+        chat=0x3, chat_session=-1, settings=0x5, server_payload=0xa),
+
+    758: dict(  # 1.18.2
+        known_packs=-1, join=0x26, respawn=0x3d, position=0x38,
+        chunk=0x22, chunk_bulk=-1, keepalive=0x21, disconnect=0x1a,
+        start_configuration=-1, system_chat=0xf, border=0x20, payload=0x18,
+        commands=0x12, batch_finished=-1, keepalive_reply=0xf, loaded=None,
+        batch_reply=-1, configuration_ack=-1, command=0x3, signed_command=-1,
+        chat=0x3, chat_session=-1, settings=0x5, server_payload=0xa),
+
+    759: dict(  # 1.19
+        known_packs=-1, join=0x23, respawn=0x3b, position=0x36,
+        chunk=0x1f, chunk_bulk=-1, keepalive=0x1e, disconnect=0x17,
+        start_configuration=-1, system_chat=0x5f, border=0x1d, payload=0x15,
+        commands=0xf, batch_finished=-1, keepalive_reply=0x11, loaded=None,
+        batch_reply=-1, configuration_ack=-1, command=0x3, signed_command=0x3,
+        chat=0x4, chat_session=-1, settings=0x7, server_payload=0xc),
+
+    760: dict(  # 1.19.2
+        known_packs=-1, join=0x25, respawn=0x3e, position=0x39,
+        chunk=0x21, chunk_bulk=-1, keepalive=0x20, disconnect=0x19,
+        start_configuration=-1, system_chat=0x62, border=0x1f, payload=0x16,
+        commands=0xf, batch_finished=-1, keepalive_reply=0x12, loaded=None,
+        batch_reply=-1, configuration_ack=-1, command=0x4, signed_command=0x4,
+        chat=0x5, chat_session=-1, settings=0x8, server_payload=0xd),
+
+    761: dict(  # 1.19.3
+        known_packs=-1, join=0x24, respawn=0x3d, position=0x38,
+        chunk=0x20, chunk_bulk=-1, keepalive=0x1f, disconnect=0x17,
+        start_configuration=-1, system_chat=0x60, border=0x1e, payload=0x15,
+        commands=0xe, batch_finished=-1, keepalive_reply=0x11, loaded=None,
+        batch_reply=-1, configuration_ack=-1, command=0x4, signed_command=0x4,
+        chat=0x5, chat_session=0x20, settings=0x7, server_payload=0xc),
+
+    762: dict(  # 1.19.4
+        known_packs=-1, join=0x28, respawn=0x41, position=0x3c,
+        chunk=0x24, chunk_bulk=-1, keepalive=0x23, disconnect=0x1a,
+        start_configuration=-1, system_chat=0x64, border=0x22, payload=0x17,
+        commands=0x10, batch_finished=-1, keepalive_reply=0x12, loaded=None,
+        batch_reply=-1, configuration_ack=-1, command=0x4, signed_command=0x4,
+        chat=0x5, chat_session=0x6, settings=0x8, server_payload=0xd),
+
+    763: dict(  # 1.20.1
+        known_packs=-1, join=0x28, respawn=0x41, position=0x3c,
+        chunk=0x24, chunk_bulk=-1, keepalive=0x23, disconnect=0x1a,
+        start_configuration=-1, system_chat=0x64, border=0x22, payload=0x17,
+        commands=0x10, batch_finished=-1, keepalive_reply=0x12, loaded=None,
+        batch_reply=-1, configuration_ack=-1, command=0x4, signed_command=0x4,
+        chat=0x5, chat_session=0x6, settings=0x8, server_payload=0xd),
+
+    764: dict(  # 1.20.2
+        known_packs=-1, join=0x29, respawn=0x43, position=0x3e,
+        chunk=0x25, chunk_bulk=-1, keepalive=0x24, disconnect=0x1b,
+        start_configuration=0x65, system_chat=0x67, border=0x23, payload=0x18,
+        commands=0x11, batch_finished=0xc, keepalive_reply=0x14, loaded=None,
+        batch_reply=0x7, configuration_ack=0xb, command=0x4, signed_command=0x4,
+        chat=0x5, chat_session=0x6, settings=0x9, server_payload=0xf),
+
+    765: dict(  # 1.20.4
+        known_packs=-1, join=0x29, respawn=0x45, position=0x3e,
+        chunk=0x25, chunk_bulk=-1, keepalive=0x24, disconnect=0x1b,
+        start_configuration=0x67, system_chat=0x69, border=0x23, payload=0x18,
+        commands=0x11, batch_finished=0xc, keepalive_reply=0x15, loaded=None,
+        batch_reply=0x7, configuration_ack=0xb, command=0x4, signed_command=0x4,
+        chat=0x5, chat_session=0x6, settings=0x9, server_payload=0x10),
+
+    766: dict(  # 1.20.6
+        known_packs=0xe, join=0x2b, respawn=0x47, position=0x40,
+        chunk=0x27, chunk_bulk=-1, keepalive=0x26, disconnect=0x1d,
+        start_configuration=0x69, system_chat=0x6c, border=0x25, payload=0x19,
+        commands=0x11, batch_finished=0xc, keepalive_reply=0x18, loaded=None,
+        batch_reply=0x8, configuration_ack=0xc, command=0x4, signed_command=0x5,
+        chat=0x6, chat_session=0x7, settings=0xa, server_payload=0x12),
+    767: dict(  # 1.21.1
+        known_packs=0x0E, join=0x2B, position=0x40, chunk=0x27,
+        keepalive=0x26, disconnect=0x1D, start_configuration=0x69, system_chat=0x6C,
+        border=0x25, payload=0x19, commands=0x11, batch_finished=0x0C,
+        keepalive_reply=0x18, loaded=None, batch_reply=0x08, configuration_ack=0x0C,
+        command=0x04, signed_command=0x05, chat=0x06, chat_session=0x07),
+    768: dict(  # 1.21.3
+        known_packs=0x0E, join=0x2C, position=0x42, chunk=0x28,
+        keepalive=0x27, disconnect=0x1D, start_configuration=0x70, system_chat=0x73,
+        border=0x26, payload=0x19, commands=0x11, batch_finished=0x0C,
+        keepalive_reply=0x1A, loaded=None, batch_reply=0x09, configuration_ack=0x0E,
+        command=0x05, signed_command=0x06, chat=0x07, chat_session=0x08),
+    769: dict(  # 1.21.4
+        known_packs=0x0E, join=0x2C, position=0x42, chunk=0x28,
+        keepalive=0x27, disconnect=0x1D, start_configuration=0x70, system_chat=0x73,
+        border=0x26, payload=0x19, commands=0x11, batch_finished=0x0C,
+        keepalive_reply=0x1A, loaded=0x2A, batch_reply=0x09, configuration_ack=0x0E,
+        command=0x05, signed_command=0x06, chat=0x07, chat_session=0x08),
+    770: dict(  # 1.21.5
+        known_packs=0x0E, join=0x2B, position=0x41, chunk=0x27,
+        keepalive=0x26, disconnect=0x1C, start_configuration=0x6F, system_chat=0x72,
+        border=0x25, payload=0x18, commands=0x10, batch_finished=0x0B,
+        keepalive_reply=0x1A, loaded=0x2A, batch_reply=0x09, configuration_ack=0x0E,
+        command=0x05, signed_command=0x06, chat=0x07, chat_session=0x08),
+    771: dict(  # 1.21.6
+        known_packs=0x0E, join=0x2B, position=0x41, chunk=0x27,
+        keepalive=0x26, disconnect=0x1C, start_configuration=0x6F, system_chat=0x72,
+        border=0x25, payload=0x18, commands=0x10, batch_finished=0x0B,
+        keepalive_reply=0x1B, loaded=0x2B, batch_reply=0x0A, configuration_ack=0x0F,
+        command=0x06, signed_command=0x07, chat=0x08, chat_session=0x09),
+    772: dict(  # 1.21.8
+        known_packs=0x0E, join=0x2B, position=0x41, chunk=0x27,
+        keepalive=0x26, disconnect=0x1C, start_configuration=0x6F, system_chat=0x72,
+        border=0x25, payload=0x18, commands=0x10, batch_finished=0x0B,
+        keepalive_reply=0x1B, loaded=0x2B, batch_reply=0x0A, configuration_ack=0x0F,
+        command=0x06, signed_command=0x07, chat=0x08, chat_session=0x09),
+    773: dict(  # 1.21.9
+        known_packs=0x0E, join=0x30, position=0x46, chunk=0x2C,
+        keepalive=0x2B, disconnect=0x20, start_configuration=0x74, system_chat=0x77,
+        border=0x2A, payload=0x18, commands=0x10, batch_finished=0x0B,
+        keepalive_reply=0x1B, loaded=0x2B, batch_reply=0x0A, configuration_ack=0x0F,
+        command=0x06, signed_command=0x07, chat=0x08, chat_session=0x09),
+    774: dict(  # 1.21.11
+        known_packs=0x0E, join=0x30, position=0x46, chunk=0x2C,
+        keepalive=0x2B, disconnect=0x20, start_configuration=0x74, system_chat=0x77,
+        border=0x2A, payload=0x18, commands=0x10, batch_finished=0x0B,
+        keepalive_reply=0x1B, loaded=0x2B, batch_reply=0x0A, configuration_ack=0x0F,
+        command=0x06, signed_command=0x07, chat=0x08, chat_session=0x09),
+    775: dict(  # 26.1
+        known_packs=0x0E, join=0x31, position=0x48, chunk=0x2D,
+        keepalive=0x2C, disconnect=0x20, start_configuration=0x76, system_chat=0x79,
+        border=0x2B, payload=0x18, commands=0x10, batch_finished=0x0B,
+        keepalive_reply=0x1C, loaded=0x2C, batch_reply=0x0B, configuration_ack=0x10,
+        command=0x07, signed_command=0x08, chat=0x09, chat_session=0x0A),
+    776: dict(  # 26.2
+        known_packs=0x0E, join=0x31, position=0x48, chunk=0x2D,
+        keepalive=0x2C, disconnect=0x20, start_configuration=0x76, system_chat=0x79,
+        border=0x2B, payload=0x18, commands=0x10, batch_finished=0x0B,
+        keepalive_reply=0x1C, loaded=0x2C, batch_reply=0x0B, configuration_ack=0x10,
+        command=0x07, signed_command=0x08, chat=0x09, chat_session=0x0A),
+    777: dict(  # 26.3
+        known_packs=0x0F, join=0x32, position=0x49, chunk=0x2E,
+        keepalive=0x2D, disconnect=0x20, start_configuration=0x78, system_chat=0x7C,
+        border=0x2C, payload=0x18, commands=0x10, batch_finished=0x0B,
+        keepalive_reply=0x1C, loaded=0x2C, batch_reply=0x0B, configuration_ack=0x10,
+        command=0x07, signed_command=0x08, chat=0x09, chat_session=0x0A),
 }
 
 
@@ -69,8 +441,44 @@ def string(value):
     return varint(len(encoded)) + encoded
 
 
+def login_start(name, player_id, protocol):
+    data = string(name)
+    if protocol in (759, 760):
+        data += b"\0"  # No profile key on offline test clients.
+    if protocol >= 760:
+        if protocol < 764:
+            data += b"\1"
+        data += player_id.bytes
+    return data
+
+
+def client_settings(protocol):
+    settings = string("en_us") + bytes([2, 0, 1, 127])
+    if protocol >= 107:
+        settings += b"\1"  # Main hand.
+    if protocol >= 755:
+        settings += b"\0"  # Text filtering.
+    if protocol >= 757:
+        settings += b"\1"  # Server listing.
+    if protocol >= 768:
+        settings += b"\2"  # Particle status.
+    return settings
+
+
+def empty_chat_update(protocol):
+    if protocol < 759:
+        return b""
+    if protocol == 759:
+        return bytes(2)  # Empty signature/list, no signed preview.
+    if protocol == 760:
+        return bytes(4)  # Plus empty last-seen and rejected-message lists.
+    return b"\0" * 5 + (b"\1" if protocol >= 770 else b"")
+
+
 def teleport_acknowledgement(body, protocol):
     data = io.BytesIO(body)
+    if protocol < 768:
+        assert len(data.read(33)) == 33  # Position, rotation and relative flags.
     reply = varint(read_varint(data))
     if protocol == 777:
         # 26.3 also requires the accepted position and rotation. These fixtures
@@ -159,35 +567,45 @@ def play(port, name, protocol=774, compression=True, pumpkin=False, hostname="lo
         if observe is not None:
             client.deadline = time.monotonic() + 900
             observe(client, {})
-        client.send(0, string(name) + player_id.bytes)
+        client.send(0, login_start(name, player_id, protocol))
         while True:
             packet_id, body = client.receive()
             if packet_id == 3:
                 client.threshold = read_varint(io.BytesIO(body))
             elif packet_id == 2:
-                assert body[:16] == player_id.bytes, "login UUID changed"
-                profile = io.BytesIO(body[16:])
+                profile = io.BytesIO(body)
+                if protocol < 735:
+                    assert profile.read(read_varint(profile)).decode() == str(player_id)
+                else:
+                    assert profile.read(16) == player_id.bytes, "login UUID changed"
                 assert profile.read(read_varint(profile)).decode() == name
                 break
             else:
                 raise AssertionError(f"unexpected login packet {packet_id}: {body[:200]!r}")
-        client.send(3)  # Login acknowledged; enter configuration.
-        client.send(0, string("en_us") + bytes([2, 0, 1, 127, 1, 0, 1, 2]))
-        client.send(2, string("minecraft:brand") + string("rift-test"))
-        # An opaque custom payload exercises client -> server compression without
-        # depending on a backend's interpretation of a long client brand.
-        client.send(2, string("rift:compression_test") + b"x" * 512)
-        while True:
-            packet_id, body = client.receive()
-            if packet_id == packets["known_packs"]:
-                client.send(7, b"\0")  # No cached packs: request full registries.
-            elif packet_id in (4, 5):
-                client.send(packet_id, body)  # Keepalive / ping.
-            elif packet_id == 3:
-                client.send(3)
-                break
-            elif packet_id == 2:
-                raise AssertionError(f"configuration disconnect: {body[:200]!r}")
+        def options(configuration=False):
+            settings_id = 0 if configuration else packets["settings"]
+            payload_id = (2 if protocol >= 766 else 1) if configuration else packets["server_payload"]
+            client.send(settings_id, client_settings(protocol))
+            brand = "minecraft:brand" if protocol >= 393 else "MC|Brand"
+            client.send(payload_id, string(brand) + string("rift-test"))
+            channel = "rift:compression_test" if protocol >= 393 else "RiftTest"
+            client.send(payload_id, string(channel) + b"x" * 512)
+
+        if protocol >= 764:
+            client.send(3)
+            options(configuration=True)
+            finish = 3 if protocol >= 766 else 2
+            while True:
+                packet_id, body = client.receive()
+                if packet_id == packets["known_packs"]:
+                    client.send(7, b"\0")
+                elif packet_id in ((4, 5) if protocol >= 766 else (3, 4)):
+                    client.send(packet_id, body)
+                elif packet_id == finish:
+                    client.send(finish)
+                    break
+                elif packet_id == finish - 1:
+                    raise AssertionError(f"configuration disconnect: {body[:200]!r}")
         joined = positioned = False
         keepalives = 0
         chunks = 0
@@ -196,15 +614,21 @@ def play(port, name, protocol=774, compression=True, pumpkin=False, hostname="lo
         while time.monotonic() < deadline:
             packet_id, body = client.receive()
             if packet_id == packets["join"]:
+                if protocol < 764 and not joined:
+                    options()
                 joined = True
             elif packet_id == packets["position"]:
-                client.send(0, teleport_acknowledgement(body, protocol))
-                client.send(packets["loaded"])
+                if protocol == 47:
+                    client.send(6, body[:32] + b"\1")
+                else:
+                    client.send(0, teleport_acknowledgement(body, protocol))
+                if packets["loaded"] is not None:
+                    client.send(packets["loaded"])
                 positioned = True
                 teleports += 1
-            elif packet_id == packets["chunk"]:
+            elif packet_id in (packets["chunk"], packets.get("chunk_bulk", -1)):
                 chunks += 1
-            elif packet_id == 0x0B:
+            elif packet_id == packets["batch_finished"]:
                 client.send(packets["batch_reply"], struct.pack(">f", 10.0))
             elif packet_id == packets["keepalive"]:
                 client.send(packets["keepalive_reply"], body)
@@ -217,7 +641,7 @@ def play(port, name, protocol=774, compression=True, pumpkin=False, hostname="lo
                     assert (client.sent_compressed_packets > 0) == compression
                     if observe is None:
                         return chunks, client.compressed_packets
-            elif packet_id == 0x20:
+            elif packet_id == packets["disconnect"]:
                 raise AssertionError(f"play disconnect: {body[:200]!r}")
             if observe is not None:
                 observe(client, dict(joined=joined, teleports=teleports, chunks=chunks,
@@ -326,7 +750,7 @@ def configure_server(name, directory, backend, compression, motd=None, online=Fa
     (directory / "server.properties").write_text(
         f"server-ip=127.0.0.1\nserver-port={backend}\nmotd={motd}\n"
         f"online-mode={str(online).lower()}\nenforce-secure-profile={str(online).lower()}\n"
-        "prevent-proxy-connections=false\n"
+        "prevent-proxy-connections=false\nwhite-list=false\nenforce-whitelist=false\n"
         f"network-compression-threshold={256 if compression else -1}\n"
         "gamemode=creative\nforce-gamemode=true\ndifficulty=peaceful\n"
         "view-distance=2\nsimulation-distance=2\nmax-players=20\nlevel-type=minecraft:flat\n"
@@ -336,7 +760,16 @@ def configure_server(name, directory, backend, compression, motd=None, online=Fa
         "generate-structures=false\nspawn-protection=0\nmax-tick-time=-1\n"
         "pause-when-empty-seconds=0\n"
     )
-    return ["java", "-XX:ActiveProcessorCount=2", "-Xms256M", "-Xmx768M",
+    java = os.environ.get(f"RIFT_JAVA_{SERVERS[name]['java']}", "java")
+    if SERVERS[name]["protocol"] < 759:
+        properties = directory / "server.properties"
+        properties.write_text(properties.read_text().replace("level-type=minecraft:flat", "level-type=flat"))
+    if SERVERS[name]["protocol"] < 477:
+        properties = directory / "server.properties"
+        properties.write_text(properties.read_text().replace("level-type=flat", "level-type=FLAT")
+                              .replace("gamemode=creative", "gamemode=1")
+                              .replace("difficulty=peaceful", "difficulty=0"))
+    return [java, "-XX:ActiveProcessorCount=2", "-XX:+UseSerialGC", "-Xms256M", "-Xmx768M",
             "-jar", str(artifact), "nogui"]
 
 
