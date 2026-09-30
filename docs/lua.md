@@ -160,11 +160,14 @@ API v2 supports live grants, durable state, jobs and HTTP integrations as descri
 in the [extension API](extensions.md). A failed reload preserves the active
 configuration.
 
-All imports and handlers share the existing 8 MiB VM memory limit, 100,000
-instruction budget and 50 ms execution deadline (v2 scheduled jobs have a five-second
-wall deadline). Direct filesystem/process I/O, native
-modules, arbitrary code loaders and the other restricted facilities remain
-unavailable. This is a local Lua plugin API, not the full Neovim runtime.
+All imports and handlers share the existing 8 MiB VM memory limit and 100,000
+instruction budget. Configuration evaluation during startup, checks, reloads and
+web-editor validation/saves has a five-second wall deadline, allowing for cold VM
+setup and scheduling delays on busy hosts. Runtime callbacks retain their 50 ms
+execution deadline (v2 scheduled jobs have a five-second wall deadline). Direct
+filesystem/process I/O, native modules, arbitrary code loaders and the other
+restricted facilities remain unavailable. This is a local Lua plugin API, not
+the full Neovim runtime.
 
 `rift check path/to/rift.lua`, reloads, and web-editor validation/saves resolve
 the same local module directories. The web editor edits the entry script;

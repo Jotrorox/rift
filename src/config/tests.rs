@@ -133,9 +133,13 @@ fn hook_is_optional_but_must_be_a_function() {
 }
 
 #[test]
-fn startup_execution_and_source_size_are_bounded() {
+fn startup_instruction_memory_and_source_limits_are_enforced() {
     for (source, expected) in [
         ("while true do end".to_owned(), "instruction limit"),
+        (
+            "return string.rep('x', 16 * 1024 * 1024)".to_owned(),
+            "memory",
+        ),
         (
             " ".repeat(crate::script::MAX_SOURCE_BYTES + 1),
             "source limit",
@@ -145,10 +149,7 @@ fn startup_execution_and_source_size_are_bounded() {
             .unwrap_err()
             .to_string();
         assert!(error.contains("bad.lua"), "{error}");
-        assert!(
-            error.contains(expected) || error.contains("deadline"),
-            "{error}"
-        );
+        assert!(error.contains(expected), "{error}");
     }
 }
 
