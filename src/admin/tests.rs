@@ -497,6 +497,44 @@ async fn admin_transfer_keeps_the_original_backend_after_an_explicit_target_ban(
 }
 
 #[tokio::test]
+async fn admin_transfer_accepts_every_switching_protocol() {
+    timeout(Duration::from_secs(5), async {
+        let fixture = SessionFixture::new().await;
+        let args = vec!["transfer".into(), fixture.id.to_string(), "second".into()];
+        let (commands, _) = mpsc::channel(1);
+        let (sender, mut receiver) = mpsc::channel::<Transfer>(1);
+        for protocol in (0..=777).filter(|number| {
+            rift::protocol::ProtocolVersion::new(*number)
+                .is_ok_and(rift::protocol::ProtocolVersion::supports_switching)
+        }) {
+            {
+                let mut players = fixture.snapshot.control.players.lock().unwrap();
+                let entry = players.get_mut(&fixture.id).unwrap();
+                entry.protocol = protocol;
+                entry.transfer = sender.clone();
+            }
+            let (result, ()) = tokio::join!(
+                execute(&args, fixture.snapshot.clone(), &fixture.metrics, &commands),
+                async {
+                    let request = receiver.recv().await.unwrap();
+                    assert_eq!(request.backend, "second");
+                    request.reply.send(Err("reached session".into())).unwrap();
+                }
+            );
+            assert_eq!(
+                result.unwrap_err(),
+                "reached session",
+                "protocol {protocol}"
+            );
+        }
+        fixture.task.abort();
+        let _ = fixture.task.await;
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn admin_transfer_rejects_draining_backends_and_unmapped_protocols_before_contact() {
     timeout(Duration::from_secs(5), async {
         let mut fixture = SessionFixture::new().await;
@@ -518,7 +556,7 @@ async fn admin_transfer_rejects_draining_backends_and_unmapped_protocols_before_
             .lock()
             .unwrap()
             .insert("second".into(), false);
-        for protocol in [47, 764, 773, 775, 777] {
+        for protocol in [46, 48, 106, 778, 1073742100] {
             fixture
                 .snapshot
                 .control
@@ -530,7 +568,7 @@ async fn admin_transfer_rejects_draining_backends_and_unmapped_protocols_before_
                 .protocol = protocol;
             let result =
                 execute(&args, fixture.snapshot.clone(), &fixture.metrics, &commands).await;
-            assert!(result.unwrap_err().contains("774"));
+            assert!(result.unwrap_err().contains("1.8.9–26.3"));
         }
         assert!(
             timeout(Duration::from_millis(10), fixture.second.accept())

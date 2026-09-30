@@ -355,7 +355,7 @@ async fn captured_encryption_response_cannot_replay_an_authenticated_session() {
 
 #[tokio::test]
 async fn online_handshake_authenticates_profile_and_preserves_encrypted_pipelined_bytes() {
-    for version in [47, 761, 765, 766, 774, 777] {
+    for version in [47, 761, 765, 766, 774, 775, 776, 777] {
         let (url, http) = http_fixture(200, profile().to_string(), Duration::ZERO).await;
         let auth = Authenticator::for_test_session_server(url, Duration::from_secs(3));
         let (left, right) = tokio::io::duplex(4096);

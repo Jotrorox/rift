@@ -1,9 +1,8 @@
 //! Explicit, tested switching contracts. Relay support does not imply switching.
 //!
-//! 1.21.8 and 1.21.11 share Join Game/SpawnInfo, signed command (including
-//! checksum), and Brigadier parser layouts, but have different clientbound IDs.
-//! Layouts checked against PrismarineJS minecraft-data data/pc/{1.21.8,1.21.11}/protocol.json:
+//! Layouts checked against PrismarineJS minecraft-data and Mojang server artifacts:
 //! https://github.com/PrismarineJS/minecraft-data/tree/master/data/pc
+//! See docs/network-protocol.md for the version matrix and source references.
 //! Add a pinned real-server switch AND recovery fixture in tests/servers.json
 //! before adding a version here. Do not infer support from a protocol range.
 use super::packets::{boolean, take};
@@ -15,6 +14,7 @@ use std::io;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct SwitchingCapabilities {
+    protocol: i32,
     pub join_game: i32,
     pub commands: i32,
     pub bundle_delimiter: i32,
@@ -27,9 +27,19 @@ pub(crate) struct SwitchingCapabilities {
     signed_command: i32,
     chat_acknowledgement: i32,
     system_chat: i32,
+    sea_level: bool,
+    varint_game_modes: bool,
+    online_mode: bool,
+    chat_checksum: bool,
+    score_holder_parser: i32,
+    time_parser: i32,
+    first_resource_parser: i32,
+    last_resource_parser: i32,
+    last_parser: i32,
 }
 
 const V1_21_8: SwitchingCapabilities = SwitchingCapabilities {
+    protocol: 772,
     join_game: 0x2b,
     commands: 0x10,
     bundle_delimiter: 0x00,
@@ -42,25 +52,121 @@ const V1_21_8: SwitchingCapabilities = SwitchingCapabilities {
     signed_command: 0x07,
     chat_acknowledgement: 0x05,
     system_chat: 0x72,
+    sea_level: true,
+    varint_game_modes: false,
+    online_mode: false,
+    chat_checksum: true,
+    score_holder_parser: 31,
+    time_parser: 43,
+    first_resource_parser: 44,
+    last_resource_parser: 48,
+    last_parser: 56,
+};
+const V1_21: SwitchingCapabilities = SwitchingCapabilities {
+    commands: 0x11,
+    play_information: 0x0a,
+    play_payload: 0x12,
+    command: 0x04,
+    signed_command: 0x05,
+    chat_acknowledgement: 0x03,
+    system_chat: 0x6c,
+    sea_level: false,
+    chat_checksum: false,
+    score_holder_parser: 30,
+    time_parser: 42,
+    first_resource_parser: 43,
+    last_resource_parser: 46,
+    last_parser: 53,
+    ..V1_21_8
+};
+const V1_21_2: SwitchingCapabilities = SwitchingCapabilities {
+    join_game: 0x2c,
+    play_information: 0x0c,
+    play_payload: 0x14,
+    command: 0x05,
+    signed_command: 0x06,
+    chat_acknowledgement: 0x04,
+    system_chat: 0x73,
+    sea_level: true,
+    ..V1_21
+};
+const V1_21_5: SwitchingCapabilities = SwitchingCapabilities {
+    join_game: 0x2b,
+    commands: 0x10,
+    system_chat: 0x72,
+    chat_checksum: true,
+    last_resource_parser: 47,
+    last_parser: 54,
+    ..V1_21_2
 };
 const V1_21_11: SwitchingCapabilities = SwitchingCapabilities {
     join_game: 0x30,
     system_chat: 0x77,
     ..V1_21_8
 };
+const V26_1: SwitchingCapabilities = SwitchingCapabilities {
+    join_game: 0x31,
+    play_information: 0x0e,
+    play_payload: 0x16,
+    command: 0x07,
+    signed_command: 0x08,
+    chat_acknowledgement: 0x06,
+    system_chat: 0x79,
+    ..V1_21_8
+};
+const V26_2: SwitchingCapabilities = SwitchingCapabilities {
+    online_mode: true,
+    ..V26_1
+};
+const V26_3: SwitchingCapabilities = SwitchingCapabilities {
+    join_game: 0x32,
+    system_chat: 0x7c,
+    varint_game_modes: true,
+    last_parser: 61,
+    ..V26_2
+};
 
 pub(super) fn for_version(version: ProtocolVersion) -> Option<SwitchingCapabilities> {
     match version.number() {
-        772 => Some(V1_21_8),
-        774 => Some(V1_21_11),
-        _ => None,
+        767 => Some(V1_21),
+        768 | 769 => Some(V1_21_2),
+        770 => Some(V1_21_5),
+        771 | 772 => Some(V1_21_8),
+        773 | 774 => Some(V1_21_11),
+        775 => Some(V26_1),
+        776 => Some(V26_2),
+        777 => Some(V26_3),
+        number => legacy_capabilities(number),
     }
+    .map(|mut caps| {
+        caps.protocol = version.number();
+        caps
+    })
 }
 
+include!("legacy_capabilities.rs");
+
 impl SwitchingCapabilities {
+    fn string_parser(self, data: &mut Vec<u8>) {
+        if self.protocol < 759 {
+            write_string("brigadier:string", data);
+        } else {
+            write_varint(5, data);
+        }
+    }
+    pub(crate) fn legacy_world(self, packet: &Packet) -> io::Result<(Packet, Packet)> {
+        super::legacy::world(self.protocol, packet)
+    }
+    pub(crate) fn legacy_keepalive(self) -> Option<(i32, i32)> {
+        super::legacy::ids(self.protocol).map(|ids| (ids.keepalive, ids.keepalive_reply))
+    }
     pub(crate) fn validate_join(self, packet: &Packet, authenticated: bool) -> io::Result<()> {
         if packet.id != self.join_game {
             return Err(invalid("expected Join Game"));
+        }
+        if self.protocol < 764 {
+            super::legacy::world(self.protocol, packet)?;
+            return Ok(());
         }
         let mut bytes = packet.data.as_slice();
         take(&mut bytes, 4)?; // entity id
@@ -78,9 +184,19 @@ impl SwitchingCapabilities {
         for _ in 0..3 {
             boolean(&mut bytes)?;
         }
-        read_varint(&mut bytes)?; // dimension registry id
+        if self.protocol < 766 {
+            read_string(&mut bytes, 32767)?;
+        } else {
+            read_varint(&mut bytes)?;
+        } // Dimension registry ID since 1.20.5.
         read_string(&mut bytes, 32767)?; // world name
-        take(&mut bytes, 10)?; // seed and game modes
+        take(&mut bytes, 8)?; // seed
+        if self.varint_game_modes {
+            read_varint(&mut bytes)?;
+            read_varint(&mut bytes)?; // Optional VarInt: zero means absent.
+        } else {
+            take(&mut bytes, 2)?;
+        }
         boolean(&mut bytes)?; // debug
         boolean(&mut bytes)?; // flat
         if boolean(&mut bytes)? {
@@ -88,8 +204,13 @@ impl SwitchingCapabilities {
             take(&mut bytes, 8)?;
         }
         read_varint(&mut bytes)?; // portal cooldown
-        read_varint(&mut bytes)?; // sea level
-        let secure = boolean(&mut bytes)?;
+        if self.sea_level {
+            read_varint(&mut bytes)?; // Added in 1.21.2.
+        }
+        if self.online_mode {
+            boolean(&mut bytes)?;
+        }
+        let secure = self.protocol >= 766 && boolean(&mut bytes)?;
         if !bytes.is_empty() {
             return Err(invalid("trailing Join Game data"));
         }
@@ -125,7 +246,15 @@ impl SwitchingCapabilities {
             return Ok(None);
         }
         let mut bytes = packet.data.as_slice();
-        let command = read_string(&mut bytes, 32767)?;
+        let raw = read_string(&mut bytes, 32767)?;
+        let command = if self.protocol < 759 {
+            let Some(command) = raw.strip_prefix('/') else {
+                return Ok(None);
+            };
+            command
+        } else {
+            raw
+        };
         let root = command.split_ascii_whitespace().next().unwrap_or("");
         if !matches!(root, "server" | "hub") && !commands.iter().any(|name| name == root) {
             return Ok(None);
@@ -139,13 +268,44 @@ impl SwitchingCapabilities {
             }
             for _ in 0..count {
                 read_string(&mut bytes, 16)?;
-                take(&mut bytes, 256)?;
+                if self.protocol <= 760 {
+                    signature(&mut bytes)?;
+                } else {
+                    take(&mut bytes, 256)?;
+                }
+            }
+            if self.protocol <= 760 {
+                boolean(&mut bytes)?; // Signed preview.
+                if self.protocol == 760 {
+                    let update = bytes;
+                    let seen = read_varint(&mut bytes)?;
+                    if !(0..=5).contains(&seen) {
+                        return Err(invalid("invalid last-seen message count"));
+                    }
+                    for _ in 0..seen {
+                        take(&mut bytes, 16)?;
+                        signature(&mut bytes)?;
+                    }
+                    if boolean(&mut bytes)? {
+                        take(&mut bytes, 16)?;
+                        signature(&mut bytes)?;
+                    }
+                    acknowledgement = Some(Packet::new(self.chat_acknowledgement, update.to_vec()));
+                }
+                if !bytes.is_empty() {
+                    return Err(invalid("trailing signed command data"));
+                }
+                return if count == 0 {
+                    Ok(Some((command.to_owned(), acknowledgement)))
+                } else {
+                    Ok(None)
+                };
             }
             let offset = read_varint(&mut bytes)?;
             if offset < 0 {
                 return Err(invalid("invalid chat acknowledgement offset"));
             }
-            take(&mut bytes, 4)?; // 20-bit acknowledgement set and 1.21.5+ checksum
+            take(&mut bytes, if self.chat_checksum { 4 } else { 3 })?;
             if !bytes.is_empty() {
                 return Err(invalid("trailing signed command data"));
             }
@@ -169,10 +329,15 @@ impl SwitchingCapabilities {
         version: ProtocolVersion,
         message: &str,
     ) -> io::Result<Packet> {
-        // Disconnect and system-chat use the same anonymous NBT component encoding.
+        // Disconnect and system chat share the version's component encoding.
         let mut packet = disconnect(Some(version), State::Play, message)?;
         packet.id = self.system_chat;
-        packet.data.push(0); // ordinary chat, not action bar
+        // Through 1.19, position 1 is system text (a byte before 1.19, then a
+        // VarInt). 1.19.1 replaces the position with an overlay boolean.
+        packet.data.push(u8::from(self.protocol <= 759));
+        if (735..759).contains(&self.protocol) {
+            packet.data.extend([0; 16]);
+        }
         Ok(packet)
     }
 
@@ -233,7 +398,12 @@ impl SwitchingCapabilities {
                 1 => Some(read_string(&mut bytes, 32767)?),
                 2 => {
                     let name = read_string(&mut bytes, 32767)?;
-                    match read_varint(&mut bytes)? {
+                    let parser = if self.protocol < 759 {
+                        named_parser(read_string(&mut bytes, 32767)?)?
+                    } else {
+                        read_varint(&mut bytes)?
+                    };
+                    match parser {
                         parser @ 1..=4 => {
                             let bounds = take(&mut bytes, 1)?[0];
                             if bounds & !3 != 0 {
@@ -252,16 +422,19 @@ impl SwitchingCapabilities {
                                 return Err(invalid("invalid string argument type"));
                             }
                         }
-                        6 | 31 => {
+                        parser if parser == 6 || parser == self.score_holder_parser => {
                             take(&mut bytes, 1)?;
                         }
-                        43 => {
+                        parser if parser == self.time_parser => {
                             take(&mut bytes, 4)?;
                         }
-                        44..=48 => {
+                        parser
+                            if (self.first_resource_parser..=self.last_resource_parser)
+                                .contains(&parser) =>
+                        {
                             read_string(&mut bytes, 32767)?;
                         }
-                        0..=56 => {}
+                        parser if (0..=self.last_parser).contains(&parser) => {}
                         _ => {
                             return Err(invalid("unknown command parser for switching capability"));
                         }
@@ -322,7 +495,7 @@ impl SwitchingCapabilities {
         data.push(6);
         write_varint(0, &mut data);
         write_string("name", &mut data);
-        write_varint(5, &mut data);
+        self.string_parser(&mut data);
         write_varint(2, &mut data);
         data.push(5);
         write_varint(0, &mut data);
@@ -335,10 +508,19 @@ impl SwitchingCapabilities {
             data.push(6);
             write_varint(0, &mut data);
             write_string("args", &mut data);
-            write_varint(5, &mut data);
+            self.string_parser(&mut data);
             write_varint(2, &mut data);
         }
         write_varint(root as i32, &mut data);
         Ok(Packet::new(packet.id, data))
     }
+}
+
+fn signature(bytes: &mut &[u8]) -> io::Result<()> {
+    let size = read_varint(bytes)?;
+    if !(0..=8192).contains(&size) {
+        return Err(invalid("invalid signature length"));
+    }
+    take(bytes, size as usize)?;
+    Ok(())
 }

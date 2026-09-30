@@ -418,7 +418,7 @@ pub async fn handle(
         let mut extension_selection = None;
         if snapshot.config.extensions.is_some() {
             if !session.switch_supported() {
-                let reason = "Extensions v1 requires Minecraft 1.21.8 or 1.21.11.";
+                let reason = "Extensions v1 requires Minecraft 1.19.3–26.3.";
                 let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect(reason)).await;
                 return Err(io::Error::new(io::ErrorKind::Unsupported, reason));
             }
@@ -626,7 +626,7 @@ pub async fn handle(
                     if request.reply.is_closed() { continue; }
                     let target = &request.backend;
                     if !session.can_switch() || current_backend == *target {
-                        let _ = request.reply.send(Err("transfer requires a joined Minecraft 1.21.11 player and a different backend".into()));
+                        let _ = request.reply.send(Err("transfer requires a joined Minecraft 1.8.9–26.3 player and a different backend".into()));
                         continue;
                     }
                     let name = session.player_name().unwrap_or_default();

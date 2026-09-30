@@ -190,7 +190,7 @@ pub(crate) fn login_success(
     write_string(&profile.name, &mut data);
     if version.number() >= 761 {
         write_properties(profile, &mut data);
-        let suffix = if version.number() >= 777 {
+        let suffix = if version.number() >= 776 {
             16
         } else if matches!(version.number(), 766..=767) {
             1

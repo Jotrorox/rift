@@ -173,34 +173,36 @@ fn handshake_preserves_fields_and_bounds_utf16_address_length() {
 
 #[test]
 fn login_success_validates_session_uuid_without_changing_player_identity() {
-    let version = ProtocolVersion::new(777).unwrap();
-    let mut identity = vec![1; 16];
-    write_string("Player", &mut identity);
-    let mut data = identity.clone();
-    data.push(0); // No profile properties.
-    let session_offset = data.len();
-    data.extend_from_slice(&[2; 16]);
-    for length in session_offset..data.len() {
-        assert!(login_identity(version, &Packet::new(2, data[..length].to_vec())).is_err());
+    for number in [776, 777] {
+        let version = ProtocolVersion::new(number).unwrap();
+        let mut identity = vec![1; 16];
+        write_string("Player", &mut identity);
+        let mut data = identity.clone();
+        data.push(0); // No profile properties.
+        let session_offset = data.len();
+        data.extend_from_slice(&[2; 16]);
+        for length in session_offset..data.len() {
+            assert!(login_identity(version, &Packet::new(2, data[..length].to_vec())).is_err());
+        }
+        assert_eq!(
+            login_identity(version, &Packet::new(2, data.clone())).unwrap(),
+            identity
+        );
+        data[session_offset..].fill(3);
+        assert_eq!(
+            login_identity(version, &Packet::new(2, data.clone())).unwrap(),
+            identity
+        );
+        assert!(
+            login_identity(
+                ProtocolVersion::new(775).unwrap(),
+                &Packet::new(2, data.clone())
+            )
+            .is_err()
+        );
+        data.push(0);
+        assert!(login_identity(version, &Packet::new(2, data)).is_err());
     }
-    assert_eq!(
-        login_identity(version, &Packet::new(2, data.clone())).unwrap(),
-        identity
-    );
-    data[session_offset..].fill(3);
-    assert_eq!(
-        login_identity(version, &Packet::new(2, data.clone())).unwrap(),
-        identity
-    );
-    assert!(
-        login_identity(
-            ProtocolVersion::new(775).unwrap(),
-            &Packet::new(2, data.clone())
-        )
-        .is_err()
-    );
-    data.push(0);
-    assert!(login_identity(version, &Packet::new(2, data)).is_err());
 }
 
 #[test]
@@ -209,7 +211,15 @@ fn packet_ids_and_disconnect_encoding_follow_the_version_and_phase() {
         (764, 2, 0x1b, 0x65, 0x0b),
         (765, 2, 0x1b, 0x67, 0x0b),
         (767, 3, 0x1d, 0x69, 0x0c),
+        (768, 3, 0x1d, 0x70, 0x0e),
+        (769, 3, 0x1d, 0x70, 0x0e),
+        (770, 3, 0x1c, 0x6f, 0x0e),
+        (771, 3, 0x1c, 0x6f, 0x0f),
+        (772, 3, 0x1c, 0x6f, 0x0f),
+        (773, 3, 0x20, 0x74, 0x0f),
         (774, 3, 0x20, 0x74, 0x0f),
+        (775, 3, 0x20, 0x76, 0x10),
+        (776, 3, 0x20, 0x76, 0x10),
         (777, 3, 0x20, 0x78, 0x10),
     ] {
         let version = ProtocolVersion::new(number).unwrap();
@@ -347,21 +357,37 @@ fn malformed_compression_streams_fail_without_panics_or_unbounded_output() {
     }
 }
 
+fn command_id(number: i32) -> i32 {
+    match number {
+        767 => 4,
+        768..=770 => 5,
+        771..=774 => 6,
+        775..=777 => 7,
+        _ => panic!("unmapped test protocol"),
+    }
+}
+fn command_tree_id(number: i32) -> i32 {
+    if number < 770 { 0x11 } else { 0x10 }
+}
+fn chat_update(number: i32) -> Vec<u8> {
+    vec![0; if number < 770 { 3 } else { 4 }]
+}
+
 #[test]
 fn network_commands_preserve_redirects_and_override_signed_backend_literals() {
-    for number in [772, 774] {
+    for number in 767..=777 {
         let caps = ProtocolVersion::new(number).unwrap().switching().unwrap();
         // root -> backend "server" -> signable minecraft:message, and root -> "help".
         let mut data = vec![4, 0, 2, 1, 3, 5, 1, 2];
         write_string("server", &mut data);
         data.extend([6, 0]);
         write_string("message", &mut data);
-        data.push(20);
+        data.push(if number < 771 { 19 } else { 20 });
         data.extend([13, 0, 1]);
         write_string("help", &mut data); // executable literal, redirects to server
         data.push(0);
         let expanded = caps
-            .network_commands(&Packet::new(0x10, data.clone()))
+            .network_commands(&Packet::new(command_tree_id(number), data.clone()))
             .unwrap();
         let mut bytes = expanded.data.as_slice();
         assert_eq!(read_varint(&mut bytes).unwrap(), 7);
@@ -376,24 +402,29 @@ fn network_commands_preserve_redirects_and_override_signed_backend_literals() {
 
 #[test]
 fn signed_proxy_command_without_signatures_preserves_acknowledgement_offset() {
-    for number in [772, 774] {
+    for number in 767..=777 {
         let caps = ProtocolVersion::new(number).unwrap().switching().unwrap();
         let mut data = Vec::new();
         write_string("hub", &mut data);
         data.extend([0; 16]);
         data.push(0);
         write_varint(7, &mut data);
-        data.extend([0; 4]);
-        let (command, acknowledgement) =
-            caps.proxy_command(&Packet::new(7, data)).unwrap().unwrap();
+        data.extend(chat_update(number));
+        let (command, acknowledgement) = caps
+            .proxy_command(&Packet::new(command_id(number) + 1, data))
+            .unwrap()
+            .unwrap();
         assert_eq!(command, "hub");
-        assert_eq!(acknowledgement, Some(Packet::new(5, vec![7])));
+        assert_eq!(
+            acknowledgement,
+            Some(Packet::new(command_id(number) - 1, vec![7]))
+        );
     }
 }
 
 #[test]
 fn secure_profile_join_requires_authenticated_identity_and_valid_packet() {
-    for number in [772, 774] {
+    for number in 767..=777 {
         let caps = ProtocolVersion::new(number).unwrap().switching().unwrap();
         let mut data = 1_i32.to_be_bytes().to_vec();
         data.extend([0, 1]); // hardcore, world count
@@ -401,8 +432,15 @@ fn secure_profile_join_requires_authenticated_identity_and_valid_packet() {
         data.extend([20, 8, 8, 0, 1, 0, 0]); // limits, flags, dimension type
         write_string("minecraft:overworld", &mut data);
         data.extend([0; 8]); // seed
-        data.extend([0, 255, 0, 0, 0, 0, 63, 1]); // game modes, flags, death, cooldown, sea level, secure
-        let mut packet = Packet::new(if number == 772 { 0x2b } else { 0x30 }, data);
+        data.extend([0, if number >= 777 { 0 } else { 255 }, 0, 0, 0, 0]);
+        if number >= 768 {
+            data.push(63);
+        } // Sea level.
+        if number >= 776 {
+            data.push(0);
+        } // Backend online mode.
+        data.push(1); // Enforce secure profile.
+        let mut packet = Packet::new(caps.join_game, data);
         caps.validate_join(&packet, true).unwrap();
         let denied = caps.validate_join(&packet, false).unwrap_err();
         assert_eq!(denied.kind(), std::io::ErrorKind::Unsupported);
@@ -438,19 +476,34 @@ fn switching_requires_an_explicit_capability_and_real_server_fixture() {
         supported, tested,
         "every switching capability needs real-server switch/recovery coverage"
     );
-    assert_eq!(supported, [772, 774].into_iter().collect());
-    for number in [47, 761, 764, 769, 770, 771, 773, 775, 777] {
-        let version = ProtocolVersion::new(number).unwrap();
-        assert!(version.switching().is_none());
-        assert!(system_message(version, "test").is_err());
-        for id in [0x2b, 0x30] {
-            assert_ne!(
-                version.kind(State::Play, Direction::Clientbound, id),
-                PacketKind::JoinGame
-            );
-        }
+    assert_eq!(supported.len(), 50);
+    assert_eq!(supported.first(), Some(&47));
+    assert_eq!(supported.last(), Some(&777));
+    for number in &supported {
+        let version = ProtocolVersion::new(*number).unwrap();
+        let caps = version.switching().unwrap();
+        assert_eq!(
+            version.kind(State::Play, Direction::Clientbound, caps.join_game),
+            PacketKind::JoinGame
+        );
+        assert!(system_message(version, "test").is_ok());
     }
-    for (number, join, chat) in [(772, 0x2b, 0x72), (774, 0x30, 0x77)] {
+    for number in [46, 48, 106, 111, 339, 7590, 778] {
+        assert!(ProtocolVersion::new(number).is_err());
+    }
+    for (number, join, chat) in [
+        (767, 0x2b, 0x6c),
+        (768, 0x2c, 0x73),
+        (769, 0x2c, 0x73),
+        (770, 0x2b, 0x72),
+        (771, 0x2b, 0x72),
+        (772, 0x2b, 0x72),
+        (773, 0x30, 0x77),
+        (774, 0x30, 0x77),
+        (775, 0x31, 0x79),
+        (776, 0x31, 0x79),
+        (777, 0x32, 0x7c),
+    ] {
         let version = ProtocolVersion::new(number).unwrap();
         assert_eq!(
             version.kind(State::Play, Direction::Clientbound, join),
@@ -464,10 +517,10 @@ fn switching_requires_an_explicit_capability_and_real_server_fixture() {
 
 #[test]
 fn switching_commands_reject_malformed_data_and_preserve_signed_arguments() {
-    for number in [772, 774] {
+    for number in 767..=777 {
         let caps = ProtocolVersion::new(number).unwrap().switching().unwrap();
         assert!(
-            caps.proxy_command(&Packet::new(8, vec![]))
+            caps.proxy_command(&Packet::new(0x7fff, vec![]))
                 .unwrap()
                 .is_none()
         );
@@ -477,40 +530,50 @@ fn switching_commands_reject_malformed_data_and_preserve_signed_arguments() {
         data.push(1);
         write_string("name", &mut data);
         data.extend([0; 256]);
-        data.extend([7, 0, 0, 0, 1]);
+        data.push(7);
+        data.extend(chat_update(number));
         assert!(
-            caps.proxy_command(&Packet::new(7, data.clone()))
+            caps.proxy_command(&Packet::new(command_id(number) + 1, data.clone()))
                 .unwrap()
                 .is_none()
         );
         for cut in [data.len() - 1, data.len() - 4, 5] {
             assert!(
-                caps.proxy_command(&Packet::new(7, data[..cut].to_vec()))
+                caps.proxy_command(&Packet::new(command_id(number) + 1, data[..cut].to_vec()))
                     .is_err()
             );
         }
         let mut unsigned = Vec::new();
         write_string("hub", &mut unsigned);
         unsigned.push(0);
-        assert!(caps.proxy_command(&Packet::new(6, unsigned)).is_err());
+        assert!(
+            caps.proxy_command(&Packet::new(command_id(number), unsigned))
+                .is_err()
+        );
         // Unknown parser IDs must not be treated as property-free nodes.
         let mut tree = vec![2, 0, 1, 1, 2, 0];
         write_string("arg", &mut tree);
-        tree.extend([57, 0]);
-        assert!(caps.network_commands(&Packet::new(0x10, tree)).is_err());
+        tree.extend([127, 0]);
+        assert!(
+            caps.network_commands(&Packet::new(command_tree_id(number), tree))
+                .is_err()
+        );
     }
 }
 
 #[test]
 fn extension_commands_replace_backend_roots_and_keep_unsigned_arguments() {
-    for number in [772, 774] {
+    for number in 767..=777 {
         let caps = ProtocolVersion::new(number).unwrap().switching().unwrap();
         let mut data = vec![2, 0, 1, 1, 5, 0];
         write_string("queue", &mut data);
         data.push(0);
         let commands = vec!["queue".to_owned(), "staff".to_owned()];
         let expanded = caps
-            .network_commands_with(&Packet::new(0x10, data.clone()), &commands)
+            .network_commands_with(
+                &Packet::new(command_tree_id(number), data.clone()),
+                &commands,
+            )
             .unwrap();
         let mut bytes = expanded.data.as_slice();
         assert_eq!(read_varint(&mut bytes).unwrap(), 9);
@@ -521,14 +584,17 @@ fn extension_commands_replace_backend_roots_and_keep_unsigned_arguments() {
         let mut unsigned = Vec::new();
         write_string("queue game", &mut unsigned);
         assert_eq!(
-            caps.proxy_command_with(&Packet::new(6, unsigned.clone()), &commands)
-                .unwrap()
-                .unwrap()
-                .0,
+            caps.proxy_command_with(
+                &Packet::new(command_id(number), unsigned.clone()),
+                &commands
+            )
+            .unwrap()
+            .unwrap()
+            .0,
             "queue game"
         );
         assert!(
-            caps.proxy_command_with(&Packet::new(6, unsigned.clone()), &[])
+            caps.proxy_command_with(&Packet::new(command_id(number), unsigned.clone()), &[])
                 .unwrap()
                 .is_none()
         );
@@ -536,11 +602,59 @@ fn extension_commands_replace_backend_roots_and_keep_unsigned_arguments() {
         unsigned.push(1);
         write_string("args", &mut unsigned);
         unsigned.extend([42; 256]);
-        unsigned.extend([0; 5]);
+        unsigned.push(0);
+        unsigned.extend(chat_update(number));
         assert!(
-            caps.proxy_command_with(&Packet::new(7, unsigned), &commands)
+            caps.proxy_command_with(&Packet::new(command_id(number) + 1, unsigned), &commands)
                 .unwrap()
                 .is_none()
         );
+    }
+}
+
+#[test]
+fn command_parser_properties_follow_each_registry() {
+    for number in 767..=777 {
+        let caps = ProtocolVersion::new(number).unwrap().switching().unwrap();
+        let score = if number < 771 { 30 } else { 31 };
+        let time = if number < 771 { 42 } else { 43 };
+        let resource_end = if number < 770 {
+            46
+        } else if number == 770 {
+            47
+        } else {
+            48
+        };
+        let last = match number {
+            767..=769 => 53,
+            770 => 54,
+            771..=776 => 56,
+            777 => 61,
+            _ => unreachable!(),
+        };
+        for parser in 0..=last {
+            let mut data = vec![2, 0, 1, 1, 2, 0];
+            write_string("arg", &mut data);
+            data.push(parser);
+            match parser {
+                1..=4 => {
+                    data.push(3); // Both minimum and maximum.
+                    data.extend(vec![0; if parser == 2 || parser == 4 { 16 } else { 8 }]);
+                }
+                5 => data.push(2),
+                p if p == 6 || p == score => data.push(1),
+                p if p == time => data.extend([0; 4]),
+                p if (time + 1..=resource_end).contains(&p) => {
+                    write_string("minecraft:worldgen/biome", &mut data)
+                }
+                _ => {}
+            }
+            data.push(0); // Root index.
+            let packet = Packet::new(command_tree_id(number), data);
+            assert!(
+                caps.network_commands(&packet).is_ok(),
+                "protocol {number}, parser {parser}"
+            );
+        }
     }
 }

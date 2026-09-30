@@ -1,7 +1,7 @@
 // Control packet layouts are checked against PrismarineJS minecraft-data:
 // https://github.com/PrismarineJS/minecraft-data/tree/master/data/pc
-// Protocol 777 uses the repository's pinned Pumpkin fixture:
-// https://github.com/Pumpkin-MC/Pumpkin/blob/204a94ed895f041a845630d5a23c094705a0704e/crates/pumpkin-data/src/generated/packet.rs
+// 26.2/26.3 were checked against the official checksum-pinned server artifacts.
+// See docs/network-protocol.md and tests/servers.json.
 use super::{
     Direction, Packet, State, invalid, read_string, read_varint, write_string, write_varint,
 };
@@ -95,10 +95,41 @@ pub struct ProtocolVersion(i32);
 impl ProtocolVersion {
     pub fn new(protocol: i32) -> io::Result<Self> {
         match protocol {
-            47 | 761..=775 | 777 => Ok(Self(protocol)),
+            47
+            | 107
+            | 108
+            | 109
+            | 110
+            | 210
+            | 315
+            | 316
+            | 335
+            | 338
+            | 340
+            | 393
+            | 401
+            | 404
+            | 477
+            | 480
+            | 485
+            | 490
+            | 498
+            | 573
+            | 575
+            | 578
+            | 735
+            | 736
+            | 751
+            | 753
+            | 754
+            | 755
+            | 756
+            | 757
+            | 758
+            | 759..=777 => Ok(Self(protocol)),
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "Unsupported Minecraft version. Rift supports 1.8, 1.19.3–26.1 and protocol 777.",
+                "Unsupported Minecraft version. Rift supports Java 1.8.9–26.3.",
             )),
         }
     }
@@ -130,6 +161,38 @@ impl ProtocolVersion {
     fn play_disconnect(self) -> i32 {
         match self.0 {
             47 => 0x40,
+            107 => 0x1a,
+            108 => 0x1a,
+            109 => 0x1a,
+            110 => 0x1a,
+            210 => 0x1a,
+            315 => 0x1a,
+            316 => 0x1a,
+            335 => 0x1a,
+            338 => 0x1a,
+            340 => 0x1a,
+            393 => 0x1b,
+            401 => 0x1b,
+            404 => 0x1b,
+            477 => 0x1a,
+            480 => 0x1a,
+            485 => 0x1a,
+            490 => 0x1a,
+            498 => 0x1a,
+            573 => 0x1b,
+            575 => 0x1b,
+            578 => 0x1b,
+            735 => 0x1a,
+            736 => 0x1a,
+            751 => 0x19,
+            753 => 0x19,
+            754 => 0x19,
+            755 => 0x1a,
+            756 => 0x1a,
+            757 => 0x1a,
+            758 => 0x1a,
+            759 => 0x17,
+            760 => 0x19,
             761 => 0x17,
             762..=763 => 0x1a,
             764..=765 => 0x1b,
@@ -146,7 +209,7 @@ impl ProtocolVersion {
             768..=769 => Some(0x70),
             770..=772 => Some(0x6f),
             773..=774 => Some(0x74),
-            775 => Some(0x76),
+            775..=776 => Some(0x76),
             777 => Some(0x78),
             _ => None,
         }
@@ -157,7 +220,7 @@ impl ProtocolVersion {
             766..=767 => Some(0x0c),
             768..=770 => Some(0x0e),
             771..=774 => Some(0x0f),
-            775 | 777 => Some(0x10),
+            775..=777 => Some(0x10),
             _ => None,
         }
     }
@@ -282,7 +345,7 @@ pub fn status_response(protocol: i32, online: u64, maximum: usize, description: 
 /// identity independently of backend-specific profile properties.
 pub(crate) fn login_identity(version: ProtocolVersion, packet: &Packet) -> io::Result<Vec<u8>> {
     let mut bytes = packet.data.as_slice();
-    if version.number() == 47 {
+    if version.number() < 735 {
         let uuid = read_string(&mut bytes, 36)?;
         if uuid.len() != 36 {
             return Err(invalid("invalid login UUID"));
@@ -296,7 +359,7 @@ pub(crate) fn login_identity(version: ProtocolVersion, packet: &Packet) -> io::R
         return Err(invalid("empty player name"));
     }
     let identity = packet.data[..packet.data.len() - bytes.len()].to_vec();
-    if version.number() >= 761 {
+    if version.number() >= 759 {
         let count = read_varint(&mut bytes)?;
         // Every property has at least two string lengths and a signed flag.
         if count < 0 || count as usize > bytes.len() / 3 {
@@ -316,7 +379,7 @@ pub(crate) fn login_identity(version: ProtocolVersion, packet: &Packet) -> io::R
         }
         // 26.2 adds a backend session UUID after the profile properties.
         // It is not part of the player's identity across backend connections.
-        if version.number() >= 777 {
+        if version.number() >= 776 {
             bytes = bytes
                 .get(16..)
                 .ok_or_else(|| invalid("missing login session UUID"))?;
@@ -348,7 +411,17 @@ pub(crate) fn start_identity(
 ) -> io::Result<PlayerIdentity> {
     let mut bytes = packet.data.as_slice();
     let name = read_string(&mut bytes, 16)?.to_owned();
-    let uuid = if version.number() >= 764 || (version.number() >= 761 && boolean(&mut bytes)?) {
+    if matches!(version.number(), 759..=760) && boolean(&mut bytes)? {
+        take(&mut bytes, 8)?; // Expiry of the client's optional profile key.
+        for _ in 0..2 {
+            let length = read_varint(&mut bytes)?;
+            if !(0..=8192).contains(&length) {
+                return Err(invalid("invalid profile key length"));
+            }
+            take(&mut bytes, length as usize)?;
+        }
+    }
+    let uuid = if version.number() >= 764 || (version.number() >= 760 && boolean(&mut bytes)?) {
         Some(take(&mut bytes, 16)?.try_into().unwrap())
     } else {
         None
@@ -365,7 +438,7 @@ pub(crate) fn success_identity(
 ) -> io::Result<PlayerIdentity> {
     login_identity(version, packet)?;
     let mut bytes = packet.data.as_slice();
-    let uuid = if version.number() == 47 {
+    let uuid = if version.number() < 735 {
         let value = read_string(&mut bytes, 36)?.replace('-', "");
         if value.len() != 32 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(invalid("invalid login UUID"));

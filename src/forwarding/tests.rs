@@ -214,7 +214,7 @@ fn plugin_queries_are_bounded_single_use_and_proxy_owned() {
 
 #[test]
 fn authenticated_packets_preserve_protocol_suffix_and_signed_properties() {
-    for number in [47, 761, 762, 763, 764, 766, 767, 774, 777] {
+    for number in [47, 761, 762, 763, 764, 766, 767, 774, 775, 776, 777] {
         let version = ProtocolVersion::new(number).unwrap();
         let profile = profile();
         let start = login_start(&profile, version);
@@ -241,7 +241,7 @@ fn authenticated_packets_preserve_protocol_suffix_and_signed_properties() {
         if matches!(number, 766..=767) {
             backend.push(1);
         }
-        if number >= 777 {
+        if number >= 776 {
             backend.extend([9; 16]);
         }
         let success = login_success(&profile, version, &Packet::new(2, backend)).unwrap();
@@ -251,7 +251,7 @@ fn authenticated_packets_preserve_protocol_suffix_and_signed_properties() {
         if matches!(number, 766..=767) {
             assert_eq!(success.data.last(), Some(&1));
         }
-        if number >= 777 {
+        if number >= 776 {
             assert!(success.data.ends_with(&[9; 16]));
         }
         if number >= 761 {
