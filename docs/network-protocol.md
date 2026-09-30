@@ -125,9 +125,11 @@ NBT is rejected. A busy source retains its attachment if the client transition
 has not already required closing an unfinished packet bundle. Old-server
 keepalive replies still reach that server during the barrier, so a cancelled
 switch does not cause a later keepalive timeout. After the barrier reply, no
-additional old-server packets are forwarded to the client. A late packet or
-partial frame instead cancels the switch as busy and stays buffered on the old
-attachment for rollback; an explicit disconnect remains terminal. This prevents
+additional old-server packets are forwarded to the client. A bounded batch of
+late packets is inspected for bans and retained on the old attachment until the
+switch succeeds. An incomplete frame, compression change or exhausted inspection
+budget cancels the switch as busy; retained packets resume in order on rollback.
+An explicit disconnect remains terminal. This prevents
 replies to late old-server packets from reaching the replacement backend.
 
 For 1.20.2 and newer, reconfiguration is the world reset. The official 1.21.11

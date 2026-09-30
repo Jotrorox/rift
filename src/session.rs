@@ -9,6 +9,7 @@ use crate::{
     forwarding::{self, Forwarding, LoginPlugins},
 };
 use std::{
+    collections::VecDeque,
     future::{Future, poll_fn},
     io,
     net::IpAddr,
@@ -23,7 +24,7 @@ pub struct Connection<S> {
     pub state: ConnectionState,
     pub codec: Codec,
     reader: Reader,
-    received: Option<Packet>,
+    received: VecDeque<Packet>,
     pending: Option<PendingWrite>,
     login_plugins: LoginPlugins,
 }
@@ -46,7 +47,7 @@ impl<S> Connection<S> {
             state: ConnectionState::new(state),
             codec: Codec::default(),
             reader: Reader::default(),
-            received: None,
+            received: VecDeque::new(),
             pending: None,
             login_plugins: LoginPlugins::default(),
         }
@@ -101,7 +102,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
                     .as_ref()
                     .is_none_or(|pending| pending.kind == PacketKind::Unknown)
             {
-                if let Some(packet) = self.received.take() {
+                if let Some(packet) = self.received.pop_front() {
                     return Poll::Ready(Ok(ConnectionEvent::Read(Some(packet))));
                 }
                 let read = self.reader.read(&mut self.io, self.codec);
@@ -571,40 +572,53 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         let Some(old) = self.backend.as_mut() else {
             return Ok(());
         };
-        // Nothing may be forwarded to the client after its barrier reply:
-        // responses to those packets would belong to the retired backend.
-        // Retain a late packet without observing it so rollback can relay it
-        // exactly once, with its original compression and protocol state.
-        let ready = if let Some(packet) = old.received.take() {
-            Poll::Ready(Ok(Some(packet)))
-        } else {
-            let read = tokio::task::unconstrained(old.reader.read(&mut old.io, old.codec));
-            tokio::pin!(read);
-            poll_fn(|cx| Poll::Ready(read.as_mut().poll(cx))).await
-        };
-        match ready {
-            Poll::Ready(Ok(Some(packet))) => {
-                if version.kind(State::Play, Direction::Clientbound, packet.id)
-                    == PacketKind::Disconnect
-                {
-                    old.state
-                        .observe(version, Direction::Clientbound, &packet)?;
-                    self.client
-                        .queue(version, Direction::Clientbound, &packet)?;
-                    return Err(io::Error::new(
-                        io::ErrorKind::PermissionDenied,
-                        "The current backend disconnected the player.",
-                    ));
+        // Inspect late traffic without delivering it past the client barrier.
+        // Keep packets unobserved for rollback; a successful cutover drops them
+        // with the old attachment. Bound work, time and retained packet bytes.
+        let started = std::time::Instant::now();
+        let mut bytes = old
+            .received
+            .iter()
+            .map(|packet| packet.data.len())
+            .sum::<usize>();
+        while old.received.len() < 128
+            && bytes < protocol::MAX_PACKET_SIZE
+            && started.elapsed() < std::time::Duration::from_millis(20)
+        {
+            let ready = {
+                let read = tokio::task::unconstrained(old.reader.read(&mut old.io, old.codec));
+                tokio::pin!(read);
+                poll_fn(|cx| Poll::Ready(read.as_mut().poll(cx))).await
+            };
+            match ready {
+                Poll::Ready(Ok(Some(packet))) => {
+                    let kind = version.kind(State::Play, Direction::Clientbound, packet.id);
+                    if kind == PacketKind::Disconnect {
+                        old.state
+                            .observe(version, Direction::Clientbound, &packet)?;
+                        self.client
+                            .queue(version, Direction::Clientbound, &packet)?;
+                        return Err(io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            "The current backend disconnected the player.",
+                        ));
+                    }
+                    bytes += packet.data.len();
+                    old.received.push_back(packet);
+                    // 1.8 allows changing compression in play. Roll back before
+                    // decoding another frame with a codec that is now stale.
+                    if kind == PacketKind::SetCompression {
+                        break;
+                    }
                 }
-                old.received = Some(packet);
+                Poll::Ready(result) => {
+                    self.backend_error = result.err();
+                    self.backend = None;
+                    return Ok(());
+                }
+                Poll::Pending if !old.reader.has_partial_frame() => return Ok(()),
+                Poll::Pending => break,
             }
-            Poll::Ready(result) => {
-                self.backend_error = result.err();
-                self.backend = None;
-                return Ok(());
-            }
-            Poll::Pending if !old.reader.has_partial_frame() => return Ok(()),
-            Poll::Pending => {}
         }
         Err(io::Error::new(
             io::ErrorKind::WouldBlock,

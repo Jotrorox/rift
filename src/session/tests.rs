@@ -1458,6 +1458,11 @@ async fn legacy_barrier_drains_old_input_and_keeps_busy_or_banned_cutovers_safe(
                         }
                     }
                     "ban" => {
+                        // A ban behind ordinary late traffic is still terminal.
+                        codec
+                            .write(&mut old, &Packet::new(0, vec![99]))
+                            .await
+                            .unwrap();
                         codec
                             .write(
                                 &mut old,
@@ -1478,6 +1483,10 @@ async fn legacy_barrier_drains_old_input_and_keeps_busy_or_banned_cutovers_safe(
                             .unwrap();
                     }
                     "partial" => {
+                        codec
+                            .write(&mut old, &Packet::new(0, vec![98]))
+                            .await
+                            .unwrap();
                         let frame = codec.encode(&Packet::new(0, vec![99])).unwrap();
                         old.write_all(&frame[..1]).await.unwrap();
                     }
@@ -1489,7 +1498,7 @@ async fn legacy_barrier_drains_old_input_and_keeps_busy_or_banned_cutovers_safe(
                 tokio::join!(session.connect_backend(new_server), login, frontend);
             assert_eq!(receive(&mut old, codec).await, Packet::new(0, vec![42]));
             match outcome {
-                "switch" => {
+                "switch" | "late_keepalive" => {
                     result.unwrap();
                     assert!(!session.switch_in_progress());
                     assert!(session.can_switch());
@@ -1514,7 +1523,7 @@ async fn legacy_barrier_drains_old_input_and_keeps_busy_or_banned_cutovers_safe(
                     assert!(session.can_switch());
                     assert!(session.backend().is_some());
                 }
-                "late_keepalive" | "partial" => {
+                "partial" => {
                     assert_eq!(result.unwrap_err().kind(), io::ErrorKind::WouldBlock);
                     assert!(!session.switch_in_progress());
                     assert!(session.can_switch());
@@ -1524,16 +1533,19 @@ async fn legacy_barrier_drains_old_input_and_keeps_busy_or_banned_cutovers_safe(
                             .is_err(),
                         "old-server packet was forwarded after the barrier"
                     );
-                    let keepalive = Packet::new(0, vec![99]);
-                    if outcome == "partial" {
-                        let frame = codec.encode(&keepalive).unwrap();
-                        old.write_all(&frame[1..]).await.unwrap();
+                    let frame = codec.encode(&Packet::new(0, vec![99])).unwrap();
+                    old.write_all(&frame[1..]).await.unwrap();
+                    for value in [98, 99] {
+                        let keepalive = Packet::new(0, vec![value]);
+                        session.forward().await.unwrap();
+                        assert_eq!(receive(&mut client, codec).await, keepalive);
                     }
-                    session.forward().await.unwrap();
-                    assert_eq!(receive(&mut client, codec).await, keepalive);
-                    codec.write(&mut client, &keepalive).await.unwrap();
-                    session.forward().await.unwrap();
-                    assert_eq!(receive(&mut old, codec).await, keepalive);
+                    for value in [98, 99] {
+                        let keepalive = Packet::new(0, vec![value]);
+                        codec.write(&mut client, &keepalive).await.unwrap();
+                        session.forward().await.unwrap();
+                        assert_eq!(receive(&mut old, codec).await, keepalive);
+                    }
                     // The cancelled replacement received neither persistent
                     // settings nor a reply belonging to the old server.
                     assert!(
@@ -1554,12 +1566,12 @@ async fn legacy_barrier_drains_old_input_and_keeps_busy_or_banned_cutovers_safe(
 }
 
 #[tokio::test]
-async fn legacy_barrier_preserves_late_bundles_for_rollback() {
+async fn legacy_barrier_discards_late_bundles_on_success() {
     timeout(Duration::from_secs(3), async {
         let (mut session, mut client, mut old) = session().await;
         let version = ProtocolVersion::new(763).unwrap();
         let caps = version.switching().unwrap();
-        // Focus on an established 1.20.1 attachment receiving a late bundle.
+        // Close an existing bundle, but never open the late old-server bundle.
         session.version = Some(version);
         session.handshake.protocol = 763;
         session.client.state = ConnectionState::new(State::Play);
@@ -1569,6 +1581,7 @@ async fn legacy_barrier_preserves_late_bundles_for_rollback() {
             uuid: Some([7; 16]),
         });
         session.joined = true;
+        session.bundle_open = true;
         let mut start = Vec::new();
         write_string("Player", &mut start);
         start.push(1);
@@ -1593,9 +1606,10 @@ async fn legacy_barrier_preserves_late_bundles_for_rollback() {
                 .await
                 .unwrap();
             codec.write(&mut replacement, &join).await.unwrap();
+            assert_eq!(receive(&mut client, codec).await, Packet::empty(0));
             let barrier = receive(&mut client, codec).await;
             assert_eq!(barrier.id, 0x23);
-            // This delimiter must remain on the old attachment until rollback.
+            // This late delimiter must never reach the client.
             codec.write(&mut old, &Packet::empty(0)).await.unwrap();
             codec
                 .write(&mut client, &Packet::new(0x12, barrier.data))
@@ -1603,13 +1617,13 @@ async fn legacy_barrier_preserves_late_bundles_for_rollback() {
                 .unwrap();
         };
         let (result, ()) = tokio::join!(session.connect_backend(server), peers);
-        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        result.unwrap();
         assert!(!session.switch_in_progress());
         assert!(session.can_switch());
         assert!(!session.bundle_open);
-        session.forward().await.unwrap();
-        assert_eq!(receive(&mut client, codec).await, Packet::empty(0));
-        assert!(session.bundle_open);
+        for id in [0x65, 0x0e, caps.join_game, 0x41] {
+            assert_eq!(receive(&mut client, codec).await.id, id);
+        }
     })
     .await
     .unwrap();
