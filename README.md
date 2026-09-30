@@ -153,6 +153,7 @@ See the [supported subchannels and configuration](docs/bungeecord.md).
 - [Messaging](docs/messaging.md): plugin messaging, [Lua API](docs/messaging-lua.md) and [QUIC protocol](docs/messaging-protocol.md).
 - [BungeeCord compatibility](docs/bungeecord.md): backend plugin transfers and player/server queries.
 - [Network protocol](docs/network-protocol.md): backend switching and recovery.
+- [Performance comparison](docs/performance.md): measured CPU, memory, latency and failure rates against Velocity, with reproducible workloads and raw results.
 
 ## Development
 
