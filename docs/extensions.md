@@ -5,7 +5,7 @@ network with a FIFO survival queue, a staff-only server and registered commands.
 It uses the existing Paper/Velocity forwarding setup in
 [`examples/online.lua`](../examples/online.lua). Run `rift --check
 examples/extensions.lua`, then start with `RIFT_FORWARDING_SECRET` set. Clients
-must use one of Rift's switchable protocols: Java 1.21.8 or 1.21.11.
+must use Java 1.19.3–26.3, which supports both switching and online authentication.
 
 Set `rift.config.extensions = { api_version = 1, ... }`, or use
 `rift.on(event, callback)` and `rift.command(name, definition)` from a script or

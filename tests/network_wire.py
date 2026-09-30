@@ -19,22 +19,13 @@ import threading
 import time
 import uuid
 
-from minecraft import (Client, PROTOCOLS, ROOT, process, read_varint, string, teleport_acknowledgement,
-                       unused_port, varint, wait_ready)
+from minecraft import (Client, PROTOCOLS, ROOT, client_settings, empty_chat_update, login_start, process,
+                       read_varint, string, teleport_acknowledgement, unused_port, varint, wait_ready)
 
 PROTOCOL = 774
 # Independent client mappings, shared by fake-peer and real-server acceptance.
 # No range fallback: every advertised switchable version needs its own entry.
-NETWORK_PROTOCOLS = {
-    772: dict(PROTOCOLS[772], disconnect=0x1C, start_configuration=0x6F,
-              configuration_ack=0x0F, system_chat=0x72, border=0x25,
-              payload=0x18, command=0x06, signed_command=0x07, commands=0x10,
-              chat=0x08, chat_session=0x09, batch_finished=0x0B),
-    774: dict(PROTOCOLS[774], disconnect=0x20, start_configuration=0x74,
-              configuration_ack=0x0F, system_chat=0x77, border=0x2A,
-              payload=0x18, command=0x06, signed_command=0x07, commands=0x10,
-              chat=0x08, chat_session=0x09, batch_finished=0x0B),
-}
+NETWORK_PROTOCOLS = PROTOCOLS
 SETTINGS = string("en_us") + bytes([2, 0, 1, 127, 1, 0, 1, 2])
 BRAND = string("minecraft:brand") + string("rift-network-test")
 
@@ -218,7 +209,7 @@ class NetworkClient(Client):
         self.joins, self.transitions, self.pack_pops = [], 0, 0
         self.messages = []
         self.frontend = self.socket.getsockname()
-        self.send(0, string(name) + identity(name).bytes)
+        self.send(0, login_start(name, identity(name), protocol))
 
     def next_packet(self):
         packet_id, body = self.receive()
@@ -228,26 +219,33 @@ class NetworkClient(Client):
             if packet_id == 3:
                 self.threshold = read_varint(io.BytesIO(body))
             elif packet_id == 2:
-                assert body[:16] == identity(self.name).bytes
-                self.phase = "configuration"
-                if self.bootstrap:
+                if self.protocol < 735:
+                    assert read_string(io.BytesIO(body)) == str(identity(self.name))
+                else:
+                    assert body[:16] == identity(self.name).bytes
+                self.phase = "configuration" if self.protocol >= 764 else "play"
+                if self.bootstrap and self.protocol >= 764:
                     self.send(3)
-                    self.send(0, SETTINGS)
-                    self.send(2, BRAND)
-                    self.send(2, string("rift:compression_test") + b"x" * 512)
+                    settings_id = 0
+                    payload_id = 2 if self.protocol >= 766 else 1
+                    self.send(settings_id, client_settings(self.protocol))
+                    brand = "minecraft:brand" if self.protocol >= 393 else "MC|Brand"
+                    self.send(payload_id, string(brand) + string("rift-network-test"))
+                    channel = "rift:compression_test" if self.protocol >= 393 else "RiftTest"
+                    self.send(payload_id, string(channel) + b"x" * 512)
             else:
                 raise AssertionError(f"unexpected login packet {packet_id:#x}")
         elif self.phase == "configuration":
-            if packet_id == 2:
+            if packet_id == (2 if self.protocol >= 766 else 1):
                 return "disconnect", body
-            if packet_id == 0x0E:
+            if packet_id == self.packets["known_packs"]:
                 self.send(7, b"\0")
-            elif packet_id == 3:
-                self.send(3)
+            elif packet_id == (3 if self.protocol >= 766 else 2):
+                self.send(packet_id)
                 self.phase = "play"
-            elif packet_id in (4, 5):
+            elif packet_id in ((4, 5) if self.protocol >= 766 else (3, 4)):
                 self.send(packet_id, body)
-            elif packet_id == 8 and body == b"\0":
+            elif packet_id == (8 if self.protocol >= 766 else 6) and body == b"\0":
                 self.pack_pops += 1
         elif self.phase == "play":
             if packet_id == self.packets["disconnect"]:
@@ -261,7 +259,16 @@ class NetworkClient(Client):
                 self.phase = "configuration"
             elif packet_id == self.packets["join"]:
                 self.joins.append(struct.unpack(">i", body[:4])[0])
-                if self.chat:
+                if self.protocol < 764 and len(self.joins) == 1 and self.bootstrap:
+                    self.send(self.packets["settings"], client_settings(self.protocol))
+                    brand = "minecraft:brand" if self.protocol >= 393 else "MC|Brand"
+                    self.send(self.packets["server_payload"], string(brand) + string("rift-network-test"))
+                    channel = "rift:compression_test" if self.protocol >= 393 else "RiftTest"
+                    self.send(self.packets["server_payload"], string(channel) + b"x" * 512)
+
+                if self.protocol < 764 and len(self.joins) > 1:
+                    self.transitions += 1
+                if self.chat and self.packets["chat_session"] >= 0:
                     self.send(self.packets["chat_session"], chat_session(len(self.joins)))
             elif packet_id == self.packets["system_chat"]:
                 self.messages.append(body)
@@ -271,8 +278,12 @@ class NetworkClient(Client):
             elif packet_id == self.packets["keepalive"]:
                 self.send(self.packets["keepalive_reply"], body)
             elif packet_id == self.packets["position"]:
-                self.send(0, teleport_acknowledgement(body, self.protocol))
-                self.send(self.packets["loaded"])
+                if self.protocol == 47:
+                    self.send(6, body[:32] + b"\1")  # Position/look acknowledges 1.8 teleports.
+                else:
+                    self.send(0, teleport_acknowledgement(body, self.protocol))
+                if self.packets["loaded"] is not None:
+                    self.send(self.packets["loaded"])
             elif packet_id == self.packets["batch_finished"]:
                 self.send(self.packets["batch_reply"], struct.pack(">f", 10.0))
         assert self.socket.getsockname() == self.frontend, "frontend socket replaced"
@@ -291,11 +302,13 @@ class NetworkClient(Client):
         self.until("payload", string("rift:joined") + string(backend))
 
     def command(self, command, signed=False):
-        if signed:
+        if self.protocol < 759:
+            self.send(self.packets["command"], string("/" + command))
+        elif signed or self.protocol < 766:
             # Empty signature list and last-seen set; checksum for the empty set.
             self.send(self.packets["signed_command"], string(command)
                       + struct.pack(">qq", int(time.time() * 1000), 0)
-                      + b"\0\0\0\0\0\1")
+                      + empty_chat_update(self.protocol))
         else:
             self.send(self.packets["command"], string(command))
 

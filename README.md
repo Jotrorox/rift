@@ -115,15 +115,22 @@ commands with UUID permission checks, and FIFO server queues. The
 [extension example](examples/extensions.lua) demonstrates a survival queue and
 staff-only server. See the [extension API contract](docs/extensions.md) for
 ordering, deadlines, permissions and reload behavior. Extensions require online
-authentication and a switchable client protocol (Java 1.21.8 or 1.21.11).
+authentication and Java 1.19.3–26.3 (the online authentication range).
 
 ## Compatibility
 
-Login supports protocol 47 (1.8), 761–775 (1.19.3–26.1), and the pinned Pumpkin
-protocol 777. Online authentication requires a supported modern protocol;
-protocol 47 is offline only. Backend switching and recovery support **1.21.8 and
-1.21.11**. Clients and backends must use the same version. Protocol translation,
-Bedrock/UDP, and legacy pre-1.7 pings are unsupported.
+Minecraft Java **1.8.9 through 26.3**, including all intervening releases, supports
+login, `/server`, `/hub`, backend switching and crash recovery. All 66 releases
+have checksum-pinned official server fixtures for joining, world/chunk delivery,
+chat, switching, ban rollback and recovery. Older clients use Join Game/Respawn
+world resets; 1.20.2+ uses the configuration phase.
+See the [protocol matrix and test scope](docs/network-protocol.md).
+
+Clients and backends must use the same protocol version. Rift does not translate
+between Minecraft versions. Online authentication, Velocity modern forwarding and
+authenticated extensions require **1.19.3 or newer**; earlier versions use offline
+backends with forwarding disabled. Bedrock/UDP, unlisted snapshots and legacy
+pre-1.7 pings are unsupported.
 
 ## Documentation
 

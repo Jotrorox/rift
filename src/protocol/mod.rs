@@ -2,11 +2,14 @@
 //! Gameplay payloads remain opaque; this is not a protocol translator.
 mod compression;
 mod framing;
+mod legacy;
+mod nbt;
 mod packets;
 mod state;
 mod switching;
 
 pub use framing::{Codec, MAX_FRAME_SIZE, MAX_PACKET_SIZE, Packet, Reader};
+pub(crate) use legacy::LegacyState;
 pub use packets::{Handshake, NextState, PacketKind, ProtocolVersion, disconnect, status_response};
 pub use packets::{PlayerIdentity, system_message};
 pub(crate) use packets::{login_identity, start_identity, success_identity};

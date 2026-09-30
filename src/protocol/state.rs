@@ -1,4 +1,4 @@
-use super::{Packet, PacketKind, ProtocolVersion, invalid, read_string, read_varint};
+use super::{Packet, PacketKind, ProtocolVersion, invalid, read_varint};
 use std::io;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,24 +95,7 @@ impl ConnectionState {
                 if self.login_started {
                     return Err(invalid("duplicate login start"));
                 }
-                let mut bytes = packet.data.as_slice();
-                if read_string(&mut bytes, 16)?.is_empty() {
-                    return Err(invalid("empty player name"));
-                }
-                let uuid_bytes = if version.number() >= 764 {
-                    16
-                } else if version.number() >= 761 {
-                    match bytes.first() {
-                        Some(0) => 1,
-                        Some(1) => 17,
-                        _ => return Err(invalid("invalid optional UUID")),
-                    }
-                } else {
-                    0
-                };
-                if bytes.len() != uuid_bytes {
-                    return Err(invalid("invalid login start payload"));
-                }
+                super::start_identity(version, packet)?;
                 self.login_started = true;
             }
             LoginSuccess => {

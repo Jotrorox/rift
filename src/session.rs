@@ -9,6 +9,7 @@ use crate::{
     forwarding::{self, Forwarding, LoginPlugins},
 };
 use std::{
+    collections::VecDeque,
     future::{Future, poll_fn},
     io,
     net::IpAddr,
@@ -23,6 +24,7 @@ pub struct Connection<S> {
     pub state: ConnectionState,
     pub codec: Codec,
     reader: Reader,
+    received: VecDeque<Packet>,
     pending: Option<PendingWrite>,
     login_plugins: LoginPlugins,
 }
@@ -45,6 +47,7 @@ impl<S> Connection<S> {
             state: ConnectionState::new(state),
             codec: Codec::default(),
             reader: Reader::default(),
+            received: VecDeque::new(),
             pending: None,
             login_plugins: LoginPlugins::default(),
         }
@@ -99,6 +102,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
                     .as_ref()
                     .is_none_or(|pending| pending.kind == PacketKind::Unknown)
             {
+                if let Some(packet) = self.received.pop_front() {
+                    return Poll::Ready(Ok(ConnectionEvent::Read(Some(packet))));
+                }
                 let read = self.reader.read(&mut self.io, self.codec);
                 return std::pin::pin!(read)
                     .poll(cx)
@@ -149,6 +155,7 @@ pub struct Session<C, B> {
     initial_retry_safe: bool,
     client_eof: bool,
     read_chunk_size: usize,
+    legacy_state: protocol::LegacyState,
 }
 
 impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Session<C, B> {
@@ -182,6 +189,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             initial_retry_safe: true,
             client_eof: false,
             read_chunk_size: 32 * 1024,
+            legacy_state: protocol::LegacyState::default(),
         })
     }
 
@@ -395,13 +403,13 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         if replacing {
             let expected = self.identity.clone().unwrap();
             let forwarding = self.forwarding.clone();
-            {
+            let legacy_join = {
                 let login =
                     Self::login_replacement(&mut backend, version, &expected, forwarding.as_ref());
                 tokio::pin!(login);
                 loop {
                     tokio::select! {
-                        result = &mut login => { result?; break; }
+                        result = &mut login => { break result?; }
                         event = self.forward(), if self.backend.is_some() => match event? {
                             SessionEvent::Packet | SessionEvent::ProxyCommand(_) => {}
                             SessionEvent::BackendClosed | SessionEvent::BackendFailed => {}
@@ -412,7 +420,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                         }
                     }
                 }
-            }
+            };
             // A ready Login Success must not win the select and discard an
             // already queued kick on the old connection. Establish a bounded
             // quiescent cutover before changing the client's protocol state.
@@ -429,12 +437,86 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             self.client.flush_pending().await?;
             // A failed backend may have left an unfinished bundle on the wire.
             // Close it before the unbundled configuration transition.
-            if self.bundle_open {
+            let closed_bundle = self.bundle_open;
+            if closed_bundle {
                 self.send_client(&Packet::empty(
                     version.switching().unwrap().bundle_delimiter,
                 ))
                 .await?;
                 self.bundle_open = false;
+            }
+            if let Some(join) = legacy_join {
+                let caps = version.switching().unwrap();
+                // A proxy-owned keepalive fences packets sent for the old world.
+                let (request_id, reply_id) = caps.legacy_keepalive().unwrap();
+                let mut random = [0; 8];
+                aws_lc_rs::rand::fill(&mut random)
+                    .map_err(|_| protocol::invalid("could not create transition barrier"))?;
+                let challenge = if version.number() >= 340 {
+                    random.to_vec()
+                } else {
+                    let mut data = Vec::new();
+                    write_varint(
+                        i32::from_be_bytes(random[..4].try_into().unwrap()),
+                        &mut data,
+                    );
+                    data
+                };
+                self.send_client(&Packet::new(request_id, challenge.clone()))
+                    .await?;
+                loop {
+                    let packet = self
+                        .client
+                        .reader
+                        .read(&mut self.client.io, self.client.codec)
+                        .await?
+                        .ok_or_else(|| protocol::invalid("client closed during legacy switch"))?;
+                    if packet.id == reply_id && packet.data == challenge {
+                        break;
+                    }
+                    self.remember_client_packet(State::Play, &packet)?;
+                    // A later busy-source rollback must not strand the old
+                    // server's keepalive and disconnect an otherwise live player.
+                    if packet.id == reply_id
+                        && let Some(old) = self.backend.as_mut()
+                    {
+                        let result = async {
+                            old.flush_pending().await?;
+                            old.queue(version, Direction::Serverbound, &packet)?;
+                            old.flush_pending().await
+                        }
+                        .await;
+                        if let Err(error) = result {
+                            self.backend_error = Some(error);
+                            self.backend = None;
+                        }
+                    }
+                }
+                if let Err(error) = self.check_legacy_cutover().await {
+                    // The keepalive did not change client state. A busy source
+                    // can safely resume, including any cancel-safe queued frame.
+                    if error.kind() == io::ErrorKind::WouldBlock && !closed_bundle {
+                        self.switch_in_progress = false;
+                    }
+                    return Err(error);
+                }
+                for packet in self.legacy_state.reset(version)? {
+                    self.send_client(&packet).await?;
+                }
+                let (join, respawn) = caps.legacy_world(&join)?;
+                self.send_client(&join).await?;
+                self.send_client(&respawn).await?;
+                if let Some(settings) = &self.client_information {
+                    backend.codec.write(&mut backend.io, settings).await?;
+                }
+                if let Some(brand) = &self.client_brand {
+                    backend.codec.write(&mut backend.io, brand).await?;
+                }
+                self.backend = Some(backend);
+                self.backend_error = None;
+                self.joined = true;
+                self.switch_in_progress = false;
+                return Ok(());
             }
             self.send_client(&Packet::empty(version.start_configuration().unwrap()))
                 .await?;
@@ -475,15 +557,73 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             }
             // Resource packs are common-listener state and survive a fresh play
             // listener. Pop the old server's stack before new configuration.
-            self.send_client(&Packet::new(
-                version.switching().unwrap().config_pack_pop,
-                vec![0],
-            ))
-            .await?;
+            let pop = version.switching().unwrap().config_pack_pop;
+            if pop >= 0 {
+                self.send_client(&Packet::new(pop, vec![0])).await?;
+            }
         }
         self.backend = Some(backend);
         self.backend_error = None;
         Ok(())
+    }
+
+    async fn check_legacy_cutover(&mut self) -> io::Result<()> {
+        let version = self.version()?;
+        let Some(old) = self.backend.as_mut() else {
+            return Ok(());
+        };
+        // Inspect late traffic without delivering it past the client barrier.
+        // Keep packets unobserved for rollback; a successful cutover drops them
+        // with the old attachment. Bound work, time and retained packet bytes.
+        let started = std::time::Instant::now();
+        let mut bytes = old
+            .received
+            .iter()
+            .map(|packet| packet.data.len())
+            .sum::<usize>();
+        while old.received.len() < 128
+            && bytes < protocol::MAX_PACKET_SIZE
+            && started.elapsed() < std::time::Duration::from_millis(20)
+        {
+            let ready = {
+                let read = tokio::task::unconstrained(old.reader.read(&mut old.io, old.codec));
+                tokio::pin!(read);
+                poll_fn(|cx| Poll::Ready(read.as_mut().poll(cx))).await
+            };
+            match ready {
+                Poll::Ready(Ok(Some(packet))) => {
+                    let kind = version.kind(State::Play, Direction::Clientbound, packet.id);
+                    if kind == PacketKind::Disconnect {
+                        old.state
+                            .observe(version, Direction::Clientbound, &packet)?;
+                        self.client
+                            .queue(version, Direction::Clientbound, &packet)?;
+                        return Err(io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            "The current backend disconnected the player.",
+                        ));
+                    }
+                    bytes += packet.data.len();
+                    old.received.push_back(packet);
+                    // 1.8 allows changing compression in play. Roll back before
+                    // decoding another frame with a codec that is now stale.
+                    if kind == PacketKind::SetCompression {
+                        break;
+                    }
+                }
+                Poll::Ready(result) => {
+                    self.backend_error = result.err();
+                    self.backend = None;
+                    return Ok(());
+                }
+                Poll::Pending if !old.reader.has_partial_frame() => return Ok(()),
+                Poll::Pending => break,
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "The current server is busy. Please retry the switch.",
+        ))
     }
 
     async fn drain_before_switch(&mut self) -> io::Result<()> {
@@ -569,7 +709,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         version: ProtocolVersion,
         expected: &PlayerIdentity,
         forwarding: Option<&Forwarding>,
-    ) -> io::Result<()> {
+    ) -> io::Result<Option<Packet>> {
         loop {
             let packet = backend
                 .reader
@@ -597,12 +737,22 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                             "replacement backend changed the player identity",
                         ));
                     }
+                    if !version.has_configuration() {
+                        continue;
+                    }
                     let acknowledged = Packet::empty(3);
                     backend
                         .state
                         .observe(version, Direction::Serverbound, &acknowledged)?;
                     backend.codec.write(&mut backend.io, &acknowledged).await?;
-                    return Ok(());
+                    return Ok(None);
+                }
+                PacketKind::JoinGame if !version.has_configuration() => {
+                    version
+                        .switching()
+                        .unwrap()
+                        .validate_join(&packet, forwarding.is_some())?;
+                    return Ok(Some(packet));
                 }
                 PacketKind::Disconnect => {
                     // A ban/whitelist rejection is authoritative. Preserve its
@@ -641,20 +791,36 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         if (state == State::Configuration && packet.id == caps.config_information)
             || (state == State::Play && packet.id == caps.play_information)
         {
-            self.client_information =
-                Some(Packet::new(caps.config_information, packet.data.clone()));
+            self.client_information = Some(Packet::new(
+                if self.version()?.has_configuration() {
+                    caps.config_information
+                } else {
+                    caps.play_information
+                },
+                packet.data.clone(),
+            ));
         }
         if (state == State::Configuration && packet.id == caps.config_payload)
             || (state == State::Play && packet.id == caps.play_payload)
         {
             let mut bytes = packet.data.as_slice();
-            if protocol::read_string(&mut bytes, 32767)? == "minecraft:brand" {
+            if matches!(
+                protocol::read_string(&mut bytes, 32767)?,
+                "minecraft:brand" | "MC|Brand"
+            ) {
                 // Avoid retaining arbitrary large mod payloads across backends.
                 protocol::read_string(&mut bytes, 32767)?;
                 if !bytes.is_empty() {
                     return Err(protocol::invalid("invalid client brand"));
                 }
-                self.client_brand = Some(Packet::new(caps.config_payload, packet.data.clone()));
+                self.client_brand = Some(Packet::new(
+                    if self.version()?.has_configuration() {
+                        caps.config_payload
+                    } else {
+                        caps.play_payload
+                    },
+                    packet.data.clone(),
+                ));
             }
         }
         Ok(())
@@ -769,6 +935,9 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                         .observe(version, Direction::Clientbound, &packet)?;
                     if kind == PacketKind::CookieRequest {
                         self.initial_retry_safe = false;
+                    }
+                    if phase == State::Play {
+                        self.legacy_state.observe(version, &packet)?;
                     }
                     match kind {
                         PacketKind::LoginPluginRequest => {

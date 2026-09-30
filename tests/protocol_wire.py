@@ -14,11 +14,11 @@ import subprocess
 import time
 import uuid
 
-from minecraft import Client, ROOT, string, varint
+from minecraft import Client, PROTOCOLS, ROOT, login_start, string, varint
 
 PLAYER_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
 PAYLOAD = random.Random(2026).randbytes(40000) + b"Minecraft compression" * 4000
-VERSIONS = (47, 761, 764, 765, 766, 767, 768, 774, 775, 777)
+VERSIONS = tuple(PROTOCOLS)
 
 
 def backend_session(listener, protocol, threshold):
@@ -35,9 +35,9 @@ def backend_session(listener, protocol, threshold):
         assert peer.receive()[0] == 0  # Login start.
         peer.send(3, varint(threshold & 0xFFFFFFFF))
         peer.threshold = threshold if threshold >= 0 else None
-        identity = string(str(PLAYER_ID)) if protocol == 47 else PLAYER_ID.bytes
-        success = identity + string("Interop") + (b"\0" if protocol >= 761 else b"")
-        if protocol >= 777:
+        identity = string(str(PLAYER_ID)) if protocol < 735 else PLAYER_ID.bytes
+        success = identity + string("Interop") + (b"\0" if protocol >= 759 else b"")
+        if protocol >= 776:
             success += uuid.UUID(int=2).bytes  # Backend session UUID, added in 26.2.
         if protocol in (766, 767):
             success += b"\0"  # Strict error handling, only present in these versions.
@@ -56,12 +56,7 @@ def backend_session(listener, protocol, threshold):
 
 def check_client(port, protocol, threshold):
     with Client(port, 2, protocol) as client:
-        start = string("Interop")
-        if protocol >= 764:
-            start += PLAYER_ID.bytes
-        elif protocol >= 761:
-            start += b"\1" + PLAYER_ID.bytes
-        client.send(0, start)
+        client.send(0, login_start("Interop", PLAYER_ID, protocol))
         assert client.receive()[0] == 3
         client.threshold = threshold if threshold >= 0 else None
         assert client.receive()[0] == 2
@@ -73,9 +68,7 @@ def check_client(port, protocol, threshold):
         assert client.receive() == (0x7F, PAYLOAD)
         client.send(0x7F, PAYLOAD)
         kick, reason = client.receive()
-        expected = (0x40 if protocol == 47 else 0x17 if protocol == 761
-                    else 0x1B if protocol in (764, 765)
-                    else 0x1D if protocol in (766, 767, 768) else 0x20)
+        expected = PROTOCOLS[protocol]["disconnect"]
         assert kick == expected, (protocol, kick, expected)
         assert b"connection was lost" in reason
 
@@ -99,7 +92,7 @@ def check(binary):
                         server = pool.submit(backend_session, backend, protocol, threshold)
                         check_client(port, protocol, threshold)
                         server.result(timeout=10)
-            print("PASS: 40 wire sessions, 10 protocol versions, four compression thresholds; "
+            print(f"PASS: {len(VERSIONS) * 4} wire sessions, {len(VERSIONS)} protocol versions, four compression thresholds; "
                   "Python zlib verified both directions and state-correct disconnects.")
         finally:
             proxy.terminate()

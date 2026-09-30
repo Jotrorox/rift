@@ -209,7 +209,7 @@ pub(crate) async fn execute(
             let sender = {
                 let players = control.players.lock().unwrap();
                 let entry = players.get(&id).ok_or("player is no longer online; refresh status")?;
-                if entry.protocol != 774 { return Err("player transfers require Minecraft 1.21.11 (protocol 774)".into()); }
+                if !rift::protocol::ProtocolVersion::new(entry.protocol).is_ok_and(rift::protocol::ProtocolVersion::supports_switching) { return Err("player transfers require Minecraft 1.8.9–26.3".into()); }
                 if entry.backend == *backend { return Err("player is already on that backend".into()); }
                 entry.transfer.clone()
             };

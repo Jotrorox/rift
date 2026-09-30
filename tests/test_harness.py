@@ -72,14 +72,36 @@ class HarnessTests(unittest.TestCase):
         with self.assertRaises(AssertionError):
             self.client(mc.varint(9 * 1024 * 1024)).receive()
 
-    def test_teleport_acknowledgement_for_both_protocols(self):
+    def test_version_specific_teleport_acknowledgements(self):
         position = struct.pack(">ddd", 1, 64, -2)
         rotation = struct.pack(">ff", 90, 0)
         body = b"\x01" + position + bytes(24) + rotation + bytes(4)
-        self.assertEqual(mc.teleport_acknowledgement(body, 774), b"\x01")
+        old_body = position + rotation + b"\0\x81\x01"
+        self.assertEqual(mc.teleport_acknowledgement(old_body, 767), b"\x81\x01")
+        for protocol in range(768, 777):
+            self.assertEqual(mc.teleport_acknowledgement(body, protocol), b"\x01")
         self.assertEqual(mc.teleport_acknowledgement(body, 777), b"\x01" + position + rotation)
         with self.assertRaises(AssertionError):
             mc.teleport_acknowledgement(body[:-1] + b"\x01", 777)
+
+    def test_client_settings_and_chat_update_layout_boundaries(self):
+        self.assertEqual(mc.client_settings(768), mc.client_settings(767) + b"\2")
+        self.assertEqual(mc.empty_chat_update(769), bytes(5))
+        self.assertEqual(mc.empty_chat_update(770), bytes(5) + b"\1")
+
+    def test_every_switchable_fixture_has_an_explicit_client_mapping(self):
+        covered = {fixture["protocol"] for fixture in mc.SERVERS.values()
+                   if fixture.get("switchable")}
+        self.assertEqual(len(covered), 50)
+        self.assertEqual((min(covered), max(covered)), (47, 777))
+        self.assertTrue(set(range(767, 778)) <= covered)
+        self.assertEqual(covered, set(mc.PROTOCOLS))
+        fixtures = [fixture for fixture in mc.SERVERS.values() if fixture.get("switchable")]
+        self.assertEqual(len(fixtures), 66)
+        self.assertEqual({fixture["java"] for fixture in fixtures}, {8, 17, 21, 25})
+        self.assertIsNone(mc.PROTOCOLS[767]["loaded"])
+        self.assertIsNone(mc.PROTOCOLS[768]["loaded"])
+        self.assertEqual(mc.PROTOCOLS[769]["loaded"], 0x2A)
 
     def test_download_verifies_fresh_and_cached_artifacts(self):
         with tempfile.TemporaryDirectory() as temporary:
