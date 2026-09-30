@@ -15,6 +15,7 @@ fn runtime(extension: &str) -> Extensions {
         Broker::new(Default::default()).unwrap(),
         None,
     )
+    .unwrap()
 }
 fn context(id: u64) -> Context {
     Context::authenticated(
@@ -31,7 +32,7 @@ fn context(id: u64) -> Context {
 fn version_schema_and_authenticated_mode_are_required() {
     for invalid in [
         "",
-        "api_version = 2",
+        "api_version = 3",
         "api_version = 1, typo = true",
         "api_version = 1, login = true",
         "api_version = 1, commands = { hub = { permission = 'use', run = function() end } }",
@@ -216,7 +217,8 @@ async fn reload_pins_callbacks_and_permissions_but_shares_capacity_and_fifo() {
         ),
         old.broker.clone(),
         Some(&old),
-    );
+    )
+    .unwrap();
     let existing = old.session(context(1)).unwrap();
     let new = next.session(context(2)).unwrap();
     existing.enqueue("game").unwrap();
@@ -244,7 +246,7 @@ async fn reload_pins_callbacks_and_permissions_but_shares_capacity_and_fifo() {
 #[tokio::test]
 async fn local_lua_state_does_not_survive_invocations_and_expired_queue_cleans_up() {
     let cfg = Config::from_lua(&format!("local calls=0; {}", source("api_version=1, queues={game=1}, login=function() calls=calls+1; assert(calls==1) end")), "state.lua").unwrap();
-    let runtime = Extensions::new(&cfg, Broker::new(Default::default()).unwrap(), None);
+    let runtime = Extensions::new(&cfg, Broker::new(Default::default()).unwrap(), None).unwrap();
     let player = runtime.session(context(1)).unwrap();
     for _ in 0..2 {
         player.decision("login").await.unwrap();

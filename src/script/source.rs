@@ -3,7 +3,7 @@ use std::{
     collections::BTreeMap,
     fs,
     io::{self, Read},
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
 };
 
@@ -22,6 +22,7 @@ pub(crate) struct SourceFile {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ScriptSource {
     pub entry: SourceFile,
+    pub root: PathBuf,
     pub files: Arc<BTreeMap<String, SourceFile>>,
 }
 
@@ -32,6 +33,10 @@ impl ScriptSource {
                 source: source.into(),
                 name: name.into(),
             },
+            root: Path::new(name)
+                .parent()
+                .unwrap_or(Path::new("."))
+                .to_owned(),
             files: Arc::new(BTreeMap::new()),
         }
     }
@@ -50,6 +55,7 @@ impl ScriptSource {
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or(Path::new("."));
+        snapshot.root = root.to_owned();
         let mut bytes = source.len();
         let mut entries = 0;
         if bytes > MAX_SOURCE_BYTES {

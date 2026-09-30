@@ -293,7 +293,7 @@ async fn imported_api_and_publish_references_work_in_http_message_and_authentica
     }
     worker.abort();
     let _ = worker.await;
-    let extensions = Extensions::new(&config, broker, None);
+    let extensions = Extensions::new(&config, broker, None).unwrap();
     let session = extensions
         .session(Context::authenticated(
             1,
@@ -420,6 +420,31 @@ fn entry_symlinks_resolve_modules_beside_the_target_for_checks_and_reload() {
     let reloaded = Config::load(&target.0.join("rift.lua")).unwrap();
     assert_eq!(checked, reloaded);
     assert_eq!(checked.limits.max_connections, 17);
+}
+
+#[cfg(unix)]
+#[test]
+fn extension_storage_uses_the_same_symlink_root_as_local_modules() {
+    let fixture = Fixture::new();
+    let target = Fixture::new();
+    let source = format!("{BASE}; require('settings')");
+    target.write("rift.lua", &source);
+    target.write(
+        "lua/settings.lua",
+        r#"
+        rift.config.authentication = { online_mode = true }
+        rift.config.forwarding = { mode = 'velocity', secret_env = 'TEST_SECRET' }
+        rift.config.extensions = { api_version = 2, storage = { path = 'state.bin' } }
+    "#,
+    );
+    let linked = fixture.0.join("rift.lua");
+    std::os::unix::fs::symlink(target.0.join("rift.lua"), &linked).unwrap();
+    let config = Config::from_lua_at(&source, &linked).unwrap();
+    assert!(!target.0.join("state.bin").exists());
+    let _runtime =
+        Extensions::new(&config, Broker::new(Default::default()).unwrap(), None).unwrap();
+    assert!(target.0.join("state.bin").is_file());
+    assert!(!fixture.0.join("state.bin").exists());
 }
 
 #[test]

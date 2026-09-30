@@ -31,6 +31,12 @@ pub(super) fn install(
     let cache = lua.create_table()?;
     cache.raw_set("rift", api.clone())?;
     cache.raw_set("rift.config", api.raw_get::<Table>("config")?)?;
+    for namespace in ["store", "permissions", "http"] {
+        cache.raw_set(
+            format!("rift.{namespace}"),
+            api.raw_get::<Table>(namespace)?,
+        )?;
+    }
     let plugins = lua.create_table()?;
     let roots = Rc::new(RefCell::new(vec!["lua".to_owned()]));
     let loading = Rc::new(RefCell::new(BTreeSet::new()));
