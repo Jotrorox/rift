@@ -554,7 +554,7 @@ impl Config {
     pub fn validate(&self) -> io::Result<()> {
         if let Some(extensions) = &self.extensions {
             if !self.authentication.online_mode {
-                return Err(invalid("extensions v1 requires authentication.online_mode"));
+                return Err(invalid("extensions requires authentication.online_mode"));
             }
             for (backend, capacity) in &extensions.queues {
                 if !(1..=100_000).contains(capacity) {

@@ -147,6 +147,119 @@ fn unverified_claims_never_reach_a_backend_and_authentication_has_a_deadline() {
     }
 }
 
+#[test]
+fn v2_jobs_run_in_the_executable_and_state_survives_restart() {
+    let fixture = Fixture::new();
+    let external = TcpListener::bind("127.0.0.1:0").unwrap();
+    let configuration = |generation: &str| {
+        format!(
+            "rift.config.extensions = {{ api_version=2, storage={{path='state.bin'}},
+            integrations={{collector={{url='http://{}/',timeout_ms=1000}}}},
+            jobs={{sample={{every_ms=150,run=function(ctx)
+                local count=rift.store.increment('jobs',ctx.job,1)
+                local response=rift.http.request('collector',{{method='POST',body='{generation}:'..tostring(count)}})
+                assert(response.status==200)
+            end}}}} }}; {}",
+            external.local_addr().unwrap(),
+            online_config("127.0.0.1:25566".parse().unwrap())
+        )
+    };
+    let observation = || {
+        let mut stream = accept(&external);
+        let mut request = BufReader::new(&mut stream);
+        let mut line = String::new();
+        request.read_line(&mut line).unwrap();
+        assert_eq!(line, "POST / HTTP/1.1\r\n");
+        let mut length = None;
+        loop {
+            line.clear();
+            request.read_line(&mut line).unwrap();
+            if line == "\r\n" {
+                break;
+            }
+            if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                length = Some(value.trim().parse::<usize>().unwrap());
+            }
+        }
+        let mut body = vec![0; length.unwrap()];
+        request.read_exact(&mut body).unwrap();
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let body = String::from_utf8(body).unwrap();
+        let (generation, count) = body.split_once(':').unwrap();
+        (generation.to_owned(), count.parse::<u64>().unwrap())
+    };
+    fixture.write(&configuration("first"));
+    // Validation from another working directory neither opens state nor runs jobs.
+    let checked = Command::new(env!("CARGO_BIN_EXE_rift"))
+        .arg("check")
+        .arg(fixture.0.join("rift.lua"))
+        .output()
+        .unwrap();
+    assert!(checked.status.success(), "{:?}", checked.stderr);
+    assert!(!fixture.0.join("state.bin").exists());
+    let first = fixture.spawn_security(&[], Some("velocity-fixture-secret"));
+    first.listener();
+    assert_eq!(observation(), ("first".into(), 1));
+    let mut last_count = 1;
+    let next_count = observation().1;
+    assert!(next_count > last_count);
+    last_count = next_count;
+
+    #[cfg(unix)]
+    {
+        fixture.write(&configuration("second"));
+        assert!(
+            Command::new("kill")
+                .args(["-HUP", &first.child.id().to_string()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let (generation, count) = observation();
+            assert!(count > last_count);
+            last_count = count;
+            if generation == "second" {
+                break;
+            }
+            assert!(Instant::now() < deadline, "new schedule did not activate");
+        }
+        // A rejected candidate must preserve the currently running schedule.
+        fixture.write(&configuration("rejected").replace("every_ms=150", "every_ms=1"));
+        assert!(
+            Command::new("kill")
+                .args(["-HUP", &first.child.id().to_string()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let line = first
+                .lines
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap();
+            if line.contains("reload rejected") {
+                break;
+            }
+        }
+        let (generation, count) = observation();
+        assert_eq!(generation, "second");
+        assert!(count > last_count);
+        last_count = count;
+    }
+    drop(first);
+    fixture.write(&configuration("restarted"));
+    let restarted = fixture.spawn_security(&[], Some("velocity-fixture-secret"));
+    restarted.listener();
+    let (generation, count) = observation();
+    assert_eq!(generation, "restarted");
+    assert!(count > last_count);
+}
+
 impl Drop for Fixture {
     fn drop(&mut self) {
         fs::remove_dir_all(&self.0).unwrap();
