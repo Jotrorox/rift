@@ -26,6 +26,10 @@ rift.config.limits = {
 -- rift.config.authentication = { online_mode = true, timeout_ms = 10000 }
 -- rift.config.forwarding = { mode = "velocity", secret_env = "RIFT_FORWARDING_SECRET" }
 
+-- Existing backend plugins can use BungeeCord transfers and player/server queries.
+-- See docs/bungeecord.md for supported subchannels and trusted-backend semantics.
+-- rift.config.network = { bungeecord = true }
+
 -- Maintenance and draining reject new logins; existing players stay connected.
 rift.config.maintenance = false
 rift.config.draining = {} -- For example: { "lobby" }. Use configured backend names.
