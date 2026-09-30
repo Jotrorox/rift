@@ -1,4 +1,5 @@
-# Run from an extracted Linux x86_64 release with a readable config/rift.lua:
+# Run from a repository checkout with the Linux executable saved as rift
+# and a readable config/rift.lua:
 # docker compose -f examples/compose.yaml up --build -d
 services:
   rift:

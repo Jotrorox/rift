@@ -1,18 +1,17 @@
 # Operating a Rift release
 
-The archives contain `rift` (`rift.exe` on Windows), licenses, `README.md`,
-`examples/` and `docs/`. Keep the examples alongside these documents so relative
-links keep working. The [README](../README.md) covers protocol support and backend
-configuration; this guide covers daily administration.
+Releases provide standalone executables for Linux x86_64, macOS ARM64 and Windows
+x86_64. Run `rift --license` to view the embedded licenses. Documentation and
+examples are available in the repository. The [README](../README.md) covers
+protocol support and backend configuration; this guide covers daily administration.
 
 ## First start
 
-Download the archive for your OS/CPU and `SHA256SUMS` from the same release.
-On Linux, check and extract it in an empty directory:
+Download the executable for your OS/CPU. On Linux, rename it and make it executable:
 
 ```sh
-sha256sum --check --ignore-missing SHA256SUMS
-tar xzf rift-linux-x86_64.tar.gz
+mv rift-linux-x86_64 rift
+chmod +x rift
 ./rift --version
 ./rift init rift.lua
 # Edit listener and backend addresses for your server.
@@ -26,12 +25,11 @@ it without opening listeners or contacting backends; the older `--check path`
 spelling also works. Correct the field/path named by any error and rerun the
 check before starting. Configuration scripts are trusted local code.
 
-On macOS use `shasum -a 256 rift-macos-aarch64.tar.gz` and compare the hash with
-its entry in `SHA256SUMS`; extract with `tar xzf`. On Windows compare
-`Get-FileHash .\rift-windows-x86_64.zip -Algorithm SHA256` with its entry,
-then use `Expand-Archive .\rift-windows-x86_64.zip` and run `rift.exe` inside it.
+On macOS, rename `rift-macos-aarch64` to `rift`, run `chmod +x rift`, then use the
+same commands. On Windows, rename `rift-windows-x86_64.exe` to `rift.exe` and
+run it with `.\rift.exe`.
 `--version` identifies the Cargo package version; nightly builds may share that
-version, so retain the release tag and its `CHANGELOG.md` when reporting issues.
+version, so retain the release tag when reporting issues.
 
 The generated configuration forwards port 25565 to loopback port 25566.
 Configure that backend as described in the README. For public Paper networks,
@@ -171,8 +169,9 @@ results without logging credentials.
 ## Linux systemd service
 
 The supplied [unit](../examples/rift.service) uses an unprivileged `rift` account
-and root-owned configuration. Run these commands from the extracted archive on
-a systemd host; create the account only if it does not exist:
+and root-owned configuration. Run these commands from a repository checkout on
+a systemd host, with the downloaded executable saved as `rift` and a generated
+`rift.lua`. Create the account only if it does not exist:
 
 ```sh
 sudo useradd --system --user-group --no-create-home --shell /usr/sbin/nologin rift
@@ -206,7 +205,8 @@ The supplied [Dockerfile](../examples/Dockerfile) packages the Linux release
 binary using the release runner's Ubuntu 24.04 runtime baseline. The
 [Compose example](../examples/compose.yaml) runs as UID/GID 65532 with a read-only
 filesystem, no Linux capabilities, a read-only config directory and a 40-second
-stop deadline. Run from an extracted Linux x86_64 release archive:
+stop deadline. Download the Linux x86_64 executable as `rift` into a repository
+checkout, make it executable with `chmod +x rift`, then run from that checkout:
 
 ```sh
 mkdir config
@@ -224,7 +224,7 @@ docker compose -f examples/compose.yaml logs --tail=50 rift
 The image build runs `rift --version` to detect a wrong architecture or
 incompatible runtime before startup. For a source build, set
 `RIFT_BINARY=target/release/rift`; ensure its architecture/libc match the image.
-The example fixes `platform: linux/amd64` to match the released Linux archive.
+The example fixes `platform: linux/amd64` to match the released Linux executable.
 
 Loopback in a container refers to that container. Use private, reachable backend
 addresses or service DNS names on a shared container network. To expose metrics
@@ -349,8 +349,9 @@ during the drain. **Keep the supervisor stop deadline longer than Rift's drain**
 40 seconds in the examples. Apply systemd edits with `systemctl daemon-reload`.
 See systemd's [`ExecReload` and `TimeoutStopSec` documentation](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html).
 
-Verify and extract the new release separately, record both release tags and
-retain the previous archive. From the extracted candidate directory:
+Download the new executable into a separate directory, rename it to `rift` and
+run `chmod +x rift`. Record both release tags and retain the previous executable.
+From the candidate directory:
 
 ```sh
 # Validate compatibility before touching the running installation.

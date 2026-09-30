@@ -1,51 +1,40 @@
-"""Release archive layout is the same on every supported platform."""
+"""Each supported platform stages only its standalone release executable."""
 
 from pathlib import Path
 import sys
-import tarfile
 import tempfile
 import unittest
-import zipfile
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import package
 
 
 class PackageTests(unittest.TestCase):
-    def test_archives_preserve_operator_files_and_binary(self):
-        root = Path(__file__).resolve().parents[1]
-        required = {"README.md", "LICENSE", "THIRD_PARTY_NOTICES",
-                    "examples/rift.lua", "examples/online.lua",
-                    "examples/network.lua", "examples/rift.service", "examples/Dockerfile",
-                    "examples/compose.yaml", "docs/operations.md",
-                    "examples/admin.lua", "examples/messaging.lua", "docs/http.md",
-                    "docs/messaging.md", "docs/messaging-lua.md",
-                    "docs/messaging-protocol.md", "docs/network-protocol.md", "docs/lua.md",
-                    "examples/modular/rift.lua", "examples/modular/lua/config/network.lua",
-                    "examples/modular/plugins/greeting/init.lua",
-                    "examples/modular/plugins/greeting/lua/greeting/init.lua"}
-        with tempfile.TemporaryDirectory() as temporary:
-            directory = Path(temporary)
-            for windows in [False, True]:
-                with self.subTest(windows=windows):
-                    binary = directory / ("rift.exe" if windows else "rift")
-                    binary.write_bytes(b"test binary")
-                    binary.chmod(0o755)
-                    archive = directory / ("release.zip" if windows else "release.tar.gz")
-                    package.create_archive(archive, package.contents(root, binary), windows)
-                    if windows:
-                        with zipfile.ZipFile(archive) as bundle:
-                            self.assertTrue(required | {binary.name} <= set(bundle.namelist()))
-                            for name in required:
-                                self.assertEqual(bundle.read(name), (root / name).read_bytes())
-                            self.assertEqual(bundle.read(binary.name), b"test binary")
-                    else:
-                        with tarfile.open(archive) as bundle:
-                            self.assertTrue(required | {binary.name} <= set(bundle.getnames()))
-                            for name in required:
-                                self.assertEqual(bundle.extractfile(name).read(), (root / name).read_bytes())
-                            self.assertEqual(bundle.extractfile(binary.name).read(), b"test binary")
-                            self.assertTrue(bundle.getmember(binary.name).mode & 0o111)
+    def test_stages_only_executable_for_each_platform(self):
+        for label, (system, machine) in package.PLATFORMS.items():
+            with self.subTest(platform=label), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                (root / "Cargo.toml").write_text('[package]\nversion = "0.1.0"\n')
+                # Operator files stay in the repository, even when present.
+                (root / "README.md").write_text("Documentation")
+                (root / "LICENSE").write_text("License")
+                suffix = ".exe" if system == "Windows" else ""
+                binary = root / "target" / "release" / f"rift{suffix}"
+                binary.parent.mkdir(parents=True)
+                binary.write_bytes(b"test binary")
+                binary.chmod(0o755)
+                with mock.patch.object(package, "ROOT", root), \
+                        mock.patch.object(package.platform, "system", return_value=system), \
+                        mock.patch.object(package.platform, "machine", return_value=machine), \
+                        mock.patch.object(sys, "argv", ["package.py", "--platform", label]), \
+                        mock.patch.object(package, "smoke_test") as smoke_test:
+                    package.main()
+                executable = root / "dist" / f"rift-{label}{suffix}"
+                self.assertEqual(list((root / "dist").iterdir()), [executable])
+                self.assertEqual(executable.read_bytes(), binary.read_bytes())
+                self.assertEqual(executable.stat().st_mode, binary.stat().st_mode)
+                smoke_test.assert_called_once_with(executable, "0.1.0")
 
 
 if __name__ == "__main__":
