@@ -26,6 +26,8 @@ import uuid
 import zipfile
 
 import minecraft as mc
+import online_evidence as evidence
+import online_plugins
 import operations as op
 
 
@@ -82,6 +84,14 @@ def confirm(result, step, instruction):
         raise AssertionError(f"operator did not confirm {step}")
     result["manual_steps"][step] = {
         "passed": True, "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    save_result(result)
+
+
+def save_result(result):
+    path = Path(result["logs"]) / "result.json"
+    pending = path.with_suffix(".tmp")
+    pending.write_text(json.dumps(result, indent=2) + "\n")
+    pending.replace(path)
 
 
 def public_profile(name):
@@ -107,12 +117,18 @@ def build_probe(directory):
         for entry in paper.infolist():
             if entry.filename.startswith("META-INF/libraries/") and entry.filename.endswith(".jar"):
                 (libraries / Path(entry.filename).name).write_bytes(paper.read(entry))
+    # Paper's command API references Brigadier, supplied by the pinned Mojang jar.
+    with zipfile.ZipFile(mc.download("vanilla")) as vanilla:
+        for entry in vanilla.infolist():
+            if entry.filename.startswith("META-INF/libraries/com/mojang/brigadier/") and entry.filename.endswith(".jar"):
+                (libraries / Path(entry.filename).name).write_bytes(vanilla.read(entry))
     source = mc.ROOT / "tests/fixtures/online-plugin"
     subprocess.run(["javac", "--release", "21", "-proc:none", "-classpath", str(libraries / "*"),
                     "-d", str(build), str(source / "RiftOnlineProbe.java")], check=True)
     plugin = build / "rift-online-probe.jar"
     with zipfile.ZipFile(plugin, "w") as output:
-        output.write(build / "RiftOnlineProbe.class", "RiftOnlineProbe.class")
+        for compiled in build.glob("RiftOnlineProbe*.class"):
+            output.write(compiled, compiled.name)
         output.write(source / "plugin.yml", "plugin.yml")
     return plugin
 
@@ -167,9 +183,104 @@ def switch_failures(log, target):
 
 def snapshot(server, directory, name):
     before = len(records(directory))
-    console(server, f"riftprobe {name}")
-    return op.eventually(lambda: (rows[-1] if len(rows := records(directory)) > before else None),
+    console(server, f"riftprobe snapshot {name}")
+    return op.eventually(lambda: next((row for row in records(directory)[before:]
+                                      if row["event"] == "snapshot" and row["name"] == name), None),
                          f"Paper profile/inventory snapshot for {name}", timeout=10)
+
+
+def plugin_checkpoint(server, directory, expected):
+    before = len(records(directory))
+    console(server, "riftprobe plugins")
+    record = op.eventually(lambda: next((row for row in records(directory)[before:]
+                                        if row["event"] == "plugins"), None),
+                           "enabled Paper plugin inventory", timeout=15)
+    evidence.verify_plugins(record, expected)
+    return record
+
+
+def signed_checkpoint(result, phase, directory, expected):
+    marker = f"rift_{phase}_{secrets.token_hex(4)}"
+    before = len(records(directory))
+    confirm(result, f"signed_{phase}",
+            f"Send chat exactly: {marker}\nThen run /riftsigned {marker}\n"
+            f"Then send chat exactly: {marker}_after\n"
+            "Check both chat messages are visible and the signed command succeeds.")
+    observations = []
+    for event, message in (("chat", marker), ("signed_command", marker), ("chat", marker + "_after")):
+        record = op.eventually(lambda: next((row for row in records(directory)[before:]
+                                            if row["event"] == event and row.get("message") == message
+                                            and row.get("uuid") == expected["id"]), None),
+                               f"Paper {event} observation for {message}", timeout=10)
+        evidence.verify_signed(record, expected, message, event)
+        observations.append(record)
+    result.setdefault("signed_checks", {})[phase] = observations
+    save_result(result)
+
+
+def pack_checkpoint(result, phase, server, directory, expected, pack, required=False, decline=False):
+    pack_id = str(uuid.uuid4())
+    before = len(records(directory))
+    # The client must use Prompt in its server entry for explicit decline tests.
+    print("\nResource-pack test: select " + ("No / Decline" if decline else "Yes / Accept")
+          + " if prompted (Minecraft may remember your choice for this connection).", flush=True)
+    console(server, f"riftprobe pack {expected['name']} {pack_id} {pack['url']} {pack['sha1']} {str(required).lower()}")
+    request = op.eventually(lambda: next((row for row in records(directory)[before:]
+                                         if row.get("event") == "resource_pack_request"
+                                         and row.get("pack_id") == pack_id), None),
+                            "Paper resource-pack request", timeout=10)
+    assert request["uuid"] == expected["id"] and request["required"] is required
+    assert request["url"] == pack["url"] and request["sha1"] == pack["sha1"]
+    status = "DECLINED" if decline else "SUCCESSFULLY_LOADED"
+    confirm(result, f"pack_{phase}",
+            ("Decline the resource pack. " + ("Confirm the server disconnects you." if required
+                                              else "Confirm you remain connected and can move.")) if decline else
+            "Accept the resource pack, wait for it to load, and hover your inventory item: "
+            f"its English name must start with RIFT {phase.split('_')[0].upper()}.")
+    if decline and required:
+        # Vanilla can disconnect immediately on required-pack refusal, before
+        # sending a status packet. The caller must assert connection closure.
+        observed = [row for row in records(directory)[before:]
+                    if row.get("event") == "resource_pack_status" and row.get("pack_id") == pack_id
+                    and row.get("uuid") == expected["id"]]
+        assert not any(row["status"] in ("ACCEPTED", "SUCCESSFULLY_LOADED") for row in observed)
+        result.setdefault("pack_checks", {})[phase] = {
+            "pack_id": pack_id, "required": True, "pack": pack, "request": request,
+            "observations": observed, "status_callback_required": False,
+            "outcome": "operator_confirmed_refusal_disconnect"}
+        save_result(result)
+        return
+    op.eventually(lambda: any(row.get("event") == "resource_pack_status" and row.get("pack_id") == pack_id
+                             and row.get("uuid") == expected["id"] and row.get("status") == status
+                             for row in records(directory)[before:]), "Paper resource-pack response", timeout=10)
+    result.setdefault("pack_checks", {})[phase] = {
+        "pack_id": pack_id, "required": required, "pack": pack, "request": request,
+        "observations": evidence.verify_pack_status(records(directory)[before:], expected, pack_id, status)}
+    save_result(result)
+
+
+def permission_checkpoint(result, phase, server, directory, expected):
+    """Prove a UUID-based LuckPerms grant/revoke reaches Paper's permission API."""
+    if result["plugin_stack"] != "essentials":
+        return
+    node = "rift.acceptance." + secrets.token_hex(4)
+    checks = []
+    for allowed in (True, False):
+        console(server, f"lp user {expected['id']} permission set {node} {str(allowed).lower()}")
+
+        def observe():
+            before = len(records(directory))
+            console(server, f"riftprobe permission {expected['name']} {node}")
+            record = op.eventually(lambda: next((row for row in records(directory)[before:]
+                                                if row["event"] == "permission" and row.get("permission") == node
+                                                and row.get("uuid") == expected["id"]), None),
+                                   "Paper permission observation", timeout=5)
+            return record if record["allowed"] is allowed and record["is_set"] is True else None
+
+        checks.append(op.eventually(observe, "LuckPerms permission update", timeout=15))
+    console(server, f"lp user {expected['id']} permission unset {node}")
+    result.setdefault("permission_checks", {})[phase] = checks
+    save_result(result)
 
 
 def verify_profile(record, expected, ip):
@@ -215,10 +326,17 @@ def run(args, binary, directory, result):
     result.update(server="paper", version=mc.SERVERS["paper"]["version"],
                   online_mode=True, forwarding="velocity", manual_steps={}, checkpoints={},
                   ports=dict(primary=primary_port, lobby=lobby_port, proxy=front, metrics=monitor),
-                  scope="online_authentication_and_velocity_forwarding", passed=False)
+                  scope="paper_plugin_preflight" if args.preflight else "authenticated_paper_compatibility",
+                  plugin_stack=args.plugin_stack, authenticated_acceptance="not_run", passed=False,
+                  server_fixture=mc.SERVERS["paper"],
+                  binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest())
+    save_result(result)
     plugin = build_probe(directory)
     with ExitStack() as stack:
+        packs = stack.enter_context(evidence.resource_packs(directory, args.pack_port))
+        result["resource_packs"] = packs
         servers, commands, directories = {}, {}, {}
+        result["plugin_artifacts"], result["plugin_observations"] = {}, {}
         for role, port in [("primary", primary_port), ("lobby", lobby_port)]:
             server_dir = directory / role
             server_dir.mkdir()
@@ -232,11 +350,15 @@ def run(args, binary, directory, result):
             plugins = server_dir / "plugins"
             plugins.mkdir()
             shutil.copyfile(plugin, plugins / plugin.name)
+            result["plugin_artifacts"][role] = online_plugins.install(args.plugin_stack, plugins)
+            assert result["plugin_artifacts"][role]["paper_version"] == mc.SERVERS["paper"]["version"], "plugin matrix targets another Paper fixture"
             servers[role] = stack.enter_context(mc.process(command, server_dir, "server.log", server=True))
             commands[role], directories[role] = command, server_dir
         for role, port in [("primary", primary_port), ("lobby", lobby_port)]:
             mc.wait_ready(servers[role], lambda p=port: mc.status_ready(p, protocol),
                           directories[role] / "server.log", timeout=600)
+            result["plugin_observations"][role] = plugin_checkpoint(
+                servers[role], directories[role], result["plugin_artifacts"][role]["expected_plugins"])
         result["bad_forwarding_probes"] = {
             role: reject_bad_forwarding(port, protocol)
             for role, port in [("primary", primary_port), ("lobby", lobby_port)]}
@@ -246,12 +368,20 @@ def run(args, binary, directory, result):
                                                env={**os.environ, SECRET_ENV: secret}))
         mc.wait_ready(proxy, lambda: "metrics on" in (directory / "proxy.log").read_text(), directory / "proxy.log")
         result["encryption_probe"] = encryption_challenge(front, protocol)
+        save_result(result)
+        if args.preflight:
+            # No licensed account has authenticated. Never report online acceptance.
+            result["passed"] = True
+            return
         print(f"\nMinecraft Java 1.21.11, signed in through your launcher. Connect to 127.0.0.1:{front}.", flush=True)
         print(f"Evidence and logs: {directory}. Backends use Velocity modern forwarding.", flush=True)
+        print("Use English (US) and set Server Resource Packs to Prompt in the server entry. "
+              f"For SSH, also forward resource-pack port {packs['lobby']['url'].split(':')[2].split('/')[0]}.", flush=True)
         username = args.profile or input("Your Minecraft profile name (no password/token): ").strip()
         assert re.fullmatch(r"[A-Za-z0-9_]{3,16}", username), "invalid profile name"
         expected = public_profile(username)
         result["expected_profile"] = expected
+        result["authenticated_acceptance"] = "in_progress"
         username = expected["name"]
         # Knowing a real name/UUID still does not produce an authenticated login.
         result["claimed_identity_probe"] = encryption_challenge(front, protocol, username, uuid.UUID(expected["id"]))
@@ -261,31 +391,44 @@ def run(args, binary, directory, result):
         baseline = op.metrics(monitor)
         result["initial_metrics"] = baseline
         checkpoint(result, "lobby_initial", servers["lobby"], directories["lobby"], expected, args.expected_ip)
-        console(servers["lobby"], f"give {username} minecraft:diamond 7")
+        console(servers["lobby"], f"minecraft:give {username} minecraft:diamond 7")
         checkpoint(result, "lobby_inventory", servers["lobby"], directories["lobby"], expected, args.expected_ip,
                    "minecraft:diamond", 7)
+        signed_checkpoint(result, "lobby_initial", directories["lobby"], expected)
+        permission_checkpoint(result, "lobby_initial", servers["lobby"], directories["lobby"], expected)
+        pack_checkpoint(result, "lobby_loaded", servers["lobby"], directories["lobby"], expected, packs["lobby"])
         confirm(result, "switch_primary",
                 "You received 7 diamonds in the lobby. Use /server primary without disconnecting. "
-                "Check your usual skin, fresh world/chunks, block interactions and chat on primary.")
+                "Check your usual skin, fresh world/chunks, block interactions and chat on primary. "
+                "In the creative inventory, diamonds and emeralds must have their normal English names "
+                "(the lobby resource pack must be removed).")
         assert_continuity(monitor, baseline, "primary")
         checkpoint(result, "primary_initial", servers["primary"], directories["primary"], expected, args.expected_ip)
-        console(servers["primary"], f"give {username} minecraft:emerald 11")
+        console(servers["primary"], f"minecraft:give {username} minecraft:emerald 11")
         checkpoint(result, "primary_inventory", servers["primary"], directories["primary"], expected, args.expected_ip,
                    "minecraft:emerald", 11)
+        signed_checkpoint(result, "primary_initial", directories["primary"], expected)
+        permission_checkpoint(result, "primary_initial", servers["primary"], directories["primary"], expected)
+        pack_checkpoint(result, "primary_loaded", servers["primary"], directories["primary"], expected,
+                        packs["primary"], required=True)
         confirm(result, "return_lobby_inventory",
                 "You received 11 emeralds on primary. Use /hub. Verify the lobby's 7 diamonds returned, "
-                "your skin is correct, and movement, blocks and chat still work. Keep the diamonds unchanged.")
+                "your skin is correct, and movement, blocks and chat still work. Keep the diamonds unchanged. "
+                "The item names must be normal again: primary's pack must be removed.")
         assert_continuity(monitor, baseline, "lobby")
         checkpoint(result, "lobby_return", servers["lobby"], directories["lobby"], expected, args.expected_ip,
                    "minecraft:diamond", 7)
+        signed_checkpoint(result, "lobby_return", directories["lobby"], expected)
         confirm(result, "return_primary_inventory",
                 "Use /server primary again. Verify primary's 11 emeralds returned and your skin/gameplay still work. "
                 "Keep the emeralds unchanged.")
         assert_continuity(monitor, baseline, "primary")
         checkpoint(result, "primary_return", servers["primary"], directories["primary"], expected, args.expected_ip,
                    "minecraft:emerald", 11)
+        signed_checkpoint(result, "primary_return", directories["primary"], expected)
         confirm(result, "lobby_before_bad_secret", "Use /hub and confirm you are back in the lobby with 7 diamonds.")
         assert_continuity(monitor, baseline, "lobby")
+        pack_checkpoint(result, "lobby_retained", servers["lobby"], directories["lobby"], expected, packs["lobby"])
         # Only restart the unoccupied destination, keeping the user's active server alive.
         console(servers["primary"], "stop")
         assert servers["primary"].wait(timeout=45) == 0
@@ -293,11 +436,14 @@ def run(args, binary, directory, result):
         bad_primary = stack.enter_context(mc.process(commands["primary"], directories["primary"], "wrong-secret.log", server=True))
         mc.wait_ready(bad_primary, lambda: mc.status_ready(primary_port, protocol),
                       directories["primary"] / "wrong-secret.log", timeout=600)
+        result["plugin_observations"]["primary_wrong_secret"] = plugin_checkpoint(
+            bad_primary, directories["primary"], result["plugin_artifacts"]["primary"]["expected_plugins"])
         primary_joins_before = sum(row["event"] == "join" for row in records(directories["primary"]))
         failures_before = len(switch_failures(directory / "proxy.log", "primary"))
         confirm(result, "bad_secret_retains_lobby",
                 "Primary now has an incorrect forwarding secret. Use /server primary. Expect a clear failure message "
-                "and stay in the lobby. Move, interact with blocks and chat; verify your 7 diamonds remain.")
+                "and stay in the lobby. Move, interact with blocks and chat; verify your 7 diamonds remain "
+                "and their name still starts with RIFT LOBBY (the active pack must survive the failed transfer).")
         assert_continuity(monitor, baseline, "lobby")
         failures = switch_failures(directory / "proxy.log", "primary")
         assert len(failures) > failures_before, "Rift did not record a rejected transfer to primary"
@@ -307,6 +453,8 @@ def run(args, binary, directory, result):
         result["wrong_secret_rejection"] = rejection
         checkpoint(result, "bad_secret_lobby_survives", servers["lobby"], directories["lobby"], expected, args.expected_ip,
                    "minecraft:diamond", 7)
+        signed_checkpoint(result, "bad_secret_lobby", directories["lobby"], expected)
+        permission_checkpoint(result, "bad_secret_lobby", servers["lobby"], directories["lobby"], expected)
         assert sum(row["event"] == "join" for row in records(directories["primary"])) == primary_joins_before, "wrong-secret login reached play"
         console(bad_primary, "stop")
         assert bad_primary.wait(timeout=45) == 0
@@ -314,19 +462,43 @@ def run(args, binary, directory, result):
         restored = stack.enter_context(mc.process(commands["primary"], directories["primary"], "restored.log", server=True))
         mc.wait_ready(restored, lambda: mc.status_ready(primary_port, protocol),
                       directories["primary"] / "restored.log", timeout=600)
+        result["plugin_observations"]["primary_restored"] = plugin_checkpoint(
+            restored, directories["primary"], result["plugin_artifacts"]["primary"]["expected_plugins"])
         confirm(result, "secret_repair",
                 "The correct secret is restored. Use /server primary and confirm your 11 emeralds, usual skin, "
-                "block interactions and chat work again, without reconnecting.")
+                "block interactions and chat work again, without reconnecting. "
+                "Inventory item names must be normal again (the lobby pack is removed).")
         result["final_metrics"] = assert_continuity(monitor, baseline, "primary")
         checkpoint(result, "primary_after_repair", restored, directories["primary"], expected, args.expected_ip,
                    "minecraft:emerald", 11)
+        signed_checkpoint(result, "primary_repaired", directories["primary"], expected)
+        permission_checkpoint(result, "primary_repaired", restored, directories["primary"], expected)
         properties = result["checkpoints"]["lobby_initial"]["properties"]
         assert all(record["properties"] == properties for record in result["checkpoints"].values()), "profile properties changed across replacement"
         confirm(result, "disconnect", "All transfer checks are complete. Disconnect normally from Minecraft.")
         op.eventually(lambda: op.metrics(monitor)["connections_active"] == 0, "client disconnected")
         for role in ("primary", "lobby"):
             assert (directories[role] / "world/playerdata" / f"{expected['id']}.dat").exists(), "playerdata did not use the Mojang UUID"
+        # Vanilla remembers pack consent for the connection. Test refusal on a
+        # separate authenticated connection, after all continuity assertions.
+        confirm(result, "decline_login",
+                "In the server-list entry set Server Resource Packs back to Prompt, then join the lobby again. "
+                "This separate connection tests refusal; confirm your 7 diamonds and gameplay work.")
+        decline_baseline = op.metrics(monitor)
+        assert decline_baseline["connections_active"] == 1
+        checkpoint(result, "lobby_decline_login", servers["lobby"], directories["lobby"], expected,
+                   args.expected_ip, "minecraft:diamond", 7)
+        pack_checkpoint(result, "lobby_optional_declined", servers["lobby"], directories["lobby"], expected,
+                        packs["lobby"], decline=True)
+        assert_continuity(monitor, decline_baseline, "lobby")
+        signed_checkpoint(result, "optional_decline", directories["lobby"], expected)
+        pack_checkpoint(result, "lobby_required_declined", servers["lobby"], directories["lobby"], expected,
+                        packs["lobby"], required=True, decline=True)
+        op.eventually(lambda: op.metrics(monitor)["connections_active"] == 0, "required pack refusal disconnected client")
+        result["decline_metrics"] = op.metrics(monitor)
+        assert result["decline_metrics"]["connections_accepted_total"] == decline_baseline["connections_accepted_total"]
         assert proxy.poll() is None
+    result["authenticated_acceptance"] = "passed"
     result["passed"] = True
 
 
@@ -339,13 +511,19 @@ def main():
     parser.add_argument("--profile", help="Minecraft profile name; otherwise prompted when ready")
     parser.add_argument("--port", type=int, default=0, help="loopback frontend port (default: choose unused)")
     parser.add_argument("--expected-ip", default="127.0.0.1", help="IP Paper must receive from Rift")
+    parser.add_argument("--plugin-stack", choices=online_plugins.STACKS, default="baseline")
+    parser.add_argument("--preflight", action="store_true",
+                        help="check real Paper/plugin startup and rejection probes; no authenticated client acceptance")
+    parser.add_argument("--pack-port", type=int, default=0, help="loopback HTTP port for resource packs (SSH forward this too)")
     args = parser.parse_args()
     if not __debug__:
         parser.error("assertions must be enabled (do not use python -O)")
     if not args.accept_eula:
         parser.error("--accept-eula is required (https://aka.ms/MinecraftEULA)")
-    if not 0 <= args.port <= 65535:
-        parser.error("--port must be between 0 and 65535")
+    if not 0 <= args.port <= 65535 or not 0 <= args.pack_port <= 65535:
+        parser.error("--port and --pack-port must be between 0 and 65535")
+    if args.port and args.port == args.pack_port:
+        parser.error("--port and --pack-port must differ")
     if not shutil.which("java") or not shutil.which("javac"):
         parser.error("Java JDK 21+ must supply java and javac on PATH")
     if args.binary:
@@ -364,10 +542,15 @@ def main():
         run(args, binary, directory, result)
     except (Exception, KeyboardInterrupt):
         result["error"] = traceback.format_exc()
+        result["passed"] = False
+        if result.get("authenticated_acceptance") == "in_progress":
+            result["authenticated_acceptance"] = "failed"
         raise
     finally:
-        (directory / "result.json").write_text(json.dumps(result, indent=2) + "\n")
-        print(f"Manual check passed={result['passed']}; {directory / 'result.json'}", flush=True)
+        save_result(result)
+        print(f"{result.get('scope', 'setup')} passed={result['passed']}; "
+              f"authenticated_acceptance={result.get('authenticated_acceptance', 'not_run')}; "
+              f"{directory / 'result.json'}", flush=True)
 
 
 if __name__ == "__main__":

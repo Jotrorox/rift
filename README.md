@@ -128,6 +128,12 @@ chat, switching, ban rollback and recovery. Older clients use Join Game/Respawn
 world resets; 1.20.2+ uses the configuration phase.
 See the [protocol matrix and test scope](docs/network-protocol.md).
 
+Authenticated acceptance has a separate [Paper test matrix](tests/MANUAL_ONLINE.md)
+for signed chat and commands, resource-pack acceptance/refusal and transfer cleanup,
+plus pinned LuckPerms/EssentialsX and ViaVersion/ViaBackwards combinations.
+CI runs their startup and rejection preflights; full acceptance requires a signed-in
+1.21.11 client and records Paper observations alongside operator confirmations.
+
 Clients and backends must use the same protocol version. Rift does not translate
 between Minecraft versions. Online authentication, Velocity modern forwarding and
 authenticated extensions require **1.19.3 or newer**; earlier versions use offline

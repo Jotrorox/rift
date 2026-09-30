@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "paper_version": "1.21.11-132",
+  "artifacts": {
+    "luckperms": {
+      "name": "LuckPerms",
+      "version": "5.5.85",
+      "filename": "LuckPerms-Bukkit-5.5.85.jar",
+      "url": "https://download.luckperms.net/1672/bukkit/loader/LuckPerms-Bukkit-5.5.85.jar",
+      "sha256": "dc637ce18f48d3b75a7ffd1784b85be16a627359090dfe5adf15dab6d145dc7d",
+      "source": "https://github.com/LuckPerms/LuckPerms/commit/25f223317a9ec2b6e73369126b630eca07d79506",
+      "requires": []
+    },
+    "essentials": {
+      "name": "Essentials",
+      "version": "2.22.0",
+      "filename": "EssentialsX-2.22.0.jar",
+      "url": "https://github.com/EssentialsX/Essentials/releases/download/2.22.0/EssentialsX-2.22.0.jar",
+      "sha256": "bda4685105977fca2e209820a9f0ad24275bd103390a03236f38e59bfdac58e6",
+      "source": "https://github.com/EssentialsX/Essentials/releases/tag/2.22.0",
+      "requires": []
+    },
+    "essentials-chat": {
+      "name": "EssentialsChat",
+      "version": "2.22.0",
+      "filename": "EssentialsXChat-2.22.0.jar",
+      "url": "https://github.com/EssentialsX/Essentials/releases/download/2.22.0/EssentialsXChat-2.22.0.jar",
+      "sha256": "e5b0211f98af1eaba712d9294997639a39209db1fc842394a0923820073ec65a",
+      "source": "https://github.com/EssentialsX/Essentials/releases/tag/2.22.0",
+      "requires": ["essentials"]
+    },
+    "viaversion": {
+      "name": "ViaVersion",
+      "version": "5.12.0",
+      "filename": "ViaVersion-5.12.0.jar",
+      "url": "https://github.com/ViaVersion/ViaVersion/releases/download/5.12.0/ViaVersion-5.12.0.jar",
+      "sha256": "72c40a6a702d67f226fc9a0d8ad82aba1483fdabe2e6159bcdddb2dc070750b0",
+      "source": "https://github.com/ViaVersion/ViaVersion/releases/tag/5.12.0",
+      "requires": []
+    },
+    "viabackwards": {
+      "name": "ViaBackwards",
+      "version": "5.12.0",
+      "filename": "ViaBackwards-5.12.0.jar",
+      "url": "https://github.com/ViaVersion/ViaBackwards/releases/download/5.12.0/ViaBackwards-5.12.0.jar",
+      "sha256": "194e9250224632274d7b3c17e411e031a9223c1863c6f5138d53c721f07ab78d",
+      "source": "https://github.com/ViaVersion/ViaBackwards/releases/tag/5.12.0",
+      "requires": ["viaversion"]
+    }
+  },
+  "stacks": {
+    "baseline": {
+      "description": "Paper and the Rift evidence probe only.",
+      "artifacts": []
+    },
+    "essentials": {
+      "description": "LuckPerms permissions with EssentialsX commands and EssentialsXChat formatting.",
+      "artifacts": ["luckperms", "essentials", "essentials-chat"]
+    },
+    "protocol": {
+      "description": "ViaVersion and ViaBackwards coexistence with a native 1.21.11 client; protocol translation is not covered.",
+      "artifacts": ["viaversion", "viabackwards"]
+    }
+  }
+}
