@@ -1,15 +1,13 @@
 #!/usr/bin/env python3
-"""Package and smoke-test an operator-ready native release with a SHA-256 sidecar."""
+"""Stage and smoke-test a standalone native release executable."""
 
 import argparse
-import hashlib
 from pathlib import Path
 import platform
+import shutil
 import subprocess
-import tarfile
 import tempfile
 import tomllib
-import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 PLATFORMS = {
@@ -19,40 +17,12 @@ PLATFORMS = {
 }
 
 
-def contents(root, binary):
-    return [(binary, binary.name)] + [
-        (path, path.relative_to(root).as_posix())
-        for path in [root / "README.md", root / "LICENSE", root / "THIRD_PARTY_NOTICES",
-                     *sorted((root / "examples").rglob("*.lua")),
-                     root / "examples/rift.service",
-                     root / "examples/Dockerfile",
-                     root / "examples/compose.yaml",
-                     *sorted((root / "docs").glob("*.md"))]
-    ]
-
-
-def create_archive(archive, files, windows):
-    if windows:
-        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as package:
-            for path, name in files:
-                package.write(path, name)
-    else:
-        with tarfile.open(archive, "w:gz") as package:
-            for path, name in files:
-                package.add(path, arcname=name)
-
-
-def smoke_test(archive, windows, version):
-    # Run from the extracted archive, with no dependency on the source checkout.
+def smoke_test(executable, version):
+    # Run with only the executable present, as downloaded from a release.
     with tempfile.TemporaryDirectory(prefix="rift-package-") as temporary:
         directory = Path(temporary)
-        if windows:
-            with zipfile.ZipFile(archive) as package:
-                package.extractall(directory)
-        else:
-            with tarfile.open(archive) as package:
-                package.extractall(directory, filter="data")
-        binary = directory / ("rift.exe" if windows else "rift")
+        binary = directory / executable.name
+        shutil.copy2(executable, binary)
         # Informational flags must not evaluate an implicit configuration.
         (directory / "rift.lua").write_text("this is invalid Lua", encoding="utf-8")
         result = subprocess.run([str(binary), "--version"], cwd=directory,
@@ -60,18 +30,16 @@ def smoke_test(archive, windows, version):
         if result.stdout.strip() != f"rift {version}" or result.stderr:
             raise RuntimeError(f"unexpected packaged version output: {result}")
         subprocess.run([str(binary), "--help"], cwd=directory, check=True, timeout=10)
-        license_files = [directory / "LICENSE", directory / "THIRD_PARTY_NOTICES"]
+        license_files = [ROOT / "LICENSE", ROOT / "THIRD_PARTY_NOTICES"]
         expected_license = "\n".join(path.read_text(encoding="utf-8") for path in license_files)
         # The standalone binary must carry its notices without external files.
-        for path in license_files:
-            path.unlink()
         result = subprocess.run([str(binary), "--license"], cwd=directory,
                                 check=True, capture_output=True, text=True,
                                 encoding="utf-8", timeout=10)
         if result.stdout != expected_license or result.stderr:
             raise RuntimeError("unexpected packaged license output")
-        configs = [*sorted((directory / "examples").glob("*.lua")),
-                   directory / "examples/modular/rift.lua"]
+        configs = [*sorted((ROOT / "examples").glob("*.lua")),
+                   ROOT / "examples/modular/rift.lua"]
         for config in configs:
             subprocess.run([str(binary), "--check", str(config)],
                            cwd=directory, check=True, timeout=10)
@@ -97,16 +65,12 @@ def main():
     binary = ROOT / "target" / "release" / ("rift.exe" if windows else "rift")
     output = ROOT / "dist"
     output.mkdir(exist_ok=True)
-    archive = output / f"rift-{args.platform}{'.zip' if windows else '.tar.gz'}"
-    create_archive(archive, contents(ROOT, binary), windows)
+    executable = output / f"rift-{args.platform}{'.exe' if windows else ''}"
+    shutil.copy2(binary, executable)
     with (ROOT / "Cargo.toml").open("rb") as manifest:
         version = tomllib.load(manifest)["package"]["version"]
-    smoke_test(archive, windows, version)
-    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
-    archive.with_name(archive.name + ".sha256").write_text(
-        f"{digest}  {archive.name}\n", encoding="utf-8", newline="\n"
-    )
-    print(archive)
+    smoke_test(executable, version)
+    print(executable)
 
 
 if __name__ == "__main__":

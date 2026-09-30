@@ -34,7 +34,7 @@ jobs:
     uses: ./.github/workflows/ci.yml
 
   publish:
-    name: Publish tested release artifacts
+    name: Publish tested release executables
     needs: verify
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -46,15 +46,13 @@ jobs:
           pattern: release-*
           path: dist
           merge-multiple: true
-      - name: Verify packages and publish
+      - name: Publish executables
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
         working-directory: dist
         run: |
-          sha256sum --check rift-linux-x86_64.tar.gz.sha256 \
-            rift-macos-aarch64.tar.gz.sha256 rift-windows-x86_64.zip.sha256
-          cat ./*.sha256 > SHA256SUMS
-          gh release create "$RELEASE_TAG" ./*.tar.gz ./*.zip SHA256SUMS \
+          gh release create "$RELEASE_TAG" \
+            rift-linux-x86_64 rift-macos-aarch64 rift-windows-x86_64.exe \
             --verify-tag --generate-notes --title "$RELEASE_TAG"
