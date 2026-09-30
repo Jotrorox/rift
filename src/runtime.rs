@@ -168,7 +168,8 @@ pub async fn handle(
 ) -> io::Result<(u64, u64)> {
     event.stage = "client_setup";
     client.set_nodelay(true)?;
-    let peer_ip = client.peer_addr()?.ip().to_canonical();
+    let peer = client.peer_addr()?;
+    let peer_ip = peer.ip().to_canonical();
     let connection = ConnectionInfo {
         listener: listener.to_owned(),
         peer_addr: client.peer_addr()?,
@@ -370,6 +371,9 @@ pub async fn handle(
         if network_enabled {
             session.enable_network()?;
         }
+        if snapshot.config.network.bungeecord {
+            session.enable_bungeecord();
+        }
         let mut login_name = if network_configured || snapshot.authenticator.is_some() {
             match timeout(HANDSHAKE_TIMEOUT, session.read_login_start()).await {
                 Ok(Ok(login)) => login.name,
@@ -539,7 +543,7 @@ pub async fn handle(
         let control = snapshot.control.clone();
         let mut admin_registration = None;
         let mut transfers: Option<mpsc::Receiver<admin::Transfer>> = None;
-        let mut transfer_reply: Option<admin::Reply> = None;
+        let mut transfer_reply: Option<admin::TransferReply> = None;
         // An administrator may select a backend added after this session's
         // snapshot. Keep its address without indexing the older configuration.
         let mut current_address = snapshot.config.backends[&current_backend]
@@ -640,7 +644,7 @@ pub async fn handle(
                         continue;
                     }
                     if let Some(extension) = &mut session.extension
-                        && let Err(error) = extension.before_transfer(target, "admin").await {
+                        && let Err(error) = extension.before_transfer(target, request.reply.reason()).await {
                             metrics.transfer_failures.inc();
                             let _ = request.reply.send(Err(error.to_string()));
                             continue;
@@ -762,6 +766,7 @@ pub async fn handle(
                                 current_backend.clone(),
                                 session.handshake.protocol,
                                 session.player_name().unwrap_or_default().to_owned(),
+                                peer,
                             );
                             admin_registration = Some(guard);
                             transfers = Some(receiver);
@@ -783,6 +788,19 @@ pub async fn handle(
                     }
                     if playing && !ready {
                         phase_deadline = Deadline::now() + Duration::from_secs(30);
+                    }
+                }
+                Ok(SessionEvent::BungeeCord(request)) => {
+                    if let Some(identity) = session.identity()
+                        && let Ok(Some(payload)) = crate::bungee_runtime::handle(
+                            &snapshot,
+                            &current_backend,
+                            &identity,
+                            peer,
+                            request,
+                        )
+                    {
+                        timeout(HANDSHAKE_TIMEOUT, session.send_bungeecord(&payload)).await??;
                     }
                 }
                 Ok(SessionEvent::ProxyCommand(command)) => {

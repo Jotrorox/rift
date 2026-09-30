@@ -51,6 +51,8 @@ pub struct Config {
 /// Hubs are explicit destinations for `/hub` and outage recovery.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Network {
+    /// Handle trusted backend BungeeCord transfer and query plugin messages.
+    pub bungeecord: bool,
     pub initial: Vec<String>,
     pub hubs: Vec<String>,
     pub access: BTreeMap<String, ServerAccess>,
@@ -616,6 +618,16 @@ impl Config {
                 return Err(invalid(format!("{path}: names must not be empty")));
             }
         }
+        if self.network.bungeecord {
+            let mut names = BTreeSet::new();
+            for name in self.backends.keys() {
+                if !names.insert(name.to_ascii_lowercase()) {
+                    return Err(invalid(
+                        "network.bungeecord: backend names must be unique ignoring ASCII case",
+                    ));
+                }
+            }
+        }
         for name in &self.draining {
             if !self.backends.contains_key(name) {
                 return Err(invalid(format!("draining: unknown backend {name:?}")));
@@ -896,10 +908,18 @@ fn forwarding(root: &Table) -> Result<Option<VelocityForwarding>, String> {
 }
 
 fn network(root: &Table) -> Result<Network, String> {
-    let Some(values) = options(root, "network", &["initial", "hubs", "access"])? else {
+    let Some(values) = options(
+        root,
+        "network",
+        &["bungeecord", "initial", "hubs", "access"],
+    )?
+    else {
         return Ok(Network::default());
     };
-    let mut network = Network::default();
+    let mut network = Network {
+        bungeecord: boolean(&values, "network", "bungeecord", false)?,
+        ..Network::default()
+    };
     for (key, destination) in [
         ("initial", &mut network.initial),
         ("hubs", &mut network.hubs),
