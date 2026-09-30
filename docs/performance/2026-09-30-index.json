@@ -1,0 +1,52 @@
+{
+  "recorded_date": "2026-09-30",
+  "reports": [
+    {
+      "file": "2026-09-30-loopback-16.json.gz",
+      "compressed_sha256": "3120d1a3a571cf84ef3fb48256bbe2ca74646c50df3eb38bab618b1b01d166b9",
+      "json_sha256": "ff8286542fec5285b4222ccd865a689dfef107baa799af03ad162113f5917d56",
+      "compressed_bytes": 5359802,
+      "settings": {
+        "trials": 3,
+        "clients": 16,
+        "workers": 2,
+        "java_heap_mib": 1024,
+        "duration": 20.0,
+        "warmup": 30.0,
+        "rate": 20.0,
+        "payload_bytes": 1024,
+        "attempts": 2048,
+        "burst_size": 16,
+        "timeout": 5.0
+      }
+    },
+    {
+      "file": "2026-09-30-loopback-64.json.gz",
+      "compressed_sha256": "4bd4b0b0c0c39c3c04b3af5323cc9fe13d1f7fd38fab06747452346ae8245377",
+      "json_sha256": "6417c39858a7612d87fda0f2b7941fc1f051c63fb86108eac66a33a175ccd4b6",
+      "compressed_bytes": 19223622,
+      "settings": {
+        "trials": 3,
+        "clients": 64,
+        "workers": 2,
+        "java_heap_mib": 1024,
+        "duration": 20.0,
+        "warmup": 30.0,
+        "rate": 20.0,
+        "payload_bytes": 1024,
+        "attempts": 2048,
+        "burst_size": 64,
+        "timeout": 5.0
+      }
+    }
+  ],
+  "runtime_archive": {
+    "version": "Temurin 25.0.4.1+1",
+    "url": "https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.4.1%2B1/OpenJDK25U-jre_x64_linux_hotspot_25.0.4.1_1.tar.gz",
+    "sha256": "1731a34baadec5479258ea0202e4d5d865d2efeee60cb0c7d7eb056fe96ca219"
+  },
+  "process_logs": {
+    "file": "2026-09-30-process-logs.tar.gz",
+    "sha256": "a415c55808c0ba82541683dab8c4aace974d0124df1e7a04307e85bc5d8b103f"
+  }
+}
