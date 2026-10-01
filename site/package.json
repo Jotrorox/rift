@@ -1,0 +1,13 @@
+{
+  "name": "rift-docs",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "serve": "node build.mjs --serve"
+  },
+  "dependencies": {
+    "marked": "^18.0.0",
+    "shiki": "^4.4.0"
+  }
+}

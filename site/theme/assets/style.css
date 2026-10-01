@@ -1,0 +1,210 @@
+/* Rift documentation theme */
+:root {
+  --sky: #7fb2f0;
+  --sky-low: #b6d6fa;
+  --gui: #c6c6c6;
+  --gui-hi: #ffffff;
+  --gui-lo: #555555;
+  --slot: #8b8b8b;
+  --text: #262626;
+  --muted: #4a4a4a;
+  --link: #1d4fb0;
+  --tip: #100010;
+  --tip-edge: #28007a;
+  --pixel: 'Pixelify Sans', system-ui, sans-serif;
+  --body: 'Rubik', system-ui, sans-serif;
+  --mono: 'Source Code Pro', ui-monospace, monospace;
+
+  /* Code uses the in-game chat colours on a dark panel. */
+  --code-background: #1b1b1b;
+  --code-foreground: #ffffff;
+  --code-token-comment: #aaaaaa;
+  --code-token-keyword: #ffaa00;
+  --code-token-string: #55ff55;
+  --code-token-string-expression: #55ff55;
+  --code-token-constant: #ff55ff;
+  --code-token-function: #55ffff;
+  --code-token-parameter: #ffffff;
+  --code-token-punctuation: #aaaaaa;
+  --code-token-link: #55ffff;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --sky: #0e1a3a;
+    --sky-low: #22335e;
+    --gui: #3b3b3b;
+    --gui-hi: #6a6a6a;
+    --gui-lo: #161616;
+    --slot: #262626;
+    --text: #efefef;
+    --muted: #c3c3c3;
+    --link: #8ec0ff;
+    color-scheme: dark;
+  }
+}
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; scroll-padding-top: 20px; }
+body {
+  margin: 0; padding-bottom: 110px; color: var(--text);
+  background: linear-gradient(var(--sky) 0, var(--sky-low) 720px, var(--sky-low));
+  font: 16.5px/1.6 var(--body);
+}
+body.docpage { background: #2b2118 url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20aria-hidden%3D%22true%22%20viewBox%3D%220%200%208%208%22%20width%3D%228%22%20height%3D%228%22%20shape-rendering%3D%22crispEdges%22%3E%3Crect%20x%3D%220%22%20y%3D%220%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%221%22%20y%3D%220%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%222%22%20y%3D%220%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%223%22%20y%3D%220%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%233a2a1e%22%2F%3E%3Crect%20x%3D%224%22%20y%3D%220%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%225%22%20y%3D%220%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%226%22%20y%3D%220%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%227%22%20y%3D%220%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%220%22%20y%3D%221%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%221%22%20y%3D%221%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%233a2a1e%22%2F%3E%3Crect%20x%3D%222%22%20y%3D%221%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%223%22%20y%3D%221%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%224%22%20y%3D%221%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%225%22%20y%3D%221%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%226%22%20y%3D%221%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%227%22%20y%3D%221%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%220%22%20y%3D%222%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%221%22%20y%3D%222%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%222%22%20y%3D%222%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%223%22%20y%3D%222%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%224%22%20y%3D%222%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%225%22%20y%3D%222%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%226%22%20y%3D%222%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%233a2a1e%22%2F%3E%3Crect%20x%3D%227%22%20y%3D%222%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%220%22%20y%3D%223%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%221%22%20y%3D%223%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%222%22%20y%3D%223%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%223%22%20y%3D%223%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%224%22%20y%3D%223%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%225%22%20y%3D%223%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%226%22%20y%3D%223%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%227%22%20y%3D%223%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%220%22%20y%3D%224%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%221%22%20y%3D%224%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%222%22%20y%3D%224%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%233a2a1e%22%2F%3E%3Crect%20x%3D%223%22%20y%3D%224%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%224%22%20y%3D%224%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%225%22%20y%3D%224%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%226%22%20y%3D%224%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%227%22%20y%3D%224%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%220%22%20y%3D%225%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%221%22%20y%3D%225%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%222%22%20y%3D%225%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%223%22%20y%3D%225%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%224%22%20y%3D%225%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%225%22%20y%3D%225%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%233a2a1e%22%2F%3E%3Crect%20x%3D%226%22%20y%3D%225%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%227%22%20y%3D%225%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%220%22%20y%3D%226%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%221%22%20y%3D%226%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%233a2a1e%22%2F%3E%3Crect%20x%3D%222%22%20y%3D%226%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%223%22%20y%3D%226%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%224%22%20y%3D%226%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%225%22%20y%3D%226%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%226%22%20y%3D%226%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%227%22%20y%3D%226%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%220%22%20y%3D%227%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%221%22%20y%3D%227%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%222%22%20y%3D%227%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%223%22%20y%3D%227%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%224%22%20y%3D%227%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%225%22%20y%3D%227%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3Crect%20x%3D%226%22%20y%3D%227%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%233a2a1e%22%2F%3E%3Crect%20x%3D%227%22%20y%3D%227%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%234a3526%22%2F%3E%3C%2Fsvg%3E") 0 0 / 64px 64px; image-rendering: pixelated; }
+a { color: var(--link); }
+:focus-visible { outline: 3px solid #ffff55; outline-offset: 2px; }
+code { font-family: var(--mono); font-size: 0.9em; }
+svg { image-rendering: pixelated; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+
+/* Bevelled GUI primitives */
+.window {
+  background: var(--gui);
+  border: 3px solid #000;
+  box-shadow: inset 3px 3px 0 var(--gui-hi), inset -3px -3px 0 var(--gui-lo);
+  border-radius: 6px;
+  padding: clamp(16px, 3vw, 28px);
+  max-width: 980px; margin: 0 auto 28px;
+}
+.window h2, .page h1, .prose h2, .prose h3 { font-family: var(--pixel); color: var(--text); }
+.window > h2 { font-size: 26px; margin: 0 0 8px; font-weight: 600; }
+.hint { color: var(--muted); font-size: 14.5px; margin: 0 0 16px; }
+.mc-btn {
+  display: inline-block; padding: 9px 18px; min-width: 150px; text-align: center;
+  font: 500 17px var(--pixel); color: #fff; text-decoration: none; text-shadow: 2px 2px 0 #383838;
+  background: #6f6f6f; border: 2px solid #000;
+  box-shadow: inset 2px 2px 0 #a8a8a8, inset -2px -3px 0 #494949;
+}
+.mc-btn:hover, .mc-btn:focus-visible { background: #7e8fce; box-shadow: inset 2px 2px 0 #b9c4ee, inset -2px -3px 0 #4b5a96; color: #ffffa0; }
+.mc-btn.small { min-width: 0; padding: 5px 12px; font-size: 15px; }
+.row-btns { display: flex; flex-wrap: wrap; gap: 10px; }
+
+.topbar { display: flex; justify-content: space-between; align-items: center; padding: 14px clamp(16px, 4vw, 40px); gap: 12px; }
+.topbar nav { display: flex; gap: 8px; }
+.logo { font: 700 28px var(--pixel); color: #fff; text-decoration: none; text-shadow: 3px 3px 0 #3f3f3f; }
+
+/* Hero */
+.sky { max-width: 1060px; margin: 0 auto; padding: 24px 16px 0; text-align: center; position: relative; }
+.title {
+  font: 700 clamp(72px, 15vw, 168px)/0.9 var(--pixel); margin: 12px 0 10px; color: #f2f2f2;
+  text-shadow: 0.05em 0.05em 0 #3f3f3f; letter-spacing: 0.02em;
+}
+.splash {
+  position: absolute; top: clamp(70px, 12vw, 130px); left: calc(50% + clamp(90px, 18vw, 210px));
+  margin: 0; font: 600 clamp(15px, 2vw, 22px) var(--pixel); color: #ffff55; text-shadow: 2px 2px 0 #3f3f00;
+  transform: rotate(-18deg); white-space: nowrap;
+  animation: pulse 0.9s ease-in-out infinite alternate;
+}
+@keyframes pulse { to { transform: rotate(-18deg) scale(1.08); } }
+.sub { font-size: clamp(17px, 2vw, 20px); color: #13233f; max-width: 34em; margin: 0 auto 24px; font-weight: 500; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .sub { color: #dbe6ff; } }
+
+.scene { position: relative; display: grid; grid-template-columns: repeat(3, 1fr); align-items: end; gap: 12px; padding-top: 70px; }
+.player { position: absolute; top: 0; left: 0; width: calc((100% - 24px) / 3); display: flex; justify-content: center; transform: translateX(calc(var(--i) * (100% + 12px))); transition: transform 0.7s cubic-bezier(.45, .05, .3, 1); z-index: 2; }
+.player svg { width: 40px; height: 60px; }
+.hop.go { animation: hop 0.7s ease-in-out; }
+@keyframes hop { 40% { transform: translateY(-38px); } 100% { transform: translateY(0); } }
+.island { display: grid; justify-items: center; }
+.island .sign { font: 600 16px var(--pixel); color: #fff; background: rgb(0 0 0 / 0.45); padding: 2px 10px; margin: 0 0 10px; }
+.island .rowb { display: flex; line-height: 0; }
+.island .blk svg { width: clamp(28px, 5vw, 48px); height: auto; display: block; }
+
+.chat { max-width: 560px; margin: 28px auto 0; text-align: left; background: rgb(0 0 0 / 0.55); padding: 10px 12px; }
+.log { list-style: none; margin: 0 0 10px; padding: 0; font: 15px/1.5 var(--mono); color: #fff; max-height: 7.5em; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end; min-height: 3em; }
+.gray { color: #aaaaaa; }
+.gold { color: #ffaa00; }
+.green { color: #55ff55; }
+.cmds { display: flex; flex-wrap: wrap; gap: 6px; }
+.cmds button { font: 14px var(--mono); color: #fff; background: rgb(255 255 255 / 0.12); border: 1px solid rgb(255 255 255 / 0.25); padding: 5px 10px; cursor: pointer; }
+.cmds button:hover { background: rgb(255 255 255 / 0.25); }
+
+.ground { height: 56px; margin: 32px 0 40px; background: url("data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20aria-hidden%3D%22true%22%20viewBox%3D%220%200%208%208%22%20width%3D%228%22%20height%3D%228%22%20shape-rendering%3D%22crispEdges%22%3E%3Crect%20x%3D%220%22%20y%3D%220%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%235b8c32%22%2F%3E%3Crect%20x%3D%221%22%20y%3D%220%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%237cbd45%22%2F%3E%3Crect%20x%3D%222%22%20y%3D%220%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%235b8c32%22%2F%3E%3Crect%20x%3D%223%22%20y%3D%220%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%235b8c32%22%2F%3E%3Crect%20x%3D%224%22%20y%3D%220%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%235b8c32%22%2F%3E%3Crect%20x%3D%225%22%20y%3D%220%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%237cbd45%22%2F%3E%3Crect%20x%3D%226%22%20y%3D%220%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%235b8c32%22%2F%3E%3Crect%20x%3D%227%22%20y%3D%220%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%235b8c32%22%2F%3E%3Crect%20x%3D%220%22%20y%3D%221%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%235b8c32%22%2F%3E%3Crect%20x%3D%221%22%20y%3D%221%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%235b8c32%22%2F%3E%3Crect%20x%3D%222%22%20y%3D%221%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%235b8c32%22%2F%3E%3Crect%20x%3D%223%22%20y%3D%221%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%237cbd45%22%2F%3E%3Crect%20x%3D%224%22%20y%3D%221%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%235b8c32%22%2F%3E%3Crect%20x%3D%225%22%20y%3D%221%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%235b8c32%22%2F%3E%3Crect%20x%3D%226%22%20y%3D%221%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%235b8c32%22%2F%3E%3Crect%20x%3D%227%22%20y%3D%221%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%235b8c32%22%2F%3E%3Crect%20x%3D%220%22%20y%3D%222%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%23866043%22%2F%3E%3Crect%20x%3D%221%22%20y%3D%222%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%235b8c32%22%2F%3E%3Crect%20x%3D%222%22%20y%3D%222%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%23866043%22%2F%3E%3Crect%20x%3D%223%22%20y%3D%222%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%235b8c32%22%2F%3E%3Crect%20x%3D%224%22%20y%3D%222%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%23866043%22%2F%3E%3Crect%20x%3D%225%22%20y%3D%222%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%23866043%22%2F%3E%3Crect%20x%3D%226%22%20y%3D%222%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%235b8c32%22%2F%3E%3Crect%20x%3D%227%22%20y%3D%222%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%23866043%22%2F%3E%3Crect%20x%3D%220%22%20y%3D%223%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%23866043%22%2F%3E%3Crect%20x%3D%221%22%20y%3D%223%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%23866043%22%2F%3E%3Crect%20x%3D%222%22%20y%3D%223%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%23866043%22%2F%3E%3Crect%20x%3D%223%22%20y%3D%223%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%23866043%22%2F%3E%3Crect%20x%3D%224%22%20y%3D%223%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%23866043%22%2F%3E%3Crect%20x%3D%225%22%20y%3D%223%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%23866043%22%2F%3E%3Crect%20x%3D%226%22%20y%3D%223%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%23866043%22%2F%3E%3Crect%20x%3D%227%22%20y%3D%223%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%23866043%22%2F%3E%3Crect%20x%3D%220%22%20y%3D%224%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%23866043%22%2F%3E%3Crect%20x%3D%221%22%20y%3D%224%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%23866043%22%2F%3E%3Crect%20x%3D%222%22%20y%3D%224%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%236b4a33%22%2F%3E%3Crect%20x%3D%223%22%20y%3D%224%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%23866043%22%2F%3E%3Crect%20x%3D%224%22%20y%3D%224%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%23866043%22%2F%3E%3Crect%20x%3D%225%22%20y%3D%224%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%23866043%22%2F%3E%3Crect%20x%3D%226%22%20y%3D%224%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%23866043%22%2F%3E%3Crect%20x%3D%227%22%20y%3D%224%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%23866043%22%2F%3E%3Crect%20x%3D%220%22%20y%3D%225%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%23866043%22%2F%3E%3Crect%20x%3D%221%22%20y%3D%225%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%23866043%22%2F%3E%3Crect%20x%3D%222%22%20y%3D%225%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%23866043%22%2F%3E%3Crect%20x%3D%223%22%20y%3D%225%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%23866043%22%2F%3E%3Crect%20x%3D%224%22%20y%3D%225%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%23866043%22%2F%3E%3Crect%20x%3D%225%22%20y%3D%225%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%236b4a33%22%2F%3E%3Crect%20x%3D%226%22%20y%3D%225%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%23866043%22%2F%3E%3Crect%20x%3D%227%22%20y%3D%225%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%23866043%22%2F%3E%3Crect%20x%3D%220%22%20y%3D%226%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%23866043%22%2F%3E%3Crect%20x%3D%221%22%20y%3D%226%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%236b4a33%22%2F%3E%3Crect%20x%3D%222%22%20y%3D%226%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%23866043%22%2F%3E%3Crect%20x%3D%223%22%20y%3D%226%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%23866043%22%2F%3E%3Crect%20x%3D%224%22%20y%3D%226%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%23866043%22%2F%3E%3Crect%20x%3D%225%22%20y%3D%226%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%23866043%22%2F%3E%3Crect%20x%3D%226%22%20y%3D%226%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%23866043%22%2F%3E%3Crect%20x%3D%227%22%20y%3D%226%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%23866043%22%2F%3E%3Crect%20x%3D%220%22%20y%3D%227%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%23866043%22%2F%3E%3Crect%20x%3D%221%22%20y%3D%227%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%23866043%22%2F%3E%3Crect%20x%3D%222%22%20y%3D%227%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%23866043%22%2F%3E%3Crect%20x%3D%223%22%20y%3D%227%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%23866043%22%2F%3E%3Crect%20x%3D%224%22%20y%3D%227%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%23866043%22%2F%3E%3Crect%20x%3D%225%22%20y%3D%227%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%23866043%22%2F%3E%3Crect%20x%3D%226%22%20y%3D%227%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%236b4a33%22%2F%3E%3Crect%20x%3D%227%22%20y%3D%227%22%20width%3D%221%22%20height%3D%221%22%20fill%3D%22%23866043%22%2F%3E%3C%2Fsvg%3E") 0 0 / 56px 56px repeat-x; image-rendering: pixelated; }
+
+/* Home windows */
+.recipe { list-style: none; counter-reset: s; margin: 0 0 16px; padding: 0; display: grid; gap: 8px; }
+.recipe li { counter-increment: s; display: grid; grid-template-columns: auto 1fr; gap: 2px 14px; align-items: center; background: var(--slot); padding: 10px 14px; box-shadow: inset 2px 2px 0 var(--gui-lo), inset -2px -2px 0 var(--gui-hi); }
+.recipe li::before { content: counter(s); grid-row: span 2; font: 700 22px var(--pixel); color: #fff; text-shadow: 2px 2px 0 #3f3f3f; }
+.recipe code { color: #fff; font-size: 16px; text-shadow: 1px 1px 0 #3f3f3f; }
+.recipe span { font-size: 14px; color: #f0f0f0; }
+
+.slots { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(auto-fill, 60px); gap: 4px; }
+.slot {
+  position: relative; width: 60px; height: 60px; display: grid; place-items: center; cursor: help;
+  background: var(--slot); border: 0; padding: 0;
+  box-shadow: inset 2px 2px 0 var(--gui-lo), inset -2px -2px 0 var(--gui-hi);
+}
+.slot:hover, .slot:focus-visible { background: #a6a6a6; }
+.tip {
+  position: absolute; left: 50%; bottom: calc(100% + 10px); transform: translateX(-50%);
+  width: max-content; max-width: 280px; text-align: left; z-index: 20;
+  background: var(--tip); color: #fff; padding: 6px 9px; border: 2px solid var(--tip-edge); outline: 2px solid var(--tip);
+  font: 500 16px/1.35 var(--pixel); pointer-events: none; opacity: 0; visibility: hidden;
+}
+.tip small { display: block; font: 13.5px/1.45 var(--body); color: #aaaaaa; margin-top: 3px; }
+.slot:hover .tip, .slot:focus-visible .tip, .hotbar a:hover .tip, .hotbar a:focus-visible .tip { opacity: 1; visibility: visible; }
+.plain { display: none; }
+
+.stat h3 { font: 600 17px var(--pixel); margin: 16px 0 8px; }
+.stat p { margin: 2px 0 10px; font-size: 14.5px; }
+.xp { height: 14px; background: #1f1f1f; border: 2px solid #000; }
+.xp span { display: block; height: 100%; background: repeating-linear-gradient(90deg, #80ff20 0 18px, #3a7a10 18px 20px); }
+.xp.velo span { background: repeating-linear-gradient(90deg, #a0a0a0 0 18px, #606060 18px 20px); }
+
+.books ul { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.books a { display: block; padding: 10px 12px; text-decoration: none; color: var(--text); background: color-mix(in srgb, var(--gui-hi) 30%, var(--gui)); border: 2px solid transparent; }
+.books a:hover { border-color: #000; }
+.books b { font: 600 17px var(--pixel); display: block; }
+.books span { font-size: 14px; color: var(--muted); }
+.legal { text-align: center; font-size: 13px; color: var(--muted); margin: 0 16px 20px; }
+
+/* Hotbar */
+.hotbar { position: fixed; left: 50%; bottom: 12px; transform: translateX(-50%); z-index: 50; max-width: calc(100vw - 16px); }
+.hotbar ol { list-style: none; display: flex; margin: 0; padding: 3px; background: rgb(20 20 20 / 0.8); border: 3px solid #000; box-shadow: inset 0 0 0 2px #8b8b8b; }
+.hotbar li { flex: 1; }
+.hotbar a { position: relative; display: grid; place-items: center; width: clamp(34px, 9.4vw, 56px); aspect-ratio: 1; border: 2px solid rgb(255 255 255 / 0.12); }
+.hotbar a svg { width: 62%; height: auto; }
+.hotbar a[aria-current] { border: 4px solid #fff; box-shadow: 0 0 0 2px #000; z-index: 1; }
+.hotbar .n { position: absolute; right: 3px; bottom: 0; font: 600 12px var(--pixel); color: #fff; text-shadow: 1px 1px 0 #000; }
+.hotbar .tip { bottom: calc(100% + 16px); }
+
+/* Documentation window */
+.dirt { padding: 8px 12px 0; }
+.page { max-width: 900px; }
+.page h1 { font-size: clamp(30px, 4.6vw, 46px); line-height: 1.05; font-weight: 700; margin: 0 0 18px; }
+.tabs { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 16px; }
+.tabs a { font: 500 15px var(--pixel); padding: 6px 12px; color: var(--text); text-decoration: none; background: var(--slot); box-shadow: inset 2px 2px 0 var(--gui-lo), inset -2px -2px 0 var(--gui-hi); }
+.tabs a[aria-current] { background: var(--gui); box-shadow: inset 2px 2px 0 var(--gui-hi), inset -2px -2px 0 var(--gui-lo); }
+.contents { background: var(--slot); box-shadow: inset 2px 2px 0 var(--gui-lo), inset -2px -2px 0 var(--gui-hi); padding: 8px 14px; margin-bottom: 20px; color: #fff; }
+.contents summary { font: 600 16px var(--pixel); cursor: pointer; }
+.contents ul { margin: 8px 0 4px; padding-left: 1.2em; columns: 2; }
+.contents a { color: #fff; }
+.prose { max-width: 72ch; }
+.prose h2 { font-size: 27px; font-weight: 600; margin: 44px 0 10px; position: relative; }
+.prose h3 { font-size: 20px; font-weight: 600; margin: 28px 0 8px; position: relative; }
+.anchor { display: none; }
+.prose p, .prose li { hyphens: auto; }
+.prose :not(pre) > code { hyphens: none; background: color-mix(in srgb, #000 12%, transparent); padding: 0 0.3em; overflow-wrap: anywhere; }
+.code { position: relative; margin: 18px 0; }
+.code pre { margin: 0; padding: 14px 16px; overflow-x: auto; font: 14px/1.6 var(--mono); border: 2px solid #000; }
+.code pre code { font-size: inherit; }
+.copy { position: absolute; top: 6px; right: 6px; font: 13px var(--pixel); color: #fff; background: #6f6f6f; border: 2px solid #000; box-shadow: inset 1px 1px 0 #a8a8a8, inset -1px -2px 0 #494949; padding: 2px 8px; cursor: pointer; }
+.table-wrap { overflow-x: auto; margin: 18px 0; border: 2px solid #000; }
+.prose table { border-collapse: collapse; width: 100%; font-size: 14.5px; line-height: 1.45; }
+.prose th { text-align: left; font: 600 15px var(--pixel); background: var(--slot); color: #fff; }
+.prose th, .prose td { padding: 8px 10px; vertical-align: top; border-bottom: 2px solid color-mix(in srgb, var(--gui-lo) 40%, transparent); }
+.prose td code { white-space: nowrap; }
+.pager { margin-top: 40px; justify-content: space-between; }
+
+@media (max-width: 700px) {
+  .slots { display: none; }
+  .plain { display: grid; gap: 12px; margin: 0; }
+  .plain dt { font: 600 17px var(--pixel); }
+  .plain dd { margin: 0; color: var(--muted); font-size: 15px; }
+  .books ul, .contents ul { grid-template-columns: 1fr; columns: 1; }
+  .hotbar .tip { display: none; }
+  .splash { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .splash, .hop.go { animation: none; }
+  .player { transition: none; }
+}

@@ -180,8 +180,26 @@ async fn captured_store_functions_preserve_binary_values_across_calls_and_reload
     );
 }
 
-#[tokio::test]
-async fn durable_store_survives_restart_and_delete_persists() {
+#[test]
+fn durable_store_survives_restart_and_delete_persists() {
+    // Disk sync latency on shared runners can exceed the session's 50 ms budget.
+    // Test persistence with an explicit budget; timeout behavior is tested separately.
+    let login = |runtime: &Extensions| {
+        assert_eq!(
+            runtime
+                .script
+                .as_ref()
+                .unwrap()
+                .evaluate(
+                    "login",
+                    &context(1),
+                    Instant::now() + Duration::from_secs(30),
+                    runtime,
+                )
+                .unwrap(),
+            Action::Continue
+        );
+    };
     let state = StateFile::new();
     let settings = format!("api_version=2, storage={{path={}}}", state.lua_path());
     {
@@ -191,12 +209,7 @@ async fn durable_store_survives_restart_and_delete_persists() {
             rift.store.set('flags','disabled','false')
         end"#
         ));
-        runtime
-            .session(context(1))
-            .unwrap()
-            .decision("login")
-            .await
-            .unwrap();
+        login(&runtime);
     }
     assert!(state.0.is_file());
     {
@@ -208,12 +221,7 @@ async fn durable_store_survives_restart_and_delete_persists() {
             rift.store.delete('profiles','player')
         end"#
         ));
-        runtime
-            .session(context(1))
-            .unwrap()
-            .decision("login")
-            .await
-            .unwrap();
+        login(&runtime);
     }
     let runtime = runtime(&format!(
         r#"{settings}, login=function()
@@ -221,12 +229,7 @@ async fn durable_store_survives_restart_and_delete_persists() {
         assert(rift.store.get('flags','disabled')=='false')
     end"#
     ));
-    runtime
-        .session(context(1))
-        .unwrap()
-        .decision("login")
-        .await
-        .unwrap();
+    login(&runtime);
 }
 
 #[tokio::test]
