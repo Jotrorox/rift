@@ -13,17 +13,20 @@ Download the executable for your OS/CPU. On Linux, rename it and make it executa
 mv rift-linux-x86_64 rift
 chmod +x rift
 ./rift --version
-./rift init rift.lua
+./rift init
 # Edit listener and backend addresses for your server.
-./rift check rift.lua
-./rift --config rift.lua
+./rift check
+./rift
 ```
 
 `rift init [path]` writes a commented configuration (default `./rift.lua`) and
 refuses to overwrite an existing file. `rift check [path]` evaluates and validates
-it without opening listeners or contacting backends; the older `--check path`
-spelling also works. Correct the field/path named by any error and rerun the
-check before starting. Configuration scripts are trusted local code.
+it without opening listeners or contacting backends; `rift --check [path]`
+uses the same default. Running `./rift` loads `rift.lua` from the current working
+directory when present, or uses the default addresses when it is absent. Use
+`rift --config path/to/custom.lua` to select another file. Correct the field/path
+named by any error and rerun the check before starting. Configuration scripts
+are trusted local code.
 
 On macOS, rename `rift-macos-aarch64` to `rift`, run `chmod +x rift`, then use the
 same commands. On Windows, rename `rift-windows-x86_64.exe` to `rift.exe` and
@@ -75,8 +78,8 @@ in both the server and the administrator's environment. For a local shell:
 
 ```sh
 export RIFT_ADMIN_TOKEN="$(openssl rand -hex 32)"
-./rift check rift.lua
-./rift --config rift.lua
+./rift check
+./rift
 # In a separate shell with the same secret:
 ./rift admin status
 ```

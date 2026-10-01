@@ -26,15 +26,18 @@ Download a native archive from [Releases](https://github.com/Jotrorox/rift/relea
 extract it, then run:
 
 ```sh
-./rift init rift.lua
+./rift init
 # Edit listener and backend addresses in rift.lua.
-./rift check rift.lua
-./rift --config rift.lua
+./rift check
+./rift
 ```
 
 On Windows, use `rift.exe`. The default listener is `0.0.0.0:25565` and the backend
 is `127.0.0.1:25566`. `rift init` refuses to overwrite existing files. With no
-arguments, Rift loads `./rift.lua` if present or uses those default addresses.
+arguments, Rift loads `rift.lua` from the current working directory if present
+or uses those default addresses. `rift check` and `rift --check` validate that
+same file by default. Use `rift --config path/to/custom.lua` to start with another
+configuration file.
 For a quick local run without a configuration file:
 
 ```sh
