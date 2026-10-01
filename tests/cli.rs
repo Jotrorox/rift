@@ -50,6 +50,8 @@ fn help_is_successful_and_describes_the_interface() {
         assert!(text.contains("--license"));
         assert!(text.contains("rift init"));
         assert!(text.contains("rift check"));
+        assert!(text.contains("rift --check [path]"));
+        assert!(text.contains("No arguments: load ./rift.lua if present"));
         assert!(text.contains("rift admin"));
         assert!(text.contains("existing sessions continue"));
         assert!(output.stderr.is_empty());
@@ -190,6 +192,7 @@ fn check_validates_without_binding_or_resolving_admin_secrets() {
     fs::write(fixture.0.join("rift.lua"), &source).unwrap();
     for args in [
         vec!["check"],
+        vec!["--check"],
         vec!["check", "rift.lua"],
         vec!["--check", "rift.lua"],
     ] {
@@ -206,27 +209,39 @@ fn check_validates_without_binding_or_resolving_admin_secrets() {
         source.replace("'lobby'", "'missing'"),
     )
     .unwrap();
-    let output = fixture.run(&["check"]);
-    assert!(!output.status.success());
-    let error = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        error.contains("rift.lua") && error.contains("unknown backend"),
-        "{error}"
-    );
+    for args in [vec!["check"], vec!["--check"]] {
+        let output = fixture.run(&args);
+        assert!(!output.status.success());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            error.contains("rift.lua") && error.contains("unknown backend"),
+            "{error}"
+        );
+    }
 }
 
 #[test]
 fn setup_commands_report_paths_and_reject_extra_arguments() {
     let fixture = Fixture::new();
     for args in [
+        vec!["check"],
+        vec!["--check"],
         vec!["check", "missing.lua"],
+        vec!["--check", "missing.lua"],
         vec!["init", "missing/parent.lua"],
     ] {
         let output = fixture.run(&args);
         assert!(!output.status.success());
-        assert!(String::from_utf8_lossy(&output.stderr).contains(args[1]));
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains(args.get(1).copied().unwrap_or("rift.lua"))
+        );
     }
-    for args in [vec!["init", "one", "two"], vec!["check", "one", "two"]] {
+    for args in [
+        vec!["init", "one", "two"],
+        vec!["check", "one", "two"],
+        vec!["--check", "one", "two"],
+    ] {
         let output = fixture.run(&args);
         assert!(!output.status.success());
         assert!(String::from_utf8_lossy(&output.stderr).contains("Usage:"));
