@@ -146,14 +146,18 @@ See the [supported subchannels and configuration](docs/bungeecord.md).
 
 ## Documentation
 
-- [Lua configuration and plugins](docs/lua.md): script-style settings, modules and folder plugins.
-- [Authenticated extensions](docs/extensions.md): lifecycle hooks, commands, permissions and queues.
-- [Operations](docs/operations.md): installation, systemd/containers, administration and upgrades.
-- [HTTP services](docs/http.md): web dashboard, status, API and Lua extensions.
-- [Messaging](docs/messaging.md): plugin messaging, [Lua API](docs/messaging-lua.md) and [QUIC protocol](docs/messaging-protocol.md).
-- [BungeeCord compatibility](docs/bungeecord.md): backend plugin transfers and player/server queries.
-- [Network protocol](docs/network-protocol.md): backend switching and recovery.
-- [Performance comparison](docs/performance.md): CPU, memory, latency and failures against Velocity, with reproducible workloads.
+Read the documentation at **[jotrorox.github.io/rift](https://jotrorox.github.io/rift/)**.
+The pages are built from the Markdown in [docs/](docs), which every release archive
+also includes for offline use.
+
+- [Lua configuration and plugins](https://jotrorox.github.io/rift/docs/lua/): script-style settings, modules and folder plugins.
+- [Authenticated extensions](https://jotrorox.github.io/rift/docs/extensions/): lifecycle hooks, commands, permissions and queues.
+- [Operations](https://jotrorox.github.io/rift/docs/operations/): installation, systemd/containers, administration and upgrades.
+- [HTTP services](https://jotrorox.github.io/rift/docs/http/): web dashboard, status, API and Lua extensions.
+- [Messaging](https://jotrorox.github.io/rift/docs/messaging/): plugin messaging, [Lua API](https://jotrorox.github.io/rift/docs/messaging-lua/) and [QUIC protocol](https://jotrorox.github.io/rift/docs/messaging-protocol/).
+- [BungeeCord compatibility](https://jotrorox.github.io/rift/docs/bungeecord/): backend plugin transfers and player/server queries.
+- [Network protocol](https://jotrorox.github.io/rift/docs/network-protocol/): backend switching and recovery.
+- [Performance comparison](https://jotrorox.github.io/rift/docs/performance/): CPU, memory, latency and failures against Velocity, with reproducible workloads.
 
 ## Development
 
@@ -168,6 +172,9 @@ cargo test --locked --all-targets -- --test-threads=1
 python3 -m unittest discover -s tests -p 'test_*.py'
 node src/web_assets/tests.js
 ```
+
+To preview the documentation site, run `npm ci` and `npm run serve` in `site/`
+(Node 24 or newer), then open <http://localhost:4321>.
 
 CI also runs release tests, wire-protocol checks, real-server integration tests,
 benchmarks and packaging smoke tests. See the [CI workflow](.github/workflows/ci.yml)
