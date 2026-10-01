@@ -984,21 +984,17 @@ async fn spawn_ready(server: &Server, child: &mut Option<Child>) -> io::Result<(
                 "managed server requires a literal loopback backend address and nonzero port",
             )
         })?;
-    match tokio::time::timeout(Duration::from_millis(500), TcpStream::connect(address)).await {
-        Ok(Ok(_)) => {
+    // Probe local port ownership directly. Closed-port TCP refusal can take
+    // longer than a short preflight deadline on Windows.
+    match std::net::TcpListener::bind(address) {
+        Ok(listener) => drop(listener),
+        Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
             return Err(io::Error::new(
                 io::ErrorKind::AddrInUse,
-                "managed backend already has a listener; Rift will not adopt an unowned process",
+                "managed backend port is in use; Rift will not adopt an unowned process",
             ));
         }
-        Ok(Err(error)) if error.kind() == io::ErrorKind::ConnectionRefused => {}
-        Ok(Err(error)) => return Err(error),
-        Err(_) => {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "managed backend preflight connection timed out",
-            ));
-        }
+        Err(error) => return Err(error),
     }
     let (program, arguments) = server.config.command.split_first().ok_or_else(|| {
         io::Error::new(
