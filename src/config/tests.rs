@@ -433,7 +433,9 @@ fn http_services_are_independently_optional_and_have_loopback_defaults() {
             listen: "[::1]:8081".parse().unwrap(),
             api: false,
             ui: false,
-            token: None
+            token: None,
+            operators: BTreeMap::new(),
+            records_directory: None,
         }
     );
     assert_eq!(
@@ -543,6 +545,44 @@ fn programmatic_web_options_cannot_bypass_token_validation() {
     );
     config.web.as_mut().unwrap().token = Some("0123456789abcdef".into());
     config.validate().unwrap();
+}
+
+#[test]
+fn operator_credentials_and_privileged_scopes_are_validated() {
+    let root = "return {listeners={main='127.0.0.1:0'},backends={lobby='127.0.0.1:1'},routes={main='lobby'},web={listen='0.0.0.0:8080',operators={staff={%s}}}}";
+    let valid = "token='independent-staff-token',permissions={'read','logs'},groups={'lobby'}";
+    assert!(Config::from_lua(&root.replace("%s", valid), "operators.lua").is_ok());
+    for invalid in [
+        "token='short',permissions={'read'}",
+        "token='independent-staff-token',permissions={'unknown'}",
+        "token='independent-staff-token',permissions={'config'},groups={'lobby'}",
+        "token='independent-staff-token',permissions={'deploy'},groups={}",
+        "token='independent-staff-token',permissions={'extensions'},groups={'lobby'}",
+    ] {
+        assert!(Config::from_lua(&root.replace("%s", invalid), "operators.lua").is_err());
+    }
+    assert!(
+        Config::from_lua(
+            &root.replace("%s", valid).replace("staff=", "admin="),
+            "operators.lua"
+        )
+        .is_err()
+    );
+    let duplicate = root
+        .replace("%s", valid)
+        .replace("operators=", "token='independent-staff-token',operators=");
+    assert!(Config::from_lua(&duplicate, "operators.lua").is_err());
+    let mut config = Config::from_lua(&root.replace("%s", valid), "operators.lua").unwrap();
+    config
+        .web
+        .as_mut()
+        .unwrap()
+        .operators
+        .get_mut("staff")
+        .unwrap()
+        .permissions
+        .insert("config".into());
+    assert!(config.validate().is_err());
 }
 
 const NETWORK: &str = "return {

@@ -13,9 +13,15 @@ use tokio::sync::Semaphore;
 
 pub use crate::message_script::MessageScript;
 pub use crate::{http_script::HttpScript, script::RouteScript};
+pub use managed::ManagedServer;
 pub use messaging::{MessagingConfig, MessagingPrincipal, MessagingStream, MessagingSubscription};
+pub use services::{InstanceStorage, ServiceGroup, ServiceInstance, ServiceScaling};
+pub use templates::ServerTemplate;
 
+mod managed;
 mod messaging;
+mod services;
+mod templates;
 
 // Configuration evaluation includes cold VM setup and can be descheduled on
 // busy hosts. Keep it bounded without applying the latency-sensitive callback
@@ -26,6 +32,10 @@ const CONFIGURATION_TIMEOUT: Duration = Duration::from_secs(5);
 pub struct Config {
     pub listeners: BTreeMap<String, SocketAddr>,
     pub backends: BTreeMap<String, Backend>,
+    pub managed_servers: BTreeMap<String, ManagedServer>,
+    pub templates: BTreeMap<String, ServerTemplate>,
+    pub service_groups: BTreeMap<String, ServiceGroup>,
+    pub instances: BTreeMap<String, ServiceInstance>,
     pub routes: BTreeMap<String, Route>,
     pub limits: Limits,
     pub authentication: Authentication,
@@ -122,15 +132,52 @@ pub const ADMIN_PERMISSIONS: &[&str] = &[
     "transfer",
     "reload",
     "shutdown",
+    "servers",
 ];
 
-/// Optional administration service. A token is mandatory for non-loopback binds.
+/// Grants available to named `web.operators`.
+pub const WEB_PERMISSIONS: &[&str] = &[
+    "read",
+    "logs",
+    "console",
+    "servers",
+    "config",
+    "deploy",
+    "audit",
+    "extensions",
+];
+
+/// These grants can affect the whole proxy, so they require unrestricted scope.
+const UNSCOPED_WEB_PERMISSIONS: &[&str] = &["config", "deploy", "extensions"];
+
+/// Identities that Rift itself records in operator audit logs.
+const RESERVED_OPERATOR_NAMES: &[&str] = &[
+    "admin",
+    "local",
+    "anonymous",
+    "system",
+    "signal",
+    "local-admin",
+    "scaler",
+];
+
+/// Optional administration service. Credentials are mandatory for non-loopback binds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebConfig {
     pub listen: SocketAddr,
     pub token: Option<String>,
     pub api: bool,
     pub ui: bool,
+    pub operators: BTreeMap<String, WebOperator>,
+    pub records_directory: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebOperator {
+    pub token: String,
+    pub permissions: BTreeSet<String>,
+    /// None grants access to every group and static managed server.
+    pub groups: Option<BTreeSet<String>>,
 }
 
 impl Default for WebConfig {
@@ -140,6 +187,8 @@ impl Default for WebConfig {
             token: None,
             api: true,
             ui: true,
+            operators: BTreeMap::new(),
+            records_directory: None,
         }
     }
 }
@@ -222,6 +271,10 @@ impl Config {
         let config = Self {
             listeners: BTreeMap::from([("default".into(), address(listen, "listen")?)]),
             backends: BTreeMap::from([("default".into(), Backend::parse(backend)?)]),
+            managed_servers: BTreeMap::new(),
+            templates: BTreeMap::new(),
+            service_groups: BTreeMap::new(),
+            instances: BTreeMap::new(),
             routes: BTreeMap::from([("default".into(), Route::Direct("default".into()))]),
             limits: Limits::default(),
             authentication: Authentication::default(),
@@ -268,7 +321,11 @@ impl Config {
 
     /// Evaluate an in-memory script without access to local modules or plugins.
     pub fn from_lua(source: &str, name: &str) -> io::Result<Self> {
-        Self::from_source(crate::script::ScriptSource::new(source, name))
+        Self::from_source(
+            crate::script::ScriptSource::new(source, name),
+            Path::new("."),
+            None,
+        )
     }
 
     /// Evaluate edited source with modules relative to its configuration path.
@@ -276,10 +333,37 @@ impl Config {
     pub fn from_lua_at(source: &str, path: &Path) -> io::Result<Self> {
         let source = crate::script::ScriptSource::from_path(source, path)
             .map_err(|error| invalid(format!("{}: {error}", path.display())))?;
-        Self::from_source(source)
+        let directory = source.root.clone();
+        Self::from_source(source, &directory, None)
     }
 
-    fn from_source(source: crate::script::ScriptSource) -> io::Result<Self> {
+    /// Validate edited configuration against the current runtime instances.
+    /// Definitions supplied by Lua cannot replace a live instance.
+    pub fn from_lua_at_with_instances(
+        source: &str,
+        path: &Path,
+        previous: &Self,
+    ) -> io::Result<Self> {
+        let source = crate::script::ScriptSource::from_path(source, path)
+            .map_err(|error| invalid(format!("{}: {error}", path.display())))?;
+        let directory = source.root.clone();
+        Self::from_source(source, &directory, Some(previous))
+    }
+
+    /// Validate an in-memory script against the current runtime instances.
+    pub fn from_lua_with_instances(source: &str, name: &str, previous: &Self) -> io::Result<Self> {
+        Self::from_source(
+            crate::script::ScriptSource::new(source, name),
+            Path::new("."),
+            Some(previous),
+        )
+    }
+
+    fn from_source(
+        source: crate::script::ScriptSource,
+        directory: &Path,
+        previous: Option<&Self>,
+    ) -> io::Result<Self> {
         let name = source.entry.name.as_ref();
         let parse = || -> Result<Self, String> {
             let (_lua, value) =
@@ -291,6 +375,9 @@ impl Config {
                 &[
                     "listeners",
                     "backends",
+                    "managed_servers",
+                    "templates",
+                    "service_groups",
                     "routes",
                     "limits",
                     "authentication",
@@ -328,6 +415,9 @@ impl Config {
                         .map_err(|error| format!("backends.{name}: {error}"))
                 })
                 .collect::<Result<_, _>>()?;
+            let managed_servers = managed::parse(&root, directory)?;
+            let templates = templates::parse(&root, directory)?;
+            let service_groups = services::parse(&_lua, &root, directory)?;
             let routes = routes(root.get("routes").map_err(|e| e.to_string())?)?;
             let mut limits = Limits::default();
             let value: Value = root.get("limits").map_err(|e| e.to_string())?;
@@ -484,7 +574,7 @@ impl Config {
                 Value::Nil => BTreeSet::new(),
                 value => string_set(value, "draining")?,
             };
-            let web = web_options(&root)?;
+            let web = web_options(&root, directory)?;
             let status = status_options(&root)?;
             let shutdown_timeout = Duration::from_millis(integer(
                 &root,
@@ -525,6 +615,10 @@ impl Config {
             Ok(Self {
                 listeners,
                 backends,
+                managed_servers,
+                templates,
+                service_groups,
+                instances: BTreeMap::new(),
                 routes,
                 limits,
                 authentication,
@@ -549,7 +643,11 @@ impl Config {
                 shutdown_timeout,
             })
         };
-        let config = parse().map_err(|error| invalid(format!("{name}: {error}")))?;
+        let mut config = parse().map_err(|error| invalid(format!("{name}: {error}")))?;
+        if let Some(previous) = previous {
+            services::restore_instances(&mut config, previous)
+                .map_err(|error| invalid(format!("{name}: {error}")))?;
+        }
         config
             .validate()
             .map_err(|error| invalid(format!("{name}: {error}")))?;
@@ -557,6 +655,9 @@ impl Config {
     }
 
     pub fn validate(&self) -> io::Result<()> {
+        services::validate(self).map_err(invalid)?;
+        managed::validate(&self.managed_servers, &self.backends).map_err(invalid)?;
+        templates::validate(self).map_err(invalid)?;
         if let Some(extensions) = &self.extensions {
             if !self.authentication.online_mode {
                 return Err(invalid("extensions requires authentication.online_mode"));
@@ -565,7 +666,7 @@ impl Config {
                 if !(1..=100_000).contains(capacity) {
                     return Err(invalid("extensions.queues: capacity must be 1..=100000"));
                 }
-                if !self.backends.contains_key(backend) {
+                if !self.is_destination(backend) {
                     return Err(invalid("extensions.queues: unknown backend"));
                 }
             }
@@ -612,7 +713,7 @@ impl Config {
             ),
             (
                 "backends",
-                self.backends.is_empty(),
+                self.backends.is_empty() && self.service_groups.is_empty(),
                 self.backends.keys().any(|name| name.trim().is_empty()),
             ),
         ] {
@@ -625,7 +726,7 @@ impl Config {
         }
         if self.network.bungeecord {
             let mut names = BTreeSet::new();
-            for name in self.backends.keys() {
+            for name in self.backends.keys().chain(self.service_groups.keys()) {
                 if !names.insert(name.to_ascii_lowercase()) {
                     return Err(invalid(
                         "network.bungeecord: backend names must be unique ignoring ASCII case",
@@ -722,7 +823,7 @@ impl Config {
                 return Err(invalid(format!("{label}: at most 16 backend names")));
             }
             for name in names {
-                if !self.backends.contains_key(name) || !seen.insert(name) {
+                if !self.is_destination(name) || !seen.insert(name) {
                     return Err(invalid(format!(
                         "{label}: unknown or duplicate backend {name:?}"
                     )));
@@ -730,7 +831,7 @@ impl Config {
             }
         }
         for (backend, access) in &self.network.access {
-            if !self.backends.contains_key(backend) {
+            if !self.is_destination(backend) {
                 return Err(invalid(format!(
                     "network.access.{backend}: unknown backend"
                 )));
@@ -752,12 +853,12 @@ impl Config {
             }
         }
         for (name, targets) in &self.fallbacks {
-            if !self.backends.contains_key(name) {
+            if !self.is_destination(name) {
                 return Err(invalid(format!("fallbacks.{name}: unknown backend")));
             }
             let mut seen = std::collections::HashSet::new();
             for target in targets {
-                if !self.backends.contains_key(target) || target == name || !seen.insert(target) {
+                if !self.is_destination(target) || target == name || !seen.insert(target) {
                     return Err(invalid(format!(
                         "fallbacks.{name}: unknown, duplicate or self backend {target:?}"
                     )));
@@ -766,6 +867,53 @@ impl Config {
         }
         // Lists are deliberately flat: fallback targets' own lists are not followed.
         if let Some(web) = &self.web {
+            if web.operators.len() > 128 {
+                return Err(invalid("web.operators: at most 128 operators"));
+            }
+            let mut tokens = BTreeSet::new();
+            if let Some(token) = &web.token {
+                tokens.insert(token.as_str());
+            }
+            for (name, operator) in &web.operators {
+                if !services::safe_name(name) || RESERVED_OPERATOR_NAMES.contains(&name.as_str()) {
+                    return Err(invalid(format!(
+                        "web.operators: invalid or reserved operator name {name:?}; use up to 128 ASCII letters, digits, underscores or hyphens"
+                    )));
+                }
+                let path = format!("web.operators.{name}");
+                if !(16..=4096).contains(&operator.token.len())
+                    || !operator.token.bytes().all(|b| b.is_ascii_graphic())
+                    || !tokens.insert(&operator.token)
+                {
+                    return Err(invalid(format!(
+                        "{path}.token: expected a unique secret of 16..=4096 printable bytes"
+                    )));
+                }
+                if let Some(permission) = operator
+                    .permissions
+                    .iter()
+                    .find(|p| !WEB_PERMISSIONS.contains(&p.as_str()))
+                {
+                    return Err(invalid(format!(
+                        "{path}.permissions: unknown permission {permission:?}; expected {}",
+                        WEB_PERMISSIONS.join(", ")
+                    )));
+                }
+                if let Some(groups) = &operator.groups {
+                    if groups.len() > 128 {
+                        return Err(invalid(format!("{path}.groups: at most 128 scopes")));
+                    }
+                    if operator
+                        .permissions
+                        .iter()
+                        .any(|p| UNSCOPED_WEB_PERMISSIONS.contains(&p.as_str()))
+                    {
+                        return Err(invalid(format!(
+                            "{path}: config, deploy and extensions require unrestricted group access"
+                        )));
+                    }
+                }
+            }
             if let Some(token) = &web.token {
                 if !(16..=4096).contains(&token.len())
                     || !token.bytes().all(|byte| byte.is_ascii_graphic())
@@ -774,7 +922,7 @@ impl Config {
                         "web.token: expected 16..=4096 printable ASCII bytes without whitespace",
                     ));
                 }
-            } else if !web.listen.ip().is_loopback() {
+            } else if web.operators.is_empty() && !web.listen.ip().is_loopback() {
                 return Err(invalid(
                     "web.token: required when web.listen is not loopback",
                 ));
@@ -845,12 +993,18 @@ impl Config {
     /// Apply the same rule to initial login, commands and failure recovery.
     /// Unknown destinations are never permitted, even with no access entry.
     pub fn can_access(&self, backend: &str, username: &str) -> bool {
-        self.backends.contains_key(backend)
+        self.is_destination(backend)
             && self
                 .network
                 .access
                 .get(backend)
                 .is_none_or(|access| access.permits(username))
+            && self.instances.get(backend).is_none_or(|instance| {
+                self.network
+                    .access
+                    .get(&instance.group)
+                    .is_none_or(|access| access.permits(username))
+            })
     }
 
     pub fn mode(&self, listener: &str) -> io::Result<Mode> {
@@ -858,6 +1012,11 @@ impl Config {
             self.backends
                 .get(name)
                 .cloned()
+                .or_else(|| {
+                    self.service_groups.get(name).and_then(|group| {
+                        Backend::parse(&format!("127.0.0.1:{}", group.port_start)).ok()
+                    })
+                })
                 .ok_or_else(|| invalid(format!("routes.{listener}: unknown backend {name:?}")))
         };
         match &self.routes[listener] {
@@ -1041,8 +1200,20 @@ fn service_listen(table: &Table, path: &str, default: SocketAddr) -> Result<Sock
     }
 }
 
-fn web_options(root: &Table) -> Result<Option<WebConfig>, String> {
-    let Some(table) = service_options(root, "web", &["enabled", "listen", "token", "api", "ui"])?
+fn web_options(root: &Table, base: &Path) -> Result<Option<WebConfig>, String> {
+    let Some(table) = service_options(
+        root,
+        "web",
+        &[
+            "enabled",
+            "listen",
+            "token",
+            "api",
+            "ui",
+            "operators",
+            "records_directory",
+        ],
+    )?
     else {
         return Ok(None);
     };
@@ -1051,11 +1222,62 @@ fn web_options(root: &Table) -> Result<Option<WebConfig>, String> {
         Value::Nil => None,
         value => Some(string(value, "web.token")?),
     };
+    // Names, credentials and grants are checked by `Config::validate`.
+    let mut operators = BTreeMap::new();
+    if let Some(values) = options_map(&table, "operators")? {
+        for pair in values.pairs::<Value, Value>() {
+            let (name, value) = pair.map_err(|e| e.to_string())?;
+            let name = string(name, "web.operators key")?;
+            let path = format!("web.operators.{name}");
+            let value = self::table(value, &path)?;
+            fields(&value, &["token", "permissions", "groups"], &path)?;
+            let token = string(
+                value.raw_get("token").map_err(|e| e.to_string())?,
+                &format!("{path}.token"),
+            )?;
+            let permissions = string_set(
+                value.raw_get("permissions").map_err(|e| e.to_string())?,
+                &format!("{path}.permissions"),
+            )?;
+            let groups = match value
+                .raw_get::<Value>("groups")
+                .map_err(|e| e.to_string())?
+            {
+                Value::Nil => None,
+                value => Some(string_set(value, &format!("{path}.groups"))?),
+            };
+            operators.insert(
+                name,
+                WebOperator {
+                    token,
+                    permissions,
+                    groups,
+                },
+            );
+        }
+    }
     let config = WebConfig {
         listen: service_listen(&table, "web", WebConfig::default().listen)?,
         token,
         api: boolean(&table, "web", "api", true)?,
         ui: boolean(&table, "web", "ui", true)?,
+        operators,
+        records_directory: match table
+            .raw_get::<Value>("records_directory")
+            .map_err(|e| e.to_string())?
+        {
+            Value::Nil => None,
+            value => {
+                let value = string(value, "web.records_directory")?;
+                if value.trim().is_empty()
+                    || value.len() > 4096
+                    || value.chars().any(char::is_control)
+                {
+                    return Err("web.records_directory: invalid path".into());
+                }
+                Some(base.join(value))
+            }
+        },
     };
     Ok(enabled.then_some(config))
 }
@@ -1204,7 +1426,7 @@ fn strings(value: Value, path: &str) -> Result<BTreeMap<String, String>, String>
         }
         result.insert(key.clone(), string(value, &format!("{path}.{key}"))?);
     }
-    if result.is_empty() {
+    if result.is_empty() && path != "backends" {
         return Err(format!("{path}: must not be empty"));
     }
     Ok(result)

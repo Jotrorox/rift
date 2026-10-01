@@ -56,7 +56,7 @@ returned Lua configuration table before starting:
 admin = {
     listen = "127.0.0.1:9091",
     token_env = "RIFT_ADMIN_TOKEN",
-    permissions = { "status", "maintenance", "drain", "transfer", "reload", "shutdown" },
+    permissions = { "status", "servers", "maintenance", "drain", "transfer", "reload", "shutdown" },
 },
 maintenance = false,
 draining = {}, -- For example, { "survival" } blocks new attachments to survival.
@@ -101,6 +101,17 @@ a different `token_env` variable. It defaults to `127.0.0.1:9091`; use
 maintenance state. Commands fail with an actionable error when authentication,
 permission checks or validation fail. Use the local CLI through SSH for remote
 administration.
+
+The `servers` permission grants `rift admin servers`, `rift admin start <backend>`
+and `rift admin stop <backend>` for configured [managed servers](managed-servers.md).
+It also grants `rift admin groups`, `rift admin create <group>` and
+`rift admin remove <instance>` for [service groups](managed-servers.md#service-groups-and-dynamic-instances).
+Creation allocates a port and registers a stopped backend; removal waits for
+child cleanup and refuses players or pending attachments.
+Start and stop return an accepted response immediately; poll `servers` to verify
+completion. A failed start appears in the server's `last_error` field. These
+commands never accept arbitrary process commands or modify ordinary unmanaged
+backends. `status` also includes the managed server state for read-only inspection.
 
 Connection `rate_limit` runs before handshake parsing. `login_rate_limit` runs
 at login admission and has the same token-bucket fields and defaults; it allows
@@ -281,6 +292,9 @@ isolation and cannot detect changes incompatible with an already running process
 | Shutdown deadline | New value applies to the later shutdown drain |
 | `web`, `status`, standalone `metrics`, web bearer token | Can enable, disable or move live; replacement sockets bind before commit |
 | Gameplay listeners, operational `admin` bind/token variable/permissions | Restart required; incompatible reload rejects the entire candidate |
+| `managed_servers` definitions or addresses of managed backends | Restart required; running processes and their lifecycle policy remain attached to the original definition |
+| `service_groups`, `templates` and scaling policies | Apply live while each registered instance keeps its process definition, storage policy and an in-range port; otherwise the reload names the instance to remove first. Create and remove instances with admin or web operations |
+| Runtime service instances | Preserved on reload; registrations are not persisted across proxy restarts |
 
 Already accepted connections keep their original configuration snapshot while
 initial login completes. A route edit never transfers a connected player.
@@ -311,9 +325,31 @@ attachments to that backend (including fallback and explicit transfers), and
 allows eligible configured fallbacks to accept new players. Wait for the backend
 player count to reach zero or transfer supported clients before stopping it.
 
+For a managed backend, check both players and attachments before stopping:
+
+```sh
+rift admin servers
+rift admin stop survival
+rift admin servers
+# After maintenance, re-enable automatic wake and start the process:
+rift admin start survival
+rift admin servers
+```
+
+The `reservations` count includes pending and established backend attachments,
+including connections whose protocol does not support player tracking. Tracked
+players also have an attachment, so these counts overlap.
+Manual stop refuses occupied servers and pauses automatic wake so an incoming
+connection cannot undo maintenance. Start re-enables automatic wake according to
+the configured policy. Idle shutdown leaves automatic wake available. Start and
+stop acknowledgements mean the request was accepted; verify `running` or `stopped`
+in the following `servers` response. Shutdown failures are reported there too.
+
 Transfers retain the client socket on Minecraft 1.8.9–26.3 (50 explicitly mapped release protocols) while
 attaching the target backend and checking the same UUID/name. Completion requires
-the replacement world's Join Game, with a 30-second operation cap. Other client
+the replacement world's Join Game, with a 30-second transition cap. A sleeping
+managed destination may first take up to its configured startup deadline to
+become ready; the original session continues forwarding during that wait. Other client
 versions and invalid targets are rejected without moving the player. The target
 must permit the player under both the session's original access rules and the
 current administrator-request configuration. A denied or failed replacement
@@ -407,8 +443,12 @@ and signal reloads share one serialized configuration transaction path.
 
 The `web` configuration controls the dashboard and HTTP API, with its own
 `web.token` bearer credential. Operational `admin.permissions` do not restrict
-the HTTP API: a web credential grants the enabled HTTP API capabilities,
-including configuration editing. The `status` server is read-only and
+the HTTP API: the legacy `web.token` grants full enabled API access. Named
+`web.operators` can restrict permissions and service groups; the dashboard
+provides managed-server logs/commands, structured definitions, deployment
+history/rollback and audit records. See [HTTP access](http.md#authentication-and-access).
+Configure `web.records_directory` on writable storage for retained records when
+the configuration mount is read-only. The `status` server is read-only and
 unauthenticated. All services are disabled unless configured.
 
 The supplied systemd and Compose examples intentionally keep configuration

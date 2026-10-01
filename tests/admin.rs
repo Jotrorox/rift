@@ -20,7 +20,8 @@ mod game;
 use game::{GameStream, accept_game, connect_game};
 
 const SECRET: &str = "rift-integration-test-secret-32-bytes";
-const PERMISSIONS: &str = "'status', 'maintenance', 'drain', 'transfer', 'reload', 'shutdown'";
+const PERMISSIONS: &str =
+    "'status', 'servers', 'maintenance', 'drain', 'transfer', 'reload', 'shutdown'";
 
 struct Fixture(PathBuf);
 impl Fixture {
@@ -133,7 +134,11 @@ impl Process {
     }
 
     fn message(&self, expected: &str) {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        self.message_with_timeout(expected, Duration::from_secs(10));
+    }
+
+    fn message_with_timeout(&self, expected: &str, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
         let mut logs = Vec::new();
         loop {
             let line = self
@@ -182,6 +187,46 @@ fn config(backends: &[&TcpListener], options: &str, permissions: &str) -> String
         {options}
     }}"
     )
+}
+
+#[test]
+fn service_group_cli_registers_and_removes_instances_with_servers_permission() {
+    let fixture = Fixture::new();
+    let backend = TcpListener::bind("127.0.0.1:0").unwrap();
+    let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = reservation.local_addr().unwrap().port();
+    let options = format!(
+        "service_groups = {{ lobby = {{ directory = 'servers/{{name}}', command = {{'private-group-command', 'private-group-argument'}}, port_range = {{{port}, {port}}} }} }},"
+    );
+    let source = config(&[&backend], &options, "'servers'");
+    fixture.write(&source);
+    drop(reservation);
+    let process = fixture.spawn();
+    let groups = process.ok(&["groups"]);
+    assert_eq!(groups["groups"][0]["name"], "lobby");
+    assert_eq!(groups["groups"][0]["instances"], json!([]));
+    assert!(!groups.to_string().contains("private-group"));
+    assert!(!groups.to_string().contains("servers/"));
+    let created = process.ok(&["create", "lobby"]);
+    assert_eq!(created["name"], "lobby-1");
+    assert_eq!(created["port"], port);
+    assert_eq!(created["created"], true);
+    assert_eq!(
+        process.ok(&["groups"])["groups"][0]["instances"],
+        json!(["lobby-1"])
+    );
+    let servers = process.ok(&["servers"]);
+    assert_eq!(servers["servers"][0]["name"], "lobby-1");
+    assert_eq!(servers["servers"][0]["state"], "stopped");
+    assert_eq!(servers["servers"][0]["port"], port);
+    assert!(!process.command(&["create", "lobby"]).status.success());
+    assert_eq!(process.ok(&["remove", "lobby-1"])["removed"], true);
+    assert_eq!(process.ok(&["servers"])["servers"], json!([]));
+    assert_eq!(process.ok(&["groups"])["groups"][0]["instances"], json!([]));
+    assert_eq!(
+        fs::read_to_string(fixture.0.join("rift.lua")).unwrap(),
+        source
+    );
 }
 
 fn connect(address: SocketAddr) -> TcpStream {
@@ -290,6 +335,9 @@ fn authentication_and_permissions_reject_actions_without_changing_state() {
         vec!["drain", "b0", "on"],
         vec!["reload"],
         vec!["shutdown"],
+        vec!["servers"],
+        vec!["start", "b0"],
+        vec!["stop", "b0"],
     ] {
         let output = process.command(&args);
         assert!(!output.status.success());
@@ -303,6 +351,68 @@ fn authentication_and_permissions_reject_actions_without_changing_state() {
     let mut client = connect_game(process.front);
     let mut server = accept_game(&backend);
     exchange(&mut client, &mut server);
+}
+
+#[test]
+fn server_commands_reject_unknown_and_unmanaged_backends() {
+    let fixture = Fixture::new();
+    let backend = TcpListener::bind("127.0.0.1:0").unwrap();
+    fixture.write(&config(&[&backend], "", PERMISSIONS));
+    let process = fixture.spawn();
+    assert_eq!(process.ok(&["servers"])["servers"], json!([]));
+    for operation in ["start", "stop"] {
+        for (name, expected) in [("missing", "unknown backend"), ("b0", "not managed")] {
+            let response = process.request(json!({"token":SECRET,"args":[operation,name]}));
+            assert_eq!(response["ok"], false);
+            assert!(
+                response["error"].as_str().unwrap().contains(expected),
+                "{response}"
+            );
+        }
+    }
+    let mut client = connect_game(process.front);
+    let mut server = accept_game(&backend);
+    exchange(&mut client, &mut server);
+}
+
+#[test]
+fn server_commands_accept_lifecycle_requests_and_report_completion_separately() {
+    let fixture = Fixture::new();
+    let backend = TcpListener::bind("127.0.0.1:0").unwrap();
+    fixture.write(&config(&[&backend], "managed_servers = { b0 = { command = {'rift-test-executable-that-does-not-exist', 'private-process-argument'}, directory = '.', start_timeout_ms = 1000 } },", "'servers'"));
+    drop(backend);
+    let process = fixture.spawn();
+    let initial = process.ok(&["servers"]);
+    assert_eq!(initial["servers"][0]["name"], "b0");
+    assert_eq!(initial["servers"][0]["state"], "stopped");
+    assert_eq!(initial["servers"][0]["automatic_start"], true);
+    let stopped = process.ok(&["stop", "b0"]);
+    assert_eq!(stopped["accepted"], true);
+    assert_eq!(
+        process.ok(&["servers"])["servers"][0]["automatic_start"],
+        false
+    );
+    let started = process.ok(&["start", "b0"]);
+    assert_eq!(started["accepted"], true);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let servers = process.ok(&["servers"]);
+        assert!(!servers.to_string().contains("private-process-argument"));
+        assert!(
+            !servers
+                .to_string()
+                .contains("rift-test-executable-that-does-not-exist")
+        );
+        if servers["servers"][0]["state"] == "failed" {
+            assert!(servers["servers"][0]["last_error"].is_string());
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "failed start was not reported: {servers}"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 #[test]
@@ -498,4 +608,137 @@ fn shutdown_acknowledges_then_drains_live_sessions() {
     drop(client);
     drop(server);
     process.exited();
+}
+
+/// A real managed child that holds its listener after receiving `stop` until
+/// the parent test releases it. Running the ordinary suite is a no-op.
+#[cfg(target_os = "linux")]
+#[test]
+fn slow_removal_process_helper() {
+    let Ok(properties) = fs::read_to_string("server.properties") else {
+        return;
+    };
+    let port = properties
+        .lines()
+        .find_map(|line| line.strip_prefix("server-port="))
+        .unwrap();
+    let _listener = TcpListener::bind(format!("127.0.0.1:{port}")).unwrap();
+    let mut command = String::new();
+    std::io::stdin().lock().read_line(&mut command).unwrap();
+    assert_eq!(command, "stop\n");
+    fs::write("../../removal-started", "yes").unwrap();
+    while !std::path::Path::new("../../release-removal").exists() {
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn sigterm_drains_promptly_during_slow_removal_and_reaps_children() {
+    // Ensure a failing assertion cannot leave the helper running indefinitely.
+    struct OwnedChild(u32);
+    impl Drop for OwnedChild {
+        fn drop(&mut self) {
+            if std::path::Path::new(&format!("/proc/{}", self.0)).exists() {
+                let _ = Command::new("kill")
+                    .args(["-KILL", &self.0.to_string()])
+                    .status();
+            }
+        }
+    }
+
+    let fixture = Fixture::new();
+    let backend = TcpListener::bind("127.0.0.1:0").unwrap();
+    let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = reservation.local_addr().unwrap().port();
+    let helper = std::env::current_exe().unwrap();
+    fs::write(fixture.0.join("helper.jar"), "test template").unwrap();
+    let options = format!(
+        "templates = {{ test = {{ server_jar = 'helper.jar' }} }},
+         service_groups = {{ lobby = {{
+             template = 'test', storage = 'disposable',
+             directory = 'servers/{{name}}',
+             command = {{{}, '--exact', 'slow_removal_process_helper', '--nocapture'}},
+             port_range = {{{port}, {port}}}, stop_timeout_ms = 8000
+         }} }},",
+        serde_json::to_string(&helper.to_string_lossy()).unwrap(),
+    );
+    fixture.write(&config(&[&backend], &options, PERMISSIONS));
+    drop(reservation);
+    let mut process = fixture.spawn();
+    process.ok(&["create", "lobby"]);
+    process.ok(&["start", "lobby-1"]);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let pid = loop {
+        let servers = process.ok(&["servers"]);
+        let state = &servers["servers"][0];
+        if state["state"] == "running" {
+            break state["pid"].as_u64().unwrap() as u32;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "child did not become ready: {state}"
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
+    let child = OwnedChild(pid);
+
+    let mut client = connect_game(process.front);
+    let mut server = accept_game(&backend);
+    exchange(&mut client, &mut server);
+    let mut removal = connect(process.admin);
+    writeln!(
+        removal,
+        "{}",
+        json!({"token":SECRET,"args":["remove","lobby-1"]})
+    )
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !fixture.0.join("removal-started").exists() {
+        assert!(
+            Instant::now() < deadline,
+            "removal did not reach the child; servers: {}; child log: {:?}",
+            process.ok(&["servers"]),
+            fs::read_to_string(fixture.0.join("servers/lobby-1/rift-server.log")),
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    // Disconnecting the requester must not cancel the transaction either.
+    drop(removal);
+
+    let signalled = Instant::now();
+    assert!(
+        Command::new("kill")
+            .args(["-TERM", &process.child.id().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    process.message_with_timeout("draining 1 connections", Duration::from_secs(1));
+    assert!(signalled.elapsed() < Duration::from_secs(1));
+    let deadline = signalled + Duration::from_secs(1);
+    while TcpStream::connect_timeout(&process.front, Duration::from_millis(50)).is_ok() {
+        assert!(
+            Instant::now() < deadline,
+            "proxy listener did not close promptly"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    // Drain existing sessions while the removal is still blocked.
+    exchange(&mut client, &mut server);
+    drop(client);
+    drop(server);
+    thread::sleep(Duration::from_millis(100));
+    assert!(process.child.try_wait().unwrap().is_none());
+    assert!(std::path::Path::new(&format!("/proc/{pid}")).exists());
+    assert!(fixture.0.join("servers/lobby-1").exists());
+
+    fs::write(fixture.0.join("release-removal"), "yes").unwrap();
+    process.message("shutdown complete");
+    process.exited();
+    // Absence from /proc proves the child was reaped, including any zombie.
+    assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
+    assert!(!fixture.0.join("servers/lobby-1").exists());
+    assert!(TcpListener::bind(("127.0.0.1", port)).is_ok());
+    drop(child);
 }

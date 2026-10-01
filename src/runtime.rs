@@ -22,7 +22,7 @@ use std::{
     io,
     net::SocketAddr,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
     time::{Duration, Instant},
 };
 use tokio::{
@@ -54,6 +54,9 @@ pub struct Snapshot {
     pub health: Health,
     cache: status::Cache,
     pub players: Arc<PlayerRegistry>,
+    pub managed: rift::managed::ManagedServers,
+    live: Arc<Mutex<Weak<Snapshot>>>,
+    instance_sequence: Arc<Mutex<BTreeMap<String, u64>>>,
     pub extensions: rift::extensions::Extensions,
     pub messaging: Broker,
     pub messaging_streams: Arc<HashMap<String, Stream>>,
@@ -129,7 +132,19 @@ impl Snapshot {
             messaging.clone(),
             previous.map(|old| &old.extensions),
         )?;
+        let players = previous.map_or_else(
+            || Arc::new(PlayerRegistry::default()),
+            |old| old.players.clone(),
+        );
+        let managed = previous.map_or_else(
+            || rift::managed::ManagedServers::new(&config, players.clone()),
+            |old| old.managed.clone(),
+        );
         Ok(Self {
+            live: previous
+                .map_or_else(|| Arc::new(Mutex::new(Weak::new())), |old| old.live.clone()),
+            instance_sequence: previous
+                .map_or_else(Arc::default, |old| old.instance_sequence.clone()),
             extensions,
             source: None,
             revision: "runtime".into(),
@@ -150,11 +165,47 @@ impl Snapshot {
             ),
             health,
             cache: status::Cache::default(),
-            players: previous.map_or_else(
-                || Arc::new(PlayerRegistry::default()),
-                |old| old.players.clone(),
-            ),
+            players,
+            managed,
         })
+    }
+
+    /// Resolve a service group at admission time, sharing load across its
+    /// instances while retaining the full list for startup/connect fallback.
+    pub fn candidates(&self, destinations: &[String]) -> Vec<String> {
+        let loads: BTreeMap<_, _> = self
+            .managed
+            .snapshot()
+            .into_iter()
+            .map(|server| (server.name, server.reservations.max(server.players)))
+            .collect();
+        let mut seen = std::collections::BTreeSet::new();
+        destinations
+            .iter()
+            .flat_map(|destination| {
+                let mut names = self.config.destination_names(destination);
+                if self.config.service_groups.contains_key(destination) {
+                    names.sort_by_key(|name| (loads.get(name).copied().unwrap_or(0), name.clone()));
+                }
+                names
+            })
+            .filter(|name| seen.insert(name.clone()))
+            .collect()
+    }
+
+    /// Whether a new attachment may target this backend: managed servers can
+    /// be woken on demand, while unmanaged backends must pass health checks.
+    pub fn reachable(&self, name: &str) -> bool {
+        self.managed.can_connect(name)
+            && (self.managed.is_managed(name) || self.health.available(name))
+    }
+
+    pub fn latest(self: &Arc<Self>) -> Arc<Self> {
+        self.live
+            .lock()
+            .unwrap()
+            .upgrade()
+            .unwrap_or_else(|| self.clone())
     }
 }
 
@@ -241,9 +292,14 @@ pub async fn handle(
     let unmatched = primary.is_err();
     let primary = match primary {
         Ok(primary) => primary,
-        Err(_) if !is_status && snapshot.config.extensions.is_some() => {
-            snapshot.config.backends.keys().next().unwrap().clone()
-        }
+        Err(_) if !is_status && snapshot.config.extensions.is_some() => snapshot
+            .config
+            .backends
+            .keys()
+            .chain(snapshot.config.service_groups.keys())
+            .next()
+            .unwrap()
+            .clone(),
         Err(error) => {
             if is_status {
                 timeout(HANDSHAKE_TIMEOUT, session.status_request()).await??;
@@ -265,7 +321,11 @@ pub async fn handle(
         }
     };
     event.backend = Some(primary.clone());
-    event.backend_address = Some(snapshot.config.backends[&primary].address().to_owned());
+    event.backend_address = snapshot
+        .config
+        .backends
+        .get(&primary)
+        .map(|backend| backend.address().to_owned());
     event.failure = "io_error";
     if is_status {
         event.stage = "status_request";
@@ -365,8 +425,12 @@ pub async fn handle(
             let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect(reason)).await;
             return Err(io::Error::new(io::ErrorKind::Unsupported, reason));
         }
-        let network_configured =
-            snapshot.config.network != Default::default() || snapshot.config.extensions.is_some();
+        let network_configured = snapshot.config.network != Default::default()
+            || snapshot.config.extensions.is_some()
+            || !snapshot.config.service_groups.is_empty();
+        let tracked_login = network_configured
+            || !snapshot.config.managed_servers.is_empty()
+            || snapshot.authenticator.is_some();
         let network_enabled = session.switch_supported() && network_configured;
         if network_enabled {
             session.enable_network()?;
@@ -374,7 +438,7 @@ pub async fn handle(
         if snapshot.config.network.bungeecord {
             session.enable_bungeecord();
         }
-        let mut login_name = if network_configured || snapshot.authenticator.is_some() {
+        let mut login_name = if tracked_login {
             match timeout(HANDSHAKE_TIMEOUT, session.read_login_start()).await {
                 Ok(Ok(login)) => login.name,
                 result => {
@@ -471,7 +535,11 @@ pub async fn handle(
         };
         let candidate_result = if let Some(selected) = extension_selection {
             if snapshot.config.can_access(&selected, &login_name) {
-                Ok(vec![selected])
+                Ok(snapshot
+                    .candidates(&[selected])
+                    .into_iter()
+                    .filter(|name| snapshot.config.can_access(name, &login_name))
+                    .collect())
             } else {
                 Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
@@ -497,7 +565,7 @@ pub async fn handle(
         // Reserve the name before contacting a backend, which might
         // otherwise evict the existing player as soon as a duplicate logs in.
         // The client's claimed UUID is never used as the confirmed identity.
-        let mut name_reservation = if network_configured || snapshot.authenticator.is_some() {
+        let mut name_reservation = if tracked_login {
             match snapshot.players.reserve_name(&login_name) {
                 Ok(reservation) => Some(reservation),
                 Err(error) => {
@@ -509,9 +577,9 @@ pub async fn handle(
         } else {
             None
         };
-        let deadline = Deadline::now() + snapshot.config.limits.connect_timeout;
+        let mut deadline = Deadline::now() + snapshot.config.limits.connect_timeout;
         let mut current_backend = match network
-            .connect_initial(&mut session, &candidates, deadline, event)
+            .connect_initial(&mut session, &candidates, &mut deadline, event)
             .await
         {
             Ok(name) => name,
@@ -525,13 +593,13 @@ pub async fn handle(
                 return Err(error);
             }
         };
-        let entry_deadline = |current: &str| {
+        let entry_deadline = |current: &str, deadline: Deadline| {
             let remaining =
                 candidates.len() - candidates.iter().position(|name| name == current).unwrap();
             Deadline::now() + deadline.saturating_duration_since(Deadline::now()) / remaining as u32
         };
         let mut phase_deadline = if network_configured {
-            entry_deadline(&current_backend)
+            entry_deadline(&current_backend, deadline)
         } else {
             Deadline::now() + Duration::from_secs(30)
         };
@@ -552,6 +620,12 @@ pub async fn handle(
         let mut queue_tick = tokio::time::interval(Duration::from_secs(1));
         queue_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
+            let live_snapshot = snapshot.latest();
+            let network = Network {
+                snapshot: &live_snapshot,
+                addresses: &live_snapshot.addresses,
+                metrics: &metrics,
+            };
             event.stage = if transfer_reply.is_some() {
                 "transfer"
             } else {
@@ -602,7 +676,7 @@ pub async fn handle(
                         Ok(Some(target)) => {
                             match network.switch_for(&mut session, &current_backend, &[target], event, "queue").await {
                                 Ok(target) => {
-                                    current_address = snapshot.config.backends[&target].address().to_owned();
+                                    current_address = live_snapshot.config.backends[&target].address().to_owned();
                                     current_backend = target;
                                     phase_deadline = Deadline::now() + Duration::from_secs(30);
                                 }
@@ -637,7 +711,7 @@ pub async fn handle(
                     if snapshot.config.network.access.get(target).is_some_and(|access| !access.permits(name))
                         || !request.snapshot.config.can_access(target, name)
                         || control.draining(&request.snapshot.config, target)
-                        || !request.snapshot.health.available(target)
+                        || !request.snapshot.reachable(target)
                     {
                         metrics.transfer_failures.inc();
                         let _ = request.reply.send(Err("target backend is unavailable or the player does not have access".into()));
@@ -649,6 +723,35 @@ pub async fn handle(
                             let _ = request.reply.send(Err(error.to_string()));
                             continue;
                         }
+                    let target_network = Network {
+                        snapshot: &request.snapshot,
+                        addresses: &request.snapshot.addresses,
+                        metrics: &metrics,
+                    };
+                    let lease = match target_network.prepare_transfer(&mut session, &current_backend, target, event).await {
+                        Ok(lease) => lease,
+                        Err(error) => {
+                            metrics.transfer_failures.inc();
+                            if let Some(extension) = &mut session.extension { extension.transfer_failed().await; }
+                            let _ = request.reply.send(Err(format!("target transfer preparation failed: {error}")));
+                            if error.kind() == io::ErrorKind::PermissionDenied || !session.can_switch() {
+                                return Err(error);
+                            }
+                            if session.backend().is_none() {
+                                let candidates = network.recovery_candidates(&current_backend);
+                                let recovered = network.switch(&mut session, &current_backend, &candidates, event).await?;
+                                current_address = live_snapshot.config.backends[&recovered].address().to_owned();
+                                current_backend = recovered;
+                                phase_deadline = Deadline::now() + Duration::from_secs(30);
+                                metrics.fallbacks.inc();
+                            }
+                            continue;
+                        }
+                    };
+                    if request.reply.is_closed() {
+                        if let Some(extension) = &mut session.extension { extension.transfer_failed().await; }
+                        continue;
+                    }
                     let deadline = Deadline::now() + Duration::from_secs(30);
                     let connect_deadline = deadline.min(Deadline::now() + request.snapshot.config.limits.connect_timeout);
                     let upstream = match request.snapshot.config.backends[target].connect_until(&request.snapshot.addresses, connect_deadline).await {
@@ -687,6 +790,7 @@ pub async fn handle(
                     let result = timeout_at(deadline, session.connect_backend(upstream)).await;
                     match result {
                         Ok(Ok(())) => {
+                            event.hold_managed_backend(target, lease);
                             current_backend = target.clone();
                             current_address = request.snapshot.config.backends[target].address().to_owned();
                             transfer_reply = Some(request.reply);
@@ -749,6 +853,7 @@ pub async fn handle(
                         && (!network_enabled || session.can_switch())
                         && !session.switch_in_progress();
                     if ready {
+                        event.retain_managed_backend(&current_backend);
                         if let Some(player) = &mut player {
                             if registered_backend != current_backend {
                                 player.move_backend(current_backend.clone());
@@ -791,9 +896,10 @@ pub async fn handle(
                     }
                 }
                 Ok(SessionEvent::BungeeCord(request)) => {
+                    let live_snapshot = snapshot.latest();
                     if let Some(identity) = session.identity()
                         && let Ok(Some(payload)) = crate::bungee_runtime::handle(
-                            &snapshot,
+                            &live_snapshot,
                             &current_backend,
                             &identity,
                             peer,
@@ -804,8 +910,21 @@ pub async fn handle(
                     }
                 }
                 Ok(SessionEvent::ProxyCommand(command)) => {
+                    let live_snapshot = snapshot.latest();
+                    let network = Network {
+                        snapshot: &live_snapshot,
+                        addresses: &live_snapshot.addresses,
+                        metrics: &metrics,
+                    };
                     let mut result = match timeout(
-                        snapshot.config.limits.connect_timeout + HANDSHAKE_TIMEOUT,
+                        live_snapshot.config.limits.connect_timeout
+                            + HANDSHAKE_TIMEOUT
+                            + live_snapshot
+                                .config
+                                .managed_servers
+                                .values()
+                                .map(|server| server.start_timeout)
+                                .sum::<Duration>(),
                         network.command(&mut session, &current_backend, &command, event),
                     )
                     .await
@@ -842,7 +961,7 @@ pub async fn handle(
                     match result {
                         Ok(Some(target)) => {
                             current_address =
-                                snapshot.config.backends[&target].address().to_owned();
+                                live_snapshot.config.backends[&target].address().to_owned();
                             current_backend = target;
                             phase_deadline = Deadline::now() + Duration::from_secs(30);
                         }
@@ -863,6 +982,12 @@ pub async fn handle(
                     phase_deadline = Deadline::now() + Duration::from_secs(30);
                 }
                 Ok(SessionEvent::BackendClosed | SessionEvent::BackendFailed) => {
+                    let live_snapshot = snapshot.latest();
+                    let network = Network {
+                        snapshot: &live_snapshot,
+                        addresses: &live_snapshot.addresses,
+                        metrics: &metrics,
+                    };
                     if client_closed {
                         break;
                     }
@@ -877,14 +1002,19 @@ pub async fn handle(
                             + 1;
                         if next < candidates.len()
                             && let Ok(target) = network
-                                .connect_initial(&mut session, &candidates[next..], deadline, event)
+                                .connect_initial(
+                                    &mut session,
+                                    &candidates[next..],
+                                    &mut deadline,
+                                    event,
+                                )
                                 .await
                         {
                             metrics.fallbacks.inc();
                             current_address =
-                                snapshot.config.backends[&target].address().to_owned();
+                                live_snapshot.config.backends[&target].address().to_owned();
                             current_backend = target;
-                            phase_deadline = entry_deadline(&current_backend);
+                            phase_deadline = entry_deadline(&current_backend, deadline);
                             continue;
                         }
                     }
@@ -897,7 +1027,7 @@ pub async fn handle(
                             Ok(target) => {
                                 metrics.fallbacks.inc();
                                 current_address =
-                                    snapshot.config.backends[&target].address().to_owned();
+                                    live_snapshot.config.backends[&target].address().to_owned();
                                 current_backend = target;
                                 phase_deadline = Deadline::now() + Duration::from_secs(30);
                                 continue;
@@ -1009,6 +1139,30 @@ pub(crate) async fn accept(
     while sessions.join_next().await.is_some() {}
 }
 
+/// Make `next` visible to new connections, in-flight sessions and health checks.
+async fn publish(
+    snapshot: &mut Arc<Snapshot>,
+    next: Arc<Snapshot>,
+    current: &watch::Sender<Arc<Snapshot>>,
+    health: &mut Option<JoinHandle<()>>,
+    metrics: &Arc<Metrics>,
+) {
+    snapshot.health.retire();
+    *snapshot = next;
+    snapshot.extensions.update_destinations(&snapshot.config);
+    *snapshot.live.lock().unwrap() = Arc::downgrade(snapshot);
+    current.send_replace(snapshot.clone());
+    if let Some(task) = health.take() {
+        task.abort();
+        let _ = task.await;
+    }
+    *health = health_worker(
+        snapshot.clone(),
+        snapshot.addresses.clone(),
+        metrics.clone(),
+    );
+}
+
 fn health_worker(
     snapshot: Arc<Snapshot>,
     addresses: Arc<Vec<SocketAddr>>,
@@ -1064,21 +1218,15 @@ async fn reconfigure(
         .clone()
         .ok_or_else(|| Error::conflict("no configuration source available"))?;
     let path_for_prepare = path.clone();
+    let active_config = snapshot.config.clone();
     let candidate = tokio::task::spawn_blocking(move || {
-        control::prepare(&path_for_prepare, &active, operation)
+        control::prepare_with_instances(&path_for_prepare, &active, operation, &active_config)
     })
     .await
     .map_err(Error::invalid)??;
-    if candidate.config.listeners != snapshot.config.listeners
-        || candidate.config.admin != snapshot.config.admin
-        || candidate.config.messaging != snapshot.config.messaging
-        || candidate.config.extensions.as_ref().map(|e| &e.queues)
-            != snapshot.config.extensions.as_ref().map(|e| &e.queues)
-    {
-        return Err(Error::invalid(
-            "listener names/addresses, admin, messaging, extension enablement and queue capacities require a restart",
-        ));
-    }
+    control::live_compatible(&candidate.config, &snapshot.config)
+        .and_then(|()| app.record_settings_compatible(&candidate.config))
+        .map_err(Error::invalid)?;
     let prepared = services.prepare(&candidate.config).await?;
     let mut service_addresses = services.addresses(&candidate.config, &prepared)?;
     if let Some(address) = snapshot.service_addresses.get("admin") {
@@ -1105,6 +1253,233 @@ async fn reconfigure(
         .map_err(Error::invalid)??;
     }
     Ok((Arc::new(next), prepared))
+}
+
+type InstanceResult = Result<(Arc<Snapshot>, serde_json::Value), crate::control::Error>;
+
+/// Keep the transaction and its replies owned until completion, even after
+/// shutdown starts or the requesting client disconnects.
+struct InstanceChange {
+    task: JoinHandle<InstanceResult>,
+    reply: Option<tokio::sync::oneshot::Sender<crate::control::Reply>>,
+    admin_reply: Option<admin::Reply>,
+}
+
+impl InstanceChange {
+    fn respond(self, response: Result<serde_json::Value, crate::control::Error>) {
+        if self.reply.is_none()
+            && self.admin_reply.is_none()
+            && let Err(error) = &response
+        {
+            eprintln!("rift: automatic scaling failed: {}", error.message);
+        }
+        if let Some(reply) = self.admin_reply {
+            let _ = reply.send(
+                response
+                    .as_ref()
+                    .cloned()
+                    .map_err(|error| error.message.clone()),
+            );
+        }
+        if let Some(reply) = self.reply {
+            let _ = reply.send(response.map(|value| value.to_string()));
+        }
+    }
+}
+
+/// Serialized by the same control queue as configuration reloads. Build and
+/// validate a complete candidate before changing process ownership or routing.
+async fn change_instance(
+    operation: crate::control::Operation,
+    snapshot: &Arc<Snapshot>,
+) -> InstanceResult {
+    use crate::control::{Error, Operation};
+    match operation {
+        Operation::CreateInstance { group } => create_instance(group, snapshot).await,
+        Operation::RemoveInstance { name } => remove_instance(name, snapshot).await,
+        _ => Err(Error::invalid("expected an instance operation")),
+    }
+}
+
+async fn create_instance(group: String, snapshot: &Arc<Snapshot>) -> InstanceResult {
+    use crate::control::Error;
+    let mut config = snapshot.config.clone();
+    let definition = config.service_groups.get(&group).ok_or_else(|| Error {
+        status: 404,
+        message: format!("unknown service group {group:?}"),
+    })?;
+    if definition
+        .scaling
+        .as_ref()
+        .is_some_and(|policy| config.instance_names(&group).len() >= policy.max_instances)
+    {
+        return Err(Error::conflict(
+            "service group reached scaling.max_instances",
+        ));
+    }
+    let reservation = reserve_port(&config, &snapshot.addresses, definition)
+        .ok_or_else(|| Error::conflict("service group port range is exhausted"))?;
+    let port = reservation.local_addr()?.port();
+    let name = next_instance_name(snapshot, &config, &group)?;
+    config.add_instance(&group, &name, port)?;
+    let next = instance_snapshot(config, snapshot)?;
+    let (provisioning_config, provisioning_name) = (next.config.clone(), name.clone());
+    let receipt = blocking(move || {
+        rift::provisioning::provision_tracked(&provisioning_config, &provisioning_name)
+    })
+    .await?;
+    // Release the port only once the instance can claim it.
+    drop(reservation);
+    if let Err(error) = next.managed.add(&next.config, &name) {
+        let (provisioning_config, provisioning_name) = (next.config.clone(), name.clone());
+        if let Err(cleanup_error) = blocking(move || {
+            rift::provisioning::rollback(&provisioning_config, &provisioning_name, &receipt)
+        })
+        .await
+        {
+            return Err(Error::conflict(format!(
+                "instance registration failed: {error}; provisioning rollback failed: {cleanup_error}"
+            )));
+        }
+        return Err(error.into());
+    }
+    let instance = &next.config.instances[&name];
+    let group = &next.config.service_groups[&instance.group];
+    if group.scaling.is_some() && !group.server.autostart {
+        // Start newly provisioned capacity immediately. The per-group
+        // cooldown bounds provisioning, not process readiness.
+        if let Err(error) = next.managed.request_scale_start(&name) {
+            eprintln!("rift: automatic start of {name} rejected: {error}");
+        }
+    }
+    let response = serde_json::json!({
+        "name": name,
+        "group": instance.group,
+        "port": instance.port,
+        "address": next.config.backends[&name].address(),
+        "template": group.template,
+        "storage": group.storage.as_str(),
+        "created": true,
+    });
+    Ok((Arc::new(next), response))
+}
+
+async fn remove_instance(name: String, snapshot: &Arc<Snapshot>) -> InstanceResult {
+    use crate::control::Error;
+    let mut config = snapshot.config.clone();
+    let Some(instance) = config.instances.remove(&name) else {
+        return Err(Error {
+            status: 404,
+            message: format!("unknown service instance {name:?}"),
+        });
+    };
+    config.backends.remove(&name);
+    config.managed_servers.remove(&name);
+    config.draining.remove(&name);
+    config.validate().map_err(|error| {
+        Error::conflict(format!("instance is referenced by configuration: {error}"))
+    })?;
+    let next = instance_snapshot(config, snapshot)?;
+    let (provisioning_config, provisioning_name) = (snapshot.config.clone(), name.clone());
+    blocking(move || rift::provisioning::validate_remove(&provisioning_config, &provisioning_name))
+        .await
+        .map_err(Error::conflict)?;
+    next.managed.remove(&name).await.map_err(Error::conflict)?;
+    let storage = snapshot.config.service_groups[&instance.group].storage;
+    let (provisioning_config, provisioning_name) = (snapshot.config.clone(), name.clone());
+    // Process ownership has ended. Publish deregistration even if a filesystem
+    // error leaves files behind, and make that cleanup failure visible.
+    let cleanup_error =
+        blocking(move || rift::provisioning::remove(&provisioning_config, &provisioning_name))
+            .await
+            .err()
+            .map(|error| error.to_string());
+    let files_removed =
+        storage == rift::config::InstanceStorage::Disposable && cleanup_error.is_none();
+    let response = serde_json::json!({
+        "name": name,
+        "removed": true,
+        "storage": storage.as_str(),
+        "files_removed": files_removed,
+        "cleanup_error": cleanup_error,
+    });
+    Ok((Arc::new(next), response))
+}
+
+/// Run filesystem provisioning work off the async runtime.
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> io::Result<T> + Send + 'static,
+) -> io::Result<T> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(io::Error::other)?
+}
+
+/// Instance changes keep the active source, revision and bound sockets.
+fn instance_snapshot(config: Config, snapshot: &Arc<Snapshot>) -> io::Result<Snapshot> {
+    let mut next = Snapshot::new(config, Some(snapshot))?;
+    next.source = snapshot.source.clone();
+    next.revision = snapshot.revision.clone();
+    next.listener_addresses = snapshot.listener_addresses.clone();
+    next.service_addresses = snapshot.service_addresses.clone();
+    next.addresses = snapshot.addresses.clone();
+    Ok(next)
+}
+
+/// Hold the first free loopback port in the group's range. Ports configured
+/// for other backends (including `localhost` aliases) or bound by Rift itself
+/// are skipped; the listener keeps the port reserved during provisioning.
+fn reserve_port(
+    config: &Config,
+    bound: &[SocketAddr],
+    group: &rift::config::ServiceGroup,
+) -> Option<std::net::TcpListener> {
+    (group.port_start..=group.port_end).find_map(|port| {
+        let address = SocketAddr::from(([127, 0, 0, 1], port));
+        let configured = config.backends.values().any(|backend| {
+            backend.check_loop(address).is_err()
+                || backend
+                    .address()
+                    .rsplit_once(':')
+                    .is_some_and(|(host, configured)| {
+                        host.trim_end_matches('.').eq_ignore_ascii_case("localhost")
+                            && configured.parse::<u16>().ok() == Some(port)
+                    })
+        });
+        let listening = bound.iter().any(|bound| {
+            bound.port() == port
+                && (bound.ip().is_unspecified() || bound.ip().to_canonical() == address.ip())
+        });
+        if configured || listening {
+            return None;
+        }
+        std::net::TcpListener::bind(address).ok()
+    })
+}
+
+/// Sequence numbers only grow within a proxy process, so a removed instance's
+/// name is never reassigned to a different instance.
+fn next_instance_name(
+    snapshot: &Snapshot,
+    config: &Config,
+    group: &str,
+) -> Result<String, crate::control::Error> {
+    let mut sequences = snapshot.instance_sequence.lock().unwrap();
+    let sequence = sequences.entry(group.to_owned()).or_default();
+    loop {
+        *sequence = sequence
+            .checked_add(1)
+            .ok_or_else(|| crate::control::Error::conflict("instance name sequence exhausted"))?;
+        let name = format!("{group}-{sequence}");
+        let case_conflict = config.network.bungeecord
+            && config
+                .backends
+                .keys()
+                .any(|backend| backend.eq_ignore_ascii_case(&name));
+        if !config.is_destination(&name) && !case_conflict {
+            return Ok(name);
+        }
+    }
 }
 
 pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
@@ -1184,14 +1559,16 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
             .collect(),
     );
     check_bound_loops(&initial.config, &initial.addresses)?;
+    initial.managed.launch()?;
     let mut snapshot = Arc::new(initial);
+    *snapshot.live.lock().unwrap() = Arc::downgrade(&snapshot);
     let mut extension_jobs = snapshot.extensions.scheduler();
     let metrics = Arc::new(Metrics::default());
     let admission = Arc::new(Mutex::new(Admission::default()));
     let (current, receiver) = watch::channel(snapshot.clone());
     let (stop, stopping) = watch::channel(false);
     let (commands, mut requests) = tokio::sync::mpsc::channel::<control::Command>(8);
-    let app = web::App::new(receiver.clone(), metrics.clone(), commands, source);
+    let app = web::App::new(receiver.clone(), metrics.clone(), commands, source)?;
     let mut tasks = JoinSet::new();
     for (name, listener) in listeners {
         eprintln!("rift: listening on {}", listener.local_addr()?);
@@ -1230,6 +1607,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
             receiver.clone(),
             metrics.clone(),
             admin_commands,
+            app.workflows.clone(),
         ));
     }
     services.commit(&snapshot.config, prepared, &app);
@@ -1245,18 +1623,45 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     );
     let mut failure = None;
     let mut service_check = tokio::time::interval(Duration::from_secs(1));
+    let mut scaling_check = tokio::time::interval(Duration::from_millis(100));
+    scaling_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut scaler = crate::scaling::Scaler::default();
+    let mut instance_change: Option<InstanceChange> = None;
+    let mut reload_pending = false;
     loop {
-        let (operation, reply, admin_reply) = tokio::select! {
+        let (operation, reply, admin_reply, actor) = tokio::select! {
             event = signals.next() => match event {
                 Event::Shutdown => break,
                 Event::Reload => {
                     if app.path.is_none() { eprintln!("rift: reload ignored: no configuration file selected"); continue; }
-                    (control::Operation::Reload, None, None)
+                    if instance_change.is_some() { reload_pending = true; continue; }
+                    (control::Operation::Reload, None, None, "signal".to_owned())
                 }
             },
-            Some(command) = requests.recv() => (command.operation, Some(command.reply), None),
-            Some(command) = admin_requests.recv() => match command {
-                admin::Command::Reload(reply) => (control::Operation::Reload, None, Some(reply)),
+            _ = std::future::ready(()), if reload_pending && instance_change.is_none() => {
+                reload_pending = false;
+                (control::Operation::Reload, None, None, "signal".to_owned())
+            }
+            result = async { (&mut instance_change.as_mut().unwrap().task).await }, if instance_change.is_some() => {
+                let change = instance_change.take().unwrap();
+                let result = result.unwrap_or_else(|error| Err(control::Error::invalid(error)));
+                let response = match result {
+                    Ok((next, response)) => {
+                        publish(&mut snapshot, next, &current, &mut health, &metrics).await;
+                        Ok(response)
+                    }
+                    Err(error) => Err(error),
+                };
+                change.respond(response);
+                continue;
+            }
+            // Leave later mutations in their bounded queues until this
+            // transaction has published its snapshot. Signals stay pollable.
+            Some(command) = requests.recv(), if instance_change.is_none() => (command.operation, Some(command.reply), None, command.actor),
+            Some(command) = admin_requests.recv(), if instance_change.is_none() => match command {
+                admin::Command::Reload(reply) => (control::Operation::Reload, None, Some(reply), "local-admin".to_owned()),
+                admin::Command::CreateInstance { group, reply } => (control::Operation::CreateInstance { group }, None, Some(reply), "local-admin".to_owned()),
+                admin::Command::RemoveInstance { name, reply } => (control::Operation::RemoveInstance { name }, None, Some(reply), "local-admin".to_owned()),
                 admin::Command::Shutdown(ack) => { let _ = timeout(Duration::from_secs(2), ack).await; break; }
             },
             result = background.join_next(), if !background.is_empty() => {
@@ -1266,6 +1671,18 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
             result = tasks.join_next() => {
                 failure = Some(io::Error::other(format!("listener stopped unexpectedly: {result:?}")));
                 break;
+            }
+            _ = scaling_check.tick(), if instance_change.is_none() => {
+                match scaler.next(&snapshot, Instant::now()) {
+                    Some(crate::scaling::Change::Instance(operation)) => (operation, None, None, "scaler".to_owned()),
+                    Some(crate::scaling::Change::Start(name)) => {
+                        if let Err(error) = snapshot.managed.request_scale_start(&name) {
+                            eprintln!("rift: automatic start of {name} rejected: {error}");
+                        }
+                        continue;
+                    }
+                    None => continue,
+                }
             }
             _ = service_check.tick() => {
                 if messaging_server.as_ref().is_some_and(rift::messaging::quic::Server::is_finished) {
@@ -1283,6 +1700,23 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                 continue;
             }
         };
+        if matches!(
+            operation,
+            control::Operation::CreateInstance { .. } | control::Operation::RemoveInstance { .. }
+        ) {
+            let active = snapshot.clone();
+            instance_change = Some(InstanceChange {
+                task: tokio::spawn(async move { change_instance(operation, &active).await }),
+                reply,
+                admin_reply,
+            });
+            continue;
+        }
+        let action = match &operation {
+            control::Operation::Reload => "reload",
+            control::Operation::Rollback { .. } => "rollback",
+            _ => "save",
+        };
         let result = reconfigure(operation, &app, &snapshot, &services).await;
         let response = match result {
             Ok((next, prepared)) => {
@@ -1293,19 +1727,16 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                 if let (Some(updates), Some(script)) = (&message_updates, &next.config.on_message) {
                     updates.send_replace(script.clone());
                 }
-                snapshot.health.retire();
-                snapshot = next;
-                current.send_replace(snapshot.clone());
+                publish(&mut snapshot, next, &current, &mut health, &metrics).await;
                 services.commit(&snapshot.config, prepared, &app);
-                if let Some(task) = health.take() {
-                    task.abort();
-                    let _ = task.await;
+                // Reconfiguration always reads a source; never record an empty one.
+                if let Some(source) = snapshot.source.as_deref()
+                    && let Err(error) = app.workflows.deploy_async(source, &actor, action).await
+                {
+                    eprintln!(
+                        "rift: configuration applied but deployment history could not be written: {error}"
+                    );
                 }
-                health = health_worker(
-                    snapshot.clone(),
-                    snapshot.addresses.clone(),
-                    metrics.clone(),
-                );
                 metrics.reloads.inc();
                 eprintln!("rift: configuration reloaded");
                 crate::messaging_runtime::emit(
@@ -1321,6 +1752,19 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                 Err(error)
             }
         };
+        if actor == "signal" {
+            let (outcome, status) = match &response {
+                Ok(_) => ("accepted", 200),
+                Err(error) => ("rejected", error.status),
+            };
+            if let Err(error) = app
+                .workflows
+                .audit_async("signal", "reload", "", outcome, status)
+                .await
+            {
+                eprintln!("rift: signal reload audit failed: {error}");
+            }
+        }
         if let Some(reply) = admin_reply {
             let response = response.as_ref()
                 .map(|revision| serde_json::json!({"reloaded":true,"revision":revision,"existing_sessions":"preserved"}))
@@ -1332,11 +1776,15 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         }
     }
     // Stop accepting configuration commands before draining proxy sessions.
-    extension_jobs.shutdown().await;
     admin_requests.close();
     while let Ok(command) = admin_requests.try_recv() {
-        if let admin::Command::Reload(reply) = command {
-            let _ = reply.send(Err("proxy is shutting down".into()));
+        match command {
+            admin::Command::Reload(reply)
+            | admin::Command::CreateInstance { reply, .. }
+            | admin::Command::RemoveInstance { reply, .. } => {
+                let _ = reply.send(Err("proxy is shutting down".into()));
+            }
+            admin::Command::Shutdown(_) => {}
         }
     }
     requests.close();
@@ -1352,6 +1800,8 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         "rift.events.lifecycle",
         serde_json::json!({"state":"draining"}),
     );
+    eprintln!("rift: draining {} connections", metrics.active.get());
+    extension_jobs.shutdown().await;
     if let Some(task) = message_task {
         task.abort();
         let _ = task.await;
@@ -1364,7 +1814,6 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         task.abort();
         let _ = task.await;
     }
-    eprintln!("rift: draining {} connections", metrics.active.get());
     let drained = async { while tasks.join_next().await.is_some() {} };
     tokio::select! {
         result = timeout(snapshot.config.shutdown_timeout, drained) => {
@@ -1381,6 +1830,20 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     tasks.shutdown().await;
     background.shutdown().await;
     services.shutdown().await;
+    // Do not abort or detach an instance transaction: filesystem work and
+    // process retirement must finish. A newly registered child then belongs
+    // to the managed shutdown below, just like all existing children.
+    if let Some(mut change) = instance_change {
+        let result = (&mut change.task)
+            .await
+            .unwrap_or_else(|error| Err(control::Error::invalid(error)));
+        let response = result.map(|(next, response)| {
+            snapshot = next;
+            response
+        });
+        change.respond(response);
+    }
+    snapshot.managed.shutdown().await;
     eprintln!("rift: shutdown complete");
     match failure {
         Some(error) => Err(error),

@@ -29,6 +29,57 @@ fn context(id: u64) -> Context {
 }
 
 #[test]
+fn queue_pressure_excludes_expired_cancelled_and_disconnected_tickets() {
+    let runtime = runtime("api_version=1, queues={game=1}");
+    let first = runtime.session(context(1)).unwrap();
+    let second = runtime.session(context(2)).unwrap();
+    first.enqueue("game").unwrap();
+    second.enqueue("game").unwrap();
+    assert_eq!(runtime.queue_lengths()["game"], 2);
+    runtime.host.lock().unwrap().queues.get_mut("game").unwrap()[0].1 =
+        Instant::now() - Duration::from_secs(301);
+    assert_eq!(runtime.queue_lengths()["game"], 1);
+    assert!(first.queued_target().is_err()); // retain the existing expiry notification
+    assert!(first.queued_target().unwrap().is_none());
+    second.leave_queue();
+    assert_eq!(runtime.queue_lengths()["game"], 0);
+    second.enqueue("game").unwrap();
+    drop(second);
+    assert_eq!(runtime.queue_lengths()["game"], 0);
+}
+
+#[tokio::test]
+async fn group_queue_capacity_and_fifo_follow_live_instance_membership() {
+    let source = "return {listeners={public='127.0.0.1:0'},backends={},routes={public='game'},authentication={online_mode=true},forwarding={mode='velocity',secret_env='TEST_SECRET'},service_groups={game={command={'unused'},directory='instances/{name}',port_range={26000,26003},scaling={capacity_per_instance=1,min_instances=0}}},extensions={api_version=1,queues={game=1}}}";
+    let mut config = Config::from_lua(source, "group-queue.lua").unwrap();
+    let runtime = Extensions::new(&config, Broker::new(Default::default()).unwrap(), None).unwrap();
+    let mut first = runtime.session(context(1)).unwrap();
+    let second = runtime.session(context(2)).unwrap();
+    first.enqueue("game").unwrap();
+    second.enqueue("game").unwrap();
+    assert_eq!(runtime.queue_lengths()["game"], 2);
+    assert!(first.queued_target().unwrap().is_none()); // group can scale from zero
+    config.add_instance("game", "game-1", 26000).unwrap();
+    runtime.update_destinations(&config);
+    assert_eq!(first.queued_target().unwrap().as_deref(), Some("game"));
+    assert!(second.reserve("game-1").is_err()); // group FIFO cannot be bypassed
+    first.before_transfer("game-1", "queue").await.unwrap();
+    first.ready("game-1").await;
+    assert!(first.enqueue("game").is_err()); // already in the group
+    assert_eq!(runtime.queue_lengths()["game"], 1);
+    assert!(second.queued_target().unwrap().is_none());
+    assert!(second.reserve("game-1").is_err()); // full across concrete names
+    config.add_instance("game", "game-2", 26001).unwrap();
+    runtime.update_destinations(&config);
+    assert_eq!(second.queued_target().unwrap().as_deref(), Some("game"));
+    second.reserve("game-2").unwrap();
+    assert!(first.reserve("game-2").is_ok()); // moving within the group uses its existing slot
+    drop(first);
+    drop(second);
+    assert_eq!(runtime.queue_lengths()["game"], 0);
+}
+
+#[test]
 fn version_schema_and_authenticated_mode_are_required() {
     for invalid in [
         "",
@@ -317,4 +368,108 @@ fn concurrent_admissions_never_overbook_the_last_slot() {
     );
     drop(results);
     assert!(runtime.host.lock().unwrap().leases.is_empty());
+}
+
+fn dynamic_config(api_version: u32) -> Config {
+    let extension = format!(
+        "api_version={api_version}, permissions={{['*']={{['route.dynamic']=true}}}}, commands={{warp={{permission='route.dynamic',run=function(ctx) return {{server=ctx.args}} end}}}}"
+    );
+    let source = source(&extension).replace(
+        "routes = { public = 'lobby' }",
+        "routes = { public = 'lobby' }, service_groups = { arena = { directory='instances/{name}', command={'java','--port','{port}'}, port_range={25010,25011} } }",
+    );
+    Config::from_lua(&source, "dynamic-extensions.lua").unwrap()
+}
+
+#[tokio::test]
+async fn existing_extension_sessions_follow_committed_instance_destinations() {
+    for api_version in [1, 2] {
+        let config = dynamic_config(api_version);
+        let runtime =
+            Extensions::new(&config, Broker::new(Default::default()).unwrap(), None).unwrap();
+        let existing = runtime.session(context(1)).unwrap();
+        assert!(existing.command("warp arena-1").await.is_err());
+        assert_eq!(
+            existing.command("warp arena").await.unwrap(),
+            Action::Server("arena".into())
+        );
+
+        let mut added = config.clone();
+        added.add_instance("arena", "arena-1", 25010).unwrap();
+        let candidate = Extensions::new(&added, runtime.broker.clone(), Some(&runtime)).unwrap();
+        // Preparing a transaction must not publish its backend set to sessions.
+        assert!(existing.command("warp arena-1").await.is_err());
+        assert!(
+            candidate
+                .session(context(2))
+                .unwrap()
+                .command("warp arena-1")
+                .await
+                .is_err()
+        );
+        drop(candidate);
+        assert!(existing.command("warp arena-1").await.is_err());
+
+        let committed = Extensions::new(&added, runtime.broker.clone(), Some(&runtime)).unwrap();
+        committed.update_destinations(&added);
+        assert_eq!(
+            existing.command("warp arena-1").await.unwrap(),
+            Action::Server("arena-1".into())
+        );
+        assert_eq!(
+            committed
+                .session(context(3))
+                .unwrap()
+                .command("warp arena-1")
+                .await
+                .unwrap(),
+            Action::Server("arena-1".into())
+        );
+
+        let removed = Extensions::new(&config, runtime.broker.clone(), Some(&committed)).unwrap();
+        assert_eq!(
+            existing.command("warp arena-1").await.unwrap(),
+            Action::Server("arena-1".into())
+        );
+        removed.update_destinations(&config);
+        assert!(existing.command("warp arena-1").await.is_err());
+        assert!(
+            committed
+                .session(context(4))
+                .unwrap()
+                .command("warp arena-1")
+                .await
+                .is_err()
+        );
+        // The stable service-group name remains eligible after its last removal.
+        assert_eq!(
+            existing.command("warp arena").await.unwrap(),
+            Action::Server("arena".into())
+        );
+    }
+}
+
+#[tokio::test]
+async fn rejected_extension_candidate_cannot_publish_new_instance_destinations() {
+    for api_version in [1, 2] {
+        let config = dynamic_config(api_version);
+        let runtime =
+            Extensions::new(&config, Broker::new(Default::default()).unwrap(), None).unwrap();
+        let existing = runtime.session(context(1)).unwrap();
+        let mut rejected = config.clone();
+        rejected.add_instance("arena", "arena-1", 25010).unwrap();
+        rejected
+            .extensions
+            .as_mut()
+            .unwrap()
+            .queues
+            .insert("game".into(), 1);
+        rejected.validate().unwrap();
+        assert!(Extensions::new(&rejected, runtime.broker.clone(), Some(&runtime)).is_err());
+        assert!(existing.command("warp arena-1").await.is_err());
+        assert_eq!(
+            existing.command("warp lobby").await.unwrap(),
+            Action::Server("lobby".into())
+        );
+    }
 }

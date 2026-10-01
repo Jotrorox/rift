@@ -6,7 +6,10 @@
     token: "", revision: null, baseline: "", writable: false,
     loaded: false, busy: false, polling: false, fetchingSource: false,
     session: 0, mutation: 0, remoteChanged: false, conflicted: false, online: false,
+    serverButtons: [],
+    permissions: null, groups: null, logServer: "", logCursor: null, logPolling: false, definitions: {}, definitionRevision: null, definitionDirty: false, definitionVersion: 0, definitionSection: "service_groups", definitionName: "", definitionInputs: new Map(),
   };
+  const allowed = (permission) => state.permissions === null || state.permissions.includes(permission);
   const dirty = () => state.loaded && $("source").value !== state.baseline;
   const number = (value) => Number.isFinite(Number(value)) ? Number(value) : 0;
   const count = (value) => number(value).toLocaleString();
@@ -39,7 +42,7 @@
   }
   function controls() {
     const available = state.loaded && !state.busy;
-    $("save").disabled = !available || !state.writable || !dirty() || state.remoteChanged;
+    $("save").disabled = !available || !state.writable || !dirty() || state.remoteChanged || !allowed("config");
     $("validate").disabled = !available;
     $("refresh-source").disabled = state.busy;
     $("reload").disabled = !available;
@@ -50,6 +53,12 @@
     $("edit-state").className = `tag ${dirty() ? "warning" : state.loaded ? "good" : ""}`;
     text("source-size", `${$("source").value.split("\n").length.toLocaleString()} lines`);
     $("conflict").classList.toggle("hidden", !state.remoteChanged);
+    for (const { button, unavailable } of state.serverButtons) button.disabled = state.busy || unavailable || !allowed("servers");
+    $("console-send").disabled = state.busy || !state.logServer || !allowed("console");
+    $("definition-save").disabled = state.busy || !state.definitionRevision || !allowed("config");
+    $("definition-delete").disabled = state.busy || !state.definitionRevision || !$("definition-select").value || !allowed("config");
+    for (const [id, permission] of [["config-panel", "config"], ["definitions-panel", "config"], ["deployments-panel", "deploy"], ["audit-panel", "audit"], ["extensions-panel", "extensions"]]) $(id).classList.toggle("hidden", !allowed(permission));
+    $("live-console-panel").classList.toggle("hidden", !allowed("logs") && !allowed("console"));
   }
   async function request(path, options = {}, raw = false) {
     const headers = new Headers(options.headers || {});
@@ -70,7 +79,7 @@
           : response.status === 404
             ? "The admin API is unavailable. Enable web.api in the Lua configuration, or check that this is the admin service address."
             : `Request failed (HTTP ${response.status}).`;
-        const error = new Error(response.status === 404 ? fallback : data.error || fallback);
+        const error = new Error(response.status === 404 && !path.startsWith("/api/operations/") ? fallback : data.error || fallback);
         error.status = response.status;
         throw error;
       }
@@ -133,6 +142,62 @@
       span.textContent = !checks ? "Checks disabled" : backend.healthy === false ? "Unhealthy" : backend.healthy === true ? "Healthy" : "Unknown";
       td.append(span);
     });
+    state.serverButtons = [];
+    table("service-groups", status.service_groups || [], 6, (tr, group) => {
+      cell(tr, group.name);
+      cell(tr, (group.port_range || []).join("–"));
+      cell(tr, group.storage === "disposable" ? "Disposable game" : "Persistent world");
+      cell(tr, group.template || "Prepared directories");
+      cell(tr, (group.instances || []).join(", ") || "None created");
+      const actions = cell(tr, ""), button = document.createElement("button");
+      button.type = "button"; button.className = "button secondary"; button.textContent = "Create instance";
+      button.setAttribute("aria-label", `Create instance in ${group.name}`);
+      const full = Boolean(group.scaling) && (group.instances || []).length >= number(group.scaling.max_instances);
+      if (full) button.title = "This group has reached its scaling maximum. Remove an instance or raise max_instances first.";
+      state.serverButtons.push({ button, unavailable: full });
+      button.addEventListener("click", () => { if (!button.disabled) instanceOperation(group.name, "create", group.storage); });
+      actions.append(button);
+    });
+    table("managed-servers", status.managed_servers || [], 9, (tr, server) => {
+      cell(tr, server.name); cell(tr, server.state);
+      cell(tr, `${count(server.players)} players · ${count(server.reservations)} attachments`);
+      cell(tr, wakeLabel(server));
+      cell(tr, server.storage === "disposable" ? "Disposable game" : "Persistent world");
+      cell(tr, server.template || "Prepared directory");
+      cell(tr, server.group ? `${server.group} · ${server.address}` : server.address, "address");
+      cell(tr, server.last_error || "—");
+      const actions = cell(tr, ""); actions.className = "action-group";
+      for (const action of ["start", "stop"]) {
+        const button = document.createElement("button");
+        button.type = "button"; button.className = "button subtle";
+        button.textContent = action === "start" ? "Start" : "Stop";
+        button.setAttribute("aria-label", `${button.textContent} ${server.name}`);
+        const unavailable = action === "start"
+          ? ["starting", "running", "stopping", "removing"].includes(server.state)
+          : number(server.players) > 0 || number(server.reservations) > 0 || ["stopping", "removing"].includes(server.state) || (server.state === "stopped" && !server.automatic_start);
+        state.serverButtons.push({ button, unavailable });
+        button.addEventListener("click", () => serverOperation(server.name, action));
+        actions.append(button);
+      }
+      if (server.group) {
+        const button = document.createElement("button");
+        button.type = "button"; button.className = "button subtle";
+        button.textContent = server.storage === "disposable" ? "Remove & delete files" : "Remove · keep files";
+        button.setAttribute("aria-label", `${button.textContent}: ${server.name}`);
+        button.title = server.storage === "disposable" ? "Stops the instance and permanently deletes its generated directory, including the world." : "Stops and unregisters the instance; its world and server files remain on disk.";
+        const unavailable = number(server.players) > 0 || number(server.reservations) > 0 || ["stopping", "removing"].includes(server.state);
+        state.serverButtons.push({ button, unavailable });
+        button.addEventListener("click", () => { if (!button.disabled) instanceOperation(server.name, "remove", server.storage); });
+        actions.append(button);
+      }
+    });
+    const selected = $("console-server").value;
+    $("console-server").replaceChildren();
+    for (const server of [{ name: "", label: "Choose a server" }, ...(status.managed_servers || [])]) {
+      const option = document.createElement("option"); option.value = server.name; option.textContent = server.label || server.name; $("console-server").append(option);
+    }
+    $("console-server").value = (status.managed_servers || []).some((s) => s.name === selected) ? selected : "";
+    if (!$("console-server").value && state.logServer) { state.logServer = ""; state.logCursor = null; text("console-output", "Choose a server to view its logs."); }
     const routes = Object.entries(status.routes || {}).flatMap(([listener, route]) => typeof route === "string"
       ? [[listener, "All traffic", route]]
       : Object.entries(route).map(([pattern, backend]) => [listener, pattern, backend]));
@@ -196,10 +261,151 @@
     if (state.busy) return;
     state.busy = true; controls();
     try {
-      await refreshStatus();
-      await loadSource();
+      const access = await request("/api/access");
+      state.permissions = Array.isArray(access.permissions) ? access.permissions : null;
+      state.groups = access.groups;
+      text("operator-name", access.name || "Local operator");
+      if (allowed("read")) await refreshStatus();
+      if (allowed("config")) await loadSource();
+      else { $("source").value = ""; state.baseline = ""; state.revision = null; state.loaded = false; }
+      if (allowed("config")) await loadDefinitions();
+      if (allowed("deploy")) await loadDeployments();
     } catch (error) { handleError(error); }
     finally { state.busy = false; controls(); }
+  }
+  const time = (value) => new Date(number(value)).toLocaleString();
+  async function pollLogs({ reset = false } = {}) {
+    if (state.logPolling || !state.logServer || !allowed("logs")) return;
+    const session = state.session, server = state.logServer;
+    if (reset) state.logCursor = null;
+    state.logPolling = true;
+    try {
+      const suffix = state.logCursor === null ? "" : `?cursor=${state.logCursor}`;
+      const data = await request(`/api/servers/${encodeURIComponent(server)}/logs${suffix}`);
+      if (session !== state.session || server !== state.logServer) return;
+      const previous = reset || state.logCursor === null || data.truncated ? "" : $("console-output").textContent;
+      text("console-output", (previous + (data.text || "")).slice(-128 * 1024));
+      state.logCursor = data.cursor;
+      if ($("console-follow").checked) $("console-output").scrollTop = $("console-output").scrollHeight;
+    } catch (error) { if (session === state.session && server === state.logServer) text("console-result", error.message); }
+    finally { state.logPolling = false; }
+  }
+  const groupFields = [
+    ["directory", "Instance directory ({name} required)", "text"], ["command", "Command arguments (one per line)", "array"],
+    ["port_range.0", "First port", "number"], ["port_range.1", "Last port", "number"],
+    ["template", "Template (optional)", "text"], ["storage", "Storage", ["persistent", "disposable"]],
+    ["autostart", "Start new instances automatically", "boolean"], ["start_on_connect", "Start on player connection", "boolean"],
+    ["idle_timeout_ms", "Idle timeout (ms; 0 disables)", "number"], ["start_timeout_ms", "Startup timeout (ms)", "number"],
+    ["stop_timeout_ms", "Stop timeout (ms)", "number"], ["restart_delay_ms", "Recovery delay (ms)", "number"], ["restart_retries", "Recovery attempts", "number"],
+    ["scaling_enabled", "Automatic scaling", "boolean"],
+    ...[["min_instances", "Minimum instances"], ["max_instances", "Maximum instances"], ["spare_instances", "Spare instances"], ["capacity_per_instance", "Players per instance"], ["target_occupancy_percent", "Target occupancy (%)"], ["queue_threshold", "Queue threshold"], ["cooldown_ms", "Scaling cooldown (ms)"]].map(([key, label]) => [`scaling.${key}`, label, "number"]),
+  ];
+  const templateFields = [["server_jar", "Server jar path", "text"], ["plugins", "Plugin paths (one per line)", "array"], ["configs", "Configuration directory (optional)", "text"], ["map", "Map directory (optional)", "text"]];
+  function renderDefinition() {
+    const section = $("definition-section").value || "service_groups", name = $("definition-select").value;
+    state.definitionSection = section; state.definitionName = name;
+    const maximumName = section === "templates" ? 128 : 107;
+    $("definition-name").maxLength = maximumName; $("definition-name").pattern = `[A-Za-z0-9_\\-]{1,${maximumName}}`;
+    const value = state.definitions[section]?.[name] || (section === "service_groups" ? { storage: "persistent", start_on_connect: true, start_timeout_ms: 120000, stop_timeout_ms: 30000, restart_delay_ms: 5000, restart_retries: 3, idle_timeout_ms: 0 } : {});
+    $("definition-name").value = name; $("definition-fields").replaceChildren(); state.definitionInputs = new Map();
+    for (const [key, label, type] of section === "templates" ? templateFields : groupFields) {
+      const wrapper = document.createElement("div"), title = document.createElement("label"); wrapper.className = "field";
+      const input = document.createElement(Array.isArray(type) || type === "boolean" ? "select" : type === "array" ? "textarea" : "input");
+      input.id = `definition-field-${key.replaceAll(".", "-")}`; title.setAttribute("for", input.id); title.textContent = label;
+      let current = key === "scaling_enabled" ? Boolean(value.scaling) : key.split(".").reduce((v, k) => v?.[k], value);
+      if (Array.isArray(type) || type === "boolean") {
+        for (const item of type === "boolean" ? ["false", "true"] : type) { const option = document.createElement("option"); option.value = item; option.textContent = item === "true" ? "Enabled" : item === "false" ? "Disabled" : item; input.append(option); }
+        input.value = String(current ?? (type === "boolean" ? false : type[0]));
+      } else { if (type !== "array") input.type = type === "number" ? "number" : "text"; if (type === "number") { input.min = "0"; input.step = "1"; } input.value = type === "array" ? (current || []).join("\n") : current ?? ""; }
+      input.addEventListener("input", () => { state.definitionDirty = true; state.definitionVersion += 1; });
+      state.definitionInputs.set(key, { input, type }); wrapper.append(title, input); $("definition-fields").append(wrapper);
+    }
+    state.definitionDirty = false; controls();
+  }
+  async function loadDefinitions() {
+    const session = state.session, version = state.definitionVersion;
+    const value = await request("/api/definitions");
+    if (session !== state.session) return;
+    if (version !== state.definitionVersion) { text("definition-result", "Your newer field edits were preserved. Refresh again when ready."); return false; }
+    state.definitions = value; state.definitionRevision = value.revision || null;
+    const select = $("definition-select"), previous = select.value;
+    select.replaceChildren();
+    for (const name of ["", ...Object.keys(value[$("definition-section").value || "service_groups"] || {})]) {
+      const option = document.createElement("option"); option.value = name; option.textContent = name || "New definition"; select.append(option);
+    }
+    select.value = Object.hasOwn(value[$("definition-section").value || "service_groups"] || {}, previous) ? previous : "";
+    renderDefinition();
+  }
+  function definitionValue() {
+    const value = {}, scaling = {}, ports = [], scalingEnabled = state.definitionInputs.get("scaling_enabled")?.input.value === "true";
+    for (const [key, { input, type }] of state.definitionInputs) {
+      if (key === "scaling_enabled") continue;
+      const raw = String(input.value);
+      if (key.startsWith("scaling.") && !scalingEnabled) continue;
+      if (raw === "") continue;
+      let parsed = type === "array" ? raw.split("\n").filter((line) => line.trim()) : type === "number" ? Number(raw) : type === "boolean" ? raw === "true" : raw;
+      if (type === "number" && (!Number.isSafeInteger(parsed) || parsed < 0)) throw new Error("Numeric fields must be nonnegative integers.");
+      if (key.startsWith("scaling.")) scaling[key.split(".")[1]] = parsed;
+      else if (key.startsWith("port_range.")) ports[Number(key.split(".")[1])] = parsed;
+      else value[key] = parsed;
+    }
+    if (scalingEnabled) value.scaling = scaling;
+    if ($("definition-section").value !== "templates") value.port_range = ports;
+    return value;
+  }
+  async function saveDefinition(remove = false) {
+    if (state.busy || !state.definitionRevision || !allowed("config")) return;
+    if (dirty()) { text("definition-result", "Save or discard your Lua editor changes before editing a definition."); return; }
+    const section = $("definition-section").value || "service_groups", name = $("definition-name").value;
+    if (!/^[A-Za-z0-9_-]+$/.test(name) || name.length > (section === "templates" ? 128 : 107)) { text("definition-result", "Enter a name using letters, digits, underscores or hyphens."); return; }
+    if (remove && !window.confirm(`Delete ${name} from configuration? Referenced definitions cannot be deleted.`)) return;
+    const version = state.definitionVersion;
+    state.busy = true; controls(); text("definition-result", "Validating and applying definition…");
+    try {
+      const saved = await request(`/api/definitions/${section}/${encodeURIComponent(name)}`, { method: "PUT", body: JSON.stringify({ revision: state.definitionRevision, definition: remove ? null : definitionValue() }) });
+      state.mutation += 1; state.definitionRevision = saved.revision;
+      if (version === state.definitionVersion) state.definitionDirty = false;
+      await loadSource();
+      if (version === state.definitionVersion) await loadDefinitions();
+      await refreshStatus({ syncSource: false });
+      if (allowed("deploy")) await loadDeployments();
+      text("definition-result", `${remove ? "Definition deleted." : "Definition saved and applied."}${state.definitionDirty ? " Your newer field edits remain unsaved." : ""}`);
+    } catch (error) { text("definition-result", error.status === 409 ? `${error.message} Refresh definitions after preserving your edits.` : error.message); }
+    finally { state.busy = false; controls(); }
+  }
+  async function loadDeployments() {
+    const session = state.session, data = await request("/api/deployments");
+    if (session !== state.session) return;
+    state.deploymentRevision = data.revision;
+    table("deployments", data.deployments || [], 5, (tr, deployment) => {
+      cell(tr, time(deployment.timestamp_unix_ms)); cell(tr, deployment.actor); cell(tr, deployment.action); cell(tr, deployment.revision, "address");
+      const actions = cell(tr, ""), button = document.createElement("button"); button.type = "button"; button.className = "button secondary"; button.textContent = "Roll back";
+      button.addEventListener("click", async () => {
+        if (state.busy || !allowed("deploy")) return;
+        if (dirty() || state.definitionDirty) { text("deployment-result", "Save or discard editor changes before rolling back."); return; }
+        if (!window.confirm(`Restore deployment ${deployment.id}? Configuration will be validated before applying.`)) return;
+        state.busy = true; controls(); text("deployment-result", "Restoring deployment…");
+        try {
+          await request(`/api/deployments/${deployment.id}/rollback`, { method: "POST", body: JSON.stringify({ revision: state.deploymentRevision }) });
+          state.mutation += 1;
+          if (allowed("config")) { await loadSource(); await loadDefinitions(); }
+          if (allowed("read")) await refreshStatus({ syncSource: false });
+          await loadDeployments(); text("deployment-result", "Deployment restored; worlds and instance files are preserved.");
+        } catch (error) { text("deployment-result", error.message); }
+        finally { state.busy = false; controls(); }
+      }); actions.append(button);
+    });
+  }
+  async function loadAudit() {
+    const session = state.session, data = await request("/api/audit");
+    if (session !== state.session) return;
+    table("audit-records", data.records || [], 5, (tr, record) => { cell(tr, time(record.timestamp_unix_ms)); cell(tr, record.actor); cell(tr, record.action); cell(tr, record.target || "—"); cell(tr, `${record.outcome}${record.status ? ` (${record.status})` : ""}`); });
+    text("audit-result", data.durable ? "Records are retained on disk." : "Records are held in memory for this process.");
+  }
+  function wakeLabel(server) {
+    if (server.restart_exhausted) return "Paused · restart retries exhausted; Start to retry";
+    if (server.automatic_enabled === false) return "Paused by Stop; Start to resume";
+    return server.automatic_start ? "Enabled" : "Explicit start only";
   }
   function checkSource() {
     const source = $("source").value;
@@ -254,27 +460,136 @@
       if (!error.status) result(`${error.message} Reloading may have moved or disabled this service. Check the configured address.`, "warning");
     } finally { state.busy = false; controls(); }
   }
+  async function serverOperation(name, action) {
+    if (state.busy) return;
+    state.busy = true; controls();
+    text("server-result", `Requesting ${action} for ${name}…`);
+    $("server-result").className = "operation-result";
+    try {
+      await request(`/api/servers/${encodeURIComponent(name)}/${action}`, { method: "POST", body: "{}" });
+      text("server-result", `${action === "start" ? "Start" : "Stop"} accepted for ${name}. State updates below; ${action === "stop" ? "automatic wake stays paused until Start is requested." : "wait for running before connecting."}`);
+      $("server-result").className = "operation-result success";
+      await refreshStatus({ syncSource: false });
+    } catch (error) {
+      if (error.status === 401 || error.status === 403) $("auth-panel").open = true;
+      text("server-result", error.message || "The server request failed.");
+      $("server-result").className = "operation-result error";
+    } finally { state.busy = false; controls(); }
+  }
+  async function instanceOperation(name, action, storage) {
+    if (state.busy) return;
+    state.busy = true; state.mutation += 1; controls();
+    text("server-result", `${action === "create" ? "Creating an instance in" : "Removing"} ${name}…`);
+    $("server-result").className = "operation-result";
+    let operationId = "";
+    try {
+      let outcome = await request(action === "create"
+        ? `/api/groups/${encodeURIComponent(name)}/instances`
+        : `/api/instances/${encodeURIComponent(name)}`, { method: action === "create" ? "POST" : "DELETE", body: "{}" });
+      if (outcome.operation_id) {
+        operationId = outcome.operation_id;
+        const path = `/api/operations/${encodeURIComponent(operationId)}`;
+        text("server-result", `${action === "create" ? "Creation" : "Removal"} in progress for ${name}. Operation ${operationId}; waiting for completion…`);
+        for (;;) {
+          const operation = await request(path);
+          if (operation.status === "succeeded") { outcome = operation.result; break; }
+          if (operation.status === "failed") {
+            const error = new Error(operation.error || "The instance operation failed.");
+            error.status = operation.http_status;
+            error.operationFailed = true;
+            throw error;
+          }
+          if (operation.status !== "pending") throw new Error("The server returned an invalid operation status.");
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
+      }
+      const cleanupFailed = action === "remove" && Boolean(outcome.cleanup_error);
+      text("server-result", action === "create"
+        ? `Created ${outcome.name || "instance"} in ${name}. Check its state below; provisioned servers require your EULA acceptance and backend settings before starting.`
+        : cleanupFailed ? `Removed ${name}, but file cleanup failed: ${outcome.cleanup_error}`
+          : storage === "disposable"
+            ? outcome.files_removed === true ? `Removed ${name} and deleted its instance files, including its world.` : `Removed ${name}. Instance files were not deleted; inspect the directory before reuse.`
+            : `Removed ${name}. Its persistent world and server files remain on disk.`);
+      $("server-result").className = `operation-result ${cleanupFailed || (action === "remove" && storage === "disposable" && outcome.files_removed !== true) ? "warning" : "success"}`;
+      await refreshStatus({ syncSource: false });
+    } catch (error) {
+      if (error.status === 401 || error.status === 403) $("auth-panel").open = true;
+      const message = error.message || "The instance request failed.";
+      text("server-result", operationId
+        ? error.operationFailed ? `Operation ${operationId} failed: ${message}`
+          : `Could not retrieve operation ${operationId}: ${message} It may still be running; check /api/operations/${encodeURIComponent(operationId)} before retrying.`
+        : message);
+      $("server-result").className = "operation-result error";
+    } finally { state.busy = false; controls(); }
+  }
   $("source").addEventListener("input", controls);
   $("source").addEventListener("keydown", (event) => {
     if ((event.ctrlKey || event.metaKey) && event.key === "Enter") { event.preventDefault(); validate(); }
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") { event.preventDefault(); save(); }
   });
   window.addEventListener("beforeunload", (event) => {
-    if (dirty()) { event.preventDefault(); event.returnValue = ""; }
+    if (dirty() || state.definitionDirty) { event.preventDefault(); event.returnValue = ""; }
   });
   $("auth-form").addEventListener("submit", (event) => {
     event.preventDefault();
     if (state.busy) return;
+    if (!resetOperatorView()) return;
     state.token = $("token").value.trim(); $("token").value = ""; state.session += 1;
     text("auth-state", state.token ? "Token held in this tab" : "No token set");
     connect();
   });
   $("forget-token").addEventListener("click", () => {
     if (state.busy) return;
+    if (!resetOperatorView()) return;
     state.token = ""; $("token").value = ""; state.session += 1;
     text("auth-state", "No token set"); connect();
   });
+  function resetOperatorView() {
+    if ((dirty() || state.definitionDirty) && !window.confirm("Switch operator and discard unsaved editor changes?")) return false;
+    state.loaded = false; state.baseline = ""; state.revision = null; state.remoteChanged = false; state.conflicted = false;
+    state.permissions = []; state.logServer = ""; state.logCursor = null; state.definitions = {}; state.definitionRevision = null; state.definitionDirty = false; state.definitionVersion += 1;
+    $("source").value = ""; $("console-server").replaceChildren(); $("definition-fields").replaceChildren();
+    for (const id of ["console-output", "config-path", "revision", "deployment-result", "definition-result", "console-result", "extension-output"]) text(id, "");
+    for (const id of ["deployments", "audit-records", "managed-servers", "service-groups", "backends", "routes"]) $(id).replaceChildren();
+    state.serverButtons = []; return true;
+  }
   $("refresh-status").addEventListener("click", () => refreshStatus());
+  $("console-server").addEventListener("change", () => {
+    state.logServer = $("console-server").value; state.logCursor = null;
+    text("console-output", ""); text("console-result", ""); controls(); pollLogs({ reset: true });
+  });
+  $("console-refresh").addEventListener("click", () => pollLogs());
+  $("console-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (state.busy || !state.logServer || !allowed("console")) return;
+    const session = state.session, server = state.logServer, command = $("console-command").value;
+    state.busy = true; controls();
+    try {
+      const data = await request(`/api/servers/${encodeURIComponent(server)}/console`, { method: "POST", body: JSON.stringify({ command }) });
+      if (session !== state.session) return;
+      if ($("console-command").value === command) $("console-command").value = "";
+      text("console-result", data.message || "Command sent; check logs for its result."); await pollLogs();
+    } catch (error) { if (session === state.session) text("console-result", error.message); }
+    finally { state.busy = false; controls(); }
+  });
+  $("definition-form").addEventListener("submit", (event) => { event.preventDefault(); saveDefinition(); });
+  $("definition-delete").addEventListener("click", () => saveDefinition(true));
+  $("definition-name").addEventListener("input", () => { state.definitionDirty = true; state.definitionVersion += 1; });
+  for (const id of ["definition-section", "definition-select"]) $(id).addEventListener("change", async () => {
+    if (state.definitionDirty && !window.confirm("Discard unsaved definition fields?")) {
+      $("definition-section").value = state.definitionSection; $("definition-select").value = state.definitionName;
+      text("definition-result", "Your definition fields were kept. Refresh definitions to select another entry."); return;
+    }
+    if (id === "definition-section") { $("definition-select").value = ""; try { await loadDefinitions(); } catch (error) { text("definition-result", error.message); } }
+    else renderDefinition();
+  });
+  $("definitions-refresh").addEventListener("click", async () => {
+    if (state.busy || (state.definitionDirty && !window.confirm("Discard unsaved definition fields and refresh?"))) return;
+    try { await loadDefinitions(); text("definition-result", "Definitions refreshed."); } catch (error) { text("definition-result", error.message); }
+  });
+  $("deployments-refresh").addEventListener("click", async () => { try { await loadDeployments(); } catch (error) { text("deployment-result", error.message); } });
+  $("audit-refresh").addEventListener("click", async () => { try { await loadAudit(); } catch (error) { text("audit-result", error.message); } });
+  $("audit-panel").addEventListener("toggle", () => { if ($("audit-panel").open && allowed("audit")) loadAudit().catch((error) => text("audit-result", error.message)); });
   $("validate").addEventListener("click", validate);
   $("save").addEventListener("click", save);
   $("reload").addEventListener("click", reload);
@@ -311,7 +626,8 @@
     } catch (error) { text("extension-output", error.message); }
     finally { $("extension-send").disabled = false; }
   });
-  setInterval(() => { if (!document.hidden && !state.busy) refreshStatus(); }, 5000);
+  setInterval(() => { if (!document.hidden && !state.busy && allowed("read")) refreshStatus(); }, 5000);
+  setInterval(() => { if (!document.hidden && !state.busy && $("console-follow").checked) pollLogs(); }, 1000);
   document.addEventListener("visibilitychange", () => { if (!document.hidden && !state.busy) refreshStatus(); });
   controls(); connect();
 })();

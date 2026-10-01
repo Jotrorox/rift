@@ -4,7 +4,13 @@
 //! adapter can translate addresses and UTF-8 strings and use a tagged decision;
 //! these Rust types themselves are not a stable C layout.
 
-use std::{collections::BTreeMap, fmt, net::SocketAddr, sync::Arc, time::Instant};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    net::SocketAddr,
+    sync::Arc,
+    time::Instant,
+};
 
 use tokio::{sync::Semaphore, task::spawn_blocking, time::timeout};
 
@@ -65,6 +71,7 @@ impl std::error::Error for RouteError {}
 pub struct Router {
     script: Option<RouteScript>,
     backends: Arc<BTreeMap<String, Backend>>,
+    groups: Arc<BTreeSet<String>>,
     routes: Arc<BTreeMap<String, Route>>,
     slots: Arc<Semaphore>,
     messaging: Option<crate::messaging::Broker>,
@@ -83,6 +90,7 @@ impl Router {
         Self {
             script: config.on_route.clone(),
             backends: Arc::new(config.backends.clone()),
+            groups: Arc::new(config.service_groups.keys().cloned().collect()),
             routes: Arc::new(config.routes.clone()),
             slots: Arc::new(Semaphore::new(crate::script::MAX_CONCURRENT)),
             messaging: None,
@@ -122,6 +130,7 @@ impl Router {
         };
         if let RouteDecision::Backend(name) = &decision
             && !self.backends.contains_key(name)
+            && !self.groups.contains(name)
         {
             return Err(RouteError::UnknownBackend(name.clone()));
         }
