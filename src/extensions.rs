@@ -382,7 +382,7 @@ struct HostState {
 #[derive(Clone)]
 pub struct Extensions {
     script: Option<ExtensionScript>,
-    backends: Arc<BTreeSet<String>>,
+    backends: Arc<Mutex<BTreeSet<String>>>,
     slots: Arc<Semaphore>,
     host: Arc<Mutex<HostState>>,
     broker: Broker,
@@ -417,7 +417,19 @@ impl Extensions {
         };
         let runtime = Self {
             script: config.extensions.clone(),
-            backends: Arc::new(config.backends.keys().cloned().collect()),
+            backends: previous.map_or_else(
+                || {
+                    Arc::new(Mutex::new(
+                        config
+                            .backends
+                            .keys()
+                            .chain(config.service_groups.keys())
+                            .cloned()
+                            .collect(),
+                    ))
+                },
+                |previous| previous.backends.clone(),
+            ),
             broker,
             store,
             permissions: previous
@@ -441,6 +453,17 @@ impl Extensions {
         Ok(runtime)
     }
     /// Publish the permission baseline only after the configuration transaction commits.
+    /// Publish the live destination catalog after a runtime transaction commits.
+    /// Existing sessions share this catalog with newly configured extensions.
+    pub fn update_destinations(&self, config: &Config) {
+        *self.backends.lock().unwrap_or_else(|e| e.into_inner()) = config
+            .backends
+            .keys()
+            .chain(config.service_groups.keys())
+            .cloned()
+            .collect();
+    }
+
     pub fn activate(&self) {
         if let Some(script) = &self.script
             && script.api_version == 2
@@ -496,7 +519,11 @@ impl Extensions {
             .map_err(invalid)?
             .map_err(invalid)??;
         if let Action::Server(server) | Action::Queue(server) = &action
-            && !self.backends.contains(server)
+            && !self
+                .backends
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(server)
         {
             return Err(invalid("extension selected an unknown backend"));
         }

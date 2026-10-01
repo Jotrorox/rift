@@ -21,6 +21,12 @@ impl Network<'_> {
         &self,
         name: &str,
     ) -> io::Result<Option<rift::managed::ManagedLease>> {
+        if !self.snapshot.config.backends.contains_key(name) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "backend is no longer registered",
+            ));
+        }
         if self.snapshot.control.draining(&self.snapshot.config, name) {
             return Err(io::Error::new(
                 io::ErrorKind::NotConnected,
@@ -132,9 +138,20 @@ impl Network<'_> {
         } else {
             std::iter::once(primary.to_owned())
                 .chain(config.fallbacks.get(primary).into_iter().flatten().cloned())
+                .chain(
+                    config
+                        .instances
+                        .get(primary)
+                        .and_then(|instance| config.fallbacks.get(&instance.group))
+                        .into_iter()
+                        .flatten()
+                        .cloned(),
+                )
                 .collect()
         };
-        Ok(candidates
+        Ok(self
+            .snapshot
+            .candidates(&candidates)
             .into_iter()
             .filter(|server| config.can_access(server, name))
             .collect())
@@ -143,13 +160,23 @@ impl Network<'_> {
     pub fn recovery_candidates(&self, current: &str) -> Vec<String> {
         let config = &self.snapshot.config;
         let mut seen = HashSet::from([current.to_owned()]);
-        config
+        let group_fallbacks = config
+            .instances
+            .get(current)
+            .and_then(|instance| config.fallbacks.get(&instance.group));
+        let destinations: Vec<_> = config
             .network
             .hubs
             .iter()
             .chain(config.fallbacks.get(current).into_iter().flatten())
+            .chain(group_fallbacks.into_iter().flatten())
             .filter(|server| seen.insert((*server).clone()))
             .cloned()
+            .collect();
+        self.snapshot
+            .candidates(&destinations)
+            .into_iter()
+            .filter(|name| name != current)
             .collect()
     }
 
@@ -288,7 +315,8 @@ impl Network<'_> {
             .identity()
             .ok_or_else(|| io::Error::other("missing player identity"))?;
         let config = &self.snapshot.config;
-        let candidates: Vec<_> = candidates
+        let expanded = self.snapshot.candidates(candidates);
+        let candidates: Vec<_> = expanded
             .iter()
             .filter(|server| {
                 server.as_str() != current
@@ -445,7 +473,7 @@ impl Network<'_> {
                     (Vec::new(), Some(format!("You are already on {current}.")))
                 }
                 ["server", target]
-                    if !config.backends.contains_key(*target)
+                    if !config.is_destination(target)
                         || !config.can_access(target, &identity.name) =>
                 {
                     (

@@ -15,7 +15,8 @@ environment-provided secret and explicit operation permissions; see the
 on distinct ports. `admin.permissions` do not govern HTTP requests: the web
 credential grants the enabled HTTP API capabilities, including configuration
 editing and managed server lifecycle operations. Changes to the operational
-`admin` or `managed_servers` configuration require restart.
+`admin`, `managed_servers` or `service_groups` definitions require restart;
+instances can be created and removed through the API while Rift runs.
 
 ## Configuration
 
@@ -110,6 +111,9 @@ Errors use `{"error":"description"}`. `GET /api` provides endpoint discovery.
 | `GET /api/servers` | `{servers: [...]}` with managed server lifecycle state and usage |
 | `POST /api/servers/{name}/start` | Request a managed server start with `{}`; returns `202` when accepted |
 | `POST /api/servers/{name}/stop` | Request an unused managed server stop and pause automatic wake with `{}`; returns `202` when accepted |
+| `GET /api/groups` | `{groups: [...]}` with group names, inclusive port ranges and instance names |
+| `POST /api/groups/{name}/instances` | Allocate and register a stopped instance with `{}`; returns `201` with `{name, group, port, address, created}` |
+| `DELETE /api/instances/{name}` | Stop and deregister an unused instance with `{}`; returns `200` with `{name, removed}` after child cleanup |
 | `GET /api/metrics` | Counter values as JSON |
 | `GET /api/config` | `{source, revision, writable}` for the active configuration |
 | `POST /api/config/validate` | Validate `{source}` including live listener restrictions; does not save or bind sockets |
@@ -121,7 +125,8 @@ Errors use `{"error":"description"}`. `GET /api` provides endpoint discovery.
 Managed lifecycle requests return promptly; acceptance does not mean startup or
 shutdown has completed. Poll `GET /api/servers` for `state`, `pid`, `players`,
 `reservations`, `automatic_start` and `last_error`. The same array is available
-as `managed_servers` on authenticated `/api/status`. Commands, arguments and
+as `managed_servers` on authenticated `/api/status`. Listings include `address`,
+`port`, and `group` (`null` for static servers). Commands, arguments and
 working directories are omitted. The public `/status` and Lua HTTP context omit
 managed lifecycle details entirely. Authenticated `/api/config` still contains
 the complete trusted configuration source.
@@ -136,6 +141,11 @@ existing unmanaged backends return `400`, conflicting lifecycle requests return
 after acceptance appear in `last_error`. See [managed servers](managed-servers.md)
 for configuration and shutdown behavior. Managed definitions and their backend
 addresses require a proxy restart; the configuration API cannot change them live.
+Service-group operations allocate loopback ports and register/remove instance
+backends without a proxy restart. Port exhaustion or an occupied instance
+returns `409`; unknown groups/instances return `404`. Instance registration
+survives configuration reloads and ends when the proxy restarts. Instance
+removal waits for its shutdown deadline and leaves its files on disk.
 
 Configuration saves preserve the source exactly, including comments, functions,
 computed values and formatting. The source is the single editable configuration;

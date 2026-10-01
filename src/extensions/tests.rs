@@ -318,3 +318,107 @@ fn concurrent_admissions_never_overbook_the_last_slot() {
     drop(results);
     assert!(runtime.host.lock().unwrap().leases.is_empty());
 }
+
+fn dynamic_config(api_version: u32) -> Config {
+    let extension = format!(
+        "api_version={api_version}, permissions={{['*']={{['route.dynamic']=true}}}}, commands={{warp={{permission='route.dynamic',run=function(ctx) return {{server=ctx.args}} end}}}}"
+    );
+    let source = source(&extension).replace(
+        "routes = { public = 'lobby' }",
+        "routes = { public = 'lobby' }, service_groups = { arena = { directory='instances/{name}', command={'java','--port','{port}'}, port_range={25010,25011} } }",
+    );
+    Config::from_lua(&source, "dynamic-extensions.lua").unwrap()
+}
+
+#[tokio::test]
+async fn existing_extension_sessions_follow_committed_instance_destinations() {
+    for api_version in [1, 2] {
+        let config = dynamic_config(api_version);
+        let runtime =
+            Extensions::new(&config, Broker::new(Default::default()).unwrap(), None).unwrap();
+        let existing = runtime.session(context(1)).unwrap();
+        assert!(existing.command("warp arena-1").await.is_err());
+        assert_eq!(
+            existing.command("warp arena").await.unwrap(),
+            Action::Server("arena".into())
+        );
+
+        let mut added = config.clone();
+        added.add_instance("arena", "arena-1", 25010).unwrap();
+        let candidate = Extensions::new(&added, runtime.broker.clone(), Some(&runtime)).unwrap();
+        // Preparing a transaction must not publish its backend set to sessions.
+        assert!(existing.command("warp arena-1").await.is_err());
+        assert!(
+            candidate
+                .session(context(2))
+                .unwrap()
+                .command("warp arena-1")
+                .await
+                .is_err()
+        );
+        drop(candidate);
+        assert!(existing.command("warp arena-1").await.is_err());
+
+        let committed = Extensions::new(&added, runtime.broker.clone(), Some(&runtime)).unwrap();
+        committed.update_destinations(&added);
+        assert_eq!(
+            existing.command("warp arena-1").await.unwrap(),
+            Action::Server("arena-1".into())
+        );
+        assert_eq!(
+            committed
+                .session(context(3))
+                .unwrap()
+                .command("warp arena-1")
+                .await
+                .unwrap(),
+            Action::Server("arena-1".into())
+        );
+
+        let removed = Extensions::new(&config, runtime.broker.clone(), Some(&committed)).unwrap();
+        assert_eq!(
+            existing.command("warp arena-1").await.unwrap(),
+            Action::Server("arena-1".into())
+        );
+        removed.update_destinations(&config);
+        assert!(existing.command("warp arena-1").await.is_err());
+        assert!(
+            committed
+                .session(context(4))
+                .unwrap()
+                .command("warp arena-1")
+                .await
+                .is_err()
+        );
+        // The stable service-group name remains eligible after its last removal.
+        assert_eq!(
+            existing.command("warp arena").await.unwrap(),
+            Action::Server("arena".into())
+        );
+    }
+}
+
+#[tokio::test]
+async fn rejected_extension_candidate_cannot_publish_new_instance_destinations() {
+    for api_version in [1, 2] {
+        let config = dynamic_config(api_version);
+        let runtime =
+            Extensions::new(&config, Broker::new(Default::default()).unwrap(), None).unwrap();
+        let existing = runtime.session(context(1)).unwrap();
+        let mut rejected = config.clone();
+        rejected.add_instance("arena", "arena-1", 25010).unwrap();
+        rejected
+            .extensions
+            .as_mut()
+            .unwrap()
+            .queues
+            .insert("game".into(), 1);
+        rejected.validate().unwrap();
+        assert!(Extensions::new(&rejected, runtime.broker.clone(), Some(&runtime)).is_err());
+        assert!(existing.command("warp arena-1").await.is_err());
+        assert_eq!(
+            existing.command("warp lobby").await.unwrap(),
+            Action::Server("lobby".into())
+        );
+    }
+}

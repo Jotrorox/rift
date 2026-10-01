@@ -22,7 +22,7 @@ use std::{
     io,
     net::SocketAddr,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
     time::{Duration, Instant},
 };
 use tokio::{
@@ -55,6 +55,8 @@ pub struct Snapshot {
     cache: status::Cache,
     pub players: Arc<PlayerRegistry>,
     pub managed: rift::managed::ManagedServers,
+    live: Arc<Mutex<Weak<Snapshot>>>,
+    instance_sequence: Arc<Mutex<BTreeMap<String, u64>>>,
     pub extensions: rift::extensions::Extensions,
     pub messaging: Broker,
     pub messaging_streams: Arc<HashMap<String, Stream>>,
@@ -139,6 +141,10 @@ impl Snapshot {
             |old| old.managed.clone(),
         );
         Ok(Self {
+            live: previous
+                .map_or_else(|| Arc::new(Mutex::new(Weak::new())), |old| old.live.clone()),
+            instance_sequence: previous
+                .map_or_else(Arc::default, |old| old.instance_sequence.clone()),
             extensions,
             source: None,
             revision: "runtime".into(),
@@ -162,6 +168,37 @@ impl Snapshot {
             players,
             managed,
         })
+    }
+
+    /// Resolve a service group at admission time, sharing load across its
+    /// instances while retaining the full list for startup/connect fallback.
+    pub fn candidates(&self, destinations: &[String]) -> Vec<String> {
+        let loads: BTreeMap<_, _> = self
+            .managed
+            .snapshot()
+            .into_iter()
+            .map(|server| (server.name, server.reservations.max(server.players)))
+            .collect();
+        let mut seen = std::collections::BTreeSet::new();
+        destinations
+            .iter()
+            .flat_map(|destination| {
+                let mut names = self.config.destination_names(destination);
+                if self.config.service_groups.contains_key(destination) {
+                    names.sort_by_key(|name| (loads.get(name).copied().unwrap_or(0), name.clone()));
+                }
+                names
+            })
+            .filter(|name| seen.insert(name.clone()))
+            .collect()
+    }
+
+    pub fn latest(self: &Arc<Self>) -> Arc<Self> {
+        self.live
+            .lock()
+            .unwrap()
+            .upgrade()
+            .unwrap_or_else(|| self.clone())
     }
 }
 
@@ -248,9 +285,14 @@ pub async fn handle(
     let unmatched = primary.is_err();
     let primary = match primary {
         Ok(primary) => primary,
-        Err(_) if !is_status && snapshot.config.extensions.is_some() => {
-            snapshot.config.backends.keys().next().unwrap().clone()
-        }
+        Err(_) if !is_status && snapshot.config.extensions.is_some() => snapshot
+            .config
+            .backends
+            .keys()
+            .chain(snapshot.config.service_groups.keys())
+            .next()
+            .unwrap()
+            .clone(),
         Err(error) => {
             if is_status {
                 timeout(HANDSHAKE_TIMEOUT, session.status_request()).await??;
@@ -272,7 +314,11 @@ pub async fn handle(
         }
     };
     event.backend = Some(primary.clone());
-    event.backend_address = Some(snapshot.config.backends[&primary].address().to_owned());
+    event.backend_address = snapshot
+        .config
+        .backends
+        .get(&primary)
+        .map(|backend| backend.address().to_owned());
     event.failure = "io_error";
     if is_status {
         event.stage = "status_request";
@@ -372,8 +418,9 @@ pub async fn handle(
             let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect(reason)).await;
             return Err(io::Error::new(io::ErrorKind::Unsupported, reason));
         }
-        let network_configured =
-            snapshot.config.network != Default::default() || snapshot.config.extensions.is_some();
+        let network_configured = snapshot.config.network != Default::default()
+            || snapshot.config.extensions.is_some()
+            || !snapshot.config.service_groups.is_empty();
         let tracked_login = network_configured
             || !snapshot.config.managed_servers.is_empty()
             || snapshot.authenticator.is_some();
@@ -481,7 +528,11 @@ pub async fn handle(
         };
         let candidate_result = if let Some(selected) = extension_selection {
             if snapshot.config.can_access(&selected, &login_name) {
-                Ok(vec![selected])
+                Ok(snapshot
+                    .candidates(&[selected])
+                    .into_iter()
+                    .filter(|name| snapshot.config.can_access(name, &login_name))
+                    .collect())
             } else {
                 Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
@@ -562,6 +613,12 @@ pub async fn handle(
         let mut queue_tick = tokio::time::interval(Duration::from_secs(1));
         queue_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
+            let live_snapshot = snapshot.latest();
+            let network = Network {
+                snapshot: &live_snapshot,
+                addresses: &live_snapshot.addresses,
+                metrics: &metrics,
+            };
             event.stage = if transfer_reply.is_some() {
                 "transfer"
             } else {
@@ -612,7 +669,7 @@ pub async fn handle(
                         Ok(Some(target)) => {
                             match network.switch_for(&mut session, &current_backend, &[target], event, "queue").await {
                                 Ok(target) => {
-                                    current_address = snapshot.config.backends[&target].address().to_owned();
+                                    current_address = live_snapshot.config.backends[&target].address().to_owned();
                                     current_backend = target;
                                     phase_deadline = Deadline::now() + Duration::from_secs(30);
                                 }
@@ -677,7 +734,7 @@ pub async fn handle(
                             if session.backend().is_none() {
                                 let candidates = network.recovery_candidates(&current_backend);
                                 let recovered = network.switch(&mut session, &current_backend, &candidates, event).await?;
-                                current_address = snapshot.config.backends[&recovered].address().to_owned();
+                                current_address = live_snapshot.config.backends[&recovered].address().to_owned();
                                 current_backend = recovered;
                                 phase_deadline = Deadline::now() + Duration::from_secs(30);
                                 metrics.fallbacks.inc();
@@ -833,9 +890,10 @@ pub async fn handle(
                     }
                 }
                 Ok(SessionEvent::BungeeCord(request)) => {
+                    let live_snapshot = snapshot.latest();
                     if let Some(identity) = session.identity()
                         && let Ok(Some(payload)) = crate::bungee_runtime::handle(
-                            &snapshot,
+                            &live_snapshot,
                             &current_backend,
                             &identity,
                             peer,
@@ -846,10 +904,16 @@ pub async fn handle(
                     }
                 }
                 Ok(SessionEvent::ProxyCommand(command)) => {
+                    let live_snapshot = snapshot.latest();
+                    let network = Network {
+                        snapshot: &live_snapshot,
+                        addresses: &live_snapshot.addresses,
+                        metrics: &metrics,
+                    };
                     let mut result = match timeout(
-                        snapshot.config.limits.connect_timeout
+                        live_snapshot.config.limits.connect_timeout
                             + HANDSHAKE_TIMEOUT
-                            + snapshot
+                            + live_snapshot
                                 .config
                                 .managed_servers
                                 .values()
@@ -891,7 +955,7 @@ pub async fn handle(
                     match result {
                         Ok(Some(target)) => {
                             current_address =
-                                snapshot.config.backends[&target].address().to_owned();
+                                live_snapshot.config.backends[&target].address().to_owned();
                             current_backend = target;
                             phase_deadline = Deadline::now() + Duration::from_secs(30);
                         }
@@ -912,6 +976,12 @@ pub async fn handle(
                     phase_deadline = Deadline::now() + Duration::from_secs(30);
                 }
                 Ok(SessionEvent::BackendClosed | SessionEvent::BackendFailed) => {
+                    let live_snapshot = snapshot.latest();
+                    let network = Network {
+                        snapshot: &live_snapshot,
+                        addresses: &live_snapshot.addresses,
+                        metrics: &metrics,
+                    };
                     if client_closed {
                         break;
                     }
@@ -936,7 +1006,7 @@ pub async fn handle(
                         {
                             metrics.fallbacks.inc();
                             current_address =
-                                snapshot.config.backends[&target].address().to_owned();
+                                live_snapshot.config.backends[&target].address().to_owned();
                             current_backend = target;
                             phase_deadline = entry_deadline(&current_backend, deadline);
                             continue;
@@ -951,7 +1021,7 @@ pub async fn handle(
                             Ok(target) => {
                                 metrics.fallbacks.inc();
                                 current_address =
-                                    snapshot.config.backends[&target].address().to_owned();
+                                    live_snapshot.config.backends[&target].address().to_owned();
                                 current_backend = target;
                                 phase_deadline = Deadline::now() + Duration::from_secs(30);
                                 continue;
@@ -1118,19 +1188,35 @@ async fn reconfigure(
         .clone()
         .ok_or_else(|| Error::conflict("no configuration source available"))?;
     let path_for_prepare = path.clone();
+    let active_config = snapshot.config.clone();
     let candidate = tokio::task::spawn_blocking(move || {
-        control::prepare(&path_for_prepare, &active, operation)
+        control::prepare_with_instances(&path_for_prepare, &active, operation, &active_config)
     })
     .await
     .map_err(Error::invalid)??;
     if candidate.config.listeners != snapshot.config.listeners
         || candidate.config.admin != snapshot.config.admin
         || candidate.config.messaging != snapshot.config.messaging
-        || candidate.config.managed_servers != snapshot.config.managed_servers
+        || candidate.config.service_groups != snapshot.config.service_groups
+        || candidate
+            .config
+            .managed_servers
+            .iter()
+            .filter(|(name, _)| !candidate.config.instances.contains_key(*name))
+            .map(|(name, server)| (name.clone(), server.clone()))
+            .collect::<BTreeMap<_, _>>()
+            != snapshot
+                .config
+                .managed_servers
+                .iter()
+                .filter(|(name, _)| !snapshot.config.instances.contains_key(*name))
+                .map(|(name, server)| (name.clone(), server.clone()))
+                .collect()
         || snapshot
             .config
             .managed_servers
             .keys()
+            .filter(|name| !snapshot.config.instances.contains_key(*name))
             .any(|name| candidate.config.backends.get(name) != snapshot.config.backends.get(name))
         || candidate.config.extensions.as_ref().map(|e| &e.queues)
             != snapshot.config.extensions.as_ref().map(|e| &e.queues)
@@ -1165,6 +1251,110 @@ async fn reconfigure(
         .map_err(Error::invalid)??;
     }
     Ok((Arc::new(next), prepared))
+}
+
+/// Serialized by the same control queue as configuration reloads. Build and
+/// validate a complete candidate before changing process ownership or routing.
+async fn change_instance(
+    operation: crate::control::Operation,
+    snapshot: &Arc<Snapshot>,
+) -> Result<(Arc<Snapshot>, serde_json::Value), crate::control::Error> {
+    use crate::control::{Error, Operation};
+    let mut config = snapshot.config.clone();
+    let (name, creating, reservation) = match operation {
+        Operation::CreateInstance { group } => {
+            let definition = config.service_groups.get(&group).ok_or_else(|| Error {
+                status: 404,
+                message: format!("unknown service group {group:?}"),
+            })?;
+            let mut reservation = None;
+            for port in definition.port_start..=definition.port_end {
+                let address = SocketAddr::from(([127, 0, 0, 1], port));
+                if config.backends.values().any(|backend| {
+                    backend.check_loop(address).is_err()
+                        || backend.address().rsplit_once(':').is_some_and(
+                            |(host, configured_port)| {
+                                host.trim_end_matches('.').eq_ignore_ascii_case("localhost")
+                                    && configured_port.parse::<u16>().ok() == Some(port)
+                            },
+                        )
+                }) || snapshot.addresses.iter().any(|bound| {
+                    bound.port() == port
+                        && (bound.ip().is_unspecified()
+                            || bound.ip().to_canonical() == address.ip())
+                }) {
+                    continue;
+                }
+                if let Ok(listener) = std::net::TcpListener::bind(address) {
+                    reservation = Some(listener);
+                    break;
+                }
+            }
+            let reservation = reservation
+                .ok_or_else(|| Error::conflict("service group port range is exhausted"))?;
+            let port = reservation.local_addr()?.port();
+            let name = {
+                let mut sequences = snapshot.instance_sequence.lock().unwrap();
+                let sequence = sequences.entry(group.clone()).or_default();
+                loop {
+                    *sequence = sequence
+                        .checked_add(1)
+                        .ok_or_else(|| Error::conflict("instance name sequence exhausted"))?;
+                    let name = format!("{group}-{sequence}");
+                    if !config.is_destination(&name)
+                        && (!config.network.bungeecord
+                            || !config
+                                .backends
+                                .keys()
+                                .any(|backend| backend.eq_ignore_ascii_case(&name)))
+                    {
+                        break name;
+                    }
+                }
+            };
+            config.add_instance(&group, &name, port)?;
+            (name, true, Some(reservation))
+        }
+        Operation::RemoveInstance { name } => {
+            if config.instances.remove(&name).is_none() {
+                return Err(Error {
+                    status: 404,
+                    message: format!("unknown service instance {name:?}"),
+                });
+            }
+            config.backends.remove(&name);
+            config.managed_servers.remove(&name);
+            config.draining.remove(&name);
+            config.validate().map_err(|error| {
+                Error::conflict(format!("instance is referenced by configuration: {error}"))
+            })?;
+            (name, false, None)
+        }
+        _ => return Err(Error::invalid("expected an instance operation")),
+    };
+    let mut next = Snapshot::new(config, Some(snapshot))?;
+    next.source = snapshot.source.clone();
+    next.revision = snapshot.revision.clone();
+    next.listener_addresses = snapshot.listener_addresses.clone();
+    next.service_addresses = snapshot.service_addresses.clone();
+    next.addresses = snapshot.addresses.clone();
+    let response = if creating {
+        let directory = next.config.managed_servers[&name].directory.clone();
+        tokio::task::spawn_blocking(move || std::fs::create_dir_all(directory))
+            .await
+            .map_err(Error::invalid)??;
+        drop(reservation);
+        next.managed.add(&next.config, &name)?;
+        let instance = &next.config.instances[&name];
+        serde_json::json!({"name":name,"group":instance.group,"port":instance.port,"address":next.config.backends[&name].address(),"created":true})
+    } else {
+        next.managed.remove(&name).await.map_err(|error| Error {
+            status: 409,
+            message: error.to_string(),
+        })?;
+        serde_json::json!({"name":name,"removed":true})
+    };
+    Ok((Arc::new(next), response))
 }
 
 pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
@@ -1246,6 +1436,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     check_bound_loops(&initial.config, &initial.addresses)?;
     initial.managed.launch()?;
     let mut snapshot = Arc::new(initial);
+    *snapshot.live.lock().unwrap() = Arc::downgrade(&snapshot);
     let mut extension_jobs = snapshot.extensions.scheduler();
     let metrics = Arc::new(Metrics::default());
     let admission = Arc::new(Mutex::new(Admission::default()));
@@ -1318,6 +1509,8 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
             Some(command) = requests.recv() => (command.operation, Some(command.reply), None),
             Some(command) = admin_requests.recv() => match command {
                 admin::Command::Reload(reply) => (control::Operation::Reload, None, Some(reply)),
+                admin::Command::CreateInstance { group, reply } => (control::Operation::CreateInstance { group }, None, Some(reply)),
+                admin::Command::RemoveInstance { name, reply } => (control::Operation::RemoveInstance { name }, None, Some(reply)),
                 admin::Command::Shutdown(ack) => { let _ = timeout(Duration::from_secs(2), ack).await; break; }
             },
             result = background.join_next(), if !background.is_empty() => {
@@ -1344,6 +1537,43 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                 continue;
             }
         };
+        if matches!(
+            operation,
+            control::Operation::CreateInstance { .. } | control::Operation::RemoveInstance { .. }
+        ) {
+            let response = match change_instance(operation, &snapshot).await {
+                Ok((next, response)) => {
+                    snapshot.health.retire();
+                    snapshot = next;
+                    snapshot.extensions.update_destinations(&snapshot.config);
+                    *snapshot.live.lock().unwrap() = Arc::downgrade(&snapshot);
+                    current.send_replace(snapshot.clone());
+                    if let Some(task) = health.take() {
+                        task.abort();
+                        let _ = task.await;
+                    }
+                    health = health_worker(
+                        snapshot.clone(),
+                        snapshot.addresses.clone(),
+                        metrics.clone(),
+                    );
+                    Ok(response)
+                }
+                Err(error) => Err(error),
+            };
+            if let Some(reply) = admin_reply {
+                let _ = reply.send(
+                    response
+                        .as_ref()
+                        .cloned()
+                        .map_err(|error| error.message.clone()),
+                );
+            }
+            if let Some(reply) = reply {
+                let _ = reply.send(response.map(|value| value.to_string()));
+            }
+            continue;
+        }
         let result = reconfigure(operation, &app, &snapshot, &services).await;
         let response = match result {
             Ok((next, prepared)) => {
@@ -1356,6 +1586,8 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                 }
                 snapshot.health.retire();
                 snapshot = next;
+                snapshot.extensions.update_destinations(&snapshot.config);
+                *snapshot.live.lock().unwrap() = Arc::downgrade(&snapshot);
                 current.send_replace(snapshot.clone());
                 services.commit(&snapshot.config, prepared, &app);
                 if let Some(task) = health.take() {
@@ -1396,8 +1628,13 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     extension_jobs.shutdown().await;
     admin_requests.close();
     while let Ok(command) = admin_requests.try_recv() {
-        if let admin::Command::Reload(reply) = command {
-            let _ = reply.send(Err("proxy is shutting down".into()));
+        match command {
+            admin::Command::Reload(reply)
+            | admin::Command::CreateInstance { reply, .. }
+            | admin::Command::RemoveInstance { reply, .. } => {
+                let _ = reply.send(Err("proxy is shutting down".into()));
+            }
+            admin::Command::Shutdown(_) => {}
         }
     }
     requests.close();

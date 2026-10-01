@@ -2,9 +2,10 @@
 
 Rift can start local Minecraft server processes when players need them and stop
 them after they become empty. It supervises one persistent directory and one
-process per named backend on the same host. This provides the basic lifecycle
-of a small server network; it does not provision remote machines, download server
-jars, clone templates, allocate replicas or manage containers.
+process per named backend on the same host. Service groups also create and remove
+named instances with allocated ports while the proxy stays running. Rift does
+not provision remote machines, download server jars, clone directories or manage
+containers.
 
 Start with [examples/managed.lua](../examples/managed.lua). Its lobby starts with
 Rift; survival starts on demand and stops after five empty minutes. Players use
@@ -19,8 +20,10 @@ backends; a standalone managed backend can also use ordinary proxy mode.
 Install the Java runtime required by your Minecraft server and prepare a separate
 server directory for each backend. Place the server jar, plugins and
 configuration there, accept the Minecraft EULA where required, and make sure the
-account running Rift can read and write the directory. Rift does not create or
-delete these directories. Worlds and other server files survive process restarts.
+account running Rift can read and write the directory. Static managed servers
+use directories you prepare; service-group creation can create its instance
+directory. Rift never deletes these directories. Worlds and other server files
+survive process restarts.
 
 The example expects `examples/servers/lobby/paper.jar` and
 `examples/servers/survival/paper.jar`. For lobby, set these properties:
@@ -99,6 +102,69 @@ must have distinct directories, including symlink aliases. In-memory Rust
 working directory; file loading and `Config::from_lua_at` use the configuration
 directory.
 
+## Service groups and dynamic instances
+
+Define a process template once under `service_groups` and route to its group:
+
+```lua
+local config = require("rift.config")
+config.listeners = { public = "0.0.0.0:25565" }
+config.backends = {}
+config.service_groups.lobby = {
+    directory = "servers/{name}",
+    command = { "java", "-jar", "/absolute/paper.jar", "--port", "{port}" },
+    port_range = { 25600, 25700 },
+    start_on_connect = true,
+    idle_timeout_ms = 300000,
+}
+config.routes.public = "lobby"
+```
+
+Groups accept the managed-server lifecycle fields above plus an inclusive
+`port_range`. The directory must contain `{name}` to isolate instance data.
+`{name}`, `{group}` and `{port}` expand in the directory and command
+arguments for each instance. A directory such as `servers/{name}` gives every
+instance its own persistent world. Creation makes the instance directory when
+needed. Prepare its EULA acceptance, plugins and backend settings before
+starting the process; group creation does not copy or delete server files.
+Use an absolute jar path if the jar is shared across directories.
+See [examples/services.lua](../examples/services.lua) for a complete configuration.
+
+With the `servers` admin permission:
+
+```sh
+rift admin groups
+rift admin create lobby   # Registers lobby-1 and allocates its loopback port.
+rift admin create lobby   # Registers lobby-2 on another free port.
+rift admin servers
+rift admin start lobby-1  # Optional: otherwise an eligible login starts it.
+rift admin remove lobby-2
+```
+
+Creation registers an instance in the proxy immediately, without
+restarting its listeners. Rift chooses an available port in the configured range
+and rejects creation when no port remains. By default it stays stopped until
+an eligible login or explicit start; template `autostart = true` starts it after
+creation. Instances support the existing
+`start`, `stop`, `drain` and transfer commands. Routing to `lobby` chooses an
+eligible instance by occupancy with deterministic ties and tries alternatives
+when an instance is unavailable. Routing directly to `lobby-1` targets that
+instance. An empty group has no destination until an instance is created.
+
+Removal refuses instances with players or attachment reservations. Drain and
+empty the instance first; removal stops and reaps its child before deregistering
+the backend. Existing worlds remain on disk. Runtime instances survive a normal
+configuration reload but are not persisted across a proxy restart. Changing a
+group template or port range requires a restart.
+
+The authenticated web API exposes `GET /api/groups`,
+`POST /api/groups/{name}/instances` and `DELETE /api/instances/{name}`. Send an
+empty JSON object (`{}`) for both mutations. Creation returns HTTP `201` with the
+instance details, and completed removal returns HTTP `200`. Group listings
+include names, port ranges and instance names; server listings also include each
+instance's group, address and port. Neither listing exposes process arguments
+or filesystem paths.
+
 ## Lifecycle and readiness
 
 The observable states are `stopped`, `starting`, `running`, `stopping` and `failed`.
@@ -158,7 +224,8 @@ Lifecycle mutation requests return HTTP `202` when accepted; poll the listing
 to observe completion. See [HTTP services](http.md) for authentication.
 
 Changing managed definitions, adding/removing a managed server, or changing its
-backend address requires a Rift restart. Incompatible reloads reject the entire
+static backend address requires a Rift restart. Use service-group instance
+operations above for live creation and removal. Incompatible reloads reject the entire
 candidate and retain the current configuration. Ordinary route and policy
 changes can still reload under the existing configuration rules.
 
@@ -170,7 +237,12 @@ After building Rift, run the Minecraft wire scenario without downloads:
 
 ```sh
 python3 tests/managed_wire.py --binary target/debug/rift
+python3 tests/services_wire.py --binary target/debug/rift
 ```
+
+The service-group scenario also checks concurrent allocation, balancing, live
+transfers and crash recovery, reload preservation, occupied removal, port reuse
+and cleanup. CI runs both wire scenarios on Linux, macOS and Windows.
 
 The real-server harness checks cold login, world/chunk delivery, idle shutdown
 and restart using the pinned server fixtures. It requires the fixture's Java

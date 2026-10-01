@@ -357,3 +357,235 @@ async fn early_exit_and_missing_command_report_errors_without_restart_loops() {
     assert_eq!(manager.snapshot()[0].state, "failed");
     manager.shutdown().await;
 }
+
+fn empty_manager(fixture: &Fixture) -> ManagedServers {
+    let mut empty = fixture.config.clone();
+    empty.managed_servers.clear();
+    let manager = ManagedServers::new(&empty, fixture.players.clone());
+    manager.launch().unwrap();
+    manager
+}
+
+async fn wait_removed(manager: &ManagedServers) {
+    let deadline = Instant::now() + Duration::from_secs(4);
+    while !manager.snapshot().is_empty() {
+        assert!(Instant::now() < deadline, "server did not retire");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test]
+async fn dynamic_registration_autostarts_and_removal_reaps_before_reuse() {
+    let mut fixture = Fixture::new(0, "normal");
+    fixture.definition().autostart = true;
+    let manager = empty_manager(&fixture);
+    assert!(manager.snapshot().is_empty());
+    manager.add(&fixture.config, "default").unwrap();
+    assert_eq!(
+        manager.add(&fixture.config, "default").unwrap_err().kind(),
+        std::io::ErrorKind::AlreadyExists
+    );
+    wait_state(&manager, "running").await;
+    assert_eq!(fixture.starts(), 1);
+    manager.remove("default").await.unwrap();
+    assert!(manager.snapshot().is_empty());
+    assert!(fixture.directory.join("graceful-stop").exists());
+    assert!(std::net::TcpStream::connect(fixture.address).is_err());
+    // Stale routing snapshots must not turn a deleted managed backend into an
+    // unmanaged destination that can bypass the lifecycle admission guard.
+    assert!(manager.is_managed("default"));
+    assert!(!manager.can_connect("default"));
+    assert!(manager.reserve("default").is_err());
+    assert!(manager.ensure_running("default").await.is_err());
+    assert!(manager.start("default").await.is_err());
+    manager.add(&fixture.config, "default").unwrap();
+    wait_state(&manager, "running").await;
+    assert!(manager.can_connect("default"));
+    assert_eq!(fixture.starts(), 2);
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn removal_refuses_players_and_pending_connections_without_disabling_backend() {
+    let fixture = Fixture::new(0, "normal");
+    let manager = empty_manager(&fixture);
+    manager.add(&fixture.config, "default").unwrap();
+    let lease = manager.reserve("default").unwrap();
+    manager.ensure_running("default").await.unwrap();
+    assert_eq!(
+        manager.remove("default").await.unwrap_err().kind(),
+        std::io::ErrorKind::ResourceBusy
+    );
+    assert!(manager.can_connect("default"));
+    let player = fixture.players.register([2; 16], "Bob", "default").unwrap();
+    drop(lease);
+    assert_eq!(
+        manager.remove("default").await.unwrap_err().kind(),
+        std::io::ErrorKind::ResourceBusy
+    );
+    assert!(manager.can_connect("default"));
+    drop(player);
+    manager.remove("default").await.unwrap();
+    assert!(manager.snapshot().is_empty());
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn cancelled_removal_finishes_and_rejects_all_operations_while_retiring() {
+    let mut fixture = Fixture::new(0, "stubborn");
+    fixture.definition().stop_timeout = Duration::from_millis(400);
+    let manager = fixture.manager();
+    manager.start("default").await.unwrap();
+    let removal_manager = manager.clone();
+    let removal = tokio::spawn(async move { removal_manager.remove("default").await });
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while manager.can_connect("default") {
+        assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    removal.abort();
+    assert!(manager.reserve("default").is_err());
+    assert!(manager.request_start("default").is_err());
+    assert!(manager.request_stop("default").is_err());
+    assert_eq!(
+        manager.remove("default").await.unwrap_err().kind(),
+        std::io::ErrorKind::ResourceBusy
+    );
+    assert_eq!(
+        manager.add(&fixture.config, "default").unwrap_err().kind(),
+        std::io::ErrorKind::AlreadyExists
+    );
+    wait_removed(&manager).await;
+    assert!(std::net::TcpStream::connect(fixture.address).is_err());
+    assert!(!manager.can_connect("default"));
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn removal_interrupts_startup_without_abandoning_process() {
+    let fixture = Fixture::new(10_000, "normal");
+    let manager = empty_manager(&fixture);
+    manager.add(&fixture.config, "default").unwrap();
+    manager.request_start("default").unwrap();
+    wait_file(&fixture.directory.join("starts")).await;
+    let before = Instant::now();
+    manager.remove("default").await.unwrap();
+    assert!(before.elapsed() < Duration::from_secs(1));
+    assert!(manager.snapshot().is_empty());
+    assert_eq!(fixture.starts(), 1);
+    assert!(std::net::TcpStream::connect(fixture.address).is_err());
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn shutdown_waits_for_retiring_children_and_prevents_dynamic_additions() {
+    let mut fixture = Fixture::new(0, "stubborn");
+    fixture.definition().stop_timeout = Duration::from_millis(300);
+    let manager = fixture.manager();
+    manager.start("default").await.unwrap();
+    let removal_manager = manager.clone();
+    let removal = tokio::spawn(async move { removal_manager.remove("default").await });
+    while manager.can_connect("default") {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    manager.shutdown().await;
+    removal.await.unwrap().unwrap();
+    assert!(std::net::TcpStream::connect(fixture.address).is_err());
+    assert!(manager.add(&fixture.config, "default").is_err());
+    assert!(manager.remove("default").await.is_err());
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn dynamic_add_requires_launch_and_valid_managed_definition() {
+    let fixture = Fixture::new(0, "normal");
+    let manager = ManagedServers::new(&fixture.config, fixture.players.clone());
+    assert!(manager.add(&fixture.config, "default").is_err());
+    assert_eq!(fixture.starts(), 0);
+    let manager = empty_manager(&fixture);
+    assert_eq!(
+        manager.add(&fixture.config, "missing").unwrap_err().kind(),
+        std::io::ErrorKind::NotFound
+    );
+    let mut invalid = fixture.config.clone();
+    invalid.backends.clear();
+    assert_eq!(
+        manager.add(&invalid, "default").unwrap_err().kind(),
+        std::io::ErrorKind::InvalidInput
+    );
+    invalid = fixture.config.clone();
+    invalid
+        .managed_servers
+        .get_mut("default")
+        .unwrap()
+        .command
+        .clear();
+    assert_eq!(
+        manager.add(&invalid, "default").unwrap_err().kind(),
+        std::io::ErrorKind::InvalidInput
+    );
+    assert!(manager.snapshot().is_empty());
+    assert_eq!(fixture.starts(), 0);
+    manager.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_dynamic_additions_create_exactly_one_worker() {
+    let mut fixture = Fixture::new(0, "normal");
+    fixture.definition().autostart = true;
+    let manager = empty_manager(&fixture);
+    let barrier = Arc::new(tokio::sync::Barrier::new(9));
+    let mut additions = Vec::new();
+    for _ in 0..8 {
+        let manager = manager.clone();
+        let config = fixture.config.clone();
+        let barrier = barrier.clone();
+        additions.push(tokio::spawn(async move {
+            barrier.wait().await;
+            manager.add(&config, "default")
+        }));
+    }
+    barrier.wait().await;
+    let mut added = 0;
+    for addition in additions {
+        match addition.await.unwrap() {
+            Ok(()) => added += 1,
+            Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists),
+        }
+    }
+    assert_eq!(added, 1);
+    wait_state(&manager, "running").await;
+    assert_eq!(fixture.starts(), 1);
+    manager.remove("default").await.unwrap();
+    manager.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn racing_dynamic_add_and_shutdown_cannot_leave_a_live_child() {
+    let mut fixture = Fixture::new(100, "normal");
+    fixture.definition().autostart = true;
+    let manager = empty_manager(&fixture);
+    let barrier = Arc::new(tokio::sync::Barrier::new(3));
+    let adding_manager = manager.clone();
+    let adding_barrier = barrier.clone();
+    let config = fixture.config.clone();
+    let adding = tokio::spawn(async move {
+        adding_barrier.wait().await;
+        adding_manager.add(&config, "default")
+    });
+    let shutting_manager = manager.clone();
+    let shutting_barrier = barrier.clone();
+    let shutting = tokio::spawn(async move {
+        shutting_barrier.wait().await;
+        shutting_manager.shutdown().await;
+    });
+    barrier.wait().await;
+    let added = adding.await.unwrap();
+    shutting.await.unwrap();
+    if let Err(error) = added {
+        assert_eq!(error.kind(), std::io::ErrorKind::NotConnected);
+    }
+    assert!(manager.snapshot().iter().all(|server| server.pid.is_none()));
+    assert!(std::net::TcpStream::connect(fixture.address).is_err());
+    assert!(manager.add(&fixture.config, "default").is_err());
+}

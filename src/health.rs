@@ -108,7 +108,7 @@ pub async fn connect(
     deadline: Instant,
     event: &mut crate::events::Connection,
 ) -> io::Result<TcpStream> {
-    let candidates: Vec<&str> = std::iter::once(primary)
+    let destinations: Vec<String> = std::iter::once(primary)
         .chain(
             config
                 .fallbacks
@@ -117,7 +117,13 @@ pub async fn connect(
                 .flatten()
                 .map(String::as_str),
         )
+        .map(str::to_owned)
         .collect();
+    let expanded: Vec<String> = destinations
+        .iter()
+        .flat_map(|name| config.destination_names(name))
+        .collect();
+    let candidates: Vec<&str> = expanded.iter().map(String::as_str).collect();
     connect_candidates(
         config,
         health,
@@ -148,7 +154,8 @@ pub async fn connect_candidates(
         .iter()
         .copied()
         .filter(|name| {
-            (config.managed_servers.contains_key(*name) || health.available(name))
+            config.backends.contains_key(*name)
+                && (config.managed_servers.contains_key(*name) || health.available(name))
                 && !health.control.draining(config, name)
         })
         .collect();

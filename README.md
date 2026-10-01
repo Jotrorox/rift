@@ -6,9 +6,11 @@ configuration through Lua or the bundled web dashboard. No Java or separate Lua
 installation is needed to run Rift.
 
 Rift can also supervise local Minecraft servers: start them on demand, stop
-empty servers, and operate their lifecycle from the CLI or web dashboard. See
+empty servers, and operate their lifecycle from the CLI or web dashboard. Define
+a service group once, then create `lobby-1`, `lobby-2` and more instances with
+allocated ports and live backend registration. See the
 the [managed-server guide](docs/managed-servers.md) and
-[example](examples/managed.lua). Managed Minecraft processes need their own Java
+[example](examples/managed.lua) and [service groups](examples/services.lua). Managed Minecraft processes need their own Java
 runtime and prepared server directories.
 
 ## Quick start

@@ -490,6 +490,157 @@ fn managed_state_and_accepted_operations_are_private_and_restart_bound() {
 }
 
 #[test]
+fn service_instances_register_concurrently_reload_and_remove_without_proxy_restart() {
+    let fixture = Fixture::new();
+    let occupied = TcpListener::bind("127.0.0.1:0").unwrap();
+    let occupied_port = occupied.local_addr().unwrap().port();
+    let (first, second) = (0..128)
+        .find_map(|_| {
+            let first = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = first.local_addr().unwrap().port();
+            let second = TcpListener::bind(("127.0.0.1", port.checked_add(1)?)).ok()?;
+            Some((first, second))
+        })
+        .expect("could not reserve two adjacent test ports");
+    let port = first.local_addr().unwrap().port();
+    let extra = format!(
+        "service_groups = {{ lobby = {{ directory = 'servers/{{name}}', command = {{'private-group-command', 'private-group-argument', '{{port}}'}}, port_range = {{{port}, {}}} }}, blocked = {{ directory = 'blocked/{{name}}', command = {{'private-group-command'}}, port_range = {{{occupied_port}, {occupied_port}}} }} }},",
+        port + 1
+    );
+    let source = fixture.source(&format!("token = '{TOKEN}',"), &extra);
+    drop((first, second));
+    let mut process = fixture.start(&source);
+    let pid = process.child.id();
+    let public = fixture.client();
+    let admin = public.authenticated();
+    public.get("/api/groups").expect(401);
+    for (method, path) in [
+        ("POST", "/api/groups/lobby/instances"),
+        ("DELETE", "/api/instances/lobby-1"),
+    ] {
+        public.json(method, path, json!({})).expect(401);
+        admin
+            .send(
+                method,
+                path,
+                &[
+                    ("Origin", "https://attacker.example"),
+                    ("Content-Type", "application/json"),
+                ],
+                "{}",
+            )
+            .expect(403);
+        admin.send(method, path, &[], "{}").expect(415);
+        admin.json(method, path, json!({"port":port})).expect(400);
+    }
+    let initial = admin.get("/api/groups").expect(200).value();
+    assert_eq!(initial["groups"][1]["name"], "lobby");
+    assert_eq!(initial["groups"][1]["instances"], json!([]));
+    assert!(!initial.to_string().contains("private-group"));
+    assert!(!initial.to_string().contains("servers/"));
+    let create = move || {
+        admin
+            .json("POST", "/api/groups/lobby/instances", json!({}))
+            .expect(201)
+            .value()
+    };
+    let first = thread::spawn(create);
+    let second = thread::spawn(create);
+    let first = first.join().unwrap();
+    let second = second.join().unwrap();
+    assert_ne!(first["name"], second["name"]);
+    assert_ne!(first["port"], second["port"]);
+    assert_eq!(first["group"], "lobby");
+    assert_eq!(second["group"], "lobby");
+    for instance in [&first, &second] {
+        assert!(
+            (u64::from(port)..=u64::from(port + 1)).contains(&instance["port"].as_u64().unwrap())
+        );
+    }
+    admin
+        .json("POST", "/api/groups/lobby/instances", json!({}))
+        .expect(409);
+    admin
+        .json("POST", "/api/groups/blocked/instances", json!({}))
+        .expect(409);
+    admin
+        .json("POST", "/api/groups/missing/instances", json!({}))
+        .expect(404);
+    let servers = admin.get("/api/servers").expect(200).value();
+    assert_eq!(servers["servers"].as_array().unwrap().len(), 2);
+    assert_eq!(servers["servers"][0]["state"], "stopped");
+    assert_eq!(servers["servers"][0]["group"], "lobby");
+    assert!(
+        servers["servers"][0]["address"]
+            .as_str()
+            .unwrap()
+            .starts_with("127.0.0.1:")
+    );
+    assert!(!servers.to_string().contains("private-group"));
+    admin
+        .json("POST", "/api/config/validate", json!({"source":source}))
+        .expect(200);
+    admin.json("POST", "/api/reload", json!({})).expect(200);
+    assert_eq!(
+        admin.get("/api/servers").expect(200).value()["servers"],
+        servers["servers"]
+    );
+    assert_eq!(
+        admin.get("/api/groups").expect(200).value()["groups"][1]["instances"],
+        json!(["lobby-1", "lobby-2"])
+    );
+    let changed = source.replace("private-group-argument", "changed-group-argument");
+    admin
+        .json("POST", "/api/config/validate", json!({"source":changed}))
+        .expect(400);
+    save(admin, &changed, &revision(admin)).expect(400);
+    assert_eq!(fixture.read(), source);
+    let explicit = source
+        .replace(
+            "routes = { main = 'primary' }",
+            "routes = { main = 'lobby-1' }",
+        )
+        .replace(
+            "service_groups =",
+            "network = { access = { ['lobby-1'] = { deny = {'Blocked'} } } }, service_groups =",
+        );
+    assert_ne!(explicit, source);
+    admin
+        .json("POST", "/api/config/validate", json!({"source":explicit}))
+        .expect(200);
+    save(admin, &explicit, &revision(admin)).expect(200);
+    admin.json("POST", "/api/reload", json!({})).expect(200);
+    assert_eq!(
+        admin.get("/api/status").expect(200).value()["routes"]["main"],
+        "lobby-1"
+    );
+    assert_eq!(
+        admin.get("/api/servers").expect(200).value()["servers"],
+        servers["servers"]
+    );
+    admin
+        .json("DELETE", "/api/instances/lobby-1", json!({}))
+        .expect(409);
+    save(admin, &source, &revision(admin)).expect(200);
+    let name = first["name"].as_str().unwrap();
+    let removed = admin
+        .json("DELETE", &format!("/api/instances/{name}"), json!({}))
+        .expect(200)
+        .value();
+    assert_eq!(removed["name"], name);
+    assert_eq!(removed["removed"], true);
+    assert_eq!(
+        admin.get("/api/servers").expect(200).value()["servers"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(process.child.id(), pid);
+    assert!(process.child.try_wait().unwrap().is_none());
+}
+
+#[test]
 fn bearer_token_rotation_takes_effect_without_restarting_the_listener() {
     let fixture = Fixture::new();
     let source = fixture.source(&format!("token = '{TOKEN}',"), "");

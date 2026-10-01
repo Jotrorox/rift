@@ -104,6 +104,10 @@ administration.
 
 The `servers` permission grants `rift admin servers`, `rift admin start <backend>`
 and `rift admin stop <backend>` for configured [managed servers](managed-servers.md).
+It also grants `rift admin groups`, `rift admin create <group>` and
+`rift admin remove <instance>` for [service groups](managed-servers.md#service-groups-and-dynamic-instances).
+Creation allocates a port and registers a stopped backend; removal waits for
+child cleanup and refuses players or pending attachments.
 Start and stop return an accepted response immediately; poll `servers` to verify
 completion. A failed start appears in the server's `last_error` field. These
 commands never accept arbitrary process commands or modify ordinary unmanaged
@@ -289,6 +293,8 @@ isolation and cannot detect changes incompatible with an already running process
 | `web`, `status`, standalone `metrics`, web bearer token | Can enable, disable or move live; replacement sockets bind before commit |
 | Gameplay listeners, operational `admin` bind/token variable/permissions | Restart required; incompatible reload rejects the entire candidate |
 | `managed_servers` definitions or addresses of managed backends | Restart required; running processes and their lifecycle policy remain attached to the original definition |
+| `service_groups` templates or port ranges | Restart required; live instance creation/removal uses admin or web operations |
+| Runtime service instances | Preserved on reload; registrations are not persisted across proxy restarts |
 
 Already accepted connections keep their original configuration snapshot while
 initial login completes. A route edit never transfers a connected player.

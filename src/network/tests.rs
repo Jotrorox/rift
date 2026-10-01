@@ -2,6 +2,68 @@ use super::*;
 use rift::{config::Config, protocol::State};
 use std::sync::Arc;
 
+#[test]
+fn group_candidates_balance_load_inherit_access_and_expand_fallbacks() {
+    let mut config = Config::from_lua(
+        "return {listeners={public='127.0.0.1:0'},backends={backup='127.0.0.1:25003'},
+        routes={public='lobby'},service_groups={lobby={directory='servers/{name}',command={'java'},port_range={25001,25002}}},
+        fallbacks={lobby={'backup'}},network={access={lobby={deny={'Blocked'}}}}}",
+        "groups.lua",
+    ).unwrap();
+    config.add_instance("lobby", "lobby-1", 25001).unwrap();
+    config.add_instance("lobby", "lobby-2", 25002).unwrap();
+    let snapshot = Arc::new(Snapshot::new(config, None).unwrap());
+    let metrics = Metrics::default();
+    let network = Network {
+        snapshot: &snapshot,
+        addresses: &[],
+        metrics: &metrics,
+    };
+    let player = snapshot
+        .players
+        .register([1; 16], "Alice", "lobby-1")
+        .unwrap();
+    assert_eq!(
+        network.initial_candidates("lobby", false, "Bob").unwrap(),
+        ["lobby-2", "lobby-1", "backup"]
+    );
+    assert_eq!(
+        network.initial_candidates("lobby-1", false, "Bob").unwrap(),
+        ["lobby-1", "backup"]
+    );
+    assert!(
+        network
+            .initial_candidates("lobby", false, "Blocked")
+            .is_err()
+    );
+    assert!(
+        network
+            .initial_candidates("lobby-1", false, "Blocked")
+            .is_err()
+    );
+    assert_eq!(network.recovery_candidates("lobby-1"), ["backup"]);
+    drop(player);
+    assert_eq!(
+        network.initial_candidates("lobby", false, "Bob").unwrap(),
+        ["lobby-1", "lobby-2", "backup"]
+    );
+}
+
+#[tokio::test]
+async fn stale_backend_candidates_fail_before_health_lookup_or_process_admission() {
+    let snapshot = Arc::new(Snapshot::new(config(), None).unwrap());
+    let metrics = Metrics::default();
+    let network = Network {
+        snapshot: &snapshot,
+        addresses: &[],
+        metrics: &metrics,
+    };
+    assert_eq!(
+        network.prepare_backend("removed").await.unwrap_err().kind(),
+        io::ErrorKind::NotFound
+    );
+}
+
 fn config() -> Config {
     Config::from_lua(
         "return {

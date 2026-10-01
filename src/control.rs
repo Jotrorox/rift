@@ -41,6 +41,8 @@ impl From<io::Error> for Error {
 pub enum Operation {
     Reload,
     Save { source: String, revision: String },
+    CreateInstance { group: String },
+    RemoveInstance { name: String },
 }
 pub struct Command {
     pub operation: Operation,
@@ -77,7 +79,12 @@ pub struct Candidate {
     pub save: bool,
 }
 
-pub fn prepare(path: &Path, active_source: &str, operation: Operation) -> Result<Candidate, Error> {
+pub fn prepare_with_instances(
+    path: &Path,
+    active_source: &str,
+    operation: Operation,
+    previous: &Config,
+) -> Result<Candidate, Error> {
     let disk = read_source(path)?;
     let (source, save) = match operation {
         Operation::Reload => (disk.clone(), false),
@@ -97,8 +104,13 @@ pub fn prepare(path: &Path, active_source: &str, operation: Operation) -> Result
             }
             (source, true)
         }
+        Operation::CreateInstance { .. } | Operation::RemoveInstance { .. } => {
+            return Err(Error::invalid(
+                "instance operations do not edit configuration files",
+            ));
+        }
     };
-    let config = Config::from_lua_at(&source, path)?;
+    let config = Config::from_lua_at_with_instances(&source, path, previous)?;
     Ok(Candidate {
         source,
         config,

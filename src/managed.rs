@@ -1,7 +1,7 @@
 //! Local process ownership for managed backends. Workers own child processes,
 //! so cancelling a login or an administrator request cannot abandon a start.
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs::OpenOptions,
     io,
     net::SocketAddr,
@@ -41,7 +41,8 @@ pub struct ManagedServers(Arc<Inner>);
 
 #[derive(Debug)]
 struct Inner {
-    servers: BTreeMap<String, Arc<Server>>,
+    servers: Mutex<BTreeMap<String, Arc<Server>>>,
+    retired: Mutex<BTreeSet<String>>,
     players: Arc<PlayerRegistry>,
     launched: AtomicBool,
     shutdown: AtomicBool,
@@ -105,37 +106,16 @@ impl ManagedServers {
             .managed_servers
             .iter()
             .map(|(name, definition)| {
-                let (sender, receiver) = mpsc::channel(64);
                 let address = config
                     .backends
                     .get(name)
                     .and_then(|backend| backend.address().parse().ok());
-                (
-                    name.clone(),
-                    Arc::new(Server {
-                        name: name.clone(),
-                        config: definition.clone(),
-                        address,
-                        sender,
-                        receiver: Mutex::new(Some(receiver)),
-                        shutdown: AtomicBool::new(false),
-                        wake: Notify::new(),
-                        state: Mutex::new(State {
-                            phase: "stopped",
-                            pid: None,
-                            reservations: 0,
-                            automatic: true,
-                            pending_stop: false,
-                            last_error: None,
-                            retry_at: None,
-                            last_activity: Instant::now(),
-                        }),
-                    }),
-                )
+                (name.clone(), new_server(name, definition.clone(), address))
             })
             .collect();
         Self(Arc::new(Inner {
-            servers,
+            servers: Mutex::new(servers),
+            retired: Mutex::new(BTreeSet::new()),
             players,
             launched: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
@@ -145,6 +125,7 @@ impl ManagedServers {
     /// Call once after startup validation and listener binding have succeeded.
     /// Subsequent calls do not repeat autostart or create additional workers.
     pub fn launch(&self) -> io::Result<()> {
+        let servers = self.0.servers.lock().unwrap_or_else(|e| e.into_inner());
         if self.0.shutdown.load(Ordering::Acquire) {
             return Err(unavailable("managed servers are shutting down"));
         }
@@ -152,25 +133,131 @@ impl ManagedServers {
         if self.0.launched.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
-        for server in self.0.servers.values() {
-            let receiver = server
-                .receiver
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .take()
-                .expect("single launch");
-            runtime.spawn(worker(server.clone(), self.0.players.clone(), receiver));
+        for server in servers.values() {
+            launch_worker(&runtime, server, &self.0.players);
         }
         Ok(())
     }
 
+    /// Register a configured backend and give its child process a worker owner.
+    /// The registry lock serializes registration against launch and shutdown.
+    pub fn add(&self, config: &Config, name: &str) -> io::Result<()> {
+        let runtime = tokio::runtime::Handle::try_current().map_err(io::Error::other)?;
+        let mut servers = self.0.servers.lock().unwrap_or_else(|e| e.into_inner());
+        self.check_running()?;
+        if servers.contains_key(name) {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "managed server already exists",
+            ));
+        }
+        let definition = config.managed_servers.get(name).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "unknown managed server definition")
+        })?;
+        let address = config
+            .backends
+            .get(name)
+            .and_then(|backend| backend.address().parse::<SocketAddr>().ok())
+            .filter(|address| address.ip().to_canonical().is_loopback() && address.port() != 0)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "managed server requires a literal loopback backend address and nonzero port",
+                )
+            })?;
+        if definition.command.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "managed server command is empty",
+            ));
+        }
+        let server = new_server(name, definition.clone(), Some(address));
+        launch_worker(&runtime, &server, &self.0.players);
+        servers.insert(name.to_owned(), server);
+        self.0
+            .retired
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(name);
+        Ok(())
+    }
+
+    /// Retire only an unoccupied backend. A detached owner completes cleanup
+    /// even if the administrator disconnects while its child is terminating.
+    pub async fn remove(&self, name: &str) -> io::Result<()> {
+        let runtime = tokio::runtime::Handle::try_current().map_err(io::Error::other)?;
+        let (reply, receive) = oneshot::channel();
+        {
+            let servers = self.0.servers.lock().unwrap_or_else(|e| e.into_inner());
+            self.check_running()?;
+            let server = servers
+                .get(name)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "unknown managed server"))?
+                .clone();
+            let mut state = server.state.lock().unwrap_or_else(|e| e.into_inner());
+            if server.shutdown.load(Ordering::Acquire) {
+                return Err(io::Error::new(
+                    io::ErrorKind::ResourceBusy,
+                    "managed server is already retiring",
+                ));
+            }
+            if state.reservations > 0 || player_count(&self.0.players, name) > 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::ResourceBusy,
+                    "managed server has connected players or pending connections",
+                ));
+            }
+            state.automatic = false;
+            state.pending_stop = true;
+            server.shutdown.store(true, Ordering::Release);
+            server.wake.notify_one();
+            drop(state);
+            let inner = self.0.clone();
+            let name = name.to_owned();
+            runtime.spawn(async move {
+                // Closing the channel happens only after process termination
+                // and reaping, including a start currently awaiting readiness.
+                server.sender.closed().await;
+                let mut servers = inner.servers.lock().unwrap_or_else(|e| e.into_inner());
+                if servers
+                    .get(&name)
+                    .is_some_and(|current| Arc::ptr_eq(current, &server))
+                {
+                    inner
+                        .retired
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(name.clone());
+                    servers.remove(&name);
+                }
+                let _ = reply.send(());
+            });
+        }
+        receive
+            .await
+            .map_err(|_| unavailable("managed server removal worker stopped"))
+    }
+
     pub fn is_managed(&self, name: &str) -> bool {
-        self.0.servers.contains_key(name)
+        let servers = self.0.servers.lock().unwrap_or_else(|e| e.into_inner());
+        servers.contains_key(name)
+            || self
+                .0
+                .retired
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(name)
     }
 
     pub fn can_connect(&self, name: &str) -> bool {
-        let Some(server) = self.0.servers.get(name) else {
-            return true;
+        let servers = self.0.servers.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(server) = servers.get(name) else {
+            return !self
+                .0
+                .retired
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(name);
         };
         if !self.0.launched.load(Ordering::Acquire) || self.0.shutdown.load(Ordering::Acquire) {
             return false;
@@ -180,7 +267,17 @@ impl ManagedServers {
     }
 
     pub fn reserve(&self, name: &str) -> io::Result<Option<ManagedLease>> {
-        let Some(server) = self.0.servers.get(name) else {
+        let servers = self.0.servers.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(server) = servers.get(name) else {
+            if self
+                .0
+                .retired
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(name)
+            {
+                return Err(unavailable("managed server was removed"));
+            }
             return Ok(None);
         };
         self.check_running()?;
@@ -243,12 +340,16 @@ impl ManagedServers {
         reply: Option<oneshot::Sender<io::Result<()>>>,
     ) -> io::Result<()> {
         self.check_running()?;
-        let server = self
-            .0
-            .servers
+        let servers = self.0.servers.lock().unwrap_or_else(|e| e.into_inner());
+        // Recheck under the same registry lock used by shutdown and removal.
+        self.check_running()?;
+        let server = servers
             .get(name)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "unknown managed server"))?;
         let mut state = server.state.lock().unwrap_or_else(|e| e.into_inner());
+        if server.shutdown.load(Ordering::Acquire) {
+            return Err(unavailable("managed server is retiring or shutting down"));
+        }
         if matches!(action, Action::Stop) {
             if state.reservations > 0 || player_count(&self.0.players, name) > 0 {
                 return Err(io::Error::new(
@@ -286,6 +387,8 @@ impl ManagedServers {
     pub fn snapshot(&self) -> Vec<ManagedServerSnapshot> {
         self.0
             .servers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
             .values()
             .map(|server| {
                 let state = server.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -309,18 +412,20 @@ impl ManagedServers {
     /// The proxy must first drain its sessions. Shutdown then forcibly stops all
     /// processes Rift owns, including ones whose sessions exceeded that deadline.
     pub async fn shutdown(&self) {
-        self.0.shutdown.store(true, Ordering::Release);
-        for server in self.0.servers.values() {
-            server.shutdown.store(true, Ordering::Release);
-            server.wake.notify_one();
-        }
+        let servers: Vec<_> = {
+            let servers = self.0.servers.lock().unwrap_or_else(|e| e.into_inner());
+            self.0.shutdown.store(true, Ordering::Release);
+            for server in servers.values() {
+                server.shutdown.store(true, Ordering::Release);
+                server.wake.notify_one();
+            }
+            servers.values().cloned().collect()
+        };
         if !self.0.launched.load(Ordering::Acquire) {
             return;
         }
-        // All workers stop concurrently. A channel closes only after its child
-        // has been reaped, so no task handle or cancellation-sensitive ownership
-        // needs to pass to a caller.
-        for server in self.0.servers.values() {
+        // All workers stop concurrently, including ones already retiring.
+        for server in servers {
             server.sender.closed().await;
         }
     }
@@ -328,11 +433,53 @@ impl ManagedServers {
 
 impl Drop for Inner {
     fn drop(&mut self) {
-        for server in self.servers.values() {
+        for server in self
+            .servers
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+        {
             server.shutdown.store(true, Ordering::Release);
             server.wake.notify_one();
         }
     }
+}
+
+fn new_server(name: &str, config: ManagedServer, address: Option<SocketAddr>) -> Arc<Server> {
+    let (sender, receiver) = mpsc::channel(64);
+    Arc::new(Server {
+        name: name.to_owned(),
+        config,
+        address,
+        sender,
+        receiver: Mutex::new(Some(receiver)),
+        shutdown: AtomicBool::new(false),
+        wake: Notify::new(),
+        state: Mutex::new(State {
+            phase: "stopped",
+            pid: None,
+            reservations: 0,
+            automatic: true,
+            pending_stop: false,
+            last_error: None,
+            retry_at: None,
+            last_activity: Instant::now(),
+        }),
+    })
+}
+
+fn launch_worker(
+    runtime: &tokio::runtime::Handle,
+    server: &Arc<Server>,
+    players: &Arc<PlayerRegistry>,
+) {
+    let receiver = server
+        .receiver
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+        .expect("single launch");
+    runtime.spawn(worker(server.clone(), players.clone(), receiver));
 }
 
 fn unavailable(message: &str) -> io::Error {

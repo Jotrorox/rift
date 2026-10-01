@@ -20,6 +20,8 @@ use tokio::{
 pub type Reply = oneshot::Sender<Result<Value, String>>;
 pub enum Command {
     Reload(Reply),
+    CreateInstance { group: String, reply: Reply },
+    RemoveInstance { name: String, reply: Reply },
     // The handler confirms that the response has been written before shutdown begins.
     Shutdown(oneshot::Receiver<()>),
 }
@@ -226,7 +228,7 @@ fn request(value: &Value, settings: &Admin, secret: &str) -> Result<Vec<String>,
         .collect::<Result<Vec<_>, _>>()?;
     let command = args.first().ok_or("missing command")?;
     let permission = match command.as_str() {
-        "start" | "stop" => "servers",
+        "start" | "stop" | "groups" | "create" | "remove" => "servers",
         command => command,
     };
     if !settings.permissions.contains(permission) {
@@ -248,9 +250,26 @@ pub(crate) fn managed_servers(snapshot: &Snapshot) -> Value {
                 "name":server.name,"state":server.state,"pid":server.pid,
                 "players":server.players,"reservations":server.reservations,
                 "automatic_start":server.automatic_start,"last_error":server.last_error,
+                "group":snapshot.config.instances.get(&server.name).map(|instance| &instance.group),
+                "address":snapshot.config.backends.get(&server.name).map(|backend| backend.address()),
+                "port":snapshot.config.backends.get(&server.name).and_then(|backend| backend.address().parse::<SocketAddr>().ok()).map(|address| address.port()),
             }))
             .collect::<Vec<_>>()
     )
+}
+
+/// Group metadata only: templates contain executable arguments and filesystem paths.
+pub(crate) fn service_groups(snapshot: &Snapshot) -> Value {
+    json!({"groups":snapshot.config.service_groups.iter().map(|(name, group)| {
+        json!({
+            "name":name,
+            "port_range":[group.port_start,group.port_end],
+            "instances":snapshot.config.instances.iter()
+                .filter(|(_, instance)| instance.group == *name)
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>(),
+        })
+    }).collect::<Vec<_>>()})
 }
 
 pub(crate) fn managed_backend(snapshot: &Snapshot, backend: &str) -> io::Result<()> {
@@ -284,6 +303,19 @@ pub(crate) async fn execute(
     match args {
         [command] if command == "status" => Ok(control.status(&snapshot, metrics)),
         [command] if command == "servers" => Ok(json!({"servers":managed_servers(&snapshot)})),
+        [command] if command == "groups" => Ok(service_groups(&snapshot)),
+        [command, group] if command == "create" => {
+            let (reply, receiver) = oneshot::channel();
+            commands.try_send(Command::CreateInstance { group: group.clone(), reply })
+                .map_err(|_| "administrator command queue is full or shutting down")?;
+            receiver.await.map_err(|_| "proxy is shutting down".to_owned())?
+        }
+        [command, name] if command == "remove" => {
+            let (reply, receiver) = oneshot::channel();
+            commands.try_send(Command::RemoveInstance { name: name.clone(), reply })
+                .map_err(|_| "administrator command queue is full or shutting down")?;
+            receiver.await.map_err(|_| "proxy is shutting down".to_owned())?
+        }
         [command, backend] if command == "start" || command == "stop" => {
             managed_backend(&snapshot, backend).map_err(|error| error.to_string())?;
             if command == "start" {
@@ -324,7 +356,7 @@ pub(crate) async fn execute(
             commands.try_send(Command::Reload(reply)).map_err(|_| "administrator command queue is full or shutting down")?;
             receiver.await.map_err(|_| "proxy is shutting down".to_owned())?
         }
-        _ => Err("usage: status | servers | start <backend> | stop <backend> | maintenance on/off | drain <backend> on/off | transfer <connection-id> <backend> | reload | shutdown".into()),
+        _ => Err("usage: status | servers | groups | create <group> | remove <instance> | start <backend> | stop <backend> | maintenance on/off | drain <backend> on/off | transfer <connection-id> <backend> | reload | shutdown".into()),
     }
 }
 
@@ -375,6 +407,12 @@ pub async fn serve(
                                     {
                                         deadline += server.start_timeout;
                                     }
+                                    if let [command, name] = args.as_slice()
+                                        && command == "remove"
+                                        && let Some(server) = snapshot.config.managed_servers.get(name)
+                                    {
+                                        deadline += server.stop_timeout;
+                                    }
                                     timeout(deadline, execute(&args, snapshot, &metrics, &commands)).await
                                         .unwrap_or_else(|_| Err("administrator operation deadline exceeded; refresh status before retrying".into()))
                                 }
@@ -404,7 +442,7 @@ pub async fn client(args: &[String]) -> io::Result<()> {
     if args.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "usage: rift admin [--address 127.0.0.1:9091] status|servers|start <backend>|stop <backend>|maintenance on/off|drain <backend> on/off|transfer <connection-id> <backend>|reload|shutdown",
+            "usage: rift admin [--address 127.0.0.1:9091] status|servers|groups|create <group>|remove <instance>|start <backend>|stop <backend>|maintenance on/off|drain <backend> on/off|transfer <connection-id> <backend>|reload|shutdown",
         ));
     }
     let address: SocketAddr = address.parse().map_err(|_| {
@@ -425,7 +463,10 @@ pub async fn client(args: &[String]) -> io::Result<()> {
             "set RIFT_ADMIN_TOKEN to the server's admin secret",
         )
     })?;
-    let deadline = if args.first().is_some_and(|command| command == "transfer") {
+    let deadline = if args
+        .first()
+        .is_some_and(|command| command == "transfer" || command == "remove")
+    {
         Duration::from_secs(24 * 60 * 60 + 45)
     } else {
         Duration::from_secs(40)

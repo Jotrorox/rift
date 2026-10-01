@@ -185,6 +185,46 @@ fn config(backends: &[&TcpListener], options: &str, permissions: &str) -> String
     )
 }
 
+#[test]
+fn service_group_cli_registers_and_removes_instances_with_servers_permission() {
+    let fixture = Fixture::new();
+    let backend = TcpListener::bind("127.0.0.1:0").unwrap();
+    let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = reservation.local_addr().unwrap().port();
+    let options = format!(
+        "service_groups = {{ lobby = {{ directory = 'servers/{{name}}', command = {{'private-group-command', 'private-group-argument'}}, port_range = {{{port}, {port}}} }} }},"
+    );
+    let source = config(&[&backend], &options, "'servers'");
+    fixture.write(&source);
+    drop(reservation);
+    let process = fixture.spawn();
+    let groups = process.ok(&["groups"]);
+    assert_eq!(groups["groups"][0]["name"], "lobby");
+    assert_eq!(groups["groups"][0]["instances"], json!([]));
+    assert!(!groups.to_string().contains("private-group"));
+    assert!(!groups.to_string().contains("servers/"));
+    let created = process.ok(&["create", "lobby"]);
+    assert_eq!(created["name"], "lobby-1");
+    assert_eq!(created["port"], port);
+    assert_eq!(created["created"], true);
+    assert_eq!(
+        process.ok(&["groups"])["groups"][0]["instances"],
+        json!(["lobby-1"])
+    );
+    let servers = process.ok(&["servers"]);
+    assert_eq!(servers["servers"][0]["name"], "lobby-1");
+    assert_eq!(servers["servers"][0]["state"], "stopped");
+    assert_eq!(servers["servers"][0]["port"], port);
+    assert!(!process.command(&["create", "lobby"]).status.success());
+    assert_eq!(process.ok(&["remove", "lobby-1"])["removed"], true);
+    assert_eq!(process.ok(&["servers"])["servers"], json!([]));
+    assert_eq!(process.ok(&["groups"])["groups"][0]["instances"], json!([]));
+    assert_eq!(
+        fs::read_to_string(fixture.0.join("rift.lua")).unwrap(),
+        source
+    );
+}
+
 fn connect(address: SocketAddr) -> TcpStream {
     let stream = TcpStream::connect_timeout(&address, Duration::from_secs(5)).unwrap();
     stream

@@ -15,9 +15,11 @@ pub use crate::message_script::MessageScript;
 pub use crate::{http_script::HttpScript, script::RouteScript};
 pub use managed::ManagedServer;
 pub use messaging::{MessagingConfig, MessagingPrincipal, MessagingStream, MessagingSubscription};
+pub use services::{ServiceGroup, ServiceInstance};
 
 mod managed;
 mod messaging;
+mod services;
 
 // Configuration evaluation includes cold VM setup and can be descheduled on
 // busy hosts. Keep it bounded without applying the latency-sensitive callback
@@ -29,6 +31,8 @@ pub struct Config {
     pub listeners: BTreeMap<String, SocketAddr>,
     pub backends: BTreeMap<String, Backend>,
     pub managed_servers: BTreeMap<String, ManagedServer>,
+    pub service_groups: BTreeMap<String, ServiceGroup>,
+    pub instances: BTreeMap<String, ServiceInstance>,
     pub routes: BTreeMap<String, Route>,
     pub limits: Limits,
     pub authentication: Authentication,
@@ -227,6 +231,8 @@ impl Config {
             listeners: BTreeMap::from([("default".into(), address(listen, "listen")?)]),
             backends: BTreeMap::from([("default".into(), Backend::parse(backend)?)]),
             managed_servers: BTreeMap::new(),
+            service_groups: BTreeMap::new(),
+            instances: BTreeMap::new(),
             routes: BTreeMap::from([("default".into(), Route::Direct("default".into()))]),
             limits: Limits::default(),
             authentication: Authentication::default(),
@@ -276,6 +282,7 @@ impl Config {
         Self::from_source(
             crate::script::ScriptSource::new(source, name),
             Path::new("."),
+            None,
         )
     }
 
@@ -285,10 +292,36 @@ impl Config {
         let source = crate::script::ScriptSource::from_path(source, path)
             .map_err(|error| invalid(format!("{}: {error}", path.display())))?;
         let directory = source.root.clone();
-        Self::from_source(source, &directory)
+        Self::from_source(source, &directory, None)
     }
 
-    fn from_source(source: crate::script::ScriptSource, directory: &Path) -> io::Result<Self> {
+    /// Validate edited configuration against the current runtime instances.
+    /// Definitions supplied by Lua cannot replace a live instance.
+    pub fn from_lua_at_with_instances(
+        source: &str,
+        path: &Path,
+        previous: &Self,
+    ) -> io::Result<Self> {
+        let source = crate::script::ScriptSource::from_path(source, path)
+            .map_err(|error| invalid(format!("{}: {error}", path.display())))?;
+        let directory = source.root.clone();
+        Self::from_source(source, &directory, Some(previous))
+    }
+
+    /// Validate an in-memory script against the current runtime instances.
+    pub fn from_lua_with_instances(source: &str, name: &str, previous: &Self) -> io::Result<Self> {
+        Self::from_source(
+            crate::script::ScriptSource::new(source, name),
+            Path::new("."),
+            Some(previous),
+        )
+    }
+
+    fn from_source(
+        source: crate::script::ScriptSource,
+        directory: &Path,
+        previous: Option<&Self>,
+    ) -> io::Result<Self> {
         let name = source.entry.name.as_ref();
         let parse = || -> Result<Self, String> {
             let (_lua, value) =
@@ -301,6 +334,7 @@ impl Config {
                     "listeners",
                     "backends",
                     "managed_servers",
+                    "service_groups",
                     "routes",
                     "limits",
                     "authentication",
@@ -339,6 +373,7 @@ impl Config {
                 })
                 .collect::<Result<_, _>>()?;
             let managed_servers = managed::parse(&root, directory)?;
+            let service_groups = services::parse(&_lua, &root, directory)?;
             let routes = routes(root.get("routes").map_err(|e| e.to_string())?)?;
             let mut limits = Limits::default();
             let value: Value = root.get("limits").map_err(|e| e.to_string())?;
@@ -537,6 +572,8 @@ impl Config {
                 listeners,
                 backends,
                 managed_servers,
+                service_groups,
+                instances: BTreeMap::new(),
                 routes,
                 limits,
                 authentication,
@@ -561,7 +598,11 @@ impl Config {
                 shutdown_timeout,
             })
         };
-        let config = parse().map_err(|error| invalid(format!("{name}: {error}")))?;
+        let mut config = parse().map_err(|error| invalid(format!("{name}: {error}")))?;
+        if let Some(previous) = previous {
+            services::restore_instances(&mut config, previous)
+                .map_err(|error| invalid(format!("{name}: {error}")))?;
+        }
         config
             .validate()
             .map_err(|error| invalid(format!("{name}: {error}")))?;
@@ -569,6 +610,7 @@ impl Config {
     }
 
     pub fn validate(&self) -> io::Result<()> {
+        services::validate(self).map_err(invalid)?;
         managed::validate(&self.managed_servers, &self.backends).map_err(invalid)?;
         if let Some(extensions) = &self.extensions {
             if !self.authentication.online_mode {
@@ -625,7 +667,7 @@ impl Config {
             ),
             (
                 "backends",
-                self.backends.is_empty(),
+                self.backends.is_empty() && self.service_groups.is_empty(),
                 self.backends.keys().any(|name| name.trim().is_empty()),
             ),
         ] {
@@ -638,7 +680,7 @@ impl Config {
         }
         if self.network.bungeecord {
             let mut names = BTreeSet::new();
-            for name in self.backends.keys() {
+            for name in self.backends.keys().chain(self.service_groups.keys()) {
                 if !names.insert(name.to_ascii_lowercase()) {
                     return Err(invalid(
                         "network.bungeecord: backend names must be unique ignoring ASCII case",
@@ -735,7 +777,7 @@ impl Config {
                 return Err(invalid(format!("{label}: at most 16 backend names")));
             }
             for name in names {
-                if !self.backends.contains_key(name) || !seen.insert(name) {
+                if !self.is_destination(name) || !seen.insert(name) {
                     return Err(invalid(format!(
                         "{label}: unknown or duplicate backend {name:?}"
                     )));
@@ -743,7 +785,7 @@ impl Config {
             }
         }
         for (backend, access) in &self.network.access {
-            if !self.backends.contains_key(backend) {
+            if !self.is_destination(backend) {
                 return Err(invalid(format!(
                     "network.access.{backend}: unknown backend"
                 )));
@@ -765,12 +807,12 @@ impl Config {
             }
         }
         for (name, targets) in &self.fallbacks {
-            if !self.backends.contains_key(name) {
+            if !self.is_destination(name) {
                 return Err(invalid(format!("fallbacks.{name}: unknown backend")));
             }
             let mut seen = std::collections::HashSet::new();
             for target in targets {
-                if !self.backends.contains_key(target) || target == name || !seen.insert(target) {
+                if !self.is_destination(target) || target == name || !seen.insert(target) {
                     return Err(invalid(format!(
                         "fallbacks.{name}: unknown, duplicate or self backend {target:?}"
                     )));
@@ -858,12 +900,18 @@ impl Config {
     /// Apply the same rule to initial login, commands and failure recovery.
     /// Unknown destinations are never permitted, even with no access entry.
     pub fn can_access(&self, backend: &str, username: &str) -> bool {
-        self.backends.contains_key(backend)
+        self.is_destination(backend)
             && self
                 .network
                 .access
                 .get(backend)
                 .is_none_or(|access| access.permits(username))
+            && self.instances.get(backend).is_none_or(|instance| {
+                self.network
+                    .access
+                    .get(&instance.group)
+                    .is_none_or(|access| access.permits(username))
+            })
     }
 
     pub fn mode(&self, listener: &str) -> io::Result<Mode> {
@@ -871,6 +919,11 @@ impl Config {
             self.backends
                 .get(name)
                 .cloned()
+                .or_else(|| {
+                    self.service_groups.get(name).and_then(|group| {
+                        Backend::parse(&format!("127.0.0.1:{}", group.port_start)).ok()
+                    })
+                })
                 .ok_or_else(|| invalid(format!("routes.{listener}: unknown backend {name:?}")))
         };
         match &self.routes[listener] {
@@ -1217,7 +1270,7 @@ fn strings(value: Value, path: &str) -> Result<BTreeMap<String, String>, String>
         }
         result.insert(key.clone(), string(value, &format!("{path}.{key}"))?);
     }
-    if result.is_empty() {
+    if result.is_empty() && path != "backends" {
         return Err(format!("{path}: must not be empty"));
     }
     Ok(result)

@@ -6,7 +6,7 @@ use axum::{
     http::{HeaderValue, StatusCode, Uri, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
-    routing::{any, get, post},
+    routing::{any, delete, get, post},
 };
 use rift::{
     config::Config,
@@ -85,6 +85,7 @@ impl App {
         });
         if private {
             value["managed_servers"] = admin::managed_servers(snapshot);
+            value["service_groups"] = admin::service_groups(snapshot)["groups"].clone();
             value["config_path"] = json!(self.path.as_ref().map(|p| p.display().to_string()));
             value["writable"] = json!(self.path.is_some());
             value["routes"] = Value::Object(
@@ -267,6 +268,9 @@ fn router(kind: Kind, address: SocketAddr, mut app: App) -> Router {
             .route("/api/servers", get(managed_servers))
             .route("/api/servers/{name}/start", post(start_server))
             .route("/api/servers/{name}/stop", post(stop_server))
+            .route("/api/groups", get(service_groups))
+            .route("/api/groups/{name}/instances", post(create_instance))
+            .route("/api/instances/{name}", delete(remove_instance))
             .route("/api/metrics", get(json_metrics))
             .route("/api/config", get(config_source).put(save_config))
             .route("/api/config/validate", post(validate_config))
@@ -297,7 +301,14 @@ async fn boundary(State(app): State<App>, request: Request, next: Next) -> Respo
             "HTTP request capacity exhausted",
         );
     };
-    let mut response = match timeout(Duration::from_secs(10), next.run(request)).await {
+    let mut deadline = Duration::from_secs(10);
+    if request.method() == axum::http::Method::DELETE
+        && let Some(name) = request.uri().path().strip_prefix("/api/instances/")
+        && let Some(server) = app.snapshot().config.managed_servers.get(name)
+    {
+        deadline += server.stop_timeout;
+    }
+    let mut response = match timeout(deadline, next.run(request)).await {
         Ok(response) => response,
         Err(_) => error(
             StatusCode::REQUEST_TIMEOUT,
@@ -458,6 +469,70 @@ async fn admin_status(State(app): State<App>) -> Json<Value> {
 async fn managed_servers(State(app): State<App>) -> Json<Value> {
     Json(json!({"servers":admin::managed_servers(&app.snapshot())}))
 }
+async fn service_groups(State(app): State<App>) -> Json<Value> {
+    Json(admin::service_groups(&app.snapshot()))
+}
+async fn create_instance(
+    State(app): State<App>,
+    Path(group): Path<String>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    if let Err(error) = payload(body, &[]) {
+        return error.into_response();
+    }
+    instance_operation(
+        app,
+        control::Operation::CreateInstance { group },
+        StatusCode::CREATED,
+    )
+    .await
+}
+async fn remove_instance(
+    State(app): State<App>,
+    Path(name): Path<String>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    if let Err(error) = payload(body, &[]) {
+        return error.into_response();
+    }
+    instance_operation(
+        app,
+        control::Operation::RemoveInstance { name },
+        StatusCode::OK,
+    )
+    .await
+}
+async fn instance_operation(
+    app: App,
+    operation: control::Operation,
+    status: StatusCode,
+) -> Response {
+    let (reply, result) = oneshot::channel();
+    if app
+        .commands
+        .try_send(control::Command { operation, reply })
+        .is_err()
+    {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "instance operation queue unavailable or busy",
+        );
+    }
+    match result.await {
+        Ok(Ok(value)) => match serde_json::from_str::<Value>(&value) {
+            Ok(value) => (status, Json(value)).into_response(),
+            Err(_) => error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "invalid instance operation response",
+            ),
+        },
+        Ok(Err(failure)) => failure.into_response(),
+        Err(_) => error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "instance operation service stopped",
+        ),
+    }
+}
 async fn start_server(
     State(app): State<App>,
     Path(name): Path<String>,
@@ -538,7 +613,7 @@ async fn standalone_metrics(state: State<App>) -> Response {
 }
 async fn discovery() -> Json<Value> {
     Json(
-        json!({"version":1,"endpoints":["GET /api/status","GET /api/servers","POST /api/servers/{name}/start","POST /api/servers/{name}/stop","GET /api/metrics","GET /api/config","POST /api/config/validate","PUT /api/config","POST /api/reload"],"extensions":"/ext/* -> on_http(request)","source_limit_bytes":control::MAX_SOURCE}),
+        json!({"version":1,"endpoints":["GET /api/status","GET /api/servers","POST /api/servers/{name}/start","POST /api/servers/{name}/stop","GET /api/groups","POST /api/groups/{name}/instances","DELETE /api/instances/{name}","GET /api/metrics","GET /api/config","POST /api/config/validate","PUT /api/config","POST /api/reload"],"extensions":"/ext/* -> on_http(request)","source_limit_bytes":control::MAX_SOURCE}),
     )
 }
 async fn config_source(State(app): State<App>) -> Json<Value> {
@@ -601,11 +676,12 @@ async fn validate_config(
     };
     let snapshot = app.snapshot();
     let path = app.path.clone();
+    let previous_config = snapshot.config.clone();
     match tokio::task::spawn_blocking(move || {
         let _permit = permit;
         match path {
-            Some(path) => Config::from_lua_at(&source, &path),
-            None => Config::from_lua(&source, "HTTP validation"),
+            Some(path) => Config::from_lua_at_with_instances(&source, &path, &previous_config),
+            None => Config::from_lua_with_instances(&source, "HTTP validation", &previous_config),
         }
     })
     .await
@@ -614,15 +690,29 @@ async fn validate_config(
             if config.listeners != snapshot.config.listeners
                 || config.admin != snapshot.config.admin
                 || config.messaging != snapshot.config.messaging
-                || config.managed_servers != snapshot.config.managed_servers
+                || config.service_groups != snapshot.config.service_groups
+                || config
+                    .managed_servers
+                    .iter()
+                    .filter(|(name, _)| !config.instances.contains_key(*name))
+                    .map(|(name, server)| (name.clone(), server.clone()))
+                    .collect::<BTreeMap<_, _>>()
+                    != snapshot
+                        .config
+                        .managed_servers
+                        .iter()
+                        .filter(|(name, _)| !snapshot.config.instances.contains_key(*name))
+                        .map(|(name, server)| (name.clone(), server.clone()))
+                        .collect()
                 || config
                     .managed_servers
                     .keys()
+                    .filter(|name| !config.instances.contains_key(*name))
                     .any(|name| config.backends.get(name) != snapshot.config.backends.get(name))
             {
                 return error(
                     StatusCode::BAD_REQUEST,
-                    "listener names/addresses, admin, messaging and managed server settings require a restart",
+                    "listener names/addresses, admin, messaging, managed server and service group settings require a restart",
                 );
             }
             Json(json!({"valid":true,"message":"Configuration valid; socket availability is checked when applying."})).into_response()
