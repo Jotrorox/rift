@@ -26,12 +26,14 @@ use std::{
     process::ExitCode,
 };
 
+const DEFAULT_CONFIG_PATH: &str = "rift.lua";
+
 const USAGE: &str = "Usage: rift [<listen-ip:port> <backend-ip:port>]\n\
     Backend may also be a DNS hostname with a port.\n\
     rift --config <path>\n\
     rift init [path] (generate configuration; default ./rift.lua)\n\
     rift check [path] (validate configuration; default ./rift.lua)\n\
-    rift --check <path> (validate configuration and scripts without binding)\n\
+    rift --check [path] (alias for rift check; default ./rift.lua)\n\
     rift admin [--address <loopback-ip:port>] <command> (run an authenticated administrator command)\n\
     rift --version (print package version)\n\
     rift --license (print project license and third-party notices)\n\
@@ -63,12 +65,15 @@ async fn start() -> io::Result<()> {
     }
     if args
         .first()
-        .is_some_and(|arg| arg == "init" || arg == "check")
+        .is_some_and(|arg| arg == "init" || arg == "check" || arg == "--check")
     {
         if args.len() > 2 {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, USAGE));
         }
-        let path = args.get(1).map(String::as_str).unwrap_or("rift.lua");
+        let path = args
+            .get(1)
+            .map(String::as_str)
+            .unwrap_or(DEFAULT_CONFIG_PATH);
         if args[0] == "init" {
             let mut file = fs::OpenOptions::new()
                 .write(true)
@@ -92,8 +97,8 @@ async fn start() -> io::Result<()> {
         return Ok(());
     }
     let (config, path) = match args.as_slice() {
-        [] => match Config::load(Path::new("rift.lua")) {
-            Ok(config) => (config, Some(PathBuf::from("rift.lua"))),
+        [] => match Config::load(Path::new(DEFAULT_CONFIG_PATH)) {
+            Ok(config) => (config, Some(PathBuf::from(DEFAULT_CONFIG_PATH))),
             Err(error) if error.kind() == io::ErrorKind::NotFound => (Config::default(), None),
             Err(error) => return Err(error),
         },
@@ -111,11 +116,6 @@ async fn start() -> io::Result<()> {
                 include_str!("../LICENSE"),
                 include_str!("../THIRD_PARTY_NOTICES")
             );
-            return Ok(());
-        }
-        [flag, path] if flag == "--check" => {
-            Config::load(Path::new(path))?;
-            println!("rift: configuration valid: {path}");
             return Ok(());
         }
         [flag, path] if flag == "--config" => {

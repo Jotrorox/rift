@@ -15,9 +15,9 @@ export const SITE = {
 };
 
 export const QUICK_START = [
-  { cmd: './rift init rift.lua', note: 'Write a commented starter configuration' },
-  { cmd: './rift check rift.lua', note: 'Validate it without opening any ports' },
-  { cmd: './rift --config rift.lua', note: 'Start the proxy' },
+  { cmd: './rift init', note: 'Write a commented rift.lua configuration' },
+  { cmd: './rift check', note: 'Validate rift.lua without opening any ports' },
+  { cmd: './rift', note: 'Start the proxy using rift.lua' },
 ];
 
 // Median values, 16 concurrent clients, from docs/performance.md.
