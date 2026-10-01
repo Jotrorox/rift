@@ -741,7 +741,9 @@ fn managed_config_defaults_and_explicit_policy_are_preserved() {
     assert_eq!(server.command, ["java", "-jar", "paper.jar", "nogui"]);
     assert_eq!(
         server.directory,
-        std::env::current_dir().unwrap().join("servers/lobby")
+        fs::canonicalize(std::env::current_dir().unwrap())
+            .unwrap()
+            .join("servers/lobby")
     );
     assert!(!server.autostart);
     assert!(server.start_on_connect);
