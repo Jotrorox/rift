@@ -1,8 +1,8 @@
 //! Axum control and observability services. Assets are embedded in the binary.
-use crate::{control, metrics::Metrics, runtime::Snapshot};
+use crate::{admin, control, metrics::Metrics, runtime::Snapshot};
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Request, State, rejection::JsonRejection},
+    extract::{DefaultBodyLimit, Path, Request, State, rejection::JsonRejection},
     http::{HeaderValue, StatusCode, Uri, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
@@ -84,6 +84,7 @@ impl App {
             }
         });
         if private {
+            value["managed_servers"] = admin::managed_servers(snapshot);
             value["config_path"] = json!(self.path.as_ref().map(|p| p.display().to_string()));
             value["writable"] = json!(self.path.is_some());
             value["routes"] = Value::Object(
@@ -263,6 +264,9 @@ fn router(kind: Kind, address: SocketAddr, mut app: App) -> Router {
             .route("/assets/app.js", get(app_js))
             .route("/api", get(discovery))
             .route("/api/status", get(admin_status))
+            .route("/api/servers", get(managed_servers))
+            .route("/api/servers/{name}/start", post(start_server))
+            .route("/api/servers/{name}/stop", post(stop_server))
             .route("/api/metrics", get(json_metrics))
             .route("/api/config", get(config_source).put(save_config))
             .route("/api/config/validate", post(validate_config))
@@ -451,6 +455,62 @@ async fn status_js() -> impl IntoResponse {
 async fn admin_status(State(app): State<App>) -> Json<Value> {
     Json(app.status(true))
 }
+async fn managed_servers(State(app): State<App>) -> Json<Value> {
+    Json(json!({"servers":admin::managed_servers(&app.snapshot())}))
+}
+async fn start_server(
+    State(app): State<App>,
+    Path(name): Path<String>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    server_operation(app, name, body, true)
+}
+async fn stop_server(
+    State(app): State<App>,
+    Path(name): Path<String>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    server_operation(app, name, body, false)
+}
+fn server_operation(
+    app: App,
+    name: String,
+    body: Result<Json<Value>, JsonRejection>,
+    start: bool,
+) -> Response {
+    if let Err(error) = payload(body, &[]) {
+        return error.into_response();
+    }
+    let snapshot = app.snapshot();
+    let result = admin::managed_backend(&snapshot, &name).and_then(|()| {
+        if start {
+            snapshot.managed.request_start(&name)
+        } else {
+            snapshot.managed.request_stop(&name)
+        }
+    });
+    match result {
+        Ok(()) => (
+            StatusCode::ACCEPTED,
+            Json(json!({
+                "backend":name,"operation":if start {"start"} else {"stop"},
+                "accepted":true,"message":"Request accepted; poll /api/servers for completion",
+            })),
+        )
+            .into_response(),
+        Err(failure) => error(
+            match failure.kind() {
+                io::ErrorKind::NotFound => StatusCode::NOT_FOUND,
+                io::ErrorKind::InvalidInput => StatusCode::BAD_REQUEST,
+                io::ErrorKind::WouldBlock
+                | io::ErrorKind::BrokenPipe
+                | io::ErrorKind::NotConnected => StatusCode::SERVICE_UNAVAILABLE,
+                _ => StatusCode::CONFLICT,
+            },
+            failure,
+        ),
+    }
+}
 async fn public_status(State(app): State<App>) -> Json<Value> {
     Json(app.status(false))
 }
@@ -478,7 +538,7 @@ async fn standalone_metrics(state: State<App>) -> Response {
 }
 async fn discovery() -> Json<Value> {
     Json(
-        json!({"version":1,"endpoints":["GET /api/status","GET /api/metrics","GET /api/config","POST /api/config/validate","PUT /api/config","POST /api/reload"],"extensions":"/ext/* -> on_http(request)","source_limit_bytes":control::MAX_SOURCE}),
+        json!({"version":1,"endpoints":["GET /api/status","GET /api/servers","POST /api/servers/{name}/start","POST /api/servers/{name}/stop","GET /api/metrics","GET /api/config","POST /api/config/validate","PUT /api/config","POST /api/reload"],"extensions":"/ext/* -> on_http(request)","source_limit_bytes":control::MAX_SOURCE}),
     )
 }
 async fn config_source(State(app): State<App>) -> Json<Value> {
@@ -554,10 +614,15 @@ async fn validate_config(
             if config.listeners != snapshot.config.listeners
                 || config.admin != snapshot.config.admin
                 || config.messaging != snapshot.config.messaging
+                || config.managed_servers != snapshot.config.managed_servers
+                || config
+                    .managed_servers
+                    .keys()
+                    .any(|name| config.backends.get(name) != snapshot.config.backends.get(name))
             {
                 return error(
                     StatusCode::BAD_REQUEST,
-                    "listener names/addresses, admin and messaging settings require a restart",
+                    "listener names/addresses, admin, messaging and managed server settings require a restart",
                 );
             }
             Json(json!({"valid":true,"message":"Configuration valid; socket availability is checked when applying."})).into_response()

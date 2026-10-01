@@ -3,7 +3,8 @@
 Run `rift --config examples/admin.lua`, then open <http://127.0.0.1:8080>.
 The admin website shows listeners, backends, routes and live counters, edits the
 complete Lua source, validates changes, saves and applies them, and reloads edits
-made on disk. The status website runs separately at <http://127.0.0.1:9090>.
+made on disk. Its managed servers panel reports lifecycle state and requests
+server starts and stops. The status website runs separately at <http://127.0.0.1:9090>.
 The dashboard assets are embedded in the binary; no Node installation or
 separate frontend server is needed at runtime.
 
@@ -13,7 +14,8 @@ environment-provided secret and explicit operation permissions; see the
 [operator guide](operations.md#enable-operational-administration). Both can run
 on distinct ports. `admin.permissions` do not govern HTTP requests: the web
 credential grants the enabled HTTP API capabilities, including configuration
-editing. Changes to the operational `admin` configuration require restart.
+editing and managed server lifecycle operations. Changes to the operational
+`admin` or `managed_servers` configuration require restart.
 
 ## Configuration
 
@@ -104,7 +106,10 @@ Errors use `{"error":"description"}`. `GET /api` provides endpoint discovery.
 
 | Method and path | Purpose |
 | --- | --- |
-| `GET /api/status` | Runtime version, uptime, revision, actual listeners, backends, health, routes, fallbacks, limits, counters and enabled services |
+| `GET /api/status` | Runtime version, uptime, revision, actual listeners, backends, health, managed server state, routes, fallbacks, limits, counters and enabled services |
+| `GET /api/servers` | `{servers: [...]}` with managed server lifecycle state and usage |
+| `POST /api/servers/{name}/start` | Request a managed server start with `{}`; returns `202` when accepted |
+| `POST /api/servers/{name}/stop` | Request an unused managed server stop and pause automatic wake with `{}`; returns `202` when accepted |
 | `GET /api/metrics` | Counter values as JSON |
 | `GET /api/config` | `{source, revision, writable}` for the active configuration |
 | `POST /api/config/validate` | Validate `{source}` including live listener restrictions; does not save or bind sockets |
@@ -112,6 +117,25 @@ Errors use `{"error":"description"}`. `GET /api` provides endpoint discovery.
 | `POST /api/reload` | Reload the selected file, with an empty JSON object `{}` |
 | `GET /status` | Public JSON on the separate status server |
 | `GET /metrics` | Prometheus text on the status server when enabled, or the standalone metrics server |
+
+Managed lifecycle requests return promptly; acceptance does not mean startup or
+shutdown has completed. Poll `GET /api/servers` for `state`, `pid`, `players`,
+`reservations`, `automatic_start` and `last_error`. The same array is available
+as `managed_servers` on authenticated `/api/status`. Commands, arguments and
+working directories are omitted. The public `/status` and Lua HTTP context omit
+managed lifecycle details entirely. Authenticated `/api/config` still contains
+the complete trusted configuration source.
+
+A manual stop is rejected while players or backend attachments use the server.
+The `reservations` count includes both pending and established attachments;
+it overlaps the tracked player count rather than adding more players to it.
+Once accepted, it pauses automatic wake until an explicit start or proxy restart;
+idle shutdown preserves automatic wake. Unknown backend names return `404`,
+existing unmanaged backends return `400`, conflicting lifecycle requests return
+`409`, and an unavailable/full supervisor queue returns `503`. Start failures
+after acceptance appear in `last_error`. See [managed servers](managed-servers.md)
+for configuration and shutdown behavior. Managed definitions and their backend
+addresses require a proxy restart; the configuration API cannot change them live.
 
 Configuration saves preserve the source exactly, including comments, functions,
 computed values and formatting. The source is the single editable configuration;

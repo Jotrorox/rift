@@ -54,6 +54,7 @@ pub struct Snapshot {
     pub health: Health,
     cache: status::Cache,
     pub players: Arc<PlayerRegistry>,
+    pub managed: rift::managed::ManagedServers,
     pub extensions: rift::extensions::Extensions,
     pub messaging: Broker,
     pub messaging_streams: Arc<HashMap<String, Stream>>,
@@ -129,6 +130,14 @@ impl Snapshot {
             messaging.clone(),
             previous.map(|old| &old.extensions),
         )?;
+        let players = previous.map_or_else(
+            || Arc::new(PlayerRegistry::default()),
+            |old| old.players.clone(),
+        );
+        let managed = previous.map_or_else(
+            || rift::managed::ManagedServers::new(&config, players.clone()),
+            |old| old.managed.clone(),
+        );
         Ok(Self {
             extensions,
             source: None,
@@ -150,10 +159,8 @@ impl Snapshot {
             ),
             health,
             cache: status::Cache::default(),
-            players: previous.map_or_else(
-                || Arc::new(PlayerRegistry::default()),
-                |old| old.players.clone(),
-            ),
+            players,
+            managed,
         })
     }
 }
@@ -367,6 +374,9 @@ pub async fn handle(
         }
         let network_configured =
             snapshot.config.network != Default::default() || snapshot.config.extensions.is_some();
+        let tracked_login = network_configured
+            || !snapshot.config.managed_servers.is_empty()
+            || snapshot.authenticator.is_some();
         let network_enabled = session.switch_supported() && network_configured;
         if network_enabled {
             session.enable_network()?;
@@ -374,7 +384,7 @@ pub async fn handle(
         if snapshot.config.network.bungeecord {
             session.enable_bungeecord();
         }
-        let mut login_name = if network_configured || snapshot.authenticator.is_some() {
+        let mut login_name = if tracked_login {
             match timeout(HANDSHAKE_TIMEOUT, session.read_login_start()).await {
                 Ok(Ok(login)) => login.name,
                 result => {
@@ -497,7 +507,7 @@ pub async fn handle(
         // Reserve the name before contacting a backend, which might
         // otherwise evict the existing player as soon as a duplicate logs in.
         // The client's claimed UUID is never used as the confirmed identity.
-        let mut name_reservation = if network_configured || snapshot.authenticator.is_some() {
+        let mut name_reservation = if tracked_login {
             match snapshot.players.reserve_name(&login_name) {
                 Ok(reservation) => Some(reservation),
                 Err(error) => {
@@ -509,9 +519,9 @@ pub async fn handle(
         } else {
             None
         };
-        let deadline = Deadline::now() + snapshot.config.limits.connect_timeout;
+        let mut deadline = Deadline::now() + snapshot.config.limits.connect_timeout;
         let mut current_backend = match network
-            .connect_initial(&mut session, &candidates, deadline, event)
+            .connect_initial(&mut session, &candidates, &mut deadline, event)
             .await
         {
             Ok(name) => name,
@@ -525,13 +535,13 @@ pub async fn handle(
                 return Err(error);
             }
         };
-        let entry_deadline = |current: &str| {
+        let entry_deadline = |current: &str, deadline: Deadline| {
             let remaining =
                 candidates.len() - candidates.iter().position(|name| name == current).unwrap();
             Deadline::now() + deadline.saturating_duration_since(Deadline::now()) / remaining as u32
         };
         let mut phase_deadline = if network_configured {
-            entry_deadline(&current_backend)
+            entry_deadline(&current_backend, deadline)
         } else {
             Deadline::now() + Duration::from_secs(30)
         };
@@ -637,7 +647,8 @@ pub async fn handle(
                     if snapshot.config.network.access.get(target).is_some_and(|access| !access.permits(name))
                         || !request.snapshot.config.can_access(target, name)
                         || control.draining(&request.snapshot.config, target)
-                        || !request.snapshot.health.available(target)
+                        || !request.snapshot.managed.can_connect(target)
+                        || (!request.snapshot.managed.is_managed(target) && !request.snapshot.health.available(target))
                     {
                         metrics.transfer_failures.inc();
                         let _ = request.reply.send(Err("target backend is unavailable or the player does not have access".into()));
@@ -649,6 +660,35 @@ pub async fn handle(
                             let _ = request.reply.send(Err(error.to_string()));
                             continue;
                         }
+                    let target_network = Network {
+                        snapshot: &request.snapshot,
+                        addresses: &request.snapshot.addresses,
+                        metrics: &metrics,
+                    };
+                    let lease = match target_network.prepare_transfer(&mut session, &current_backend, target, event).await {
+                        Ok(lease) => lease,
+                        Err(error) => {
+                            metrics.transfer_failures.inc();
+                            if let Some(extension) = &mut session.extension { extension.transfer_failed().await; }
+                            let _ = request.reply.send(Err(format!("target transfer preparation failed: {error}")));
+                            if error.kind() == io::ErrorKind::PermissionDenied || !session.can_switch() {
+                                return Err(error);
+                            }
+                            if session.backend().is_none() {
+                                let candidates = network.recovery_candidates(&current_backend);
+                                let recovered = network.switch(&mut session, &current_backend, &candidates, event).await?;
+                                current_address = snapshot.config.backends[&recovered].address().to_owned();
+                                current_backend = recovered;
+                                phase_deadline = Deadline::now() + Duration::from_secs(30);
+                                metrics.fallbacks.inc();
+                            }
+                            continue;
+                        }
+                    };
+                    if request.reply.is_closed() {
+                        if let Some(extension) = &mut session.extension { extension.transfer_failed().await; }
+                        continue;
+                    }
                     let deadline = Deadline::now() + Duration::from_secs(30);
                     let connect_deadline = deadline.min(Deadline::now() + request.snapshot.config.limits.connect_timeout);
                     let upstream = match request.snapshot.config.backends[target].connect_until(&request.snapshot.addresses, connect_deadline).await {
@@ -687,6 +727,7 @@ pub async fn handle(
                     let result = timeout_at(deadline, session.connect_backend(upstream)).await;
                     match result {
                         Ok(Ok(())) => {
+                            event.hold_managed_backend(target, lease);
                             current_backend = target.clone();
                             current_address = request.snapshot.config.backends[target].address().to_owned();
                             transfer_reply = Some(request.reply);
@@ -749,6 +790,7 @@ pub async fn handle(
                         && (!network_enabled || session.can_switch())
                         && !session.switch_in_progress();
                     if ready {
+                        event.retain_managed_backend(&current_backend);
                         if let Some(player) = &mut player {
                             if registered_backend != current_backend {
                                 player.move_backend(current_backend.clone());
@@ -805,7 +847,14 @@ pub async fn handle(
                 }
                 Ok(SessionEvent::ProxyCommand(command)) => {
                     let mut result = match timeout(
-                        snapshot.config.limits.connect_timeout + HANDSHAKE_TIMEOUT,
+                        snapshot.config.limits.connect_timeout
+                            + HANDSHAKE_TIMEOUT
+                            + snapshot
+                                .config
+                                .managed_servers
+                                .values()
+                                .map(|server| server.start_timeout)
+                                .sum::<Duration>(),
                         network.command(&mut session, &current_backend, &command, event),
                     )
                     .await
@@ -877,14 +926,19 @@ pub async fn handle(
                             + 1;
                         if next < candidates.len()
                             && let Ok(target) = network
-                                .connect_initial(&mut session, &candidates[next..], deadline, event)
+                                .connect_initial(
+                                    &mut session,
+                                    &candidates[next..],
+                                    &mut deadline,
+                                    event,
+                                )
                                 .await
                         {
                             metrics.fallbacks.inc();
                             current_address =
                                 snapshot.config.backends[&target].address().to_owned();
                             current_backend = target;
-                            phase_deadline = entry_deadline(&current_backend);
+                            phase_deadline = entry_deadline(&current_backend, deadline);
                             continue;
                         }
                     }
@@ -1072,11 +1126,17 @@ async fn reconfigure(
     if candidate.config.listeners != snapshot.config.listeners
         || candidate.config.admin != snapshot.config.admin
         || candidate.config.messaging != snapshot.config.messaging
+        || candidate.config.managed_servers != snapshot.config.managed_servers
+        || snapshot
+            .config
+            .managed_servers
+            .keys()
+            .any(|name| candidate.config.backends.get(name) != snapshot.config.backends.get(name))
         || candidate.config.extensions.as_ref().map(|e| &e.queues)
             != snapshot.config.extensions.as_ref().map(|e| &e.queues)
     {
         return Err(Error::invalid(
-            "listener names/addresses, admin, messaging, extension enablement and queue capacities require a restart",
+            "listener names/addresses, admin, messaging, managed server definitions/addresses, extension enablement and queue capacities require a restart",
         ));
     }
     let prepared = services.prepare(&candidate.config).await?;
@@ -1184,6 +1244,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
             .collect(),
     );
     check_bound_loops(&initial.config, &initial.addresses)?;
+    initial.managed.launch()?;
     let mut snapshot = Arc::new(initial);
     let mut extension_jobs = snapshot.extensions.scheduler();
     let metrics = Arc::new(Metrics::default());
@@ -1381,6 +1442,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     tasks.shutdown().await;
     background.shutdown().await;
     services.shutdown().await;
+    snapshot.managed.shutdown().await;
     eprintln!("rift: shutdown complete");
     match failure {
         Some(error) => Err(error),

@@ -18,6 +18,9 @@ pub struct Connection {
     pub backend_address: Option<String>,
     pub stage: &'static str,
     pub failure: &'static str,
+    // Keep both attachments alive during a transfer until the new world is
+    // committed. Dropping the connection releases every outstanding lease.
+    managed_leases: std::collections::BTreeMap<String, rift::managed::ManagedLease>,
 }
 
 impl Connection {
@@ -32,11 +35,26 @@ impl Connection {
             backend_address: None,
             stage: "admission",
             failure: "io_error",
+            managed_leases: Default::default(),
         }
     }
 
     pub fn id(&self) -> u64 {
         self.id
+    }
+
+    pub fn peer_addr(&self) -> SocketAddr {
+        self.peer
+    }
+
+    pub fn hold_managed_backend(&mut self, name: &str, lease: Option<rift::managed::ManagedLease>) {
+        if let Some(lease) = lease {
+            self.managed_leases.insert(name.to_owned(), lease);
+        }
+    }
+
+    pub fn retain_managed_backend(&mut self, name: &str) {
+        self.managed_leases.retain(|backend, _| backend == name);
     }
 
     pub fn elapsed(&self) -> Duration {

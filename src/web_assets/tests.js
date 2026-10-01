@@ -17,6 +17,7 @@ async function testWebAssets(appSource, statusSource) {
     append(...children) { this.children.push(...children); }
     replaceChildren(...children) { this.children = children; }
     addEventListener(event, listener) { this.listeners[event] = listener; }
+    setAttribute(name, value) { this[name] = value; }
     async emit(event, properties = {}) { await this.listeners[event]?.({ preventDefault() {}, ...properties }); }
   }
   class TestHeaders {
@@ -92,6 +93,35 @@ async function testWebAssets(appSource, statusSource) {
     assert(h.element("source").value === "my changes", "External revision overwrote edits");
     assert(!h.element("conflict").className.includes("hidden"), "Missing revision warning");
     assert(h.element("save").disabled, "Stale source save must be blocked");
+  });
+  await test("managed controls encode names, post JSON, and report accepted operations", async () => {
+    const h = fixture(appSource); await flush();
+    h.model.status.managed_servers = [{ name: "lobby west", state: "stopped", players: 0, reservations: 0, automatic_start: true, last_error: null }];
+    await h.element("refresh-status").emit("click"); await flush();
+    const row = h.element("managed-servers").children[0];
+    assert(row.children[0].textContent === "lobby west", "Managed server name missing");
+    const [start, stop] = row.children[5].children;
+    assert(!start.disabled && !stop.disabled, "Idle managed server controls unavailable");
+    await start.emit("click"); await flush();
+    const call = h.calls.find(({ path }) => path === "/api/servers/lobby%20west/start");
+    assert(call && call.options.method === "POST" && call.options.body === "{}", "Lifecycle operation missing or incorrectly encoded");
+    assert(h.element("server-result").textContent.includes("accepted"), "Accepted operation presented as complete");
+  });
+  await test("managed servers cannot be stopped from dashboard while occupied", async () => {
+    const h = fixture(appSource); await flush();
+    h.model.status.managed_servers = [{ name: "lobby", state: "running", players: 1, reservations: 0, automatic_start: true }];
+    await h.element("refresh-status").emit("click"); await flush();
+    const [start, stop] = h.element("managed-servers").children[0].children[5].children;
+    assert(start.disabled && stop.disabled, "Occupied running server controls must be disabled");
+  });
+  await test("lifecycle conflicts do not mark the source editor stale", async () => {
+    const h = fixture(appSource); await flush();
+    h.model.status.managed_servers = [{ name: "lobby", state: "running", players: 0, reservations: 0, automatic_start: true }];
+    await h.element("refresh-status").emit("click"); await flush();
+    h.model.intercept = (path) => path === "/api/servers/lobby/stop" ? h.response({ error: "Backend became occupied" }, 409) : undefined;
+    await h.element("managed-servers").children[0].children[5].children[1].emit("click"); await flush();
+    assert(h.element("server-result").textContent.includes("occupied"), "Lifecycle error was not displayed");
+    assert(h.element("conflict").className.includes("hidden"), "Lifecycle conflict incorrectly affected configuration revision");
   });
   await test("clean editor synchronizes external source changes", async () => {
     const h = fixture(appSource); await flush();

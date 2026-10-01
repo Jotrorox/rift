@@ -151,6 +151,8 @@ jobs:
         run: python tests/protocol_wire.py --binary target/release/rift
       - name: Verify server switching and recovery
         run: python tests/network_wire.py --binary target/release/rift
+      - name: Verify managed server lifecycle
+        run: python tests/managed_wire.py --binary target/release/rift
       - name: Verify BungeeCord plugin-message compatibility
         run: python tests/bungeecord_wire.py --binary target/release/rift
       - name: Stage and smoke-test executable
@@ -255,6 +257,11 @@ jobs:
           --server ${{ matrix.server }}
           --compression ${{ matrix.compression }}
           --report target/minecraft/report.json
+      - name: Verify managed Paper cold start and idle shutdown
+        if: matrix.server == 'paper' && matrix.compression == 'enabled'
+        run: >-
+          python tests/managed_minecraft.py --accept-eula
+          --binary target/release/rift --server paper
       - name: Save verified server download
         if: >-
           steps.server-cache.outputs.cache-hit != 'true' && matrix.compression == 'enabled' &&

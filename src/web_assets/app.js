@@ -6,6 +6,7 @@
     token: "", revision: null, baseline: "", writable: false,
     loaded: false, busy: false, polling: false, fetchingSource: false,
     session: 0, mutation: 0, remoteChanged: false, conflicted: false, online: false,
+    serverButtons: [],
   };
   const dirty = () => state.loaded && $("source").value !== state.baseline;
   const number = (value) => Number.isFinite(Number(value)) ? Number(value) : 0;
@@ -50,6 +51,7 @@
     $("edit-state").className = `tag ${dirty() ? "warning" : state.loaded ? "good" : ""}`;
     text("source-size", `${$("source").value.split("\n").length.toLocaleString()} lines`);
     $("conflict").classList.toggle("hidden", !state.remoteChanged);
+    for (const { button, unavailable } of state.serverButtons) button.disabled = state.busy || unavailable;
   }
   async function request(path, options = {}, raw = false) {
     const headers = new Headers(options.headers || {});
@@ -132,6 +134,26 @@
       span.className = `health ${!checks ? "unknown" : backend.healthy === false ? "bad" : backend.healthy === true ? "" : "unknown"}`;
       span.textContent = !checks ? "Checks disabled" : backend.healthy === false ? "Unhealthy" : backend.healthy === true ? "Healthy" : "Unknown";
       td.append(span);
+    });
+    state.serverButtons = [];
+    table("managed-servers", status.managed_servers || [], 6, (tr, server) => {
+      cell(tr, server.name); cell(tr, server.state);
+      cell(tr, `${count(server.players)} players · ${count(server.reservations)} attachments`);
+      cell(tr, server.automatic_start ? "Enabled" : "Disabled");
+      cell(tr, server.last_error || "—");
+      const actions = cell(tr, ""); actions.className = "action-group";
+      for (const action of ["start", "stop"]) {
+        const button = document.createElement("button");
+        button.type = "button"; button.className = "button subtle";
+        button.textContent = action === "start" ? "Start" : "Stop";
+        button.setAttribute("aria-label", `${button.textContent} ${server.name}`);
+        const unavailable = action === "start"
+          ? server.state === "starting" || server.state === "running" || server.state === "stopping"
+          : number(server.players) > 0 || number(server.reservations) > 0 || server.state === "stopping" || (server.state === "stopped" && !server.automatic_start);
+        state.serverButtons.push({ button, unavailable });
+        button.addEventListener("click", () => serverOperation(server.name, action));
+        actions.append(button);
+      }
     });
     const routes = Object.entries(status.routes || {}).flatMap(([listener, route]) => typeof route === "string"
       ? [[listener, "All traffic", route]]
@@ -252,6 +274,22 @@
     } catch (error) {
       handleError(error, true);
       if (!error.status) result(`${error.message} Reloading may have moved or disabled this service. Check the configured address.`, "warning");
+    } finally { state.busy = false; controls(); }
+  }
+  async function serverOperation(name, action) {
+    if (state.busy) return;
+    state.busy = true; controls();
+    text("server-result", `Requesting ${action} for ${name}…`);
+    $("server-result").className = "operation-result";
+    try {
+      await request(`/api/servers/${encodeURIComponent(name)}/${action}`, { method: "POST", body: "{}" });
+      text("server-result", `${action === "start" ? "Start" : "Stop"} accepted for ${name}. State updates below; ${action === "stop" ? "automatic wake stays paused until Start is requested." : "wait for running before connecting."}`);
+      $("server-result").className = "operation-result success";
+      await refreshStatus({ syncSource: false });
+    } catch (error) {
+      if (error.status === 401 || error.status === 403) $("auth-panel").open = true;
+      text("server-result", error.message || "The server request failed.");
+      $("server-result").className = "operation-result error";
     } finally { state.busy = false; controls(); }
   }
   $("source").addEventListener("input", controls);

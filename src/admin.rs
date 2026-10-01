@@ -155,7 +155,7 @@ impl Control {
         let backends: Vec<Value> = snapshot.health.metrics().into_iter().map(|(name, up)| {
             json!({"draining":self.draining(&snapshot.config, &name),"backend":name,"up":up})
         }).collect();
-        json!({"maintenance":self.maintenance(&snapshot.config),"connections":metrics.active.get(),"players_online":metrics.players.get(),"players":players,"backends":backends})
+        json!({"maintenance":self.maintenance(&snapshot.config),"connections":metrics.active.get(),"players_online":metrics.players.get(),"players":players,"backends":backends,"managed_servers":managed_servers(snapshot)})
     }
 }
 
@@ -224,13 +224,49 @@ fn request(value: &Value, settings: &Admin, secret: &str) -> Result<Vec<String>,
                 .ok_or("command arguments must be strings".to_owned())
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let permission = args.first().ok_or("missing command")?;
+    let command = args.first().ok_or("missing command")?;
+    let permission = match command.as_str() {
+        "start" | "stop" => "servers",
+        command => command,
+    };
     if !settings.permissions.contains(permission) {
         return Err(format!(
             "permission denied: {permission}; grant it in admin.permissions and restart"
         ));
     }
     Ok(args)
+}
+
+/// Operational state only: never include process arguments, environment or paths.
+pub(crate) fn managed_servers(snapshot: &Snapshot) -> Value {
+    json!(
+        snapshot
+            .managed
+            .snapshot()
+            .into_iter()
+            .map(|server| json!({
+                "name":server.name,"state":server.state,"pid":server.pid,
+                "players":server.players,"reservations":server.reservations,
+                "automatic_start":server.automatic_start,"last_error":server.last_error,
+            }))
+            .collect::<Vec<_>>()
+    )
+}
+
+pub(crate) fn managed_backend(snapshot: &Snapshot, backend: &str) -> io::Result<()> {
+    if !snapshot.config.backends.contains_key(backend) {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("unknown backend {backend:?}"),
+        ));
+    }
+    if !snapshot.managed.is_managed(backend) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("backend {backend:?} is not managed; configure managed_servers and restart"),
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) async fn execute(
@@ -247,6 +283,16 @@ pub(crate) async fn execute(
     };
     match args {
         [command] if command == "status" => Ok(control.status(&snapshot, metrics)),
+        [command] if command == "servers" => Ok(json!({"servers":managed_servers(&snapshot)})),
+        [command, backend] if command == "start" || command == "stop" => {
+            managed_backend(&snapshot, backend).map_err(|error| error.to_string())?;
+            if command == "start" {
+                snapshot.managed.request_start(backend)
+            } else {
+                snapshot.managed.request_stop(backend)
+            }.map_err(|error| error.to_string())?;
+            Ok(json!({"backend":backend,"operation":command,"accepted":true,"message":"Request accepted; use servers to check completion"}))
+        }
         [command, value] if command == "maintenance" => {
             let value = enabled(value)?;
             *control.maintenance.lock().unwrap() = Some(value);
@@ -261,7 +307,7 @@ pub(crate) async fn execute(
         [command, id, backend] if command == "transfer" => {
             let id: u64 = id.parse().map_err(|_| "connection ID must be a positive integer")?;
             if !snapshot.config.backends.contains_key(backend) { return Err(format!("unknown backend {backend:?}")); }
-            if control.draining(&snapshot.config, backend) || !snapshot.health.available(backend) { return Err("target backend is draining or unhealthy".into()); }
+            if control.draining(&snapshot.config, backend) || !snapshot.managed.can_connect(backend) || (!snapshot.managed.is_managed(backend) && !snapshot.health.available(backend)) { return Err("target backend is draining, stopped or unhealthy".into()); }
             let sender = {
                 let players = control.players.lock().unwrap();
                 let entry = players.get(&id).ok_or("player is no longer online; refresh status")?;
@@ -278,7 +324,7 @@ pub(crate) async fn execute(
             commands.try_send(Command::Reload(reply)).map_err(|_| "administrator command queue is full or shutting down")?;
             receiver.await.map_err(|_| "proxy is shutting down".to_owned())?
         }
-        _ => Err("usage: status | maintenance on/off | drain <backend> on/off | transfer <connection-id> <backend> | reload | shutdown".into()),
+        _ => Err("usage: status | servers | start <backend> | stop <backend> | maintenance on/off | drain <backend> on/off | transfer <connection-id> <backend> | reload | shutdown".into()),
     }
 }
 
@@ -306,7 +352,7 @@ pub async fn serve(
                 let metrics = metrics.clone();
                 let commands = commands.clone();
                 handlers.spawn(async move {
-                    let _ = timeout(Duration::from_secs(40), async {
+                    let _ = async {
                         let bytes = timeout(Duration::from_secs(2), read_line(&mut stream, 8192)).await??;
                         let parsed = serde_json::from_slice::<Value>(&bytes).map_err(|_| "invalid JSON request".to_owned()).and_then(|value| request(&value, &settings, &secret));
                         let mut permission = String::new();
@@ -322,7 +368,15 @@ pub async fn serve(
                                     }
                                 } else {
                                     let snapshot = current.borrow().clone();
-                                    execute(&args, snapshot, &metrics, &commands).await
+                                    let mut deadline = Duration::from_secs(40);
+                                    if let [command, _, backend] = args.as_slice()
+                                        && command == "transfer"
+                                        && let Some(server) = snapshot.config.managed_servers.get(backend)
+                                    {
+                                        deadline += server.start_timeout;
+                                    }
+                                    timeout(deadline, execute(&args, snapshot, &metrics, &commands)).await
+                                        .unwrap_or_else(|_| Err("administrator operation deadline exceeded; refresh status before retrying".into()))
                                 }
                             }
                             Err(error) => Err(error),
@@ -331,11 +385,11 @@ pub async fn serve(
                             Ok(data) => { events::admin("admin_command", "ok", &permission, &"command completed"); json!({"ok":true,"data":data}) }
                             Err(error) => { events::admin("admin_command", "rejected", &permission, &error); json!({"ok":false,"error":error}) }
                         };
-                        stream.write_all(format!("{response}\n").as_bytes()).await?;
-                        stream.shutdown().await?;
+                        timeout(Duration::from_secs(2), stream.write_all(format!("{response}\n").as_bytes())).await??;
+                        timeout(Duration::from_secs(2), stream.shutdown()).await??;
                         if let Some(ack) = shutdown_ack { let _ = ack.send(()); }
                         Ok::<_,io::Error>(())
-                    }).await;
+                    }.await;
                 });
             }
         }
@@ -350,7 +404,7 @@ pub async fn client(args: &[String]) -> io::Result<()> {
     if args.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "usage: rift admin [--address 127.0.0.1:9091] status|maintenance on/off|drain <backend> on/off|transfer <connection-id> <backend>|reload|shutdown",
+            "usage: rift admin [--address 127.0.0.1:9091] status|servers|start <backend>|stop <backend>|maintenance on/off|drain <backend> on/off|transfer <connection-id> <backend>|reload|shutdown",
         ));
     }
     let address: SocketAddr = address.parse().map_err(|_| {
@@ -371,11 +425,18 @@ pub async fn client(args: &[String]) -> io::Result<()> {
             "set RIFT_ADMIN_TOKEN to the server's admin secret",
         )
     })?;
-    timeout(Duration::from_secs(40), async {
+    let deadline = if args.first().is_some_and(|command| command == "transfer") {
+        Duration::from_secs(24 * 60 * 60 + 45)
+    } else {
+        Duration::from_secs(40)
+    };
+    timeout(deadline, async {
         let mut stream = timeout(Duration::from_secs(2), TcpStream::connect(address)).await??;
-        stream
-            .write_all(format!("{}\n", json!({"token":secret,"args":args})).as_bytes())
-            .await?;
+        timeout(
+            Duration::from_secs(2),
+            stream.write_all(format!("{}\n", json!({"token":secret,"args":args})).as_bytes()),
+        )
+        .await??;
         let response: Value =
             serde_json::from_slice(&read_line(&mut stream, 16 * 1024 * 1024).await?)
                 .map_err(io::Error::other)?;

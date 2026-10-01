@@ -5,6 +5,12 @@ hostnames through one port, authenticate players, switch backends, and manage
 configuration through Lua or the bundled web dashboard. No Java or separate Lua
 installation is needed to run Rift.
 
+Rift can also supervise local Minecraft servers: start them on demand, stop
+empty servers, and operate their lifecycle from the CLI or web dashboard. See
+the [managed-server guide](docs/managed-servers.md) and
+[example](examples/managed.lua). Managed Minecraft processes need their own Java
+runtime and prepared server directories.
+
 ## Quick start
 
 Download a native archive from [Releases](https://github.com/Jotrorox/rift/releases),
@@ -149,6 +155,7 @@ See the [supported subchannels and configuration](docs/bungeecord.md).
 - [Lua configuration and plugins](docs/lua.md): script-style settings, modules and folder plugins.
 - [Authenticated extensions](docs/extensions.md): lifecycle hooks, commands, permissions and queues.
 - [Operations](docs/operations.md): installation, systemd/containers, administration and upgrades.
+- [Managed servers](docs/managed-servers.md): local processes, automatic start/stop and persistent worlds.
 - [HTTP services](docs/http.md): web dashboard, status, API and Lua extensions.
 - [Messaging](docs/messaging.md): plugin messaging, [Lua API](docs/messaging-lua.md) and [QUIC protocol](docs/messaging-protocol.md).
 - [BungeeCord compatibility](docs/bungeecord.md): backend plugin transfers and player/server queries.

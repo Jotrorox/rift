@@ -677,3 +677,295 @@ fn hook_failures_close_only_the_affected_connection_and_release_its_permit() {
 
 #[path = "support/operations.rs"]
 mod operations;
+
+fn managed_config(settings: &str) -> String {
+    format!(
+        "return {{ listeners = {{ public = '127.0.0.1:0' }},
+        backends = {{ lobby = '127.0.0.1:25566' }}, routes = {{ public = 'lobby' }},
+        managed_servers = {{ lobby = {{ {settings} }} }} }}"
+    )
+}
+
+#[test]
+fn managed_config_defaults_and_explicit_policy_are_preserved() {
+    let source = managed_config(
+        "command = {'java', '-jar', 'paper.jar', 'nogui'}, directory = 'servers/lobby'",
+    );
+    let config = rift::config::Config::from_lua(&source, "ignored/path/config.lua").unwrap();
+    let server = &config.managed_servers["lobby"];
+    assert_eq!(server.command, ["java", "-jar", "paper.jar", "nogui"]);
+    assert_eq!(
+        server.directory,
+        std::env::current_dir().unwrap().join("servers/lobby")
+    );
+    assert!(!server.autostart);
+    assert!(server.start_on_connect);
+    assert_eq!(server.idle_timeout, None);
+    assert_eq!(server.start_timeout, Duration::from_secs(120));
+    assert_eq!(server.stop_timeout, Duration::from_secs(30));
+    assert_eq!(server.restart_delay, Duration::from_secs(5));
+
+    let source = managed_config(
+        "command = {'java'}, directory = '.', autostart = true, start_on_connect = false, idle_timeout_ms = 5 * 60 * 1000, start_timeout_ms = 1234, stop_timeout_ms = 56, restart_delay_ms = 78",
+    );
+    let config = rift::config::Config::from_lua(&source, "managed.lua").unwrap();
+    let server = &config.managed_servers["lobby"];
+    assert!(server.autostart);
+    assert!(!server.start_on_connect);
+    assert_eq!(server.idle_timeout, Some(Duration::from_secs(300)));
+    assert_eq!(server.start_timeout, Duration::from_millis(1234));
+    assert_eq!(server.stop_timeout, Duration::from_millis(56));
+    assert_eq!(server.restart_delay, Duration::from_millis(78));
+    for zero in ["0", "0.0", "0 * 1.0"] {
+        let config = rift::config::Config::from_lua(
+            &managed_config(&format!(
+                "command={{'java'}},directory='.',idle_timeout_ms={zero}"
+            )),
+            "managed.lua",
+        )
+        .unwrap();
+        assert_eq!(config.managed_servers["lobby"].idle_timeout, None);
+    }
+    assert!(rift::config::Config::default().managed_servers.is_empty());
+}
+
+#[test]
+fn managed_config_rejects_malformed_commands_paths_and_policy() {
+    let base = "command = {'java'}, directory = 'servers/lobby'";
+    for (settings, expected) in [
+        ("directory = 'servers/lobby'".into(), ".command"),
+        ("command = {'java'}".into(), ".directory"),
+        ("command = {}, directory = '.'".into(), ".command"),
+        ("command = {'  '}, directory = '.'".into(), "executable"),
+        (
+            "command = 'java -jar paper.jar', directory = '.'".into(),
+            ".command",
+        ),
+        (
+            "command = {[1]='java',[3]='paper.jar'}, directory='.'".into(),
+            "dense array",
+        ),
+        (
+            "command = {'java', extra='paper.jar'}, directory='.'".into(),
+            "dense array",
+        ),
+        (
+            "command = {'java', 42}, directory='.'".into(),
+            "expected a string",
+        ),
+        (
+            "command = {'java', 'bad\\0argument'}, directory='.'".into(),
+            "NUL",
+        ),
+        ("command = {'java'}, directory=''".into(), ".directory"),
+        (
+            "command = {'java'}, directory='bad\\0directory'".into(),
+            ".directory",
+        ),
+        (format!("{base}, autostart = 1"), "autostart"),
+        (
+            format!("{base}, start_on_connect = 'true'"),
+            "start_on_connect",
+        ),
+        (format!("{base}, start_timout_ms = 1"), "unknown field"),
+        (format!("{base}, stop_command = 'quit'"), "unknown field"),
+        (
+            format!("{base}, idle_timeout_ms = false"),
+            "idle_timeout_ms",
+        ),
+        (format!("{base}, idle_timeout_ms = -1"), "idle_timeout_ms"),
+        (
+            format!("{base}, idle_timeout_ms = 86400001"),
+            "idle_timeout_ms",
+        ),
+        (format!("{base}, start_timeout_ms = 0"), "start_timeout_ms"),
+        (format!("{base}, stop_timeout_ms = 1.5"), "stop_timeout_ms"),
+        (format!("{base}, restart_delay_ms = 0"), "restart_delay_ms"),
+        (
+            format!("{base}, restart_delay_ms = 1 / 0"),
+            "restart_delay_ms",
+        ),
+        (
+            format!("{base}, stop_timeout_ms = 0 / 0"),
+            "stop_timeout_ms",
+        ),
+    ] {
+        let error =
+            rift::config::Config::from_lua(&managed_config(&settings), "managed.lua").unwrap_err();
+        assert!(error.to_string().contains(expected), "{settings}: {error}");
+    }
+}
+
+#[test]
+fn managed_config_requires_exclusive_literal_loopback_endpoints() {
+    let source = managed_config("command={'java'},directory='servers/lobby'");
+    for address in [
+        "localhost:25566",
+        "0.0.0.0:25566",
+        "192.0.2.1:25566",
+        "127.0.0.1:0",
+        "[::]:25566",
+        "[2001:db8::1]:25566",
+    ] {
+        let error = rift::config::Config::from_lua(
+            &source.replace("127.0.0.1:25566", address),
+            "managed.lua",
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("literal loopback"),
+            "{address}: {error}"
+        );
+    }
+    for address in [
+        "127.0.0.1:25566",
+        "[::ffff:127.0.0.1]:25566",
+        "localhost:25566",
+        "LOCALHOST.:25566",
+    ] {
+        let source = source.replace(
+            "backends = { lobby =",
+            &format!("backends = {{ alias = '{address}', lobby ="),
+        );
+        let error = rift::config::Config::from_lua(&source, "managed.lua").unwrap_err();
+        assert!(
+            error.to_string().contains("conflicts with backends.alias"),
+            "{address}: {error}"
+        );
+    }
+    let source = source.replace(
+        "managed_servers = { lobby =",
+        "managed_servers = { missing =",
+    );
+    assert!(
+        rift::config::Config::from_lua(&source, "managed.lua")
+            .unwrap_err()
+            .to_string()
+            .contains("unknown backend")
+    );
+}
+
+#[test]
+fn managed_config_resolves_paths_and_rejects_shared_world_directories() {
+    let fixture = Fixture::new();
+    let source = managed_config("command={'java'},directory='servers/unused/../lobby'");
+    let config = rift::config::Config::from_lua_at(&source, &fixture.0.join("rift.lua")).unwrap();
+    assert_eq!(
+        config.managed_servers["lobby"].directory,
+        fixture.0.join("servers/lobby")
+    );
+    assert!(!fixture.0.join("servers").exists());
+    let mut config = config;
+    config
+        .backends
+        .insert("other".into(), "127.0.0.1:25567".parse().unwrap());
+    config
+        .managed_servers
+        .insert("other".into(), config.managed_servers["lobby"].clone());
+    let error = config.validate().unwrap_err();
+    assert!(error.to_string().contains("already used"), "{error}");
+    config
+        .managed_servers
+        .get_mut("other")
+        .unwrap()
+        .directory
+        .push("different");
+    config.validate().unwrap();
+
+    #[cfg(unix)]
+    {
+        fs::create_dir(fixture.0.join("original")).unwrap();
+        std::os::unix::fs::symlink(fixture.0.join("original"), fixture.0.join("alias")).unwrap();
+        config.managed_servers.get_mut("lobby").unwrap().directory =
+            fixture.0.join("original/missing");
+        config.managed_servers.get_mut("other").unwrap().directory =
+            fixture.0.join("alias/missing");
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("already used")
+        );
+    }
+}
+
+#[test]
+fn managed_config_validates_programmatic_mutations() {
+    let config = rift::config::Config::from_lua(
+        &managed_config("command={'java'},directory='servers/lobby'"),
+        "managed.lua",
+    )
+    .unwrap();
+    for (field, value) in [
+        ("start_timeout_ms", Duration::ZERO),
+        ("stop_timeout_ms", Duration::from_nanos(1)),
+        ("restart_delay_ms", Duration::from_secs(86_401)),
+        ("idle_timeout_ms", Duration::ZERO),
+    ] {
+        let mut candidate = config.clone();
+        let server = candidate.managed_servers.get_mut("lobby").unwrap();
+        match field {
+            "start_timeout_ms" => server.start_timeout = value,
+            "stop_timeout_ms" => server.stop_timeout = value,
+            "restart_delay_ms" => server.restart_delay = value,
+            _ => server.idle_timeout = Some(value),
+        }
+        assert!(
+            candidate
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains(field)
+        );
+    }
+    for command in [
+        vec![],
+        vec!["".into()],
+        vec!["java\0bad".into()],
+        vec!["x".repeat(8193)],
+        vec!["java".into(); 129],
+        vec!["x".repeat(8192); 9],
+    ] {
+        let mut candidate = config.clone();
+        candidate.managed_servers.get_mut("lobby").unwrap().command = command;
+        assert!(
+            candidate
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("command")
+        );
+    }
+    let mut candidate = config.clone();
+    candidate
+        .managed_servers
+        .get_mut("lobby")
+        .unwrap()
+        .directory = PathBuf::new();
+    assert!(
+        candidate
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("directory")
+    );
+}
+
+#[test]
+fn managed_script_style_defaults_and_check_have_no_launch_side_effects() {
+    let fixture = Fixture::new();
+    fixture.write("rift.config.listeners.public='127.0.0.1:0'\nrift.config.backends.lobby='127.0.0.1:25566'\nrift.config.routes.public='lobby'\nrift.config.managed_servers.lobby={command={'definitely-no-such-program'},directory='servers/lobby',autostart=true}\nrift.config.admin={listen='127.0.0.1:9091',permissions={'servers'}}");
+    let checked = Command::new(env!("CARGO_BIN_EXE_rift"))
+        .args(["check"])
+        .arg(fixture.0.join("rift.lua"))
+        .output()
+        .unwrap();
+    assert!(checked.status.success(), "{:?}", checked.stderr);
+    assert!(!fixture.0.join("servers").exists());
+    let config = rift::config::Config::load(&fixture.0.join("rift.lua")).unwrap();
+    assert_eq!(
+        config.managed_servers["lobby"].directory,
+        fixture.0.join("servers/lobby")
+    );
+}

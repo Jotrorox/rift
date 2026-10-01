@@ -13,14 +13,17 @@ use tokio::sync::Semaphore;
 
 pub use crate::message_script::MessageScript;
 pub use crate::{http_script::HttpScript, script::RouteScript};
+pub use managed::ManagedServer;
 pub use messaging::{MessagingConfig, MessagingPrincipal, MessagingStream, MessagingSubscription};
 
+mod managed;
 mod messaging;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub listeners: BTreeMap<String, SocketAddr>,
     pub backends: BTreeMap<String, Backend>,
+    pub managed_servers: BTreeMap<String, ManagedServer>,
     pub routes: BTreeMap<String, Route>,
     pub limits: Limits,
     pub authentication: Authentication,
@@ -117,6 +120,7 @@ pub const ADMIN_PERMISSIONS: &[&str] = &[
     "transfer",
     "reload",
     "shutdown",
+    "servers",
 ];
 
 /// Optional administration service. A token is mandatory for non-loopback binds.
@@ -217,6 +221,7 @@ impl Config {
         let config = Self {
             listeners: BTreeMap::from([("default".into(), address(listen, "listen")?)]),
             backends: BTreeMap::from([("default".into(), Backend::parse(backend)?)]),
+            managed_servers: BTreeMap::new(),
             routes: BTreeMap::from([("default".into(), Route::Direct("default".into()))]),
             limits: Limits::default(),
             authentication: Authentication::default(),
@@ -263,7 +268,10 @@ impl Config {
 
     /// Evaluate an in-memory script without access to local modules or plugins.
     pub fn from_lua(source: &str, name: &str) -> io::Result<Self> {
-        Self::from_source(crate::script::ScriptSource::new(source, name))
+        Self::from_source(
+            crate::script::ScriptSource::new(source, name),
+            Path::new("."),
+        )
     }
 
     /// Evaluate edited source with modules relative to its configuration path.
@@ -271,10 +279,11 @@ impl Config {
     pub fn from_lua_at(source: &str, path: &Path) -> io::Result<Self> {
         let source = crate::script::ScriptSource::from_path(source, path)
             .map_err(|error| invalid(format!("{}: {error}", path.display())))?;
-        Self::from_source(source)
+        let directory = source.root.clone();
+        Self::from_source(source, &directory)
     }
 
-    fn from_source(source: crate::script::ScriptSource) -> io::Result<Self> {
+    fn from_source(source: crate::script::ScriptSource, directory: &Path) -> io::Result<Self> {
         let name = source.entry.name.as_ref();
         let parse = || -> Result<Self, String> {
             let (_lua, value) =
@@ -286,6 +295,7 @@ impl Config {
                 &[
                     "listeners",
                     "backends",
+                    "managed_servers",
                     "routes",
                     "limits",
                     "authentication",
@@ -323,6 +333,7 @@ impl Config {
                         .map_err(|error| format!("backends.{name}: {error}"))
                 })
                 .collect::<Result<_, _>>()?;
+            let managed_servers = managed::parse(&root, directory)?;
             let routes = routes(root.get("routes").map_err(|e| e.to_string())?)?;
             let mut limits = Limits::default();
             let value: Value = root.get("limits").map_err(|e| e.to_string())?;
@@ -520,6 +531,7 @@ impl Config {
             Ok(Self {
                 listeners,
                 backends,
+                managed_servers,
                 routes,
                 limits,
                 authentication,
@@ -552,6 +564,7 @@ impl Config {
     }
 
     pub fn validate(&self) -> io::Result<()> {
+        managed::validate(&self.managed_servers, &self.backends).map_err(invalid)?;
         if let Some(extensions) = &self.extensions {
             if !self.authentication.online_mode {
                 return Err(invalid("extensions requires authentication.online_mode"));

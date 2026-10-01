@@ -521,7 +521,7 @@ class Client:
         remaining = self.deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("Minecraft session deadline exceeded")
-        self.socket.settimeout(min(20, remaining))
+        self.socket.settimeout(min(getattr(self, "read_timeout", 20), remaining))
         length = read_varint(self.reader)
         assert 0 < length <= 8 * 1024 * 1024, length
         data = self.reader.read(length)

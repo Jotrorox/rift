@@ -1,7 +1,7 @@
 -- Host bootstrap. Capture primitives before configuration can replace globals.
 local type, pairs, ipairs, error, tostring = type, pairs, ipairs, error, tostring
 local api, runtime = rift, ...
-local config = { listeners = {}, backends = {}, routes = {}, limits = {} }
+local config = { listeners = {}, backends = {}, managed_servers = {}, routes = {}, limits = {} }
 local handlers, commands, finished = {}, {}, false
 local events = {
     route = "on_route", http = "on_http", message = "on_message",

@@ -20,7 +20,8 @@ mod game;
 use game::{GameStream, accept_game, connect_game};
 
 const SECRET: &str = "rift-integration-test-secret-32-bytes";
-const PERMISSIONS: &str = "'status', 'maintenance', 'drain', 'transfer', 'reload', 'shutdown'";
+const PERMISSIONS: &str =
+    "'status', 'servers', 'maintenance', 'drain', 'transfer', 'reload', 'shutdown'";
 
 struct Fixture(PathBuf);
 impl Fixture {
@@ -290,6 +291,9 @@ fn authentication_and_permissions_reject_actions_without_changing_state() {
         vec!["drain", "b0", "on"],
         vec!["reload"],
         vec!["shutdown"],
+        vec!["servers"],
+        vec!["start", "b0"],
+        vec!["stop", "b0"],
     ] {
         let output = process.command(&args);
         assert!(!output.status.success());
@@ -303,6 +307,68 @@ fn authentication_and_permissions_reject_actions_without_changing_state() {
     let mut client = connect_game(process.front);
     let mut server = accept_game(&backend);
     exchange(&mut client, &mut server);
+}
+
+#[test]
+fn server_commands_reject_unknown_and_unmanaged_backends() {
+    let fixture = Fixture::new();
+    let backend = TcpListener::bind("127.0.0.1:0").unwrap();
+    fixture.write(&config(&[&backend], "", PERMISSIONS));
+    let process = fixture.spawn();
+    assert_eq!(process.ok(&["servers"])["servers"], json!([]));
+    for operation in ["start", "stop"] {
+        for (name, expected) in [("missing", "unknown backend"), ("b0", "not managed")] {
+            let response = process.request(json!({"token":SECRET,"args":[operation,name]}));
+            assert_eq!(response["ok"], false);
+            assert!(
+                response["error"].as_str().unwrap().contains(expected),
+                "{response}"
+            );
+        }
+    }
+    let mut client = connect_game(process.front);
+    let mut server = accept_game(&backend);
+    exchange(&mut client, &mut server);
+}
+
+#[test]
+fn server_commands_accept_lifecycle_requests_and_report_completion_separately() {
+    let fixture = Fixture::new();
+    let backend = TcpListener::bind("127.0.0.1:0").unwrap();
+    fixture.write(&config(&[&backend], "managed_servers = { b0 = { command = {'rift-test-executable-that-does-not-exist', 'private-process-argument'}, directory = '.', start_timeout_ms = 1000 } },", "'servers'"));
+    drop(backend);
+    let process = fixture.spawn();
+    let initial = process.ok(&["servers"]);
+    assert_eq!(initial["servers"][0]["name"], "b0");
+    assert_eq!(initial["servers"][0]["state"], "stopped");
+    assert_eq!(initial["servers"][0]["automatic_start"], true);
+    let stopped = process.ok(&["stop", "b0"]);
+    assert_eq!(stopped["accepted"], true);
+    assert_eq!(
+        process.ok(&["servers"])["servers"][0]["automatic_start"],
+        false
+    );
+    let started = process.ok(&["start", "b0"]);
+    assert_eq!(started["accepted"], true);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let servers = process.ok(&["servers"]);
+        assert!(!servers.to_string().contains("private-process-argument"));
+        assert!(
+            !servers
+                .to_string()
+                .contains("rift-test-executable-that-does-not-exist")
+        );
+        if servers["servers"][0]["state"] == "failed" {
+            assert!(servers["servers"][0]["last_error"].is_string());
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "failed start was not reported: {servers}"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 #[test]

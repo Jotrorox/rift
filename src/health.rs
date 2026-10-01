@@ -147,7 +147,10 @@ pub async fn connect_candidates(
     let candidates: Vec<&str> = candidates
         .iter()
         .copied()
-        .filter(|name| health.available(name) && !health.control.draining(config, name))
+        .filter(|name| {
+            (config.managed_servers.contains_key(*name) || health.available(name))
+                && !health.control.draining(config, name)
+        })
         .collect();
     let mut last_error = io::Error::new(
         io::ErrorKind::NotConnected,

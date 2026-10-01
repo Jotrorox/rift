@@ -316,7 +316,7 @@ fn bearer_auth_origin_and_json_requirements_protect_administration() {
         !page.body.contains(TOKEN),
         "token leaked into the public shell"
     );
-    for path in ["/api/status", "/api/config", "/ext/private"] {
+    for path in ["/api/status", "/api/servers", "/api/config", "/ext/private"] {
         public.get(path).expect(401);
         Client {
             token: Some("incorrect-token"),
@@ -363,6 +363,129 @@ fn bearer_auth_origin_and_json_requirements_protect_administration() {
     admin
         .send("GET", "/api/config", &[("Origin", &origin)], "")
         .expect(200);
+    assert_eq!(fixture.read(), source);
+}
+
+#[test]
+fn server_operations_enforce_auth_origin_json_and_backend_validation() {
+    let fixture = Fixture::new();
+    let source = fixture.source(&format!("token = '{TOKEN}',"), "");
+    let _process = fixture.start(&source);
+    let public = fixture.client();
+    let admin = public.authenticated();
+    assert_eq!(
+        admin.get("/api/servers").expect(200).value()["servers"],
+        json!([])
+    );
+    let discovery = admin.get("/api").expect(200).value();
+    assert!(
+        discovery["endpoints"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("POST /api/servers/{name}/start"))
+    );
+    for operation in ["start", "stop"] {
+        let path = format!("/api/servers/primary/{operation}");
+        public.json("POST", &path, json!({})).expect(401);
+        admin
+            .send(
+                "POST",
+                &path,
+                &[
+                    ("Origin", "https://attacker.example"),
+                    ("Content-Type", "application/json"),
+                ],
+                "{}",
+            )
+            .expect(403);
+        admin
+            .send(
+                "POST",
+                &path,
+                &[
+                    ("Sec-Fetch-Site", "cross-site"),
+                    ("Content-Type", "application/json"),
+                ],
+                "{}",
+            )
+            .expect(403);
+        admin.send("POST", &path, &[], "{}").expect(415);
+        admin
+            .json("POST", &path, json!({"command":["unexpected"]}))
+            .expect(400);
+        let error = admin.json("POST", &path, json!({})).expect(400).value();
+        assert!(error["error"].as_str().unwrap().contains("not managed"));
+        admin
+            .json(
+                "POST",
+                &format!("/api/servers/missing/{operation}"),
+                json!({}),
+            )
+            .expect(404);
+        admin.get(&path).expect(405);
+    }
+    assert_eq!(fixture.read(), source);
+}
+
+#[test]
+fn managed_state_and_accepted_operations_are_private_and_restart_bound() {
+    let fixture = Fixture::new();
+    let extra = format!(
+        "status = {{ listen = '{}' }}, managed_servers = {{ primary = {{ command = {{'rift-test-executable-that-does-not-exist', 'private-process-argument'}}, directory = '.', start_timeout_ms = 1000 }} }},",
+        fixture.status
+    );
+    let source = fixture.source(&format!("token = '{TOKEN}',"), &extra);
+    let mut process = fixture.start(&source);
+    process.wait_for(fixture.status);
+    let admin = fixture.client().authenticated();
+    let initial = admin.get("/api/status").expect(200).value();
+    assert_eq!(initial["managed_servers"][0]["name"], "primary");
+    assert_eq!(initial["managed_servers"][0]["state"], "stopped");
+    assert!(!initial.to_string().contains("private-process-argument"));
+    let public = Client::new(fixture.status)
+        .get("/status")
+        .expect(200)
+        .value();
+    assert!(public.get("managed_servers").is_none());
+    assert!(!public.to_string().contains("private-process-argument"));
+    let stopped = admin
+        .json("POST", "/api/servers/primary/stop", json!({}))
+        .expect(202)
+        .value();
+    assert_eq!(stopped["accepted"], true);
+    assert_eq!(
+        admin.get("/api/servers").expect(200).value()["servers"][0]["automatic_start"],
+        false
+    );
+    admin
+        .json("POST", "/api/servers/primary/start", json!({}))
+        .expect(202);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let state = admin.get("/api/servers").expect(200).value();
+        assert!(!state.to_string().contains("private-process-argument"));
+        assert!(
+            !state
+                .to_string()
+                .contains("rift-test-executable-that-does-not-exist")
+        );
+        if state["servers"][0]["state"] == "failed" {
+            assert!(state["servers"][0]["last_error"].is_string());
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "failed start was not reported: {state}"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    let candidate = source.replace("start_timeout_ms = 1000", "start_timeout_ms = 2000");
+    let result = admin
+        .json("POST", "/api/config/validate", json!({"source":candidate}))
+        .expect(400)
+        .value();
+    assert!(result["error"].as_str().unwrap().contains("restart"));
+    save(admin, &candidate, &revision(admin)).expect(400);
     assert_eq!(fixture.read(), source);
 }
 
@@ -574,7 +697,14 @@ fn status_and_metrics_servers_expose_only_their_enabled_surfaces() {
     assert_eq!(state["backends"][0]["name"], "primary");
     assert!(state["metrics"]["accepted"].is_number());
     assert!(!state.to_string().contains(TOKEN));
-    for path in ["/metrics", "/api/config", "/api/status", "/ext/example"] {
+    assert!(state.get("managed_servers").is_none());
+    for path in [
+        "/metrics",
+        "/api/config",
+        "/api/status",
+        "/api/servers",
+        "/ext/example",
+    ] {
         status.get(path).expect(404);
     }
     let metrics = Client::new(fixture.metrics);

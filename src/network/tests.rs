@@ -1,5 +1,5 @@
 use super::*;
-use rift::config::Config;
+use rift::{config::Config, protocol::State};
 use std::sync::Arc;
 
 fn config() -> Config {
@@ -33,7 +33,7 @@ fn config() -> Config {
 
 #[test]
 fn explicit_initial_order_filters_access_without_using_backend_fallbacks() {
-    let snapshot = Snapshot::new(config(), None).unwrap();
+    let snapshot = Arc::new(Snapshot::new(config(), None).unwrap());
     let metrics = Metrics::default();
     let network = Network {
         snapshot: &snapshot,
@@ -61,7 +61,7 @@ fn explicit_initial_order_filters_access_without_using_backend_fallbacks() {
 
 #[test]
 fn selected_route_permissions_are_terminal_and_cannot_be_bypassed_by_fallbacks() {
-    let snapshot = Snapshot::new(config(), None).unwrap();
+    let snapshot = Arc::new(Snapshot::new(config(), None).unwrap());
     let metrics = Metrics::default();
     let network = Network {
         snapshot: &snapshot,
@@ -89,7 +89,7 @@ fn selected_route_permissions_are_terminal_and_cannot_be_bypassed_by_fallbacks()
 
 #[test]
 fn ordinary_routes_keep_their_order_and_filter_restricted_fallbacks() {
-    let snapshot = Snapshot::new(config(), None).unwrap();
+    let snapshot = Arc::new(Snapshot::new(config(), None).unwrap());
     let metrics = Metrics::default();
     let network = Network {
         snapshot: &snapshot,
@@ -114,7 +114,7 @@ fn ordinary_routes_keep_their_order_and_filter_restricted_fallbacks() {
 fn recovery_prefers_hubs_then_flat_fallbacks_excluding_the_current_server() {
     let mut config = config();
     config.network.hubs = vec!["lobby".into(), "survival".into(), "backup".into()];
-    let snapshot = Snapshot::new(config, None).unwrap();
+    let snapshot = Arc::new(Snapshot::new(config, None).unwrap());
     let metrics = Metrics::default();
     let network = Network {
         snapshot: &snapshot,
@@ -134,7 +134,7 @@ fn no_configured_recovery_destinations_means_no_implicit_cross_server_access() {
     let mut config = config();
     config.network.hubs.clear();
     config.fallbacks.clear();
-    let snapshot = Snapshot::new(config, None).unwrap();
+    let snapshot = Arc::new(Snapshot::new(config, None).unwrap());
     let metrics = Metrics::default();
     let network = Network {
         snapshot: &snapshot,
@@ -176,6 +176,216 @@ fn reloads_share_registry_and_old_session_cleanup_releases_new_snapshot_reservat
     assert_eq!(updated.players.len(), 1);
 }
 
+async fn managed_packet(
+    stream: &mut (impl tokio::io::AsyncRead + Unpin),
+) -> rift::protocol::Packet {
+    rift::protocol::Reader::default()
+        .read(stream, rift::protocol::Codec::default())
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+async fn managed_joined_session() -> (
+    Session<tokio::io::DuplexStream, TcpStream>,
+    tokio::io::DuplexStream,
+    TcpStream,
+) {
+    use rift::protocol::{Codec, Handshake, NextState, Packet, write_string};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream = TcpStream::connect(listener.local_addr().unwrap())
+        .await
+        .unwrap();
+    let (mut backend, _) = listener.accept().await.unwrap();
+    let (mut client, input) = tokio::io::duplex(65536);
+    let handshake = Handshake {
+        protocol: 774,
+        address: "play.test".into(),
+        port: 25565,
+        next_state: NextState::Login,
+    };
+    Codec::default()
+        .write(&mut client, &handshake.packet())
+        .await
+        .unwrap();
+    let mut session = Session::accept(input).await.unwrap();
+    session.enable_network().unwrap();
+    let mut login = Vec::new();
+    write_string("Player", &mut login);
+    login.extend([7; 16]);
+    Codec::default()
+        .write(&mut client, &Packet::new(0, login))
+        .await
+        .unwrap();
+    session.read_login_start().await.unwrap();
+    session.connect_backend(upstream).await.unwrap();
+    managed_packet(&mut backend).await;
+    managed_packet(&mut backend).await;
+    let mut success = vec![7; 16];
+    write_string("Player", &mut success);
+    success.push(0);
+    Codec::default()
+        .write(&mut backend, &Packet::new(2, success))
+        .await
+        .unwrap();
+    session.forward().await.unwrap();
+    managed_packet(&mut client).await;
+    Codec::default()
+        .write(&mut client, &Packet::empty(3))
+        .await
+        .unwrap();
+    session.forward().await.unwrap();
+    managed_packet(&mut backend).await;
+    Codec::default()
+        .write(&mut backend, &Packet::empty(3))
+        .await
+        .unwrap();
+    session.forward().await.unwrap();
+    managed_packet(&mut client).await;
+    Codec::default()
+        .write(&mut client, &Packet::empty(3))
+        .await
+        .unwrap();
+    session.forward().await.unwrap();
+    managed_packet(&mut backend).await;
+    let mut join = vec![0, 0, 0, 1, 0, 1];
+    write_string("minecraft:overworld", &mut join);
+    join.extend([20, 8, 8, 0, 1, 0, 0]);
+    write_string("minecraft:overworld", &mut join);
+    join.extend([0; 8]);
+    join.extend([0, 255, 0, 0, 0, 0, 63, 0]);
+    Codec::default()
+        .write(&mut backend, &Packet::new(0x30, join))
+        .await
+        .unwrap();
+    session.forward().await.unwrap();
+    managed_packet(&mut client).await;
+    assert!(session.can_switch());
+    (session, client, backend)
+}
+
+#[tokio::test]
+async fn managed_startup_keeps_current_world_live_until_destination_ready() {
+    use rift::protocol::{Codec, Packet, write_string};
+    timeout(Duration::from_secs(3), async {
+        let snapshot = Arc::new(Snapshot::new(config(), None).unwrap());
+        let metrics = Metrics::default();
+        let network = Network {
+            snapshot: &snapshot,
+            addresses: &[],
+            metrics: &metrics,
+        };
+        let (mut session, mut client, mut backend) = managed_joined_session().await;
+        let mut event = Connection::new("public", "127.0.0.1:1234".parse().unwrap());
+        let (ready, readiness) = tokio::sync::oneshot::channel::<()>();
+        let startup = async {
+            readiness.await.unwrap();
+            Ok(None)
+        };
+        let peer = async {
+            // Readiness is withheld until both directions and a repeated player
+            // command have been serviced: a blocking startup would deadlock.
+            let keepalive = Packet::new(0x2b, 123_i64.to_be_bytes().to_vec());
+            Codec::default()
+                .write(&mut backend, &keepalive)
+                .await
+                .unwrap();
+            assert_eq!(managed_packet(&mut client).await, keepalive);
+            let reply = Packet::new(0x1b, 123_i64.to_be_bytes().to_vec());
+            Codec::default().write(&mut client, &reply).await.unwrap();
+            assert_eq!(managed_packet(&mut backend).await, reply);
+            let mut command = Vec::new();
+            write_string("server backup", &mut command);
+            Codec::default()
+                .write(&mut client, &Packet::new(6, command))
+                .await
+                .unwrap();
+            let notice = managed_packet(&mut client).await;
+            assert_eq!(notice.id, 0x77);
+            assert!(
+                notice
+                    .data
+                    .windows(b"server is starting".len())
+                    .any(|part| part == b"server is starting")
+            );
+            ready.send(()).unwrap();
+        };
+        let (result, ()) = tokio::join!(
+            network.forward_during_startup(&mut session, "lobby", &mut event, startup),
+            peer
+        );
+        assert!(result.unwrap().is_none());
+        assert!(session.can_switch());
+        assert!(session.backend().is_some());
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn managed_startup_aborts_on_disconnect_and_drops_pending_reservation_future() {
+    use rift::protocol::{Codec, ProtocolVersion};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::io::AsyncWriteExt;
+    struct Released(Arc<AtomicBool>);
+    impl Drop for Released {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+    timeout(Duration::from_secs(3), async {
+        for reason in ["client", "backend", "kick"] {
+            let snapshot = Arc::new(Snapshot::new(config(), None).unwrap());
+            let metrics = Metrics::default();
+            let network = Network {
+                snapshot: &snapshot,
+                addresses: &[],
+                metrics: &metrics,
+            };
+            let (mut session, mut client, mut backend) = managed_joined_session().await;
+            let mut event = Connection::new("public", "127.0.0.1:1234".parse().unwrap());
+            let released = Arc::new(AtomicBool::new(false));
+            let reservation = Released(released.clone());
+            let startup = async move {
+                let _reservation = reservation;
+                std::future::pending().await
+            };
+            let peer = async {
+                match reason {
+                    "client" => client.shutdown().await.unwrap(),
+                    "backend" => backend.shutdown().await.unwrap(),
+                    _ => {
+                        let kick = rift::protocol::disconnect(
+                            Some(ProtocolVersion::new(774).unwrap()),
+                            State::Play,
+                            "Banned by the current backend",
+                        )
+                        .unwrap();
+                        Codec::default().write(&mut backend, &kick).await.unwrap();
+                        assert_eq!(managed_packet(&mut client).await, kick);
+                    }
+                }
+            };
+            let (result, ()) = tokio::join!(
+                network.forward_during_startup(&mut session, "lobby", &mut event, startup),
+                peer
+            );
+            let expected = match reason {
+                "client" => io::ErrorKind::UnexpectedEof,
+                "backend" => io::ErrorKind::ConnectionAborted,
+                _ => io::ErrorKind::PermissionDenied,
+            };
+            assert_eq!(result.unwrap_err().kind(), expected, "{reason}");
+            assert!(released.load(Ordering::SeqCst), "{reason}");
+            if reason != "backend" {
+                assert!(!session.can_switch(), "{reason}");
+            }
+        }
+    })
+    .await
+    .unwrap();
+}
+
 // These peers exercise the real TCP attachment/command path. Authentication
 // itself is covered by auth/session tests; this fixture supplies its verified
 // profile directly without contacting Mojang or needing account credentials.
@@ -205,7 +415,7 @@ async fn queue_command_waits_for_capacity_and_transfer_policy_runs_before_target
         let mut cfg = config();
         cfg.backends.insert("lobby".into(), rift::routing::Backend::parse(&lobby.local_addr().unwrap().to_string()).unwrap());
         cfg.backends.insert("survival".into(), rift::routing::Backend::parse(&game.local_addr().unwrap().to_string()).unwrap());
-        let snapshot = Snapshot::new(cfg.clone(), None).unwrap();
+        let snapshot = Arc::new(Snapshot::new(cfg.clone(), None).unwrap());
         let extension_config = Config::from_lua(r#"return {
             listeners={public='127.0.0.1:0'}, backends={lobby='127.0.0.1:1',survival='127.0.0.1:2'}, routes={public='lobby'},
             authentication={online_mode=true},forwarding={mode='velocity',secret_env='TEST_SECRET'},
@@ -234,7 +444,7 @@ async fn queue_command_waits_for_capacity_and_transfer_policy_runs_before_target
         Codec::default().write(&mut client, &Packet::new(0, login)).await.unwrap();
         session.read_login_start().await.unwrap();
         let mut event = Connection::new("public", "127.0.0.1:1234".parse().unwrap());
-        network.connect_initial(&mut session, &["lobby".into()], Instant::now()+Duration::from_secs(1), &mut event).await.unwrap();
+        network.connect_initial(&mut session, &["lobby".into()], &mut (Instant::now()+Duration::from_secs(1)), &mut event).await.unwrap();
         let (mut backend, _) = lobby.accept().await.unwrap();
         read(&mut backend).await; read(&mut backend).await;
         let mut success = vec![7;16]; write_string("Player", &mut success); success.push(0);

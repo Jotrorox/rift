@@ -61,14 +61,14 @@ def chat_session(generation):
 
 class Backend:
     def __init__(self, name, entity_id, threshold=256, login_ban=None, config_ban=None,
-                 login_fail=False, login_stall=False):
+                 login_fail=False, login_stall=False, port=0):
         self.name, self.entity_id, self.threshold = name, entity_id, threshold
         self.login_ban, self.config_ban = login_ban, config_ban
         self.login_fail, self.login_stall = login_fail, login_stall
         self.on_login = None
         self.listener = socket.socket()
         self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.listener.bind(("127.0.0.1", 0))
+        self.listener.bind(("127.0.0.1", port))
         self.port = self.listener.getsockname()[1]
         self.listener.listen()
         self.listener.settimeout(0.2)
@@ -209,7 +209,10 @@ class NetworkClient(Client):
         self.joins, self.transitions, self.pack_pops = [], 0, 0
         self.messages = []
         self.frontend = self.socket.getsockname()
-        self.send(0, login_start(name, identity(name), protocol))
+        self.send(0, login_start(name, self.player_identity(), protocol))
+
+    def player_identity(self):
+        return identity(self.name)
 
     def next_packet(self):
         packet_id, body = self.receive()
@@ -220,9 +223,9 @@ class NetworkClient(Client):
                 self.threshold = read_varint(io.BytesIO(body))
             elif packet_id == 2:
                 if self.protocol < 735:
-                    assert read_string(io.BytesIO(body)) == str(identity(self.name))
+                    assert read_string(io.BytesIO(body)) == str(self.player_identity())
                 else:
-                    assert body[:16] == identity(self.name).bytes
+                    assert body[:16] == self.player_identity().bytes
                 self.phase = "configuration" if self.protocol >= 764 else "play"
                 if self.bootstrap and self.protocol >= 764:
                     self.send(3)
