@@ -114,6 +114,27 @@ struct Process {
 }
 
 impl Process {
+    fn wait_for_log(&mut self, prefix: &str) -> String {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let value = self
+                .logs
+                .lock()
+                .unwrap()
+                .iter()
+                .find_map(|line| line.strip_prefix(prefix).map(str::to_owned));
+            if let Some(value) = value {
+                return value;
+            }
+            assert!(
+                self.child.try_wait().unwrap().is_none() && Instant::now() < deadline,
+                "missing startup log {prefix:?}: {:?}",
+                self.logs.lock().unwrap()
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     fn wait_for(&mut self, address: SocketAddr) {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
@@ -1295,16 +1316,8 @@ fn http_and_cli_controls_share_revisions_and_preserve_runtime_overrides() {
         &format!("token = '{TOKEN}'"),
         "admin = { listen = '127.0.0.1:0', permissions = { 'status', 'maintenance', 'drain', 'reload' } }, metrics = false,",
     );
-    let process = fixture.start(&source);
-    let address: SocketAddr = process
-        .logs
-        .lock()
-        .unwrap()
-        .iter()
-        .find_map(|line| line.strip_prefix("rift: admin on "))
-        .unwrap()
-        .parse()
-        .unwrap();
+    let mut process = fixture.start(&source);
+    let address: SocketAddr = process.wait_for_log("rift: admin on ").parse().unwrap();
     let admin = |args: &[&str]| -> Value {
         let mut stream = connect(address);
         writeln!(stream, "{}", json!({"token":ADMIN_TOKEN,"args":args})).unwrap();
