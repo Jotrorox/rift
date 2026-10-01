@@ -8,6 +8,7 @@ mod messaging_runtime;
 mod metrics;
 mod network;
 mod runtime;
+mod scaling;
 mod status;
 mod web;
 mod web_transport;

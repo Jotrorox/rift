@@ -20,6 +20,9 @@ pub struct ManagedServer {
     pub start_timeout: Duration,
     pub stop_timeout: Duration,
     pub restart_delay: Duration,
+    /// Maximum recovery attempts after a failed start or unexpected process exit.
+    /// Zero disables automatic recovery.
+    pub restart_retries: usize,
 }
 
 pub(super) fn parse(root: &Table, base: &Path) -> Result<BTreeMap<String, ManagedServer>, String> {
@@ -43,6 +46,7 @@ pub(super) fn parse(root: &Table, base: &Path) -> Result<BTreeMap<String, Manage
                 "start_timeout_ms",
                 "stop_timeout_ms",
                 "restart_delay_ms",
+                "restart_retries",
             ],
             &path,
         )?;
@@ -104,6 +108,7 @@ pub(super) fn parse(root: &Table, base: &Path) -> Result<BTreeMap<String, Manage
                     5000,
                     MAX_TIMEOUT_MS,
                 )? as u64),
+                restart_retries: bounded_count(&values, &path, "restart_retries", 3, 100)?,
             },
         );
     }
@@ -120,6 +125,11 @@ pub(super) fn validate(
     let mut directories = BTreeMap::new();
     for (name, server) in servers {
         let path = format!("managed_servers.{name}");
+        if server.restart_retries > 100 {
+            return Err(format!(
+                "{path}.restart_retries: expected an integer in 0..=100"
+            ));
+        }
         if name.trim().is_empty() {
             return Err("managed_servers: names must not be empty".into());
         }
@@ -198,6 +208,27 @@ fn endpoint_alias(address: SocketAddr, other: &Backend) -> bool {
         && port.parse::<u16>().ok() == Some(address.port())
 }
 
+/// Counts may be zero; ordinary configuration integers require a positive value.
+pub(super) fn bounded_count(
+    table: &Table,
+    path: &str,
+    key: &str,
+    default: usize,
+    max: usize,
+) -> Result<usize, String> {
+    let value: Value = table.raw_get(key).map_err(|e| e.to_string())?;
+    match value {
+        Value::Nil => Ok(default),
+        Value::Integer(value) if value >= 0 && value as u64 <= max as u64 => Ok(value as usize),
+        Value::Number(value)
+            if value.is_finite() && value.fract() == 0.0 && value >= 0.0 && value <= max as f64 =>
+        {
+            Ok(value as usize)
+        }
+        _ => Err(format!("{path}.{key}: expected an integer in 0..={max}")),
+    }
+}
+
 fn validate_directory(directory: &Path, path: &str) -> Result<(), String> {
     let directory = directory.as_os_str().as_encoded_bytes();
     if directory.is_empty() || directory.len() > 4096 || directory.contains(&0) {
@@ -234,4 +265,56 @@ fn resolve_directory(path: &Path) -> io::Result<PathBuf> {
         ));
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(policy: &str) -> io::Result<Config> {
+        Config::from_lua(
+            &format!(
+                "return {{listeners={{public='127.0.0.1:25565'}},backends={{lobby='127.0.0.1:25566'}},routes={{public='lobby'}},managed_servers={{lobby={{directory='servers/lobby',command={{'java'}},{policy}}}}}}}"
+            ),
+            "retries.lua",
+        )
+    }
+
+    #[test]
+    fn recovery_retry_defaults_and_boundaries() {
+        assert_eq!(
+            config("").unwrap().managed_servers["lobby"].restart_retries,
+            3
+        );
+        for retries in ["0", "0.0", "100", "100.0"] {
+            let config = config(&format!("restart_retries={retries}")).unwrap();
+            assert_eq!(
+                config.managed_servers["lobby"].restart_retries,
+                retries.parse::<f64>().unwrap() as usize
+            );
+        }
+    }
+
+    #[test]
+    fn recovery_retry_values_and_mutations_are_validated() {
+        for retries in ["-1", "101", "0.5", "true", "'3'", "math.huge", "0/0"] {
+            let error = config(&format!("restart_retries={retries}"))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("restart_retries"), "{retries}: {error}");
+        }
+        let mut config = config("").unwrap();
+        config
+            .managed_servers
+            .get_mut("lobby")
+            .unwrap()
+            .restart_retries = 101;
+        assert!(
+            config
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("restart_retries")
+        );
+    }
 }

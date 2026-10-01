@@ -6,7 +6,9 @@ configuration through Lua or the bundled web dashboard. No Java or separate Lua
 installation is needed to run Rift.
 
 Rift can also supervise local Minecraft servers: start them on demand, stop
-empty servers, and operate their lifecycle from the CLI or web dashboard. Define
+empty servers, and operate their lifecycle from the CLI or web dashboard.
+Service groups can maintain minimum and spare capacity, scale from occupancy or
+queue pressure, and recover failed processes with bounded retries. Define
 local templates from server jars, plugins, configs and maps, then create instances
 with allocated ports and live backend registration. Persistent worlds retain
 files after removal; disposable game instances delete their generated files on

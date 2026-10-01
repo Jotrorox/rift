@@ -29,6 +29,57 @@ fn context(id: u64) -> Context {
 }
 
 #[test]
+fn queue_pressure_excludes_expired_cancelled_and_disconnected_tickets() {
+    let runtime = runtime("api_version=1, queues={game=1}");
+    let first = runtime.session(context(1)).unwrap();
+    let second = runtime.session(context(2)).unwrap();
+    first.enqueue("game").unwrap();
+    second.enqueue("game").unwrap();
+    assert_eq!(runtime.queue_lengths()["game"], 2);
+    runtime.host.lock().unwrap().queues.get_mut("game").unwrap()[0].1 =
+        Instant::now() - Duration::from_secs(301);
+    assert_eq!(runtime.queue_lengths()["game"], 1);
+    assert!(first.queued_target().is_err()); // retain the existing expiry notification
+    assert!(first.queued_target().unwrap().is_none());
+    second.leave_queue();
+    assert_eq!(runtime.queue_lengths()["game"], 0);
+    second.enqueue("game").unwrap();
+    drop(second);
+    assert_eq!(runtime.queue_lengths()["game"], 0);
+}
+
+#[tokio::test]
+async fn group_queue_capacity_and_fifo_follow_live_instance_membership() {
+    let source = "return {listeners={public='127.0.0.1:0'},backends={},routes={public='game'},authentication={online_mode=true},forwarding={mode='velocity',secret_env='TEST_SECRET'},service_groups={game={command={'unused'},directory='instances/{name}',port_range={26000,26003},scaling={capacity_per_instance=1,min_instances=0}}},extensions={api_version=1,queues={game=1}}}";
+    let mut config = Config::from_lua(source, "group-queue.lua").unwrap();
+    let runtime = Extensions::new(&config, Broker::new(Default::default()).unwrap(), None).unwrap();
+    let mut first = runtime.session(context(1)).unwrap();
+    let second = runtime.session(context(2)).unwrap();
+    first.enqueue("game").unwrap();
+    second.enqueue("game").unwrap();
+    assert_eq!(runtime.queue_lengths()["game"], 2);
+    assert!(first.queued_target().unwrap().is_none()); // group can scale from zero
+    config.add_instance("game", "game-1", 26000).unwrap();
+    runtime.update_destinations(&config);
+    assert_eq!(first.queued_target().unwrap().as_deref(), Some("game"));
+    assert!(second.reserve("game-1").is_err()); // group FIFO cannot be bypassed
+    first.before_transfer("game-1", "queue").await.unwrap();
+    first.ready("game-1").await;
+    assert!(first.enqueue("game").is_err()); // already in the group
+    assert_eq!(runtime.queue_lengths()["game"], 1);
+    assert!(second.queued_target().unwrap().is_none());
+    assert!(second.reserve("game-1").is_err()); // full across concrete names
+    config.add_instance("game", "game-2", 26001).unwrap();
+    runtime.update_destinations(&config);
+    assert_eq!(second.queued_target().unwrap().as_deref(), Some("game"));
+    second.reserve("game-2").unwrap();
+    assert!(first.reserve("game-2").is_ok()); // moving within the group uses its existing slot
+    drop(first);
+    drop(second);
+    assert_eq!(runtime.queue_lengths()["game"], 0);
+}
+
+#[test]
 fn version_schema_and_authenticated_mode_are_required() {
     for invalid in [
         "",

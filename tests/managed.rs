@@ -38,7 +38,9 @@ fn managed_process_helper() {
     .unwrap();
     println!("helper stdout");
     eprintln!("helper stderr");
-    if mode == "exit" {
+    if mode == "exit"
+        || (mode == "fail-first" && fs::read_to_string("starts").unwrap().lines().count() == 1)
+    {
         return;
     }
     std::thread::sleep(Duration::from_millis(delay));
@@ -57,7 +59,13 @@ fn managed_process_helper() {
             }
         });
     }
+    let ready_at = Instant::now();
     while !stopping.load(Ordering::Acquire) {
+        if fs::remove_file("crash").is_ok()
+            || (mode == "flap" && ready_at.elapsed() >= Duration::from_millis(200))
+        {
+            return;
+        }
         let _ = listener.accept();
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -108,6 +116,7 @@ impl Fixture {
                 start_timeout: Duration::from_secs(3),
                 stop_timeout: Duration::from_millis(150),
                 restart_delay: Duration::from_millis(200),
+                restart_retries: 3,
             },
         );
         Self {
@@ -253,6 +262,7 @@ async fn players_and_inflight_leases_prevent_manual_and_idle_stops() {
 async fn readiness_timeout_kills_child_and_failed_start_has_backoff() {
     let mut fixture = Fixture::new(10_000, "normal");
     fixture.definition().start_timeout = Duration::from_millis(150);
+    fixture.definition().restart_retries = 0;
     let manager = fixture.manager();
     let error = manager.start("default").await.unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
@@ -270,7 +280,13 @@ async fn readiness_timeout_kills_child_and_failed_start_has_backoff() {
     assert!(manager.start("default").await.is_err());
     assert_eq!(fixture.starts(), 1);
     tokio::time::sleep(Duration::from_millis(250)).await;
-    assert!(manager.can_connect("default"));
+    assert!(!manager.can_connect("default"));
+    assert!(manager.snapshot()[0].restart_exhausted);
+    assert_eq!(
+        manager.start("default").await.unwrap_err().kind(),
+        std::io::ErrorKind::TimedOut
+    );
+    assert_eq!(fixture.starts(), 2);
     manager.shutdown().await;
 }
 
@@ -339,23 +355,151 @@ async fn stop_and_shutdown_interrupt_an_in_progress_start() {
 }
 
 #[tokio::test]
-async fn early_exit_and_missing_command_report_errors_without_restart_loops() {
+async fn early_exit_and_missing_command_report_errors_with_bounded_retries() {
     let mut fixture = Fixture::new(0, "exit");
     fixture.definition().autostart = true;
     let manager = fixture.manager();
-    wait_state(&manager, "failed").await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(fixture.starts(), 1);
+    wait_exhausted(&manager).await;
+    assert_eq!(fixture.starts(), 4);
+    assert_eq!(manager.snapshot()[0].restart_attempts, 3);
+    assert!(!manager.can_connect("default"));
+    assert!(manager.ensure_running("default").await.is_err());
+    assert!(manager.request_scale_start("default").is_err());
+    tokio::time::sleep(Duration::from_millis(450)).await;
+    assert_eq!(fixture.starts(), 4);
+    // An administrator can explicitly retry an exhausted service.
+    assert!(manager.start("default").await.is_err());
+    assert_eq!(fixture.starts(), 5);
+    assert_eq!(manager.snapshot()[0].restart_attempts, 0);
     manager.shutdown().await;
     fixture.definition().autostart = false;
     fixture.definition().command = vec!["/rift-test/definitely-missing-command".into()];
+    fixture.definition().restart_delay = Duration::from_millis(50);
     let manager = fixture.manager();
     assert_eq!(
         manager.start("default").await.unwrap_err().kind(),
         std::io::ErrorKind::NotFound
     );
     assert_eq!(manager.snapshot()[0].state, "failed");
+    wait_exhausted(&manager).await;
+    assert_eq!(manager.snapshot()[0].restart_attempts, 3);
+    assert_eq!(fixture.starts(), 5);
     manager.shutdown().await;
+}
+
+async fn wait_exhausted(manager: &ManagedServers) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !manager.snapshot()[0].restart_exhausted {
+        assert!(
+            Instant::now() < deadline,
+            "recovery did not exhaust: {:?}",
+            manager.snapshot()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn readiness_timeouts_retry_only_within_budget_and_reap_each_child() {
+    let mut fixture = Fixture::new(10_000, "normal");
+    fixture.definition().start_timeout = Duration::from_millis(100);
+    fixture.definition().restart_delay = Duration::from_millis(50);
+    fixture.definition().restart_retries = 1;
+    let manager = fixture.manager();
+    assert_eq!(
+        manager.start("default").await.unwrap_err().kind(),
+        std::io::ErrorKind::TimedOut
+    );
+    wait_exhausted(&manager).await;
+    assert_eq!(fixture.starts(), 2);
+    assert!(manager.snapshot()[0].pid.is_none());
+    assert!(std::net::TcpStream::connect(fixture.address).is_err());
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(fixture.starts(), 2);
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn failed_autostart_recovers_without_connection_demand() {
+    let mut fixture = Fixture::new(0, "fail-first");
+    fixture.definition().autostart = true;
+    fixture.definition().start_on_connect = false;
+    let manager = fixture.manager();
+    wait_state(&manager, "running").await;
+    assert_eq!(fixture.starts(), 2);
+    assert_eq!(manager.snapshot()[0].restart_attempts, 1);
+    assert!(manager.snapshot()[0].last_error.is_none());
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn unexpected_exit_recovers_after_delay_and_releases_owned_pid() {
+    let mut fixture = Fixture::new(0, "normal");
+    fixture.definition().start_on_connect = false;
+    fixture.definition().restart_delay = Duration::from_millis(400);
+    let manager = fixture.manager();
+    manager.request_scale_start("default").unwrap();
+    wait_state(&manager, "running").await;
+    let original_pid = manager.snapshot()[0].pid;
+    let player = fixture
+        .players
+        .register([9; 16], "Recovering", "default")
+        .unwrap();
+    fs::write(fixture.directory.join("crash"), "yes").unwrap();
+    wait_state(&manager, "failed").await;
+    assert!(manager.snapshot()[0].pid.is_none());
+    assert!(
+        manager.snapshot()[0]
+            .last_error
+            .as_ref()
+            .unwrap()
+            .contains("exited")
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(fixture.starts(), 1);
+    wait_state(&manager, "running").await;
+    assert_eq!(fixture.starts(), 2);
+    assert_ne!(manager.snapshot()[0].pid, original_pid);
+    assert_eq!(manager.snapshot()[0].restart_attempts, 1);
+    assert!(manager.stop("default").await.is_err());
+    drop(player);
+    manager.stop("default").await.unwrap();
+    assert!(manager.request_scale_start("default").is_err());
+    assert!(!manager.snapshot()[0].automatic_enabled);
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn briefly_ready_crashing_services_cannot_reset_restart_budget() {
+    let mut fixture = Fixture::new(0, "flap");
+    fixture.definition().restart_retries = 2;
+    let manager = fixture.manager();
+    manager.start("default").await.unwrap();
+    wait_exhausted(&manager).await;
+    assert_eq!(fixture.starts(), 3);
+    assert_eq!(manager.snapshot()[0].restart_attempts, 2);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(fixture.starts(), 3);
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn administrative_stop_shutdown_and_removal_cancel_pending_recovery() {
+    for action in ["stop", "shutdown", "remove"] {
+        let mut fixture = Fixture::new(0, "exit");
+        fixture.definition().restart_delay = Duration::from_millis(500);
+        let manager = fixture.manager();
+        assert!(manager.start("default").await.is_err());
+        assert_eq!(fixture.starts(), 1);
+        match action {
+            "stop" => manager.stop("default").await.unwrap(),
+            "remove" => manager.remove("default").await.unwrap(),
+            _ => manager.shutdown().await,
+        }
+        tokio::time::sleep(Duration::from_millis(650)).await;
+        assert_eq!(fixture.starts(), 1, "{action} did not cancel recovery");
+        manager.shutdown().await;
+    }
 }
 
 fn empty_manager(fixture: &Fixture) -> ManagedServers {

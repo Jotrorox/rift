@@ -383,6 +383,7 @@ struct HostState {
 pub struct Extensions {
     script: Option<ExtensionScript>,
     backends: Arc<Mutex<BTreeSet<String>>>,
+    groups: Arc<Mutex<BTreeMap<String, BTreeSet<String>>>>,
     slots: Arc<Semaphore>,
     host: Arc<Mutex<HostState>>,
     broker: Broker,
@@ -391,6 +392,23 @@ pub struct Extensions {
     job_gates: Arc<Mutex<BTreeMap<String, Weak<Semaphore>>>>,
 }
 impl Extensions {
+    /// Live FIFO pressure, excluding expired tickets even while their session
+    /// is busy elsewhere. Scaling must not keep capacity for stale demand.
+    pub fn queue_lengths(&self) -> BTreeMap<String, usize> {
+        let host = self.host.lock().unwrap();
+        let now = Instant::now();
+        host.queues
+            .iter()
+            .map(|(name, queue)| {
+                let live = queue
+                    .iter()
+                    .filter(|(_, entered)| now.duration_since(*entered) < Duration::from_secs(300))
+                    .count();
+                (name.clone(), live)
+            })
+            .collect()
+    }
+
     pub fn new(config: &Config, broker: Broker, previous: Option<&Self>) -> io::Result<Self> {
         if let Some(previous) = previous {
             match (&previous.script, &config.extensions) {
@@ -430,6 +448,10 @@ impl Extensions {
                 },
                 |previous| previous.backends.clone(),
             ),
+            groups: previous.map_or_else(
+                || Arc::new(Mutex::new(group_members(config))),
+                |previous| previous.groups.clone(),
+            ),
             broker,
             store,
             permissions: previous
@@ -456,6 +478,8 @@ impl Extensions {
     /// Publish the live destination catalog after a runtime transaction commits.
     /// Existing sessions share this catalog with newly configured extensions.
     pub fn update_destinations(&self, config: &Config) {
+        // Publish capacity membership before callbacks can select new names.
+        *self.groups.lock().unwrap() = group_members(config);
         *self.backends.lock().unwrap_or_else(|e| e.into_inner()) = config
             .backends
             .keys()
@@ -597,18 +621,33 @@ impl ExtensionSession {
     /// Reserve before any backend connection, including non-queued routes.
     pub fn reserve(&self, target: &str) -> io::Result<()> {
         let mut host = self.runtime.host.lock().unwrap();
-        if let Some(capacity) = self.runtime.script.as_ref().unwrap().queues.get(target) {
+        let groups = self.runtime.groups.lock().unwrap();
+        for (destination, capacity) in &self.runtime.script.as_ref().unwrap().queues {
+            let members = groups.get(destination);
+            if destination != target && !members.is_some_and(|members| members.contains(target)) {
+                continue;
+            }
+            let capacity = capacity * members.map_or(1, BTreeSet::len);
+            // Moving between instances does not consume another group slot.
+            if members.is_some()
+                && host
+                    .leases
+                    .get(&self.context.id)
+                    .is_some_and(|servers| contains_destination(servers, destination, members))
+            {
+                continue;
+            }
             let used = host
                 .leases
                 .values()
-                .filter(|servers| servers.contains(target))
+                .filter(|servers| contains_destination(servers, destination, members))
                 .count();
             let head = host
                 .queues
-                .get(target)
+                .get(destination)
                 .and_then(|q| q.front())
                 .map(|(id, _)| *id);
-            if used >= *capacity || head.is_some_and(|id| id != self.context.id) {
+            if used >= capacity || head.is_some_and(|id| id != self.context.id) {
                 return Err(io::Error::new(
                     io::ErrorKind::WouldBlock,
                     "Server is full; use the queue command.",
@@ -663,7 +702,16 @@ impl ExtensionSession {
         {
             return Err(invalid("No queue is configured for that server."));
         }
-        if self.context.server.as_deref() == Some(target) {
+        if self.context.server.as_deref().is_some_and(|current| {
+            current == target
+                || self
+                    .runtime
+                    .groups
+                    .lock()
+                    .unwrap()
+                    .get(target)
+                    .is_some_and(|members| members.contains(current))
+        }) {
             return Err(invalid("You are already on that server."));
         }
         let mut host = self.runtime.host.lock().unwrap();
@@ -702,14 +750,37 @@ impl ExtensionSession {
             }
         }
         Ok(head.filter(|server| {
+            let groups = self.runtime.groups.lock().unwrap();
+            let members = groups.get(server);
             let used = host
                 .leases
                 .values()
-                .filter(|servers| servers.contains(server))
+                .filter(|servers| contains_destination(servers, server, members))
                 .count();
             used < self.runtime.script.as_ref().unwrap().queues[server]
+                * members.map_or(1, BTreeSet::len)
         }))
     }
+}
+fn group_members(config: &Config) -> BTreeMap<String, BTreeSet<String>> {
+    config
+        .service_groups
+        .keys()
+        .map(|group| {
+            (
+                group.clone(),
+                config.instance_names(group).into_iter().collect(),
+            )
+        })
+        .collect()
+}
+
+fn contains_destination(
+    servers: &BTreeSet<String>,
+    destination: &str,
+    members: Option<&BTreeSet<String>>,
+) -> bool {
+    servers.contains(destination) || members.is_some_and(|members| !servers.is_disjoint(members))
 }
 impl Drop for ExtensionSession {
     fn drop(&mut self) {

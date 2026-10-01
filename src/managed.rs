@@ -33,7 +33,10 @@ pub struct ManagedServerSnapshot {
     pub players: usize,
     pub reservations: usize,
     pub automatic_start: bool,
+    pub automatic_enabled: bool,
     pub last_error: Option<String>,
+    pub restart_attempts: usize,
+    pub restart_exhausted: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -69,13 +72,23 @@ struct State {
     pending_stop: bool,
     last_error: Option<String>,
     retry_at: Option<Instant>,
+    restart_attempts: usize,
+    recover: bool,
     last_activity: Instant,
 }
 
 #[derive(Debug, Clone, Copy)]
 enum Action {
-    Start { manual: bool },
+    Start { mode: StartMode },
     Stop,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartMode {
+    Manual,
+    Demand,
+    Scale,
+    Recovery,
 }
 
 #[derive(Debug)]
@@ -294,11 +307,23 @@ impl ManagedServers {
         if !self.is_managed(name) {
             return Ok(());
         }
-        self.request(name, Action::Start { manual: false }).await
+        self.request(
+            name,
+            Action::Start {
+                mode: StartMode::Demand,
+            },
+        )
+        .await
     }
 
     pub async fn start(&self, name: &str) -> io::Result<()> {
-        self.request(name, Action::Start { manual: true }).await
+        self.request(
+            name,
+            Action::Start {
+                mode: StartMode::Manual,
+            },
+        )
+        .await
     }
 
     pub async fn stop(&self, name: &str) -> io::Result<()> {
@@ -308,7 +333,25 @@ impl ManagedServers {
     /// Admit an operation without waiting for process readiness or termination.
     /// Failures after admission are visible in `snapshot().last_error`.
     pub fn request_start(&self, name: &str) -> io::Result<()> {
-        self.enqueue(name, Action::Start { manual: true }, None)
+        self.enqueue(
+            name,
+            Action::Start {
+                mode: StartMode::Manual,
+            },
+            None,
+        )
+    }
+
+    /// Request capacity without overriding an administrator stop or resetting
+    /// the bounded recovery budget. Admission does not wait for readiness.
+    pub fn request_scale_start(&self, name: &str) -> io::Result<()> {
+        self.enqueue(
+            name,
+            Action::Start {
+                mode: StartMode::Scale,
+            },
+            None,
+        )
     }
 
     pub fn request_stop(&self, name: &str) -> io::Result<()> {
@@ -350,6 +393,14 @@ impl ManagedServers {
         if server.shutdown.load(Ordering::Acquire) {
             return Err(unavailable("managed server is retiring or shutting down"));
         }
+        if matches!(
+            action,
+            Action::Start {
+                mode: StartMode::Scale
+            }
+        ) {
+            automatic_start_allowed(server, &state)?;
+        }
         if matches!(action, Action::Stop) {
             if state.reservations > 0 || player_count(&self.0.players, name) > 0 {
                 return Err(io::Error::new(
@@ -379,6 +430,8 @@ impl ManagedServers {
         if matches!(action, Action::Stop) {
             state.automatic = false;
             state.pending_stop = true;
+            state.recover = false;
+            state.retry_at = None;
             server.wake.notify_one();
         }
         Ok(())
@@ -403,7 +456,10 @@ impl ManagedServers {
                     players: player_count(&self.0.players, &server.name),
                     reservations: state.reservations,
                     automatic_start: state.automatic && server.config.start_on_connect,
+                    automatic_enabled: state.automatic,
                     last_error: state.last_error.clone(),
+                    restart_attempts: state.restart_attempts,
+                    restart_exhausted: restart_exhausted(server, &state),
                 }
             })
             .collect()
@@ -463,6 +519,8 @@ fn new_server(name: &str, config: ManagedServer, address: Option<SocketAddr>) ->
             pending_stop: false,
             last_error: None,
             retry_at: None,
+            restart_attempts: 0,
+            recover: false,
             last_activity: Instant::now(),
         }),
     })
@@ -504,6 +562,13 @@ fn connect_allowed(server: &Server, state: &State) -> io::Result<()> {
             "managed server is stopped by an administrator or shutting down",
         ));
     }
+    if state.phase == "failed" && state.recover {
+        return Err(unavailable(if restart_exhausted(server, state) {
+            "managed server exhausted its restart retries; an explicit start is required"
+        } else {
+            "managed server is awaiting automatic recovery"
+        }));
+    }
     if matches!(state.phase, "running" | "starting") {
         return Ok(());
     }
@@ -521,6 +586,28 @@ fn connect_allowed(server: &Server, state: &State) -> io::Result<()> {
     Ok(())
 }
 
+fn restart_exhausted(server: &Server, state: &State) -> bool {
+    state.phase == "failed"
+        && state.recover
+        && state.restart_attempts >= server.config.restart_retries
+}
+
+fn automatic_start_allowed(server: &Server, state: &State) -> io::Result<()> {
+    if server.shutdown.load(Ordering::Acquire) || state.pending_stop || !state.automatic {
+        return Err(unavailable(
+            "managed server is stopped by an administrator or shutting down",
+        ));
+    }
+    if state.phase == "failed" {
+        return Err(unavailable(if restart_exhausted(server, state) {
+            "managed server exhausted its restart retries; an explicit start is required"
+        } else {
+            "managed server is awaiting automatic recovery"
+        }));
+    }
+    Ok(())
+}
+
 async fn worker(
     server: Arc<Server>,
     players: Arc<PlayerRegistry>,
@@ -528,7 +615,7 @@ async fn worker(
 ) {
     let mut child = None;
     if server.config.autostart {
-        let _ = start_process(&server, &mut child, true).await;
+        let _ = start_process(&server, &mut child, StartMode::Manual).await;
     }
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -541,7 +628,7 @@ async fn worker(
             request = requests.recv() => {
                 let Some(request) = request else { break; };
                 let result = match request.action {
-                    Action::Start { manual } => start_process(&server, &mut child, manual).await,
+                    Action::Start { mode } => start_process(&server, &mut child, mode).await,
                     Action::Stop => {
                         let result = stop_process(&server, &mut child).await;
                         server.state.lock().unwrap_or_else(|e| e.into_inner()).pending_stop = false;
@@ -551,7 +638,17 @@ async fn worker(
                 if let Some(reply) = request.reply { let _ = reply.send(result); }
             },
             _ = tick.tick() => {
-                check_exit(&server, &mut child);
+                check_exit(&server, &mut child).await;
+                let should_recover = {
+                    let state = server.state.lock().unwrap_or_else(|e| e.into_inner());
+                    state.phase == "failed" && state.recover && !state.pending_stop
+                        && !server.shutdown.load(Ordering::Acquire)
+                        && state.restart_attempts < server.config.restart_retries
+                        && state.retry_at.is_some_and(|deadline| Instant::now() >= deadline)
+                };
+                if should_recover {
+                    let _ = start_process(&server, &mut child, StartMode::Recovery).await;
+                }
                 let should_stop = {
                     let mut state = server.state.lock().unwrap_or_else(|e| e.into_inner());
                     if state.reservations > 0 || player_count(&players, &server.name) > 0 {
@@ -561,6 +658,8 @@ async fn worker(
                         // This lock also guards new reservations, closing the
                         // race between idle detection and the first stop await.
                         state.phase = "stopping";
+                        state.recover = false;
+                        state.retry_at = None;
                         true
                     } else { false }
                 };
@@ -578,7 +677,7 @@ async fn worker(
     }
 }
 
-fn check_exit(server: &Server, child: &mut Option<Child>) {
+async fn check_exit(server: &Server, child: &mut Option<Child>) {
     let Some(process) = child.as_mut() else {
         return;
     };
@@ -588,7 +687,15 @@ fn check_exit(server: &Server, child: &mut Option<Child>) {
             record_failure(server, format!("managed server exited: {status}"));
         }
         Ok(None) => {}
-        Err(error) => record_failure(server, format!("cannot inspect managed process: {error}")),
+        Err(error) => {
+            // Reap an uninspectable child before replacement so two processes
+            // can never be owned for the same managed backend.
+            if let Some(mut process) = child.take() {
+                let _ = process.kill().await;
+                let _ = process.wait().await;
+            }
+            record_failure(server, format!("cannot inspect managed process: {error}"));
+        }
     }
 }
 
@@ -600,20 +707,36 @@ fn record_failure(server: &Server, error: String) {
     state.retry_at = Some(Instant::now() + server.config.restart_delay);
 }
 
-async fn start_process(server: &Server, child: &mut Option<Child>, manual: bool) -> io::Result<()> {
-    check_exit(server, child);
+async fn start_process(
+    server: &Server,
+    child: &mut Option<Child>,
+    mode: StartMode,
+) -> io::Result<()> {
+    check_exit(server, child).await;
     {
         let mut state = server.state.lock().unwrap_or_else(|e| e.into_inner());
         if server.shutdown.load(Ordering::Acquire) || state.pending_stop {
             return Err(unavailable("managed server is stopping"));
         }
-        if !manual {
-            connect_allowed(server, &state)?;
-        }
-        if manual {
-            state.automatic = true;
+        match mode {
+            StartMode::Demand => connect_allowed(server, &state)?,
+            StartMode::Scale => automatic_start_allowed(server, &state)?,
+            StartMode::Recovery
+                if !state.automatic
+                    || !state.recover
+                    || state.restart_attempts >= server.config.restart_retries =>
+            {
+                return Err(unavailable(
+                    "managed server automatic recovery was cancelled",
+                ));
+            }
+            _ => {}
         }
         if state.phase == "running" {
+            if mode == StartMode::Manual {
+                state.automatic = true;
+                state.restart_attempts = 0;
+            }
             return Ok(());
         }
         if state
@@ -624,6 +747,14 @@ async fn start_process(server: &Server, child: &mut Option<Child>, manual: bool)
                 "managed server is cooling down after a failed start",
             ));
         }
+        if mode == StartMode::Manual {
+            state.automatic = true;
+            state.restart_attempts = 0;
+        }
+        if mode == StartMode::Recovery {
+            state.restart_attempts += 1;
+        }
+        state.recover = true;
         state.phase = "starting";
         state.last_error = None;
     }
@@ -649,6 +780,7 @@ async fn start_process(server: &Server, child: &mut Option<Child>, manual: bool)
                 state.pid = None;
                 state.last_error = None;
                 state.retry_at = None;
+                state.recover = false;
             } else {
                 record_failure(server, error.to_string());
             }
@@ -777,6 +909,8 @@ async fn stop_process(server: &Server, child: &mut Option<Child>) -> io::Result<
     state.phase = if result.is_ok() { "stopped" } else { "failed" };
     state.pid = None;
     state.pending_stop = false;
+    state.recover = false;
+    state.retry_at = None;
     if let Err(error) = &result {
         state.last_error = Some(error.to_string());
     }

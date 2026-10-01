@@ -8,6 +8,20 @@ pub struct ServiceGroup {
     pub storage: InstanceStorage,
     pub port_start: u16,
     pub port_end: u16,
+    /// Absent for groups managed entirely through explicit instance operations.
+    pub scaling: Option<ServiceScaling>,
+}
+
+/// Occupancy and queue policy for automatically managed service instances.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceScaling {
+    pub min_instances: usize,
+    pub max_instances: usize,
+    pub spare_instances: usize,
+    pub capacity_per_instance: usize,
+    pub target_occupancy_percent: usize,
+    pub queue_threshold: usize,
+    pub cooldown: Duration,
 }
 
 /// Persistent worlds retain their data when their process or instance stops.
@@ -47,6 +61,7 @@ pub(super) fn parse(
     let definitions = lua.create_table().map_err(|e| e.to_string())?;
     let mut ranges = BTreeMap::new();
     let mut policies = BTreeMap::new();
+    let mut scaling_policies = BTreeMap::new();
     for pair in values.pairs::<Value, Value>() {
         let (name, value) = pair.map_err(|e| e.to_string())?;
         let name = string(name, "service_groups key")?;
@@ -117,13 +132,17 @@ pub(super) fn parse(
             ));
         }
         ranges.insert(name.clone(), (ports[&1], ports[&2]));
+        scaling_policies.insert(
+            name.clone(),
+            parse_scaling(&value, &path, usize::from(ports[&2] - ports[&1]) + 1)?,
+        );
         let definition = lua.create_table().map_err(|e| e.to_string())?;
         for pair in value.pairs::<Value, Value>() {
             let (key, field) = pair.map_err(|e| e.to_string())?;
             if key.as_string().is_some_and(|key| {
                 matches!(
                     key.as_bytes().as_ref(),
-                    b"port_range" | b"template" | b"storage"
+                    b"port_range" | b"template" | b"storage" | b"scaling"
                 )
             }) {
                 continue;
@@ -143,6 +162,7 @@ pub(super) fn parse(
         .map(|(name, server)| {
             let (port_start, port_end) = ranges[&name];
             let (template, storage) = policies.remove(&name).unwrap();
+            let scaling = scaling_policies.remove(&name).unwrap();
             (
                 name,
                 ServiceGroup {
@@ -151,10 +171,102 @@ pub(super) fn parse(
                     storage,
                     port_start,
                     port_end,
+                    scaling,
                 },
             )
         })
         .collect::<BTreeMap<_, _>>())
+}
+
+fn parse_scaling(
+    values: &Table,
+    path: &str,
+    ports: usize,
+) -> Result<Option<ServiceScaling>, String> {
+    let value: Value = values.raw_get("scaling").map_err(|e| e.to_string())?;
+    if matches!(value, Value::Nil) {
+        return Ok(None);
+    }
+    let path = format!("{path}.scaling");
+    let values = table(value, &path)?;
+    fields(
+        &values,
+        &[
+            "min_instances",
+            "max_instances",
+            "spare_instances",
+            "capacity_per_instance",
+            "target_occupancy_percent",
+            "queue_threshold",
+            "cooldown_ms",
+        ],
+        &path,
+    )?;
+    if matches!(
+        values
+            .raw_get::<Value>("capacity_per_instance")
+            .map_err(|e| e.to_string())?,
+        Value::Nil
+    ) {
+        return Err(format!(
+            "{path}.capacity_per_instance: required positive integer"
+        ));
+    }
+    let scaling = ServiceScaling {
+        min_instances: managed::bounded_count(&values, &path, "min_instances", 1, 128)?,
+        max_instances: integer(&values, &path, "max_instances", ports.min(128), 128)?,
+        spare_instances: managed::bounded_count(&values, &path, "spare_instances", 0, 128)?,
+        capacity_per_instance: integer(&values, &path, "capacity_per_instance", 1, 100_000)?,
+        target_occupancy_percent: integer(&values, &path, "target_occupancy_percent", 80, 100)?,
+        queue_threshold: integer(&values, &path, "queue_threshold", 1, 1024)?,
+        cooldown: Duration::from_millis(
+            integer(&values, &path, "cooldown_ms", 5000, 86_400_000)? as u64
+        ),
+    };
+    validate_scaling(&scaling, &path, ports)?;
+    Ok(Some(scaling))
+}
+
+fn validate_scaling(scaling: &ServiceScaling, path: &str, ports: usize) -> Result<(), String> {
+    if scaling.max_instances == 0 || scaling.max_instances > 128 || scaling.max_instances > ports {
+        return Err(format!(
+            "{path}.max_instances: expected 1..={} within the port range",
+            ports.min(128)
+        ));
+    }
+    for (field, count) in [
+        ("min_instances", scaling.min_instances),
+        ("spare_instances", scaling.spare_instances),
+    ] {
+        if count > scaling.max_instances {
+            return Err(format!("{path}.{field}: must not exceed max_instances"));
+        }
+    }
+    for (field, value, max) in [
+        (
+            "capacity_per_instance",
+            scaling.capacity_per_instance,
+            100_000,
+        ),
+        (
+            "target_occupancy_percent",
+            scaling.target_occupancy_percent,
+            100,
+        ),
+        ("queue_threshold", scaling.queue_threshold, 1024),
+    ] {
+        if value == 0 || value > max {
+            return Err(format!("{path}.{field}: expected an integer in 1..={max}"));
+        }
+    }
+    if scaling.cooldown < Duration::from_millis(1)
+        || scaling.cooldown > Duration::from_millis(86_400_000)
+    {
+        return Err(format!(
+            "{path}.cooldown_ms: expected 1..=86400000 milliseconds"
+        ));
+    }
+    Ok(())
 }
 
 fn safe_name(name: &str) -> bool {
@@ -198,6 +310,16 @@ pub(super) fn render(
     server
 }
 
+fn render_group(group: &str, name: &str, port: u16, definition: &ServiceGroup) -> ManagedServer {
+    let mut server = render(group, name, port, &definition.server);
+    // The scaler owns idle capacity, so the process supervisor must not stop
+    // instances that satisfy the minimum or spare-capacity policy.
+    if definition.scaling.is_some() {
+        server.idle_timeout = None;
+    }
+    server
+}
+
 pub(super) fn validate(config: &Config) -> Result<(), String> {
     if config.service_groups.len() > 128 {
         return Err("service_groups: at most 128 groups".into());
@@ -226,13 +348,31 @@ pub(super) fn validate(config: &Config) -> Result<(), String> {
                 "{path}.port_range: expected ordered ports in 1..=65535"
             ));
         }
+        if let Some(scaling) = &group.scaling {
+            validate_scaling(
+                scaling,
+                &format!("{path}.scaling"),
+                usize::from(group.port_end - group.port_start) + 1,
+            )?;
+            if config
+                .instances
+                .values()
+                .filter(|instance| instance.group == *name)
+                .count()
+                > scaling.max_instances
+            {
+                return Err(format!(
+                    "{path}.scaling.max_instances: existing instance count exceeds maximum"
+                ));
+            }
+        }
         if !group.server.directory.to_string_lossy().contains("{name}") {
             return Err(format!(
                 "{path}.directory: must contain {{name}} to isolate instances"
             ));
         }
         // Apply all ordinary managed-server command, directory and policy bounds.
-        let server = render(name, &format!("{name}-1"), group.port_start, &group.server);
+        let server = render_group(name, &format!("{name}-1"), group.port_start, group);
         let backends = BTreeMap::from([(
             name.clone(),
             Backend::parse(&format!("127.0.0.1:{}", group.port_start))
@@ -258,7 +398,7 @@ pub(super) fn validate(config: &Config) -> Result<(), String> {
         if !(group.port_start..=group.port_end).contains(&instance.port) {
             return Err(format!("{path}: port is outside the service group range"));
         }
-        let expected = render(&instance.group, name, instance.port, &group.server);
+        let expected = render_group(&instance.group, name, instance.port, group);
         if config.managed_servers.get(name) != Some(&expected) {
             return Err(format!(
                 "{path}: managed definition does not match the service group"
@@ -293,7 +433,7 @@ pub(super) fn restore_instances(config: &mut Config, previous: &Config) -> Resul
                 instance.group
             )
         })?;
-        let server = render(&instance.group, name, instance.port, &group.server);
+        let server = render_group(&instance.group, name, instance.port, group);
         config.backends.insert(
             name.clone(),
             Backend::parse(&format!("127.0.0.1:{}", instance.port))
@@ -345,7 +485,7 @@ impl Config {
         {
             return Err(invalid(format!("instance {name:?} already exists")));
         }
-        let server = render(group, name, port, &definition.server);
+        let server = render_group(group, name, port, definition);
         let mut candidate = self.clone();
         candidate
             .backends
@@ -377,6 +517,193 @@ mod tests {
 
     fn config() -> Config {
         Config::from_lua(&group_source("directory='servers/{group}/{name}', command={'java','-jar','/absolute/paper.jar','--port','{port}','--name={name}','--group={group}'}, port_range={25600,25602}"), "groups.lua").unwrap()
+    }
+
+    fn scaled_config(policy: &str) -> io::Result<Config> {
+        Config::from_lua(
+            &group_source(&format!(
+                "directory='servers/{{name}}',command={{'java'}},port_range={{25600,25602}},scaling={{{policy}}}"
+            )),
+            "scaling.lua",
+        )
+    }
+
+    #[test]
+    fn scaling_defaults_are_opt_in_and_bounded_by_ports() {
+        assert!(config().service_groups["lobby"].scaling.is_none());
+        let config = scaled_config("capacity_per_instance=20").unwrap();
+        assert_eq!(
+            config.service_groups["lobby"].scaling,
+            Some(ServiceScaling {
+                min_instances: 1,
+                max_instances: 3,
+                spare_instances: 0,
+                capacity_per_instance: 20,
+                target_occupancy_percent: 80,
+                queue_threshold: 1,
+                cooldown: Duration::from_secs(5),
+            })
+        );
+        let source = group_source(
+            "directory='servers/{name}',command={'java'},port_range={25600,26000},scaling={capacity_per_instance=20}",
+        );
+        let config = Config::from_lua(&source, "wide-range.lua").unwrap();
+        assert_eq!(
+            config.service_groups["lobby"]
+                .scaling
+                .as_ref()
+                .unwrap()
+                .max_instances,
+            128
+        );
+    }
+
+    #[test]
+    fn accepts_zero_minimum_and_explicit_scaling_boundaries() {
+        let config = scaled_config("min_instances=0, max_instances=3, spare_instances=3, capacity_per_instance=100000, target_occupancy_percent=100, queue_threshold=1024, cooldown_ms=86400000").unwrap();
+        let scaling = config.service_groups["lobby"].scaling.as_ref().unwrap();
+        assert_eq!(scaling.min_instances, 0);
+        assert_eq!(scaling.spare_instances, 3);
+        assert_eq!(scaling.cooldown, Duration::from_secs(86_400));
+        scaled_config("min_instances=0.0, spare_instances=0.0, capacity_per_instance=1.0").unwrap();
+    }
+
+    #[test]
+    fn rejects_invalid_scaling_values_and_relationships() {
+        for policy in [
+            "",
+            "capacity_per_instance=0",
+            "capacity_per_instance=-1",
+            "capacity_per_instance=100001",
+            "capacity_per_instance=1.5",
+            "capacity_per_instance='20'",
+            "capacity_per_instance=20,unknown=1",
+            "capacity_per_instance=20,min_instances=-1",
+            "capacity_per_instance=20,min_instances=4",
+            "capacity_per_instance=20,max_instances=0",
+            "capacity_per_instance=20,max_instances=4",
+            "capacity_per_instance=20,max_instances=129",
+            "capacity_per_instance=20,spare_instances=4",
+            "capacity_per_instance=20,spare_instances=-1",
+            "capacity_per_instance=20,target_occupancy_percent=0",
+            "capacity_per_instance=20,target_occupancy_percent=101",
+            "capacity_per_instance=20,queue_threshold=0",
+            "capacity_per_instance=20,queue_threshold=1025",
+            "capacity_per_instance=20,cooldown_ms=0",
+            "capacity_per_instance=20,cooldown_ms=86400001",
+            "capacity_per_instance=0/0",
+            "capacity_per_instance=math.huge",
+        ] {
+            let error = scaled_config(policy).unwrap_err().to_string();
+            assert!(
+                error.contains("service_groups.lobby.scaling"),
+                "{policy}: {error}"
+            );
+        }
+        let source = group_source(
+            "directory='servers/{name}',command={'java'},port_range={25600,25602},scaling=true",
+        );
+        assert!(Config::from_lua(&source, "wrong-type.lua").is_err());
+    }
+
+    #[test]
+    fn validates_programmatically_changed_scaling() {
+        let config = scaled_config("capacity_per_instance=20").unwrap();
+        for mutate in [
+            |scaling: &mut ServiceScaling| scaling.max_instances = 0,
+            |scaling: &mut ServiceScaling| scaling.max_instances = 4,
+            |scaling: &mut ServiceScaling| scaling.min_instances = 4,
+            |scaling: &mut ServiceScaling| scaling.spare_instances = 4,
+            |scaling: &mut ServiceScaling| scaling.capacity_per_instance = 0,
+            |scaling: &mut ServiceScaling| scaling.capacity_per_instance = 100_001,
+            |scaling: &mut ServiceScaling| scaling.target_occupancy_percent = 0,
+            |scaling: &mut ServiceScaling| scaling.target_occupancy_percent = 101,
+            |scaling: &mut ServiceScaling| scaling.queue_threshold = 0,
+            |scaling: &mut ServiceScaling| scaling.queue_threshold = 1025,
+            |scaling: &mut ServiceScaling| scaling.cooldown = Duration::ZERO,
+            |scaling: &mut ServiceScaling| scaling.cooldown = Duration::from_millis(86_400_001),
+        ] {
+            let mut changed = config.clone();
+            mutate(
+                changed
+                    .service_groups
+                    .get_mut("lobby")
+                    .unwrap()
+                    .scaling
+                    .as_mut()
+                    .unwrap(),
+            );
+            assert!(changed.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn scaled_instances_leave_idle_capacity_to_the_scaler_on_create_and_reload() {
+        let source = group_source(
+            "directory='servers/{name}',command={'java'},port_range={25600,25602},idle_timeout_ms=1,scaling={capacity_per_instance=20}",
+        );
+        let path = Path::new("/tmp/rift-scaled-instance-config/rift.lua");
+        let mut config = Config::from_lua_at(&source, path).unwrap();
+        config.add_instance("lobby", "lobby-1", 25600).unwrap();
+        assert_eq!(
+            config.service_groups["lobby"].server.idle_timeout,
+            Some(Duration::from_millis(1))
+        );
+        assert_eq!(config.managed_servers["lobby-1"].idle_timeout, None);
+        let restored = Config::from_lua_at_with_instances(&source, path, &config).unwrap();
+        assert_eq!(restored.managed_servers["lobby-1"].idle_timeout, None);
+        restored.validate().unwrap();
+    }
+
+    #[test]
+    fn extension_queues_accept_groups_and_reject_unknown_destinations() {
+        let source = group_source("directory='servers/{name}',command={'java'},port_range={25600,25602},scaling={capacity_per_instance=20}")
+            .replace("service_groups=", "authentication={online_mode=true},forwarding={mode='velocity',secret_env='TEST_SECRET'},extensions={api_version=1,queues={lobby=20}},service_groups=");
+        let config = Config::from_lua(&source, "group-queue.lua").unwrap();
+        assert!(config.backends.is_empty());
+        assert_eq!(config.extensions.as_ref().unwrap().queues["lobby"], 20);
+        let unknown = source.replace("queues={lobby=20}", "queues={unknown=20}");
+        assert!(
+            Config::from_lua(&unknown, "unknown-queue.lua")
+                .unwrap_err()
+                .to_string()
+                .contains("extensions.queues: unknown backend")
+        );
+    }
+
+    #[test]
+    fn scaling_maximum_limits_creation_mutation_and_reload() {
+        let mut config = scaled_config("capacity_per_instance=20,max_instances=2").unwrap();
+        config.add_instance("lobby", "lobby-1", 25600).unwrap();
+        config.add_instance("lobby", "lobby-2", 25601).unwrap();
+        config.validate().unwrap();
+        let before = config.clone();
+        assert!(
+            config
+                .add_instance("lobby", "lobby-3", 25602)
+                .unwrap_err()
+                .to_string()
+                .contains("existing instance count exceeds maximum")
+        );
+        assert_eq!(config, before);
+        config
+            .service_groups
+            .get_mut("lobby")
+            .unwrap()
+            .scaling
+            .as_mut()
+            .unwrap()
+            .max_instances = 1;
+        assert!(config.validate().is_err());
+        let source = group_source(
+            "directory='servers/{name}',command={'java'},port_range={25600,25602},scaling={capacity_per_instance=20,max_instances=1}",
+        );
+        assert!(
+            Config::from_lua_at_with_instances(&source, Path::new("groups.lua"), &before)
+                .unwrap_err()
+                .to_string()
+                .contains("existing instance count exceeds maximum")
+        );
     }
 
     #[test]

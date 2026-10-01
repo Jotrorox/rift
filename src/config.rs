@@ -15,7 +15,7 @@ pub use crate::message_script::MessageScript;
 pub use crate::{http_script::HttpScript, script::RouteScript};
 pub use managed::ManagedServer;
 pub use messaging::{MessagingConfig, MessagingPrincipal, MessagingStream, MessagingSubscription};
-pub use services::{InstanceStorage, ServiceGroup, ServiceInstance};
+pub use services::{InstanceStorage, ServiceGroup, ServiceInstance, ServiceScaling};
 pub use templates::ServerTemplate;
 
 mod managed;
@@ -628,7 +628,7 @@ impl Config {
                 if !(1..=100_000).contains(capacity) {
                     return Err(invalid("extensions.queues: capacity must be 1..=100000"));
                 }
-                if !self.backends.contains_key(backend) {
+                if !self.is_destination(backend) {
                     return Err(invalid("extensions.queues: unknown backend"));
                 }
             }

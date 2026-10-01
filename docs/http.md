@@ -125,12 +125,16 @@ Errors use `{"error":"description"}`. `GET /api` provides endpoint discovery.
 
 Managed lifecycle requests return promptly; acceptance does not mean startup or
 shutdown has completed. Poll `GET /api/servers` for `state`, `pid`, `players`,
-`reservations`, `automatic_start` and `last_error`. The same array is available
+`reservations`, `automatic_start` and `last_error`. `automatic_enabled` reports
+whether an administrator has paused automatic starts. `restart_attempts` counts
+automatic restarts since the last explicit Start, and `restart_exhausted`
+identifies failed services requiring operator intervention. The same array is available
 as `managed_servers` on authenticated `/api/status`. Listings include `address`,
 `port`, `group` (`null` for static servers), `template` (`null` without one),
 and `storage` (`persistent` or `disposable`; static managed servers are
 `persistent`). Authenticated `/api/status` also includes `service_groups` with
-the same objects as `/api/groups`. Commands, arguments and
+the same objects as `/api/groups`, including the optional `scaling` policy.
+Commands, arguments and
 working directories are omitted. The public `/status` and Lua HTTP context omit
 managed lifecycle details entirely. Authenticated `/api/config` still contains
 the complete trusted configuration source.

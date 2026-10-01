@@ -1,5 +1,5 @@
 -- Run: rift check examples/services.lua
--- Prepared-directory group: accept EULA and configure plugins/backend before start.
+-- Automatic capacity: prepare the jar, EULA and backend settings before starting Rift.
 -- For asset copying and disposable games, see examples/templates.lua.
 -- Replace /absolute/paper.jar and configure authentication/forwarding on Paper.
 local config = require("rift.config")
@@ -12,10 +12,19 @@ config.service_groups.lobby = {
     port_range = { 25600, 25700 },
     storage = "persistent", -- Removal retains world and server files.
     start_on_connect = true,
-    idle_timeout_ms = 5 * 60 * 1000,
     start_timeout_ms = 120000,
     stop_timeout_ms = 30000,
     restart_delay_ms = 5000,
+    restart_retries = 3,
+    scaling = {
+        min_instances = 1,
+        max_instances = 8,
+        spare_instances = 1,
+        capacity_per_instance = 50,
+        target_occupancy_percent = 80,
+        queue_threshold = 4,
+        cooldown_ms = 5000,
+    },
 }
 config.authentication = { online_mode = true }
 config.forwarding = { mode = "velocity", secret_env = "RIFT_FORWARDING_SECRET" }
@@ -26,7 +35,6 @@ config.admin = {
 }
 config.web = { listen = "127.0.0.1:8080" }
 -- Set RIFT_ADMIN_TOKEN, start Rift, then use:
--- rift admin create lobby
--- rift admin create lobby
 -- rift admin groups
--- rift admin remove lobby-2
+-- rift admin servers
+-- rift admin start lobby-1  -- Resets an exhausted recovery budget after a fix.

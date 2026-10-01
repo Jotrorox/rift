@@ -250,6 +250,8 @@ pub(crate) fn managed_servers(snapshot: &Snapshot) -> Value {
                 "name":server.name,"state":server.state,"pid":server.pid,
                 "players":server.players,"reservations":server.reservations,
                 "automatic_start":server.automatic_start,"last_error":server.last_error,
+                "automatic_enabled":server.automatic_enabled,
+                "restart_attempts":server.restart_attempts,"restart_exhausted":server.restart_exhausted,
                 "group":snapshot.config.instances.get(&server.name).map(|instance| &instance.group),
                 "template":snapshot.config.instances.get(&server.name).and_then(|instance| snapshot.config.service_groups.get(&instance.group)).and_then(|group| group.template.as_ref()),
                 "storage":snapshot.config.instances.get(&server.name).and_then(|instance| snapshot.config.service_groups.get(&instance.group)).map_or("persistent", |group| group.storage.as_str()),
@@ -268,6 +270,12 @@ pub(crate) fn service_groups(snapshot: &Snapshot) -> Value {
             "template":group.template,
             "storage":group.storage.as_str(),
             "port_range":[group.port_start,group.port_end],
+            "scaling":group.scaling.as_ref().map(|policy| json!({
+                "min_instances":policy.min_instances,"max_instances":policy.max_instances,
+                "spare_instances":policy.spare_instances,"capacity_per_instance":policy.capacity_per_instance,
+                "target_occupancy_percent":policy.target_occupancy_percent,"queue_threshold":policy.queue_threshold,
+                "cooldown_ms":policy.cooldown.as_millis(),
+            })),
             "instances":snapshot.config.instances.iter()
                 .filter(|(_, instance)| instance.group == *name)
                 .map(|(name, _)| name)

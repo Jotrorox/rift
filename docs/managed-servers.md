@@ -72,6 +72,7 @@ rift.config.managed_servers.survival = {
     start_timeout_ms = 120000,
     stop_timeout_ms = 30000,
     restart_delay_ms = 5000,
+    restart_retries = 3,
 }
 ```
 
@@ -84,7 +85,8 @@ rift.config.managed_servers.survival = {
 | `idle_timeout_ms` | Disabled | Stop after this interval without players or pending attachments; `0` disables it. |
 | `start_timeout_ms` | `120000` | Deadline for the process to open its backend TCP port. |
 | `stop_timeout_ms` | `30000` | Grace period after sending `stop` to stdin, before killing and reaping the child. |
-| `restart_delay_ms` | `5000` | Cooldown after a failed start or unexpected process exit before another attempt. |
+| `restart_delay_ms` | `5000` | Delay after a failed start or unexpected process exit before an automatic restart. |
+| `restart_retries` | `3` | Maximum automatic restart attempts after the initial start; an explicit Start resets the budget. `0` disables automatic recovery. |
 
 Commands run without a shell: arguments containing spaces remain single
 arguments, and `$VARIABLE`, `~`, redirection and shell operators are not expanded.
@@ -93,7 +95,8 @@ inherits Rift's environment and operating-system identity; configuration authors
 who can change managed commands can run programs with that identity.
 
 Timeouts accept whole milliseconds from `1` through `86400000` (24 hours), with
-the additional disabled value `0` for `idle_timeout_ms`. There can be at most 128
+the additional disabled value `0` for `idle_timeout_ms`. `restart_retries` accepts
+whole counts from `0` through `100`. There can be at most 128
 managed servers, 128 arguments per command, 8192 bytes per argument and 65536
 bytes across a command. The executable must be nonempty; command strings and
 directory paths cannot contain NUL. Unknown fields and sparse arrays are rejected.
@@ -166,7 +169,8 @@ creation. Instances support the existing
 `start`, `stop`, `drain` and transfer commands. Routing to `lobby` chooses an
 eligible instance by occupancy with deterministic ties and tries alternatives
 when an instance is unavailable. Routing directly to `lobby-1` targets that
-instance. An empty group has no destination until an instance is created.
+instance. A group without a scaling policy has no destination until an instance
+is created.
 
 Removal refuses instances with players or attachment reservations. Drain and
 empty the instance first; removal stops and reaps its child before deregistering
@@ -183,10 +187,70 @@ The authenticated web API exposes `GET /api/groups`,
 `POST /api/groups/{name}/instances` and `DELETE /api/instances/{name}`. Send an
 empty JSON object (`{}`) for both mutations. Creation returns HTTP `201` with the
 instance details, and completed removal returns HTTP `200`. Group listings
-include names, port ranges, instance names, `template` and `storage`; server
+include names, port ranges, instance names, `template`, `storage` and `scaling`;
+server
 listings also include each instance's group, address, port, template and storage.
 Static servers report persistent storage and no template. Neither listing
 exposes process arguments or filesystem paths.
+
+## Automatic scaling
+
+Add an optional `scaling` table to a service group to maintain capacity:
+
+```lua
+config.service_groups.lobby.scaling = {
+    min_instances = 1,
+    max_instances = 8,
+    spare_instances = 1,
+    capacity_per_instance = 50,
+    target_occupancy_percent = 80,
+    queue_threshold = 4,
+    cooldown_ms = 5000,
+}
+```
+
+| Field | Default | Behavior |
+| --- | --- | --- |
+| `min_instances` | `1` | Minimum registered capacity; accepts `0` through `128`. |
+| `max_instances` | Port-range size, capped at `128` | Upper instance bound, including manually created instances. Must fit the group's port range and be at least the minimum and spare counts. |
+| `spare_instances` | `0` | Extra instances above occupancy demand; accepts `0` through `max_instances`. |
+| `capacity_per_instance` | Required | Estimated players per instance, from `1` through `100000`. |
+| `target_occupancy_percent` | `80` | Desired occupancy fraction, from `1` through `100`. |
+| `queue_threshold` | `1` | Queued player count that adds capacity demand, from `1` through `1024`. |
+| `cooldown_ms` | `5000` | Minimum interval between automatic instance creation/removal operations, from `1` through `86400000`. |
+
+Rift creates and starts the minimum and spare capacity automatically after its
+listeners have bound. Prepare the executable, assets, EULA acceptance and
+forwarding settings before starting Rift with a scaling policy. Groups without
+`scaling` retain explicit creation and wake-on-demand behavior.
+
+The occupancy target is rounded up to whole player slots per instance. For
+example, capacity `50` at `80` percent gives `40` slots: `41` players require two
+instances, plus the configured spare count. Load counts the larger of connected
+players and attachment reservations per instance so active sessions are counted
+once. Rift reads configured extension queues for the group and its instances.
+When their combined length reaches `queue_threshold`, queued players are added
+to occupancy demand before rounding up to the target slots. The desired count
+is bounded by the minimum and maximum; with no load it is the larger of the
+minimum and spare counts.
+
+Scaling creates capacity one instance at a time, respecting the cooldown.
+When demand drops, it removes only empty instances with no pending attachment
+reservations. Occupied instances remain registered even when current demand
+would call for fewer instances. Automatic removal follows the group's storage
+policy: persistent files remain, while disposable directories are deleted.
+Later growth allocates new instance names; retained persistent worlds are not
+automatically reopened during the same proxy process.
+Scaled instances use this removal policy instead of `idle_timeout_ms` shutdown,
+so the minimum and spare capacity stay running.
+
+Manually stopped and failed instances count toward the maximum while registered.
+Scaling respects a manual Stop and does not force a restart after the retry
+budget is exhausted. Explicitly Start a repaired instance or remove it when
+appropriate; empty excess instances remain eligible for automatic removal.
+Scaling policies and runtime instance registrations follow the existing reload
+and restart rules: policy changes require a proxy restart, and registrations are
+not persisted across proxy restarts.
 
 ## Local asset templates
 
@@ -281,11 +345,17 @@ this file alongside the lifecycle state when startup fails. Startup timeout and
 shutdown timeout both clean up the supervised child. Programs should run in the
 foreground; wrappers that daemonize or fork detached services are unsupported.
 
-A crash records a failure and applies `restart_delay_ms`. There is no perpetual
-restart loop: a later demand or explicit start can retry. `autostart` starts the
-server once and does not repeatedly restart a server stopped by idle policy.
-Idle shutdown preserves wake-on-demand behavior. Disabling `start_on_connect`
-requires an explicit start or the initial `autostart` before players can connect.
+A failed startup or unexpected exit records an error and automatically retries
+after `restart_delay_ms`, up to `restart_retries` times after the initial attempt.
+Successful readiness does not replenish this budget. When it is exhausted, the
+server remains failed and subsequent player demand cannot restart it. Inspect
+the error, fix the cause and explicitly Start the server to reset the budget.
+`restart_retries = 0` leaves automatic recovery disabled.
+
+`autostart` starts the server when registered and does not restart a server
+stopped by idle policy. Idle shutdown preserves wake-on-demand behavior.
+Disabling `start_on_connect` requires an explicit start, `autostart`, or a scaling
+policy before players can connect.
 
 Player sessions and pending attachments prevent an idle or manual shutdown. A
 manual stop also disables automatic wake until an explicit start or a Rift
@@ -309,8 +379,10 @@ rift admin stop survival
 `start` and `stop` accept work asynchronously. Poll `servers` for completion;
 acceptance alone does not mean the process has started or exited. Listings show
 the state, PID, player count, attachment reservations, automatic-start policy
-and last error. Reservations cover active sessions and pending attachments, so
-they overlap the player count. Listings do not return command arguments or
+and last error. Listings also expose `automatic_enabled`, `restart_attempts` and
+`restart_exhausted` so operators can distinguish maintenance stops from failed
+recovery. Reservations cover active sessions and pending attachments, so they
+overlap the player count. Listings do not return command arguments or
 environment variables.
 
 To stop an occupied server, drain it, transfer its players to another backend,
@@ -343,11 +415,15 @@ After building Rift, run the Minecraft wire scenario without downloads:
 ```sh
 python3 tests/managed_wire.py --binary target/debug/rift
 python3 tests/services_wire.py --binary target/debug/rift
+python3 tests/scaling_wire.py --binary target/debug/rift
 ```
 
 The service-group scenario also checks concurrent allocation, balancing, live
 transfers and crash recovery, reload preservation, occupied removal, port reuse
-and cleanup. CI runs both wire scenarios on Linux, macOS and Windows.
+and cleanup. The scaling scenario checks minimum and spare startup, occupancy
+growth, maximum capacity, empty-only shrink, cooldown, bounded recovery and
+manual reset/stop. CI runs the existing lifecycle and service-group wire scenarios
+on Linux, macOS and Windows.
 
 The real-server harness checks cold login, world/chunk delivery, idle shutdown
 and restart using the pinned server fixtures. It requires the fixture's Java

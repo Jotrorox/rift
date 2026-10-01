@@ -1262,77 +1262,85 @@ async fn change_instance(
 ) -> Result<(Arc<Snapshot>, serde_json::Value), crate::control::Error> {
     use crate::control::{Error, Operation};
     let mut config = snapshot.config.clone();
-    let (name, creating, reservation) = match operation {
-        Operation::CreateInstance { group } => {
-            let definition = config.service_groups.get(&group).ok_or_else(|| Error {
-                status: 404,
-                message: format!("unknown service group {group:?}"),
-            })?;
-            let mut reservation = None;
-            for port in definition.port_start..=definition.port_end {
-                let address = SocketAddr::from(([127, 0, 0, 1], port));
-                if config.backends.values().any(|backend| {
-                    backend.check_loop(address).is_err()
-                        || backend.address().rsplit_once(':').is_some_and(
-                            |(host, configured_port)| {
-                                host.trim_end_matches('.').eq_ignore_ascii_case("localhost")
-                                    && configured_port.parse::<u16>().ok() == Some(port)
-                            },
-                        )
-                }) || snapshot.addresses.iter().any(|bound| {
-                    bound.port() == port
-                        && (bound.ip().is_unspecified()
-                            || bound.ip().to_canonical() == address.ip())
+    let (name, creating, reservation) =
+        match operation {
+            Operation::CreateInstance { group } => {
+                let definition = config.service_groups.get(&group).ok_or_else(|| Error {
+                    status: 404,
+                    message: format!("unknown service group {group:?}"),
+                })?;
+                if definition.scaling.as_ref().is_some_and(|policy| {
+                    config.instance_names(&group).len() >= policy.max_instances
                 }) {
-                    continue;
+                    return Err(Error::conflict(
+                        "service group reached scaling.max_instances",
+                    ));
                 }
-                if let Ok(listener) = std::net::TcpListener::bind(address) {
-                    reservation = Some(listener);
-                    break;
-                }
-            }
-            let reservation = reservation
-                .ok_or_else(|| Error::conflict("service group port range is exhausted"))?;
-            let port = reservation.local_addr()?.port();
-            let name = {
-                let mut sequences = snapshot.instance_sequence.lock().unwrap();
-                let sequence = sequences.entry(group.clone()).or_default();
-                loop {
-                    *sequence = sequence
-                        .checked_add(1)
-                        .ok_or_else(|| Error::conflict("instance name sequence exhausted"))?;
-                    let name = format!("{group}-{sequence}");
-                    if !config.is_destination(&name)
-                        && (!config.network.bungeecord
-                            || !config
-                                .backends
-                                .keys()
-                                .any(|backend| backend.eq_ignore_ascii_case(&name)))
-                    {
-                        break name;
+                let mut reservation = None;
+                for port in definition.port_start..=definition.port_end {
+                    let address = SocketAddr::from(([127, 0, 0, 1], port));
+                    if config.backends.values().any(|backend| {
+                        backend.check_loop(address).is_err()
+                            || backend.address().rsplit_once(':').is_some_and(
+                                |(host, configured_port)| {
+                                    host.trim_end_matches('.').eq_ignore_ascii_case("localhost")
+                                        && configured_port.parse::<u16>().ok() == Some(port)
+                                },
+                            )
+                    }) || snapshot.addresses.iter().any(|bound| {
+                        bound.port() == port
+                            && (bound.ip().is_unspecified()
+                                || bound.ip().to_canonical() == address.ip())
+                    }) {
+                        continue;
+                    }
+                    if let Ok(listener) = std::net::TcpListener::bind(address) {
+                        reservation = Some(listener);
+                        break;
                     }
                 }
-            };
-            config.add_instance(&group, &name, port)?;
-            (name, true, Some(reservation))
-        }
-        Operation::RemoveInstance { name } => {
-            if config.instances.remove(&name).is_none() {
-                return Err(Error {
-                    status: 404,
-                    message: format!("unknown service instance {name:?}"),
-                });
+                let reservation = reservation
+                    .ok_or_else(|| Error::conflict("service group port range is exhausted"))?;
+                let port = reservation.local_addr()?.port();
+                let name = {
+                    let mut sequences = snapshot.instance_sequence.lock().unwrap();
+                    let sequence = sequences.entry(group.clone()).or_default();
+                    loop {
+                        *sequence = sequence
+                            .checked_add(1)
+                            .ok_or_else(|| Error::conflict("instance name sequence exhausted"))?;
+                        let name = format!("{group}-{sequence}");
+                        if !config.is_destination(&name)
+                            && (!config.network.bungeecord
+                                || !config
+                                    .backends
+                                    .keys()
+                                    .any(|backend| backend.eq_ignore_ascii_case(&name)))
+                        {
+                            break name;
+                        }
+                    }
+                };
+                config.add_instance(&group, &name, port)?;
+                (name, true, Some(reservation))
             }
-            config.backends.remove(&name);
-            config.managed_servers.remove(&name);
-            config.draining.remove(&name);
-            config.validate().map_err(|error| {
-                Error::conflict(format!("instance is referenced by configuration: {error}"))
-            })?;
-            (name, false, None)
-        }
-        _ => return Err(Error::invalid("expected an instance operation")),
-    };
+            Operation::RemoveInstance { name } => {
+                if config.instances.remove(&name).is_none() {
+                    return Err(Error {
+                        status: 404,
+                        message: format!("unknown service instance {name:?}"),
+                    });
+                }
+                config.backends.remove(&name);
+                config.managed_servers.remove(&name);
+                config.draining.remove(&name);
+                config.validate().map_err(|error| {
+                    Error::conflict(format!("instance is referenced by configuration: {error}"))
+                })?;
+                (name, false, None)
+            }
+            _ => return Err(Error::invalid("expected an instance operation")),
+        };
     let mut next = Snapshot::new(config, Some(snapshot))?;
     next.source = snapshot.source.clone();
     next.revision = snapshot.revision.clone();
@@ -1365,6 +1373,13 @@ async fn change_instance(
         }
         let instance = &next.config.instances[&name];
         let group = &next.config.service_groups[&instance.group];
+        if group.scaling.is_some() && !group.server.autostart {
+            // Start newly provisioned capacity immediately. The per-group
+            // cooldown bounds provisioning, not process readiness.
+            if let Err(error) = next.managed.request_scale_start(&name) {
+                eprintln!("rift: automatic start of {name} rejected: {error}");
+            }
+        }
         serde_json::json!({"name":name,"group":instance.group,"port":instance.port,"address":next.config.backends[&name].address(),"template":group.template,"storage":group.storage.as_str(),"created":true})
     } else {
         let provisioning_config = snapshot.config.clone();
@@ -1539,6 +1554,9 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     );
     let mut failure = None;
     let mut service_check = tokio::time::interval(Duration::from_secs(1));
+    let mut scaling_check = tokio::time::interval(Duration::from_millis(100));
+    scaling_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut scaler = crate::scaling::Scaler::default();
     loop {
         let (operation, reply, admin_reply) = tokio::select! {
             event = signals.next() => match event {
@@ -1562,6 +1580,18 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
             result = tasks.join_next() => {
                 failure = Some(io::Error::other(format!("listener stopped unexpectedly: {result:?}")));
                 break;
+            }
+            _ = scaling_check.tick() => {
+                match scaler.next(&snapshot, Instant::now()) {
+                    Some(crate::scaling::Change::Instance(operation)) => (operation, None, None),
+                    Some(crate::scaling::Change::Start(name)) => {
+                        if let Err(error) = snapshot.managed.request_scale_start(&name) {
+                            eprintln!("rift: automatic start of {name} rejected: {error}");
+                        }
+                        continue;
+                    }
+                    None => continue,
+                }
             }
             _ = service_check.tick() => {
                 if messaging_server.as_ref().is_some_and(rift::messaging::quic::Server::is_finished) {
@@ -1601,7 +1631,12 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                     );
                     Ok(response)
                 }
-                Err(error) => Err(error),
+                Err(error) => {
+                    if reply.is_none() && admin_reply.is_none() {
+                        eprintln!("rift: automatic scaling failed: {}", error.message);
+                    }
+                    Err(error)
+                }
             };
             if let Some(reply) = admin_reply {
                 let _ = reply.send(
