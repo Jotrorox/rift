@@ -77,10 +77,11 @@ struct State {
     last_activity: Instant,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum Action {
     Start { mode: StartMode },
     Stop,
+    Console(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -358,6 +359,56 @@ impl ManagedServers {
         self.enqueue(name, Action::Stop, None)
     }
 
+    /// Send exactly one server command through the owned child's stdin.
+    pub async fn console(&self, name: &str, command: String) -> io::Result<()> {
+        if command.trim().is_empty()
+            || command.len() > 4096
+            || command.chars().any(char::is_control)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "console command must contain 1..=4096 bytes without control characters",
+            ));
+        }
+        self.request(name, Action::Console(command)).await
+    }
+
+    /// Bounded incremental reads from the same file used by stdout/stderr.
+    /// An absent cursor tails the file; a cursor past EOF reports truncation.
+    pub async fn logs(&self, name: &str, cursor: Option<u64>) -> io::Result<serde_json::Value> {
+        let path = {
+            let servers = self.0.servers.lock().unwrap_or_else(|e| e.into_inner());
+            let server = servers
+                .get(name)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "unknown managed server"))?;
+            server.config.directory.join("rift-server.log")
+        };
+        tokio::task::spawn_blocking(move || {
+            use std::io::{Read, Seek, SeekFrom};
+            const LIMIT: u64 = 64 * 1024;
+            match std::fs::symlink_metadata(&path) {
+                Ok(metadata) if !metadata.is_file() => return Err(io::Error::other("server log must be a regular file")),
+                Ok(_) => {},
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(serde_json::json!({"text":"", "cursor":0, "truncated":cursor.is_some_and(|c| c > 0)})),
+                Err(e) => return Err(e),
+            }
+            let mut file = match std::fs::File::open(&path) {
+                Ok(file) => file,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(serde_json::json!({"text":"", "cursor":0, "truncated":cursor.is_some_and(|c| c > 0)})),
+                Err(e) => return Err(e),
+            };
+            let metadata = file.metadata()?;
+            if !metadata.is_file() { return Err(io::Error::other("server log must be a regular file")); }
+            let size = metadata.len();
+            let truncated = cursor.is_some_and(|c| c > size);
+            let start = cursor.filter(|c| *c <= size).unwrap_or_else(|| size.saturating_sub(LIMIT));
+            file.seek(SeekFrom::Start(start))?;
+            let mut bytes = Vec::new();
+            file.take(LIMIT).read_to_end(&mut bytes)?;
+            Ok(serde_json::json!({"text":String::from_utf8_lossy(&bytes), "cursor":start + bytes.len() as u64, "truncated":truncated, "has_more":start + (bytes.len() as u64) < size}))
+        }).await.map_err(io::Error::other)?
+    }
+
     async fn request(&self, name: &str, action: Action) -> io::Result<()> {
         let (reply, receive) = oneshot::channel();
         self.enqueue(name, action, Some(reply))?;
@@ -393,6 +444,14 @@ impl ManagedServers {
         if server.shutdown.load(Ordering::Acquire) {
             return Err(unavailable("managed server is retiring or shutting down"));
         }
+        if matches!(action, Action::Console(_)) && (state.phase != "running" || state.pending_stop)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "managed server is not running",
+            ));
+        }
+        let stopping = matches!(action, Action::Stop);
         if matches!(
             action,
             Action::Start {
@@ -401,7 +460,7 @@ impl ManagedServers {
         ) {
             automatic_start_allowed(server, &state)?;
         }
-        if matches!(action, Action::Stop) {
+        if stopping {
             if state.reservations > 0 || player_count(&self.0.players, name) > 0 {
                 return Err(io::Error::new(
                     io::ErrorKind::ResourceBusy,
@@ -427,7 +486,7 @@ impl ManagedServers {
                     unavailable("managed server worker stopped")
                 }
             })?;
-        if matches!(action, Action::Stop) {
+        if stopping {
             state.automatic = false;
             state.pending_stop = true;
             state.recover = false;
@@ -633,6 +692,16 @@ async fn worker(
                         let result = stop_process(&server, &mut child).await;
                         server.state.lock().unwrap_or_else(|e| e.into_inner()).pending_stop = false;
                         result
+                    },
+                    Action::Console(command) => {
+                        match child.as_mut().and_then(|process| process.stdin.as_mut()) {
+                            Some(stdin) => tokio::time::timeout(Duration::from_secs(2), async {
+                                stdin.write_all(command.as_bytes()).await?;
+                                stdin.write_all(b"\n").await?;
+                                stdin.flush().await
+                            }).await.unwrap_or_else(|_| Err(io::Error::new(io::ErrorKind::TimedOut, "server console write timed out"))),
+                            None => Err(io::Error::new(io::ErrorKind::NotConnected, "managed server console is unavailable")),
+                        }
                     },
                 };
                 if let Some(reply) = request.reply { let _ = reply.send(result); }

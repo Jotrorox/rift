@@ -51,11 +51,15 @@ fn managed_process_helper() {
         let stopping = stopping.clone();
         std::thread::spawn(move || {
             for line in std::io::stdin().lock().lines() {
-                if line.unwrap_or_default() == "stop" {
+                let line = line.unwrap_or_default();
+                if line == "stop" {
                     fs::write("graceful-stop", "yes").unwrap();
                     stopping.store(true, Ordering::Release);
                     break;
                 }
+                fs::write("last-command.tmp", &line).unwrap();
+                println!("command: {line}");
+                fs::rename("last-command.tmp", "last-command").unwrap();
             }
         });
     }
@@ -69,6 +73,62 @@ fn managed_process_helper() {
         let _ = listener.accept();
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+#[tokio::test]
+async fn live_console_writes_one_command_and_logs_resume_from_bounded_cursors() {
+    let fixture = Fixture::new(0, "normal");
+    let manager = fixture.manager();
+    assert!(manager.console("default", "list".into()).await.is_err());
+    assert_eq!(manager.logs("default", None).await.unwrap()["cursor"], 0);
+    manager.start("default").await.unwrap();
+    for command in [
+        "",
+        "\n",
+        "list\nstop",
+        "list\rstop",
+        "list\0",
+        &"x".repeat(4097),
+    ] {
+        assert!(manager.console("default", command.into()).await.is_err());
+    }
+    let first = manager.logs("default", None).await.unwrap();
+    assert!(first["text"].as_str().unwrap().contains("helper stdout"));
+    manager
+        .console("default", "say hello operators".into())
+        .await
+        .unwrap();
+    wait_file(&fixture.directory.join("last-command")).await;
+    assert_eq!(
+        fs::read_to_string(fixture.directory.join("last-command")).unwrap(),
+        "say hello operators"
+    );
+    let next = manager
+        .logs("default", first["cursor"].as_u64())
+        .await
+        .unwrap();
+    assert!(
+        next["text"]
+            .as_str()
+            .unwrap()
+            .contains("say hello operators")
+    );
+    assert!(next["cursor"].as_u64().unwrap() > first["cursor"].as_u64().unwrap());
+    manager.stop("default").await.unwrap();
+    fs::write(
+        fixture.directory.join("rift-server.log"),
+        "x".repeat(100_000),
+    )
+    .unwrap();
+    let tail = manager.logs("default", None).await.unwrap();
+    assert_eq!(tail["text"].as_str().unwrap().len(), 65536);
+    let beginning = manager.logs("default", Some(0)).await.unwrap();
+    assert_eq!(beginning["has_more"], true);
+    fs::write(fixture.directory.join("rift-server.log"), "rotated").unwrap();
+    let rotated = manager.logs("default", Some(100_000)).await.unwrap();
+    assert_eq!(rotated["truncated"], true);
+    assert_eq!(rotated["text"], "rotated");
+    manager.shutdown().await;
 }
 
 struct Fixture {

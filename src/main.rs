@@ -7,6 +7,7 @@ mod health;
 mod messaging_runtime;
 mod metrics;
 mod network;
+mod operator;
 mod runtime;
 mod scaling;
 mod status;

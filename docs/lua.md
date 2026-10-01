@@ -30,8 +30,9 @@ named `template`, and a `storage` policy (`persistent` by default, or `disposabl
 for games whose generated directory should be deleted on removal). Disposable
 groups require a template. Routes can target the group to spread logins across
 its runtime instances. Asset paths resolve relative to the configuration file.
-Template and group definitions require a restart to change; creating/removing
-instances works live. Provisioning never accepts the Minecraft EULA automatically.
+Templates and group policies can change live when existing instances retain
+their process definitions and storage policy. Remove affected instances before
+changing those settings. Creating/removing instances also works live. Provisioning never accepts the Minecraft EULA automatically.
 See [service groups](managed-servers.md#service-groups-and-dynamic-instances),
 [asset templates](managed-servers.md#local-asset-templates) and the
 [provisioning example](../examples/templates.lua).

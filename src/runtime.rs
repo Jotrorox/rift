@@ -1194,36 +1194,11 @@ async fn reconfigure(
     })
     .await
     .map_err(Error::invalid)??;
-    if candidate.config.listeners != snapshot.config.listeners
-        || candidate.config.admin != snapshot.config.admin
-        || candidate.config.messaging != snapshot.config.messaging
-        || candidate.config.service_groups != snapshot.config.service_groups
-        || candidate.config.templates != snapshot.config.templates
-        || candidate
-            .config
-            .managed_servers
-            .iter()
-            .filter(|(name, _)| !candidate.config.instances.contains_key(*name))
-            .map(|(name, server)| (name.clone(), server.clone()))
-            .collect::<BTreeMap<_, _>>()
-            != snapshot
-                .config
-                .managed_servers
-                .iter()
-                .filter(|(name, _)| !snapshot.config.instances.contains_key(*name))
-                .map(|(name, server)| (name.clone(), server.clone()))
-                .collect()
-        || snapshot
-            .config
-            .managed_servers
-            .keys()
-            .filter(|name| !snapshot.config.instances.contains_key(*name))
-            .any(|name| candidate.config.backends.get(name) != snapshot.config.backends.get(name))
-        || candidate.config.extensions.as_ref().map(|e| &e.queues)
-            != snapshot.config.extensions.as_ref().map(|e| &e.queues)
+    if !control::live_compatible(&candidate.config, &snapshot.config)
+        || !app.record_settings_compatible(&candidate.config)
     {
         return Err(Error::invalid(
-            "listener names/addresses, admin, messaging, templates, service groups, managed server definitions/addresses, extension enablement and queue capacities require a restart",
+            "listener, admin, messaging, existing managed process definitions/addresses, instance storage and extension queue changes require a restart or removal of affected instances",
         ));
     }
     let prepared = services.prepare(&candidate.config).await?;
@@ -1500,7 +1475,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     let (current, receiver) = watch::channel(snapshot.clone());
     let (stop, stopping) = watch::channel(false);
     let (commands, mut requests) = tokio::sync::mpsc::channel::<control::Command>(8);
-    let app = web::App::new(receiver.clone(), metrics.clone(), commands, source);
+    let app = web::App::new(receiver.clone(), metrics.clone(), commands, source)?;
     let mut tasks = JoinSet::new();
     for (name, listener) in listeners {
         eprintln!("rift: listening on {}", listener.local_addr()?);
@@ -1539,6 +1514,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
             receiver.clone(),
             metrics.clone(),
             admin_commands,
+            app.workflows.clone(),
         ));
     }
     services.commit(&snapshot.config, prepared, &app);
@@ -1558,19 +1534,19 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     scaling_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut scaler = crate::scaling::Scaler::default();
     loop {
-        let (operation, reply, admin_reply) = tokio::select! {
+        let (operation, reply, admin_reply, actor) = tokio::select! {
             event = signals.next() => match event {
                 Event::Shutdown => break,
                 Event::Reload => {
                     if app.path.is_none() { eprintln!("rift: reload ignored: no configuration file selected"); continue; }
-                    (control::Operation::Reload, None, None)
+                    (control::Operation::Reload, None, None, "signal".to_owned())
                 }
             },
-            Some(command) = requests.recv() => (command.operation, Some(command.reply), None),
+            Some(command) = requests.recv() => (command.operation, Some(command.reply), None, command.actor),
             Some(command) = admin_requests.recv() => match command {
-                admin::Command::Reload(reply) => (control::Operation::Reload, None, Some(reply)),
-                admin::Command::CreateInstance { group, reply } => (control::Operation::CreateInstance { group }, None, Some(reply)),
-                admin::Command::RemoveInstance { name, reply } => (control::Operation::RemoveInstance { name }, None, Some(reply)),
+                admin::Command::Reload(reply) => (control::Operation::Reload, None, Some(reply), "local-admin".to_owned()),
+                admin::Command::CreateInstance { group, reply } => (control::Operation::CreateInstance { group }, None, Some(reply), "local-admin".to_owned()),
+                admin::Command::RemoveInstance { name, reply } => (control::Operation::RemoveInstance { name }, None, Some(reply), "local-admin".to_owned()),
                 admin::Command::Shutdown(ack) => { let _ = timeout(Duration::from_secs(2), ack).await; break; }
             },
             result = background.join_next(), if !background.is_empty() => {
@@ -1583,7 +1559,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
             }
             _ = scaling_check.tick() => {
                 match scaler.next(&snapshot, Instant::now()) {
-                    Some(crate::scaling::Change::Instance(operation)) => (operation, None, None),
+                    Some(crate::scaling::Change::Instance(operation)) => (operation, None, None, "scaler".to_owned()),
                     Some(crate::scaling::Change::Start(name)) => {
                         if let Err(error) = snapshot.managed.request_scale_start(&name) {
                             eprintln!("rift: automatic start of {name} rejected: {error}");
@@ -1651,6 +1627,11 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
             }
             continue;
         }
+        let action = match &operation {
+            control::Operation::Reload => "reload",
+            control::Operation::Rollback { .. } => "rollback",
+            _ => "save",
+        };
         let result = reconfigure(operation, &app, &snapshot, &services).await;
         let response = match result {
             Ok((next, prepared)) => {
@@ -1676,6 +1657,20 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                     snapshot.addresses.clone(),
                     metrics.clone(),
                 );
+                let store = app.workflows.clone();
+                let deployed_source = snapshot.source.clone().unwrap();
+                let deployed_actor = actor.clone();
+                if let Err(error) = tokio::task::spawn_blocking(move || {
+                    store.deploy(&deployed_source, &deployed_actor, action)
+                })
+                .await
+                .map_err(io::Error::other)
+                .and_then(|r| r)
+                {
+                    eprintln!(
+                        "rift: configuration applied but deployment history could not be written: {error}"
+                    );
+                }
                 metrics.reloads.inc();
                 eprintln!("rift: configuration reloaded");
                 crate::messaging_runtime::emit(
@@ -1691,6 +1686,29 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                 Err(error)
             }
         };
+        if actor == "signal" {
+            let store = app.workflows.clone();
+            let status = response.as_ref().map_or_else(|error| error.status, |_| 200);
+            if let Err(error) = tokio::task::spawn_blocking(move || {
+                store.audit(
+                    "signal",
+                    "reload",
+                    "",
+                    if status == 200 {
+                        "accepted"
+                    } else {
+                        "rejected"
+                    },
+                    status,
+                )
+            })
+            .await
+            .map_err(io::Error::other)
+            .and_then(|result| result)
+            {
+                eprintln!("rift: signal reload audit failed: {error}");
+            }
+        }
         if let Some(reply) = admin_reply {
             let response = response.as_ref()
                 .map(|revision| serde_json::json!({"reloaded":true,"revision":revision,"existing_sessions":"preserved"}))

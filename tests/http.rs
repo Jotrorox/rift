@@ -17,6 +17,7 @@ use std::{
 
 const TOKEN: &str = "test-administration-token";
 const ADMIN_TOKEN: &str = "test-local-administration-token-32-bytes";
+const OPERATOR_TOKEN: &str = "test-scoped-operator-token";
 
 struct Fixture {
     directory: PathBuf,
@@ -1253,4 +1254,307 @@ fn http_and_cli_controls_share_revisions_and_preserve_runtime_overrides() {
         next
     );
     assert_eq!(admin(&["maintenance", "off"])["ok"], true);
+}
+
+#[test]
+fn named_operators_enforce_permissions_and_group_scope_and_record_denials() {
+    let fixture = Fixture::new();
+    let source = fixture.source(&format!("token = '{TOKEN}', operators = {{ lobby_staff = {{ token = '{OPERATOR_TOKEN}', permissions = {{'read','logs','servers','audit'}}, groups = {{'lobby'}} }} }},"),
+        "service_groups = { lobby = { command = {'unused'}, directory = 'lobby/{name}', port_range = {26300,26302} }, survival = { command = {'unused'}, directory = 'survival/{name}', port_range = {26303,26305} } },");
+    let _process = fixture.start(&source);
+    let staff = Client {
+        token: Some(OPERATOR_TOKEN),
+        ..fixture.client()
+    };
+    let admin = fixture.client().authenticated();
+    assert_eq!(
+        staff.get("/api/access").expect(200).value()["name"],
+        "lobby_staff"
+    );
+    fixture.client().get("/api/status").expect(401);
+    for path in [
+        "/api/config",
+        "/api/definitions",
+        "/api/deployments",
+        "/ext/hello",
+    ] {
+        staff.get(path).expect(403);
+    }
+    staff
+        .json("POST", "/api/groups/survival/instances", json!({}))
+        .expect(403);
+    admin
+        .json("POST", "/api/groups/survival/instances", json!({}))
+        .expect(201);
+    staff
+        .json("POST", "/api/groups/lobby/instances", json!({}))
+        .expect(201);
+    let state = staff.get("/api/status").expect(200).value();
+    assert_eq!(state["managed_servers"].as_array().unwrap().len(), 1);
+    assert_eq!(state["service_groups"].as_array().unwrap().len(), 1);
+    assert_eq!(state["backends"][0]["name"], "lobby-1");
+    assert!(state.get("config_path").is_none() && state.get("routes").is_none());
+    staff.get("/api/servers/survival-1/logs").expect(403);
+    staff.get("/api/servers/%73urvival-1/logs").expect(403);
+    staff.get("/api/servers/lobby-1/logs").expect(200);
+    staff
+        .get("/api/servers/lobby-1/logs?cursor=bad")
+        .expect(400);
+    staff
+        .json(
+            "POST",
+            "/api/servers/lobby-1/console",
+            json!({"command":"secret command"}),
+        )
+        .expect(403);
+    staff
+        .json("DELETE", "/api/instances/survival-1", json!({}))
+        .expect(403);
+    let audit = staff.get("/api/audit").expect(200).value();
+    assert!(
+        audit["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["actor"] == "lobby_staff")
+    );
+    assert!(
+        audit["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["outcome"] == "denied")
+    );
+    assert!(
+        audit["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["outcome"] == "accepted")
+    );
+    assert!(
+        !audit.to_string().contains(OPERATOR_TOKEN)
+            && !audit.to_string().contains("secret command")
+    );
+    let restricted = source.replace("'read','logs','servers','audit'", "'read'");
+    save(admin, &restricted, &revision(admin)).expect(200);
+    staff
+        .json("POST", "/api/groups/lobby/instances", json!({}))
+        .expect(403);
+    let renamed = restricted.replace(OPERATOR_TOKEN, "replacement-operator-token");
+    save(admin, &renamed, &revision(admin)).expect(200);
+    staff.get("/api/status").expect(401);
+}
+
+#[test]
+fn deployments_rollback_atomically_and_history_and_audit_survive_restart() {
+    let fixture = Fixture::new();
+    let source = fixture.source(&format!("token = '{TOKEN}',"), "");
+    let process = fixture.start(&source);
+    let client = fixture.client().authenticated();
+    let startup = client.get("/api/deployments").expect(200).value();
+    let id = startup["deployments"][0]["id"].as_u64().unwrap();
+    assert!(startup["deployments"][0].get("source").is_none());
+    assert!(!startup.to_string().contains(TOKEN));
+    let edited = source.replace("127.0.0.1:1", "127.0.0.1:3");
+    save(client, &edited, &revision(client)).expect(200);
+    let path = format!("/api/deployments/{id}/rollback");
+    client
+        .json("POST", &path, json!({"revision":"stale"}))
+        .expect(409);
+    assert_eq!(fixture.read(), edited);
+    client
+        .json("POST", &path, json!({"revision":revision(client)}))
+        .expect(200);
+    assert_eq!(fixture.read(), source);
+    assert_eq!(
+        client.get("/api/status").expect(200).value()["backends"][0]["address"],
+        "127.0.0.1:1"
+    );
+    let deployments = client.get("/api/deployments").expect(200).value();
+    assert_eq!(deployments["deployments"][0]["action"], "rollback");
+    assert_eq!(deployments["deployments"][0]["actor"], "admin");
+    client
+        .json(
+            "POST",
+            "/api/deployments/9999/rollback",
+            json!({"revision":revision(client)}),
+        )
+        .expect(404);
+    let audit = client.get("/api/audit").expect(200).value();
+    assert!(
+        audit["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["status"] == 409)
+    );
+    drop(process);
+    let _process = fixture.start(&source);
+    assert!(
+        client.get("/api/deployments").expect(200).value()["deployments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["id"] == id)
+    );
+    assert_eq!(client.get("/api/audit").expect(200).value(), audit);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(
+                fixture
+                    .directory
+                    .join("rift.lua.operators/deployments.json")
+            )
+            .unwrap()
+            .permissions()
+            .mode()
+                & 0o777,
+            0o600
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn explicit_records_directory_survives_web_disable_and_reenable() {
+    let fixture = Fixture::new();
+    let source = fixture.source("records_directory = 'records',", "");
+    let mut process = fixture.start(&source);
+    let client = fixture.client();
+    assert_eq!(
+        client.get("/api/deployments").expect(200).value()["durable"],
+        true
+    );
+    let changed = source.replace(
+        "records_directory = 'records'",
+        "records_directory = 'different-records'",
+    );
+    save(client, &changed, &revision(client)).expect(400);
+    let disabled = source.replace(
+        &format!(
+            "web = {{ listen = '{}', records_directory = 'records', }},",
+            fixture.web
+        ),
+        "web = false,",
+    );
+    save(client, &disabled, &revision(client)).expect(200);
+    eventually_closed(fixture.web);
+    fixture.write(&source);
+    assert!(
+        Command::new("kill")
+            .args(["-HUP", &process.child.id().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    process.wait_for(fixture.web);
+    assert_eq!(
+        client.get("/api/deployments").expect(200).value()["durable"],
+        true
+    );
+}
+
+#[test]
+fn structured_definitions_preserve_lua_and_apply_safe_group_and_template_edits() {
+    let fixture = Fixture::new();
+    let source = fixture.source(
+        "",
+        "on_http = function() return { body = 'hook preserved' } end,",
+    );
+    let _process = fixture.start(&source);
+    let client = fixture.client();
+    let definition = json!({"directory":"servers/{name}","command":["unused","{port}"],"port_range":[26400,26404]});
+    client
+        .json(
+            "PUT",
+            "/api/definitions/service_groups/lobby",
+            json!({"revision":revision(client),"definition":definition}),
+        )
+        .expect(200);
+    assert!(fixture.read().contains(&source));
+    assert_eq!(client.get("/ext/test").expect(200).body, "hook preserved");
+    client
+        .json("POST", "/api/groups/lobby/instances", json!({}))
+        .expect(201);
+    let before = revision(client);
+    let mut changed = definition.clone();
+    changed["command"] = json!(["different"]);
+    client
+        .json(
+            "PUT",
+            "/api/definitions/service_groups/lobby",
+            json!({"revision":before,"definition":changed}),
+        )
+        .expect(400);
+    assert_eq!(revision(client), before);
+    changed = definition.clone();
+    changed["scaling"] =
+        json!({"min_instances":1,"max_instances":2,"capacity_per_instance":20,"cooldown_ms":60000});
+    client
+        .json(
+            "PUT",
+            "/api/definitions/service_groups/lobby",
+            json!({"revision":before,"definition":changed}),
+        )
+        .expect(200);
+    let values = client.get("/api/definitions").expect(200).value();
+    assert_eq!(
+        values["service_groups"]["lobby"]["scaling"]["capacity_per_instance"],
+        20
+    );
+    let template = json!({"server_jar":"assets/server'\"é.jar","plugins":["assets/p.jar"]});
+    client
+        .json(
+            "PUT",
+            "/api/definitions/templates/game",
+            json!({"revision":revision(client),"definition":template}),
+        )
+        .expect(200);
+    assert!(
+        client.get("/api/definitions").expect(200).value()["templates"]["game"]["server_jar"]
+            .as_str()
+            .unwrap()
+            .ends_with("server'\"é.jar")
+    );
+    let snapshot = fixture.read();
+    client
+        .json(
+            "PUT",
+            "/api/definitions/templates/game",
+            json!({"revision":before,"definition":template}),
+        )
+        .expect(409);
+    client
+        .json(
+            "PUT",
+            "/api/definitions/templates/game",
+            json!({"revision":revision(client),"definition":{"unknown":"bad"}}),
+        )
+        .expect(400);
+    client
+        .json(
+            "PUT",
+            "/api/definitions/service_groups/lobby",
+            json!({"revision":revision(client),"definition":null}),
+        )
+        .expect(400);
+    assert_eq!(fixture.read(), snapshot);
+    client
+        .json(
+            "PUT",
+            "/api/definitions/templates/game",
+            json!({"revision":revision(client),"definition":null}),
+        )
+        .expect(200);
+    assert_eq!(
+        fixture
+            .read()
+            .matches("local __rift_operator_config")
+            .count(),
+        1
+    );
+    assert_eq!(client.get("/ext/test").expect(200).body, "hook preserved");
 }

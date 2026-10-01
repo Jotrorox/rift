@@ -157,11 +157,24 @@ def check(binary):
             (world_dir / "world/region/r.0.0.mca").write_bytes(b"player progress")
             removed = operation("remove", "survival-1")
             assert removed["files_removed"] is False and world_dir.exists()
-            # Template definition changes require a restart; ordinary reload keeps instances.
+            # Live template edits affect future provisioning and preserve existing files.
             operation("reload")
+            existing = operation("create", "games")
+            existing_dir = directory / "instances" / existing["name"]
+            (assets / "other.jar").write_bytes(b"updated server fixture")
             config.write_text(source.replace("assets/paper.jar", "assets/other.jar"))
-            assert not admin(control, "reload")["ok"]
+            operation("reload")
+            updated = operation("create", "games")
+            updated_dir = directory / "instances" / updated["name"]
+            assert (updated_dir / "server.jar").read_bytes() == b"updated server fixture"
+            assert (existing_dir / "server.jar").read_bytes() == b"server fixture"
+            assert existing["name"] in servers()
+            assert (world_dir / "server.jar").read_bytes() == b"server fixture"
+            assert (world_dir / "world/region/r.0.0.mca").read_bytes() == b"player progress"
+            operation("remove", existing["name"])
+            operation("remove", updated["name"])
             config.write_text(source)
+            operation("reload")
             operation("shutdown")
             proxy.wait(timeout=8)
             assert proxy.returncode == 0
@@ -188,7 +201,7 @@ def check(binary):
             assert proxy.returncode == 0
         assert (assets / "map/region/r.0.0.mca").read_bytes() == b"original world"
     print("PASS: template assets, copy rollback, port release, storage metadata, occupied removal, "
-          "stop/restart, disposable cleanup, persistent reattachment and reload protection")
+          "stop/restart, disposable cleanup, persistent reattachment and live template reload")
 
 
 if __name__ == "__main__":

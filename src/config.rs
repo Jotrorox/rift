@@ -135,13 +135,23 @@ pub const ADMIN_PERMISSIONS: &[&str] = &[
     "servers",
 ];
 
-/// Optional administration service. A token is mandatory for non-loopback binds.
+/// Optional administration service. Credentials are mandatory for non-loopback binds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebConfig {
     pub listen: SocketAddr,
     pub token: Option<String>,
     pub api: bool,
     pub ui: bool,
+    pub operators: BTreeMap<String, WebOperator>,
+    pub records_directory: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebOperator {
+    pub token: String,
+    pub permissions: BTreeSet<String>,
+    /// None grants access to every group and static managed server.
+    pub groups: Option<BTreeSet<String>>,
 }
 
 impl Default for WebConfig {
@@ -151,6 +161,8 @@ impl Default for WebConfig {
             token: None,
             api: true,
             ui: true,
+            operators: BTreeMap::new(),
+            records_directory: None,
         }
     }
 }
@@ -536,7 +548,7 @@ impl Config {
                 Value::Nil => BTreeSet::new(),
                 value => string_set(value, "draining")?,
             };
-            let web = web_options(&root)?;
+            let web = web_options(&root, directory)?;
             let status = status_options(&root)?;
             let shutdown_timeout = Duration::from_millis(integer(
                 &root,
@@ -829,6 +841,67 @@ impl Config {
         }
         // Lists are deliberately flat: fallback targets' own lists are not followed.
         if let Some(web) = &self.web {
+            if web.operators.len() > 128 {
+                return Err(invalid("web.operators: at most 128 operators"));
+            }
+            let mut tokens = BTreeSet::new();
+            if let Some(token) = &web.token {
+                tokens.insert(token.clone());
+            }
+            for (name, operator) in &web.operators {
+                if name.is_empty()
+                    || name.len() > 128
+                    || !name
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+                    || [
+                        "admin",
+                        "local",
+                        "anonymous",
+                        "system",
+                        "signal",
+                        "local-admin",
+                        "scaler",
+                    ]
+                    .contains(&name.as_str())
+                {
+                    return Err(invalid("web.operators: invalid or reserved operator name"));
+                }
+                if !(16..=4096).contains(&operator.token.len())
+                    || !operator.token.bytes().all(|b| b.is_ascii_graphic())
+                    || !tokens.insert(operator.token.clone())
+                {
+                    return Err(invalid(
+                        "web.operators: tokens must be unique printable secrets of 16..=4096 bytes",
+                    ));
+                }
+                if operator.permissions.iter().any(|p| {
+                    ![
+                        "read",
+                        "logs",
+                        "console",
+                        "servers",
+                        "config",
+                        "deploy",
+                        "audit",
+                        "extensions",
+                    ]
+                    .contains(&p.as_str())
+                }) {
+                    return Err(invalid("web.operators: unknown permission"));
+                }
+                if let Some(groups) = &operator.groups
+                    && (groups.len() > 128
+                        || operator
+                            .permissions
+                            .iter()
+                            .any(|p| ["config", "deploy", "extensions"].contains(&p.as_str())))
+                {
+                    return Err(invalid(
+                        "web.operators: config, deploy and extensions require unrestricted group access; at most 128 scopes",
+                    ));
+                }
+            }
             if let Some(token) = &web.token {
                 if !(16..=4096).contains(&token.len())
                     || !token.bytes().all(|byte| byte.is_ascii_graphic())
@@ -837,7 +910,7 @@ impl Config {
                         "web.token: expected 16..=4096 printable ASCII bytes without whitespace",
                     ));
                 }
-            } else if !web.listen.ip().is_loopback() {
+            } else if web.operators.is_empty() && !web.listen.ip().is_loopback() {
                 return Err(invalid(
                     "web.token: required when web.listen is not loopback",
                 ));
@@ -1115,8 +1188,20 @@ fn service_listen(table: &Table, path: &str, default: SocketAddr) -> Result<Sock
     }
 }
 
-fn web_options(root: &Table) -> Result<Option<WebConfig>, String> {
-    let Some(table) = service_options(root, "web", &["enabled", "listen", "token", "api", "ui"])?
+fn web_options(root: &Table, base: &Path) -> Result<Option<WebConfig>, String> {
+    let Some(table) = service_options(
+        root,
+        "web",
+        &[
+            "enabled",
+            "listen",
+            "token",
+            "api",
+            "ui",
+            "operators",
+            "records_directory",
+        ],
+    )?
     else {
         return Ok(None);
     };
@@ -1125,11 +1210,108 @@ fn web_options(root: &Table) -> Result<Option<WebConfig>, String> {
         Value::Nil => None,
         value => Some(string(value, "web.token")?),
     };
+    let mut operators = BTreeMap::new();
+    let mut tokens = BTreeSet::new();
+    if let Some(token) = &token {
+        tokens.insert(token.clone());
+    }
+    if let Some(values) = options_map(&table, "operators")? {
+        for pair in values.pairs::<Value, Value>() {
+            let (name, value) = pair.map_err(|e| e.to_string())?;
+            let name = string(name, "web.operators key")?;
+            if name.is_empty()
+                || name.len() > 128
+                || !name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+            {
+                return Err("web.operators: invalid operator name".into());
+            }
+            let path = format!("web.operators.{name}");
+            let value = self::table(value, &path)?;
+            fields(&value, &["token", "permissions", "groups"], &path)?;
+            let token = string(
+                value.raw_get("token").map_err(|e| e.to_string())?,
+                &format!("{path}.token"),
+            )?;
+            if !(16..=4096).contains(&token.len())
+                || !token.bytes().all(|b| b.is_ascii_graphic())
+                || !tokens.insert(token.clone())
+            {
+                return Err(format!(
+                    "{path}.token: expected a unique secret of 16..=4096 printable bytes"
+                ));
+            }
+            let permissions = string_set(
+                value.raw_get("permissions").map_err(|e| e.to_string())?,
+                &format!("{path}.permissions"),
+            )?;
+            if permissions.iter().any(|p| {
+                ![
+                    "read",
+                    "logs",
+                    "console",
+                    "servers",
+                    "config",
+                    "deploy",
+                    "audit",
+                    "extensions",
+                ]
+                .contains(&p.as_str())
+            }) {
+                return Err(format!("{path}.permissions: unknown permission"));
+            }
+            let groups = match value
+                .raw_get::<Value>("groups")
+                .map_err(|e| e.to_string())?
+            {
+                Value::Nil => None,
+                value => Some(string_set(value, &format!("{path}.groups"))?),
+            };
+            if groups.is_some()
+                && permissions
+                    .iter()
+                    .any(|p| ["config", "deploy", "extensions"].contains(&p.as_str()))
+            {
+                return Err(format!(
+                    "{path}: config, deploy and extensions require unrestricted group access"
+                ));
+            }
+            operators.insert(
+                name,
+                WebOperator {
+                    token,
+                    permissions,
+                    groups,
+                },
+            );
+        }
+    }
+    if operators.len() > 128 {
+        return Err("web.operators: at most 128 operators".into());
+    }
     let config = WebConfig {
         listen: service_listen(&table, "web", WebConfig::default().listen)?,
         token,
         api: boolean(&table, "web", "api", true)?,
         ui: boolean(&table, "web", "ui", true)?,
+        operators,
+        records_directory: match table
+            .raw_get::<Value>("records_directory")
+            .map_err(|e| e.to_string())?
+        {
+            Value::Nil => None,
+            value => {
+                let value = string(value, "web.records_directory")?;
+                if value.trim().is_empty()
+                    || value.len() > 4096
+                    || value.chars().any(char::is_control)
+                {
+                    return Err("web.records_directory: invalid path".into());
+                }
+                Some(base.join(value))
+            }
+        },
     };
     Ok(enabled.then_some(config))
 }

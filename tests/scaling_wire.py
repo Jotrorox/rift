@@ -193,16 +193,20 @@ def recovery(binary):
                 def state():
                     return servers(control)["recovery"]
 
+                def matching_state(predicate):
+                    current = state()
+                    return current if predicate(current) else None
+
                 def starts():
                     path = server_directory / "starts.txt"
                     return path.read_text().splitlines() if path.exists() else []
 
-                initial = eventually(lambda: state() if state()["state"] == "running" else None,
+                initial = eventually(lambda: matching_state(lambda current: current["state"] == "running"),
                                      "autostart running")
                 # A real process crash recovers with no new player demand.
                 os.kill(initial["pid"], signal.SIGTERM)
-                recovered = eventually(lambda: state() if state()["state"] == "running"
-                                       and state()["pid"] != initial["pid"] else None,
+                recovered = eventually(lambda: matching_state(lambda current: current["state"] == "running"
+                                       and current["pid"] != initial["pid"]),
                                        "unexpected exit restarts automatically")
                 assert len(starts()) == 2
                 # Fail all subsequent starts to exhaust a finite retry budget.
@@ -210,7 +214,7 @@ def recovery(binary):
                 os.kill(recovered["pid"], signal.SIGTERM)
                 eventually(lambda: state()["state"] == "failed" and len(starts()) >= 3,
                            "repeated startup failures become visible")
-                exhausted_state = eventually(lambda: state() if state()["restart_exhausted"] else None,
+                exhausted_state = eventually(lambda: matching_state(lambda current: current["restart_exhausted"]),
                                              "bounded recovery reports exhaustion")
                 assert exhausted_state["restart_attempts"] == 2, exhausted_state
                 assert exhausted_state["last_error"], exhausted_state
@@ -224,7 +228,7 @@ def recovery(binary):
                 assert len(starts()) == exhausted, "new demand must honor retry exhaustion"
                 (server_directory / "fail-start").unlink()
                 operation(control, "start", "recovery")
-                restored = eventually(lambda: state() if state()["state"] == "running" else None,
+                restored = eventually(lambda: matching_state(lambda current: current["state"] == "running"),
                                       "manual start resets exhausted retry budget")
                 assert len(starts()) == exhausted + 1
                 assert restored["restart_attempts"] == 0 and not restored["restart_exhausted"], restored

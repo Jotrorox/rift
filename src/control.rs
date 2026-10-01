@@ -41,12 +41,37 @@ impl From<io::Error> for Error {
 pub enum Operation {
     Reload,
     Save { source: String, revision: String },
+    Rollback { source: String, revision: String },
     CreateInstance { group: String },
     RemoveInstance { name: String },
 }
 pub struct Command {
     pub operation: Operation,
     pub reply: oneshot::Sender<Reply>,
+    pub actor: String,
+}
+
+/// Existing instances keep their process definitions and storage ownership.
+/// Templates and policies can change for future provisioning; static workers
+/// and listener topology still require a restart.
+pub fn live_compatible(config: &Config, previous: &Config) -> bool {
+    config.listeners == previous.listeners
+        && config.admin == previous.admin
+        && config.messaging == previous.messaging
+        && config.managed_servers == previous.managed_servers
+        && previous
+            .managed_servers
+            .keys()
+            .all(|name| config.backends.get(name) == previous.backends.get(name))
+        && previous.instances.values().all(|instance| {
+            config
+                .service_groups
+                .get(&instance.group)
+                .zip(previous.service_groups.get(&instance.group))
+                .is_some_and(|(next, old)| next.storage == old.storage)
+        })
+        && config.extensions.as_ref().map(|e| &e.queues)
+            == previous.extensions.as_ref().map(|e| &e.queues)
 }
 
 pub fn read_source(path: &Path) -> io::Result<String> {
@@ -89,6 +114,10 @@ pub fn prepare_with_instances(
     let (source, save) = match operation {
         Operation::Reload => (disk.clone(), false),
         Operation::Save {
+            source,
+            revision: expected,
+        }
+        | Operation::Rollback {
             source,
             revision: expected,
         } => {

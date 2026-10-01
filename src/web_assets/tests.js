@@ -40,7 +40,11 @@ async function testWebAssets(appSource, statusSource) {
   function fixture(script) {
     const elements = new Map(), intervals = [], calls = [];
     const element = (id) => { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); };
-    const document = { getElementById: element, createElement: () => new Element(), hidden: false, addEventListener() {} };
+    const document = { getElementById: element, createElement: (tag) => {
+      const node = new Element();
+      if (tag === "textarea") Object.defineProperty(node, "type", { get: () => "textarea" });
+      return node;
+    }, hidden: false, addEventListener() {} };
     const window = { location: { origin: "http://localhost:8080" }, addEventListener() {}, confirm: () => true };
     const model = {
       config: { source: "return { -- original comments\n}\n", revision: "rev-1", writable: true },
@@ -51,6 +55,9 @@ async function testWebAssets(appSource, statusSource) {
         metrics: { active: 2, accepted: 7, sent: 1024, received: 2048, errors: 0, reloads: 1 },
         services: { web: { listen: "127.0.0.1:8080", api: true, ui: true }, status: { metrics: true } }, http_hook: true },
       fail: null, intercept: null,
+      access: { name: "local", permissions: null, groups: null },
+      definitions: { revision: "rev-1", service_groups: {}, templates: {} },
+      deployments: { revision: "rev-1", deployments: [{ id: 1, revision: "rev-1", actor: "local", action: "startup", timestamp_unix_ms: 1 }] },
     };
     const response = (data, status = 200) => ({ status, statusText: status === 200 ? "OK" : "Conflict", ok: status >= 200 && status < 300,
       headers: new TestHeaders({ "content-type": "application/json" }), text: async () => JSON.stringify(data), json: async () => data });
@@ -58,6 +65,9 @@ async function testWebAssets(appSource, statusSource) {
       calls.push({ path, options });
       if (model.intercept) { const intercepted = await model.intercept(path, options); if (intercepted) return intercepted; }
       if (model.fail) return response({ error: "Server rejected request" }, model.fail);
+      if (path === "/api/access") return response(model.access);
+      if (path === "/api/definitions") return response(model.definitions);
+      if (path === "/api/deployments") return response(model.deployments);
       if (path === "/api/status" || path === "/status") return response({ ...model.status });
       if (path === "/api/config" && options.method !== "PUT") return response({ ...model.config });
       if (path === "/api/config/validate") return response({ valid: true });
@@ -296,6 +306,55 @@ async function testWebAssets(appSource, statusSource) {
     await h.element("refresh-status").emit("click"); await flush();
     assert(h.element("metric-active").textContent === "2", "Error removed last snapshot");
     assert(h.element("connection-state").textContent === "Unavailable", "Failed status presented as live");
+  });
+  await test("scoped operators hide configuration and disable ungranted mutations", async () => {
+    const h = fixture(appSource); await flush();
+    h.model.access = { name: "lobby_staff", permissions: ["read", "logs"], groups: ["lobby"] };
+    h.model.status.managed_servers = [{ name: "lobby-1", state: "stopped", players: 0, reservations: 0 }];
+    const before = h.calls.length;
+    h.element("token").value = "staff-token"; await h.element("auth-form").emit("submit"); await flush();
+    assert(h.element("config-panel").className.includes("hidden"), "Privileged editor was exposed");
+    assert(h.element("source").value === "", "Previous operator source was retained");
+    assert(!h.calls.slice(before).some(({ path }) => path === "/api/config" || path === "/api/definitions"), "Scoped operator fetched privileged data");
+    assert(h.element("managed-servers").children[0].children[8].children[0].disabled, "Ungrantable server mutation was enabled");
+  });
+  await test("server logs resume their cursor and discard responses for a previous selection", async () => {
+    const h = fixture(appSource); await flush();
+    h.model.intercept = (path) => path.includes("/logs") ? h.response({ text: "first\n", cursor: 6 }) : null;
+    h.element("console-server").value = "lobby west"; await h.element("console-server").emit("change"); await flush();
+    assert(h.element("console-output").textContent === "first\n", "Log output did not render");
+    await h.element("console-refresh").emit("click"); await flush();
+    assert(h.calls.some(({ path }) => path === "/api/servers/lobby%20west/logs?cursor=6"), "Log cursor or encoded name missing");
+    let resolve;
+    h.model.intercept = () => new Promise((done) => { resolve = done; });
+    const pending = h.element("console-refresh").emit("click"); await flush();
+    h.element("console-server").value = "other"; await h.element("console-server").emit("change");
+    resolve(h.response({ text: "wrong server", cursor: 99 })); await pending; await flush();
+    assert(!h.element("console-output").textContent.includes("wrong server"), "Old server output leaked into the selected console");
+  });
+  await test("structured fields send typed definitions with the loaded revision", async () => {
+    const h = fixture(appSource); await flush();
+    h.element("definition-section").value = "templates"; await h.element("definition-section").emit("change"); await flush();
+    h.element("definition-name").value = "arena";
+    const inputs = h.element("definition-fields").children.map((wrapper) => wrapper.children[1]);
+    inputs.find((input) => input.id === "definition-field-server_jar").value = "assets/paper.jar";
+    inputs.find((input) => input.id === "definition-field-plugins").value = "assets/a.jar\nassets/b.jar";
+    let submitted;
+    h.model.intercept = (path, options) => {
+      if (options.method === "PUT" && path.includes("/definitions/")) { submitted = JSON.parse(options.body); return h.response({ revision: "rev-1" }); } return null;
+    };
+    await h.element("definition-form").emit("submit"); await flush();
+    assert(submitted.revision === "rev-1", "Definition revision check was omitted");
+    assert(submitted.definition.server_jar === "assets/paper.jar" && submitted.definition.plugins.length === 2, "Fields were not serialized as a structured definition");
+  });
+  await test("rollback uses the displayed history revision and keeps conflicts visible", async () => {
+    const h = fixture(appSource); await flush();
+    h.model.status.revision = "newer-revision";
+    h.model.intercept = (path) => path.endsWith("/rollback") ? h.response({ error: "Deployment revision conflict" }, 409) : null;
+    await h.element("deployments").children[0].children[4].children[0].emit("click"); await flush();
+    const call = h.calls.find(({ path }) => path.endsWith("/rollback"));
+    assert(JSON.parse(call.options.body).revision === "rev-1", "Rollback silently refreshed its expected revision");
+    assert(h.element("deployment-result").textContent.includes("conflict"), "Stale rollback conflict was hidden");
   });
   return passed;
 }

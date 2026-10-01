@@ -5,7 +5,9 @@ The admin website shows listeners, backends, routes and live counters, edits the
 complete Lua source, validates changes, saves and applies them, and reloads edits
 made on disk. Its managed servers panel reports lifecycle state and requests
 server starts and stops, creates instances from service groups, and removes
-instances with explicit file retention/deletion labels. The status website runs separately at <http://127.0.0.1:9090>.
+instances with explicit file retention/deletion labels. It also provides live server
+logs and console commands, field-based group/template editing, configuration
+deployment history, rollback and operator audit records. The status website runs separately at <http://127.0.0.1:9090>.
 The dashboard assets are embedded in the binary; no Node installation or
 separate frontend server is needed at runtime.
 
@@ -15,9 +17,11 @@ environment-provided secret and explicit operation permissions; see the
 [operator guide](operations.md#enable-operational-administration). Both can run
 on distinct ports. `admin.permissions` do not govern HTTP requests: the web
 credential grants the enabled HTTP API capabilities, including configuration
-editing and managed server lifecycle operations. Changes to the operational
-`admin`, `managed_servers`, `templates` or `service_groups` definitions require restart;
-instances can be created and removed through the API while Rift runs.
+editing and managed server lifecycle operations. Named `web.operators` can receive
+restricted permissions and group scopes. Changes to operational `admin` and
+static `managed_servers` definitions require a restart. Group/template changes
+can apply live when existing instances retain their process definitions and
+storage policy; remove affected instances before changing those settings.
 
 ## Configuration
 
@@ -71,8 +75,9 @@ routes and are never interrupted by an HTTP configuration change.
 ## Authentication and access
 
 Loopback web binds may omit `token` for local development. A non-loopback bind
-requires a token of 16–4096 printable, non-whitespace ASCII characters. When a
-token is configured, every `/api` and `/ext` request requires:
+requires `web.token` or at least one named operator token. Tokens contain 16–4096
+printable, non-whitespace ASCII characters. When credentials are configured,
+every `/api` and `/ext` request requires:
 
 ```http
 Authorization: Bearer your-token
@@ -91,6 +96,51 @@ HTTPS at a trusted reverse proxy or an SSH tunnel for remote administration;
 the built-in listener speaks HTTP. When proxying, preserve the browser's Host
 header and use a token.
 
+Named operators use independent tokens and permission lists:
+
+```lua
+rift.config.web = {
+    listen = "127.0.0.1:8080",
+    token = "replace-with-a-random-administrator-secret",
+    records_directory = "operator-records", -- Relative to the config directory.
+    operators = {
+        lobby_staff = {
+            token = "replace-with-a-different-random-staff-secret",
+            permissions = { "read", "logs", "console", "servers", "audit" },
+            groups = { "lobby" },
+        },
+        observer = {
+            token = "replace-with-an-independent-observer-secret",
+            permissions = { "read", "logs" },
+        },
+    },
+}
+```
+
+| Permission | Access |
+| --- | --- |
+| `read` | Status, metrics and scoped group/server listings; include it for dashboard use |
+| `logs` | Read managed server logs within the operator's scope |
+| `console` | Send commands with the managed server's console privileges |
+| `servers` | Start/stop servers and create/remove instances within scope |
+| `config` | Read, validate, edit and reload complete Lua source and structured definitions |
+| `deploy` | View configuration deployment metadata and restore retained deployments |
+| `audit` | View operator records; group-scoped operators see only their own records |
+| `extensions` | Invoke configured Lua `/ext` handlers |
+
+Omitting `groups` permits all groups and static managed servers. A list restricts
+server actions and logs to instances of those groups; an empty list permits no
+server targets. Scoped listings omit other groups/servers, backend routing and
+configuration paths. Global counters and listener information remain visible.
+`config`, `deploy` and `extensions` require unrestricted scope because Lua and
+configuration changes can affect the whole proxy. `config` exposes any secrets
+in the Lua source and can change credentials. The legacy `web.token` and
+credential-free loopback access retain full privileges. Once any named operator
+is configured, loopback requests also require a valid token. Tokens must be
+unique, names must be distinct from reserved system/admin audit identities,
+and permission/credential changes apply on the next request after reload.
+`GET /api/access` reports the current identity and grants without credentials.
+
 The separate status and metrics servers are read-only and unauthenticated. Their
 JSON includes backend/listener addresses, health eligibility, counters and
 service settings, but no Lua source, token or configuration filesystem path.
@@ -108,10 +158,18 @@ Errors use `{"error":"description"}`. `GET /api` provides endpoint discovery.
 
 | Method and path | Purpose |
 | --- | --- |
+| `GET /api/access` | Current operator name, permissions (`null` for full access) and group scopes |
 | `GET /api/status` | Runtime version, uptime, revision, actual listeners, backends, health, managed server state, service groups, routes, fallbacks, limits, counters and enabled services |
 | `GET /api/servers` | `{servers: [...]}` with managed server lifecycle state and usage |
 | `POST /api/servers/{name}/start` | Request a managed server start with `{}`; returns `202` when accepted |
 | `POST /api/servers/{name}/stop` | Request an unused managed server stop and pause automatic wake with `{}`; returns `202` when accepted |
+| `GET /api/servers/{name}/logs?cursor={byte_offset}` | Up to 64 KiB of log text with the next byte cursor, `truncated` and `has_more`; omit cursor to tail the log |
+| `POST /api/servers/{name}/console` | Write one `{command: "list"}` to a running managed server; commands are limited to 4096 bytes without control characters |
+| `GET /api/definitions` | Structured `templates`, `service_groups` and the active `revision`; includes private paths and executable arguments |
+| `PUT /api/definitions/{section}/{name}` | Apply `{revision, definition}`; section is `templates` or `service_groups`, and `null` removes a definition |
+| `GET /api/deployments` | Retained deployment metadata, active revision, retention limit and durability flag; never includes source |
+| `POST /api/deployments/{id}/rollback` | Validate and restore a retained configuration with `{revision}` |
+| `GET /api/audit` | Latest operator records and durability flag |
 | `GET /api/groups` | `{groups: [...]}` with group names, inclusive port ranges, instance names, template and storage policy |
 | `POST /api/groups/{name}/instances` | Provision and register an instance with `{}`; returns `201` with instance details (autostart follows group policy) |
 | `DELETE /api/instances/{name}` | Stop and deregister an unused instance with `{}`; returns `200` with `{name, removed, files_removed}` after child cleanup |
@@ -172,6 +230,49 @@ change returns `409`; fetch/reload and review before retrying. Changes on disk
 are applied only by an explicit reload or signal, not by a file watcher. The
 website polls active state and preserves unsaved editor changes when another
 client applies a revision.
+
+The structured editor writes a single generated Lua wrapper around the original
+script, preserving its comments, hooks and computed values. Field overrides are
+ordinary Lua source and remain visible in `/api/config`. Definitions use the
+same fields as Lua configuration. Structured reads return resolved absolute
+paths; optional fields are omitted. Updates replace one complete definition,
+validate all references and live-instance restrictions, then use the same save
+transaction as source edits. Templates affect future provisioning; existing
+instance files are preserved. Scaling policies can change while instances run.
+
+The dashboard follows selected server logs every second, retaining a bounded
+128 KiB view. Logs contain server output and may include private information;
+grant `logs` accordingly. Console requests write exactly one line to the owned
+process's stdin, with a bounded write deadline. A successful response confirms
+the write; observe server logs for the command's result. Console commands have
+the server's full console powers, including commands affecting players or files.
+
+Deployment history retains the latest 64 successful source configurations,
+including startup, HTTP saves, CLI/signal reloads and rollbacks. Rollback checks
+the supplied active revision and external disk edits, validates the candidate,
+reserves sockets, then atomically saves/applies it. Rejection preserves the
+working file/runtime. Restore uses the retained entry Lua source and current
+local module/plugin files; it does not restore asset contents, executable files,
+runtime instances or worlds. Restoring creates a new history entry.
+
+Records default to a private `<config filename>.operators` directory beside the
+configuration. Set `web.records_directory` to writable storage when the config
+mount is read-only; changing that directory requires a restart. Unix directories
+use mode `0700`, files `0600`. Retained deployment sources may contain credentials;
+protect and back up this directory as administrative data. With no file-backed
+configuration, or an unwritable default directory, records stay in memory and
+the APIs report `durable: false`. An explicitly configured unwritable records
+directory fails startup. A post-commit history write failure is reported in Rift's
+stderr; the already-applied configuration remains active.
+
+HTTP mutations record the named actor, operation, target, timestamp and admission
+result. Authentication/scope denials, local CLI commands and signal reload results
+are also recorded. Bodies, console text, authorization headers and query strings
+are excluded. Lifecycle `accepted` means queued; follow server state for completion.
+An intent record precedes HTTP/CLI mutation execution; a timeout can leave an
+intent without a final result. HTTP/CLI operations are refused if that intent
+cannot be written. The API retains the latest 1024 audit records; the journal
+compacts at 8 MiB. These are local records, not a tamper-proof external audit log.
 
 Validation errors and failed socket reservations return `400`. Missing or
 invalid tokens return `401`, denied browser origins return `403`, unknown or

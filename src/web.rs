@@ -1,8 +1,10 @@
 //! Axum control and observability services. Assets are embedded in the binary.
-use crate::{admin, control, metrics::Metrics, runtime::Snapshot};
+use crate::{admin, control, metrics::Metrics, operator, runtime::Snapshot};
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Path, Request, State, rejection::JsonRejection},
+    extract::{
+        DefaultBodyLimit, Extension, Path, RawQuery, Request, State, rejection::JsonRejection,
+    },
     http::{HeaderValue, StatusCode, Uri, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
@@ -15,6 +17,7 @@ use rift::{
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
+    collections::BTreeSet,
     io,
     net::SocketAddr,
     path::PathBuf,
@@ -35,6 +38,8 @@ pub struct App {
     pub commands: control::Sender,
     pub path: Option<PathBuf>,
     pub started: Instant,
+    pub workflows: Arc<operator::Store>,
+    records_directory: Option<PathBuf>,
     binding: Option<(Kind, SocketAddr)>,
     requests: Arc<Semaphore>,
     validations: Arc<Semaphore>,
@@ -45,20 +50,66 @@ impl App {
         metrics: Arc<Metrics>,
         commands: control::Sender,
         path: Option<PathBuf>,
-    ) -> Self {
-        Self {
+    ) -> io::Result<Self> {
+        let snapshot = current.borrow().clone();
+        let configured_directory = snapshot
+            .config
+            .web
+            .as_ref()
+            .and_then(|web| web.records_directory.clone());
+        let directory = configured_directory.clone().or_else(|| {
+            (snapshot.config.web.is_some() || snapshot.config.admin.is_some())
+                .then(|| {
+                    path.as_ref().map(|path| {
+                        path.with_file_name(format!(
+                            "{}.operators",
+                            path.file_name().unwrap().to_string_lossy()
+                        ))
+                    })
+                })
+                .flatten()
+        });
+        let store = match operator::Store::open(directory) {
+            Ok(store) => store,
+            Err(e)
+                if configured_directory.is_none()
+                    && matches!(
+                        e.kind(),
+                        io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem
+                    ) =>
+            {
+                eprintln!(
+                    "rift: operator records are in memory; configure web.records_directory on a writable filesystem for retention"
+                );
+                operator::Store::open(None)?
+            }
+            Err(e) => return Err(e),
+        };
+        let workflows = Arc::new(store);
+        if let Some(source) = current.borrow().source.as_deref() {
+            workflows.deploy(source, "system", "startup")?;
+        }
+        Ok(Self {
             current,
             metrics,
             commands,
             path,
             started: Instant::now(),
+            workflows,
+            records_directory: configured_directory,
             binding: None,
             requests: Arc::new(Semaphore::new(64)),
             validations: Arc::new(Semaphore::new(4)),
-        }
+        })
     }
     fn snapshot(&self) -> Arc<Snapshot> {
         self.current.borrow().clone()
+    }
+    pub(crate) fn record_settings_compatible(&self, config: &Config) -> bool {
+        config
+            .web
+            .as_ref()
+            .is_none_or(|web| web.records_directory == self.records_directory)
     }
     fn active_binding(&self, snapshot: &Snapshot) -> bool {
         self.binding.is_none_or(|(kind, address)| {
@@ -268,7 +319,18 @@ fn router(kind: Kind, address: SocketAddr, mut app: App) -> Router {
             .route("/api/servers", get(managed_servers))
             .route("/api/servers/{name}/start", post(start_server))
             .route("/api/servers/{name}/stop", post(stop_server))
+            .route("/api/servers/{name}/logs", get(server_logs))
+            .route("/api/servers/{name}/console", post(server_console))
             .route("/api/groups", get(service_groups))
+            .route("/api/definitions", get(definitions))
+            .route(
+                "/api/definitions/{section}/{name}",
+                axum::routing::put(edit_definition),
+            )
+            .route("/api/access", get(operator_access))
+            .route("/api/deployments", get(deployments))
+            .route("/api/deployments/{id}/rollback", post(rollback))
+            .route("/api/audit", get(audit_records))
             .route("/api/groups/{name}/instances", post(create_instance))
             .route("/api/instances/{name}", delete(remove_instance))
             .route("/api/metrics", get(json_metrics))
@@ -331,7 +393,62 @@ async fn boundary(State(app): State<App>, request: Request, next: Next) -> Respo
     response
 }
 
-async fn admin_guard(State(app): State<App>, request: Request, next: Next) -> Response {
+#[derive(Clone)]
+struct Access {
+    name: String,
+    permissions: Option<BTreeSet<String>>,
+    groups: Option<BTreeSet<String>>,
+}
+impl Access {
+    fn allows(&self, permission: &str) -> bool {
+        self.permissions
+            .as_ref()
+            .is_none_or(|p| p.contains(permission))
+    }
+    fn group(&self, group: &str) -> bool {
+        self.groups
+            .as_ref()
+            .is_none_or(|groups| groups.contains(group))
+    }
+    fn server(&self, snapshot: &Snapshot, name: &str) -> bool {
+        self.groups.is_none()
+            || snapshot
+                .config
+                .instances
+                .get(name)
+                .is_some_and(|instance| self.group(&instance.group))
+    }
+}
+fn decode_name(name: &str) -> Option<String> {
+    let mut result = Vec::new();
+    let mut bytes = name.bytes();
+    while let Some(byte) = bytes.next() {
+        result.push(if byte == b'%' {
+            let a = char::from(bytes.next()?).to_digit(16)?;
+            let b = char::from(bytes.next()?).to_digit(16)?;
+            (a * 16 + b) as u8
+        } else {
+            byte
+        });
+    }
+    String::from_utf8(result).ok()
+}
+async fn record_audit(
+    app: &App,
+    access: &Access,
+    action: &str,
+    target: &str,
+    outcome: &str,
+    status: u16,
+) -> io::Result<()> {
+    let store = app.workflows.clone();
+    let actor = access.name.clone();
+    let (action, target, outcome) = (action.to_owned(), target.to_owned(), outcome.to_owned());
+    tokio::task::spawn_blocking(move || store.audit(&actor, &action, &target, &outcome, status))
+        .await
+        .map_err(io::Error::other)?
+}
+async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -> Response {
     let snapshot = app.snapshot();
     // A socket retained only to finish an earlier response must never acquire
     // the replacement listener's authentication policy (for example when a
@@ -342,7 +459,7 @@ async fn admin_guard(State(app): State<App>, request: Request, next: Next) -> Re
     let Some(settings) = &snapshot.config.web else {
         return error(StatusCode::NOT_FOUND, "web service disabled");
     };
-    let path = request.uri().path();
+    let path = request.uri().path().to_owned();
     let api = path == "/api" || path.starts_with("/api/");
     let extension = path == "/ext" || path.starts_with("/ext/");
     if (api && !settings.api) || (!api && !extension && !settings.ui) {
@@ -378,13 +495,39 @@ async fn admin_guard(State(app): State<App>, request: Request, next: Next) -> Re
         {
             return error(StatusCode::FORBIDDEN, "cross-site requests are not allowed");
         }
-        if let Some(token) = &settings.token {
-            let supplied = headers
-                .get(header::AUTHORIZATION)
-                .and_then(|h| h.to_str().ok())
-                .and_then(|h| h.strip_prefix("Bearer "))
-                .unwrap_or("");
-            if !equal_token(token.as_bytes(), supplied.as_bytes()) {
+        let supplied = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|h| h.to_str().ok())
+            .and_then(|h| h.strip_prefix("Bearer "))
+            .unwrap_or("");
+        let mut access = None;
+        if let Some(token) = &settings.token
+            && equal_token(token.as_bytes(), supplied.as_bytes())
+        {
+            access = Some(Access {
+                name: "admin".into(),
+                permissions: None,
+                groups: None,
+            });
+        }
+        for (name, operator) in &settings.operators {
+            if equal_token(operator.token.as_bytes(), supplied.as_bytes()) {
+                access = Some(Access {
+                    name: name.clone(),
+                    permissions: Some(operator.permissions.clone()),
+                    groups: operator.groups.clone(),
+                });
+            }
+        }
+        if settings.token.is_some() || !settings.operators.is_empty() {
+            if access.is_none() {
+                drop(snapshot);
+                let anonymous = Access {
+                    name: "anonymous".into(),
+                    permissions: Some(BTreeSet::new()),
+                    groups: None,
+                };
+                let _ = record_audit(&app, &anonymous, "authentication", "", "denied", 401).await;
                 let mut response =
                     error(StatusCode::UNAUTHORIZED, "a valid bearer token is required");
                 response
@@ -409,7 +552,106 @@ async fn admin_guard(State(app): State<App>, request: Request, next: Next) -> Re
                     "tokenless administration requires a loopback Host header",
                 );
             }
+            access = Some(Access {
+                name: "local".into(),
+                permissions: None,
+                groups: None,
+            });
         }
+        let access = access.unwrap();
+        let segments: Vec<_> = path.trim_start_matches('/').split('/').collect();
+        let mutation = request.method() != axum::http::Method::GET
+            && request.method() != axum::http::Method::HEAD;
+        let permission = if extension {
+            "extensions"
+        } else {
+            match segments.as_slice() {
+                ["api", "access"] | ["api"] => "",
+                ["api", "servers", _, "logs"] => "logs",
+                ["api", "servers", _, "console"] => "console",
+                ["api", "servers", _, _]
+                | ["api", "groups", _, "instances"]
+                | ["api", "instances", _] => "servers",
+                ["api", "definitions", ..] | ["api", "config", ..] | ["api", "reload"] => "config",
+                ["api", "deployments", ..] => "deploy",
+                ["api", "audit"] => "audit",
+                _ => "read",
+            }
+        };
+        let (in_scope, target) = match segments.as_slice() {
+            ["api", "servers" | "instances", name, ..] => {
+                let name = decode_name(name).unwrap_or_default();
+                (
+                    access.server(&snapshot, &name),
+                    if snapshot.config.managed_servers.contains_key(&name) {
+                        name
+                    } else {
+                        String::new()
+                    },
+                )
+            }
+            ["api", "groups", name, ..] => {
+                let name = decode_name(name).unwrap_or_default();
+                (
+                    access.group(&name),
+                    if snapshot.config.service_groups.contains_key(&name) {
+                        name
+                    } else {
+                        String::new()
+                    },
+                )
+            }
+            _ => (true, String::new()),
+        };
+        let authorized = (permission.is_empty() || access.allows(permission)) && in_scope;
+        let operation = match segments.as_slice() {
+            ["api", "servers", _, "start"] => "start",
+            ["api", "servers", _, "stop"] => "stop",
+            ["api", "servers", _, "console"] => "console",
+            ["api", "groups", _, "instances"] => "create_instance",
+            ["api", "instances", _] => "remove_instance",
+            ["api", "definitions", "templates", _] => "edit_template",
+            ["api", "definitions", "service_groups", _] => "edit_group",
+            ["api", "deployments", _, "rollback"] => "rollback",
+            ["api", "config"] => "configuration",
+            ["api", "config", "validate"] => "validate",
+            ["api", "reload"] => "reload",
+            _ => permission,
+        };
+        let action = format!("{} {}", request.method(), operation);
+        drop(snapshot);
+        if !authorized {
+            let _ = record_audit(&app, &access, &action, &target, "denied", 403).await;
+            return error(
+                StatusCode::FORBIDDEN,
+                "operator permission or group scope denied",
+            );
+        }
+        if mutation
+            && record_audit(&app, &access, &action, &target, "requested", 0)
+                .await
+                .is_err()
+        {
+            return error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "audit record could not be written; operation was not submitted",
+            );
+        }
+        request.extensions_mut().insert(access.clone());
+        let response = next.run(request).await;
+        if mutation {
+            let status = response.status().as_u16();
+            let outcome = if response.status().is_success() {
+                "accepted"
+            } else {
+                "rejected"
+            };
+            if let Err(error) = record_audit(&app, &access, &action, &target, outcome, status).await
+            {
+                eprintln!("rift: operator result audit failed: {error}");
+            }
+        }
+        return response;
     }
     drop(snapshot);
     next.run(request).await
@@ -463,14 +705,230 @@ async fn status_js() -> impl IntoResponse {
         include_str!("web_assets/status.js"),
     )
 }
-async fn admin_status(State(app): State<App>) -> Json<Value> {
-    Json(app.status(true))
+fn visible_servers(snapshot: &Snapshot, access: &Access) -> Value {
+    let mut value = admin::managed_servers(snapshot);
+    value
+        .as_array_mut()
+        .unwrap()
+        .retain(|server| access.server(snapshot, server["name"].as_str().unwrap()));
+    value
 }
-async fn managed_servers(State(app): State<App>) -> Json<Value> {
-    Json(json!({"servers":admin::managed_servers(&app.snapshot())}))
+fn visible_groups(snapshot: &Snapshot, access: &Access) -> Value {
+    let mut value = admin::service_groups(snapshot);
+    value["groups"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|group| access.group(group["name"].as_str().unwrap()));
+    value
 }
-async fn service_groups(State(app): State<App>) -> Json<Value> {
-    Json(admin::service_groups(&app.snapshot()))
+async fn admin_status(State(app): State<App>, Extension(access): Extension<Access>) -> Json<Value> {
+    let snapshot = app.snapshot();
+    let mut value = app.status_snapshot(&snapshot, true);
+    value["managed_servers"] = visible_servers(&snapshot, &access);
+    value["service_groups"] = visible_groups(&snapshot, &access)["groups"].clone();
+    if access.groups.is_some() {
+        let names: BTreeSet<_> = snapshot
+            .config
+            .instances
+            .iter()
+            .filter(|(_, instance)| access.group(&instance.group))
+            .map(|(name, _)| name.as_str())
+            .collect();
+        value["backends"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|backend| names.contains(backend["name"].as_str().unwrap()));
+        value.as_object_mut().unwrap().remove("routes");
+        value.as_object_mut().unwrap().remove("fallbacks");
+    }
+    if !access.allows("config") {
+        value.as_object_mut().unwrap().remove("config_path");
+    }
+    Json(value)
+}
+async fn managed_servers(
+    State(app): State<App>,
+    Extension(access): Extension<Access>,
+) -> Json<Value> {
+    Json(json!({"servers":visible_servers(&app.snapshot(), &access)}))
+}
+async fn service_groups(
+    State(app): State<App>,
+    Extension(access): Extension<Access>,
+) -> Json<Value> {
+    Json(visible_groups(&app.snapshot(), &access))
+}
+
+async fn operator_access(Extension(access): Extension<Access>) -> Json<Value> {
+    Json(json!({"name":access.name,"permissions":access.permissions,"groups":access.groups}))
+}
+async fn server_logs(
+    State(app): State<App>,
+    Path(name): Path<String>,
+    RawQuery(query): RawQuery,
+) -> Response {
+    let cursor = match query.as_deref() {
+        None | Some("") => None,
+        Some(query) => match query
+            .strip_prefix("cursor=")
+            .and_then(|value| value.parse::<u64>().ok())
+        {
+            Some(value) => Some(value),
+            None => {
+                return error(
+                    StatusCode::BAD_REQUEST,
+                    "expected cursor=<nonnegative integer>",
+                );
+            }
+        },
+    };
+    match app.snapshot().managed.logs(&name, cursor).await {
+        Ok(value) => Json(value).into_response(),
+        Err(e) => managed_error(e),
+    }
+}
+fn managed_error(failure: io::Error) -> Response {
+    error(
+        match failure.kind() {
+            io::ErrorKind::NotFound => StatusCode::NOT_FOUND,
+            io::ErrorKind::InvalidInput => StatusCode::BAD_REQUEST,
+            io::ErrorKind::NotConnected | io::ErrorKind::ResourceBusy => StatusCode::CONFLICT,
+            _ => StatusCode::SERVICE_UNAVAILABLE,
+        },
+        failure,
+    )
+}
+async fn server_console(
+    State(app): State<App>,
+    Path(name): Path<String>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    let value = match payload(body, &["command"]) {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+    let Some(command) = value["command"].as_str() else {
+        return error(StatusCode::BAD_REQUEST, "command must be a string");
+    };
+    match app.snapshot().managed.console(&name, command.to_owned()).await {
+        Ok(()) => Json(json!({"sent":true, "message":"Command written to the server console; check logs for its result"})).into_response(),
+        Err(e) => managed_error(e),
+    }
+}
+async fn deployments(State(app): State<App>) -> Json<Value> {
+    let mut value = app.workflows.deployments();
+    value["revision"] = json!(app.snapshot().revision);
+    Json(value)
+}
+async fn audit_records(
+    State(app): State<App>,
+    Extension(access): Extension<Access>,
+) -> Json<Value> {
+    let mut value = app.workflows.audits();
+    if access.groups.is_some() {
+        value["records"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|record| record["actor"] == access.name);
+    }
+    Json(value)
+}
+async fn rollback(
+    State(app): State<App>,
+    Extension(access): Extension<Access>,
+    Path(id): Path<u64>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    let value = match payload(body, &["revision"]) {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+    let Some(revision) = value["revision"].as_str() else {
+        return error(StatusCode::BAD_REQUEST, "revision is required");
+    };
+    let Some(source) = app.workflows.source(id) else {
+        return error(StatusCode::NOT_FOUND, "deployment is no longer retained");
+    };
+    submit(
+        app,
+        control::Operation::Rollback {
+            source,
+            revision: revision.to_owned(),
+        },
+        access.name,
+    )
+    .await
+}
+fn definition_values(config: &Config) -> Value {
+    let server = |s: &rift::config::ManagedServer| json!({"directory":s.directory,"command":s.command,"autostart":s.autostart,"start_on_connect":s.start_on_connect,"idle_timeout_ms":s.idle_timeout.map_or(0, |d| d.as_millis()),"start_timeout_ms":s.start_timeout.as_millis(),"stop_timeout_ms":s.stop_timeout.as_millis(),"restart_delay_ms":s.restart_delay.as_millis(),"restart_retries":s.restart_retries});
+    let groups: BTreeMap<_,_> = config.service_groups.iter().map(|(name, group)| {
+        let mut value = server(&group.server);
+        value["port_range"] = json!([group.port_start,group.port_end]); value["storage"] = json!(group.storage.as_str());
+        if let Some(template) = &group.template { value["template"] = json!(template); }
+        if let Some(s) = &group.scaling { value["scaling"] = json!({"min_instances":s.min_instances,"max_instances":s.max_instances,"spare_instances":s.spare_instances,"capacity_per_instance":s.capacity_per_instance,"target_occupancy_percent":s.target_occupancy_percent,"queue_threshold":s.queue_threshold,"cooldown_ms":s.cooldown.as_millis()}); }
+        (name, value)
+    }).collect();
+    let templates: BTreeMap<_, _> = config
+        .templates
+        .iter()
+        .map(|(name, t)| {
+            let mut value = json!({"server_jar":t.server_jar,"plugins":t.plugins});
+            if let Some(v) = &t.configs {
+                value["configs"] = json!(v);
+            }
+            if let Some(v) = &t.map {
+                value["map"] = json!(v);
+            }
+            (name, value)
+        })
+        .collect();
+    json!({"service_groups":groups,"templates":templates})
+}
+async fn definitions(State(app): State<App>) -> Json<Value> {
+    let snapshot = app.snapshot();
+    let mut value = definition_values(&snapshot.config);
+    value["revision"] = json!(snapshot.revision);
+    Json(value)
+}
+async fn edit_definition(
+    State(app): State<App>,
+    Extension(access): Extension<Access>,
+    Path((section, name)): Path<(String, String)>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    let value = match payload(body, &["revision", "definition"]) {
+        Ok(v) => v,
+        Err(e) => return e.into_response(),
+    };
+    let Some(revision) = value["revision"].as_str() else {
+        return error(StatusCode::BAD_REQUEST, "revision is required");
+    };
+    let Some(definition) = value.get("definition") else {
+        return error(StatusCode::BAD_REQUEST, "definition is required");
+    };
+    let snapshot = app.snapshot();
+    if revision != snapshot.revision {
+        return error(
+            StatusCode::CONFLICT,
+            "configuration changed; refresh definitions before editing",
+        );
+    }
+    let Some(source) = snapshot.source.as_deref() else {
+        return error(StatusCode::CONFLICT, "no configuration source available");
+    };
+    let source = match operator::edited_source(source, &section, &name, definition) {
+        Ok(s) => s,
+        Err(e) => return e.into_response(),
+    };
+    submit(
+        app,
+        control::Operation::Save {
+            source,
+            revision: revision.to_owned(),
+        },
+        access.name,
+    )
+    .await
 }
 async fn create_instance(
     State(app): State<App>,
@@ -510,7 +968,11 @@ async fn instance_operation(
     let (reply, result) = oneshot::channel();
     if app
         .commands
-        .try_send(control::Command { operation, reply })
+        .try_send(control::Command {
+            operation,
+            reply,
+            actor: "operator".into(),
+        })
         .is_err()
     {
         return error(
@@ -613,7 +1075,7 @@ async fn standalone_metrics(state: State<App>) -> Response {
 }
 async fn discovery() -> Json<Value> {
     Json(
-        json!({"version":1,"endpoints":["GET /api/status","GET /api/servers","POST /api/servers/{name}/start","POST /api/servers/{name}/stop","GET /api/groups","POST /api/groups/{name}/instances","DELETE /api/instances/{name}","GET /api/metrics","GET /api/config","POST /api/config/validate","PUT /api/config","POST /api/reload"],"extensions":"/ext/* -> on_http(request)","source_limit_bytes":control::MAX_SOURCE}),
+        json!({"version":1,"endpoints":["GET /api/access","GET /api/status","GET /api/servers","POST /api/servers/{name}/start","POST /api/servers/{name}/stop","GET /api/servers/{name}/logs","POST /api/servers/{name}/console","GET /api/groups","POST /api/groups/{name}/instances","DELETE /api/instances/{name}","GET /api/definitions","PUT /api/definitions/{section}/{name}","GET /api/deployments","POST /api/deployments/{id}/rollback","GET /api/audit","GET /api/metrics","GET /api/config","POST /api/config/validate","PUT /api/config","POST /api/reload"],"extensions":"/ext/* -> on_http(request)","source_limit_bytes":control::MAX_SOURCE}),
     )
 }
 async fn config_source(State(app): State<App>) -> Json<Value> {
@@ -687,33 +1149,12 @@ async fn validate_config(
     .await
     {
         Ok(Ok(config)) => {
-            if config.listeners != snapshot.config.listeners
-                || config.admin != snapshot.config.admin
-                || config.messaging != snapshot.config.messaging
-                || config.service_groups != snapshot.config.service_groups
-                || config.templates != snapshot.config.templates
-                || config
-                    .managed_servers
-                    .iter()
-                    .filter(|(name, _)| !config.instances.contains_key(*name))
-                    .map(|(name, server)| (name.clone(), server.clone()))
-                    .collect::<BTreeMap<_, _>>()
-                    != snapshot
-                        .config
-                        .managed_servers
-                        .iter()
-                        .filter(|(name, _)| !snapshot.config.instances.contains_key(*name))
-                        .map(|(name, server)| (name.clone(), server.clone()))
-                        .collect()
-                || config
-                    .managed_servers
-                    .keys()
-                    .filter(|name| !config.instances.contains_key(*name))
-                    .any(|name| config.backends.get(name) != snapshot.config.backends.get(name))
+            if !control::live_compatible(&config, &snapshot.config)
+                || !app.record_settings_compatible(&config)
             {
                 return error(
                     StatusCode::BAD_REQUEST,
-                    "listener names/addresses, admin, messaging, templates, managed server and service group settings require a restart",
+                    "listener, admin, messaging, existing managed process definitions/addresses, instance storage and extension queue changes require a restart or removal of affected instances",
                 );
             }
             Json(json!({"valid":true,"message":"Configuration valid; socket availability is checked when applying."})).into_response()
@@ -722,11 +1163,15 @@ async fn validate_config(
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e),
     }
 }
-async fn submit(app: App, operation: control::Operation) -> Response {
+async fn submit(app: App, operation: control::Operation, actor: String) -> Response {
     let (reply, result) = oneshot::channel();
     if app
         .commands
-        .try_send(control::Command { operation, reply })
+        .try_send(control::Command {
+            operation,
+            reply,
+            actor,
+        })
         .is_err()
     {
         return error(
@@ -745,7 +1190,11 @@ async fn submit(app: App, operation: control::Operation) -> Response {
         ),
     }
 }
-async fn save_config(State(app): State<App>, body: Result<Json<Value>, JsonRejection>) -> Response {
+async fn save_config(
+    State(app): State<App>,
+    Extension(operator): Extension<Access>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
     let value = match payload(body, &["source", "revision"]) {
         Ok(v) => v,
         Err(e) => return e.into_response(),
@@ -766,14 +1215,19 @@ async fn save_config(State(app): State<App>, body: Result<Json<Value>, JsonRejec
             source,
             revision: revision.to_owned(),
         },
+        operator.name,
     )
     .await
 }
-async fn reload(State(app): State<App>, body: Result<Json<Value>, JsonRejection>) -> Response {
+async fn reload(
+    State(app): State<App>,
+    Extension(operator): Extension<Access>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
     if let Err(e) = payload(body, &[]) {
         return e.into_response();
     }
-    submit(app, control::Operation::Reload).await
+    submit(app, control::Operation::Reload, operator.name).await
 }
 async fn extension(State(app): State<App>, request: Request) -> Response {
     let snapshot = app.snapshot();

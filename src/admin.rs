@@ -379,6 +379,7 @@ pub async fn serve(
     current: watch::Receiver<Arc<Snapshot>>,
     metrics: Arc<Metrics>,
     commands: mpsc::Sender<Command>,
+    workflows: Arc<crate::operator::Store>,
 ) {
     let settings = Arc::new(settings);
     let secret = Arc::new(secret);
@@ -395,6 +396,7 @@ pub async fn serve(
                 let current = current.clone();
                 let metrics = metrics.clone();
                 let commands = commands.clone();
+                let workflows = workflows.clone();
                 handlers.spawn(async move {
                     let _ = async {
                         let bytes = timeout(Duration::from_secs(2), read_line(&mut stream, 8192)).await??;
@@ -404,7 +406,12 @@ pub async fn serve(
                         let result = match parsed {
                             Ok(args) => {
                                 permission = args[0].clone();
-                                if args == ["shutdown"] {
+                                let store = workflows.clone();
+                                let action = permission.clone();
+                                let audit = tokio::task::spawn_blocking(move || store.audit("local-admin", &action, "", "requested", 0)).await.map_err(io::Error::other).and_then(|result| result);
+                                if audit.is_err() {
+                                    Err("operator audit unavailable; command was not submitted".into())
+                                } else if args == ["shutdown"] {
                                     let (ack, receiver) = oneshot::channel();
                                     match commands.try_send(Command::Shutdown(receiver)) {
                                         Ok(()) => {shutdown_ack = Some(ack); Ok(json!({"shutdown":"draining"}))}
@@ -431,6 +438,12 @@ pub async fn serve(
                             }
                             Err(error) => Err(error),
                         };
+                        let store = workflows.clone();
+                        let action = permission.clone();
+                        let outcome = if result.is_ok() { "accepted" } else { "rejected" };
+                        if let Err(error) = tokio::task::spawn_blocking(move || store.audit(if action.is_empty() { "anonymous" } else { "local-admin" }, &action, "", outcome, if outcome == "accepted" { 200 } else { 400 })).await.map_err(io::Error::other).and_then(|result| result) {
+                            eprintln!("rift: local administrator audit failed: {error}");
+                        }
                         let response = match result {
                             Ok(data) => { events::admin("admin_command", "ok", &permission, &"command completed"); json!({"ok":true,"data":data}) }
                             Err(error) => { events::admin("admin_command", "rejected", &permission, &error); json!({"ok":false,"error":error}) }

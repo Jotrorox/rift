@@ -320,7 +320,10 @@ the seed map again. Instance registrations remain runtime only. After a proxy
 restart, create instances in the same group to reuse retained names/directories;
 check the listing for their newly allocated ports. Disposable recreation copies
 the source assets again. Editing template assets does not update existing
-instances. Structural template or group configuration changes require a restart;
+instances. Templates and group policies can change live through Lua or the
+[structured operator editor](http.md). Existing instances must retain their
+process definitions and storage policy; remove affected instances before
+changing those settings. Static managed definitions require a restart;
 ordinary routes and policies can reload while instances remain registered.
 
 Remove disposable instances before restarting Rift if you want their files

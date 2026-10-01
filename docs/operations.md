@@ -443,8 +443,12 @@ and signal reloads share one serialized configuration transaction path.
 
 The `web` configuration controls the dashboard and HTTP API, with its own
 `web.token` bearer credential. Operational `admin.permissions` do not restrict
-the HTTP API: a web credential grants the enabled HTTP API capabilities,
-including configuration editing. The `status` server is read-only and
+the HTTP API: the legacy `web.token` grants full enabled API access. Named
+`web.operators` can restrict permissions and service groups; the dashboard
+provides managed-server logs/commands, structured definitions, deployment
+history/rollback and audit records. See [HTTP access](http.md#authentication-and-access).
+Configure `web.records_directory` on writable storage for retained records when
+the configuration mount is read-only. The `status` server is read-only and
 unauthenticated. All services are disabled unless configured.
 
 The supplied systemd and Compose examples intentionally keep configuration

@@ -172,3 +172,8 @@ footer{flex-direction:column;gap:8px}
 
 
 .routing-note{padding-top:16px;border-top:1px solid var(--line);margin-bottom:16px}
+.definition-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 16px; padding: 20px; }
+.definition-grid textarea { min-height: 90px; }
+.live-log { min-height: 240px; max-height: 480px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+#live-console-panel .extension-inputs, #definition-form > .extension-inputs { padding: 16px 20px; }
+#live-console-panel input[type="checkbox"] { width: auto; }
