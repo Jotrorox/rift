@@ -96,6 +96,12 @@ fn normalize(value: &Path) -> io::Result<PathBuf> {
     let mut result = PathBuf::new();
     for component in std::path::absolute(value)?.components() {
         match component {
+            // A Windows prefix (C: or \\?\C:) is not a rooted path yet.
+            // Inspect it only after the following root component is appended.
+            Component::Prefix(_) => {
+                result.push(component.as_os_str());
+                continue;
+            }
             Component::CurDir => {}
             Component::ParentDir => {
                 result.pop();

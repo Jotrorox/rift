@@ -204,6 +204,12 @@ fn checked_path(path: &Path) -> io::Result<PathBuf> {
     let mut result = PathBuf::new();
     for component in absolute.components() {
         match component {
+            // A Windows prefix (C: or \\?\C:) is not a rooted path yet.
+            // Inspect it only after the following root component is appended.
+            Component::Prefix(_) => {
+                result.push(component.as_os_str());
+                continue;
+            }
             Component::CurDir => continue,
             Component::ParentDir => {
                 result.pop();
@@ -863,17 +869,30 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn special_files_are_rejected_in_templates_and_owned_properties() {
-        use std::os::unix::net::UnixListener;
         let fixture = Fixture::new("persistent");
-        let special = fixture.template("configs/socket");
-        let _socket = UnixListener::bind(&special).unwrap();
+        let special = fixture.template("configs/fifo");
+        // FIFOs exercise special-file rejection without Unix socket path limits
+        // in macOS's long temporary directory names.
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&special)
+                .status()
+                .unwrap()
+                .success()
+        );
         assert!(provision(&fixture.config, "games-1").is_err());
         assert!(!fixture.directory("games-1").exists());
         fs::remove_file(special).unwrap();
         provision(&fixture.config, "games-1").unwrap();
         let properties = fixture.directory("games-1").join("server.properties");
         fs::remove_file(&properties).unwrap();
-        let _properties_socket = UnixListener::bind(&properties).unwrap();
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&properties)
+                .status()
+                .unwrap()
+                .success()
+        );
         assert!(provision(&fixture.config, "games-1").is_err());
         assert!(
             fixture

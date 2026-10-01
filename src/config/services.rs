@@ -714,11 +714,13 @@ mod tests {
     #[test]
     fn parses_groups_without_instances_or_filesystem_effects() {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let directory = std::env::temp_dir().join(format!(
-            "rift-service-config-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        let directory = fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!(
+                "rift-service-config-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
         let source = group_source(
             "directory='servers/{name}', command={'java','-jar','/absolute/paper.jar','--port','{port}'}, port_range={25600,25602}, autostart=true, start_on_connect=false, idle_timeout_ms=123, start_timeout_ms=456, stop_timeout_ms=789, restart_delay_ms=321",
         );
