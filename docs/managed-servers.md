@@ -185,8 +185,15 @@ group lifecycle settings, storage or port ranges requires a restart.
 
 The authenticated web API exposes `GET /api/groups`,
 `POST /api/groups/{name}/instances` and `DELETE /api/instances/{name}`. Send an
-empty JSON object (`{}`) for both mutations. Creation returns HTTP `201` with the
-instance details, and completed removal returns HTTP `200`. Group listings
+empty JSON object (`{}`) for both mutations. Both return HTTP `202` with an
+`operation_id` and `poll` path. Poll `GET /api/operations/{id}` once per second
+until `status` is `succeeded` or `failed`. Success includes `result` with instance
+details or the removal outcome; failure includes `error` and `http_status`.
+Polling requires current `servers` permission and access to the operation's
+group, even after the instance is removed. Completed results remain available
+for 10 minutes and are lost on proxy restart. Tracking capacity exhaustion
+returns `503` without submitting work. See [HTTP services](http.md) for limits
+and response details. Group listings
 include names, port ranges, instance names, `template`, `storage` and `scaling`;
 server
 listings also include each instance's group, address, port, template and storage.

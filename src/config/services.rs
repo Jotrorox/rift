@@ -47,6 +47,9 @@ impl InstanceStorage {
 pub struct ServiceInstance {
     pub group: String,
     pub port: u16,
+    /// Ownership policy captured at creation and preserved across reloads.
+    pub template: Option<String>,
+    pub storage: InstanceStorage,
 }
 
 pub(super) fn parse(
@@ -496,6 +499,8 @@ impl Config {
             ServiceInstance {
                 group: group.into(),
                 port,
+                template: definition.template.clone(),
+                storage: definition.storage,
             },
         );
         candidate.validate()?;
@@ -749,7 +754,9 @@ mod tests {
             config.instances["lobby-2"],
             ServiceInstance {
                 group: "lobby".into(),
-                port: 25601
+                port: 25601,
+                template: None,
+                storage: InstanceStorage::Persistent,
             }
         );
         let server = &config.managed_servers["lobby-2"];

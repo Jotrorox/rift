@@ -11,7 +11,7 @@ use std::{
 
 use serde_json::{Value, json};
 
-use crate::config::{Config, InstanceStorage, ServiceGroup, ServiceInstance};
+use crate::config::{Config, InstanceStorage, ServiceInstance};
 
 const MARKER: &str = ".rift-instance.json";
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -28,9 +28,9 @@ pub fn provision(config: &Config, name: &str) -> io::Result<()> {
 }
 
 pub fn provision_tracked(config: &Config, name: &str) -> io::Result<Provisioned> {
-    let (instance, group, directory) = definition(config, name)?;
-    let Some(template_name) = &group.template else {
-        if group.storage == InstanceStorage::Disposable {
+    let (instance, directory) = definition(config, name)?;
+    let Some(template_name) = &instance.template else {
+        if instance.storage == InstanceStorage::Disposable {
             return Err(invalid("disposable instances require a template"));
         }
         fs::create_dir_all(&directory)?;
@@ -40,11 +40,11 @@ pub fn provision_tracked(config: &Config, name: &str) -> io::Result<Provisioned>
         });
     };
     if fs::symlink_metadata(&directory).is_ok() {
-        if group.storage != InstanceStorage::Persistent {
+        if instance.storage != InstanceStorage::Persistent {
             return Err(invalid("disposable instance directory already exists"));
         }
         let marker = read_marker(&directory)?;
-        verify_marker(&marker, instance, group, name)?;
+        verify_marker(&marker, instance, name)?;
         validate_tree(&directory, false)?;
         write_properties(&directory, instance.port)?;
         return Ok(Provisioned {
@@ -107,7 +107,7 @@ pub fn provision_tracked(config: &Config, name: &str) -> io::Result<Provisioned>
             "group": instance.group,
             "name": name,
             "template": template_name,
-            "storage": group.storage.as_str(),
+            "storage": instance.storage.as_str(),
             "generation": generation(),
         });
         fs::write(stage.join(MARKER), serde_json::to_vec_pretty(&marker)?)?;
@@ -130,20 +130,20 @@ pub fn provision_tracked(config: &Config, name: &str) -> io::Result<Provisioned>
 
 /// Preflight removal before changing runtime registration.
 pub fn validate_remove(config: &Config, name: &str) -> io::Result<()> {
-    let (instance, group, directory) = definition(config, name)?;
-    if group.storage == InstanceStorage::Persistent {
+    let (instance, directory) = definition(config, name)?;
+    if instance.storage == InstanceStorage::Persistent {
         return Ok(());
     }
     let marker = read_marker(&directory)?;
-    verify_marker(&marker, instance, group, name)?;
+    verify_marker(&marker, instance, name)?;
     validate_tree(&directory, false)
 }
 
 /// Remove disposable data only. The caller must first stop and reap the process.
 pub fn remove(config: &Config, name: &str) -> io::Result<()> {
     validate_remove(config, name)?;
-    let (_, group, directory) = definition(config, name)?;
-    if group.storage == InstanceStorage::Disposable {
+    let (instance, directory) = definition(config, name)?;
+    if instance.storage == InstanceStorage::Disposable {
         fs::remove_dir_all(directory)?;
     }
     Ok(())
@@ -154,7 +154,7 @@ pub fn rollback(config: &Config, name: &str, receipt: &Provisioned) -> io::Resul
     if !receipt.created {
         return Ok(());
     }
-    let (_, _, directory) = definition(config, name)?;
+    let (_, directory) = definition(config, name)?;
     if Some(read_marker(&directory)?) != receipt.marker {
         return Err(invalid("instance ownership changed; refusing rollback"));
     }
@@ -162,15 +162,12 @@ pub fn rollback(config: &Config, name: &str, receipt: &Provisioned) -> io::Resul
     fs::remove_dir_all(directory)
 }
 
-fn definition<'a>(
-    config: &'a Config,
-    name: &str,
-) -> io::Result<(&'a ServiceInstance, &'a ServiceGroup, PathBuf)> {
+fn definition<'a>(config: &'a Config, name: &str) -> io::Result<(&'a ServiceInstance, PathBuf)> {
     let instance = config
         .instances
         .get(name)
         .ok_or_else(|| invalid("unknown instance"))?;
-    let group = config
+    config
         .service_groups
         .get(&instance.group)
         .ok_or_else(|| invalid("unknown service group"))?;
@@ -190,7 +187,7 @@ fn definition<'a>(
             ));
         }
     }
-    Ok((instance, group, directory))
+    Ok((instance, directory))
 }
 
 fn invalid(message: impl Into<String>) -> io::Error {
@@ -337,17 +334,12 @@ fn read_marker(directory: &Path) -> io::Result<Value> {
         .map_err(|error| invalid(format!("invalid instance ownership marker: {error}")))
 }
 
-fn verify_marker(
-    marker: &Value,
-    instance: &ServiceInstance,
-    group: &ServiceGroup,
-    name: &str,
-) -> io::Result<()> {
+fn verify_marker(marker: &Value, instance: &ServiceInstance, name: &str) -> io::Result<()> {
     if marker.get("format") != Some(&json!(1))
         || marker.get("group") != Some(&json!(instance.group))
         || marker.get("name") != Some(&json!(name))
-        || marker.get("template") != Some(&json!(group.template))
-        || marker.get("storage") != Some(&json!(group.storage.as_str()))
+        || marker.get("template") != Some(&json!(instance.template))
+        || marker.get("storage") != Some(&json!(instance.storage.as_str()))
         || marker
             .get("generation")
             .and_then(Value::as_str)
@@ -456,6 +448,7 @@ mod tests {
     struct Fixture {
         root: PathBuf,
         config: Config,
+        source: String,
     }
     impl Fixture {
         fn new(storage: &str) -> Self {
@@ -479,7 +472,11 @@ mod tests {
             let mut config = Config::from_lua_at(&source, &root.join("rift.lua")).unwrap();
             config.add_instance("games", "games-1", 25600).unwrap();
             config.add_instance("games", "games-2", 25601).unwrap();
-            Self { root, config }
+            Self {
+                root,
+                config,
+                source,
+            }
         }
         fn directory(&self, name: &str) -> PathBuf {
             self.config.managed_servers[name].directory.clone()
@@ -574,6 +571,97 @@ mod tests {
         assert!(!first.exists());
         assert!(fixture.directory("games-2").exists());
         assert!(fixture.template("map/level.dat").exists());
+    }
+
+    #[test]
+    fn template_switch_preserves_ownership_and_removes_only_selected_instances() {
+        let fixture = Fixture::new("disposable");
+        provision(&fixture.config, "games-1").unwrap();
+        provision(&fixture.config, "games-2").unwrap();
+        let first = fixture.directory("games-1");
+        let original_marker = fs::read(first.join(MARKER)).unwrap();
+        let unrelated = fixture.root.join("instances/unrelated/precious");
+        fs::create_dir_all(unrelated.parent().unwrap()).unwrap();
+        fs::write(&unrelated, "keep").unwrap();
+        fs::write(fixture.template("other.jar"), "other server").unwrap();
+        // The original template can disappear from configuration after the switch.
+        let changed = fixture
+            .source
+            .replace("game={", "other={")
+            .replace("template='game'", "template='other'")
+            .replace("template/server.jar", "template/other.jar");
+        let mut reloaded = Config::from_lua_at_with_instances(
+            &changed,
+            &fixture.root.join("rift.lua"),
+            &fixture.config,
+        )
+        .unwrap();
+        assert_eq!(reloaded.instances, fixture.config.instances);
+        reloaded.add_instance("games", "games-3", 25602).unwrap();
+        provision(&reloaded, "games-3").unwrap();
+        let third = &reloaded.managed_servers["games-3"].directory;
+        assert_eq!(fs::read(first.join(MARKER)).unwrap(), original_marker);
+        assert_eq!(read_marker(&first).unwrap()["template"], "game");
+        assert_eq!(read_marker(third).unwrap()["template"], "other");
+        assert_eq!(fs::read(first.join("server.jar")).unwrap(), b"server bytes");
+        assert_eq!(fs::read(third.join("server.jar")).unwrap(), b"other server");
+        // A second reload must preserve both generations of ownership.
+        let reloaded =
+            Config::from_lua_at_with_instances(&changed, &fixture.root.join("rift.lua"), &reloaded)
+                .unwrap();
+        remove(&reloaded, "games-1").unwrap();
+        assert!(!first.exists());
+        assert!(third.exists());
+        remove(&reloaded, "games-3").unwrap();
+        assert!(!third.exists());
+        assert_eq!(fs::read_to_string(&unrelated).unwrap(), "keep");
+        assert_eq!(
+            fs::read(fixture.directory("games-2").join("server.jar")).unwrap(),
+            b"server bytes"
+        );
+        assert_eq!(
+            fs::read(fixture.template("server.jar")).unwrap(),
+            b"server bytes"
+        );
+        assert_eq!(
+            fs::read(fixture.template("other.jar")).unwrap(),
+            b"other server"
+        );
+    }
+
+    #[test]
+    fn persistent_instance_reuses_original_ownership_after_template_is_unset() {
+        let fixture = Fixture::new("persistent");
+        provision(&fixture.config, "games-1").unwrap();
+        let directory = fixture.directory("games-1");
+        let marker = fs::read(directory.join(MARKER)).unwrap();
+        fs::write(directory.join("world/level.dat"), "player progress").unwrap();
+        let changed = fixture.source.replace("template='game',", "");
+        let mut reloaded = Config::from_lua_at_with_instances(
+            &changed,
+            &fixture.root.join("rift.lua"),
+            &fixture.config,
+        )
+        .unwrap();
+        provision(&reloaded, "games-1").unwrap();
+        assert_eq!(fs::read(directory.join(MARKER)).unwrap(), marker);
+        remove(&reloaded, "games-1").unwrap();
+        assert_eq!(
+            fs::read_to_string(directory.join("world/level.dat")).unwrap(),
+            "player progress"
+        );
+        reloaded.add_instance("games", "games-3", 25602).unwrap();
+        provision(&reloaded, "games-3").unwrap();
+        assert!(reloaded.instances["games-3"].template.is_none());
+        assert!(
+            !reloaded.managed_servers["games-3"]
+                .directory
+                .join(MARKER)
+                .exists()
+        );
+        // Original ownership still requires a matching marker on reuse.
+        fs::write(directory.join(MARKER), "{}").unwrap();
+        assert!(provision(&reloaded, "games-1").is_err());
     }
 
     #[test]
@@ -716,6 +804,13 @@ mod tests {
             .get_mut("games")
             .unwrap()
             .template = None;
+        fixture.config.instances.clear();
+        fixture.config.backends.clear();
+        fixture.config.managed_servers.clear();
+        fixture
+            .config
+            .add_instance("games", "games-1", 25600)
+            .unwrap();
         let receipt = provision_tracked(&fixture.config, "games-1").unwrap();
         let directory = fixture.directory("games-1");
         fs::write(directory.join("existing"), "keep").unwrap();

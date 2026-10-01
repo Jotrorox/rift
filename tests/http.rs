@@ -171,6 +171,43 @@ impl Client {
         )
     }
 
+    // Resolve the asynchronous API to its operation result for existing
+    // lifecycle assertions. Tests of the wire contract use json() directly.
+    fn instance(&self, method: &str, path: &str, value: Value) -> Response {
+        let response = self.json(method, path, value);
+        if response.status != 202 {
+            return response;
+        }
+        let accepted = response.value();
+        let path = accepted["poll"].as_str().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(40);
+        loop {
+            let response = self.get(path).expect(200);
+            let operation = serde_json::from_str::<Value>(&response.body).unwrap();
+            match operation["status"].as_str().unwrap() {
+                "pending" => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "operation never completed: {operation}"
+                    );
+                    thread::sleep(Duration::from_millis(10));
+                }
+                "succeeded" | "failed" => {
+                    return Response {
+                        status: operation["http_status"].as_u64().unwrap() as u16,
+                        headers: response.headers,
+                        body: if operation["status"] == "succeeded" {
+                            operation["result"].to_string()
+                        } else {
+                            json!({"error":operation["error"]}).to_string()
+                        },
+                    };
+                }
+                other => panic!("unexpected operation status: {other}"),
+            }
+        }
+    }
+
     fn send(&self, method: &str, path: &str, headers: &[(&str, &str)], body: &str) -> Response {
         let mut stream = connect(self.address);
         let default_host = self.address.to_string();
@@ -541,7 +578,7 @@ fn service_instances_register_concurrently_reload_and_remove_without_proxy_resta
     assert!(!initial.to_string().contains("servers/"));
     let create = move || {
         admin
-            .json("POST", "/api/groups/lobby/instances", json!({}))
+            .instance("POST", "/api/groups/lobby/instances", json!({}))
             .expect(201)
             .value()
     };
@@ -559,13 +596,13 @@ fn service_instances_register_concurrently_reload_and_remove_without_proxy_resta
         );
     }
     admin
-        .json("POST", "/api/groups/lobby/instances", json!({}))
+        .instance("POST", "/api/groups/lobby/instances", json!({}))
         .expect(409);
     admin
-        .json("POST", "/api/groups/blocked/instances", json!({}))
+        .instance("POST", "/api/groups/blocked/instances", json!({}))
         .expect(409);
     admin
-        .json("POST", "/api/groups/missing/instances", json!({}))
+        .instance("POST", "/api/groups/missing/instances", json!({}))
         .expect(404);
     let servers = admin.get("/api/servers").expect(200).value();
     assert_eq!(servers["servers"].as_array().unwrap().len(), 2);
@@ -620,12 +657,12 @@ fn service_instances_register_concurrently_reload_and_remove_without_proxy_resta
         servers["servers"]
     );
     admin
-        .json("DELETE", "/api/instances/lobby-1", json!({}))
+        .instance("DELETE", "/api/instances/lobby-1", json!({}))
         .expect(409);
     save(admin, &source, &revision(admin)).expect(200);
     let name = first["name"].as_str().unwrap();
     let removed = admin
-        .json("DELETE", &format!("/api/instances/{name}"), json!({}))
+        .instance("DELETE", &format!("/api/instances/{name}"), json!({}))
         .expect(200)
         .value();
     assert_eq!(removed["name"], name);
@@ -639,6 +676,102 @@ fn service_instances_register_concurrently_reload_and_remove_without_proxy_resta
     );
     assert_eq!(process.child.id(), pid);
     assert!(process.child.try_wait().unwrap().is_none());
+}
+
+/// A real child process that takes longer than either HTTP deadline to stop.
+#[test]
+fn http_slow_removal_child() {
+    let Ok(properties) = fs::read_to_string("server.properties") else {
+        return;
+    };
+    let port = properties
+        .lines()
+        .find_map(|line| line.strip_prefix("server-port="))
+        .unwrap();
+    let _listener = TcpListener::bind(format!("127.0.0.1:{port}")).unwrap();
+    let mut command = String::new();
+    std::io::stdin().lock().read_line(&mut command).unwrap();
+    assert_eq!(command, "stop\n");
+    thread::sleep(Duration::from_secs(16));
+}
+
+#[test]
+fn instance_removal_outlasts_http_and_dashboard_deadlines() {
+    let fixture = Fixture::new();
+    let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = reservation.local_addr().unwrap().port();
+    let helper =
+        serde_json::to_string(&std::env::current_exe().unwrap().to_string_lossy()).unwrap();
+    fs::write(fixture.directory.join("helper.jar"), "test template").unwrap();
+    let source = fixture.source(&format!("token = '{TOKEN}',"), &format!(
+        "templates = {{ test = {{ server_jar = 'helper.jar' }} }},
+         service_groups = {{ lobby = {{ template = 'test', storage = 'disposable',
+         directory = 'servers/{{name}}', command = {{{helper}, '--exact', 'http_slow_removal_child', '--nocapture'}},
+         port_range = {{{port},{port}}}, start_timeout_ms = 5000, stop_timeout_ms = 30000 }} }},"
+    ));
+    drop(reservation);
+    let mut process = fixture.start(&source);
+    let admin = fixture.client().authenticated();
+    admin
+        .instance("POST", "/api/groups/lobby/instances", json!({}))
+        .expect(201);
+    admin
+        .json("POST", "/api/servers/lobby-1/start", json!({}))
+        .expect(202);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let servers = admin.get("/api/servers").expect(200).value();
+        if servers["servers"][0]["state"] == "running" {
+            break;
+        }
+        assert!(Instant::now() < deadline, "child did not start: {servers}");
+        thread::sleep(Duration::from_millis(20));
+    }
+    let started = Instant::now();
+    let response = admin
+        .json("DELETE", "/api/instances/lobby-1", json!({}))
+        .expect(202);
+    assert!(started.elapsed() < Duration::from_secs(3));
+    let accepted = serde_json::from_str::<Value>(&response.body).unwrap();
+    let path = accepted["poll"].as_str().unwrap();
+    assert!(response.headers.contains(&format!("location: {path}")));
+    assert_eq!(
+        path,
+        format!(
+            "/api/operations/{}",
+            accepted["operation_id"].as_str().unwrap()
+        )
+    );
+    fixture.client().get(path).expect(401);
+    // Each poll is a fresh HTTP connection with the usual short timeout.
+    while started.elapsed() < Duration::from_millis(15500) {
+        assert_eq!(admin.get(path).expect(200).value()["status"], "pending");
+        assert!(process.child.try_wait().unwrap().is_none());
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(admin.get(path).expect(200).value()["status"], "pending");
+    let operation = loop {
+        let operation = admin.get(path).expect(200).value();
+        if operation["status"] != "pending" {
+            break operation;
+        }
+        assert!(started.elapsed() < Duration::from_secs(25));
+        thread::sleep(Duration::from_millis(100));
+    };
+    assert!(started.elapsed() >= Duration::from_secs(16));
+    assert_eq!(operation["status"], "succeeded", "{operation}");
+    assert_eq!(operation["http_status"], 200);
+    assert_eq!(operation["result"]["removed"], true);
+    assert_eq!(operation["result"]["files_removed"], true);
+    assert!(!fixture.directory.join("servers/lobby-1").exists());
+    assert!(
+        admin.get("/api/servers").expect(200).value()["servers"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    // Result retrieval must keep working after removal changes the snapshot.
+    assert_eq!(admin.get(path).expect(200).value(), operation);
 }
 
 #[test]
@@ -1281,14 +1414,32 @@ fn named_operators_enforce_permissions_and_group_scope_and_record_denials() {
         staff.get(path).expect(403);
     }
     staff
-        .json("POST", "/api/groups/survival/instances", json!({}))
+        .instance("POST", "/api/groups/survival/instances", json!({}))
         .expect(403);
-    admin
+    let survival = admin
         .json("POST", "/api/groups/survival/instances", json!({}))
-        .expect(201);
-    staff
+        .expect(202)
+        .value();
+    let lobby = staff
         .json("POST", "/api/groups/lobby/instances", json!({}))
-        .expect(201);
+        .expect(202)
+        .value();
+    let lobby_path = lobby["poll"].as_str().unwrap();
+    let survival_path = survival["poll"].as_str().unwrap();
+    staff.get(survival_path).expect(403);
+    fixture.client().get(lobby_path).expect(401);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let lobby_result = staff.get(lobby_path).expect(200).value();
+        let survival_result = admin.get(survival_path).expect(200).value();
+        if lobby_result["status"] == "succeeded" && survival_result["status"] == "succeeded" {
+            break;
+        }
+        assert!(Instant::now() < deadline, "operations did not complete");
+        thread::sleep(Duration::from_millis(10));
+    }
+    staff.get(survival_path).expect(403);
+    admin.get("/api/operations/unknown").expect(404);
     let state = staff.get("/api/status").expect(200).value();
     assert_eq!(state["managed_servers"].as_array().unwrap().len(), 1);
     assert_eq!(state["service_groups"].as_array().unwrap().len(), 1);
@@ -1308,7 +1459,7 @@ fn named_operators_enforce_permissions_and_group_scope_and_record_denials() {
         )
         .expect(403);
     staff
-        .json("DELETE", "/api/instances/survival-1", json!({}))
+        .instance("DELETE", "/api/instances/survival-1", json!({}))
         .expect(403);
     let audit = staff.get("/api/audit").expect(200).value();
     assert!(
@@ -1336,14 +1487,47 @@ fn named_operators_enforce_permissions_and_group_scope_and_record_denials() {
         !audit.to_string().contains(OPERATOR_TOKEN)
             && !audit.to_string().contains("secret command")
     );
+    let removed = staff
+        .json("DELETE", "/api/instances/lobby-1", json!({}))
+        .expect(202)
+        .value();
+    let removal_path = removed["poll"].as_str().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let operation = staff.get(removal_path).expect(200).value();
+        if operation["status"] == "succeeded" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "removal did not complete: {operation}"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    // Authorization uses retained group metadata after the instance disappears.
+    assert!(
+        staff.get("/api/servers").expect(200).value()["servers"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    staff.get(removal_path).expect(200);
+    let rescoped = source.replace("groups = {'lobby'}", "groups = {'survival'}");
+    save(admin, &rescoped, &revision(admin)).expect(200);
+    staff.get(lobby_path).expect(403);
+    staff.get(removal_path).expect(403);
+    staff.get(survival_path).expect(200);
     let restricted = source.replace("'read','logs','servers','audit'", "'read'");
     save(admin, &restricted, &revision(admin)).expect(200);
+    staff.get(lobby_path).expect(403);
+    staff.get(removal_path).expect(403);
     staff
-        .json("POST", "/api/groups/lobby/instances", json!({}))
+        .instance("POST", "/api/groups/lobby/instances", json!({}))
         .expect(403);
     let renamed = restricted.replace(OPERATOR_TOKEN, "replacement-operator-token");
     save(admin, &renamed, &revision(admin)).expect(200);
     staff.get("/api/status").expect(401);
+    staff.get(lobby_path).expect(401);
 }
 
 #[test]
@@ -1477,7 +1661,7 @@ fn structured_definitions_preserve_lua_and_apply_safe_group_and_template_edits()
     assert!(fixture.read().contains(&source));
     assert_eq!(client.get("/ext/test").expect(200).body, "hook preserved");
     client
-        .json("POST", "/api/groups/lobby/instances", json!({}))
+        .instance("POST", "/api/groups/lobby/instances", json!({}))
         .expect(201);
     let before = revision(client);
     let mut changed = definition.clone();

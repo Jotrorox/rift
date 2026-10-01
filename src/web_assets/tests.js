@@ -38,7 +38,18 @@ async function testWebAssets(appSource, statusSource) {
   }
   async function flush() { for (let i = 0; i < 40; i += 1) await Promise.resolve(); }
   function fixture(script) {
-    const elements = new Map(), intervals = [], calls = [];
+    const elements = new Map(), intervals = [], calls = [], timers = new Map();
+    let timerId = 0, now = 0;
+    const schedule = (callback, delay) => { const id = ++timerId; timers.set(id, { callback, at: now + delay }); return id; };
+    const advance = async (delay) => {
+      const end = now + delay;
+      for (;;) {
+        const next = [...timers].filter(([, timer]) => timer.at <= end).sort((a, b) => a[1].at - b[1].at)[0];
+        if (!next) break;
+        now = next[1].at; timers.delete(next[0]); next[1].callback(); await flush();
+      }
+      now = end; await flush();
+    };
     const element = (id) => { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); };
     const document = { getElementById: element, createElement: (tag) => {
       const node = new Element();
@@ -83,8 +94,8 @@ async function testWebAssets(appSource, statusSource) {
     const evaluate = new Function("document", "window", "fetch", "Headers", "AbortController", "TextEncoder", "URL", "setTimeout", "clearTimeout", "setInterval", script);
     evaluate(document, window, fetch, TestHeaders, class { abort() {} },
       class { encode(value) { return { length: unescape(encodeURIComponent(value)).length }; } },
-      typeof URL === "undefined" ? TestURL : URL, () => 0, () => {}, (callback) => intervals.push(callback));
-    return { element, model, calls, window, intervals, response };
+      typeof URL === "undefined" ? TestURL : URL, schedule, (id) => timers.delete(id), (callback) => intervals.push(callback));
+    return { element, model, calls, window, intervals, response, advance };
   }
   async function test(name, callback) { await callback(); passed.push(name); }
 
@@ -170,6 +181,70 @@ async function testWebAssets(appSource, statusSource) {
     assert(h.element("server-result").textContent.includes("deleted"), "Disposable cleanup outcome missing");
     await h.element("managed-servers").children[1].children[8].children[2].emit("click"); await flush();
     assert(h.element("server-result").textContent.includes("remain on disk"), "Persistent retention outcome missing");
+  });
+  await test("dashboard polls a removal beyond 15 seconds and prevents duplicate submissions", async () => {
+    const h = fixture(appSource); await flush(); let complete = false;
+    h.model.status.managed_servers = [{ name: "arena-1", group: "arena", storage: "disposable", state: "running" }];
+    h.model.intercept = (path) => {
+      if (path === "/api/instances/arena-1") return h.response({ operation_id: "slow-removal", status: "pending" }, 202);
+      if (path === "/api/operations/slow-removal") return h.response(complete
+        ? { status: "succeeded", http_status: 200, result: { removed: true, files_removed: true } }
+        : { status: "pending" });
+    };
+    await h.element("refresh-status").emit("click"); await flush();
+    const remove = h.element("managed-servers").children[0].children[8].children[2];
+    await remove.emit("click"); await flush();
+    assert(h.element("server-result").textContent.includes("slow-removal"), "Pending operation ID missing");
+    await h.advance(16000);
+    assert(remove.disabled, "Removal controls were enabled before completion");
+    assert(!h.element("server-result").textContent.includes("timed out"), "Long operation hit the dashboard request timeout");
+    assert(h.calls.filter(({ path }) => path === "/api/operations/slow-removal").length >= 16, "Dashboard stopped polling");
+    await remove.emit("click"); await flush();
+    assert(h.calls.filter(({ options }) => options.method === "DELETE").length === 1, "Pending removal was duplicated");
+    complete = true; await h.advance(1000);
+    assert(h.element("server-result").textContent.includes("deleted"), "Completed removal outcome missing");
+    assert(!h.element("managed-servers").children[0].children[8].children[2].disabled, "Completion did not restore controls");
+  });
+  await test("asynchronous failures show their operation ID and preserve the configuration editor", async () => {
+    const h = fixture(appSource); await flush();
+    h.model.status.service_groups = [{ name: "arena", storage: "disposable" }];
+    h.model.intercept = (path) => {
+      if (path === "/api/groups/arena/instances") return h.response({ operation_id: "failed-create" }, 202);
+      if (path === "/api/operations/failed-create") return h.response({ status: "failed", http_status: 409, error: "No free ports" });
+    };
+    await h.element("refresh-status").emit("click"); await flush();
+    await h.element("service-groups").children[0].children[5].children[0].emit("click"); await flush();
+    assert(h.element("server-result").textContent.includes("failed-create failed: No free ports"), "Operation failure missing");
+    assert(h.element("server-result").className.includes("error"), "Failure presented as success");
+    assert(h.element("conflict").className.includes("hidden"), "Operation failure changed editor revision state");
+    assert(!h.element("service-groups").children[0].children[5].children[0].disabled, "Failure did not restore controls");
+  });
+  await test("polling denial or expiry explains the unresolved operation without claiming failure", async () => {
+    for (const status of [403, 404, 503]) {
+      const h = fixture(appSource); await flush();
+      h.model.status.service_groups = [{ name: "arena", storage: "disposable" }];
+      h.model.intercept = (path) => {
+        if (path === "/api/groups/arena/instances") return h.response({ operation_id: "unresolved" }, 202);
+        if (path === "/api/operations/unresolved") return h.response({ error: "Result unavailable" }, status);
+      };
+      await h.element("refresh-status").emit("click"); await flush();
+      await h.element("service-groups").children[0].children[5].children[0].emit("click"); await flush();
+      const message = h.element("server-result").textContent;
+      assert(message.includes("Result unavailable") && message.includes("/api/operations/unresolved") && message.includes("may still be running"), "Unresolved operation guidance missing");
+      if (status === 403) assert(h.element("auth-panel").open, "Polling denial did not expose token controls");
+    }
+  });
+  await test("asynchronous cleanup errors remain warnings", async () => {
+    const h = fixture(appSource); await flush();
+    h.model.status.managed_servers = [{ name: "arena-1", group: "arena", storage: "disposable", state: "stopped" }];
+    h.model.intercept = (path) => {
+      if (path === "/api/instances/arena-1") return h.response({ operation_id: "cleanup" }, 202);
+      if (path === "/api/operations/cleanup") return h.response({ status: "succeeded", result: { removed: true, files_removed: false, cleanup_error: "Directory is read-only" } });
+    };
+    await h.element("refresh-status").emit("click"); await flush();
+    await h.element("managed-servers").children[0].children[8].children[2].emit("click"); await flush();
+    assert(h.element("server-result").textContent.includes("read-only"), "Asynchronous cleanup error missing");
+    assert(h.element("server-result").className.includes("warning"), "Asynchronous cleanup error presented as success");
   });
   await test("occupied, reserved and removing instances disable removal", async () => {
     const h = fixture(appSource); await flush();

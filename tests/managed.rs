@@ -243,24 +243,165 @@ fn constructing_without_runtime_has_no_process_side_effects() {
     assert!(manager.launch().is_err());
 }
 
+fn assert_occupancy(manager: &ManagedServers, expected: &[(&str, usize)]) {
+    let snapshot = manager.snapshot();
+    let actual: Vec<_> = snapshot
+        .iter()
+        .map(|server| (server.name.as_str(), server.players))
+        .collect();
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn snapshot_occupancy_tracks_login_transfer_failure_and_disconnect() {
+    let mut fixture = Fixture::new(0, "normal");
+    let definition = fixture.config.managed_servers["default"].clone();
+    for name in ["empty", "survival"] {
+        fixture
+            .config
+            .managed_servers
+            .insert(name.into(), definition.clone());
+    }
+    let manager = ManagedServers::new(&fixture.config, fixture.players.clone());
+    let empty = [("default", 0), ("empty", 0), ("survival", 0)];
+    assert_occupancy(&manager, &empty);
+
+    let pending = fixture.players.reserve_name("Alice").unwrap();
+    assert_occupancy(&manager, &empty);
+    let alice = pending.register([1; 16], "default").unwrap();
+    let bob = fixture.players.register([2; 16], "Bob", "default").unwrap();
+    let _unmanaged = fixture
+        .players
+        .register([3; 16], "Carol", "Default")
+        .unwrap();
+    assert_occupancy(&manager, &[("default", 2), ("empty", 0), ("survival", 0)]);
+
+    // A rejected login must not replace the original player's occupancy.
+    let duplicate = fixture.players.reserve_name("Dave").unwrap();
+    assert!(duplicate.register([1; 16], "survival").is_err());
+    assert_occupancy(&manager, &[("default", 2), ("empty", 0), ("survival", 0)]);
+    let cancelled = fixture.players.reserve_name("Dave").unwrap();
+    drop(cancelled);
+    assert_occupancy(&manager, &[("default", 2), ("empty", 0), ("survival", 0)]);
+
+    let before_transfer = manager.snapshot();
+    alice.set_server("survival");
+    assert_eq!(before_transfer[0].players, 2);
+    assert_occupancy(&manager, &[("default", 1), ("empty", 0), ("survival", 1)]);
+    alice.set_server("survival");
+    assert_occupancy(&manager, &[("default", 1), ("empty", 0), ("survival", 1)]);
+    alice.set_server("unmanaged");
+    assert_occupancy(&manager, &[("default", 1), ("empty", 0), ("survival", 0)]);
+    alice.set_server("default");
+    drop(bob);
+    assert_occupancy(&manager, &[("default", 1), ("empty", 0), ("survival", 0)]);
+    drop(alice);
+    assert_occupancy(&manager, &empty);
+}
+
+#[tokio::test]
+async fn snapshot_occupancy_cleans_up_cancelled_logins_and_sessions() {
+    let fixture = Fixture::new(0, "normal");
+    let manager = fixture.manager();
+    for connected in [false, true] {
+        let players = fixture.players.clone();
+        let task_manager = manager.clone();
+        let (ready, receive) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let lease = task_manager.reserve("default").unwrap();
+            let pending = players.reserve_name("Alice").unwrap();
+            let _presence = if connected {
+                let player = pending.register([1; 16], "default").unwrap();
+                drop(lease);
+                Ok(player)
+            } else {
+                Err((pending, lease))
+            };
+            ready.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        receive.await.unwrap();
+        let snapshot = manager.snapshot();
+        assert_eq!(snapshot[0].players, usize::from(connected));
+        assert_eq!(snapshot[0].reservations, usize::from(!connected));
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_occupancy(&manager, &[("default", 0)]);
+        assert_eq!(manager.snapshot()[0].reservations, 0);
+        assert!(fixture.players.reserve_name("Alice").is_ok());
+    }
+    manager.shutdown().await;
+}
+
+#[test]
+fn snapshot_occupancy_is_consistent_during_concurrent_transfers() {
+    let mut fixture = Fixture::new(0, "normal");
+    let definition = fixture.config.managed_servers["default"].clone();
+    fixture
+        .config
+        .managed_servers
+        .insert("survival".into(), definition);
+    let manager = ManagedServers::new(&fixture.config, fixture.players.clone());
+    let player = fixture
+        .players
+        .register([1; 16], "Alice", "default")
+        .unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            barrier.wait();
+            while !stop.load(Ordering::Acquire) {
+                player.set_server("survival");
+                player.set_server("default");
+            }
+        });
+        barrier.wait();
+        // Stop the worker even if an assertion below unwinds.
+        struct StopOnDrop<'a>(&'a AtomicBool);
+        impl Drop for StopOnDrop<'_> {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+        let _stop = StopOnDrop(&stop);
+        for _ in 0..1000 {
+            let snapshot = manager.snapshot();
+            assert_eq!(
+                snapshot.iter().map(|server| server.players).sum::<usize>(),
+                1
+            );
+        }
+    });
+}
+
 #[tokio::test]
 async fn concurrent_demand_starts_once_and_manual_stop_requires_explicit_restart() {
-    let fixture = Fixture::new(150, "normal");
+    let fixture = Fixture::new(500, "normal");
     let manager = fixture.manager();
+    let barrier = Arc::new(tokio::sync::Barrier::new(75));
     let mut tasks = Vec::new();
-    for _ in 0..12 {
+    for _ in 0..75 {
         let manager = manager.clone();
+        let barrier = barrier.clone();
         tasks.push(tokio::spawn(async move {
-            let _lease = manager.reserve("default").unwrap();
+            let lease = manager.reserve("default").unwrap();
+            barrier.wait().await;
             manager.ensure_running("default").await.unwrap();
+            lease
         }));
     }
+    let mut leases = Vec::new();
     for task in tasks {
-        task.await.unwrap();
+        leases.push(task.await.unwrap());
     }
     assert_eq!(fixture.starts(), 1);
     assert_eq!(manager.snapshot()[0].state, "running");
     assert!(manager.snapshot()[0].pid.is_some());
+    assert_eq!(manager.snapshot()[0].reservations, 75);
+    assert!(manager.stop("default").await.is_err());
+    drop(leases);
+    assert_eq!(manager.snapshot()[0].reservations, 0);
     manager.stop("default").await.unwrap();
     assert!(fixture.directory.join("graceful-stop").exists());
     assert!(!manager.can_connect("default"));
@@ -274,6 +415,116 @@ async fn concurrent_demand_starts_once_and_manual_stop_requires_explicit_restart
     assert!(!manager.can_connect("default"));
     let log = fs::read_to_string(fixture.directory.join("rift-server.log")).unwrap();
     assert!(log.contains("helper stdout") && log.contains("helper stderr"));
+}
+
+#[tokio::test]
+async fn concurrent_demand_receives_the_same_startup_failure() {
+    let mut fixture = Fixture::new(10_000, "normal");
+    fixture.definition().start_timeout = Duration::from_millis(300);
+    fixture.definition().restart_retries = 0;
+    let manager = fixture.manager();
+    let barrier = Arc::new(tokio::sync::Barrier::new(75));
+    let mut tasks = Vec::new();
+    for _ in 0..75 {
+        let manager = manager.clone();
+        let barrier = barrier.clone();
+        tasks.push(tokio::spawn(async move {
+            let _lease = manager.reserve("default").unwrap();
+            barrier.wait().await;
+            manager.ensure_running("default").await.unwrap_err()
+        }));
+    }
+    for task in tasks {
+        let error = task.await.unwrap();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert_eq!(error.to_string(), "managed server startup timed out");
+    }
+    assert_eq!(fixture.starts(), 1);
+    assert_eq!(manager.snapshot()[0].reservations, 0);
+    assert!(manager.snapshot()[0].restart_exhausted);
+    assert!(manager.snapshot()[0].pid.is_none());
+    assert!(manager.ensure_running("default").await.is_err());
+    manager.shutdown().await;
+}
+
+#[tokio::test]
+async fn cancelling_demand_waiters_releases_leases_without_cancelling_startup() {
+    let fixture = Fixture::new(500, "normal");
+    let manager = fixture.manager();
+    let task_manager = manager.clone();
+    let waiter = tokio::spawn(async move {
+        let _lease = task_manager.reserve("default").unwrap();
+        task_manager.ensure_running("default").await
+    });
+    wait_file(&fixture.directory.join("starts")).await;
+    assert_eq!(manager.snapshot()[0].reservations, 1);
+    waiter.abort();
+    assert!(waiter.await.unwrap_err().is_cancelled());
+    assert_eq!(manager.snapshot()[0].reservations, 0);
+    // Even with every original waiter gone, a new login joins the owned start.
+    let lease = manager.reserve("default").unwrap();
+    manager.ensure_running("default").await.unwrap();
+    assert_eq!(fixture.starts(), 1);
+    drop(lease);
+    manager.shutdown().await;
+    assert!(fixture.directory.join("graceful-stop").exists());
+}
+
+#[tokio::test]
+async fn demand_joins_manual_and_autostart_failures() {
+    for autostart in [false, true] {
+        let mut fixture = Fixture::new(10_000, "normal");
+        fixture.definition().autostart = autostart;
+        fixture.definition().start_on_connect = false;
+        fixture.definition().start_timeout = Duration::from_millis(300);
+        fixture.definition().restart_retries = 0;
+        let manager = fixture.manager();
+        if !autostart {
+            manager.request_start("default").unwrap();
+        }
+        wait_file(&fixture.directory.join("starts")).await;
+        let error = manager.ensure_running("default").await.unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert_eq!(fixture.starts(), 1);
+        assert!(manager.snapshot()[0].restart_exhausted);
+        manager.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn stop_shutdown_and_removal_resolve_all_shared_demand_waiters() {
+    for action in ["stop", "shutdown", "remove"] {
+        let fixture = Fixture::new(10_000, "normal");
+        let manager = fixture.manager();
+        let mut tasks = Vec::new();
+        // Call without leases so administrator stop/removal can be admitted.
+        for _ in 0..75 {
+            let manager = manager.clone();
+            tasks.push(tokio::spawn(async move {
+                manager.ensure_running("default").await.unwrap_err()
+            }));
+        }
+        wait_file(&fixture.directory.join("starts")).await;
+        match action {
+            "stop" => manager.stop("default").await.unwrap(),
+            "remove" => manager.remove("default").await.unwrap(),
+            _ => manager.shutdown().await,
+        }
+        for task in tasks {
+            let error = tokio::time::timeout(Duration::from_secs(1), task)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::Interrupted,
+                "{action}: {error}"
+            );
+        }
+        assert_eq!(fixture.starts(), 1);
+        assert!(std::net::TcpStream::connect(fixture.address).is_err());
+        manager.shutdown().await;
+    }
 }
 
 #[tokio::test]

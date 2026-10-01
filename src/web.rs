@@ -1,4 +1,6 @@
 //! Axum control and observability services. Assets are embedded in the binary.
+mod operations;
+
 use crate::{admin, control, metrics::Metrics, operator, runtime::Snapshot};
 use axum::{
     Json, Router,
@@ -43,6 +45,7 @@ pub struct App {
     binding: Option<(Kind, SocketAddr)>,
     requests: Arc<Semaphore>,
     validations: Arc<Semaphore>,
+    operations: Arc<operations::Store>,
 }
 impl App {
     pub fn new(
@@ -100,6 +103,7 @@ impl App {
             binding: None,
             requests: Arc::new(Semaphore::new(64)),
             validations: Arc::new(Semaphore::new(4)),
+            operations: Arc::new(operations::Store::default()),
         })
     }
     fn snapshot(&self) -> Arc<Snapshot> {
@@ -333,6 +337,7 @@ fn router(kind: Kind, address: SocketAddr, mut app: App) -> Router {
             .route("/api/audit", get(audit_records))
             .route("/api/groups/{name}/instances", post(create_instance))
             .route("/api/instances/{name}", delete(remove_instance))
+            .route("/api/operations/{id}", get(instance_result))
             .route("/api/metrics", get(json_metrics))
             .route("/api/config", get(config_source).put(save_config))
             .route("/api/config/validate", post(validate_config))
@@ -363,14 +368,7 @@ async fn boundary(State(app): State<App>, request: Request, next: Next) -> Respo
             "HTTP request capacity exhausted",
         );
     };
-    let mut deadline = Duration::from_secs(10);
-    if request.method() == axum::http::Method::DELETE
-        && let Some(name) = request.uri().path().strip_prefix("/api/instances/")
-        && let Some(server) = app.snapshot().config.managed_servers.get(name)
-    {
-        deadline += server.stop_timeout;
-    }
-    let mut response = match timeout(deadline, next.run(request)).await {
+    let mut response = match timeout(Duration::from_secs(10), next.run(request)).await {
         Ok(response) => response,
         Err(_) => error(
             StatusCode::REQUEST_TIMEOUT,
@@ -571,7 +569,8 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
                 ["api", "servers", _, "console"] => "console",
                 ["api", "servers", _, _]
                 | ["api", "groups", _, "instances"]
-                | ["api", "instances", _] => "servers",
+                | ["api", "instances", _]
+                | ["api", "operations", _] => "servers",
                 ["api", "definitions", ..] | ["api", "config", ..] | ["api", "reload"] => "config",
                 ["api", "deployments", ..] => "deploy",
                 ["api", "audit"] => "audit",
@@ -932,6 +931,7 @@ async fn edit_definition(
 }
 async fn create_instance(
     State(app): State<App>,
+    Extension(access): Extension<Access>,
     Path(group): Path<String>,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
@@ -940,6 +940,10 @@ async fn create_instance(
     }
     instance_operation(
         app,
+        access,
+        Some(group.clone()),
+        "create_instance",
+        group.clone(),
         control::Operation::CreateInstance { group },
         StatusCode::CREATED,
     )
@@ -947,14 +951,25 @@ async fn create_instance(
 }
 async fn remove_instance(
     State(app): State<App>,
+    Extension(access): Extension<Access>,
     Path(name): Path<String>,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
     if let Err(error) = payload(body, &[]) {
         return error.into_response();
     }
+    let group = app
+        .snapshot()
+        .config
+        .instances
+        .get(&name)
+        .map(|instance| instance.group.clone());
     instance_operation(
         app,
+        access,
+        group,
+        "remove_instance",
+        name.clone(),
         control::Operation::RemoveInstance { name },
         StatusCode::OK,
     )
@@ -962,37 +977,72 @@ async fn remove_instance(
 }
 async fn instance_operation(
     app: App,
+    access: Access,
+    group: Option<String>,
+    action: &'static str,
+    target: String,
     operation: control::Operation,
     status: StatusCode,
 ) -> Response {
+    let id = match app.operations.reserve(group, action, &target) {
+        Ok(id) => id,
+        Err(failure) => return failure.into_response(),
+    };
     let (reply, result) = oneshot::channel();
     if app
         .commands
         .try_send(control::Command {
             operation,
             reply,
-            actor: "operator".into(),
+            actor: access.name.clone(),
         })
         .is_err()
     {
+        app.operations.discard(&id);
         return error(
             StatusCode::SERVICE_UNAVAILABLE,
             "instance operation queue unavailable or busy",
         );
     }
-    match result.await {
-        Ok(Ok(value)) => match serde_json::from_str::<Value>(&value) {
-            Ok(value) => (status, Json(value)).into_response(),
-            Err(_) => error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "invalid instance operation response",
-            ),
-        },
-        Ok(Err(failure)) => failure.into_response(),
-        Err(_) => error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "instance operation service stopped",
-        ),
+    let operation_id = id.clone();
+    tokio::spawn(async move {
+        let reply = result.await.unwrap_or_else(|_| {
+            Err(control::Error {
+                status: 503,
+                message: "instance operation service stopped".into(),
+            })
+        });
+        let (outcome, code) = match &reply {
+            Ok(_) => ("completed", status.as_u16()),
+            Err(error) => ("failed", error.status),
+        };
+        if let Err(error) = record_audit(&app, &access, action, &target, outcome, code).await {
+            eprintln!("rift: instance result audit failed: {error}");
+        }
+        app.operations
+            .complete(&operation_id, reply, status.as_u16());
+    });
+    let location = format!("/api/operations/{id}");
+    (
+        StatusCode::ACCEPTED,
+        [(header::LOCATION, location.clone())],
+        Json(json!({
+            "operation_id":id,"status":"pending","poll":location,
+        })),
+    )
+        .into_response()
+}
+
+async fn instance_result(
+    State(app): State<App>,
+    Extension(access): Extension<Access>,
+    Path(id): Path<String>,
+) -> Response {
+    match app.operations.get(&id, |group| {
+        access.groups.is_none() || group.is_some_and(|group| access.group(group))
+    }) {
+        Ok(value) => Json(value).into_response(),
+        Err(failure) => failure.into_response(),
     }
 }
 async fn start_server(
@@ -1075,7 +1125,7 @@ async fn standalone_metrics(state: State<App>) -> Response {
 }
 async fn discovery() -> Json<Value> {
     Json(
-        json!({"version":1,"endpoints":["GET /api/access","GET /api/status","GET /api/servers","POST /api/servers/{name}/start","POST /api/servers/{name}/stop","GET /api/servers/{name}/logs","POST /api/servers/{name}/console","GET /api/groups","POST /api/groups/{name}/instances","DELETE /api/instances/{name}","GET /api/definitions","PUT /api/definitions/{section}/{name}","GET /api/deployments","POST /api/deployments/{id}/rollback","GET /api/audit","GET /api/metrics","GET /api/config","POST /api/config/validate","PUT /api/config","POST /api/reload"],"extensions":"/ext/* -> on_http(request)","source_limit_bytes":control::MAX_SOURCE}),
+        json!({"version":1,"endpoints":["GET /api/access","GET /api/status","GET /api/servers","POST /api/servers/{name}/start","POST /api/servers/{name}/stop","GET /api/servers/{name}/logs","POST /api/servers/{name}/console","GET /api/groups","POST /api/groups/{name}/instances","DELETE /api/instances/{name}","GET /api/definitions","PUT /api/definitions/{section}/{name}","GET /api/deployments","POST /api/deployments/{id}/rollback","GET /api/audit","GET /api/operations/{id}","GET /api/metrics","GET /api/config","POST /api/config/validate","PUT /api/config","POST /api/reload"],"extensions":"/ext/* -> on_http(request)","source_limit_bytes":control::MAX_SOURCE}),
     )
 }
 async fn config_source(State(app): State<App>) -> Json<Value> {

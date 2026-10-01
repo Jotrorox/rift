@@ -1229,12 +1229,44 @@ async fn reconfigure(
     Ok((Arc::new(next), prepared))
 }
 
+type InstanceResult = Result<(Arc<Snapshot>, serde_json::Value), crate::control::Error>;
+
+/// Keep the transaction and its replies owned until completion, even after
+/// shutdown starts or the requesting client disconnects.
+struct InstanceChange {
+    task: JoinHandle<InstanceResult>,
+    reply: Option<tokio::sync::oneshot::Sender<crate::control::Reply>>,
+    admin_reply: Option<admin::Reply>,
+}
+
+impl InstanceChange {
+    fn respond(self, response: Result<serde_json::Value, crate::control::Error>) {
+        if self.reply.is_none()
+            && self.admin_reply.is_none()
+            && let Err(error) = &response
+        {
+            eprintln!("rift: automatic scaling failed: {}", error.message);
+        }
+        if let Some(reply) = self.admin_reply {
+            let _ = reply.send(
+                response
+                    .as_ref()
+                    .cloned()
+                    .map_err(|error| error.message.clone()),
+            );
+        }
+        if let Some(reply) = self.reply {
+            let _ = reply.send(response.map(|value| value.to_string()));
+        }
+    }
+}
+
 /// Serialized by the same control queue as configuration reloads. Build and
 /// validate a complete candidate before changing process ownership or routing.
 async fn change_instance(
     operation: crate::control::Operation,
     snapshot: &Arc<Snapshot>,
-) -> Result<(Arc<Snapshot>, serde_json::Value), crate::control::Error> {
+) -> InstanceResult {
     use crate::control::{Error, Operation};
     let mut config = snapshot.config.clone();
     let (name, creating, reservation) =
@@ -1533,17 +1565,52 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     let mut scaling_check = tokio::time::interval(Duration::from_millis(100));
     scaling_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut scaler = crate::scaling::Scaler::default();
+    let mut instance_change: Option<InstanceChange> = None;
+    let mut reload_pending = false;
     loop {
         let (operation, reply, admin_reply, actor) = tokio::select! {
             event = signals.next() => match event {
                 Event::Shutdown => break,
                 Event::Reload => {
                     if app.path.is_none() { eprintln!("rift: reload ignored: no configuration file selected"); continue; }
+                    if instance_change.is_some() { reload_pending = true; continue; }
                     (control::Operation::Reload, None, None, "signal".to_owned())
                 }
             },
-            Some(command) = requests.recv() => (command.operation, Some(command.reply), None, command.actor),
-            Some(command) = admin_requests.recv() => match command {
+            _ = std::future::ready(()), if reload_pending && instance_change.is_none() => {
+                reload_pending = false;
+                (control::Operation::Reload, None, None, "signal".to_owned())
+            }
+            result = async { (&mut instance_change.as_mut().unwrap().task).await }, if instance_change.is_some() => {
+                let change = instance_change.take().unwrap();
+                let result = result.unwrap_or_else(|error| Err(control::Error::invalid(error)));
+                let response = match result {
+                    Ok((next, response)) => {
+                        snapshot.health.retire();
+                        snapshot = next;
+                        snapshot.extensions.update_destinations(&snapshot.config);
+                        *snapshot.live.lock().unwrap() = Arc::downgrade(&snapshot);
+                        current.send_replace(snapshot.clone());
+                        if let Some(task) = health.take() {
+                            task.abort();
+                            let _ = task.await;
+                        }
+                        health = health_worker(
+                            snapshot.clone(),
+                            snapshot.addresses.clone(),
+                            metrics.clone(),
+                        );
+                        Ok(response)
+                    }
+                    Err(error) => Err(error),
+                };
+                change.respond(response);
+                continue;
+            }
+            // Leave later mutations in their bounded queues until this
+            // transaction has published its snapshot. Signals stay pollable.
+            Some(command) = requests.recv(), if instance_change.is_none() => (command.operation, Some(command.reply), None, command.actor),
+            Some(command) = admin_requests.recv(), if instance_change.is_none() => match command {
                 admin::Command::Reload(reply) => (control::Operation::Reload, None, Some(reply), "local-admin".to_owned()),
                 admin::Command::CreateInstance { group, reply } => (control::Operation::CreateInstance { group }, None, Some(reply), "local-admin".to_owned()),
                 admin::Command::RemoveInstance { name, reply } => (control::Operation::RemoveInstance { name }, None, Some(reply), "local-admin".to_owned()),
@@ -1557,7 +1624,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                 failure = Some(io::Error::other(format!("listener stopped unexpectedly: {result:?}")));
                 break;
             }
-            _ = scaling_check.tick() => {
+            _ = scaling_check.tick(), if instance_change.is_none() => {
                 match scaler.next(&snapshot, Instant::now()) {
                     Some(crate::scaling::Change::Instance(operation)) => (operation, None, None, "scaler".to_owned()),
                     Some(crate::scaling::Change::Start(name)) => {
@@ -1589,42 +1656,12 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
             operation,
             control::Operation::CreateInstance { .. } | control::Operation::RemoveInstance { .. }
         ) {
-            let response = match change_instance(operation, &snapshot).await {
-                Ok((next, response)) => {
-                    snapshot.health.retire();
-                    snapshot = next;
-                    snapshot.extensions.update_destinations(&snapshot.config);
-                    *snapshot.live.lock().unwrap() = Arc::downgrade(&snapshot);
-                    current.send_replace(snapshot.clone());
-                    if let Some(task) = health.take() {
-                        task.abort();
-                        let _ = task.await;
-                    }
-                    health = health_worker(
-                        snapshot.clone(),
-                        snapshot.addresses.clone(),
-                        metrics.clone(),
-                    );
-                    Ok(response)
-                }
-                Err(error) => {
-                    if reply.is_none() && admin_reply.is_none() {
-                        eprintln!("rift: automatic scaling failed: {}", error.message);
-                    }
-                    Err(error)
-                }
-            };
-            if let Some(reply) = admin_reply {
-                let _ = reply.send(
-                    response
-                        .as_ref()
-                        .cloned()
-                        .map_err(|error| error.message.clone()),
-                );
-            }
-            if let Some(reply) = reply {
-                let _ = reply.send(response.map(|value| value.to_string()));
-            }
+            let active = snapshot.clone();
+            instance_change = Some(InstanceChange {
+                task: tokio::spawn(async move { change_instance(operation, &active).await }),
+                reply,
+                admin_reply,
+            });
             continue;
         }
         let action = match &operation {
@@ -1720,7 +1757,6 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         }
     }
     // Stop accepting configuration commands before draining proxy sessions.
-    extension_jobs.shutdown().await;
     admin_requests.close();
     while let Ok(command) = admin_requests.try_recv() {
         match command {
@@ -1745,6 +1781,8 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         "rift.events.lifecycle",
         serde_json::json!({"state":"draining"}),
     );
+    eprintln!("rift: draining {} connections", metrics.active.get());
+    extension_jobs.shutdown().await;
     if let Some(task) = message_task {
         task.abort();
         let _ = task.await;
@@ -1757,7 +1795,6 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         task.abort();
         let _ = task.await;
     }
-    eprintln!("rift: draining {} connections", metrics.active.get());
     let drained = async { while tasks.join_next().await.is_some() {} };
     tokio::select! {
         result = timeout(snapshot.config.shutdown_timeout, drained) => {
@@ -1774,6 +1811,19 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     tasks.shutdown().await;
     background.shutdown().await;
     services.shutdown().await;
+    // Do not abort or detach an instance transaction: filesystem work and
+    // process retirement must finish. A newly registered child then belongs
+    // to the managed shutdown below, just like all existing children.
+    if let Some(mut change) = instance_change {
+        let result = (&mut change.task)
+            .await
+            .unwrap_or_else(|error| Err(control::Error::invalid(error)));
+        let response = result.map(|(next, response)| {
+            snapshot = next;
+            response
+        });
+        change.respond(response);
+    }
     snapshot.managed.shutdown().await;
     eprintln!("rift: shutdown complete");
     match failure {

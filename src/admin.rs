@@ -253,8 +253,8 @@ pub(crate) fn managed_servers(snapshot: &Snapshot) -> Value {
                 "automatic_enabled":server.automatic_enabled,
                 "restart_attempts":server.restart_attempts,"restart_exhausted":server.restart_exhausted,
                 "group":snapshot.config.instances.get(&server.name).map(|instance| &instance.group),
-                "template":snapshot.config.instances.get(&server.name).and_then(|instance| snapshot.config.service_groups.get(&instance.group)).and_then(|group| group.template.as_ref()),
-                "storage":snapshot.config.instances.get(&server.name).and_then(|instance| snapshot.config.service_groups.get(&instance.group)).map_or("persistent", |group| group.storage.as_str()),
+                "template":snapshot.config.instances.get(&server.name).and_then(|instance| instance.template.as_ref()),
+                "storage":snapshot.config.instances.get(&server.name).map_or("persistent", |instance| instance.storage.as_str()),
                 "address":snapshot.config.backends.get(&server.name).map(|backend| backend.address()),
                 "port":snapshot.config.backends.get(&server.name).and_then(|backend| backend.address().parse::<SocketAddr>().ok()).map(|address| address.port()),
             }))

@@ -161,18 +161,46 @@ def check(binary):
             operation("reload")
             existing = operation("create", "games")
             existing_dir = directory / "instances" / existing["name"]
+            original_marker = (existing_dir / ".rift-instance.json").read_bytes()
+            unrelated = directory / "instances/unrelated/precious.txt"
+            unrelated.parent.mkdir()
+            unrelated.write_bytes(b"unrelated data")
             (assets / "other.jar").write_bytes(b"updated server fixture")
             config.write_text(source.replace("assets/paper.jar", "assets/other.jar"))
+            operation("reload")
+            refreshed = operation("create", "games")
+            refreshed_dir = directory / "instances" / refreshed["name"]
+            assert (refreshed_dir / "server.jar").read_bytes() == b"updated server fixture"
+            assert json.loads((refreshed_dir / ".rift-instance.json").read_text())["template"] == "arena"
+            # Switching the group to a different named template also preserves ownership.
+            updated_source = source.replace(
+                "broken={server_jar=", "arena_b={server_jar='assets/other.jar'},broken={server_jar="
+            ).replace("template='arena',\n                    storage='disposable'",
+                      "template='arena_b',\n                    storage='disposable'")
+            config.write_text(updated_source)
             operation("reload")
             updated = operation("create", "games")
             updated_dir = directory / "instances" / updated["name"]
             assert (updated_dir / "server.jar").read_bytes() == b"updated server fixture"
             assert (existing_dir / "server.jar").read_bytes() == b"server fixture"
             assert existing["name"] in servers()
+            assert (existing_dir / ".rift-instance.json").read_bytes() == original_marker
+            assert json.loads(original_marker)["template"] == "arena"
+            assert json.loads((updated_dir / ".rift-instance.json").read_text())["template"] == "arena_b"
+            assert servers()[existing["name"]]["template"] == "arena"
+            assert servers()[updated["name"]]["template"] == "arena_b"
             assert (world_dir / "server.jar").read_bytes() == b"server fixture"
             assert (world_dir / "world/region/r.0.0.mca").read_bytes() == b"player progress"
             operation("remove", existing["name"])
+            assert not existing_dir.exists() and updated_dir.exists()
             operation("remove", updated["name"])
+            assert not updated_dir.exists()
+            assert refreshed_dir.exists()
+            operation("remove", refreshed["name"])
+            assert not refreshed_dir.exists()
+            assert unrelated.read_bytes() == b"unrelated data"
+            assert (assets / "paper.jar").read_bytes() == b"server fixture"
+            assert (assets / "other.jar").read_bytes() == b"updated server fixture"
             config.write_text(source)
             operation("reload")
             operation("shutdown")

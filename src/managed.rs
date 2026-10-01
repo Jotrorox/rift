@@ -17,7 +17,7 @@ use tokio::{
     io::AsyncWriteExt,
     net::TcpStream,
     process::{Child, Command},
-    sync::{Notify, mpsc, oneshot},
+    sync::{Notify, mpsc, oneshot, watch},
 };
 
 use crate::{
@@ -75,11 +75,58 @@ struct State {
     restart_attempts: usize,
     recover: bool,
     last_activity: Instant,
+    startup: Option<Arc<Startup>>,
+}
+
+/// One worker-owned result, retained for every caller even if a later start
+/// begins before an earlier caller wakes up. No caller owns the startup task.
+#[derive(Debug)]
+struct Startup {
+    result: watch::Sender<Option<Arc<io::Result<()>>>>,
+}
+
+impl Startup {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            result: watch::channel(None).0,
+        })
+    }
+
+    async fn wait(&self, server: &Server) -> io::Result<()> {
+        let mut receive = self.result.subscribe();
+        loop {
+            if let Some(result) = receive.borrow().as_ref() {
+                return copy_result(result);
+            }
+            tokio::select! {
+                changed = receive.changed() => {
+                    changed.map_err(|_| unavailable("managed server worker stopped"))?;
+                }
+                _ = server.sender.closed() => {
+                    return match receive.borrow().as_ref() {
+                        Some(result) => copy_result(result),
+                        None => Err(unavailable("managed server worker stopped")),
+                    };
+                }
+            }
+        }
+    }
+}
+
+fn copy_result(result: &io::Result<()>) -> io::Result<()> {
+    result.as_ref().map(|_| ()).map_err(|error| {
+        if let Some(code) = error.raw_os_error() {
+            io::Error::from_raw_os_error(code)
+        } else {
+            io::Error::new(error.kind(), error.to_string())
+        }
+    })
 }
 
 #[derive(Debug, Clone)]
 enum Action {
     Start { mode: StartMode },
+    Demand(Arc<Startup>),
     Stop,
     Console(String),
 }
@@ -215,7 +262,7 @@ impl ManagedServers {
                     "managed server is already retiring",
                 ));
             }
-            if state.reservations > 0 || player_count(&self.0.players, name) > 0 {
+            if state.reservations > 0 || self.0.players.count_on_server(name) > 0 {
                 return Err(io::Error::new(
                     io::ErrorKind::ResourceBusy,
                     "managed server has connected players or pending connections",
@@ -305,16 +352,42 @@ impl ManagedServers {
     }
 
     pub async fn ensure_running(&self, name: &str) -> io::Result<()> {
-        if !self.is_managed(name) {
-            return Ok(());
-        }
-        self.request(
-            name,
-            Action::Start {
-                mode: StartMode::Demand,
-            },
-        )
-        .await
+        let (startup, server) = {
+            let servers = self.0.servers.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(server) = servers.get(name) else {
+                if self
+                    .0
+                    .retired
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .contains(name)
+                {
+                    return Err(unavailable("managed server was removed"));
+                }
+                return Ok(());
+            };
+            self.check_running()?;
+            let mut state = server.state.lock().unwrap_or_else(|e| e.into_inner());
+            connect_allowed(server, &state)?;
+            let startup = if let Some(startup) = &state.startup {
+                startup.clone()
+            } else {
+                let startup = Startup::new();
+                // Only the first caller queues work. Publish under the same
+                // lock as admission so concurrent logins join this result.
+                send_request(
+                    server,
+                    Request {
+                        action: Action::Demand(startup.clone()),
+                        reply: None,
+                    },
+                )?;
+                state.startup = Some(startup.clone());
+                startup
+            };
+            (startup, server.clone())
+        };
+        startup.wait(&server).await
     }
 
     pub async fn start(&self, name: &str) -> io::Result<()> {
@@ -461,7 +534,7 @@ impl ManagedServers {
             automatic_start_allowed(server, &state)?;
         }
         if stopping {
-            if state.reservations > 0 || player_count(&self.0.players, name) > 0 {
+            if state.reservations > 0 || self.0.players.count_on_server(name) > 0 {
                 return Err(io::Error::new(
                     io::ErrorKind::ResourceBusy,
                     "managed server has connected players or pending connections",
@@ -474,18 +547,7 @@ impl ManagedServers {
                 ));
             }
         }
-        server
-            .sender
-            .try_send(Request { action, reply })
-            .map_err(|error| match error {
-                mpsc::error::TrySendError::Full(_) => io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    "managed server operation queue is full",
-                ),
-                mpsc::error::TrySendError::Closed(_) => {
-                    unavailable("managed server worker stopped")
-                }
-            })?;
+        send_request(server, Request { action, reply })?;
         if stopping {
             state.automatic = false;
             state.pending_stop = true;
@@ -497,6 +559,9 @@ impl ManagedServers {
     }
 
     pub fn snapshot(&self) -> Vec<ManagedServerSnapshot> {
+        // Read presence once so transfers cannot be counted on both backends
+        // (or neither) while this snapshot visits individual server states.
+        let counts = self.0.players.server_counts();
         self.0
             .servers
             .lock()
@@ -512,7 +577,7 @@ impl ManagedServers {
                         state.phase
                     },
                     pid: state.pid,
-                    players: player_count(&self.0.players, &server.name),
+                    players: counts.get(&server.name).copied().unwrap_or(0),
                     reservations: state.reservations,
                     automatic_start: state.automatic && server.config.start_on_connect,
                     automatic_enabled: state.automatic,
@@ -581,6 +646,7 @@ fn new_server(name: &str, config: ManagedServer, address: Option<SocketAddr>) ->
             restart_attempts: 0,
             recover: false,
             last_activity: Instant::now(),
+            startup: None,
         }),
     })
 }
@@ -603,12 +669,17 @@ fn unavailable(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::NotConnected, message)
 }
 
-fn player_count(players: &PlayerRegistry, name: &str) -> usize {
-    players
-        .snapshot()
-        .iter()
-        .filter(|player| player.server == name)
-        .count()
+fn send_request(server: &Server, request: Request) -> io::Result<()> {
+    server
+        .sender
+        .try_send(request)
+        .map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "managed server operation queue is full",
+            ),
+            mpsc::error::TrySendError::Closed(_) => unavailable("managed server worker stopped"),
+        })
 }
 
 fn connect_allowed(server: &Server, state: &State) -> io::Result<()> {
@@ -688,6 +759,16 @@ async fn worker(
                 let Some(request) = request else { break; };
                 let result = match request.action {
                     Action::Start { mode } => start_process(&server, &mut child, mode).await,
+                    Action::Demand(startup) => {
+                        let completed = startup.result.borrow().clone();
+                        if let Some(result) = completed {
+                            // Autostart or an earlier manual start may already
+                            // have satisfied this queued demand, even on failure.
+                            copy_result(&result)
+                        } else {
+                            start_process(&server, &mut child, StartMode::Demand).await
+                        }
+                    },
                     Action::Stop => {
                         let result = stop_process(&server, &mut child).await;
                         server.state.lock().unwrap_or_else(|e| e.into_inner()).pending_stop = false;
@@ -720,7 +801,7 @@ async fn worker(
                 }
                 let should_stop = {
                     let mut state = server.state.lock().unwrap_or_else(|e| e.into_inner());
-                    if state.reservations > 0 || player_count(&players, &server.name) > 0 {
+                    if state.reservations > 0 || players.count_on_server(&server.name) > 0 {
                         state.last_activity = Instant::now();
                         false
                     } else if state.phase == "running" && server.config.idle_timeout.is_some_and(|timeout| state.last_activity.elapsed() >= timeout) {
@@ -740,6 +821,13 @@ async fn worker(
     // Reject queued callers promptly instead of executing stale operations.
     requests.close();
     while let Some(request) = requests.recv().await {
+        if let Action::Demand(startup) = request.action {
+            finish_startup(
+                &server,
+                &startup,
+                Err(unavailable("managed servers are shutting down")),
+            );
+        }
         if let Some(reply) = request.reply {
             let _ = reply.send(Err(unavailable("managed servers are shutting down")));
         }
@@ -777,6 +865,34 @@ fn record_failure(server: &Server, error: String) {
 }
 
 async fn start_process(
+    server: &Server,
+    child: &mut Option<Child>,
+    mode: StartMode,
+) -> io::Result<()> {
+    let startup = {
+        let mut state = server.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.startup.get_or_insert_with(Startup::new).clone()
+    };
+    let result = start_process_inner(server, child, mode).await;
+    finish_startup(server, &startup, copy_result(&result));
+    result
+}
+
+fn finish_startup(server: &Server, startup: &Arc<Startup>, result: io::Result<()>) {
+    let mut state = server.state.lock().unwrap_or_else(|e| e.into_inner());
+    // A queued demand can outlive the start that completed it. Never replace
+    // that result or clear the shared result of a newer attempt.
+    if state
+        .startup
+        .as_ref()
+        .is_some_and(|current| Arc::ptr_eq(current, startup))
+    {
+        startup.result.send_replace(Some(Arc::new(result)));
+        state.startup = None;
+    }
+}
+
+async fn start_process_inner(
     server: &Server,
     child: &mut Option<Child>,
     mode: StartMode,

@@ -79,7 +79,7 @@
           : response.status === 404
             ? "The admin API is unavailable. Enable web.api in the Lua configuration, or check that this is the admin service address."
             : `Request failed (HTTP ${response.status}).`;
-        const error = new Error(response.status === 404 ? fallback : data.error || fallback);
+        const error = new Error(response.status === 404 && !path.startsWith("/api/operations/") ? fallback : data.error || fallback);
         error.status = response.status;
         throw error;
       }
@@ -474,10 +474,28 @@
     state.busy = true; state.mutation += 1; controls();
     text("server-result", `${action === "create" ? "Creating an instance in" : "Removing"} ${name}…`);
     $("server-result").className = "operation-result";
+    let operationId = "";
     try {
-      const outcome = await request(action === "create"
+      let outcome = await request(action === "create"
         ? `/api/groups/${encodeURIComponent(name)}/instances`
         : `/api/instances/${encodeURIComponent(name)}`, { method: action === "create" ? "POST" : "DELETE", body: "{}" });
+      if (outcome.operation_id) {
+        operationId = outcome.operation_id;
+        const path = `/api/operations/${encodeURIComponent(operationId)}`;
+        text("server-result", `${action === "create" ? "Creation" : "Removal"} in progress for ${name}. Operation ${operationId}; waiting for completion…`);
+        for (;;) {
+          const operation = await request(path);
+          if (operation.status === "succeeded") { outcome = operation.result; break; }
+          if (operation.status === "failed") {
+            const error = new Error(operation.error || "The instance operation failed.");
+            error.status = operation.http_status;
+            error.operationFailed = true;
+            throw error;
+          }
+          if (operation.status !== "pending") throw new Error("The server returned an invalid operation status.");
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
+      }
       const cleanupFailed = action === "remove" && Boolean(outcome.cleanup_error);
       text("server-result", action === "create"
         ? `Created ${outcome.name || "instance"} in ${name}. Check its state below; provisioned servers require your EULA acceptance and backend settings before starting.`
@@ -489,7 +507,11 @@
       await refreshStatus({ syncSource: false });
     } catch (error) {
       if (error.status === 401 || error.status === 403) $("auth-panel").open = true;
-      text("server-result", error.message || "The instance request failed.");
+      const message = error.message || "The instance request failed.";
+      text("server-result", operationId
+        ? error.operationFailed ? `Operation ${operationId} failed: ${message}`
+          : `Could not retrieve operation ${operationId}: ${message} It may still be running; check /api/operations/${encodeURIComponent(operationId)} before retrying.`
+        : message);
       $("server-result").className = "operation-result error";
     } finally { state.busy = false; controls(); }
   }

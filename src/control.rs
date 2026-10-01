@@ -59,6 +59,7 @@ pub fn live_compatible(config: &Config, previous: &Config) -> bool {
         && config.admin == previous.admin
         && config.messaging == previous.messaging
         && config.managed_servers == previous.managed_servers
+        && config.instances == previous.instances
         && previous
             .managed_servers
             .keys()

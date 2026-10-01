@@ -171,8 +171,9 @@ Errors use `{"error":"description"}`. `GET /api` provides endpoint discovery.
 | `POST /api/deployments/{id}/rollback` | Validate and restore a retained configuration with `{revision}` |
 | `GET /api/audit` | Latest operator records and durability flag |
 | `GET /api/groups` | `{groups: [...]}` with group names, inclusive port ranges, instance names, template and storage policy |
-| `POST /api/groups/{name}/instances` | Provision and register an instance with `{}`; returns `201` with instance details (autostart follows group policy) |
-| `DELETE /api/instances/{name}` | Stop and deregister an unused instance with `{}`; returns `200` with `{name, removed, files_removed}` after child cleanup |
+| `POST /api/groups/{name}/instances` | Submit provisioning with `{}`; returns `202` with `{operation_id, status: "pending", poll}` (autostart follows group policy) |
+| `DELETE /api/instances/{name}` | Submit removal of an unused instance with `{}`; returns `202` with `{operation_id, status: "pending", poll}` |
+| `GET /api/operations/{id}` | Retrieve instance operation state and its completed result; requires current `servers` permission and the operation's group scope |
 | `GET /api/metrics` | Counter values as JSON |
 | `GET /api/config` | `{source, revision, writable}` for the active configuration |
 | `POST /api/config/validate` | Validate `{source}` including live listener restrictions; does not save or bind sockets |
@@ -208,15 +209,35 @@ after acceptance appear in `last_error`. See [managed servers](managed-servers.m
 for configuration and shutdown behavior. Managed definitions and their backend
 addresses require a proxy restart; the configuration API cannot change them live.
 Service-group operations allocate loopback ports and register/remove instance
-backends without a proxy restart. Port exhaustion or an occupied instance
-returns `409`; unknown groups/instances return `404`. Instance registration
+backends without a proxy restart. Creation and removal return `202` promptly,
+with an operation ID and polling path (also in the `Location` header).
+Poll that path once per second using the same authorization header. A `200`
+poll response has `operation_id`, `operation`, `target` and `status`:
+`pending`, `succeeded` or `failed`. Successful operations include `result` with
+the instance details or removal outcome and `http_status` (`201` for creation,
+`200` for removal). Failed operations include `error` and `http_status`:
+port exhaustion or an occupied instance is `409`; unknown groups/instances
+are `404`. A failed operation is distinct from a failed polling request.
+Authentication, authorization, malformed bodies and queue/tracking capacity
+errors still reject the submission immediately.
+
+Tracking permits at most 32 pending operations and 256 total records;
+capacity exhaustion returns `503` without submitting work. Completed results
+are retained for 10 minutes, then polls return `404`. Records are in memory
+and do not survive proxy restarts. Pending operations retain their slots
+until completion, regardless of HTTP disconnections. Each poll checks current
+permissions and the group saved at submission, including after removal.
+The dashboard polls through long operations, displays operation failures and
+cleanup warnings, and identifies unresolved operations if polling fails.
+
+Instance registration
 survives configuration reloads and ends when the proxy restarts. Instance
-removal waits for its shutdown deadline. Persistent instances retain their world
+removal runs asynchronously through its shutdown deadline. Persistent instances retain their world
 and other files; disposable instances delete their generated directory after
 the child exits. Stop/start preserves files for both storage policies. Successful
 file deletion returns `files_removed: true`; persistent removal returns `false`.
 If deletion fails after the child is reaped, the backend is still removed and
-the response includes `files_removed: false` and `cleanup_error`; inspect the
+the operation result includes `files_removed: false` and `cleanup_error`; inspect the
 remaining directory. Failed provisioning does not register an instance.
 Template source assets are read-only inputs, and no EULA acceptance is generated.
 See [templates and storage](managed-servers.md#local-asset-templates) for asset

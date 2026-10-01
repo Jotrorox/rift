@@ -11,6 +11,7 @@ from pathlib import Path
 import socket
 import sys
 import tempfile
+import time
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -28,16 +29,29 @@ def child(port, name):
                 break
 
 
-def api(port, method, path):
+def api(port, method, path, wait=True):
     request = Request(f"http://127.0.0.1:{port}{path}", method=method,
                       data=None if method == "GET" else b"{}",
                       headers={"Authorization": f"Bearer {SECRET}",
                                "Content-Type": "application/json"})
     try:
         with urlopen(request, timeout=10) as response:
-            return response.status, json.load(response)
+            code, data = response.status, json.load(response)
     except HTTPError as response:
         return response.code, json.load(response)
+    if code == 202 and wait and "operation_id" in data:
+        deadline = time.monotonic() + 40
+        while True:
+            code, operation = api(port, "GET", data["poll"], wait=False)
+            assert code == 200, operation
+            if operation["status"] == "succeeded":
+                return operation["http_status"], operation["result"]
+            if operation["status"] == "failed":
+                return operation["http_status"], {"error": operation["error"]}
+            assert operation["status"] == "pending", operation
+            assert time.monotonic() < deadline, operation
+            time.sleep(0.05)
+    return code, data
 
 
 def available_range():

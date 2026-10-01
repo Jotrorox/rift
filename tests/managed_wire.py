@@ -11,6 +11,7 @@ import socket
 import struct
 import sys
 import tempfile
+from threading import Barrier
 import time
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -126,10 +127,18 @@ def check(binary):
                         client.__exit__()
                         raise
 
-                with ThreadPoolExecutor(max_workers=2) as pool:
-                    clients = list(pool.map(join, ("Alice", "Bob")))
+                barrier = Barrier(75)
+
+                def concurrent_join(index):
+                    barrier.wait(timeout=10)
+                    return join(f"Burst{index:02}")
+
+                with ThreadPoolExecutor(max_workers=75) as pool:
+                    clients = list(pool.map(concurrent_join, range(75)))
                 try:
+                    assert len(clients) == 75
                     assert len(starts()) == 1, starts()
+                    assert state()["players"] == 75, state()
                     current_pid = state()["pid"]
                     time.sleep(0.8)  # longer than idle timeout with active players
                     assert state()["state"] == "running", state()
