@@ -691,6 +691,7 @@ async fn validate_config(
                 || config.admin != snapshot.config.admin
                 || config.messaging != snapshot.config.messaging
                 || config.service_groups != snapshot.config.service_groups
+                || config.templates != snapshot.config.templates
                 || config
                     .managed_servers
                     .iter()
@@ -712,7 +713,7 @@ async fn validate_config(
             {
                 return error(
                     StatusCode::BAD_REQUEST,
-                    "listener names/addresses, admin, messaging, managed server and service group settings require a restart",
+                    "listener names/addresses, admin, messaging, templates, managed server and service group settings require a restart",
                 );
             }
             Json(json!({"valid":true,"message":"Configuration valid; socket availability is checked when applying."})).into_response()

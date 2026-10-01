@@ -100,7 +100,7 @@ async function testWebAssets(appSource, statusSource) {
     await h.element("refresh-status").emit("click"); await flush();
     const row = h.element("managed-servers").children[0];
     assert(row.children[0].textContent === "lobby west", "Managed server name missing");
-    const [start, stop] = row.children[5].children;
+    const [start, stop] = row.children[8].children;
     assert(!start.disabled && !stop.disabled, "Idle managed server controls unavailable");
     await start.emit("click"); await flush();
     const call = h.calls.find(({ path }) => path === "/api/servers/lobby%20west/start");
@@ -111,7 +111,7 @@ async function testWebAssets(appSource, statusSource) {
     const h = fixture(appSource); await flush();
     h.model.status.managed_servers = [{ name: "lobby", state: "running", players: 1, reservations: 0, automatic_start: true }];
     await h.element("refresh-status").emit("click"); await flush();
-    const [start, stop] = h.element("managed-servers").children[0].children[5].children;
+    const [start, stop] = h.element("managed-servers").children[0].children[8].children;
     assert(start.disabled && stop.disabled, "Occupied running server controls must be disabled");
   });
   await test("lifecycle conflicts do not mark the source editor stale", async () => {
@@ -119,9 +119,90 @@ async function testWebAssets(appSource, statusSource) {
     h.model.status.managed_servers = [{ name: "lobby", state: "running", players: 0, reservations: 0, automatic_start: true }];
     await h.element("refresh-status").emit("click"); await flush();
     h.model.intercept = (path) => path === "/api/servers/lobby/stop" ? h.response({ error: "Backend became occupied" }, 409) : undefined;
-    await h.element("managed-servers").children[0].children[5].children[1].emit("click"); await flush();
+    await h.element("managed-servers").children[0].children[8].children[1].emit("click"); await flush();
     assert(h.element("server-result").textContent.includes("occupied"), "Lifecycle error was not displayed");
     assert(h.element("conflict").className.includes("hidden"), "Lifecycle conflict incorrectly affected configuration revision");
+  });
+  await test("groups safely render template and storage and create instances with encoded names", async () => {
+    const h = fixture(appSource); await flush();
+    h.model.status.service_groups = [{ name: "arena west", port_range: [25600, 25610], storage: "disposable", template: "<script>arena</script>", instances: [] }];
+    h.model.intercept = (path) => path === "/api/groups/arena%20west/instances" ? h.response({ name: "arena-1", storage: "disposable" }, 201) : undefined;
+    await h.element("refresh-status").emit("click"); await flush();
+    const row = h.element("service-groups").children[0];
+    assert(row.children[2].textContent === "Disposable game", "Disposable group policy missing");
+    assert(row.children[3].textContent === "<script>arena</script>", "Template text was not preserved safely");
+    assert(row.children[1].textContent === "25600–25610", "Port range missing");
+    await row.children[5].children[0].emit("click"); await flush();
+    const call = h.calls.find(({ path }) => path === "/api/groups/arena%20west/instances");
+    assert(call && call.options.method === "POST" && call.options.body === "{}", "Instance creation request incorrect");
+    assert(h.element("server-result").textContent.includes("arena-1"), "Created instance name missing");
+    assert(h.element("server-result").textContent.includes("EULA"), "Provisioning prerequisite missing");
+  });
+  await test("instance removal distinguishes destructive games and persistent worlds", async () => {
+    const h = fixture(appSource); await flush();
+    h.model.status.managed_servers = [
+      { name: "game west", group: "arena", address: "127.0.0.1:25600", template: "arena", storage: "disposable", state: "stopped" },
+      { name: "survival-1", group: "survival", storage: "persistent", state: "stopped" },
+      { name: "static", group: null, storage: "persistent", state: "stopped" },
+    ];
+    h.model.intercept = (path) => path.startsWith("/api/instances/") ? h.response({ removed: true, files_removed: path.includes("game") }) : undefined;
+    await h.element("refresh-status").emit("click"); await flush();
+    const rows = h.element("managed-servers").children;
+    assert(rows[0].children[4].textContent === "Disposable game", "Disposable policy missing");
+    assert(rows[1].children[4].textContent === "Persistent world", "Persistent policy missing");
+    assert(rows[0].children[5].textContent === "arena", "Instance template missing");
+    assert(rows[0].children[8].children[2].textContent === "Remove & delete files", "Destructive removal label missing");
+    assert(rows[1].children[8].children[2].textContent === "Remove · keep files", "Persistent removal label missing");
+    assert(rows[2].children[8].children.length === 2, "Static managed servers must not expose dynamic removal");
+    await rows[0].children[8].children[2].emit("click"); await flush();
+    const call = h.calls.find(({ path }) => path === "/api/instances/game%20west");
+    assert(call && call.options.method === "DELETE" && call.options.body === "{}", "Instance removal request incorrect");
+    assert(h.element("server-result").textContent.includes("deleted"), "Disposable cleanup outcome missing");
+    await h.element("managed-servers").children[1].children[8].children[2].emit("click"); await flush();
+    assert(h.element("server-result").textContent.includes("remain on disk"), "Persistent retention outcome missing");
+  });
+  await test("occupied, reserved and removing instances disable removal", async () => {
+    const h = fixture(appSource); await flush();
+    h.model.status.managed_servers = [
+      { name: "occupied", group: "games", state: "running", players: 1 },
+      { name: "reserved", group: "games", state: "running", reservations: 1 },
+      { name: "removing", group: "games", state: "removing" },
+      { name: "stopping", group: "games", state: "stopping" },
+    ];
+    await h.element("refresh-status").emit("click"); await flush();
+    for (const row of h.element("managed-servers").children) {
+      const remove = row.children[8].children[2];
+      assert(remove.disabled, "Unsafe instance removal enabled");
+      await remove.emit("click"); await flush();
+    }
+    assert(!h.calls.some(({ options }) => options.method === "DELETE"), "Disabled removal submitted a request");
+  });
+  await test("provisioning busy state prevents duplicate requests and restores controls", async () => {
+    const h = fixture(appSource); await flush(); let release;
+    h.model.status.service_groups = [{ name: "arena", port_range: [25600, 25610], storage: "disposable", template: "arena" }];
+    h.model.intercept = (path) => path === "/api/groups/arena/instances" ? new Promise((resolve) => { release = resolve; }) : undefined;
+    await h.element("refresh-status").emit("click"); await flush();
+    const create = h.element("service-groups").children[0].children[5].children[0];
+    await create.emit("click"); await flush();
+    assert(create.disabled, "Pending creation control remains enabled");
+    await create.emit("click"); await flush();
+    assert(h.calls.filter(({ path }) => path === "/api/groups/arena/instances").length === 1, "Duplicate provisioning request");
+    release(h.response({ name: "arena-1" }, 201)); await flush();
+    assert(!h.element("service-groups").children[0].children[5].children[0].disabled, "Creation controls were not restored");
+  });
+  await test("removal cleanup failures warn without claiming files deleted or changing editor revision", async () => {
+    const h = fixture(appSource); await flush();
+    h.model.status.managed_servers = [{ name: "arena-1", group: "arena", storage: "disposable", state: "stopped" }];
+    h.model.intercept = (path) => path === "/api/instances/arena-1" ? h.response({ removed: true, files_removed: false, cleanup_error: "Directory is read-only" }) : undefined;
+    await h.element("refresh-status").emit("click"); await flush();
+    await h.element("managed-servers").children[0].children[8].children[2].emit("click"); await flush();
+    assert(h.element("server-result").textContent.includes("read-only"), "Cleanup error missing");
+    assert(h.element("server-result").className.includes("warning"), "Incomplete cleanup presented as success");
+    assert(!h.element("server-result").textContent.includes("deleted"), "Failed cleanup claimed deletion");
+    h.model.intercept = (path) => path === "/api/instances/arena-1" ? h.response({ error: "Instance became occupied" }, 409) : undefined;
+    await h.element("managed-servers").children[0].children[8].children[2].emit("click"); await flush();
+    assert(h.element("server-result").textContent.includes("occupied"), "Removal conflict missing");
+    assert(h.element("conflict").className.includes("hidden"), "Removal conflict changed editor revision state");
   });
   await test("clean editor synchronizes external source changes", async () => {
     const h = fixture(appSource); await flush();

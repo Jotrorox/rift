@@ -136,10 +136,26 @@
       td.append(span);
     });
     state.serverButtons = [];
-    table("managed-servers", status.managed_servers || [], 6, (tr, server) => {
+    table("service-groups", status.service_groups || [], 6, (tr, group) => {
+      cell(tr, group.name);
+      cell(tr, (group.port_range || []).join("–"));
+      cell(tr, group.storage === "disposable" ? "Disposable game" : "Persistent world");
+      cell(tr, group.template || "Prepared directories");
+      cell(tr, (group.instances || []).join(", ") || "None created");
+      const actions = cell(tr, ""), button = document.createElement("button");
+      button.type = "button"; button.className = "button secondary"; button.textContent = "Create instance";
+      button.setAttribute("aria-label", `Create instance in ${group.name}`);
+      state.serverButtons.push({ button, unavailable: false });
+      button.addEventListener("click", () => { if (!button.disabled) instanceOperation(group.name, "create", group.storage); });
+      actions.append(button);
+    });
+    table("managed-servers", status.managed_servers || [], 9, (tr, server) => {
       cell(tr, server.name); cell(tr, server.state);
       cell(tr, `${count(server.players)} players · ${count(server.reservations)} attachments`);
       cell(tr, server.automatic_start ? "Enabled" : "Disabled");
+      cell(tr, server.storage === "disposable" ? "Disposable game" : "Persistent world");
+      cell(tr, server.template || "Prepared directory");
+      cell(tr, server.group ? `${server.group} · ${server.address}` : server.address, "address");
       cell(tr, server.last_error || "—");
       const actions = cell(tr, ""); actions.className = "action-group";
       for (const action of ["start", "stop"]) {
@@ -148,10 +164,21 @@
         button.textContent = action === "start" ? "Start" : "Stop";
         button.setAttribute("aria-label", `${button.textContent} ${server.name}`);
         const unavailable = action === "start"
-          ? server.state === "starting" || server.state === "running" || server.state === "stopping"
-          : number(server.players) > 0 || number(server.reservations) > 0 || server.state === "stopping" || (server.state === "stopped" && !server.automatic_start);
+          ? ["starting", "running", "stopping", "removing"].includes(server.state)
+          : number(server.players) > 0 || number(server.reservations) > 0 || ["stopping", "removing"].includes(server.state) || (server.state === "stopped" && !server.automatic_start);
         state.serverButtons.push({ button, unavailable });
         button.addEventListener("click", () => serverOperation(server.name, action));
+        actions.append(button);
+      }
+      if (server.group) {
+        const button = document.createElement("button");
+        button.type = "button"; button.className = "button subtle";
+        button.textContent = server.storage === "disposable" ? "Remove & delete files" : "Remove · keep files";
+        button.setAttribute("aria-label", `${button.textContent}: ${server.name}`);
+        button.title = server.storage === "disposable" ? "Stops the instance and permanently deletes its generated directory, including the world." : "Stops and unregisters the instance; its world and server files remain on disk.";
+        const unavailable = number(server.players) > 0 || number(server.reservations) > 0 || ["stopping", "removing"].includes(server.state);
+        state.serverButtons.push({ button, unavailable });
+        button.addEventListener("click", () => { if (!button.disabled) instanceOperation(server.name, "remove", server.storage); });
         actions.append(button);
       }
     });
@@ -289,6 +316,30 @@
     } catch (error) {
       if (error.status === 401 || error.status === 403) $("auth-panel").open = true;
       text("server-result", error.message || "The server request failed.");
+      $("server-result").className = "operation-result error";
+    } finally { state.busy = false; controls(); }
+  }
+  async function instanceOperation(name, action, storage) {
+    if (state.busy) return;
+    state.busy = true; state.mutation += 1; controls();
+    text("server-result", `${action === "create" ? "Creating an instance in" : "Removing"} ${name}…`);
+    $("server-result").className = "operation-result";
+    try {
+      const outcome = await request(action === "create"
+        ? `/api/groups/${encodeURIComponent(name)}/instances`
+        : `/api/instances/${encodeURIComponent(name)}`, { method: action === "create" ? "POST" : "DELETE", body: "{}" });
+      const cleanupFailed = action === "remove" && Boolean(outcome.cleanup_error);
+      text("server-result", action === "create"
+        ? `Created ${outcome.name || "instance"} in ${name}. Check its state below; provisioned servers require your EULA acceptance and backend settings before starting.`
+        : cleanupFailed ? `Removed ${name}, but file cleanup failed: ${outcome.cleanup_error}`
+          : storage === "disposable"
+            ? outcome.files_removed === true ? `Removed ${name} and deleted its instance files, including its world.` : `Removed ${name}. Instance files were not deleted; inspect the directory before reuse.`
+            : `Removed ${name}. Its persistent world and server files remain on disk.`);
+      $("server-result").className = `operation-result ${cleanupFailed || (action === "remove" && storage === "disposable" && outcome.files_removed !== true) ? "warning" : "success"}`;
+      await refreshStatus({ syncSource: false });
+    } catch (error) {
+      if (error.status === 401 || error.status === 403) $("auth-panel").open = true;
+      text("server-result", error.message || "The instance request failed.");
       $("server-result").className = "operation-result error";
     } finally { state.busy = false; controls(); }
   }

@@ -155,6 +155,8 @@ jobs:
         run: python tests/managed_wire.py --binary target/release/rift
       - name: Verify dynamic service groups
         run: python tests/services_wire.py --binary target/release/rift
+      - name: Verify templates and instance storage
+        run: python tests/provisioning_wire.py --binary target/release/rift
       - name: Verify BungeeCord plugin-message compatibility
         run: python tests/bungeecord_wire.py --binary target/release/rift
       - name: Stage and smoke-test executable
@@ -264,6 +266,11 @@ jobs:
         run: >-
           python tests/managed_minecraft.py --accept-eula
           --binary target/release/rift --server paper
+      - name: Verify persistent and disposable Paper template instances
+        if: matrix.server == 'paper' && matrix.compression == 'enabled'
+        run: |
+          python tests/managed_minecraft.py --accept-eula --binary target/release/rift --server paper --template-storage persistent
+          python tests/managed_minecraft.py --accept-eula --binary target/release/rift --server paper --template-storage disposable
       - name: Save verified server download
         if: >-
           steps.server-cache.outputs.cache-hit != 'true' && matrix.compression == 'enabled' &&

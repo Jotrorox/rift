@@ -251,6 +251,8 @@ pub(crate) fn managed_servers(snapshot: &Snapshot) -> Value {
                 "players":server.players,"reservations":server.reservations,
                 "automatic_start":server.automatic_start,"last_error":server.last_error,
                 "group":snapshot.config.instances.get(&server.name).map(|instance| &instance.group),
+                "template":snapshot.config.instances.get(&server.name).and_then(|instance| snapshot.config.service_groups.get(&instance.group)).and_then(|group| group.template.as_ref()),
+                "storage":snapshot.config.instances.get(&server.name).and_then(|instance| snapshot.config.service_groups.get(&instance.group)).map_or("persistent", |group| group.storage.as_str()),
                 "address":snapshot.config.backends.get(&server.name).map(|backend| backend.address()),
                 "port":snapshot.config.backends.get(&server.name).and_then(|backend| backend.address().parse::<SocketAddr>().ok()).map(|address| address.port()),
             }))
@@ -263,6 +265,8 @@ pub(crate) fn service_groups(snapshot: &Snapshot) -> Value {
     json!({"groups":snapshot.config.service_groups.iter().map(|(name, group)| {
         json!({
             "name":name,
+            "template":group.template,
+            "storage":group.storage.as_str(),
             "port_range":[group.port_start,group.port_end],
             "instances":snapshot.config.instances.iter()
                 .filter(|(_, instance)| instance.group == *name)

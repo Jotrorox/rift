@@ -4,7 +4,8 @@ Run `rift --config examples/admin.lua`, then open <http://127.0.0.1:8080>.
 The admin website shows listeners, backends, routes and live counters, edits the
 complete Lua source, validates changes, saves and applies them, and reloads edits
 made on disk. Its managed servers panel reports lifecycle state and requests
-server starts and stops. The status website runs separately at <http://127.0.0.1:9090>.
+server starts and stops, creates instances from service groups, and removes
+instances with explicit file retention/deletion labels. The status website runs separately at <http://127.0.0.1:9090>.
 The dashboard assets are embedded in the binary; no Node installation or
 separate frontend server is needed at runtime.
 
@@ -15,7 +16,7 @@ environment-provided secret and explicit operation permissions; see the
 on distinct ports. `admin.permissions` do not govern HTTP requests: the web
 credential grants the enabled HTTP API capabilities, including configuration
 editing and managed server lifecycle operations. Changes to the operational
-`admin`, `managed_servers` or `service_groups` definitions require restart;
+`admin`, `managed_servers`, `templates` or `service_groups` definitions require restart;
 instances can be created and removed through the API while Rift runs.
 
 ## Configuration
@@ -107,13 +108,13 @@ Errors use `{"error":"description"}`. `GET /api` provides endpoint discovery.
 
 | Method and path | Purpose |
 | --- | --- |
-| `GET /api/status` | Runtime version, uptime, revision, actual listeners, backends, health, managed server state, routes, fallbacks, limits, counters and enabled services |
+| `GET /api/status` | Runtime version, uptime, revision, actual listeners, backends, health, managed server state, service groups, routes, fallbacks, limits, counters and enabled services |
 | `GET /api/servers` | `{servers: [...]}` with managed server lifecycle state and usage |
 | `POST /api/servers/{name}/start` | Request a managed server start with `{}`; returns `202` when accepted |
 | `POST /api/servers/{name}/stop` | Request an unused managed server stop and pause automatic wake with `{}`; returns `202` when accepted |
-| `GET /api/groups` | `{groups: [...]}` with group names, inclusive port ranges and instance names |
-| `POST /api/groups/{name}/instances` | Allocate and register a stopped instance with `{}`; returns `201` with `{name, group, port, address, created}` |
-| `DELETE /api/instances/{name}` | Stop and deregister an unused instance with `{}`; returns `200` with `{name, removed}` after child cleanup |
+| `GET /api/groups` | `{groups: [...]}` with group names, inclusive port ranges, instance names, template and storage policy |
+| `POST /api/groups/{name}/instances` | Provision and register an instance with `{}`; returns `201` with instance details (autostart follows group policy) |
+| `DELETE /api/instances/{name}` | Stop and deregister an unused instance with `{}`; returns `200` with `{name, removed, files_removed}` after child cleanup |
 | `GET /api/metrics` | Counter values as JSON |
 | `GET /api/config` | `{source, revision, writable}` for the active configuration |
 | `POST /api/config/validate` | Validate `{source}` including live listener restrictions; does not save or bind sockets |
@@ -126,7 +127,10 @@ Managed lifecycle requests return promptly; acceptance does not mean startup or
 shutdown has completed. Poll `GET /api/servers` for `state`, `pid`, `players`,
 `reservations`, `automatic_start` and `last_error`. The same array is available
 as `managed_servers` on authenticated `/api/status`. Listings include `address`,
-`port`, and `group` (`null` for static servers). Commands, arguments and
+`port`, `group` (`null` for static servers), `template` (`null` without one),
+and `storage` (`persistent` or `disposable`; static managed servers are
+`persistent`). Authenticated `/api/status` also includes `service_groups` with
+the same objects as `/api/groups`. Commands, arguments and
 working directories are omitted. The public `/status` and Lua HTTP context omit
 managed lifecycle details entirely. Authenticated `/api/config` still contains
 the complete trusted configuration source.
@@ -145,7 +149,16 @@ Service-group operations allocate loopback ports and register/remove instance
 backends without a proxy restart. Port exhaustion or an occupied instance
 returns `409`; unknown groups/instances return `404`. Instance registration
 survives configuration reloads and ends when the proxy restarts. Instance
-removal waits for its shutdown deadline and leaves its files on disk.
+removal waits for its shutdown deadline. Persistent instances retain their world
+and other files; disposable instances delete their generated directory after
+the child exits. Stop/start preserves files for both storage policies. Successful
+file deletion returns `files_removed: true`; persistent removal returns `false`.
+If deletion fails after the child is reaped, the backend is still removed and
+the response includes `files_removed: false` and `cleanup_error`; inspect the
+remaining directory. Failed provisioning does not register an instance.
+Template source assets are read-only inputs, and no EULA acceptance is generated.
+See [templates and storage](managed-servers.md#local-asset-templates) for asset
+layout and persistent directory reuse across proxy restarts.
 
 Configuration saves preserve the source exactly, including comments, functions,
 computed values and formatting. The source is the single editable configuration;

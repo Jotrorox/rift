@@ -15,11 +15,13 @@ pub use crate::message_script::MessageScript;
 pub use crate::{http_script::HttpScript, script::RouteScript};
 pub use managed::ManagedServer;
 pub use messaging::{MessagingConfig, MessagingPrincipal, MessagingStream, MessagingSubscription};
-pub use services::{ServiceGroup, ServiceInstance};
+pub use services::{InstanceStorage, ServiceGroup, ServiceInstance};
+pub use templates::ServerTemplate;
 
 mod managed;
 mod messaging;
 mod services;
+mod templates;
 
 // Configuration evaluation includes cold VM setup and can be descheduled on
 // busy hosts. Keep it bounded without applying the latency-sensitive callback
@@ -31,6 +33,7 @@ pub struct Config {
     pub listeners: BTreeMap<String, SocketAddr>,
     pub backends: BTreeMap<String, Backend>,
     pub managed_servers: BTreeMap<String, ManagedServer>,
+    pub templates: BTreeMap<String, ServerTemplate>,
     pub service_groups: BTreeMap<String, ServiceGroup>,
     pub instances: BTreeMap<String, ServiceInstance>,
     pub routes: BTreeMap<String, Route>,
@@ -231,6 +234,7 @@ impl Config {
             listeners: BTreeMap::from([("default".into(), address(listen, "listen")?)]),
             backends: BTreeMap::from([("default".into(), Backend::parse(backend)?)]),
             managed_servers: BTreeMap::new(),
+            templates: BTreeMap::new(),
             service_groups: BTreeMap::new(),
             instances: BTreeMap::new(),
             routes: BTreeMap::from([("default".into(), Route::Direct("default".into()))]),
@@ -334,6 +338,7 @@ impl Config {
                     "listeners",
                     "backends",
                     "managed_servers",
+                    "templates",
                     "service_groups",
                     "routes",
                     "limits",
@@ -373,6 +378,7 @@ impl Config {
                 })
                 .collect::<Result<_, _>>()?;
             let managed_servers = managed::parse(&root, directory)?;
+            let templates = templates::parse(&root, directory)?;
             let service_groups = services::parse(&_lua, &root, directory)?;
             let routes = routes(root.get("routes").map_err(|e| e.to_string())?)?;
             let mut limits = Limits::default();
@@ -572,6 +578,7 @@ impl Config {
                 listeners,
                 backends,
                 managed_servers,
+                templates,
                 service_groups,
                 instances: BTreeMap::new(),
                 routes,
@@ -612,6 +619,7 @@ impl Config {
     pub fn validate(&self) -> io::Result<()> {
         services::validate(self).map_err(invalid)?;
         managed::validate(&self.managed_servers, &self.backends).map_err(invalid)?;
+        templates::validate(self).map_err(invalid)?;
         if let Some(extensions) = &self.extensions {
             if !self.authentication.online_mode {
                 return Err(invalid("extensions requires authentication.online_mode"));

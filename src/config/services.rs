@@ -4,8 +4,28 @@ use super::*;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceGroup {
     pub server: ManagedServer,
+    pub template: Option<String>,
+    pub storage: InstanceStorage,
     pub port_start: u16,
     pub port_end: u16,
+}
+
+/// Persistent worlds retain their data when their process or instance stops.
+/// Disposable game instances own a fresh copy of their template assets.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum InstanceStorage {
+    #[default]
+    Persistent,
+    Disposable,
+}
+
+impl InstanceStorage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Persistent => "persistent",
+            Self::Disposable => "disposable",
+        }
+    }
 }
 
 /// Runtime metadata; instance definitions cannot be supplied by Lua configuration.
@@ -26,11 +46,35 @@ pub(super) fn parse(
     let managed_root = lua.create_table().map_err(|e| e.to_string())?;
     let definitions = lua.create_table().map_err(|e| e.to_string())?;
     let mut ranges = BTreeMap::new();
+    let mut policies = BTreeMap::new();
     for pair in values.pairs::<Value, Value>() {
         let (name, value) = pair.map_err(|e| e.to_string())?;
         let name = string(name, "service_groups key")?;
         let path = format!("service_groups.{name}");
         let value = table(value, &path)?;
+        let template = match value
+            .raw_get::<Value>("template")
+            .map_err(|e| e.to_string())?
+        {
+            Value::Nil => None,
+            value => Some(string(value, &format!("{path}.template"))?),
+        };
+        let storage = match value
+            .raw_get::<Value>("storage")
+            .map_err(|e| e.to_string())?
+        {
+            Value::Nil => InstanceStorage::Persistent,
+            value => match string(value, &format!("{path}.storage"))?.as_str() {
+                "persistent" => InstanceStorage::Persistent,
+                "disposable" => InstanceStorage::Disposable,
+                _ => {
+                    return Err(format!(
+                        "{path}.storage: expected 'persistent' or 'disposable'"
+                    ));
+                }
+            },
+        };
+        policies.insert(name.clone(), (template, storage));
         let directory = string(
             value.raw_get("directory").map_err(|e| e.to_string())?,
             &format!("{path}.directory"),
@@ -76,10 +120,12 @@ pub(super) fn parse(
         let definition = lua.create_table().map_err(|e| e.to_string())?;
         for pair in value.pairs::<Value, Value>() {
             let (key, field) = pair.map_err(|e| e.to_string())?;
-            if key
-                .as_string()
-                .is_some_and(|key| key.as_bytes().as_ref() == b"port_range")
-            {
+            if key.as_string().is_some_and(|key| {
+                matches!(
+                    key.as_bytes().as_ref(),
+                    b"port_range" | b"template" | b"storage"
+                )
+            }) {
                 continue;
             }
             definition.raw_set(key, field).map_err(|e| e.to_string())?;
@@ -96,10 +142,13 @@ pub(super) fn parse(
         .into_iter()
         .map(|(name, server)| {
             let (port_start, port_end) = ranges[&name];
+            let (template, storage) = policies.remove(&name).unwrap();
             (
                 name,
                 ServiceGroup {
                     server,
+                    template,
+                    storage,
                     port_start,
                     port_end,
                 },
@@ -127,7 +176,12 @@ fn valid_instance_name(group: &str, name: &str) -> bool {
             })
 }
 
-fn render(group: &str, name: &str, port: u16, definition: &ManagedServer) -> ManagedServer {
+pub(super) fn render(
+    group: &str,
+    name: &str,
+    port: u16,
+    definition: &ManagedServer,
+) -> ManagedServer {
     let substitute = |value: &str| {
         value
             .replace("{name}", name)
@@ -150,6 +204,15 @@ pub(super) fn validate(config: &Config) -> Result<(), String> {
     }
     for (name, group) in &config.service_groups {
         let path = format!("service_groups.{name}");
+        if let Some(template) = &group.template {
+            if !config.templates.contains_key(template) {
+                return Err(format!("{path}.template: unknown template {template:?}"));
+            }
+        } else if group.storage == InstanceStorage::Disposable {
+            return Err(format!(
+                "{path}.storage: disposable instances require a template"
+            ));
+        }
         if !safe_name(name) || name.len() > 107 {
             return Err(format!(
                 "{path}: names must contain 1..=107 ASCII letters, digits, underscores or hyphens"

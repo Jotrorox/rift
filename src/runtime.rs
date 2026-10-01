@@ -1198,6 +1198,7 @@ async fn reconfigure(
         || candidate.config.admin != snapshot.config.admin
         || candidate.config.messaging != snapshot.config.messaging
         || candidate.config.service_groups != snapshot.config.service_groups
+        || candidate.config.templates != snapshot.config.templates
         || candidate
             .config
             .managed_servers
@@ -1222,7 +1223,7 @@ async fn reconfigure(
             != snapshot.config.extensions.as_ref().map(|e| &e.queues)
     {
         return Err(Error::invalid(
-            "listener names/addresses, admin, messaging, managed server definitions/addresses, extension enablement and queue capacities require a restart",
+            "listener names/addresses, admin, messaging, templates, service groups, managed server definitions/addresses, extension enablement and queue capacities require a restart",
         ));
     }
     let prepared = services.prepare(&candidate.config).await?;
@@ -1339,20 +1340,61 @@ async fn change_instance(
     next.service_addresses = snapshot.service_addresses.clone();
     next.addresses = snapshot.addresses.clone();
     let response = if creating {
-        let directory = next.config.managed_servers[&name].directory.clone();
-        tokio::task::spawn_blocking(move || std::fs::create_dir_all(directory))
-            .await
-            .map_err(Error::invalid)??;
+        let provisioning_config = next.config.clone();
+        let provisioning_name = name.clone();
+        let receipt = tokio::task::spawn_blocking(move || {
+            rift::provisioning::provision_tracked(&provisioning_config, &provisioning_name)
+        })
+        .await
+        .map_err(Error::invalid)??;
         drop(reservation);
-        next.managed.add(&next.config, &name)?;
+        if let Err(error) = next.managed.add(&next.config, &name) {
+            let provisioning_config = next.config.clone();
+            let provisioning_name = name.clone();
+            let cleanup = tokio::task::spawn_blocking(move || {
+                rift::provisioning::rollback(&provisioning_config, &provisioning_name, &receipt)
+            })
+            .await
+            .map_err(Error::invalid)?;
+            if let Err(cleanup_error) = cleanup {
+                return Err(Error::conflict(format!(
+                    "instance registration failed: {error}; provisioning rollback failed: {cleanup_error}"
+                )));
+            }
+            return Err(error.into());
+        }
         let instance = &next.config.instances[&name];
-        serde_json::json!({"name":name,"group":instance.group,"port":instance.port,"address":next.config.backends[&name].address(),"created":true})
+        let group = &next.config.service_groups[&instance.group];
+        serde_json::json!({"name":name,"group":instance.group,"port":instance.port,"address":next.config.backends[&name].address(),"template":group.template,"storage":group.storage.as_str(),"created":true})
     } else {
+        let provisioning_config = snapshot.config.clone();
+        let provisioning_name = name.clone();
+        tokio::task::spawn_blocking(move || {
+            rift::provisioning::validate_remove(&provisioning_config, &provisioning_name)
+        })
+        .await
+        .map_err(Error::invalid)?
+        .map_err(|error| Error::conflict(error.to_string()))?;
         next.managed.remove(&name).await.map_err(|error| Error {
             status: 409,
             message: error.to_string(),
         })?;
-        serde_json::json!({"name":name,"removed":true})
+        let instance = &snapshot.config.instances[&name];
+        let group = &snapshot.config.service_groups[&instance.group];
+        let provisioning_config = snapshot.config.clone();
+        let provisioning_name = name.clone();
+        let cleanup = tokio::task::spawn_blocking(move || {
+            rift::provisioning::remove(&provisioning_config, &provisioning_name)
+        })
+        .await;
+        // Process ownership has ended. Publish deregistration even if a filesystem
+        // error leaves files behind, and make that cleanup failure visible.
+        let cleanup_error = match cleanup {
+            Ok(Ok(())) => None,
+            Ok(Err(error)) => Some(error.to_string()),
+            Err(error) => Some(error.to_string()),
+        };
+        serde_json::json!({"name":name,"removed":true,"storage":group.storage.as_str(),"files_removed":group.storage == rift::config::InstanceStorage::Disposable && cleanup_error.is_none(),"cleanup_error":cleanup_error})
     };
     Ok((Arc::new(next), response))
 }

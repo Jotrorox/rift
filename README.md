@@ -7,11 +7,13 @@ installation is needed to run Rift.
 
 Rift can also supervise local Minecraft servers: start them on demand, stop
 empty servers, and operate their lifecycle from the CLI or web dashboard. Define
-a service group once, then create `lobby-1`, `lobby-2` and more instances with
-allocated ports and live backend registration. See the
-the [managed-server guide](docs/managed-servers.md) and
-[example](examples/managed.lua) and [service groups](examples/services.lua). Managed Minecraft processes need their own Java
-runtime and prepared server directories.
+local templates from server jars, plugins, configs and maps, then create instances
+with allocated ports and live backend registration. Persistent worlds retain
+files after removal; disposable game instances delete their generated files on
+removal. Both retain files across stop/start. See the
+[managed-server guide](docs/managed-servers.md), [managed-server example](examples/managed.lua),
+[service groups](examples/services.lua) and [provisioning templates](examples/templates.lua).
+Managed Minecraft processes need their own Java runtime and explicit EULA acceptance.
 
 ## Quick start
 

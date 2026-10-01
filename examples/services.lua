@@ -1,5 +1,6 @@
 -- Run: rift check examples/services.lua
--- Prepare examples/servers/lobby-1, lobby-2, etc. with EULA/config/plugins first.
+-- Prepared-directory group: accept EULA and configure plugins/backend before start.
+-- For asset copying and disposable games, see examples/templates.lua.
 -- Replace /absolute/paper.jar and configure authentication/forwarding on Paper.
 local config = require("rift.config")
 config.listeners = { public = "0.0.0.0:25565" }
@@ -9,6 +10,7 @@ config.service_groups.lobby = {
     directory = "servers/{name}",
     command = { "java", "-Xms512M", "-Xmx1G", "-jar", "/absolute/paper.jar", "--port", "{port}", "nogui" },
     port_range = { 25600, 25700 },
+    storage = "persistent", -- Removal retains world and server files.
     start_on_connect = true,
     idle_timeout_ms = 5 * 60 * 1000,
     start_timeout_ms = 120000,

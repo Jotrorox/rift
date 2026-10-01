@@ -10,6 +10,7 @@ pub mod message_script;
 pub mod messaging;
 pub mod players;
 pub mod protocol;
+pub mod provisioning;
 pub mod routing;
 mod script;
 pub mod session;

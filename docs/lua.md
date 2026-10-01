@@ -16,17 +16,25 @@ rift.plugin("greeting")
 
 `rift` is a global, like Neovim's `vim`; `local rift = require("rift")` returns
 that same API. `rift.config` contains the existing configuration fields, with
-empty `listeners`, `backends`, `managed_servers`, `service_groups`, `routes` and
+empty `listeners`, `backends`, `managed_servers`, `service_groups`, `templates`, `routes` and
 `limits` tables ready to edit. Other
 sections are optional; assign them before editing their fields. All existing
 schema, authentication, permission and reload checks still apply. Bare globals
 such as `listeners = ...` are ordinary Lua variables, not configuration fields.
 
-Use `rift.config.service_groups` to define a reusable managed-server template
-and port range, then create named instances through the running proxy's admin
-or HTTP API. Routes can target the group to spread logins across its instances.
-See [service groups](managed-servers.md#service-groups-and-dynamic-instances)
-and the [example](../examples/services.lua).
+Use `rift.config.templates` to describe local provisioning assets: `server_jar`,
+optional `plugins` jar paths, a `configs` directory and a `map` directory. These
+Minecraft server assets are separate from Rift's Lua modules and folder plugins.
+Use `rift.config.service_groups` for lifecycle commands, a port range, an optional
+named `template`, and a `storage` policy (`persistent` by default, or `disposable`
+for games whose generated directory should be deleted on removal). Disposable
+groups require a template. Routes can target the group to spread logins across
+its runtime instances. Asset paths resolve relative to the configuration file.
+Template and group definitions require a restart to change; creating/removing
+instances works live. Provisioning never accepts the Minecraft EULA automatically.
+See [service groups](managed-servers.md#service-groups-and-dynamic-instances),
+[asset templates](managed-servers.md#local-asset-templates) and the
+[provisioning example](../examples/templates.lua).
 
 `rift.setup({ ... })` assigns top-level configuration fields. It replaces each
 supplied field, without recursively merging nested tables. You can call it more

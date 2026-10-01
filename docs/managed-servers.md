@@ -1,11 +1,13 @@
 # Managed Minecraft servers
 
 Rift can start local Minecraft server processes when players need them and stop
-them after they become empty. It supervises one persistent directory and one
-process per named backend on the same host. Service groups also create and remove
-named instances with allocated ports while the proxy stays running. Rift does
-not provision remote machines, download server jars, clone directories or manage
-containers.
+them after they become empty. It supervises one directory and one process per
+named backend on the same host. Service groups create and remove named instances
+with allocated ports while the proxy stays running. Local asset templates copy
+server jars, plugins, configs and maps into new instance directories. Persistent
+worlds retain their files after removal; disposable game instances delete their
+generated files after removal. Rift does not provision remote machines, download
+server jars or manage containers.
 
 Start with [examples/managed.lua](../examples/managed.lua). Its lobby starts with
 Rift; survival starts on demand and stops after five empty minutes. Players use
@@ -22,8 +24,10 @@ server directory for each backend. Place the server jar, plugins and
 configuration there, accept the Minecraft EULA where required, and make sure the
 account running Rift can read and write the directory. Static managed servers
 use directories you prepare; service-group creation can create its instance
-directory. Rift never deletes these directories. Worlds and other server files
-survive process restarts.
+directory. Static managed servers and persistent service-group instances retain
+worlds and other files across process restarts and removal. Disposable
+service-group instances retain files across stop/start, then delete their
+generated directory on explicit removal.
 
 The example expects `examples/servers/lobby/paper.jar` and
 `examples/servers/survival/paper.jar`. For lobby, set these properties:
@@ -49,7 +53,8 @@ rift --config examples/managed.lua
 
 `rift check` validates configuration without starting any process or creating
 server files. It does not verify that Java, a jar or a missing directory is
-available. A missing or invalid executable/directory becomes a visible startup
+available. Template configuration checks are structural; actual asset copying
+happens during instance creation. A missing or invalid executable/directory becomes a visible startup
 failure when the server is requested.
 
 ## Configuration
@@ -104,7 +109,7 @@ directory.
 
 ## Service groups and dynamic instances
 
-Define a process template once under `service_groups` and route to its group:
+Define lifecycle settings once under `service_groups` and route to its group:
 
 ```lua
 local config = require("rift.config")
@@ -114,6 +119,7 @@ config.service_groups.lobby = {
     directory = "servers/{name}",
     command = { "java", "-jar", "/absolute/paper.jar", "--port", "{port}" },
     port_range = { 25600, 25700 },
+    storage = "persistent",
     start_on_connect = true,
     idle_timeout_ms = 300000,
 }
@@ -121,14 +127,25 @@ config.routes.public = "lobby"
 ```
 
 Groups accept the managed-server lifecycle fields above plus an inclusive
-`port_range`. The directory must contain `{name}` to isolate instance data.
-`{name}`, `{group}` and `{port}` expand in the directory and command
-arguments for each instance. A directory such as `servers/{name}` gives every
-instance its own persistent world. Creation makes the instance directory when
-needed. Prepare its EULA acceptance, plugins and backend settings before
-starting the process; group creation does not copy or delete server files.
-Use an absolute jar path if the jar is shared across directories.
-See [examples/services.lua](../examples/services.lua) for a complete configuration.
+`port_range`, an optional `template` name and a `storage` policy. The directory
+must contain `{name}` to isolate instance data. `{name}`, `{group}` and `{port}`
+expand in the directory and command arguments for each instance.
+
+Without an asset template, creation makes a working directory when needed;
+prepare its jar, EULA acceptance, plugins and backend settings before starting.
+An absolute jar path can share a jar across these directories. This existing
+prepared-directory mode uses persistent storage. See
+[examples/services.lua](../examples/services.lua).
+
+| Storage | Stop/start | Remove | Recreate |
+| --- | --- | --- | --- |
+| `persistent` (default) | Retains files and world changes | Stops and unregisters; retains files | Reuses an owned template directory without reseeding its world |
+| `disposable` (requires `template`) | Retains files and world changes | Stops, reaps, unregisters and deletes the generated directory, including its world | Copies a fresh instance from the template |
+
+Choose persistent storage for survival/build worlds whose changes should outlive
+an instance registration. Choose disposable storage for matches or rounds that
+should start from a supplied map after removal and recreation. Idle shutdown or
+Stop does not reset a map or delete files for either policy.
 
 With the `servers` admin permission:
 
@@ -144,7 +161,7 @@ rift admin remove lobby-2
 Creation registers an instance in the proxy immediately, without
 restarting its listeners. Rift chooses an available port in the configured range
 and rejects creation when no port remains. By default it stays stopped until
-an eligible login or explicit start; template `autostart = true` starts it after
+an eligible login or explicit start; group `autostart = true` starts it after
 creation. Instances support the existing
 `start`, `stop`, `drain` and transfer commands. Routing to `lobby` chooses an
 eligible instance by occupancy with deterministic ties and tries alternatives
@@ -153,17 +170,102 @@ instance. An empty group has no destination until an instance is created.
 
 Removal refuses instances with players or attachment reservations. Drain and
 empty the instance first; removal stops and reaps its child before deregistering
-the backend. Existing worlds remain on disk. Runtime instances survive a normal
-configuration reload but are not persisted across a proxy restart. Changing a
-group template or port range requires a restart.
+the backend. Persistent worlds remain on disk; disposable instance files are
+deleted only after the child is reaped. A failed deletion reports a cleanup error
+and leaves the backend deregistered; inspect the remaining directory. Runtime
+instances survive a normal configuration reload but registrations are not
+persisted across a proxy restart. The data lifetime is independent: recreating
+a persistent template instance with the same generated name reuses its owned
+directory without overwriting world changes. Changing template definitions,
+group lifecycle settings, storage or port ranges requires a restart.
 
 The authenticated web API exposes `GET /api/groups`,
 `POST /api/groups/{name}/instances` and `DELETE /api/instances/{name}`. Send an
 empty JSON object (`{}`) for both mutations. Creation returns HTTP `201` with the
 instance details, and completed removal returns HTTP `200`. Group listings
-include names, port ranges and instance names; server listings also include each
-instance's group, address and port. Neither listing exposes process arguments
-or filesystem paths.
+include names, port ranges, instance names, `template` and `storage`; server
+listings also include each instance's group, address, port, template and storage.
+Static servers report persistent storage and no template. Neither listing
+exposes process arguments or filesystem paths.
+
+## Local asset templates
+
+Define named source assets under `rift.config.templates` and refer to the name
+from one or more service groups. Source paths can be absolute, or relative to
+the configuration file's directory. Assets must already exist on the host when
+an instance is created. Rift reads template sources without modifying them.
+
+```lua
+local config = require("rift.config")
+config.templates.arena = {
+    server_jar = "assets/paper.jar",
+    plugins = { "assets/plugins/game.jar" },
+    configs = "assets/configs",
+    map = "assets/maps/arena",
+}
+config.service_groups.games = {
+    template = "arena",
+    storage = "disposable",
+    directory = "servers/{name}",
+    command = { "java", "-Xmx1G", "-jar", "server.jar", "nogui" },
+    port_range = { 25600, 25649 },
+    start_on_connect = true,
+}
+```
+
+| Template field | Required | Instance destination |
+| --- | --- | --- |
+| `server_jar` | Yes | `server.jar` in the working root |
+| `plugins` | No | Each jar's filename under `plugins/` |
+| `configs` | No | Contents of this directory overlaid onto the working root |
+| `map` | No | Contents of this directory under `world/` |
+
+Configs are copied first, followed by the jar, plugins and map. Explicit jar,
+plugin and map assets replace matching files supplied by the configs directory.
+
+Template names contain ASCII letters, digits, underscores or hyphens (up to
+128 bytes). Asset paths do not expand `{name}`, `{group}` or `{port}`. The
+plugin list is a dense array of at most 128 paths with distinct filenames.
+Source trees contain ordinary files and directories; provisioning rejects
+symlinks (including path ancestors), special files and ownership markers.
+Sources and instance directories must not overlap.
+
+Provisioning writes `server-ip` to the group's loopback address, `server-port`
+to its allocated port, and `level-name=world` in the instance's
+`server.properties`, preserving other settings. Supply `online-mode=false`,
+forwarding configuration and any server/plugin settings required by your network
+in `configs`. Minecraft server plugins copied here are separate from Rift's
+Lua folder plugins.
+
+Rift never writes `eula=true` automatically. If you accept the Minecraft EULA,
+provide your own `eula.txt` in the configs directory or in each generated
+instance directory before start. `autostart=false` avoids immediate starts at
+creation, but `start_on_connect=true` can still start the process when an
+eligible player arrives. Complete setup before routing players to it.
+
+A new template instance is assembled before backend registration; a failed copy
+leaves no registered instance or partially provisioned final directory. Generated
+directories carry ownership metadata so removal and persistent reuse can identify
+Rift-owned data. Template provisioning does not adopt an arbitrary preexisting
+server directory. Keep source assets separate from the generated `servers/`
+directories. For an existing manually prepared world, use a static managed server
+or a persistent group without an asset template.
+
+Persistent reuse preserves server files and world changes rather than copying
+the seed map again. Instance registrations remain runtime only. After a proxy
+restart, create instances in the same group to reuse retained names/directories;
+check the listing for their newly allocated ports. Disposable recreation copies
+the source assets again. Editing template assets does not update existing
+instances. Structural template or group configuration changes require a restart;
+ordinary routes and policies can reload while instances remain registered.
+
+Remove disposable instances before restarting Rift if you want their files
+cleaned up. Proxy shutdown stops their processes and retains their directories;
+it does not reset games. After a restart, creation refuses to overwrite an
+existing disposable directory. Handle any leftover directory before reusing its
+name, or create another instance with the next generated name.
+See [examples/templates.lua](../examples/templates.lua) for persistent survival
+and disposable game groups using one asset template.
 
 ## Lifecycle and readiness
 
@@ -216,7 +318,10 @@ then stop it once the player and reservation counts reach zero. See the
 [maintenance workflow](operations.md) for drain and transfer commands. Explicit
 stop rejects an occupied server rather than disconnecting its players.
 
-The web dashboard also exposes server state and start/stop controls. Its API has
+The web dashboard also exposes service-group Create controls, server state,
+start/stop controls and dynamic instance removal. It labels persistent worlds
+and disposable games separately, and indicates whether removal keeps or deletes
+files. Occupied and removing instances cannot be removed from the dashboard. Its API has
 `GET /api/servers`, `POST /api/servers/{name}/start` and
 `POST /api/servers/{name}/stop`. It uses the web service's bearer token and access
 rules; operational `admin.permissions` apply to the separate admin TCP endpoint.
