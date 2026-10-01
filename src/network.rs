@@ -321,9 +321,7 @@ impl Network<'_> {
             .filter(|server| {
                 server.as_str() != current
                     && config.can_access(server, &identity.name)
-                    && self.snapshot.managed.can_connect(server)
-                    && (self.snapshot.managed.is_managed(server)
-                        || self.snapshot.health.available(server))
+                    && self.snapshot.reachable(server)
             })
             .collect();
         let mut deadline = Instant::now() + config.limits.connect_timeout;

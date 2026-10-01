@@ -90,33 +90,6 @@ fn validate_path(value: &Path, path: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Resolve existing ancestors to catch symlink aliases without creating or
-/// requiring files. Source paths may name either files or directories.
-fn normalize(value: &Path) -> io::Result<PathBuf> {
-    let mut result = PathBuf::new();
-    for component in std::path::absolute(value)?.components() {
-        match component {
-            // A Windows prefix (C: or \\?\C:) is not a rooted path yet.
-            // Inspect it only after the following root component is appended.
-            Component::Prefix(_) => {
-                result.push(component.as_os_str());
-                continue;
-            }
-            Component::CurDir => {}
-            Component::ParentDir => {
-                result.pop();
-            }
-            component => result.push(component.as_os_str()),
-        }
-        match fs::canonicalize(&result) {
-            Ok(canonical) => result = canonical,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(result)
-}
-
 /// Keep configured symlinks visible to provisioning, which rejects them.
 /// Validation resolves aliases separately when checking directory overlap.
 fn normalize_lexical(value: &Path) -> io::Result<PathBuf> {
@@ -141,17 +114,29 @@ pub(super) fn validate(config: &Config) -> Result<(), String> {
     if config.templates.len() > 128 {
         return Err("templates: at most 128 templates".into());
     }
-    let mut destinations = Vec::new();
-    for (name, server) in &config.managed_servers {
-        destinations.push((
-            format!("managed_servers.{name}.directory"),
-            normalize(&server.directory).map_err(|error| error.to_string())?,
-        ));
-    }
+    let servers = config
+        .managed_servers
+        .iter()
+        .map(|(name, server)| {
+            managed::canonicalize_existing(&server.directory)
+                .map(|directory| (name, directory))
+                .map_err(|error| error.to_string())
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    let mut destinations: Vec<_> = servers
+        .iter()
+        .map(|(name, directory)| {
+            (
+                format!("managed_servers.{name}.directory"),
+                directory.clone(),
+            )
+        })
+        .collect();
     for (name, group) in &config.service_groups {
         let rendered =
             services::render(name, &format!("{name}-1"), group.port_start, &group.server);
-        let destination = normalize(&rendered.directory).map_err(|error| error.to_string())?;
+        let destination = managed::canonicalize_existing(&rendered.directory)
+            .map_err(|error| error.to_string())?;
         for (other, directory) in &destinations {
             // Reloads already include this group's first instance.
             if other == &format!("managed_servers.{name}-1.directory") {
@@ -165,12 +150,7 @@ pub(super) fn validate(config: &Config) -> Result<(), String> {
     }
     for (name, template) in &config.templates {
         let path = format!("templates.{name}");
-        if name.is_empty()
-            || name.len() > 128
-            || !name
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
-        {
+        if !services::safe_name(name) {
             return Err(format!(
                 "{path}: names must contain 1..=128 ASCII letters, digits, underscores or hyphens"
             ));
@@ -199,7 +179,8 @@ pub(super) fn validate(config: &Config) -> Result<(), String> {
             .chain(template.map.iter().map(|path| ("map", path)))
         {
             validate_path(source, &format!("{path}.{field}"))?;
-            let source = normalize(source).map_err(|error| format!("{path}.{field}: {error}"))?;
+            let source = managed::canonicalize_existing(source)
+                .map_err(|error| format!("{path}.{field}: {error}"))?;
             for (destination_name, destination) in &destinations {
                 if overlaps(&source, destination) {
                     return Err(format!(
@@ -210,17 +191,11 @@ pub(super) fn validate(config: &Config) -> Result<(), String> {
         }
     }
     for (name, instance) in &config.instances {
-        let Some(server) = config.managed_servers.get(name) else {
+        let Some(directory) = servers.get(name) else {
             continue;
         };
-        let directory = normalize(&server.directory).map_err(|error| error.to_string())?;
-        for (other_name, other) in &config.managed_servers {
-            if name != other_name
-                && overlaps(
-                    &directory,
-                    &normalize(&other.directory).map_err(|error| error.to_string())?,
-                )
-            {
+        for (other_name, other) in &servers {
+            if name != *other_name && overlaps(directory, other) {
                 return Err(format!(
                     "instances.{name}.directory: overlaps managed_servers.{other_name}"
                 ));

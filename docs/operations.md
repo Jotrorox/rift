@@ -293,7 +293,7 @@ isolation and cannot detect changes incompatible with an already running process
 | `web`, `status`, standalone `metrics`, web bearer token | Can enable, disable or move live; replacement sockets bind before commit |
 | Gameplay listeners, operational `admin` bind/token variable/permissions | Restart required; incompatible reload rejects the entire candidate |
 | `managed_servers` definitions or addresses of managed backends | Restart required; running processes and their lifecycle policy remain attached to the original definition |
-| `service_groups` templates or port ranges | Restart required; live instance creation/removal uses admin or web operations |
+| `service_groups`, `templates` and scaling policies | Apply live while each registered instance keeps its process definition, storage policy and an in-range port; otherwise the reload names the instance to remove first. Create and remove instances with admin or web operations |
 | Runtime service instances | Preserved on reload; registrations are not persisted across proxy restarts |
 
 Already accepted connections keep their original configuration snapshot while

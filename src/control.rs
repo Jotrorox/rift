@@ -53,26 +53,64 @@ pub struct Command {
 
 /// Existing instances keep their process definitions and storage ownership.
 /// Templates and policies can change for future provisioning; static workers
-/// and listener topology still require a restart.
-pub fn live_compatible(config: &Config, previous: &Config) -> bool {
-    config.listeners == previous.listeners
-        && config.admin == previous.admin
-        && config.messaging == previous.messaging
-        && config.managed_servers == previous.managed_servers
-        && config.instances == previous.instances
-        && previous
-            .managed_servers
-            .keys()
-            .all(|name| config.backends.get(name) == previous.backends.get(name))
-        && previous.instances.values().all(|instance| {
+/// and listener topology still require a restart. Returns the first reason a
+/// candidate cannot replace the running configuration.
+pub fn live_compatible(config: &Config, previous: &Config) -> Result<(), String> {
+    if config.listeners != previous.listeners {
+        return Err("gameplay listener changes require a restart".into());
+    }
+    if config.admin != previous.admin {
+        return Err("operational admin changes require a restart".into());
+    }
+    if config.messaging != previous.messaging {
+        return Err("messaging changes require a restart".into());
+    }
+    let names = config
+        .managed_servers
+        .keys()
+        .chain(previous.managed_servers.keys());
+    for name in names {
+        if config.managed_servers.get(name) == previous.managed_servers.get(name) {
+            continue;
+        }
+        return Err(match previous.instances.get(name) {
+            Some(instance) => format!(
+                "service_groups.{}: changes the process definition of running instance {name}; remove the instance first or restart",
+                instance.group
+            ),
+            None => format!("managed_servers.{name}: managed server definitions require a restart"),
+        });
+    }
+    if config.instances != previous.instances {
+        return Err("runtime instance registrations changed during reload; retry".into());
+    }
+    for name in previous.managed_servers.keys() {
+        if config.backends.get(name) != previous.backends.get(name) {
+            return Err(format!(
+                "backends.{name}: managed backend addresses require a restart"
+            ));
+        }
+    }
+    for (name, instance) in &previous.instances {
+        let storage = |config: &Config| {
             config
                 .service_groups
                 .get(&instance.group)
-                .zip(previous.service_groups.get(&instance.group))
-                .is_some_and(|(next, old)| next.storage == old.storage)
-        })
-        && config.extensions.as_ref().map(|e| &e.queues)
-            == previous.extensions.as_ref().map(|e| &e.queues)
+                .map(|group| group.storage)
+        };
+        if storage(config) != storage(previous) {
+            return Err(format!(
+                "service_groups.{}.storage: remove instance {name} before changing storage",
+                instance.group
+            ));
+        }
+    }
+    if config.extensions.as_ref().map(|e| &e.queues)
+        != previous.extensions.as_ref().map(|e| &e.queues)
+    {
+        return Err("extension queue capacity changes require a restart".into());
+    }
+    Ok(())
 }
 
 pub fn read_source(path: &Path) -> io::Result<String> {
@@ -189,4 +227,50 @@ pub fn persist(path: &Path, source: &str, expected: &str) -> Result<(), Error> {
         let _ = fs::remove_file(&temp);
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn source(group: &str, static_command: &str) -> String {
+        format!(
+            "return {{listeners={{public='127.0.0.1:25565'}},backends={{static='127.0.0.1:25566'}},routes={{public='lobby'}},managed_servers={{static={{directory='servers/static',command={{{static_command}}}}}}},service_groups={{lobby={{directory='servers/{{name}}',port_range={{25600,25602}},{group}}}}}}}"
+        )
+    }
+
+    #[test]
+    fn live_incompatibility_names_the_blocking_setting() {
+        let mut previous =
+            Config::from_lua(&source("command={'java'}", "'java'"), "live.lua").unwrap();
+        previous.add_instance("lobby", "lobby-1", 25600).unwrap();
+        let reload = |group: &str, static_command: &str| {
+            let candidate = Config::from_lua_with_instances(
+                &source(group, static_command),
+                "live.lua",
+                &previous,
+            )
+            .unwrap();
+            live_compatible(&candidate, &previous)
+        };
+        assert_eq!(reload("command={'java'}", "'java'"), Ok(()));
+        assert_eq!(
+            reload(
+                "command={'java'},scaling={capacity_per_instance=10,max_instances=3}",
+                "'java'"
+            ),
+            Ok(()),
+            "scaling policies apply live"
+        );
+        let error = reload("command={'java','-Xmx2G'}", "'java'").unwrap_err();
+        assert!(
+            error.contains("service_groups.lobby") && error.contains("lobby-1"),
+            "{error}"
+        );
+        let error = reload("command={'java'}", "'java','-Xmx2G'").unwrap_err();
+        assert!(
+            error.contains("managed_servers.static") && error.contains("restart"),
+            "{error}"
+        );
+    }
 }

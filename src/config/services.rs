@@ -272,7 +272,8 @@ fn validate_scaling(scaling: &ServiceScaling, path: &str, ports: usize) -> Resul
     Ok(())
 }
 
-fn safe_name(name: &str) -> bool {
+/// Names that are safe in paths, URLs and audit records.
+pub(super) fn safe_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 128
         && name

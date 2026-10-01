@@ -109,11 +109,16 @@ impl App {
     fn snapshot(&self) -> Arc<Snapshot> {
         self.current.borrow().clone()
     }
-    pub(crate) fn record_settings_compatible(&self, config: &Config) -> bool {
-        config
+    pub(crate) fn record_settings_compatible(&self, config: &Config) -> Result<(), String> {
+        if config
             .web
             .as_ref()
             .is_none_or(|web| web.records_directory == self.records_directory)
+        {
+            Ok(())
+        } else {
+            Err("web.records_directory changes require a restart".into())
+        }
     }
     fn active_binding(&self, snapshot: &Snapshot) -> bool {
         self.binding.is_none_or(|(kind, address)| {
@@ -439,12 +444,9 @@ async fn record_audit(
     outcome: &str,
     status: u16,
 ) -> io::Result<()> {
-    let store = app.workflows.clone();
-    let actor = access.name.clone();
-    let (action, target, outcome) = (action.to_owned(), target.to_owned(), outcome.to_owned());
-    tokio::task::spawn_blocking(move || store.audit(&actor, &action, &target, &outcome, status))
+    app.workflows
+        .audit_async(&access.name, action, target, outcome, status)
         .await
-        .map_err(io::Error::other)?
 }
 async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -> Response {
     let snapshot = app.snapshot();
@@ -859,14 +861,35 @@ async fn rollback(
     .await
 }
 fn definition_values(config: &Config) -> Value {
-    let server = |s: &rift::config::ManagedServer| json!({"directory":s.directory,"command":s.command,"autostart":s.autostart,"start_on_connect":s.start_on_connect,"idle_timeout_ms":s.idle_timeout.map_or(0, |d| d.as_millis()),"start_timeout_ms":s.start_timeout.as_millis(),"stop_timeout_ms":s.stop_timeout.as_millis(),"restart_delay_ms":s.restart_delay.as_millis(),"restart_retries":s.restart_retries});
-    let groups: BTreeMap<_,_> = config.service_groups.iter().map(|(name, group)| {
-        let mut value = server(&group.server);
-        value["port_range"] = json!([group.port_start,group.port_end]); value["storage"] = json!(group.storage.as_str());
-        if let Some(template) = &group.template { value["template"] = json!(template); }
-        if let Some(s) = &group.scaling { value["scaling"] = json!({"min_instances":s.min_instances,"max_instances":s.max_instances,"spare_instances":s.spare_instances,"capacity_per_instance":s.capacity_per_instance,"target_occupancy_percent":s.target_occupancy_percent,"queue_threshold":s.queue_threshold,"cooldown_ms":s.cooldown.as_millis()}); }
-        (name, value)
-    }).collect();
+    let server = |s: &rift::config::ManagedServer| {
+        json!({
+            "directory": s.directory,
+            "command": s.command,
+            "autostart": s.autostart,
+            "start_on_connect": s.start_on_connect,
+            "idle_timeout_ms": s.idle_timeout.map_or(0, |d| d.as_millis()),
+            "start_timeout_ms": s.start_timeout.as_millis(),
+            "stop_timeout_ms": s.stop_timeout.as_millis(),
+            "restart_delay_ms": s.restart_delay.as_millis(),
+            "restart_retries": s.restart_retries,
+        })
+    };
+    let groups: BTreeMap<_, _> = config
+        .service_groups
+        .iter()
+        .map(|(name, group)| {
+            let mut value = server(&group.server);
+            value["port_range"] = json!([group.port_start, group.port_end]);
+            value["storage"] = json!(group.storage.as_str());
+            if let Some(template) = &group.template {
+                value["template"] = json!(template);
+            }
+            if let Some(scaling) = &group.scaling {
+                value["scaling"] = admin::scaling_values(scaling);
+            }
+            (name, value)
+        })
+        .collect();
     let templates: BTreeMap<_, _> = config
         .templates
         .iter()
@@ -1199,13 +1222,10 @@ async fn validate_config(
     .await
     {
         Ok(Ok(config)) => {
-            if !control::live_compatible(&config, &snapshot.config)
-                || !app.record_settings_compatible(&config)
+            if let Err(reason) = control::live_compatible(&config, &snapshot.config)
+                .and_then(|()| app.record_settings_compatible(&config))
             {
-                return error(
-                    StatusCode::BAD_REQUEST,
-                    "listener, admin, messaging, existing managed process definitions/addresses, instance storage and extension queue changes require a restart or removal of affected instances",
-                );
+                return error(StatusCode::BAD_REQUEST, reason);
             }
             Json(json!({"valid":true,"message":"Configuration valid; socket availability is checked when applying."})).into_response()
         }

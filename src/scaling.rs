@@ -2,7 +2,10 @@
 //! the configuration transaction path with administrator requests and reloads.
 use std::{collections::BTreeMap, time::Instant};
 
-use rift::{config::ServiceScaling, managed::ManagedServerSnapshot};
+use rift::{
+    config::ServiceScaling,
+    managed::{ManagedServerSnapshot, Phase},
+};
 
 use crate::{control::Operation, runtime::Snapshot};
 
@@ -107,7 +110,7 @@ fn decide(
         if let Some(server) = members.iter().rev().find(|server| {
             server.players == 0
                 && server.reservations == 0
-                && !matches!(server.state, "starting" | "stopping")
+                && !matches!(server.state, Phase::Starting | Phase::Stopping)
         }) {
             return Some(Change::Instance(Operation::RemoveInstance {
                 name: server.name.clone(),
@@ -117,7 +120,7 @@ fn decide(
     members
         .iter()
         .find(|server| {
-            server.state == "stopped" && server.automatic_enabled && !server.restart_exhausted
+            server.state == Phase::Stopped && server.automatic_enabled && !server.restart_exhausted
         })
         .map(|server| Change::Start(server.name.clone()))
 }
@@ -143,7 +146,7 @@ mod tests {
         name: &str,
         players: usize,
         reservations: usize,
-        state: &'static str,
+        state: Phase,
     ) -> ManagedServerSnapshot {
         ManagedServerSnapshot {
             name: name.into(),
@@ -180,10 +183,10 @@ mod tests {
 
     #[test]
     fn shrinking_never_retires_players_pending_connections_or_starting_workers() {
-        let busy = server("game-1", 1, 1, "running");
-        let pending = server("game-2", 0, 1, "running");
-        let starting = server("game-3", 0, 0, "starting");
-        let empty = server("game-4", 0, 0, "running");
+        let busy = server("game-1", 1, 1, Phase::Running);
+        let pending = server("game-2", 0, 1, Phase::Running);
+        let starting = server("game-3", 0, 0, Phase::Starting);
+        let empty = server("game-4", 0, 0, Phase::Running);
         let members = [&busy, &pending, &starting, &empty];
         let Some(Change::Instance(Operation::RemoveInstance { name })) =
             decide("game", &policy(), &members, 0)
@@ -196,13 +199,13 @@ mod tests {
 
     #[test]
     fn reservations_are_not_double_counted_and_failures_do_not_evade_retry_bounds() {
-        let occupied = server("game-1", 8, 8, "running");
-        let spare = server("game-2", 0, 0, "running");
+        let occupied = server("game-1", 8, 8, Phase::Running);
+        let spare = server("game-2", 0, 0, Phase::Running);
         assert!(decide("game", &policy(), &[&occupied, &spare], 0).is_none());
-        let mut failed = server("game-1", 0, 0, "failed");
+        let mut failed = server("game-1", 0, 0, Phase::Failed);
         failed.restart_exhausted = true;
         assert!(decide("game", &policy(), &[&failed], 0).is_none());
-        let stopped = server("game-1", 0, 0, "stopped");
+        let stopped = server("game-1", 0, 0, Phase::Stopped);
         assert!(matches!(
             decide("game", &policy(), &[&stopped], 0),
             Some(Change::Start(_))

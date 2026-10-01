@@ -6,7 +6,7 @@ use std::{
     fs::{self, OpenOptions},
     io::{self, Read, Write},
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -191,6 +191,39 @@ impl Store {
         }
         bounded_push(&mut records.audit, value, AUDIT);
         Ok(())
+    }
+    /// Append an audit record without blocking the async runtime on fsync.
+    pub async fn audit_async(
+        self: &Arc<Self>,
+        actor: &str,
+        action: &str,
+        target: &str,
+        outcome: &str,
+        status: u16,
+    ) -> io::Result<()> {
+        let store = self.clone();
+        let (actor, action, target, outcome) = (
+            actor.to_owned(),
+            action.to_owned(),
+            target.to_owned(),
+            outcome.to_owned(),
+        );
+        tokio::task::spawn_blocking(move || store.audit(&actor, &action, &target, &outcome, status))
+            .await
+            .map_err(io::Error::other)?
+    }
+    /// Record a deployment without blocking the async runtime on fsync.
+    pub async fn deploy_async(
+        self: &Arc<Self>,
+        source: &str,
+        actor: &str,
+        action: &str,
+    ) -> io::Result<()> {
+        let store = self.clone();
+        let (source, actor, action) = (source.to_owned(), actor.to_owned(), action.to_owned());
+        tokio::task::spawn_blocking(move || store.deploy(&source, &actor, &action))
+            .await
+            .map_err(io::Error::other)?
     }
     pub fn audits(&self) -> Value {
         json!({"records":self.records.lock().unwrap().audit.iter().rev().cloned().collect::<Vec<_>>(),"durable":self.directory.is_some()})

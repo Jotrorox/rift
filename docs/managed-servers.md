@@ -180,8 +180,10 @@ and leaves the backend deregistered; inspect the remaining directory. Runtime
 instances survive a normal configuration reload but registrations are not
 persisted across a proxy restart. The data lifetime is independent: recreating
 a persistent template instance with the same generated name reuses its owned
-directory without overwriting world changes. Changing template definitions,
-group lifecycle settings, storage or port ranges requires a restart.
+directory without overwriting world changes. Template and group changes apply
+on reload while every registered instance keeps its process definition, storage
+policy and an allocated port inside the range; otherwise the reload is rejected
+with the affected instance named. Remove those instances first or restart.
 
 The authenticated web API exposes `GET /api/groups`,
 `POST /api/groups/{name}/instances` and `DELETE /api/instances/{name}`. Send an
@@ -255,8 +257,9 @@ Manually stopped and failed instances count toward the maximum while registered.
 Scaling respects a manual Stop and does not force a restart after the retry
 budget is exhausted. Explicitly Start a repaired instance or remove it when
 appropriate; empty excess instances remain eligible for automatic removal.
-Scaling policies and runtime instance registrations follow the existing reload
-and restart rules: policy changes require a proxy restart, and registrations are
+Scaling policy changes apply on reload and take effect at the next scaling
+decision. Adding or removing a policy changes idle shutdown for instances of a
+group with `idle_timeout_ms`, so remove those instances first. Registrations are
 not persisted across proxy restarts.
 
 ## Local asset templates
@@ -426,14 +429,16 @@ After building Rift, run the Minecraft wire scenario without downloads:
 python3 tests/managed_wire.py --binary target/debug/rift
 python3 tests/services_wire.py --binary target/debug/rift
 python3 tests/scaling_wire.py --binary target/debug/rift
+python3 tests/provisioning_wire.py --binary target/debug/rift
 ```
 
 The service-group scenario also checks concurrent allocation, balancing, live
 transfers and crash recovery, reload preservation, occupied removal, port reuse
 and cleanup. The scaling scenario checks minimum and spare startup, occupancy
 growth, maximum capacity, empty-only shrink, cooldown, bounded recovery and
-manual reset/stop. CI runs the existing lifecycle and service-group wire scenarios
-on Linux, macOS and Windows.
+manual reset/stop. The provisioning scenario checks template copies, persistent
+reuse and disposable cleanup. CI runs all four wire scenarios on Linux, macOS
+and Windows.
 
 The real-server harness checks cold login, world/chunk delivery, idle shutdown
 and restart using the pinned server fixtures. It requires the fixture's Java
@@ -444,4 +449,5 @@ python3 tests/managed_minecraft.py --binary target/debug/rift --server paper --a
 ```
 
 Real-server artifacts remain under `target/minecraft/runs/managed-*/`. CI runs
-the wire scenario on Linux, macOS and Windows and the real Paper scenario on Linux.
+the real Paper scenario, including persistent and disposable template storage,
+on Linux.

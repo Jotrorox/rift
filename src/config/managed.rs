@@ -240,11 +240,10 @@ fn validate_directory(directory: &Path, path: &str) -> Result<(), String> {
 }
 
 /// Canonicalize existing ancestors to catch symlink aliases, while accepting
-/// directories that the operator has yet to provision. Never create anything.
-fn resolve_directory(path: &Path) -> io::Result<PathBuf> {
-    let absolute = std::path::absolute(path)?;
+/// paths that the operator has yet to provision. Never create anything.
+pub(super) fn canonicalize_existing(path: &Path) -> io::Result<PathBuf> {
     let mut result = PathBuf::new();
-    for component in absolute.components() {
+    for component in std::path::absolute(path)?.components() {
         match component {
             // A Windows prefix (C: or \\?\C:) is not a rooted path yet.
             // Inspect it only after the following root component is appended.
@@ -264,6 +263,11 @@ fn resolve_directory(path: &Path) -> io::Result<PathBuf> {
             Err(error) => return Err(error),
         }
     }
+    Ok(result)
+}
+
+fn resolve_directory(path: &Path) -> io::Result<PathBuf> {
+    let result = canonicalize_existing(path)?;
     if result.exists() && !result.is_dir() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,

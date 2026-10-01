@@ -152,14 +152,16 @@
       const actions = cell(tr, ""), button = document.createElement("button");
       button.type = "button"; button.className = "button secondary"; button.textContent = "Create instance";
       button.setAttribute("aria-label", `Create instance in ${group.name}`);
-      state.serverButtons.push({ button, unavailable: false });
+      const full = Boolean(group.scaling) && (group.instances || []).length >= number(group.scaling.max_instances);
+      if (full) button.title = "This group has reached its scaling maximum. Remove an instance or raise max_instances first.";
+      state.serverButtons.push({ button, unavailable: full });
       button.addEventListener("click", () => { if (!button.disabled) instanceOperation(group.name, "create", group.storage); });
       actions.append(button);
     });
     table("managed-servers", status.managed_servers || [], 9, (tr, server) => {
       cell(tr, server.name); cell(tr, server.state);
       cell(tr, `${count(server.players)} players · ${count(server.reservations)} attachments`);
-      cell(tr, server.automatic_start ? "Enabled" : "Disabled");
+      cell(tr, wakeLabel(server));
       cell(tr, server.storage === "disposable" ? "Disposable game" : "Persistent world");
       cell(tr, server.template || "Prepared directory");
       cell(tr, server.group ? `${server.group} · ${server.address}` : server.address, "address");
@@ -399,6 +401,11 @@
     if (session !== state.session) return;
     table("audit-records", data.records || [], 5, (tr, record) => { cell(tr, time(record.timestamp_unix_ms)); cell(tr, record.actor); cell(tr, record.action); cell(tr, record.target || "—"); cell(tr, `${record.outcome}${record.status ? ` (${record.status})` : ""}`); });
     text("audit-result", data.durable ? "Records are retained on disk." : "Records are held in memory for this process.");
+  }
+  function wakeLabel(server) {
+    if (server.restart_exhausted) return "Paused · restart retries exhausted; Start to retry";
+    if (server.automatic_enabled === false) return "Paused by Stop; Start to resume";
+    return server.automatic_start ? "Enabled" : "Explicit start only";
   }
   function checkSource() {
     const source = $("source").value;

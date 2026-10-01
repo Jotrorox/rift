@@ -241,25 +241,39 @@ fn request(value: &Value, settings: &Admin, secret: &str) -> Result<Vec<String>,
 
 /// Operational state only: never include process arguments, environment or paths.
 pub(crate) fn managed_servers(snapshot: &Snapshot) -> Value {
-    json!(
-        snapshot
-            .managed
-            .snapshot()
-            .into_iter()
-            .map(|server| json!({
-                "name":server.name,"state":server.state,"pid":server.pid,
-                "players":server.players,"reservations":server.reservations,
-                "automatic_start":server.automatic_start,"last_error":server.last_error,
-                "automatic_enabled":server.automatic_enabled,
-                "restart_attempts":server.restart_attempts,"restart_exhausted":server.restart_exhausted,
-                "group":snapshot.config.instances.get(&server.name).map(|instance| &instance.group),
-                "template":snapshot.config.instances.get(&server.name).and_then(|instance| instance.template.as_ref()),
-                "storage":snapshot.config.instances.get(&server.name).map_or("persistent", |instance| instance.storage.as_str()),
-                "address":snapshot.config.backends.get(&server.name).map(|backend| backend.address()),
-                "port":snapshot.config.backends.get(&server.name).and_then(|backend| backend.address().parse::<SocketAddr>().ok()).map(|address| address.port()),
-            }))
-            .collect::<Vec<_>>()
-    )
+    let config = &snapshot.config;
+    let servers: Vec<_> = snapshot
+        .managed
+        .snapshot()
+        .into_iter()
+        .map(|server| {
+            let instance = config.instances.get(&server.name);
+            let address = config
+                .backends
+                .get(&server.name)
+                .map(|backend| backend.address());
+            json!({
+                "name": server.name,
+                "state": server.state.as_str(),
+                "pid": server.pid,
+                "players": server.players,
+                "reservations": server.reservations,
+                "automatic_start": server.automatic_start,
+                "automatic_enabled": server.automatic_enabled,
+                "last_error": server.last_error,
+                "restart_attempts": server.restart_attempts,
+                "restart_exhausted": server.restart_exhausted,
+                "group": instance.map(|instance| &instance.group),
+                "template": instance.and_then(|instance| instance.template.as_ref()),
+                "storage": instance.map_or("persistent", |instance| instance.storage.as_str()),
+                "address": address,
+                "port": address
+                    .and_then(|address| address.parse::<SocketAddr>().ok())
+                    .map(|address| address.port()),
+            })
+        })
+        .collect();
+    json!(servers)
 }
 
 /// Group metadata only: templates contain executable arguments and filesystem paths.
@@ -270,18 +284,26 @@ pub(crate) fn service_groups(snapshot: &Snapshot) -> Value {
             "template":group.template,
             "storage":group.storage.as_str(),
             "port_range":[group.port_start,group.port_end],
-            "scaling":group.scaling.as_ref().map(|policy| json!({
-                "min_instances":policy.min_instances,"max_instances":policy.max_instances,
-                "spare_instances":policy.spare_instances,"capacity_per_instance":policy.capacity_per_instance,
-                "target_occupancy_percent":policy.target_occupancy_percent,"queue_threshold":policy.queue_threshold,
-                "cooldown_ms":policy.cooldown.as_millis(),
-            })),
+            "scaling":group.scaling.as_ref().map(scaling_values),
             "instances":snapshot.config.instances.iter()
                 .filter(|(_, instance)| instance.group == *name)
                 .map(|(name, _)| name)
                 .collect::<Vec<_>>(),
         })
     }).collect::<Vec<_>>()})
+}
+
+/// The same field names as `service_groups.*.scaling` in Lua.
+pub(crate) fn scaling_values(policy: &rift::config::ServiceScaling) -> Value {
+    json!({
+        "min_instances": policy.min_instances,
+        "max_instances": policy.max_instances,
+        "spare_instances": policy.spare_instances,
+        "capacity_per_instance": policy.capacity_per_instance,
+        "target_occupancy_percent": policy.target_occupancy_percent,
+        "queue_threshold": policy.queue_threshold,
+        "cooldown_ms": policy.cooldown.as_millis(),
+    })
 }
 
 pub(crate) fn managed_backend(snapshot: &Snapshot, backend: &str) -> io::Result<()> {
@@ -351,7 +373,7 @@ pub(crate) async fn execute(
         [command, id, backend] if command == "transfer" => {
             let id: u64 = id.parse().map_err(|_| "connection ID must be a positive integer")?;
             if !snapshot.config.backends.contains_key(backend) { return Err(format!("unknown backend {backend:?}")); }
-            if control.draining(&snapshot.config, backend) || !snapshot.managed.can_connect(backend) || (!snapshot.managed.is_managed(backend) && !snapshot.health.available(backend)) { return Err("target backend is draining, stopped or unhealthy".into()); }
+            if control.draining(&snapshot.config, backend) || !snapshot.reachable(backend) { return Err("target backend is draining, stopped or unhealthy".into()); }
             let sender = {
                 let players = control.players.lock().unwrap();
                 let entry = players.get(&id).ok_or("player is no longer online; refresh status")?;
@@ -406,9 +428,7 @@ pub async fn serve(
                         let result = match parsed {
                             Ok(args) => {
                                 permission = args[0].clone();
-                                let store = workflows.clone();
-                                let action = permission.clone();
-                                let audit = tokio::task::spawn_blocking(move || store.audit("local-admin", &action, "", "requested", 0)).await.map_err(io::Error::other).and_then(|result| result);
+                                let audit = workflows.audit_async("local-admin", &permission, "", "requested", 0).await;
                                 if audit.is_err() {
                                     Err("operator audit unavailable; command was not submitted".into())
                                 } else if args == ["shutdown"] {
@@ -438,10 +458,9 @@ pub async fn serve(
                             }
                             Err(error) => Err(error),
                         };
-                        let store = workflows.clone();
-                        let action = permission.clone();
-                        let outcome = if result.is_ok() { "accepted" } else { "rejected" };
-                        if let Err(error) = tokio::task::spawn_blocking(move || store.audit(if action.is_empty() { "anonymous" } else { "local-admin" }, &action, "", outcome, if outcome == "accepted" { 200 } else { 400 })).await.map_err(io::Error::other).and_then(|result| result) {
+                        let actor = if permission.is_empty() { "anonymous" } else { "local-admin" };
+                        let (outcome, status) = if result.is_ok() { ("accepted", 200) } else { ("rejected", 400) };
+                        if let Err(error) = workflows.audit_async(actor, &permission, "", outcome, status).await {
                             eprintln!("rift: local administrator audit failed: {error}");
                         }
                         let response = match result {

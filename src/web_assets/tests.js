@@ -159,6 +159,26 @@ async function testWebAssets(appSource, statusSource) {
     assert(h.element("server-result").textContent.includes("arena-1"), "Created instance name missing");
     assert(h.element("server-result").textContent.includes("EULA"), "Provisioning prerequisite missing");
   });
+  await test("wake status explains paused and exhausted recovery and full groups block creation", async () => {
+    const h = fixture(appSource); await flush();
+    h.model.status.managed_servers = [
+      { name: "paused", state: "stopped", automatic_start: false, automatic_enabled: false },
+      { name: "exhausted", state: "failed", automatic_start: true, automatic_enabled: true, restart_exhausted: true },
+      { name: "manual", state: "stopped", automatic_start: false, automatic_enabled: true },
+      { name: "auto", state: "stopped", automatic_start: true, automatic_enabled: true },
+    ];
+    h.model.status.service_groups = [
+      { name: "full", storage: "persistent", instances: ["full-1"], scaling: { max_instances: 1 } },
+      { name: "open", storage: "persistent", instances: ["open-1"], scaling: { max_instances: 2 } },
+    ];
+    await h.element("refresh-status").emit("click"); await flush();
+    const wake = h.element("managed-servers").children.map((row) => row.children[3].textContent);
+    assert(wake[0].includes("Paused by Stop") && wake[1].includes("retries exhausted"), "Paused wake reasons missing");
+    assert(wake[2] === "Explicit start only" && wake[3] === "Enabled", "Wake policy labels incorrect");
+    const [full, open] = h.element("service-groups").children.map((row) => row.children[5].children[0]);
+    assert(full.disabled && full.title.includes("max_instances"), "Full group creation was enabled");
+    assert(!open.disabled, "Group below its maximum was blocked");
+  });
   await test("instance removal distinguishes destructive games and persistent worlds", async () => {
     const h = fixture(appSource); await flush();
     h.model.status.managed_servers = [

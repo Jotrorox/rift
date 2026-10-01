@@ -474,7 +474,6 @@ impl Extensions {
         }
         Ok(runtime)
     }
-    /// Publish the permission baseline only after the configuration transaction commits.
     /// Publish the live destination catalog after a runtime transaction commits.
     /// Existing sessions share this catalog with newly configured extensions.
     pub fn update_destinations(&self, config: &Config) {
@@ -488,6 +487,7 @@ impl Extensions {
             .collect();
     }
 
+    /// Publish the permission baseline only after the configuration transaction commits.
     pub fn activate(&self) {
         if let Some(script) = &self.script
             && script.api_version == 2
