@@ -400,6 +400,81 @@ fn permission_checks_precede_execution_and_do_not_echo_secrets() {
     }
 }
 
+#[test]
+fn service_group_commands_share_the_servers_permission() {
+    let mut settings = Admin {
+        listen: "127.0.0.1:9091".parse().unwrap(),
+        token_env: "RIFT_ADMIN_TOKEN".into(),
+        permissions: ["servers".into()].into(),
+    };
+    let secret = "test-service-group-administration-secret";
+    for args in [
+        json!(["groups"]),
+        json!(["create", "lobby"]),
+        json!(["remove", "lobby-1"]),
+    ] {
+        let value = json!({"token":secret,"args":args});
+        assert!(request(&value, &settings, secret).is_ok());
+        settings.permissions.clear();
+        assert!(
+            request(&value, &settings, secret)
+                .unwrap_err()
+                .contains("permission denied: servers")
+        );
+        settings.permissions.insert("servers".into());
+    }
+}
+
+#[tokio::test]
+async fn instance_commands_wait_for_runtime_completion_and_report_queue_failure() {
+    let snapshot = Arc::new(
+        Snapshot::new(
+            Config::from_addresses("127.0.0.1:0", "127.0.0.1:1").unwrap(),
+            None,
+        )
+        .unwrap(),
+    );
+    let metrics = Metrics::default();
+    let (commands, mut receiver) = mpsc::channel(1);
+    let args = vec!["create".into(), "lobby".into()];
+    let (result, ()) = tokio::join!(
+        execute(&args, snapshot.clone(), &metrics, &commands),
+        async {
+            match receiver.recv().await.unwrap() {
+                Command::CreateInstance { group, reply } => {
+                    assert_eq!(group, "lobby");
+                    reply
+                        .send(Ok(json!({"name":"lobby-1","port":25600})))
+                        .unwrap();
+                }
+                _ => panic!("expected create command"),
+            }
+        }
+    );
+    assert_eq!(result.unwrap()["name"], "lobby-1");
+    let args = vec!["remove".into(), "lobby-1".into()];
+    let (result, ()) = tokio::join!(
+        execute(&args, snapshot.clone(), &metrics, &commands),
+        async {
+            match receiver.recv().await.unwrap() {
+                Command::RemoveInstance { name, reply } => {
+                    assert_eq!(name, "lobby-1");
+                    reply.send(Err("instance is occupied".into())).unwrap();
+                }
+                _ => panic!("expected remove command"),
+            }
+        }
+    );
+    assert_eq!(result.unwrap_err(), "instance is occupied");
+    drop(receiver);
+    assert!(
+        execute(&args, snapshot, &metrics, &commands)
+            .await
+            .unwrap_err()
+            .contains("queue")
+    );
+}
+
 async fn assert_original_session(fixture: &mut SessionFixture) {
     let packet = Packet::new(0x7f, vec![12; 300]);
     fixture

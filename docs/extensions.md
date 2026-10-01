@@ -320,6 +320,15 @@ holds the old and target slot; failure releases the target, successful world
 entry releases the old slot. It does not measure players connected directly to
 Paper or through another Rift process.
 
+Queues may also target service groups. For a group, the configured capacity is
+per registered instance: `queues = { games = 20 }` allows 40 group slots with
+two instances. FIFO order and leases apply across concrete instance names, so
+direct connections cannot bypass the group queue. Adding or removing instances
+updates capacity without changing tickets; transfers within a group retain the
+player's existing group slot. A group with no instances can collect tickets,
+which its [scaling policy](managed-servers.md#automatic-scaling) uses to start
+capacity. Queue policies still require authenticated extensions.
+
 A queue command keeps the client playing on its current server. Each session can
 hold one ticket. Repeating the same request returns its current position;
 switching queues removes the old ticket only when the new request succeeds.

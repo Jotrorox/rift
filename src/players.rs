@@ -83,6 +83,32 @@ impl PlayerRegistry {
             .collect()
     }
 
+    /// Count connected players from one consistent view of the registry.
+    /// Clone only distinct server names, not player records or pending logins.
+    pub(crate) fn server_counts(&self) -> BTreeMap<String, usize> {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let mut counts = BTreeMap::new();
+        for player in state.players.values() {
+            if let Some(count) = counts.get_mut(&player.server) {
+                *count += 1;
+            } else {
+                counts.insert(player.server.clone(), 1);
+            }
+        }
+        counts
+    }
+
+    /// Check one backend's occupancy without cloning player records.
+    pub(crate) fn count_on_server(&self, server: &str) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .players
+            .values()
+            .filter(|player| player.server == server)
+            .count()
+    }
+
     pub fn get(&self, uuid: &[u8; 16]) -> Option<Player> {
         self.state
             .lock()

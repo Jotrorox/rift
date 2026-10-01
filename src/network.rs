@@ -1,20 +1,125 @@
 //! Policy and bounded attachment attempts shared by commands and outage recovery.
 use crate::{events::Connection, health, metrics::Metrics, runtime::Snapshot};
-use rift::{protocol::State, session::Session};
-use std::{collections::HashSet, io, net::SocketAddr};
+use rift::session::{Session, SessionEvent};
+use std::{collections::HashSet, future::Future, io, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::TcpStream,
-    time::{Instant, timeout_at},
+    time::{Instant, sleep_until, timeout, timeout_at},
 };
 
 pub struct Network<'a> {
-    pub snapshot: &'a Snapshot,
+    pub snapshot: &'a Arc<Snapshot>,
     pub addresses: &'a [SocketAddr],
     pub metrics: &'a Metrics,
 }
 
 impl Network<'_> {
+    /// Claim an attachment before waking the process so idle/manual shutdown
+    /// cannot race a pending login. Health probes never call this path.
+    pub async fn prepare_backend(
+        &self,
+        name: &str,
+    ) -> io::Result<Option<rift::managed::ManagedLease>> {
+        if !self.snapshot.config.backends.contains_key(name) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "backend is no longer registered",
+            ));
+        }
+        if self.snapshot.control.draining(&self.snapshot.config, name) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "backend is draining",
+            ));
+        }
+        let lease = self.snapshot.managed.reserve(name)?;
+        self.snapshot.managed.ensure_running(name).await?;
+        if self.snapshot.control.draining(&self.snapshot.config, name) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "backend is draining",
+            ));
+        }
+        Ok(lease)
+    }
+
+    /// Keep the player's current world live while a cold destination starts.
+    /// The startup future owns its reservation, so cancellation releases it.
+    pub async fn prepare_transfer<C: AsyncRead + AsyncWrite + Unpin>(
+        &self,
+        session: &mut Session<C, TcpStream>,
+        current: &str,
+        name: &str,
+        event: &mut Connection,
+    ) -> io::Result<Option<rift::managed::ManagedLease>> {
+        if !self.snapshot.managed.is_managed(name) || session.backend().is_none() {
+            return self.prepare_backend(name).await;
+        }
+        self.forward_during_startup(session, current, event, self.prepare_backend(name))
+            .await
+    }
+
+    async fn forward_during_startup<C: AsyncRead + AsyncWrite + Unpin>(
+        &self,
+        session: &mut Session<C, TcpStream>,
+        current: &str,
+        event: &mut Connection,
+        startup: impl Future<Output = io::Result<Option<rift::managed::ManagedLease>>>,
+    ) -> io::Result<Option<rift::managed::ManagedLease>> {
+        tokio::pin!(startup);
+        let mut ready = None;
+        let mut transition_deadline = None;
+        let mut command_notice_sent = false;
+        loop {
+            if session.can_switch() {
+                if let Some(lease) = ready.take() {
+                    return Ok(lease);
+                }
+                transition_deadline = None;
+            } else {
+                transition_deadline.get_or_insert(Instant::now() + Duration::from_secs(30));
+            }
+            tokio::select! {
+                result = &mut startup, if ready.is_none() => {
+                    ready = Some(result?);
+                }
+                result = session.forward() => match result? {
+                    SessionEvent::Packet => {}
+                    SessionEvent::ProxyCommand(_) => {
+                        if !command_notice_sent {
+                            timeout(Duration::from_secs(5), session.send_system_message(
+                                "A server is starting. Please wait for the current transfer.",
+                            )).await??;
+                            command_notice_sent = true;
+                        }
+                    }
+                    SessionEvent::BungeeCord(request) => {
+                        if let Some(identity) = session.identity()
+                            && let Ok(Some(payload)) = crate::bungee_runtime::handle(
+                                self.snapshot, current, &identity, event.peer_addr(), request,
+                            ) {
+                                timeout(Duration::from_secs(5), session.send_bungeecord(&payload)).await??;
+                            }
+                    }
+                    SessionEvent::ClientClosed => return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof, "client closed while destination was starting",
+                    )),
+                    SessionEvent::Disconnected => return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied, "The current backend disconnected the player.",
+                    )),
+                    SessionEvent::BackendClosed | SessionEvent::BackendFailed => return Err(io::Error::new(
+                        io::ErrorKind::ConnectionAborted, "current backend closed while destination was starting",
+                    )),
+                },
+                _ = sleep_until(transition_deadline.unwrap_or(Instant::now() + Duration::from_secs(30))),
+                    if transition_deadline.is_some() => return Err(io::Error::new(
+                        io::ErrorKind::TimedOut, "current backend configuration timed out during startup",
+                    )),
+            }
+        }
+    }
+
     pub fn initial_candidates(
         &self,
         primary: &str,
@@ -33,9 +138,20 @@ impl Network<'_> {
         } else {
             std::iter::once(primary.to_owned())
                 .chain(config.fallbacks.get(primary).into_iter().flatten().cloned())
+                .chain(
+                    config
+                        .instances
+                        .get(primary)
+                        .and_then(|instance| config.fallbacks.get(&instance.group))
+                        .into_iter()
+                        .flatten()
+                        .cloned(),
+                )
                 .collect()
         };
-        Ok(candidates
+        Ok(self
+            .snapshot
+            .candidates(&candidates)
             .into_iter()
             .filter(|server| config.can_access(server, name))
             .collect())
@@ -44,13 +160,23 @@ impl Network<'_> {
     pub fn recovery_candidates(&self, current: &str) -> Vec<String> {
         let config = &self.snapshot.config;
         let mut seen = HashSet::from([current.to_owned()]);
-        config
+        let group_fallbacks = config
+            .instances
+            .get(current)
+            .and_then(|instance| config.fallbacks.get(&instance.group));
+        let destinations: Vec<_> = config
             .network
             .hubs
             .iter()
             .chain(config.fallbacks.get(current).into_iter().flatten())
+            .chain(group_fallbacks.into_iter().flatten())
             .filter(|server| seen.insert((*server).clone()))
             .cloned()
+            .collect();
+        self.snapshot
+            .candidates(&destinations)
+            .into_iter()
+            .filter(|name| name != current)
             .collect()
     }
 
@@ -61,7 +187,7 @@ impl Network<'_> {
         &self,
         session: &mut Session<C, TcpStream>,
         candidates: &[String],
-        deadline: Instant,
+        deadline: &mut Instant,
         event: &mut Connection,
     ) -> io::Result<String> {
         let names: Vec<_> = candidates.iter().map(String::as_str).collect();
@@ -80,6 +206,24 @@ impl Network<'_> {
                 }
                 continue;
             }
+            let wake_started = Instant::now();
+            let prepared = self.prepare_backend(selected).await;
+            // Cold starts have their own configured deadline; preserve the
+            // existing shared TCP/login budget across fallback attempts.
+            *deadline += wake_started.elapsed();
+            let lease = match prepared {
+                Ok(lease) => lease,
+                Err(error) => {
+                    if let Some(extension) = &session.extension {
+                        extension.release(selected);
+                    }
+                    next += 1;
+                    if next == names.len() {
+                        return Err(error);
+                    }
+                    continue;
+                }
+            };
             let connected = health::connect_candidates(
                 &self.snapshot.config,
                 &self.snapshot.health,
@@ -122,7 +266,10 @@ impl Network<'_> {
             }
             .await;
             match result {
-                Ok(()) => return Ok(current),
+                Ok(()) => {
+                    event.hold_managed_backend(&current, lease);
+                    return Ok(current);
+                }
                 Err(error) => {
                     if let Some(extension) = &session.extension {
                         extension.release(&current);
@@ -168,15 +315,16 @@ impl Network<'_> {
             .identity()
             .ok_or_else(|| io::Error::other("missing player identity"))?;
         let config = &self.snapshot.config;
-        let candidates: Vec<_> = candidates
+        let expanded = self.snapshot.candidates(candidates);
+        let candidates: Vec<_> = expanded
             .iter()
             .filter(|server| {
                 server.as_str() != current
                     && config.can_access(server, &identity.name)
-                    && self.snapshot.health.available(server)
+                    && self.snapshot.reachable(server)
             })
             .collect();
-        let deadline = Instant::now() + config.limits.connect_timeout;
+        let mut deadline = Instant::now() + config.limits.connect_timeout;
         let mut last_error = io::Error::new(
             io::ErrorKind::NotConnected,
             "No available server could be reached.",
@@ -188,6 +336,22 @@ impl Network<'_> {
                 last_error = error;
                 continue;
             }
+            let wake_started = Instant::now();
+            let prepared = self.prepare_transfer(session, current, name, event).await;
+            deadline += wake_started.elapsed();
+            let lease = match prepared {
+                Ok(lease) => lease,
+                Err(error) => {
+                    if let Some(extension) = &mut session.extension {
+                        extension.transfer_failed().await;
+                    }
+                    if error.kind() == io::ErrorKind::PermissionDenied || !session.can_switch() {
+                        return Err(error);
+                    }
+                    last_error = error;
+                    continue;
+                }
+            };
             let budget = deadline.saturating_duration_since(Instant::now())
                 / (candidates.len() - index) as u32;
             let attempt_deadline = Instant::now() + budget;
@@ -211,7 +375,10 @@ impl Network<'_> {
             }
             .await;
             match result {
-                Ok(()) => return Ok((*name).clone()),
+                Ok(()) => {
+                    event.hold_managed_backend(name, lease);
+                    return Ok((*name).clone());
+                }
                 Err(error) => {
                     if let Some(extension) = &mut session.extension {
                         extension.transfer_failed().await;
@@ -304,7 +471,7 @@ impl Network<'_> {
                     (Vec::new(), Some(format!("You are already on {current}.")))
                 }
                 ["server", target]
-                    if !config.backends.contains_key(*target)
+                    if !config.is_destination(target)
                         || !config.can_access(target, &identity.name) =>
                 {
                     (
@@ -332,7 +499,7 @@ impl Network<'_> {
             Err(error)
                 if !session.switch_in_progress()
                     && session.backend().is_some()
-                    && session.client.state.settled(State::Play) =>
+                    && session.can_switch() =>
             {
                 // The old attachment remains usable after preflight failures,
                 // including a target's ban or whitelist rejection.

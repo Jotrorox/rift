@@ -17,6 +17,8 @@ export const DOCS = [
     blurb: 'Login and transfer hooks, commands, permissions, queues and durable state.' },
   { slug: 'operations', file: 'docs/operations.md', title: 'Operations', group: 'Run',
     blurb: 'systemd, containers, reloads, maintenance, upgrades and rollback.' },
+  { slug: 'managed-servers', file: 'docs/managed-servers.md', title: 'Managed servers', group: 'Run',
+    blurb: 'Local processes, service groups, scaling, templates and persistent worlds.' },
   { slug: 'http', file: 'docs/http.md', title: 'Web dashboard and HTTP', group: 'Run',
     blurb: 'The bundled dashboard, status site, config API and Lua endpoints.' },
   { slug: 'messaging', file: 'docs/messaging.md', title: 'Messaging', group: 'Integrate',

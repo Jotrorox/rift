@@ -23,6 +23,14 @@ rift.config.web = {
     ui = true,
     api = true,
     -- token = "replace-with-a-long-random-secret",
+    -- records_directory = "operator-records", -- Use writable storage for retention.
+    -- operators = {
+    --     observer = {
+    --         token = "replace-with-an-independent-random-secret",
+    --         permissions = { "read", "logs" },
+    --         -- groups = { "lobby" }, -- Restrict to instances of these groups.
+    --     },
+    -- },
 }
 -- A separate read-only server, with no configuration or extension routes.
 -- Set status=false to disable it, or metrics=false to disable its scraper.

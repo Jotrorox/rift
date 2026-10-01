@@ -5,6 +5,21 @@ hostnames through one port, authenticate players, switch backends, and manage
 configuration through Lua or the bundled web dashboard. No Java or separate Lua
 installation is needed to run Rift.
 
+Rift can also supervise local Minecraft servers: start them on demand, stop
+empty servers, and operate their lifecycle from the CLI or web dashboard.
+Service groups can maintain minimum and spare capacity, scale from occupancy or
+queue pressure, and recover failed processes with bounded retries. Define
+local templates from server jars, plugins, configs and maps, then create instances
+with allocated ports and live backend registration. Persistent worlds retain
+files after removal; disposable game instances delete their generated files on
+removal. Both retain files across stop/start. See the
+[managed-server guide](docs/managed-servers.md), [managed-server example](examples/managed.lua),
+[service groups](examples/services.lua) and [provisioning templates](examples/templates.lua).
+The dashboard provides live server logs and commands, structured group/template
+editing, configuration deployment history and rollback, scoped operator tokens,
+and retained audit records. See the [HTTP operator guide](docs/http.md).
+Managed Minecraft processes need their own Java runtime and explicit EULA acceptance.
+
 ## Quick start
 
 Download a native archive from [Releases](https://github.com/Jotrorox/rift/releases),
@@ -153,6 +168,7 @@ also includes for offline use.
 - [Lua configuration and plugins](https://jotrorox.github.io/rift/docs/lua/): script-style settings, modules and folder plugins.
 - [Authenticated extensions](https://jotrorox.github.io/rift/docs/extensions/): lifecycle hooks, commands, permissions and queues.
 - [Operations](https://jotrorox.github.io/rift/docs/operations/): installation, systemd/containers, administration and upgrades.
+- [Managed servers](https://jotrorox.github.io/rift/docs/managed-servers/): local processes, automatic start/stop and persistent worlds.
 - [HTTP services](https://jotrorox.github.io/rift/docs/http/): web dashboard, status, API and Lua extensions.
 - [Messaging](https://jotrorox.github.io/rift/docs/messaging/): plugin messaging, [Lua API](https://jotrorox.github.io/rift/docs/messaging-lua/) and [QUIC protocol](https://jotrorox.github.io/rift/docs/messaging-protocol/).
 - [BungeeCord compatibility](https://jotrorox.github.io/rift/docs/bungeecord/): backend plugin transfers and player/server queries.

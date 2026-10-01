@@ -17,6 +17,7 @@ async function testWebAssets(appSource, statusSource) {
     append(...children) { this.children.push(...children); }
     replaceChildren(...children) { this.children = children; }
     addEventListener(event, listener) { this.listeners[event] = listener; }
+    setAttribute(name, value) { this[name] = value; }
     async emit(event, properties = {}) { await this.listeners[event]?.({ preventDefault() {}, ...properties }); }
   }
   class TestHeaders {
@@ -37,9 +38,24 @@ async function testWebAssets(appSource, statusSource) {
   }
   async function flush() { for (let i = 0; i < 40; i += 1) await Promise.resolve(); }
   function fixture(script) {
-    const elements = new Map(), intervals = [], calls = [];
+    const elements = new Map(), intervals = [], calls = [], timers = new Map();
+    let timerId = 0, now = 0;
+    const schedule = (callback, delay) => { const id = ++timerId; timers.set(id, { callback, at: now + delay }); return id; };
+    const advance = async (delay) => {
+      const end = now + delay;
+      for (;;) {
+        const next = [...timers].filter(([, timer]) => timer.at <= end).sort((a, b) => a[1].at - b[1].at)[0];
+        if (!next) break;
+        now = next[1].at; timers.delete(next[0]); next[1].callback(); await flush();
+      }
+      now = end; await flush();
+    };
     const element = (id) => { if (!elements.has(id)) elements.set(id, new Element()); return elements.get(id); };
-    const document = { getElementById: element, createElement: () => new Element(), hidden: false, addEventListener() {} };
+    const document = { getElementById: element, createElement: (tag) => {
+      const node = new Element();
+      if (tag === "textarea") Object.defineProperty(node, "type", { get: () => "textarea" });
+      return node;
+    }, hidden: false, addEventListener() {} };
     const window = { location: { origin: "http://localhost:8080" }, addEventListener() {}, confirm: () => true };
     const model = {
       config: { source: "return { -- original comments\n}\n", revision: "rev-1", writable: true },
@@ -50,6 +66,9 @@ async function testWebAssets(appSource, statusSource) {
         metrics: { active: 2, accepted: 7, sent: 1024, received: 2048, errors: 0, reloads: 1 },
         services: { web: { listen: "127.0.0.1:8080", api: true, ui: true }, status: { metrics: true } }, http_hook: true },
       fail: null, intercept: null,
+      access: { name: "local", permissions: null, groups: null },
+      definitions: { revision: "rev-1", service_groups: {}, templates: {} },
+      deployments: { revision: "rev-1", deployments: [{ id: 1, revision: "rev-1", actor: "local", action: "startup", timestamp_unix_ms: 1 }] },
     };
     const response = (data, status = 200) => ({ status, statusText: status === 200 ? "OK" : "Conflict", ok: status >= 200 && status < 300,
       headers: new TestHeaders({ "content-type": "application/json" }), text: async () => JSON.stringify(data), json: async () => data });
@@ -57,6 +76,9 @@ async function testWebAssets(appSource, statusSource) {
       calls.push({ path, options });
       if (model.intercept) { const intercepted = await model.intercept(path, options); if (intercepted) return intercepted; }
       if (model.fail) return response({ error: "Server rejected request" }, model.fail);
+      if (path === "/api/access") return response(model.access);
+      if (path === "/api/definitions") return response(model.definitions);
+      if (path === "/api/deployments") return response(model.deployments);
       if (path === "/api/status" || path === "/status") return response({ ...model.status });
       if (path === "/api/config" && options.method !== "PUT") return response({ ...model.config });
       if (path === "/api/config/validate") return response({ valid: true });
@@ -72,8 +94,8 @@ async function testWebAssets(appSource, statusSource) {
     const evaluate = new Function("document", "window", "fetch", "Headers", "AbortController", "TextEncoder", "URL", "setTimeout", "clearTimeout", "setInterval", script);
     evaluate(document, window, fetch, TestHeaders, class { abort() {} },
       class { encode(value) { return { length: unescape(encodeURIComponent(value)).length }; } },
-      typeof URL === "undefined" ? TestURL : URL, () => 0, () => {}, (callback) => intervals.push(callback));
-    return { element, model, calls, window, intervals, response };
+      typeof URL === "undefined" ? TestURL : URL, schedule, (id) => timers.delete(id), (callback) => intervals.push(callback));
+    return { element, model, calls, window, intervals, response, advance };
   }
   async function test(name, callback) { await callback(); passed.push(name); }
 
@@ -92,6 +114,200 @@ async function testWebAssets(appSource, statusSource) {
     assert(h.element("source").value === "my changes", "External revision overwrote edits");
     assert(!h.element("conflict").className.includes("hidden"), "Missing revision warning");
     assert(h.element("save").disabled, "Stale source save must be blocked");
+  });
+  await test("managed controls encode names, post JSON, and report accepted operations", async () => {
+    const h = fixture(appSource); await flush();
+    h.model.status.managed_servers = [{ name: "lobby west", state: "stopped", players: 0, reservations: 0, automatic_start: true, last_error: null }];
+    await h.element("refresh-status").emit("click"); await flush();
+    const row = h.element("managed-servers").children[0];
+    assert(row.children[0].textContent === "lobby west", "Managed server name missing");
+    const [start, stop] = row.children[8].children;
+    assert(!start.disabled && !stop.disabled, "Idle managed server controls unavailable");
+    await start.emit("click"); await flush();
+    const call = h.calls.find(({ path }) => path === "/api/servers/lobby%20west/start");
+    assert(call && call.options.method === "POST" && call.options.body === "{}", "Lifecycle operation missing or incorrectly encoded");
+    assert(h.element("server-result").textContent.includes("accepted"), "Accepted operation presented as complete");
+  });
+  await test("managed servers cannot be stopped from dashboard while occupied", async () => {
+    const h = fixture(appSource); await flush();
+    h.model.status.managed_servers = [{ name: "lobby", state: "running", players: 1, reservations: 0, automatic_start: true }];
+    await h.element("refresh-status").emit("click"); await flush();
+    const [start, stop] = h.element("managed-servers").children[0].children[8].children;
+    assert(start.disabled && stop.disabled, "Occupied running server controls must be disabled");
+  });
+  await test("lifecycle conflicts do not mark the source editor stale", async () => {
+    const h = fixture(appSource); await flush();
+    h.model.status.managed_servers = [{ name: "lobby", state: "running", players: 0, reservations: 0, automatic_start: true }];
+    await h.element("refresh-status").emit("click"); await flush();
+    h.model.intercept = (path) => path === "/api/servers/lobby/stop" ? h.response({ error: "Backend became occupied" }, 409) : undefined;
+    await h.element("managed-servers").children[0].children[8].children[1].emit("click"); await flush();
+    assert(h.element("server-result").textContent.includes("occupied"), "Lifecycle error was not displayed");
+    assert(h.element("conflict").className.includes("hidden"), "Lifecycle conflict incorrectly affected configuration revision");
+  });
+  await test("groups safely render template and storage and create instances with encoded names", async () => {
+    const h = fixture(appSource); await flush();
+    h.model.status.service_groups = [{ name: "arena west", port_range: [25600, 25610], storage: "disposable", template: "<script>arena</script>", instances: [] }];
+    h.model.intercept = (path) => path === "/api/groups/arena%20west/instances" ? h.response({ name: "arena-1", storage: "disposable" }, 201) : undefined;
+    await h.element("refresh-status").emit("click"); await flush();
+    const row = h.element("service-groups").children[0];
+    assert(row.children[2].textContent === "Disposable game", "Disposable group policy missing");
+    assert(row.children[3].textContent === "<script>arena</script>", "Template text was not preserved safely");
+    assert(row.children[1].textContent === "25600–25610", "Port range missing");
+    await row.children[5].children[0].emit("click"); await flush();
+    const call = h.calls.find(({ path }) => path === "/api/groups/arena%20west/instances");
+    assert(call && call.options.method === "POST" && call.options.body === "{}", "Instance creation request incorrect");
+    assert(h.element("server-result").textContent.includes("arena-1"), "Created instance name missing");
+    assert(h.element("server-result").textContent.includes("EULA"), "Provisioning prerequisite missing");
+  });
+  await test("wake status explains paused and exhausted recovery and full groups block creation", async () => {
+    const h = fixture(appSource); await flush();
+    h.model.status.managed_servers = [
+      { name: "paused", state: "stopped", automatic_start: false, automatic_enabled: false },
+      { name: "exhausted", state: "failed", automatic_start: true, automatic_enabled: true, restart_exhausted: true },
+      { name: "manual", state: "stopped", automatic_start: false, automatic_enabled: true },
+      { name: "auto", state: "stopped", automatic_start: true, automatic_enabled: true },
+    ];
+    h.model.status.service_groups = [
+      { name: "full", storage: "persistent", instances: ["full-1"], scaling: { max_instances: 1 } },
+      { name: "open", storage: "persistent", instances: ["open-1"], scaling: { max_instances: 2 } },
+    ];
+    await h.element("refresh-status").emit("click"); await flush();
+    const wake = h.element("managed-servers").children.map((row) => row.children[3].textContent);
+    assert(wake[0].includes("Paused by Stop") && wake[1].includes("retries exhausted"), "Paused wake reasons missing");
+    assert(wake[2] === "Explicit start only" && wake[3] === "Enabled", "Wake policy labels incorrect");
+    const [full, open] = h.element("service-groups").children.map((row) => row.children[5].children[0]);
+    assert(full.disabled && full.title.includes("max_instances"), "Full group creation was enabled");
+    assert(!open.disabled, "Group below its maximum was blocked");
+  });
+  await test("instance removal distinguishes destructive games and persistent worlds", async () => {
+    const h = fixture(appSource); await flush();
+    h.model.status.managed_servers = [
+      { name: "game west", group: "arena", address: "127.0.0.1:25600", template: "arena", storage: "disposable", state: "stopped" },
+      { name: "survival-1", group: "survival", storage: "persistent", state: "stopped" },
+      { name: "static", group: null, storage: "persistent", state: "stopped" },
+    ];
+    h.model.intercept = (path) => path.startsWith("/api/instances/") ? h.response({ removed: true, files_removed: path.includes("game") }) : undefined;
+    await h.element("refresh-status").emit("click"); await flush();
+    const rows = h.element("managed-servers").children;
+    assert(rows[0].children[4].textContent === "Disposable game", "Disposable policy missing");
+    assert(rows[1].children[4].textContent === "Persistent world", "Persistent policy missing");
+    assert(rows[0].children[5].textContent === "arena", "Instance template missing");
+    assert(rows[0].children[8].children[2].textContent === "Remove & delete files", "Destructive removal label missing");
+    assert(rows[1].children[8].children[2].textContent === "Remove · keep files", "Persistent removal label missing");
+    assert(rows[2].children[8].children.length === 2, "Static managed servers must not expose dynamic removal");
+    await rows[0].children[8].children[2].emit("click"); await flush();
+    const call = h.calls.find(({ path }) => path === "/api/instances/game%20west");
+    assert(call && call.options.method === "DELETE" && call.options.body === "{}", "Instance removal request incorrect");
+    assert(h.element("server-result").textContent.includes("deleted"), "Disposable cleanup outcome missing");
+    await h.element("managed-servers").children[1].children[8].children[2].emit("click"); await flush();
+    assert(h.element("server-result").textContent.includes("remain on disk"), "Persistent retention outcome missing");
+  });
+  await test("dashboard polls a removal beyond 15 seconds and prevents duplicate submissions", async () => {
+    const h = fixture(appSource); await flush(); let complete = false;
+    h.model.status.managed_servers = [{ name: "arena-1", group: "arena", storage: "disposable", state: "running" }];
+    h.model.intercept = (path) => {
+      if (path === "/api/instances/arena-1") return h.response({ operation_id: "slow-removal", status: "pending" }, 202);
+      if (path === "/api/operations/slow-removal") return h.response(complete
+        ? { status: "succeeded", http_status: 200, result: { removed: true, files_removed: true } }
+        : { status: "pending" });
+    };
+    await h.element("refresh-status").emit("click"); await flush();
+    const remove = h.element("managed-servers").children[0].children[8].children[2];
+    await remove.emit("click"); await flush();
+    assert(h.element("server-result").textContent.includes("slow-removal"), "Pending operation ID missing");
+    await h.advance(16000);
+    assert(remove.disabled, "Removal controls were enabled before completion");
+    assert(!h.element("server-result").textContent.includes("timed out"), "Long operation hit the dashboard request timeout");
+    assert(h.calls.filter(({ path }) => path === "/api/operations/slow-removal").length >= 16, "Dashboard stopped polling");
+    await remove.emit("click"); await flush();
+    assert(h.calls.filter(({ options }) => options.method === "DELETE").length === 1, "Pending removal was duplicated");
+    complete = true; await h.advance(1000);
+    assert(h.element("server-result").textContent.includes("deleted"), "Completed removal outcome missing");
+    assert(!h.element("managed-servers").children[0].children[8].children[2].disabled, "Completion did not restore controls");
+  });
+  await test("asynchronous failures show their operation ID and preserve the configuration editor", async () => {
+    const h = fixture(appSource); await flush();
+    h.model.status.service_groups = [{ name: "arena", storage: "disposable" }];
+    h.model.intercept = (path) => {
+      if (path === "/api/groups/arena/instances") return h.response({ operation_id: "failed-create" }, 202);
+      if (path === "/api/operations/failed-create") return h.response({ status: "failed", http_status: 409, error: "No free ports" });
+    };
+    await h.element("refresh-status").emit("click"); await flush();
+    await h.element("service-groups").children[0].children[5].children[0].emit("click"); await flush();
+    assert(h.element("server-result").textContent.includes("failed-create failed: No free ports"), "Operation failure missing");
+    assert(h.element("server-result").className.includes("error"), "Failure presented as success");
+    assert(h.element("conflict").className.includes("hidden"), "Operation failure changed editor revision state");
+    assert(!h.element("service-groups").children[0].children[5].children[0].disabled, "Failure did not restore controls");
+  });
+  await test("polling denial or expiry explains the unresolved operation without claiming failure", async () => {
+    for (const status of [403, 404, 503]) {
+      const h = fixture(appSource); await flush();
+      h.model.status.service_groups = [{ name: "arena", storage: "disposable" }];
+      h.model.intercept = (path) => {
+        if (path === "/api/groups/arena/instances") return h.response({ operation_id: "unresolved" }, 202);
+        if (path === "/api/operations/unresolved") return h.response({ error: "Result unavailable" }, status);
+      };
+      await h.element("refresh-status").emit("click"); await flush();
+      await h.element("service-groups").children[0].children[5].children[0].emit("click"); await flush();
+      const message = h.element("server-result").textContent;
+      assert(message.includes("Result unavailable") && message.includes("/api/operations/unresolved") && message.includes("may still be running"), "Unresolved operation guidance missing");
+      if (status === 403) assert(h.element("auth-panel").open, "Polling denial did not expose token controls");
+    }
+  });
+  await test("asynchronous cleanup errors remain warnings", async () => {
+    const h = fixture(appSource); await flush();
+    h.model.status.managed_servers = [{ name: "arena-1", group: "arena", storage: "disposable", state: "stopped" }];
+    h.model.intercept = (path) => {
+      if (path === "/api/instances/arena-1") return h.response({ operation_id: "cleanup" }, 202);
+      if (path === "/api/operations/cleanup") return h.response({ status: "succeeded", result: { removed: true, files_removed: false, cleanup_error: "Directory is read-only" } });
+    };
+    await h.element("refresh-status").emit("click"); await flush();
+    await h.element("managed-servers").children[0].children[8].children[2].emit("click"); await flush();
+    assert(h.element("server-result").textContent.includes("read-only"), "Asynchronous cleanup error missing");
+    assert(h.element("server-result").className.includes("warning"), "Asynchronous cleanup error presented as success");
+  });
+  await test("occupied, reserved and removing instances disable removal", async () => {
+    const h = fixture(appSource); await flush();
+    h.model.status.managed_servers = [
+      { name: "occupied", group: "games", state: "running", players: 1 },
+      { name: "reserved", group: "games", state: "running", reservations: 1 },
+      { name: "removing", group: "games", state: "removing" },
+      { name: "stopping", group: "games", state: "stopping" },
+    ];
+    await h.element("refresh-status").emit("click"); await flush();
+    for (const row of h.element("managed-servers").children) {
+      const remove = row.children[8].children[2];
+      assert(remove.disabled, "Unsafe instance removal enabled");
+      await remove.emit("click"); await flush();
+    }
+    assert(!h.calls.some(({ options }) => options.method === "DELETE"), "Disabled removal submitted a request");
+  });
+  await test("provisioning busy state prevents duplicate requests and restores controls", async () => {
+    const h = fixture(appSource); await flush(); let release;
+    h.model.status.service_groups = [{ name: "arena", port_range: [25600, 25610], storage: "disposable", template: "arena" }];
+    h.model.intercept = (path) => path === "/api/groups/arena/instances" ? new Promise((resolve) => { release = resolve; }) : undefined;
+    await h.element("refresh-status").emit("click"); await flush();
+    const create = h.element("service-groups").children[0].children[5].children[0];
+    await create.emit("click"); await flush();
+    assert(create.disabled, "Pending creation control remains enabled");
+    await create.emit("click"); await flush();
+    assert(h.calls.filter(({ path }) => path === "/api/groups/arena/instances").length === 1, "Duplicate provisioning request");
+    release(h.response({ name: "arena-1" }, 201)); await flush();
+    assert(!h.element("service-groups").children[0].children[5].children[0].disabled, "Creation controls were not restored");
+  });
+  await test("removal cleanup failures warn without claiming files deleted or changing editor revision", async () => {
+    const h = fixture(appSource); await flush();
+    h.model.status.managed_servers = [{ name: "arena-1", group: "arena", storage: "disposable", state: "stopped" }];
+    h.model.intercept = (path) => path === "/api/instances/arena-1" ? h.response({ removed: true, files_removed: false, cleanup_error: "Directory is read-only" }) : undefined;
+    await h.element("refresh-status").emit("click"); await flush();
+    await h.element("managed-servers").children[0].children[8].children[2].emit("click"); await flush();
+    assert(h.element("server-result").textContent.includes("read-only"), "Cleanup error missing");
+    assert(h.element("server-result").className.includes("warning"), "Incomplete cleanup presented as success");
+    assert(!h.element("server-result").textContent.includes("deleted"), "Failed cleanup claimed deletion");
+    h.model.intercept = (path) => path === "/api/instances/arena-1" ? h.response({ error: "Instance became occupied" }, 409) : undefined;
+    await h.element("managed-servers").children[0].children[8].children[2].emit("click"); await flush();
+    assert(h.element("server-result").textContent.includes("occupied"), "Removal conflict missing");
+    assert(h.element("conflict").className.includes("hidden"), "Removal conflict changed editor revision state");
   });
   await test("clean editor synchronizes external source changes", async () => {
     const h = fixture(appSource); await flush();
@@ -185,6 +401,55 @@ async function testWebAssets(appSource, statusSource) {
     await h.element("refresh-status").emit("click"); await flush();
     assert(h.element("metric-active").textContent === "2", "Error removed last snapshot");
     assert(h.element("connection-state").textContent === "Unavailable", "Failed status presented as live");
+  });
+  await test("scoped operators hide configuration and disable ungranted mutations", async () => {
+    const h = fixture(appSource); await flush();
+    h.model.access = { name: "lobby_staff", permissions: ["read", "logs"], groups: ["lobby"] };
+    h.model.status.managed_servers = [{ name: "lobby-1", state: "stopped", players: 0, reservations: 0 }];
+    const before = h.calls.length;
+    h.element("token").value = "staff-token"; await h.element("auth-form").emit("submit"); await flush();
+    assert(h.element("config-panel").className.includes("hidden"), "Privileged editor was exposed");
+    assert(h.element("source").value === "", "Previous operator source was retained");
+    assert(!h.calls.slice(before).some(({ path }) => path === "/api/config" || path === "/api/definitions"), "Scoped operator fetched privileged data");
+    assert(h.element("managed-servers").children[0].children[8].children[0].disabled, "Ungrantable server mutation was enabled");
+  });
+  await test("server logs resume their cursor and discard responses for a previous selection", async () => {
+    const h = fixture(appSource); await flush();
+    h.model.intercept = (path) => path.includes("/logs") ? h.response({ text: "first\n", cursor: 6 }) : null;
+    h.element("console-server").value = "lobby west"; await h.element("console-server").emit("change"); await flush();
+    assert(h.element("console-output").textContent === "first\n", "Log output did not render");
+    await h.element("console-refresh").emit("click"); await flush();
+    assert(h.calls.some(({ path }) => path === "/api/servers/lobby%20west/logs?cursor=6"), "Log cursor or encoded name missing");
+    let resolve;
+    h.model.intercept = () => new Promise((done) => { resolve = done; });
+    const pending = h.element("console-refresh").emit("click"); await flush();
+    h.element("console-server").value = "other"; await h.element("console-server").emit("change");
+    resolve(h.response({ text: "wrong server", cursor: 99 })); await pending; await flush();
+    assert(!h.element("console-output").textContent.includes("wrong server"), "Old server output leaked into the selected console");
+  });
+  await test("structured fields send typed definitions with the loaded revision", async () => {
+    const h = fixture(appSource); await flush();
+    h.element("definition-section").value = "templates"; await h.element("definition-section").emit("change"); await flush();
+    h.element("definition-name").value = "arena";
+    const inputs = h.element("definition-fields").children.map((wrapper) => wrapper.children[1]);
+    inputs.find((input) => input.id === "definition-field-server_jar").value = "assets/paper.jar";
+    inputs.find((input) => input.id === "definition-field-plugins").value = "assets/a.jar\nassets/b.jar";
+    let submitted;
+    h.model.intercept = (path, options) => {
+      if (options.method === "PUT" && path.includes("/definitions/")) { submitted = JSON.parse(options.body); return h.response({ revision: "rev-1" }); } return null;
+    };
+    await h.element("definition-form").emit("submit"); await flush();
+    assert(submitted.revision === "rev-1", "Definition revision check was omitted");
+    assert(submitted.definition.server_jar === "assets/paper.jar" && submitted.definition.plugins.length === 2, "Fields were not serialized as a structured definition");
+  });
+  await test("rollback uses the displayed history revision and keeps conflicts visible", async () => {
+    const h = fixture(appSource); await flush();
+    h.model.status.revision = "newer-revision";
+    h.model.intercept = (path) => path.endsWith("/rollback") ? h.response({ error: "Deployment revision conflict" }, 409) : null;
+    await h.element("deployments").children[0].children[4].children[0].emit("click"); await flush();
+    const call = h.calls.find(({ path }) => path.endsWith("/rollback"));
+    assert(JSON.parse(call.options.body).revision === "rev-1", "Rollback silently refreshed its expected revision");
+    assert(h.element("deployment-result").textContent.includes("conflict"), "Stale rollback conflict was hidden");
   });
   return passed;
 }
