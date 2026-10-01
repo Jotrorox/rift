@@ -662,16 +662,61 @@ fn hook_failures_close_only_the_affected_connection_and_release_its_permit() {
         let process = fixture.spawn(&[]);
         let failing = process.listener();
         let healthy = process.listener();
+        let failure_event = |peer: SocketAddr| {
+            let line = process.lines.recv_timeout(Duration::from_secs(5)).unwrap();
+            let event: serde_json::Value = serde_json::from_str(&line).expect(&line);
+            assert_eq!(event["peer"], peer.to_string(), "{line}");
+            assert_eq!(event["stage"], "on_route", "{line}");
+            event
+        };
         for _ in 0..6 {
-            assert_closed(&mut connect(failing));
+            let mut client = connect(failing);
+            let peer = client.local_addr().unwrap();
+            assert_closed(&mut client);
+            // EOF alone also accepts admission rejection. Verify that every
+            // connection reaches the hook instead of hiding a leaked permit.
+            let event = failure_event(peer);
+            assert!(
+                matches!(
+                    event["failure"].as_str(),
+                    Some("script_error" | "script_timeout" | "unknown_backend" | "route_rejected")
+                ),
+                "{failing_hook}: {event}"
+            );
         }
         assert_no_connection(&backend);
-        let mut client = connect_game(healthy);
-        let mut server = accept_game(&backend);
-        server.write_all(b"healthy").unwrap();
-        let mut response = [0; 7];
-        client.read_exact(&mut response).unwrap();
-        assert_eq!(&response, b"healthy");
+        let server = thread::spawn(move || {
+            accept_game(&backend).write_all(b"healthy").unwrap();
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let mut client = connect_game(healthy);
+            let peer = client.local_addr().unwrap();
+            let mut response = [0; 7];
+            match client.read_exact(&mut response) {
+                Ok(()) => {
+                    assert_eq!(&response, b"healthy");
+                    break;
+                }
+                Err(error) => {
+                    // Even the healthy hook can miss its 50 ms wall-clock
+                    // budget on shared runners. Retry only a diagnosed deadline
+                    // failure; capacity rejection and other errors must fail.
+                    let event = failure_event(peer);
+                    assert!(
+                        event["failure"] == "script_timeout"
+                            || (event["failure"] == "script_error"
+                                && event["message"]
+                                    .as_str()
+                                    .unwrap()
+                                    .contains("script deadline exceeded")),
+                        "{failing_hook}: {error}; {event}"
+                    );
+                    assert!(Instant::now() < deadline, "healthy hook kept timing out");
+                }
+            }
+        }
+        server.join().unwrap();
     }
 }
 
