@@ -31,7 +31,7 @@ fn now() -> u64 {
         .unwrap_or_default()
         .as_millis() as u64
 }
-fn private_file(path: &Path, append: bool) -> io::Result<std::fs::File> {
+fn private_file(path: &Path, append: bool, truncate: bool) -> io::Result<std::fs::File> {
     if fs::symlink_metadata(path).is_ok_and(|m| !m.is_file()) {
         return Err(io::Error::other(
             "operator record must be a regular file, without symlinks",
@@ -42,7 +42,7 @@ fn private_file(path: &Path, append: bool) -> io::Result<std::fs::File> {
         .write(true)
         .create(true)
         .append(append)
-        .truncate(!append);
+        .truncate(truncate);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -119,7 +119,9 @@ impl Store {
                 // A process interrupted during append may leave a partial final
                 // record. Remove only that tail before the next append.
                 if complete < bytes.len() {
-                    private_file(&audit, true)?.set_len(complete as u64)?;
+                    // Windows append handles cannot resize files; recovery needs
+                    // ordinary write access without truncating complete records.
+                    private_file(&audit, false, false)?.set_len(complete as u64)?;
                 }
             }
         }
@@ -151,7 +153,7 @@ impl Store {
         bounded_push(&mut deployments, value, HISTORY);
         if let Some(directory) = &self.directory {
             let temporary = directory.join("deployments.tmp");
-            let mut file = private_file(&temporary, false)?;
+            let mut file = private_file(&temporary, false, true)?;
             serde_json::to_writer(&mut file, &deployments).map_err(io::Error::other)?;
             file.sync_all()?;
             drop(file);
@@ -175,7 +177,7 @@ impl Store {
         if let Some(directory) = &self.directory {
             let path = directory.join("audit.jsonl");
             if fs::metadata(&path).is_ok_and(|m| m.len() >= AUDIT_BYTES) {
-                let mut file = private_file(&directory.join("audit.tmp"), false)?;
+                let mut file = private_file(&directory.join("audit.tmp"), false, true)?;
                 for value in &records.audit {
                     writeln!(file, "{value}")?;
                 }
@@ -183,7 +185,7 @@ impl Store {
                 drop(file);
                 fs::rename(directory.join("audit.tmp"), &path)?;
             }
-            let mut file = private_file(&path, true)?;
+            let mut file = private_file(&path, true, false)?;
             writeln!(file, "{value}")?;
             file.sync_data()?;
         }
@@ -325,7 +327,7 @@ mod tests {
         let store = Store::open(Some(directory.clone())).unwrap();
         store.audit("tester", "save", "", "accepted", 200).unwrap();
         drop(store);
-        private_file(&directory.join("audit.jsonl"), true)
+        private_file(&directory.join("audit.jsonl"), true, false)
             .unwrap()
             .write_all(b"{\"partial\"")
             .unwrap();
