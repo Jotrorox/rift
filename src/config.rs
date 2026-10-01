@@ -19,6 +19,11 @@ pub use messaging::{MessagingConfig, MessagingPrincipal, MessagingStream, Messag
 mod managed;
 mod messaging;
 
+// Configuration evaluation includes cold VM setup and can be descheduled on
+// busy hosts. Keep it bounded without applying the latency-sensitive callback
+// deadline; the shared instruction, memory and source limits still apply.
+const CONFIGURATION_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub listeners: BTreeMap<String, SocketAddr>,
@@ -287,7 +292,7 @@ impl Config {
         let name = source.entry.name.as_ref();
         let parse = || -> Result<Self, String> {
             let (_lua, value) =
-                crate::script::load(&source, Instant::now() + crate::script::EXECUTION_TIMEOUT)
+                crate::script::load(&source, Instant::now() + CONFIGURATION_TIMEOUT)
                     .map_err(|e| e.to_string())?;
             let root = table(value, "configuration")?;
             fields(
