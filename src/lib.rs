@@ -5,6 +5,7 @@ pub mod extensions;
 mod forwarding;
 pub mod hooks;
 pub mod http_script;
+pub mod instance_store;
 pub mod managed;
 pub mod message_script;
 pub mod messaging;

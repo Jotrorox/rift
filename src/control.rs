@@ -56,6 +56,9 @@ pub struct Command {
 /// and listener topology still require a restart. Returns the first reason a
 /// candidate cannot replace the running configuration.
 pub fn live_compatible(config: &Config, previous: &Config) -> Result<(), String> {
+    if config.instance_database != previous.instance_database {
+        return Err("instance_database: changing the database path requires a restart".into());
+    }
     if config.listeners != previous.listeners {
         return Err("gameplay listener changes require a restart".into());
     }
@@ -254,6 +257,13 @@ mod tests {
             live_compatible(&candidate, &previous)
         };
         assert_eq!(reload("command={'java'}", "'java'"), Ok(()));
+        let mut moved_database = previous.clone();
+        moved_database.instance_database = "other.sqlite3".into();
+        assert!(
+            live_compatible(&moved_database, &previous)
+                .unwrap_err()
+                .contains("instance_database")
+        );
         assert_eq!(
             reload(
                 "command={'java'},scaling={capacity_per_instance=10,max_instances=3}",

@@ -12,7 +12,9 @@ queue pressure, and recover failed processes with bounded retries. Define
 local templates from server jars, plugins, configs and maps, then create instances
 with allocated ports and live backend registration. Persistent worlds retain
 files after removal; disposable game instances delete their generated files on
-removal. Both retain files across stop/start. See the
+removal. Both retain files across stop/start. Bundled SQLite saves registrations,
+allocated ports, storage ownership and manual stops across proxy restarts in
+`rift.sqlite3` beside the config. See the
 [managed-server guide](docs/managed-servers.md), [managed-server example](examples/managed.lua),
 [service groups](examples/services.lua) and [provisioning templates](examples/templates.lua).
 The dashboard provides live server logs and commands, structured group/template

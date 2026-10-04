@@ -297,7 +297,8 @@ isolation and cannot detect changes incompatible with an already running process
 | Gameplay listeners, operational `admin` bind/token variable/permissions | Restart required; incompatible reload rejects the entire candidate |
 | `managed_servers` definitions or addresses of managed backends | Restart required; running processes and their lifecycle policy remain attached to the original definition |
 | `service_groups`, `templates` and scaling policies | Apply live while each registered instance keeps its process definition, storage policy and an in-range port; otherwise the reload names the instance to remove first. Create and remove instances with admin or web operations |
-| Runtime service instances | Preserved on reload; registrations are not persisted across proxy restarts |
+| `instance_database` | Bundled SQLite file, default `rift.sqlite3` beside the config; restores registrations before scaling. Path changes require a restart |
+| Runtime service instances | SQLite preserves names, groups, ports, storage ownership and explicit stops across reloads and proxy restarts |
 
 Already accepted connections keep their original configuration snapshot while
 initial login completes. A route edit never transfers a connected player.
