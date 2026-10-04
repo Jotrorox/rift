@@ -57,6 +57,7 @@ pub struct Snapshot {
     pub managed: rift::managed::ManagedServers,
     live: Arc<Mutex<Weak<Snapshot>>>,
     instance_sequence: Arc<Mutex<BTreeMap<String, u64>>>,
+    instance_store: Option<Arc<rift::instance_store::Store>>,
     pub extensions: rift::extensions::Extensions,
     pub messaging: Broker,
     pub messaging_streams: Arc<HashMap<String, Stream>>,
@@ -145,6 +146,7 @@ impl Snapshot {
                 .map_or_else(|| Arc::new(Mutex::new(Weak::new())), |old| old.live.clone()),
             instance_sequence: previous
                 .map_or_else(Arc::default, |old| old.instance_sequence.clone()),
+            instance_store: previous.and_then(|old| old.instance_store.clone()),
             extensions,
             source: None,
             revision: "runtime".into(),
@@ -1317,23 +1319,55 @@ async fn create_instance(group: String, snapshot: &Arc<Snapshot>) -> InstanceRes
             "service group reached scaling.max_instances",
         ));
     }
-    let reservation = reserve_port(&config, &snapshot.addresses, definition)
+    let reserved = snapshot
+        .instance_store
+        .as_ref()
+        .map(|store| store.reserved_ports())
+        .transpose()?
+        .unwrap_or_default();
+    let reservation = reserve_port(&config, &snapshot.addresses, definition, &reserved)
         .ok_or_else(|| Error::conflict("service group port range is exhausted"))?;
     let port = reservation.local_addr()?.port();
     let name = next_instance_name(snapshot, &config, &group)?;
     config.add_instance(&group, &name, port)?;
     let next = instance_snapshot(config, snapshot)?;
     let (provisioning_config, provisioning_name) = (next.config.clone(), name.clone());
+    let store = snapshot.instance_store.clone();
     let receipt = blocking(move || {
-        rift::provisioning::provision_tracked(&provisioning_config, &provisioning_name)
+        let plan = rift::provisioning::plan(&provisioning_config, &provisioning_name)?;
+        if let Some(store) = &store {
+            store.begin_creation(&provisioning_config, &provisioning_name, &plan)?;
+        }
+        let result =
+            rift::provisioning::provision_planned(&provisioning_config, &provisioning_name, &plan)
+                .and_then(|receipt| {
+                    if let Some(store) = &store {
+                        store.commit_creation(&provisioning_name)?;
+                    }
+                    Ok(receipt)
+                });
+        if result.is_err()
+            && let Some(store) = &store
+            && let Err(cleanup) = store.abort_creation(&provisioning_name)
+        {
+            return Err(io::Error::other(format!(
+                "creation failed: {}; recovery required: {cleanup}",
+                result.unwrap_err()
+            )));
+        }
+        result
     })
     .await?;
     // Release the port only once the instance can claim it.
     drop(reservation);
     if let Err(error) = next.managed.add(&next.config, &name) {
         let (provisioning_config, provisioning_name) = (next.config.clone(), name.clone());
-        if let Err(cleanup_error) = blocking(move || {
-            rift::provisioning::rollback(&provisioning_config, &provisioning_name, &receipt)
+        let store = snapshot.instance_store.clone();
+        if let Err(cleanup_error) = blocking(move || match store {
+            Some(store) => store.undo_registration(&provisioning_name),
+            None => {
+                rift::provisioning::rollback(&provisioning_config, &provisioning_name, &receipt)
+            }
         })
         .await
         {
@@ -1385,15 +1419,18 @@ async fn remove_instance(name: String, snapshot: &Arc<Snapshot>) -> InstanceResu
         .await
         .map_err(Error::conflict)?;
     next.managed.remove(&name).await.map_err(Error::conflict)?;
-    let storage = snapshot.config.service_groups[&instance.group].storage;
+    let storage = instance.storage;
     let (provisioning_config, provisioning_name) = (snapshot.config.clone(), name.clone());
     // Process ownership has ended. Publish deregistration even if a filesystem
     // error leaves files behind, and make that cleanup failure visible.
-    let cleanup_error =
-        blocking(move || rift::provisioning::remove(&provisioning_config, &provisioning_name))
-            .await
-            .err()
-            .map(|error| error.to_string());
+    let store = snapshot.instance_store.clone();
+    let cleanup_error = blocking(move || match store {
+        Some(store) => store.finish_removal(&provisioning_name),
+        None => rift::provisioning::remove(&provisioning_config, &provisioning_name),
+    })
+    .await
+    .err()
+    .map(|error| error.to_string());
     let files_removed =
         storage == rift::config::InstanceStorage::Disposable && cleanup_error.is_none();
     let response = serde_json::json!({
@@ -1433,8 +1470,12 @@ fn reserve_port(
     config: &Config,
     bound: &[SocketAddr],
     group: &rift::config::ServiceGroup,
+    reserved: &std::collections::BTreeSet<u16>,
 ) -> Option<std::net::TcpListener> {
     (group.port_start..=group.port_end).find_map(|port| {
+        if reserved.contains(&port) {
+            return None;
+        }
         let address = SocketAddr::from(([127, 0, 0, 1], port));
         let configured = config.backends.values().any(|backend| {
             backend.check_loop(address).is_err()
@@ -1457,13 +1498,18 @@ fn reserve_port(
     })
 }
 
-/// Sequence numbers only grow within a proxy process, so a removed instance's
+/// Sequence numbers grow durably, so a removed instance's
 /// name is never reassigned to a different instance.
 fn next_instance_name(
     snapshot: &Snapshot,
     config: &Config,
     group: &str,
 ) -> Result<String, crate::control::Error> {
+    if let Some(store) = &snapshot.instance_store {
+        return store
+            .allocate_name(config, group)
+            .map_err(crate::control::Error::from);
+    }
     let mut sequences = snapshot.instance_sequence.lock().unwrap();
     let sequence = sequences.entry(group.to_owned()).or_default();
     loop {
@@ -1491,7 +1537,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     let (config, document) = if let Some(path) = source.clone() {
         tokio::task::spawn_blocking(move || -> io::Result<_> {
             let text = control::read_source(&path)?;
-            let config = Config::from_lua_at(&text, &path)?;
+            let config = Config::from_lua_at_unrestored(&text, &path)?;
             Ok((config, Some(text)))
         })
         .await
@@ -1499,7 +1545,26 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     } else {
         (config, None)
     };
+    let persistent = source.is_some() || !config.service_groups.is_empty();
+    let (config, instance_store, restored_ports) = blocking(move || {
+        let mut config = config;
+        if persistent {
+            let store = Arc::new(rift::instance_store::Store::open(
+                &config.instance_database,
+            )?);
+            store.restore(&mut config)?;
+            let ports = store.reserve_restored_ports(&config)?;
+            Ok((config, Some(store), ports))
+        } else {
+            Ok((config, None, Vec::new()))
+        }
+    })
+    .await?;
     let mut initial = Snapshot::new(config, None)?;
+    if let Some(store) = instance_store {
+        initial.managed.with_persistence(store.clone())?;
+        initial.instance_store = Some(store);
+    }
     let admin_secret = initial
         .config
         .admin
@@ -1559,6 +1624,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
             .collect(),
     );
     check_bound_loops(&initial.config, &initial.addresses)?;
+    drop(restored_ports);
     initial.managed.launch()?;
     let mut snapshot = Arc::new(initial);
     *snapshot.live.lock().unwrap() = Arc::downgrade(&snapshot);
