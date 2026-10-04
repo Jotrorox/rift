@@ -115,9 +115,11 @@ def check(binary):
                     assert removed["files_removed"] is False
                     assert cleanup_fixture["name"] not in servers()
                 finally:
-                    cleanup_dir.chmod(0o755)
+                    # Disposable deletion first renames to a journaled tombstone.
+                    leftover = next((directory / "instances").glob(".rift-remove-*"))
+                    leftover.chmod(0o755)
                 import shutil
-                shutil.rmtree(cleanup_dir)
+                shutil.rmtree(leftover)
             code, game = api(dashboard, "POST", "/api/groups/games/instances")
             assert code == 201 and game["storage"] == "disposable", game
             persistent = operation("create", "survival")
@@ -206,24 +208,22 @@ def check(binary):
             operation("shutdown")
             proxy.wait(timeout=8)
             assert proxy.returncode == 0
-        # Runtime registrations reset; persistent files reattach without reseeding.
+        # Removed names stay retired across restarts; retained worlds stay on disk.
         with start_proxy("second.log") as proxy:
             wait_ready(proxy, lambda: "rift: admin on" in (directory / "second.log").read_text(),
                        directory / "second.log", timeout=10)
             assert servers() == {}
-            with closing(socket.socket()) as occupied:
-                occupied.bind(("127.0.0.1", persistent["port"]))
-                occupied.listen()
-                reattached = operation("create", "survival")
-                assert reattached["name"] == "survival-1" and reattached["port"] != persistent["port"]
+            reattached = operation("create", "survival")
+            assert reattached["name"] == "survival-2"
             assert (world_dir / "world/region/r.0.0.mca").read_bytes() == b"player progress"
-            assert f"server-port={reattached['port']}" in (world_dir / "server.properties").read_text()
+            new_world = directory / "worlds" / reattached["name"]
+            assert (new_world / "world/region/r.0.0.mca").read_bytes() == b"original world"
             # Every disposable recreation starts from the unchanged map asset.
             recreated = operation("create", "games")
-            assert recreated["name"] == "games-1"
-            assert (game_dir / "world/region/r.0.0.mca").read_bytes() == b"original world"
-            operation("remove", "games-1")
-            operation("remove", "survival-1")
+            assert recreated["name"] == "games-5"
+            assert (directory / "instances" / recreated["name"] / "world/region/r.0.0.mca").read_bytes() == b"original world"
+            operation("remove", recreated["name"])
+            operation("remove", reattached["name"])
             operation("shutdown")
             proxy.wait(timeout=8)
             assert proxy.returncode == 0

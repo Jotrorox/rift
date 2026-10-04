@@ -26,7 +26,8 @@ pub struct ServiceScaling {
 
 /// Persistent worlds retain their data when their process or instance stops.
 /// Disposable game instances own a fresh copy of their template assets.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum InstanceStorage {
     #[default]
     Persistent,
@@ -43,7 +44,7 @@ impl InstanceStorage {
 }
 
 /// Runtime metadata; instance definitions cannot be supplied by Lua configuration.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ServiceInstance {
     pub group: String,
     pub port: u16,
@@ -450,6 +451,20 @@ pub(super) fn restore_instances(config: &mut Config, previous: &Config) -> Resul
 }
 
 impl Config {
+    /// Restore all durable registrations together before validating references.
+    pub fn restore_instances(
+        &mut self,
+        instances: BTreeMap<String, ServiceInstance>,
+    ) -> io::Result<()> {
+        let mut previous = self.clone();
+        previous.instances = instances;
+        let mut candidate = self.clone();
+        restore_instances(&mut candidate, &previous).map_err(invalid)?;
+        candidate.validate()?;
+        *self = candidate;
+        Ok(())
+    }
+
     pub fn is_destination(&self, name: &str) -> bool {
         self.backends.contains_key(name) || self.service_groups.contains_key(name)
     }

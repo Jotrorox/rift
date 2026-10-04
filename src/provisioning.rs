@@ -23,12 +23,74 @@ pub struct Provisioned {
     marker: Option<Value>,
 }
 
+/// Persist this plan before touching storage. Its generation identifies both
+/// the published directory and any unfinished copy, across process restarts.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Plan {
+    pub directory: PathBuf,
+    pub marker: Option<Value>,
+    pub stage: Option<PathBuf>,
+    pub created: bool,
+}
+
+pub fn plan(config: &Config, name: &str) -> io::Result<Plan> {
+    let (instance, directory) = definition(config, name)?;
+    let Some(template) = &instance.template else {
+        return Ok(Plan {
+            directory,
+            marker: None,
+            stage: None,
+            created: false,
+        });
+    };
+    match fs::symlink_metadata(&directory) {
+        Ok(_) => {
+            if instance.storage != InstanceStorage::Persistent {
+                return Err(invalid("disposable instance directory already exists"));
+            }
+            let marker = read_marker(&directory)?;
+            verify_marker(&marker, instance, name)?;
+            validate_tree(&directory, false)?;
+            Ok(Plan {
+                directory,
+                marker: Some(marker),
+                stage: None,
+                created: false,
+            })
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let generation = generation();
+            let stage = directory
+                .parent()
+                .unwrap()
+                .join(format!(".rift-stage-{generation}"));
+            Ok(Plan {
+                directory,
+                marker: Some(json!({"format":1,"group":instance.group,"name":name,
+                    "template":template,"storage":instance.storage.as_str(),"generation":generation})),
+                stage: Some(stage),
+                created: true,
+            })
+        }
+        Err(error) => Err(error),
+    }
+}
+
 pub fn provision(config: &Config, name: &str) -> io::Result<()> {
     provision_tracked(config, name).map(|_| ())
 }
 
 pub fn provision_tracked(config: &Config, name: &str) -> io::Result<Provisioned> {
+    let plan = plan(config, name)?;
+    provision_planned(config, name, &plan)
+}
+
+pub fn provision_planned(config: &Config, name: &str, plan: &Plan) -> io::Result<Provisioned> {
     let (instance, directory) = definition(config, name)?;
+    validate_plan(instance, name, plan)?;
+    if directory != plan.directory {
+        return Err(invalid("instance directory changed after planning"));
+    }
     let Some(template_name) = &instance.template else {
         if instance.storage == InstanceStorage::Disposable {
             return Err(invalid("disposable instances require a template"));
@@ -45,6 +107,9 @@ pub fn provision_tracked(config: &Config, name: &str) -> io::Result<Provisioned>
         }
         let marker = read_marker(&directory)?;
         verify_marker(&marker, instance, name)?;
+        if plan.created || Some(&marker) != plan.marker.as_ref() {
+            return Err(invalid("instance ownership changed after planning"));
+        }
         validate_tree(&directory, false)?;
         write_properties(&directory, instance.port)?;
         return Ok(Provisioned {
@@ -86,10 +151,16 @@ pub fn provision_tracked(config: &Config, name: &str) -> io::Result<Provisioned>
         .ok_or_else(|| invalid("instance directory has no parent"))?;
     fs::create_dir_all(parent)?;
     checked_path(parent)?;
-    let stage = staging(parent)?;
+    let stage = plan
+        .stage
+        .as_ref()
+        .ok_or_else(|| invalid("missing provisioning stage"))?;
+    fs::create_dir(stage)?;
     let result = (|| {
+        // Write ownership before copying; recovery can recognize a partial tree.
+        fs::write(stage.join(MARKER), serde_json::to_vec_pretty(&plan.marker)?)?;
         if let Some(configs) = configs {
-            copy_tree(&configs, &stage, true)?;
+            copy_tree(&configs, stage, true)?;
         }
         copy_file(&jar, &stage.join("server.jar"))?;
         if !plugins.is_empty() {
@@ -101,31 +172,176 @@ pub fn provision_tracked(config: &Config, name: &str) -> io::Result<Provisioned>
         if let Some(map) = map {
             copy_tree(&map, &stage.join("world"), false)?;
         }
-        write_properties(&stage, instance.port)?;
-        let marker = json!({
-            "format": 1,
-            "group": instance.group,
-            "name": name,
-            "template": template_name,
-            "storage": instance.storage.as_str(),
-            "generation": generation(),
-        });
-        fs::write(stage.join(MARKER), serde_json::to_vec_pretty(&marker)?)?;
+        write_properties(stage, instance.port)?;
+        sync_tree(stage)?;
         // Recheck immediately before publishing, so an existing world is never replaced.
         checked_path(&directory)?;
         if fs::symlink_metadata(&directory).is_ok() {
             return Err(invalid("instance directory appeared during provisioning"));
         }
-        fs::rename(&stage, &directory)?;
+        fs::rename(stage, &directory)?;
+        sync_directory(parent)?;
         Ok(Provisioned {
             created: true,
-            marker: Some(marker),
+            marker: plan.marker.clone(),
         })
     })();
     if result.is_err() {
-        let _ = fs::remove_dir_all(&stage);
+        let _ = fs::remove_dir_all(stage);
     }
     result
+}
+
+pub(crate) fn validate_plan(instance: &ServiceInstance, name: &str, plan: &Plan) -> io::Result<()> {
+    if checked_path(&plan.directory)? != plan.directory {
+        return Err(invalid(
+            "stored instance directory must be absolute and normalized",
+        ));
+    }
+    if let Some(marker) = &plan.marker {
+        verify_marker(marker, instance, name)?;
+        let token = marker["generation"].as_str().unwrap();
+        if token.len() > 128
+            || !token
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        {
+            return Err(invalid("invalid stored ownership generation"));
+        }
+        let expected = plan
+            .directory
+            .parent()
+            .unwrap()
+            .join(format!(".rift-stage-{token}"));
+        if plan.stage.as_ref().is_some_and(|stage| *stage != expected)
+            || plan.created != plan.stage.is_some()
+        {
+            return Err(invalid("invalid stored provisioning stage"));
+        }
+    } else if instance.template.is_some()
+        || instance.storage == InstanceStorage::Disposable
+        || plan.created
+        || plan.stage.is_some()
+    {
+        return Err(invalid("missing stored storage ownership"));
+    }
+    Ok(())
+}
+
+/// Validate existing storage without reseeding it or changing properties.
+pub(crate) fn validate_restored(plan: &Plan) -> io::Result<()> {
+    checked_path(&plan.directory)?;
+    if let Some(expected) = &plan.marker
+        && read_marker(&plan.directory)? != *expected
+    {
+        return Err(invalid(
+            "instance storage ownership changed; refusing to restore",
+        ));
+    }
+    if !fs::symlink_metadata(&plan.directory)?.is_dir() {
+        return Err(invalid("instance directory is not a directory"));
+    }
+    validate_tree(&plan.directory, false)
+}
+
+pub(crate) fn rollback_plan(plan: &Plan) -> io::Result<()> {
+    if plan.created && exists(&plan.directory)? {
+        validate_restored(plan)?;
+        let stage = plan.stage.as_ref().unwrap();
+        checked_path(stage)?;
+        if exists(stage)? {
+            return Err(invalid("rollback staging directory already exists"));
+        }
+        // Journaled staging remains recognizable even if recursive deletion is
+        // interrupted after removing its ownership marker.
+        fs::rename(&plan.directory, stage)?;
+        sync_directory(plan.directory.parent().unwrap())?;
+    }
+    if let Some(stage) = &plan.stage
+        && exists(stage)?
+    {
+        checked_path(stage)?;
+        let marker = stage.join(MARKER);
+        if exists(&marker)? && Some(read_marker(stage)?) != plan.marker {
+            return Err(invalid("staging ownership changed; refusing recovery"));
+        }
+        validate_tree(stage, false)?;
+        fs::remove_dir_all(stage)?;
+        sync_directory(stage.parent().unwrap())?;
+    }
+    Ok(())
+}
+
+pub(crate) fn tombstone(plan: &Plan) -> io::Result<PathBuf> {
+    let token = plan
+        .marker
+        .as_ref()
+        .and_then(|m| m["generation"].as_str())
+        .ok_or_else(|| invalid("disposable storage has no ownership generation"))?;
+    Ok(plan
+        .directory
+        .parent()
+        .unwrap()
+        .join(format!(".rift-remove-{token}")))
+}
+
+/// Rename before deleting so partial recursive deletion never loses the
+/// registered path's ownership proof. The database journals the deletion phase.
+pub(crate) fn retire_storage(plan: &Plan) -> io::Result<()> {
+    let tomb = tombstone(plan)?;
+    checked_path(&tomb)?;
+    if exists(&tomb)? {
+        if exists(&plan.directory)? || Some(read_marker(&tomb)?) != plan.marker {
+            return Err(invalid("removal storage ownership conflict"));
+        }
+    } else if exists(&plan.directory)? {
+        validate_restored(plan)?;
+        fs::rename(&plan.directory, &tomb)?;
+        sync_directory(tomb.parent().unwrap())?;
+    }
+    Ok(())
+}
+
+pub(crate) fn delete_retired(plan: &Plan) -> io::Result<()> {
+    let tomb = tombstone(plan)?;
+    checked_path(&tomb)?;
+    if exists(&tomb)? {
+        if exists(&tomb.join(MARKER))? && Some(read_marker(&tomb)?) != plan.marker {
+            return Err(invalid("removal storage ownership changed"));
+        }
+        validate_tree(&tomb, false)?;
+        fs::remove_dir_all(&tomb)?;
+        sync_directory(tomb.parent().unwrap())?;
+    }
+    Ok(())
+}
+
+fn exists(path: &Path) -> io::Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn sync_tree(path: &Path) -> io::Result<()> {
+    for entry in fs::read_dir(path)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            sync_tree(&path)?;
+        } else {
+            fs::OpenOptions::new().write(true).open(path)?.sync_all()?;
+        }
+    }
+    sync_directory(path)
+}
+
+fn sync_directory(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    fs::File::open(path)?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
 }
 
 /// Preflight removal before changing runtime registration.
@@ -195,7 +411,7 @@ fn invalid(message: impl Into<String>) -> io::Error {
 }
 
 // Reject symlink ancestors as well as symlink leaves, including paths with '..'.
-fn checked_path(path: &Path) -> io::Result<PathBuf> {
+pub(crate) fn checked_path(path: &Path) -> io::Result<PathBuf> {
     let absolute = if path.is_absolute() {
         path.to_owned()
     } else {
@@ -431,20 +647,6 @@ fn generation() -> String {
             .as_nanos(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     )
-}
-
-fn staging(parent: &Path) -> io::Result<PathBuf> {
-    for _ in 0..16 {
-        let path = parent.join(format!(".rift-stage-{}", generation()));
-        match fs::create_dir(&path) {
-            Ok(()) => return Ok(path),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Err(invalid(
-        "could not allocate a unique provisioning staging directory",
-    ))
 }
 
 #[cfg(test)]
