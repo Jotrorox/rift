@@ -108,6 +108,8 @@ def check(binary):
                 # A post-reaping filesystem error must still publish deregistration.
                 cleanup_fixture = operation("create", "broken")
                 cleanup_dir = directory / "instances" / cleanup_fixture["name"]
+                generation = json.loads((cleanup_dir / ".rift-instance.json").read_text())["generation"]
+                tombstone = cleanup_dir.parent / f".rift-remove-{generation}"
                 cleanup_dir.chmod(0o555)
                 try:
                     removed = operation("remove", cleanup_fixture["name"])
@@ -115,8 +117,9 @@ def check(binary):
                     assert removed["files_removed"] is False
                     assert cleanup_fixture["name"] not in servers()
                 finally:
-                    # Disposable deletion first renames to a journaled tombstone.
-                    leftover = next((directory / "instances").glob(".rift-remove-*"))
+                    # Some filesystems reject the rename itself; others allow it
+                    # and reject deleting the read-only tombstone's contents.
+                    leftover = cleanup_dir if cleanup_dir.exists() else tombstone
                     leftover.chmod(0o755)
                 import shutil
                 shutil.rmtree(leftover)

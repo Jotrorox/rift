@@ -89,7 +89,7 @@ def check(binary):
             wait_ready(proxy, lambda: "rift: admin on" in (directory / log).read_text(), directory / log, timeout=10)
 
         def rows():
-            with sqlite3.connect(database) as connection:
+            with closing(sqlite3.connect(database)) as connection:
                 return connection.execute("SELECT name,port,phase,explicitly_stopped,definition FROM instances").fetchall()
 
         def failure(expected):
