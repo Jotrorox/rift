@@ -192,6 +192,8 @@ sudo useradd --system --user-group --no-create-home --shell /usr/sbin/nologin ri
 sudo install -m 0755 rift /usr/local/bin/rift
 sudo install -d -o root -g rift -m 0750 /etc/rift
 sudo install -o root -g rift -m 0640 rift.lua /etc/rift/rift.lua
+printf '%s\n' 'rift.config.instance_database = "/var/lib/rift/rift.sqlite3"' \
+  | sudo tee -a /etc/rift/rift.lua > /dev/null
 sudoedit /etc/rift/rift.lua
 sudo -u rift /usr/local/bin/rift check /etc/rift/rift.lua
 sudo install -m 0644 examples/rift.service /etc/systemd/system/rift.service
@@ -210,21 +212,29 @@ The unit validates before starting, restarts on failures with a five-second
 delay, and caps restart bursts. An explicit stop stays stopped. Its file limit
 is 8192; each active session needs client/backend sockets plus runtime headroom.
 If you raise `max_connections`, size both file descriptors and memory for it.
-The service needs no writable data directory. LuaJIT uses executable memory,
-so do not add `MemoryDenyWriteExecute=true` to this unit.
+`StateDirectory=rift` creates `/var/lib/rift`, owned by the service account with
+mode 0700, and permits writes there under `ProtectSystem=strict`. The configured
+`instance_database` stores SQLite registrations, its lock and journal in that
+directory, which survives service stops and restarts. Every file-based startup
+opens this database, even without service groups; the default location beside
+the root-owned config is not writable. `rift check` validates configuration
+without opening the database and cannot verify startup write access. LuaJIT uses
+executable memory, so do not add `MemoryDenyWriteExecute=true` to this unit.
 
 ## Container example
 
 The supplied [Dockerfile](../examples/Dockerfile) packages the Linux release
 binary using the release runner's Ubuntu 24.04 runtime baseline. The
 [Compose example](../examples/compose.yaml) runs as UID/GID 65532 with a read-only
-filesystem, no Linux capabilities, a read-only config directory and a 40-second
-stop deadline. Download the Linux x86_64 executable as `rift` into a repository
+root filesystem, no Linux capabilities, a read-only config directory, a writable
+`rift-state` volume at `/var/lib/rift` and a 40-second stop deadline.
+Download the Linux x86_64 executable as `rift` into a repository
 checkout, make it executable with `chmod +x rift`, then run from that checkout:
 
 ```sh
 mkdir config
 ./rift init config/rift.lua
+printf '%s\n' 'rift.config.instance_database = "/var/lib/rift/rift.sqlite3"' >> config/rift.lua
 # Edit config/rift.lua; make it readable by container UID 65532.
 ./rift check config/rift.lua
 export RIFT_IMAGE=rift:my-release
@@ -239,6 +249,15 @@ The image build runs `rift --version` to detect a wrong architecture or
 incompatible runtime before startup. For a source build, set
 `RIFT_BINARY=target/release/rift`; ensure its architecture/libc match the image.
 The example fixes `platform: linux/amd64` to match the released Linux executable.
+
+The image creates `/var/lib/rift` with owner 65532:65532 and mode 0700; Docker
+preserves these permissions when initializing the named volume. SQLite creates
+its database, lock and journal there while `/etc/rift` stays read-only. The
+volume survives container recreation and `docker compose down`; `down --volumes`
+removes the stored registrations. An existing volume or replacement image must
+also provide write access for UID/GID 65532. `rift check` alone does not verify
+database write access; confirm the running container reaches `rift: listening`
+in its logs after `up -d`.
 
 Loopback in a container refers to that container. Use private, reachable backend
 addresses or service DNS names on a shared container network. To expose metrics

@@ -1,5 +1,6 @@
 # Run from a repository checkout with the Linux executable saved as rift
-# and a readable config/rift.lua:
+# and a readable config/rift.lua containing:
+# rift.config.instance_database = "/var/lib/rift/rift.sqlite3"
 # docker compose -f examples/compose.yaml up --build -d
 services:
   rift:
@@ -20,6 +21,10 @@ services:
         read_only: true
         bind:
           create_host_path: false
+      # SQLite database, lock and journal; ownership is initialized by the image.
+      - type: volume
+        source: rift-state
+        target: /var/lib/rift
     ports:
       - "25565:25565"
       # Set metrics = "0.0.0.0:9090" inside the container to use this mapping.
@@ -35,3 +40,6 @@ services:
       nofile:
         soft: 8192
         hard: 8192
+
+volumes:
+  rift-state:
