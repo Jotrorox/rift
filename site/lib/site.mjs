@@ -15,9 +15,9 @@ export const SITE = {
 };
 
 export const QUICK_START = [
-  { cmd: './rift init', note: 'Write a commented rift.lua configuration' },
-  { cmd: './rift check', note: 'Validate rift.lua without opening any ports' },
-  { cmd: './rift', note: 'Start the proxy using rift.lua' },
+  { cmd: './rift init', note: 'Writes a commented rift.lua.' },
+  { cmd: './rift check', note: 'Validates it without opening any ports.' },
+  { cmd: './rift', note: 'Starts the proxy.' },
 ];
 
 // Median values, 16 concurrent clients, from docs/performance.md.
@@ -27,23 +27,42 @@ export const PERF = {
   loginCpu: { rift: 54.0, velocity: 208.12, unit: '%', label: 'CPU during login bursts' },
 };
 
+// The three headline features get a card each; the rest are listed below them.
 export const FEATURES = [
   { key: 'routing', title: 'Hostname routing',
     text: 'One listener serves many servers. Exact names win, then the longest wildcard, then the default.' },
   { key: 'auth', title: 'Online authentication',
-    text: 'Rift verifies accounts with Mojang and forwards identities to Paper with Velocity modern forwarding.' },
+    text: 'Verifies accounts with Mojang and forwards identities to Paper with Velocity modern forwarding.' },
   { key: 'lua', title: 'Configured in Lua',
-    text: 'An ordinary script with modules and folder plugins. Validate with rift check, apply with a reload.' },
-  { key: 'extensions', title: 'Extensions',
-    text: 'Login and transfer hooks, permission-checked commands, FIFO queues and durable state.' },
-  { key: 'switching', title: 'Server switching',
-    text: '/server, /hub and crash recovery keep the client connected while the backend changes.' },
-  { key: 'dashboard', title: 'Web dashboard',
-    text: 'Edit, validate and apply the configuration from a browser. Status and Prometheus metrics built in.' },
-  { key: 'messaging', title: 'Plugin messaging',
-    text: 'A subject broker shared by Lua, Rust and server plugins over authenticated QUIC.' },
-  { key: 'bungeecord', title: 'BungeeCord channel',
-    text: 'Existing Bukkit and Paper plugins can transfer players and query the network.' },
+    text: 'An ordinary script with modules and folder plugins. Check it, then apply with a reload.' },
+];
+
+export const MORE_FEATURES = [
+  { title: 'Web dashboard', text: 'Edit, validate and apply config from a browser. Prometheus metrics built in.' },
+  { title: 'Extensions', text: 'Login and transfer hooks, permission-checked commands, FIFO queues, durable state.' },
+  { title: 'Plugin messaging', text: 'A subject broker for Lua, Rust and server plugins over authenticated QUIC.' },
+  { title: 'BungeeCord channel', text: 'Existing Bukkit and Paper plugins can transfer players and query the network.' },
+  { title: 'Managed servers', text: 'Local processes, service groups, scaling, templates and persistent worlds.' },
+];
+
+// The servers in the switching demo and the command that reaches each one.
+export const WORLDS = [
+  { name: 'lobby', cmd: '/hub' },
+  { name: 'survival', cmd: '/server survival' },
+  { name: 'games', cmd: '/server games' },
+];
+
+// Guides featured on the landing page, with shorter blurbs than the docs nav.
+export const GUIDES = [
+  { slug: 'overview', blurb: 'Install, first run, auth and routing' },
+  { slug: 'lua', blurb: 'Settings, modules and folder plugins' },
+  { slug: 'extensions', blurb: 'Hooks, commands, queues and state' },
+  { slug: 'operations', blurb: 'systemd, containers, upgrades, rollback' },
+  { slug: 'managed-servers', blurb: 'Processes, scaling, templates, worlds' },
+  { slug: 'http', blurb: 'Dashboard, status site, config API' },
+  { slug: 'messaging', blurb: 'The subject broker and its QUIC protocol' },
+  { slug: 'bungeecord', blurb: 'Transfers for Bukkit/Paper plugins' },
+  { slug: 'performance', blurb: 'CPU, memory and latency vs. Velocity' },
 ];
 
 export function fmt(n, digits = 0) {
