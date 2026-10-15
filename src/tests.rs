@@ -207,3 +207,110 @@ async fn unsupported_version_gets_a_disconnect_before_any_backend_connection() {
             .is_err()
     );
 }
+
+/// Serve `config` through the production accept loop on an ephemeral port.
+async fn accept_loop(
+    config: Config,
+) -> (
+    std::net::SocketAddr,
+    Arc<metrics::Metrics>,
+    tokio::sync::watch::Sender<bool>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let mut snapshot = runtime::Snapshot::new(config, None).unwrap();
+    snapshot.addresses = Arc::new(vec![address]);
+    let (_current, current) = tokio::sync::watch::channel(Arc::new(snapshot));
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let metrics = Arc::new(metrics::Metrics::default());
+    tokio::spawn(runtime::accept(
+        listener,
+        "default".into(),
+        current,
+        stopped,
+        metrics.clone(),
+        Default::default(),
+    ));
+    (address, metrics, stop)
+}
+
+/// Request status after `header` and return whether the proxy answered.
+async fn status_after(address: std::net::SocketAddr, header: &[u8]) -> bool {
+    let mut client = TcpStream::connect(address).await.unwrap();
+    let codec = Codec::default();
+    client.write_all(header).await.unwrap();
+    codec
+        .write(&mut client, &handshake(NextState::Status, -1))
+        .await
+        .unwrap();
+    codec.write(&mut client, &Packet::empty(0)).await.unwrap();
+    matches!(Reader::default().read(&mut client, codec).await, Ok(Some(response)) if response.id == 0)
+}
+
+#[tokio::test]
+async fn proxy_protocol_reports_the_client_address_and_rejects_untrusted_sources() {
+    timeout(Duration::from_secs(10), async {
+        // The hook only admits the client named in the PROXY header, so a
+        // status response proves both the address and an intact handshake.
+        let source = |trusted: &str| {
+            Config::from_lua(
+                &format!(
+                    "return {{ listeners = {{ default = '127.0.0.1:0' }},
+                    backends = {{ target = '127.0.0.1:1' }}, routes = {{ default = 'target' }},
+                    proxy_protocol = {{ trusted_proxies = {{ '{trusted}' }} }},
+                    on_route = function(c)
+                        if c.peer_ip ~= '203.0.113.7' then return {{ reject = true }} end
+                    end }}"
+                ),
+                "proxy.lua",
+            )
+            .unwrap()
+        };
+        let (address, metrics, _stop) = accept_loop(source("127.0.0.0/8")).await;
+        assert!(status_after(address, b"PROXY TCP4 203.0.113.7 192.0.2.1 51234 25565\r\n").await);
+        let mut v2 = b"\r\n\r\n\0\r\nQUIT\n\x21\x11\x00\x0c".to_vec();
+        v2.extend([203, 0, 113, 7, 192, 0, 2, 1, 0xc8, 0x22, 0x63, 0xdd]);
+        assert!(status_after(address, &v2).await);
+        assert!(
+            !status_after(
+                address,
+                b"PROXY TCP4 198.51.100.1 192.0.2.1 51234 25565\r\n"
+            )
+            .await
+        );
+        assert_eq!(metrics.route_rejected.get(), 1);
+        // A client that reaches the listener directly sends no header.
+        assert!(!status_after(address, b"").await);
+        assert_eq!(metrics.proxy_rejected.get(), 1);
+
+        let (address, metrics, _stop) = accept_loop(source("192.0.2.0/24")).await;
+        assert!(!status_after(address, b"PROXY TCP4 203.0.113.7 192.0.2.1 51234 25565\r\n").await);
+        assert_eq!(metrics.proxy_rejected.get(), 1);
+        assert_eq!(metrics.route_rejected.get(), 0);
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn proxy_protocol_rate_limits_clients_instead_of_the_load_balancer() {
+    timeout(Duration::from_secs(10), async {
+        let config = Config::from_lua(
+            "return { listeners = { default = '127.0.0.1:0' },
+            backends = { target = '127.0.0.1:1' }, routes = { default = 'target' },
+            proxy_protocol = { trusted_proxies = { '127.0.0.1', '::1' } },
+            rate_limit = { per_ip_per_second = 1, per_ip_burst = 1 } }",
+            "proxy.lua",
+        )
+        .unwrap();
+        let (address, metrics, _stop) = accept_loop(config).await;
+        for client in ["203.0.113.7", "203.0.113.8"] {
+            let header = format!("PROXY TCP4 {client} 192.0.2.1 51234 25565\r\n");
+            assert!(status_after(address, header.as_bytes()).await);
+        }
+        assert!(!status_after(address, b"PROXY TCP4 203.0.113.7 192.0.2.1 51235 25565\r\n").await);
+        assert_eq!(metrics.rate_rejected.get(), 1);
+    })
+    .await
+    .unwrap();
+}

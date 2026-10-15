@@ -38,6 +38,7 @@ pub struct Metrics {
     pub login_rejected: Counter,
     pub access_rejected: Counter,
     pub capacity_rejected: Counter,
+    pub proxy_rejected: Counter,
     pub route_rejected: Counter,
     pub errors: Counter,
     pub backend_failures: Counter,
@@ -161,6 +162,7 @@ impl Metrics {
             "login_rejected": self.login_rejected.get(),
             "access_rejected": self.access_rejected.get(),
             "capacity_rejected": self.capacity_rejected.get(),
+            "proxy_rejected": self.proxy_rejected.get(),
             "route_rejected": self.route_rejected.get(),
             "errors": self.errors.get(),
             "backend_failures": self.backend_failures.get(),
@@ -209,6 +211,11 @@ impl Metrics {
                 "connections_capacity_rejected_total",
                 "counter",
                 self.capacity_rejected.get(),
+            ),
+            (
+                "connections_proxy_rejected_total",
+                "counter",
+                self.proxy_rejected.get(),
             ),
             (
                 "connections_route_rejected_total",

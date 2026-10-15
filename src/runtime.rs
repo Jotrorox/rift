@@ -221,11 +221,12 @@ pub async fn handle(
 ) -> io::Result<(u64, u64)> {
     event.stage = "client_setup";
     client.set_nodelay(true)?;
-    let peer = client.peer_addr()?;
+    // The accepted socket peer, or the client behind a trusted PROXY header.
+    let peer = event.peer_addr();
     let peer_ip = peer.ip().to_canonical();
     let connection = ConnectionInfo {
         listener: listener.to_owned(),
-        peer_addr: client.peer_addr()?,
+        peer_addr: peer,
         local_addr: client.local_addr()?,
         default_backend: snapshot.router.default_backend(listener).map(str::to_owned),
     };
@@ -260,7 +261,7 @@ pub async fn handle(
         event.stage = "login_admission";
         let maintenance = snapshot.control.maintenance(&snapshot.config);
         let login_allowed = snapshot.control.logins.lock().unwrap().allow_generation(
-            session.client.io.stream.peer_addr()?.ip(),
+            peer_ip,
             snapshot.config.login_rate_limit,
             snapshot.generation,
             Instant::now(),
@@ -1108,7 +1109,18 @@ pub(crate) async fn accept(
                 let mut event = Connection::new(&name, peer);
                 metrics.accepted.inc();
                 let snapshot = current.borrow().clone();
-                if !admission.lock().unwrap().allow(peer.ip(), snapshot.config.rate_limit, Instant::now()) {
+                let proxied = snapshot
+                    .config
+                    .proxy_protocol
+                    .as_ref()
+                    .is_some_and(|proxy| proxy.applies_to(&name));
+                if proxied {
+                    if !snapshot.config.proxy_protocol.as_ref().unwrap().trusts(peer.ip()) {
+                        metrics.proxy_rejected.inc();
+                        event.reject("proxy_untrusted", "connection did not come from a trusted PROXY protocol source");
+                        continue;
+                    }
+                } else if !admission.lock().unwrap().allow(peer.ip(), snapshot.config.rate_limit, Instant::now()) {
                     metrics.rate_rejected.inc();
                     event.reject("rate_limited", "connection rate limit exceeded");
                     continue;
@@ -1121,9 +1133,19 @@ pub(crate) async fn accept(
                 let name = name.clone();
                 let addresses = snapshot.addresses.clone();
                 let metrics = metrics.clone();
+                let admission = admission.clone();
                 sessions.spawn(async move {
                     let mut client = client;
-                    let result = handle(&mut client, &name, snapshot, &addresses, metrics.clone(), &mut event).await;
+                    let result = if proxied {
+                        proxied_client(&mut client, &snapshot, &metrics, &admission, &mut event).await
+                    } else {
+                        Ok(true)
+                    };
+                    let result = match result {
+                        Ok(true) => handle(&mut client, &name, snapshot, &addresses, metrics.clone(), &mut event).await,
+                        Ok(false) => Ok((0, 0)),
+                        Err(error) => Err(error),
+                    };
                     // Make capacity available before the peer can observe EOF and
                     // reconnect. The handler borrows the socket until it returns.
                     drop(active);
@@ -1139,6 +1161,49 @@ pub(crate) async fn accept(
     // Close listening sockets immediately, then keep all accepted sessions alive.
     drop(listener);
     while sessions.join_next().await.is_some() {}
+}
+
+/// Read the PROXY header from a trusted load balancer, then apply the
+/// connection rate limit to the client it reports. Returns `false` when the
+/// connection was rejected.
+async fn proxied_client(
+    client: &mut TcpStream,
+    snapshot: &Snapshot,
+    metrics: &Metrics,
+    admission: &Mutex<Admission>,
+    event: &mut Connection,
+) -> io::Result<bool> {
+    event.stage = "proxy_header";
+    event.failure = "proxy_header";
+    let header = match timeout(HANDSHAKE_TIMEOUT, rift::proxy_protocol::read_header(client)).await {
+        Ok(Ok(header)) => header,
+        Ok(Err(error)) => {
+            metrics.proxy_rejected.inc();
+            return Err(error);
+        }
+        Err(_) => {
+            metrics.proxy_rejected.inc();
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "PROXY protocol: header not received",
+            ));
+        }
+    };
+    // LOCAL and UNKNOWN headers describe the proxy's own connection.
+    if let Some(source) = header {
+        event.set_peer_addr(source);
+    }
+    let peer = event.peer_addr().ip().to_canonical();
+    if !admission
+        .lock()
+        .unwrap()
+        .allow(peer, snapshot.config.rate_limit, Instant::now())
+    {
+        metrics.rate_rejected.inc();
+        event.reject("rate_limited", "connection rate limit exceeded");
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 /// Make `next` visible to new connections, in-flight sessions and health checks.

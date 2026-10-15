@@ -50,6 +50,7 @@ pub struct Config {
     pub network: Network,
     pub rate_limit: Option<RateLimit>,
     pub login_rate_limit: Option<RateLimit>,
+    pub proxy_protocol: Option<ProxyProtocol>,
     pub health_check: Option<HealthCheck>,
     pub status_cache: Option<StatusCache>,
     pub metrics: Option<SocketAddr>,
@@ -104,6 +105,31 @@ impl Default for Authentication {
 pub struct VelocityForwarding {
     /// The configuration stores a variable name, never its secret value.
     pub secret_env: String,
+}
+
+/// Listeners behind a load balancer that prepends a HAProxy PROXY protocol
+/// v1/v2 header. Every connection to an affected listener must come from a
+/// trusted proxy and start with a header; other sources are rejected, so
+/// clients cannot bypass the proxy or claim another address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProxyProtocol {
+    /// Listener names; `None` applies the header requirement to every listener.
+    pub listeners: Option<BTreeSet<String>>,
+    pub trusted_proxies: Vec<crate::proxy_protocol::Network>,
+}
+
+impl ProxyProtocol {
+    pub fn applies_to(&self, listener: &str) -> bool {
+        self.listeners
+            .as_ref()
+            .is_none_or(|names| names.contains(listener))
+    }
+
+    pub fn trusts(&self, peer: std::net::IpAddr) -> bool {
+        self.trusted_proxies
+            .iter()
+            .any(|network| network.contains(peer))
+    }
 }
 
 impl ServerAccess {
@@ -290,6 +316,7 @@ impl Config {
             network: Network::default(),
             rate_limit: None,
             login_rate_limit: None,
+            proxy_protocol: None,
             health_check: None,
             status_cache: None,
             metrics: None,
@@ -423,6 +450,7 @@ impl Config {
                     "network",
                     "rate_limit",
                     "login_rate_limit",
+                    "proxy_protocol",
                     "health_check",
                     "status_cache",
                     "metrics",
@@ -523,6 +551,7 @@ impl Config {
             };
             let messaging = messaging::parse(&root)?;
             let login_rate_limit = rate_limit(&root, "login_rate_limit")?;
+            let proxy_protocol = proxy_protocol(&root)?;
             let health_check = options(
                 &root,
                 "health_check",
@@ -684,6 +713,7 @@ impl Config {
                 network,
                 rate_limit: connection_rate_limit,
                 login_rate_limit,
+                proxy_protocol,
                 health_check,
                 status_cache,
                 metrics,
@@ -1025,6 +1055,16 @@ impl Config {
                     )));
                 }
             }
+        }
+        if let Some(name) = self
+            .proxy_protocol
+            .iter()
+            .flat_map(|proxy| proxy.listeners.iter().flatten())
+            .find(|name| !self.listeners.contains_key(*name))
+        {
+            return Err(invalid(format!(
+                "proxy_protocol.listeners: unknown listener {name:?}"
+            )));
         }
         for listener in self.routes.keys() {
             if !self.listeners.contains_key(listener) {
@@ -1422,6 +1462,41 @@ fn string_set(value: Value, path: &str) -> Result<BTreeSet<String>, String> {
         }
     }
     Ok(result)
+}
+
+fn proxy_protocol(root: &Table) -> Result<Option<ProxyProtocol>, String> {
+    let Some(t) = options(root, "proxy_protocol", &["listeners", "trusted_proxies"])? else {
+        return Ok(None);
+    };
+    let listeners = match t.raw_get::<Value>("listeners").map_err(|e| e.to_string())? {
+        Value::Nil => None,
+        value => Some(string_set(value, "proxy_protocol.listeners")?)
+            .filter(|names| !names.is_empty())
+            .map(Some)
+            .ok_or(
+                "proxy_protocol.listeners: must not be empty; omit it to cover every listener",
+            )?,
+    };
+    let path = "proxy_protocol.trusted_proxies";
+    let trusted_proxies = match t
+        .raw_get::<Value>("trusted_proxies")
+        .map_err(|e| e.to_string())?
+    {
+        Value::Nil => Vec::new(),
+        value => string_list(value, path, 1024)?
+            .iter()
+            .map(|network| network.parse().map_err(|error| format!("{path}: {error}")))
+            .collect::<Result<_, String>>()?,
+    };
+    if trusted_proxies.is_empty() {
+        return Err(format!(
+            "{path}: list the load balancer addresses or CIDR blocks allowed to send PROXY headers"
+        ));
+    }
+    Ok(Some(ProxyProtocol {
+        listeners,
+        trusted_proxies,
+    }))
 }
 
 fn rate_limit(root: &Table, path: &str) -> Result<Option<RateLimit>, String> {

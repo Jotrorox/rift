@@ -47,6 +47,11 @@ impl Connection {
         self.peer
     }
 
+    /// Record the client address reported by a trusted PROXY protocol header.
+    pub fn set_peer_addr(&mut self, peer: SocketAddr) {
+        self.peer = peer;
+    }
+
     pub fn hold_managed_backend(&mut self, name: &str, lease: Option<rift::managed::ManagedLease>) {
         if let Some(lease) = lease {
             self.managed_leases.insert(name.to_owned(), lease);
