@@ -1,5 +1,6 @@
-//! Online players and the actions Lua can queue for them. Each session drains its
-//! own bounded queue from its connection loop; callbacks never touch a socket.
+//! Online players and the actions Lua and the BungeeCord bridge can queue for
+//! them. Each session drains its own bounded queue from its connection loop;
+//! callers never touch a socket.
 use super::fields;
 use mlua::{Lua, Table, Value};
 use std::{
@@ -30,6 +31,15 @@ pub enum PlayerAction {
     },
     Kick(String),
     Transfer(String),
+    /// A JSON text component, already checked by `protocol::validate_component`.
+    RawMessage(serde_json::Value),
+    RawKick(serde_json::Value),
+    /// A BungeeCord plugin message for the player's backend. The session drops
+    /// it if the player has left `server` before the message can be sent.
+    Forward {
+        server: String,
+        data: Vec<u8>,
+    },
 }
 
 struct Entry {
@@ -206,6 +216,62 @@ impl Players {
         let sessions = self.lock();
         Ok(find(&sessions, target)?
             .is_some_and(|(_, entry)| entry.actions.try_send(action).is_ok()))
+    }
+
+    /// Queue an action for a case-insensitive player name. False means that
+    /// the player is offline or has a full queue.
+    pub fn send_named(&self, name: &str, action: PlayerAction) -> bool {
+        self.lock()
+            .values()
+            .find(|entry| entry.name.eq_ignore_ascii_case(name))
+            .is_some_and(|entry| entry.actions.try_send(action).is_ok())
+    }
+
+    /// Queue an action for every joined player and count those that accepted it.
+    pub fn send_all(&self, action: &PlayerAction) -> usize {
+        self.lock()
+            .values()
+            .filter(|entry| entry.actions.try_send(action.clone()).is_ok())
+            .count()
+    }
+
+    /// Queue a plugin message for the backend of a case-insensitive player name.
+    pub fn forward_to_player(&self, name: &str, data: &[u8]) -> bool {
+        self.lock()
+            .values()
+            .find(|entry| entry.name.eq_ignore_ascii_case(name))
+            .is_some_and(|entry| {
+                entry
+                    .actions
+                    .try_send(PlayerAction::Forward {
+                        server: entry.server.clone(),
+                        data: data.to_vec(),
+                    })
+                    .is_ok()
+            })
+    }
+
+    /// Queue a plugin message through one player on each server that `include`
+    /// selects, oldest connection first, passing over full queues. Servers
+    /// without players are skipped. Returns the number of servers reached.
+    pub fn forward_to_servers(&self, include: impl Fn(&str) -> bool, data: &[u8]) -> usize {
+        let sessions = self.lock();
+        let mut reached = BTreeSet::new();
+        for entry in sessions.values() {
+            if include(&entry.server)
+                && !reached.contains(entry.server.as_str())
+                && entry
+                    .actions
+                    .try_send(PlayerAction::Forward {
+                        server: entry.server.clone(),
+                        data: data.to_vec(),
+                    })
+                    .is_ok()
+            {
+                reached.insert(entry.server.as_str());
+            }
+        }
+        reached.len()
     }
 
     fn known(&self, server: &str) -> mlua::Result<()> {

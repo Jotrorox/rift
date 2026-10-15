@@ -28,7 +28,7 @@ export const DOCS = [
   { slug: 'messaging-protocol', file: 'docs/messaging-protocol.md', title: 'Messaging protocol', group: 'Integrate',
     blurb: 'The QUIC wire format for clients in any language.' },
   { slug: 'bungeecord', file: 'docs/bungeecord.md', title: 'BungeeCord compatibility', group: 'Integrate',
-    blurb: 'Transfers and player queries for existing Bukkit/Paper plugins.' },
+    blurb: 'Transfers, queries, forwarding, messages and kicks for existing Bukkit/Paper plugins.' },
   { slug: 'network-protocol', file: 'docs/network-protocol.md', title: 'Network protocol', group: 'Reference',
     blurb: 'Backend switching and recovery for Java 1.8.9 through 26.3.' },
   { slug: 'performance', file: 'docs/performance.md', title: 'Performance', group: 'Reference',

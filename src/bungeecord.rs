@@ -9,7 +9,10 @@ pub const MAX_PAYLOAD_SIZE: usize = 32767;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
     Connect(String),
-    ConnectOther { player: String, server: String },
+    ConnectOther {
+        player: String,
+        server: String,
+    },
     Ip,
     IpOther(String),
     PlayerCount(String),
@@ -20,6 +23,35 @@ pub enum Request {
     Uuid,
     UuidOther(String),
     ServerIp(String),
+    /// `server` is a server name, `ALL` or `ONLINE`; `data` holds the forwarded
+    /// subchannel, length and bytes exactly as received.
+    Forward {
+        server: String,
+        data: Vec<u8>,
+    },
+    ForwardToPlayer {
+        player: String,
+        data: Vec<u8>,
+    },
+    /// `player` is a player name or `ALL`; the message is legacy `§` text.
+    Message {
+        player: String,
+        message: String,
+    },
+    /// `player` is a player name or `ALL`; the message is a JSON text component.
+    MessageRaw {
+        player: String,
+        message: String,
+    },
+    KickPlayer {
+        player: String,
+        reason: String,
+    },
+    /// The reason is a JSON text component.
+    KickPlayerRaw {
+        player: String,
+        reason: String,
+    },
 }
 
 /// Unknown subchannels have no effect. Invalid known requests are rejected by
@@ -44,12 +76,54 @@ pub fn decode(mut bytes: &[u8]) -> io::Result<Option<Request>> {
         "UUID" => Request::Uuid,
         "UUIDOther" => Request::UuidOther(read_utf(&mut bytes)?),
         "ServerIP" => Request::ServerIp(read_utf(&mut bytes)?),
+        "Forward" => Request::Forward {
+            server: read_utf(&mut bytes)?,
+            data: forwarded(&mut bytes)?,
+        },
+        "ForwardToPlayer" => Request::ForwardToPlayer {
+            player: read_utf(&mut bytes)?,
+            data: forwarded(&mut bytes)?,
+        },
+        "Message" => Request::Message {
+            player: read_utf(&mut bytes)?,
+            message: read_utf(&mut bytes)?,
+        },
+        "MessageRaw" => Request::MessageRaw {
+            player: read_utf(&mut bytes)?,
+            message: read_utf(&mut bytes)?,
+        },
+        "KickPlayer" => Request::KickPlayer {
+            player: read_utf(&mut bytes)?,
+            reason: read_utf(&mut bytes)?,
+        },
+        "KickPlayerRaw" => Request::KickPlayerRaw {
+            player: read_utf(&mut bytes)?,
+            reason: read_utf(&mut bytes)?,
+        },
         _ => return Ok(None),
     };
     if !bytes.is_empty() {
         return Err(protocol::invalid("trailing BungeeCord request data"));
     }
     Ok(Some(request))
+}
+
+/// Validate a forwarded subchannel, unsigned 16-bit length and exactly that
+/// many bytes, then return the whole message for delivery unchanged.
+fn forwarded(bytes: &mut &[u8]) -> io::Result<Vec<u8>> {
+    let start = *bytes;
+    read_utf(bytes)?;
+    let length = bytes
+        .get(..2)
+        .ok_or_else(|| protocol::invalid("missing forwarded data length"))?;
+    let length = u16::from_be_bytes(length.try_into().unwrap()) as usize;
+    if bytes.len() - 2 != length {
+        return Err(protocol::invalid(
+            "forwarded data does not match its length",
+        ));
+    }
+    *bytes = &[];
+    Ok(start.to_vec())
 }
 
 /// Read Java DataInput.readUTF, including NUL and UTF-16 surrogate pairs.
@@ -99,29 +173,7 @@ fn continuation(bytes: &[u8], position: &mut usize) -> io::Result<u8> {
 
 /// Write Java DataOutput.writeUTF. Reject overlong fields before changing output.
 pub fn write_utf(value: &str, bytes: &mut Vec<u8>) -> io::Result<()> {
-    let length = value
-        .encode_utf16()
-        .map(|unit| match unit {
-            1..=0x7f => 1usize,
-            0..=0x7ff => 2,
-            _ => 3,
-        })
-        .sum::<usize>();
-    let length = u16::try_from(length)
-        .map_err(|_| protocol::invalid("modified UTF-8 string exceeds size limit"))?;
-    bytes.extend_from_slice(&length.to_be_bytes());
-    for unit in value.encode_utf16() {
-        match unit {
-            1..=0x7f => bytes.push(unit as u8),
-            0..=0x7ff => bytes.extend([0xc0 | (unit >> 6) as u8, 0x80 | (unit & 63) as u8]),
-            _ => bytes.extend([
-                0xe0 | (unit >> 12) as u8,
-                0x80 | ((unit >> 6) & 63) as u8,
-                0x80 | (unit & 63) as u8,
-            ]),
-        }
-    }
-    Ok(())
+    protocol::write_modified_utf8(value, bytes)
 }
 
 pub(crate) fn channel(version: ProtocolVersion) -> &'static str {
@@ -217,8 +269,67 @@ mod tests {
                 Request::UuidOther("Player".into()),
             ),
             (vec!["ServerIP", "lobby"], Request::ServerIp("lobby".into())),
+            (
+                vec!["Message", "ALL", "§ahello"],
+                Request::Message {
+                    player: "ALL".into(),
+                    message: "§ahello".into(),
+                },
+            ),
+            (
+                vec!["MessageRaw", "Player", "{\"text\":\"hi\"}"],
+                Request::MessageRaw {
+                    player: "Player".into(),
+                    message: "{\"text\":\"hi\"}".into(),
+                },
+            ),
+            (
+                vec!["KickPlayer", "Player", "Bye"],
+                Request::KickPlayer {
+                    player: "Player".into(),
+                    reason: "Bye".into(),
+                },
+            ),
+            (
+                vec!["KickPlayerRaw", "Player", "\"Bye\""],
+                Request::KickPlayerRaw {
+                    player: "Player".into(),
+                    reason: "\"Bye\"".into(),
+                },
+            ),
         ] {
             assert_eq!(decode(&fields(&values)).unwrap(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn forwards_keep_the_inner_message_verbatim_and_require_its_exact_length() {
+        let mut inner = fields(&["chat:sync"]);
+        inner.extend([0, 3, 1, 2, 3]);
+        for (target, request) in [
+            ("Forward", |data| Request::Forward {
+                server: "ONLINE".into(),
+                data,
+            }),
+            ("ForwardToPlayer", |data| Request::ForwardToPlayer {
+                player: "ONLINE".into(),
+                data,
+            }),
+        ] as [(&str, fn(Vec<u8>) -> Request); 2]
+        {
+            let mut payload = fields(&[target, "ONLINE"]);
+            payload.extend(&inner);
+            assert_eq!(decode(&payload).unwrap(), Some(request(inner.clone())));
+            for invalid in [
+                &payload[..payload.len() - 1],
+                &[&payload[..], &[0]].concat(),
+            ] {
+                assert!(decode(invalid).is_err());
+            }
+            let mut empty = fields(&[target, "lobby", ""]);
+            empty.extend([0, 0]);
+            assert!(decode(&empty).unwrap().is_some());
+            assert!(decode(&fields(&[target, "lobby", "channel"])).is_err());
         }
     }
 
@@ -250,6 +361,8 @@ mod tests {
         }
         assert!(decode(&fields(&["Connect"])).is_err());
         assert!(decode(&fields(&["IP", "unexpected"])).is_err());
+        assert!(decode(&fields(&["Message", "ALL"])).is_err());
+        assert!(decode(&fields(&["KickPlayer", "Player", "Bye", "extra"])).is_err());
         assert!(decode(&vec![0; MAX_PAYLOAD_SIZE + 1]).is_err());
         assert_eq!(decode(&fields(&["Unknown", "opaque"])).unwrap(), None);
         let mut bytes = vec![42];
