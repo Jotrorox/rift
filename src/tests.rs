@@ -314,3 +314,145 @@ async fn proxy_protocol_rate_limits_clients_instead_of_the_load_balancer() {
     .await
     .unwrap();
 }
+
+async fn ping_json(config: Config, host: &str) -> serde_json::Value {
+    let (mut client, proxy) = runtime_connection(config).await;
+    let codec = Codec::default();
+    let handshake = Handshake {
+        protocol: 774,
+        address: host.into(),
+        port: 25565,
+        next_state: NextState::Status,
+    };
+    codec.write(&mut client, &handshake.packet()).await.unwrap();
+    codec.write(&mut client, &Packet::empty(0)).await.unwrap();
+    client.shutdown().await.unwrap();
+    let response = Reader::default()
+        .read(&mut client, codec)
+        .await
+        .unwrap()
+        .unwrap();
+    let _ = proxy.await.unwrap();
+    serde_json::from_str(read_string(&mut response.data.as_slice(), 32767).unwrap()).unwrap()
+}
+
+fn server_list_config(backend: &str, routes: &str, extra: &str) -> Config {
+    Config::from_lua(
+        &format!(
+            "rift.config.listeners.default = '127.0.0.1:0'
+            rift.config.backends.lobby = '{backend}'
+            rift.config.routes.default = {routes}
+            {extra}"
+        ),
+        "status.lua",
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn server_list_answers_per_hostname_without_contacting_the_backend() {
+    timeout(Duration::from_secs(5), async {
+        let backend = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = backend.local_addr().unwrap().to_string();
+        let list = "rift.config.server_list = {
+            motd = { text = 'Network', color = 'gold' },
+            maintenance_motd = 'Back soon',
+            version = 'Rift Network',
+            max_players = 500,
+            sample = { 'Hello' },
+            hosts = { ['*.play.test'] = { motd = 'Europe', max_players = 50 } },
+        }";
+        let mut config = server_list_config(&address, "'lobby'", list);
+        let json = ping_json(config.clone(), "play.test").await;
+        assert_eq!(
+            json["description"],
+            serde_json::json!({ "text": "Network", "color": "gold" })
+        );
+        assert_eq!(
+            json["version"],
+            serde_json::json!({ "name": "Rift Network", "protocol": 774 })
+        );
+        assert_eq!(json["players"]["max"], 500);
+        assert_eq!(json["players"]["online"], 0);
+        assert_eq!(json["players"]["sample"][0]["name"], "Hello");
+        let json = ping_json(config.clone(), "EU.Play.Test.").await;
+        assert_eq!(json["description"]["text"], "Europe");
+        assert_eq!(json["players"]["max"], 50);
+        assert_eq!(json["version"]["name"], "Rift Network");
+        config.maintenance = true;
+        let json = ping_json(config, "play.test").await;
+        assert_eq!(json["description"]["text"], "Back soon");
+        assert!(
+            timeout(Duration::from_millis(50), backend.accept())
+                .await
+                .is_err()
+        );
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn status_hook_overrides_fields_and_falls_back_on_nil_or_failure() {
+    timeout(Duration::from_secs(5), async {
+        let backend = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = backend.local_addr().unwrap().to_string();
+        let hook = "rift.config.server_list = { motd = 'Static', version = 'Net' }
+        rift.on('status', function(ping)
+            if ping.hostname == 'nil.test' then return nil end
+            if ping.hostname == 'error.test' then error('boom') end
+            if ping.hostname == 'bad.test' then return { colour = 'red' } end
+            return {
+                motd = table.concat({ ping.listener, ping.hostname, tostring(ping.backend),
+                    tostring(ping.protocol), tostring(ping.maintenance), ping.peer_ip }, ' '),
+                online = ping.online + 7,
+                max_players = ping.max_players + 1,
+                protocol = -1,
+                version = 'Maintenance',
+                sample = { 'a', 'b' },
+            }
+        end)";
+        let routes = "{ ['*.test'] = 'lobby' }";
+        let config = server_list_config(&address, routes, hook);
+        let json = ping_json(config.clone(), "play.test").await;
+        assert_eq!(
+            json["description"]["text"],
+            "default play.test lobby 774 false 127.0.0.1"
+        );
+        assert_eq!(json["players"]["online"], 7);
+        assert_eq!(json["players"]["max"], 1025);
+        assert_eq!(
+            json["version"],
+            serde_json::json!({ "name": "Maintenance", "protocol": -1 })
+        );
+        assert_eq!(json["players"]["sample"].as_array().unwrap().len(), 2);
+        for host in ["nil.test", "error.test", "bad.test"] {
+            let json = ping_json(config.clone(), host).await;
+            assert_eq!(json["description"]["text"], "Static", "{host}");
+            assert_eq!(json["version"]["name"], "Net", "{host}");
+        }
+        // Unmatched hostnames skip server_list, but the hook still sees them.
+        let json = ping_json(config.clone(), "unknown.example").await;
+        assert_eq!(
+            json["description"]["text"],
+            "default unknown.example nil 774 false 127.0.0.1"
+        );
+        let config = server_list_config(
+            &address,
+            routes,
+            "rift.config.server_list = { motd = 'Static' }",
+        );
+        let json = ping_json(config, "unknown.example").await;
+        assert_eq!(
+            json["description"]["text"],
+            "No server is configured for this hostname."
+        );
+        assert!(
+            timeout(Duration::from_millis(50), backend.accept())
+                .await
+                .is_err()
+        );
+    })
+    .await
+    .unwrap();
+}

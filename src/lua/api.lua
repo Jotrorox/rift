@@ -4,7 +4,7 @@ local api, runtime = rift, ...
 local config = { listeners = {}, backends = {}, managed_servers = {}, templates = {}, service_groups = {}, routes = {}, limits = {} }
 local handlers, commands, finished = {}, {}, false
 local events = {
-    route = "on_route", http = "on_http", message = "on_message",
+    route = "on_route", http = "on_http", message = "on_message", status = "on_status",
     login = "login", initial_server = "initial_server", join = "join",
     disconnect = "disconnect", before_transfer = "before_transfer",
     after_transfer = "after_transfer",
@@ -94,7 +94,8 @@ return function(returned)
         api.setup(returned)
     end
     for event, list in pairs(handlers) do
-        local target = (event == "route" or event == "http" or event == "message") and config or extensions()
+        local target = (event == "route" or event == "http" or event == "message" or event == "status")
+            and config or extensions()
         local key = events[event]
         target[key] = compose(target[key], list, event)
     end

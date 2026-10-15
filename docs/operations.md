@@ -124,6 +124,68 @@ share an IP allowance. A routing hook can enforce additional IP/listener policy.
 Online mode verifies player names before network access checks; offline-mode
 names are unauthenticated and cannot establish account ownership.
 
+## Server list: MOTD, favicon and player count
+
+By default Rift answers server-list pings itself with the network's player count,
+`limits.max_connections` as the maximum and the description `Rift`. With
+`status_cache` it instead relays the routed backend's response. To set the
+network's own entry, configure `server_list`:
+
+```lua
+rift.config.server_list = {
+    -- A string (section-sign codes such as "\u{00A7}6" work) or a chat component table.
+    motd = { text = "My Network", color = "gold", extra = { { text = "\nNow on 1.21", color = "gray" } } },
+    maintenance_motd = "Back soon. Follow @mynetwork for updates.",
+    version = "My Network 1.8-1.21", -- Shown when a client's version is incompatible.
+    max_players = 500,               -- Defaults to limits.max_connections.
+    favicon = "icons/network.png",   -- 64x64 PNG up to 16 KiB, relative to rift.lua.
+    sample = { "Survival, Creative", "and Minigames" }, -- Hover text over the player count.
+    hosts = {
+        ["survival.example.com"] = { motd = "Survival", favicon = "icons/survival.png" },
+        ["*.minigames.example.com"] = { motd = "Minigames", max_players = 200 },
+    },
+}
+```
+
+The player count is the number of players logged in through Rift across all
+backends. Rift answers each ping directly and never contacts a backend, so
+`server_list` cannot be combined with `status_cache`. Every field is optional.
+`hosts` entries use the same patterns as hostname routes (exact names first,
+then the longest `*.` suffix), and inherit any unset field from the top level.
+During maintenance, `maintenance_motd` replaces `motd`. Pings for a hostname
+with no route keep the reply "No server is configured for this hostname."
+Rift reads favicon files when it loads or reloads the configuration, so replace
+the file and reload to change the icon. It rejects missing files, images that
+are not 64×64 PNGs, and settings that would exceed the protocol's 32767-byte
+status limit.
+
+For per-ping logic, register a `status` handler. It runs before Rift contacts
+any backend and receives `listener`, `hostname`, `protocol`, `peer_addr`,
+`peer_ip`, `backend` (the routed backend or group, or nil for an unmatched
+hostname), `maintenance`, `online` and `max_players`. Return nil to keep the
+default, or a table with any of `motd`, `version`, `protocol`, `online`,
+`max_players`, `sample` and `favicon` (a `data:image/png;base64,...` URL):
+
+```lua
+rift.on("status", function(ping)
+    if ping.maintenance then
+        -- Protocol -1 makes every client show the version text in place of the count.
+        return { motd = "Scheduled maintenance until 18:00 UTC", version = "Maintenance", protocol = -1 }
+    end
+    if ping.hostname == "event.example.com" then
+        return { motd = { text = "Build contest is live!", color = "aqua" } }
+    end
+end)
+```
+
+Results apply on top of `server_list` (or Rift's default response). A
+handler's result also replaces `status_cache` passthrough for that ping;
+returning nil keeps passthrough. The handler shares the `on_route` limits:
+four concurrent scripts, a 50 ms deadline, and a fresh VM for every ping.
+On an error, overload, an invalid result or an oversized response, Rift logs
+a `status_hook_failed` event and serves the default document, so the server
+list never goes blank because of a script.
+
 ## Run behind a load balancer (PROXY protocol)
 
 When players reach Rift through TCPShield, Cloudflare Spectrum, HAProxy or a
@@ -205,6 +267,7 @@ results without logging credentials.
 | `connect` / `no_eligible_backend` | Check probes, fallback configuration and draining state |
 | `handshake` / `handshake_error` | Check client protocol, accidental health probes and connection deadlines |
 | `on_route` / script error or overload | Inspect the named script; simplify/bound the hook or reduce arrival rate |
+| `status_hook_failed` | Inspect the named `on_status` script and its returned fields; pings are still answered with the default |
 | Session/login failure | Check supported versions, authentication-service access, matching Velocity secrets on every Paper backend and the backend's own log |
 | `proxy_untrusted` / `proxy_header` | Add the load balancer to `proxy_protocol.trusted_proxies`, enable PROXY protocol on it, or block direct access to the listener |
 | Rate-limit/capacity rejection | Check legitimate player traffic and NAT concentration before changing limits |
@@ -340,7 +403,7 @@ isolation and cannot detect changes incompatible with an already running process
 | --- | --- |
 | Routes, backend addresses, fallback, hooks | New connections use the new snapshot; existing sessions keep their sockets and routing |
 | Connection/login limits, configured maintenance/draining | Apply to new admission/attachments; current sessions continue |
-| Health probes, status cache | Rebuilt after successful reload |
+| Health probes, status cache, `server_list` (favicon files are reread) | Rebuilt after successful reload |
 | Shutdown deadline | New value applies to the later shutdown drain |
 | `web`, `status`, standalone `metrics`, web bearer token | Can enable, disable or move live; replacement sockets bind before commit |
 | Gameplay listeners, operational `admin` bind/token variable/permissions | Restart required; incompatible reload rejects the entire candidate |
