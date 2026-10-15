@@ -12,6 +12,7 @@ use mlua::{Table, Value};
 use tokio::sync::Semaphore;
 
 pub use crate::message_script::MessageScript;
+pub use crate::server_list::{ServerList, StatusScript};
 pub use crate::{http_script::HttpScript, script::RouteScript};
 pub use managed::ManagedServer;
 pub use messaging::{MessagingConfig, MessagingPrincipal, MessagingStream, MessagingSubscription};
@@ -20,6 +21,7 @@ pub use templates::ServerTemplate;
 
 mod managed;
 mod messaging;
+mod server_list;
 mod services;
 mod templates;
 
@@ -45,6 +47,8 @@ pub struct Config {
     pub extensions: Option<crate::extensions::ExtensionScript>,
     pub on_http: Option<HttpScript>,
     pub on_message: Option<MessageScript>,
+    /// Per-ping server-list overrides, run before any backend contact.
+    pub on_status: Option<StatusScript>,
     pub messaging: Option<MessagingConfig>,
     pub fallbacks: BTreeMap<String, Vec<String>>,
     pub network: Network,
@@ -53,6 +57,8 @@ pub struct Config {
     pub proxy_protocol: Option<ProxyProtocol>,
     pub health_check: Option<HealthCheck>,
     pub status_cache: Option<StatusCache>,
+    /// Rift-owned server-list responses; replaces backend status passthrough.
+    pub server_list: Option<ServerList>,
     pub metrics: Option<SocketAddr>,
     pub admin: Option<Admin>,
     pub maintenance: bool,
@@ -311,6 +317,7 @@ impl Config {
             extensions: None,
             on_http: None,
             on_message: None,
+            on_status: None,
             messaging: None,
             fallbacks: BTreeMap::new(),
             network: Network::default(),
@@ -319,6 +326,7 @@ impl Config {
             proxy_protocol: None,
             health_check: None,
             status_cache: None,
+            server_list: None,
             metrics: None,
             admin: None,
             maintenance: false,
@@ -445,6 +453,7 @@ impl Config {
                     "extensions",
                     "on_http",
                     "on_message",
+                    "on_status",
                     "messaging",
                     "fallbacks",
                     "network",
@@ -453,6 +462,7 @@ impl Config {
                     "proxy_protocol",
                     "health_check",
                     "status_cache",
+                    "server_list",
                     "metrics",
                     "admin",
                     "maintenance",
@@ -549,6 +559,14 @@ impl Config {
                 Value::Function(_) => Some(MessageScript::new(&source)),
                 _ => return Err("config.on_message: expected a function".into()),
             };
+            let on_status = match root
+                .raw_get::<Value>("on_status")
+                .map_err(|e| e.to_string())?
+            {
+                Value::Nil => None,
+                Value::Function(_) => Some(StatusScript::new(&source)),
+                _ => return Err("config.on_status: expected a function".into()),
+            };
             let messaging = messaging::parse(&root)?;
             let login_rate_limit = rate_limit(&root, "login_rate_limit")?;
             let proxy_protocol = proxy_protocol(&root)?;
@@ -614,6 +632,7 @@ impl Config {
                 })
             })
             .transpose()?;
+            let server_list = server_list::parse(&root, directory)?;
             let metrics = match root.get::<Value>("metrics").map_err(|e| e.to_string())? {
                 Value::Nil | Value::Boolean(false) => None,
                 value => Some(
@@ -708,6 +727,7 @@ impl Config {
                 extensions,
                 on_http,
                 on_message,
+                on_status,
                 messaging,
                 fallbacks,
                 network,
@@ -716,6 +736,7 @@ impl Config {
                 proxy_protocol,
                 health_check,
                 status_cache,
+                server_list,
                 metrics,
                 admin,
                 maintenance,
@@ -779,6 +800,11 @@ impl Config {
         }
         if let Some(messaging) = &self.messaging {
             messaging.validate().map_err(invalid)?;
+        }
+        if self.server_list.is_some() && self.status_cache.is_some() {
+            return Err(invalid(
+                "server_list: Rift answers status itself; remove status_cache, which only caches backend responses",
+            ));
         }
         let subscriptions = self
             .messaging
