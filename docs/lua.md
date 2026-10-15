@@ -117,9 +117,10 @@ Already imported modules remain cached. Give plugin modules their own namespace
 ## Registering callbacks and commands
 
 `rift.on(event, callback)` appends a handler. Supported events are `route`, `http`,
-`message`, `login`, `initial_server`, `join`, `disconnect`, `before_transfer` and
+`message`, `status`, `login`, `initial_server`, `join`, `disconnect`, `before_transfer` and
 `after_transfer`. Arguments and results match the existing `on_route`, `on_http`,
-`on_message` and [authenticated extension](extensions.md) callbacks.
+`on_message`, [`on_status`](operations.md#server-list-motd-favicon-and-player-count) and
+[authenticated extension](extensions.md) callbacks.
 
 Handlers run in registration order. A directly configured callback runs first.
 For all events except `message`, the first non-nil result ends the chain and is

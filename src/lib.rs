@@ -15,4 +15,5 @@ pub mod provisioning;
 pub mod proxy_protocol;
 pub mod routing;
 mod script;
+pub mod server_list;
 pub mod session;

@@ -18,6 +18,7 @@ use crate::{
     config::{Config, Route},
     routing::Backend,
     script::RouteScript,
+    server_list::{Ping, StatusOverride, StatusScript},
 };
 
 /// Metadata available immediately after TCP accept, before reading any bytes.
@@ -70,6 +71,7 @@ impl std::error::Error for RouteError {}
 #[derive(Clone)]
 pub struct Router {
     script: Option<RouteScript>,
+    status: Option<StatusScript>,
     backends: Arc<BTreeMap<String, Backend>>,
     groups: Arc<BTreeSet<String>>,
     routes: Arc<BTreeMap<String, Route>>,
@@ -89,6 +91,7 @@ impl Router {
     pub fn new(config: &Config) -> Self {
         Self {
             script: config.on_route.clone(),
+            status: config.on_status.clone(),
             backends: Arc::new(config.backends.clone()),
             groups: Arc::new(config.service_groups.keys().cloned().collect()),
             routes: Arc::new(config.routes.clone()),
@@ -105,26 +108,9 @@ impl Router {
 
     /// Run once per accepted connection. Overload is rejected without waiting.
     pub async fn route(&self, connection: ConnectionInfo) -> Result<RouteDecision, RouteError> {
-        let decision = if let Some(script) = &self.script {
-            let permit = self
-                .slots
-                .clone()
-                .try_acquire_owned()
-                .map_err(|_| RouteError::Busy)?;
-            let script = script.clone();
-            let messaging = self.messaging.clone();
-            let deadline = Instant::now() + crate::script::EXECUTION_TIMEOUT;
-            let task = spawn_blocking(move || {
-                // Keep the permit until execution actually stops, including if
-                // the async caller times out or is cancelled. Never share a VM
-                // or hold a lock on Tokio's traffic threads.
-                let _permit = permit;
-                script.evaluate(&connection, deadline, messaging)
-            });
-            timeout(crate::script::EXECUTION_TIMEOUT, task)
-                .await
-                .map_err(|_| RouteError::TimedOut)?
-                .map_err(|error| RouteError::Script(format!("script worker: {error}")))??
+        let decision = if let Some(script) = self.script.clone() {
+            self.run(move |deadline, messaging| script.evaluate(&connection, deadline, messaging))
+                .await?
         } else {
             RouteDecision::Default
         };
@@ -135,6 +121,47 @@ impl Router {
             return Err(RouteError::UnknownBackend(name.clone()));
         }
         Ok(decision)
+    }
+
+    /// Run `on_status` for a server-list ping. Shares capacity with `on_route`;
+    /// `None` keeps the default response.
+    pub async fn status(&self, ping: Ping) -> Result<Option<StatusOverride>, RouteError> {
+        let Some(script) = self.status.clone() else {
+            return Ok(None);
+        };
+        self.run(move |deadline, messaging| script.evaluate(&ping, deadline, messaging))
+            .await
+    }
+
+    pub fn has_status_hook(&self) -> bool {
+        self.status.is_some()
+    }
+
+    /// Overload is rejected without waiting.
+    async fn run<T: Send + 'static>(
+        &self,
+        evaluate: impl FnOnce(Instant, Option<crate::messaging::Broker>) -> Result<T, RouteError>
+        + Send
+        + 'static,
+    ) -> Result<T, RouteError> {
+        let permit = self
+            .slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| RouteError::Busy)?;
+        let messaging = self.messaging.clone();
+        let deadline = Instant::now() + crate::script::EXECUTION_TIMEOUT;
+        let task = spawn_blocking(move || {
+            // Keep the permit until execution actually stops, including if
+            // the async caller times out or is cancelled. Never share a VM
+            // or hold a lock on Tokio's traffic threads.
+            let _permit = permit;
+            evaluate(deadline, messaging)
+        });
+        timeout(crate::script::EXECUTION_TIMEOUT, task)
+            .await
+            .map_err(|_| RouteError::TimedOut)?
+            .map_err(|error| RouteError::Script(format!("script worker: {error}")))?
     }
 
     pub fn backend(&self, name: &str) -> Option<&Backend> {

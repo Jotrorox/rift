@@ -13,8 +13,9 @@ use rift::{
     hooks::{ConnectionInfo, RouteDecision, Router},
     messaging::{Broker, BrokerConfig, Stream},
     players::PlayerRegistry,
-    protocol::{Codec, NextState, status_response},
+    protocol::{Codec, Handshake, NextState},
     routing::Routes,
+    server_list::{Document, Ping},
     session::{Session, SessionEvent},
 };
 use std::{
@@ -211,6 +212,52 @@ impl Snapshot {
     }
 }
 
+/// Rift's own server-list document: routed pings use `server_list` for their
+/// hostname, then any `on_status` result applies. `None` means neither claimed
+/// the ping, leaving the default or status-cache passthrough. Hook failures and
+/// oversized results are logged and keep the static document.
+async fn owned_status(
+    snapshot: &Snapshot,
+    listener: &str,
+    handshake: &Handshake,
+    backend: Option<&str>,
+    mut document: Document,
+    event: &Connection,
+) -> Option<Document> {
+    let maintenance = snapshot.control.maintenance(&snapshot.config);
+    let mut owned = false;
+    if let Some(list) = snapshot
+        .config
+        .server_list
+        .as_ref()
+        .filter(|_| backend.is_some())
+    {
+        document.apply(&list.entry(&handshake.hostname()), maintenance);
+        owned = true;
+    }
+    if snapshot.router.has_status_hook() {
+        let ping = Ping {
+            listener: listener.to_owned(),
+            hostname: handshake.hostname(),
+            protocol: handshake.protocol,
+            peer_addr: event.peer_addr(),
+            backend: backend.map(str::to_owned),
+            maintenance,
+            online: document.online,
+            max_players: document.max_players,
+        };
+        match snapshot.router.status(ping).await {
+            Ok(Some(changes)) => match document.apply_override(changes) {
+                Ok(()) => owned = true,
+                Err(error) => event.emit("status_hook_failed", &error, Some(error.kind())),
+            },
+            Ok(None) => {}
+            Err(error) => event.emit("status_hook_failed", &error, None),
+        }
+    }
+    owned.then_some(document)
+}
+
 pub async fn handle(
     client: &mut TcpStream,
     listener: &str,
@@ -306,12 +353,25 @@ pub async fn handle(
         Err(error) => {
             if is_status {
                 timeout(HANDSHAKE_TIMEOUT, session.status_request()).await??;
-                let response = status_response(
+                let default = Document::new(
                     session.handshake.protocol,
                     0,
-                    snapshot.config.limits.max_connections,
+                    snapshot.config.limits.max_connections as u64,
                     "No server is configured for this hostname.",
                 );
+                event.stage = "on_status";
+                let document = owned_status(
+                    &snapshot,
+                    listener,
+                    &session.handshake,
+                    None,
+                    default.clone(),
+                    event,
+                )
+                .await
+                .unwrap_or(default);
+                event.stage = "status_response";
+                let response = document.packet()?;
                 timeout(HANDSHAKE_TIMEOUT, session.respond_status(&response)).await??;
             } else {
                 let _ = timeout(
@@ -333,20 +393,32 @@ pub async fn handle(
     if is_status {
         event.stage = "status_request";
         timeout(HANDSHAKE_TIMEOUT, session.status_request()).await??;
-        let mut response = status_response(
+        let maintenance = snapshot.control.maintenance(&snapshot.config);
+        let default = Document::new(
             session.handshake.protocol,
             metrics.players.get(),
-            snapshot.config.limits.max_connections,
-            if snapshot.control.maintenance(&snapshot.config) {
+            snapshot.config.limits.max_connections as u64,
+            if maintenance {
                 "The network is under maintenance."
             } else {
                 "Rift"
             },
         );
+        event.stage = "on_status";
+        let owned = owned_status(
+            &snapshot,
+            listener,
+            &session.handshake,
+            Some(&primary),
+            default.clone(),
+            event,
+        )
+        .await;
+        let mut response = owned.as_ref().unwrap_or(&default).packet()?;
         if let Some(settings) = snapshot
             .config
             .status_cache
-            .filter(|_| !snapshot.control.maintenance(&snapshot.config))
+            .filter(|_| owned.is_none() && !maintenance)
         {
             let packet = Codec::default().encode(&session.handshake.packet())?;
             let deadline = Deadline::now() + snapshot.config.limits.connect_timeout;
@@ -401,12 +473,13 @@ pub async fn handle(
             match cached {
                 Ok(cached) => response = status::response_packet(&cached)?,
                 Err(error) if error.kind() != io::ErrorKind::InvalidData => {
-                    response = status_response(
+                    response = Document::new(
                         session.handshake.protocol,
                         0,
-                        snapshot.config.limits.max_connections,
+                        snapshot.config.limits.max_connections as u64,
                         "The server is currently unavailable. Please try again later.",
-                    );
+                    )
+                    .packet()?;
                     // Connection failures have per-attempt diagnostics. Reads and
                     // timeouts are also reported, while the client gets a pong.
                     if !matches!(event.stage, "connect" | "dns") {

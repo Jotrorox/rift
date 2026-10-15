@@ -1232,3 +1232,125 @@ fn messaging_malformed_settings_fail_closed() {
         assert!(error.to_string().contains(expected), "{settings}: {error}");
     }
 }
+
+fn png(width: u32, height: u32) -> Vec<u8> {
+    let mut bytes = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+    bytes.extend(width.to_be_bytes());
+    bytes.extend(height.to_be_bytes());
+    bytes.extend([8, 6, 0, 0, 0, 0, 0, 0, 0]);
+    bytes
+}
+
+#[test]
+fn server_list_parses_components_hosts_and_favicon_files() {
+    let directory = std::env::temp_dir().join(format!(
+        "rift-server-list-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    fs::create_dir_all(directory.join("icons")).unwrap();
+    fs::write(directory.join("icons/network.png"), png(64, 64)).unwrap();
+    fs::write(directory.join("icons/wide.png"), png(128, 64)).unwrap();
+    let source = |favicon: &str| {
+        format!(
+            "{VALID}
+            rift.config.server_list = {{
+                motd = {{ text = 'Welcome', color = 'gold', extra = {{ {{ text = '!' }} }} }},
+                maintenance_motd = 'Back soon',
+                version = 'Rift Network',
+                max_players = 500,
+                favicon = '{favicon}',
+                sample = {{ 'line one', 'line two' }},
+                hosts = {{
+                    ['Play.Example.com.'] = {{ motd = 'Survival' }},
+                    ['*.example.com'] = {{ max_players = 0 }},
+                }},
+            }}
+            rift.on('status', function(ping) return nil end)"
+        )
+    };
+    let config =
+        Config::from_lua_at(&source("icons/network.png"), &directory.join("rift.lua")).unwrap();
+    assert!(config.on_status.is_some());
+    let list = config.server_list.unwrap();
+    assert_eq!(
+        list.defaults.motd.unwrap(),
+        serde_json::json!({ "text": "Welcome", "color": "gold", "extra": [{ "text": "!" }] })
+    );
+    assert_eq!(list.defaults.max_players, Some(500));
+    assert_eq!(list.defaults.sample.unwrap(), ["line one", "line two"]);
+    assert!(
+        list.defaults
+            .favicon
+            .unwrap()
+            .starts_with("data:image/png;base64,iVBORw0KGgo")
+    );
+    assert_eq!(
+        list.hosts.keys().collect::<Vec<_>>(),
+        ["*.example.com", "play.example.com"]
+    );
+    let error = Config::from_lua_at(&source("icons/wide.png"), &directory.join("rift.lua"))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("server_list.favicon") && error.contains("64×64"),
+        "{error}"
+    );
+    let error = Config::from_lua_at(&source("icons/missing.png"), &directory.join("rift.lua"))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("server_list.favicon"), "{error}");
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn invalid_server_list_settings_are_rejected_with_context() {
+    for (settings, expected) in [
+        ("server_list = { motd = 1 }", "server_list.motd"),
+        (
+            "server_list = { motd = { text = 'a', [1] = 'b' } }",
+            "server_list.motd",
+        ),
+        ("server_list = { motd = {} }", "must not be empty"),
+        (
+            "server_list = { motd = { text = function() end } }",
+            "server_list.motd",
+        ),
+        (
+            "server_list = { version = string.rep('v', 257) }",
+            "server_list.version",
+        ),
+        (
+            "server_list = { max_players = -1 }",
+            "server_list.max_players",
+        ),
+        (
+            "server_list = { sample = { [2] = 'a' } }",
+            "server_list.sample",
+        ),
+        ("server_list = { colour = 'x' }", "unknown field"),
+        (
+            "server_list = { hosts = { ['*'] = {} } }",
+            "defaults directly",
+        ),
+        (
+            "server_list = { hosts = { ['bad host'] = {} } }",
+            "invalid route hostname",
+        ),
+        (
+            "server_list = { hosts = { ['a.test'] = {}, ['A.test.'] = {} } }",
+            "duplicate route",
+        ),
+        (
+            "server_list = { hosts = { ['a.test'] = { hosts = {} } } }",
+            "unknown field",
+        ),
+        ("server_list = {}, status_cache = {}", "remove status_cache"),
+        ("on_status = 'x'", "config.on_status"),
+    ] {
+        let error = Config::from_lua(&with_security(settings), "list.lua")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(expected), "{settings}: {error}");
+    }
+}
