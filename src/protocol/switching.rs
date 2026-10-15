@@ -329,16 +329,72 @@ impl SwitchingCapabilities {
         version: ProtocolVersion,
         message: &str,
     ) -> io::Result<Packet> {
+        self.chat(version, message, false)
+    }
+
+    pub(crate) fn action_bar(self, version: ProtocolVersion, message: &str) -> io::Result<Packet> {
+        self.chat(version, message, true)
+    }
+
+    fn chat(self, version: ProtocolVersion, message: &str, overlay: bool) -> io::Result<Packet> {
         // Disconnect and system chat share the version's component encoding.
         let mut packet = disconnect(Some(version), State::Play, message)?;
         packet.id = self.system_chat;
-        // Through 1.19, position 1 is system text (a byte before 1.19, then a
-        // VarInt). 1.19.1 replaces the position with an overlay boolean.
-        packet.data.push(u8::from(self.protocol <= 759));
+        // Through 1.19, position 1 is system text and 2 the action bar (a byte
+        // before 1.19, then a VarInt). 1.19.1 replaces it with an overlay boolean.
+        packet.data.push(if self.protocol <= 759 {
+            1 + u8::from(overlay)
+        } else {
+            u8::from(overlay)
+        });
         if (735..759).contains(&self.protocol) {
             packet.data.extend([0; 16]);
         }
         Ok(packet)
+    }
+
+    /// Set Titles Animation, Set Subtitle Text and Set Title Text, in the order
+    /// the client needs to display them. Times are ticks. An absent subtitle is
+    /// sent empty so that one from an earlier title cannot reappear.
+    pub(crate) fn title(
+        self,
+        version: ProtocolVersion,
+        title: &str,
+        subtitle: Option<&str>,
+        times: [i32; 3],
+    ) -> io::Result<Vec<Packet>> {
+        // minecraft-data through 26.1; 26.2 and 26.3 GameProtocols via javap.
+        let (subtitle_id, title_id, times_id) = match self.protocol {
+            761 => (0x59, 0x5b, 0x5c),
+            762 | 763 => (0x5d, 0x5f, 0x60),
+            764 => (0x5f, 0x61, 0x62),
+            765 => (0x61, 0x63, 0x64),
+            766 | 767 => (0x63, 0x65, 0x66),
+            768 | 769 => (0x6a, 0x6c, 0x6d),
+            770..=772 => (0x69, 0x6b, 0x6c),
+            773 | 774 => (0x6e, 0x70, 0x71),
+            775 | 776 => (0x70, 0x72, 0x73),
+            777 => (0x72, 0x74, 0x75),
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "Titles require Minecraft 1.19.3–26.3.",
+                ));
+            }
+        };
+        let component = |id, text| {
+            let mut packet = disconnect(Some(version), State::Play, text)?;
+            packet.id = id;
+            Ok::<_, io::Error>(packet)
+        };
+        Ok(vec![
+            Packet::new(
+                times_id,
+                times.iter().flat_map(|t| t.to_be_bytes()).collect(),
+            ),
+            component(subtitle_id, subtitle.unwrap_or(""))?,
+            component(title_id, title)?,
+        ])
     }
 
     /// Append unsigned Brigadier proxy literals to the backend's command

@@ -133,8 +133,9 @@ sessions for up to 30 seconds by default; a second Ctrl-C closes them immediatel
 Lua extensions provide login and transfer decisions, lifecycle events,
 commands with UUID permission checks, and FIFO server queues. API v2 adds
 durable namespaced state, recurring jobs, configured HTTP integrations,
-permission groups with inheritance and wildcards, and permissions that update
-during a session; v1 remains supported. The
+permission groups with inheritance and wildcards, permissions that update
+during a session, and an online-player API for messages, titles, action bars,
+kicks, broadcasts and transfers; v1 remains supported. The
 [extension example](examples/extensions.lua) demonstrates these APIs with a
 survival queue and staff-only server. See the [extension API contract](docs/extensions.md) for
 ordering, deadlines, permissions and reload behavior. Extensions require online

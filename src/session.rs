@@ -862,6 +862,32 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             .await
     }
 
+    pub async fn send_action_bar(&mut self, message: &str) -> io::Result<()> {
+        self.client.flush_pending().await?;
+        if !self.client.state.settled(State::Play) {
+            return Err(protocol::invalid("action bar messages require play state"));
+        }
+        self.send_client(&protocol::action_bar(self.version()?, message)?)
+            .await
+    }
+
+    /// `times` are fade-in, stay and fade-out ticks.
+    pub async fn send_title(
+        &mut self,
+        title: &str,
+        subtitle: Option<&str>,
+        times: [i32; 3],
+    ) -> io::Result<()> {
+        self.client.flush_pending().await?;
+        if !self.client.state.settled(State::Play) {
+            return Err(protocol::invalid("titles require play state"));
+        }
+        for packet in protocol::title(self.version()?, title, subtitle, times)? {
+            self.send_client(&packet).await?;
+        }
+        Ok(())
+    }
+
     /// Return a compatibility response to the current backend. Queue the write
     /// through its connection so cancellation cannot truncate or duplicate it.
     pub async fn send_bungeecord(&mut self, payload: &[u8]) -> io::Result<()> {

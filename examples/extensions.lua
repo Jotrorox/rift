@@ -1,5 +1,5 @@
--- Authenticated network extensions v2: durable state, jobs, permission groups and
--- live permissions.
+-- Authenticated network extensions v2: durable state, jobs, permission groups,
+-- live permissions and actions for online players.
 -- Use the Paper/Velocity setup documented in examples/online.lua.
 -- RIFT_FORWARDING_SECRET='<shared secret>' rift --config examples/extensions.lua
 -- Validate without credentials or backend servers: rift --check examples/extensions.lua
@@ -48,6 +48,12 @@ rift.config.extensions = {
             run = function(ctx)
                 local ticks = rift.store.increment("example", "heartbeats", 1)
                 rift.publish("example.jobs." .. ctx.job, tostring(ticks))
+            end,
+        },
+        announcements = {
+            every_ms = 300000,
+            run = function()
+                rift.players.broadcast("Join the survival queue with /queue.")
             end,
         },
     },
@@ -103,11 +109,31 @@ rift.config.extensions = {
                     table.concat(rift.permissions.groups(uuid), ", ") .. "]" }
             end,
         },
+        -- /alert <text> messages every online player with network.staff.
+        alert = {
+            permission = "network.staff",
+            run = function(ctx)
+                if ctx.args == "" then return { message = "Usage: /alert <text>" } end
+                local sent = 0
+                for _, player in ipairs(rift.players.list()) do
+                    if rift.permissions.has(player.uuid, "network.staff")
+                        and rift.players.message(player.uuid, "[Staff] " .. ctx.name .. ": " .. ctx.args)
+                    then
+                        sent = sent + 1
+                    end
+                end
+                return { message = "Alert sent to " .. sent .. " staff members." }
+            end,
+        },
     },
     -- Optional observations through the existing in-process message broker.
     -- Subscribe with a messaging consumer to capture these events.
     join = function(ctx)
-        rift.store.increment("visits", ctx.uuid, 1)
+        local visits = rift.store.increment("visits", ctx.uuid, 1)
+        rift.players.title(ctx.uuid, {
+            title = "Welcome, " .. ctx.name,
+            subtitle = visits == 1 and "First visit" or ("Visit " .. visits),
+        })
         rift.publish("example.players.join", ctx.uuid .. " " .. ctx.server)
     end,
     after_transfer = function(ctx)

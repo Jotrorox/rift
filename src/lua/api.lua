@@ -21,13 +21,16 @@ for namespace, methods in pairs({
     store = { "get", "set", "delete", "increment" },
     permissions = { "has", "set", "add_group", "remove_group", "groups" },
     http = { "request" },
+    players = { "list", "get", "message", "action_bar", "title", "kick", "transfer", "broadcast" },
 }) do
     local proxy = {}
+    local scope = namespace == "players" and "API v2 extension callbacks, on_message and on_http"
+        or "API v2 extension callbacks"
     for _, method in ipairs(methods) do
         proxy[method] = function(...)
             local service = runtime[namespace]
             if not service then
-                error("rift." .. namespace .. " is only available inside API v2 extension callbacks")
+                error("rift." .. namespace .. " is only available inside " .. scope)
             end
             return service[method](...)
         end

@@ -12,8 +12,10 @@ use tokio::sync::Semaphore;
 
 mod integrations;
 mod permissions;
+mod players;
 mod scheduler;
 mod storage;
+pub use players::{PlayerAction, PlayerHandle, Players};
 pub use scheduler::Scheduler;
 
 const HOOKS: &[&str] = &[
@@ -188,6 +190,7 @@ impl ExtensionScript {
                 let api: Table = lua.named_registry_value("rift.runtime")?;
                 runtime.store.install(&lua, &api, deadline)?;
                 runtime.permissions.install(&lua, &api, deadline)?;
+                runtime.players.install(&lua, &api, deadline)?;
                 integrations::install(&lua, &api, &self.integrations, deadline)?;
             }
             let Value::Table(root) = root else {
@@ -357,6 +360,7 @@ pub struct Extensions {
     broker: Broker,
     store: storage::Store,
     permissions: permissions::Permissions,
+    players: Players,
     job_gates: Arc<Mutex<BTreeMap<String, Weak<Semaphore>>>>,
 }
 impl Extensions {
@@ -405,25 +409,31 @@ impl Extensions {
             Some(previous) => previous.permissions.clone(),
             None => permissions::Permissions::open(store.clone())?,
         };
+        let backends = previous.map_or_else(
+            || {
+                Arc::new(Mutex::new(
+                    config
+                        .backends
+                        .keys()
+                        .chain(config.service_groups.keys())
+                        .cloned()
+                        .collect(),
+                ))
+            },
+            |previous| previous.backends.clone(),
+        );
+        let groups = previous.map_or_else(
+            || Arc::new(Mutex::new(group_members(config))),
+            |previous| previous.groups.clone(),
+        );
         let runtime = Self {
             script: config.extensions.clone(),
-            backends: previous.map_or_else(
-                || {
-                    Arc::new(Mutex::new(
-                        config
-                            .backends
-                            .keys()
-                            .chain(config.service_groups.keys())
-                            .cloned()
-                            .collect(),
-                    ))
-                },
-                |previous| previous.backends.clone(),
+            players: previous.map_or_else(
+                || Players::new(backends.clone(), groups.clone()),
+                |previous| previous.players.clone(),
             ),
-            groups: previous.map_or_else(
-                || Arc::new(Mutex::new(group_members(config))),
-                |previous| previous.groups.clone(),
-            ),
+            backends,
+            groups,
             broker,
             store,
             permissions,
@@ -456,6 +466,19 @@ impl Extensions {
             .chain(config.service_groups.keys())
             .cloned()
             .collect();
+    }
+
+    /// The process-wide directory that sessions join, with or without extensions.
+    pub fn players(&self) -> &Players {
+        &self.players
+    }
+
+    /// The directory for Lua outside extension callbacks; only API v2 exposes it.
+    pub fn player_api(&self) -> Option<Players> {
+        self.script
+            .as_ref()
+            .filter(|script| script.api_version == 2)
+            .map(|_| self.players.clone())
     }
 
     /// Publish the permission baseline only after the configuration transaction commits.

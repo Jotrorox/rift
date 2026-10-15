@@ -60,6 +60,7 @@ For a new player the order is:
 4. Initial backend capacity reservation, connect, login, configuration and Join Game.
 5. Presence/administration registration, then `join`. Registration at backend
    Login Success may be visible before Join Game; the join hook waits for the world.
+   The player appears in `rift.players` before `join` runs, so the hook can message them.
 
 Hooks execute serially within a session. Different sessions can run concurrently;
 there is no global event order. A directly configured callback runs first,
@@ -69,9 +70,10 @@ one execution budget.
 
 Every transfer entry point uses `before_transfer`: `/server`, `/hub`, extension
 commands, queue admissions, outage recovery and administration (including its
-HTTP/messaging entry points), and BungeeCord `Connect`/`ConnectOther` requests.
-Static access/health checks may eliminate a target
-before this hook. `reason` is `command`, `queue`, `recovery`, `admin` or `bungeecord`. A denial
+HTTP/messaging entry points), BungeeCord `Connect`/`ConnectOther` requests and
+`rift.players.transfer`. Static access/health checks may eliminate a target
+before this hook. `reason` is `command`, `queue`, `recovery`, `admin`, `bungeecord`
+or `extension`. A denial
 prevents that target's connection; recovery may try another eligible candidate.
 A backend can still reject an allowed player.
 
@@ -171,11 +173,12 @@ permission alone does not protect a server against `/server` or admin routing.
 
 These APIs are available only in authenticated extension callbacks and scheduled
 jobs with `api_version = 2`. They are unavailable in legacy route/HTTP/message
-callbacks. Configuration loading, `rift check` and candidate reload validation
+callbacks, except that `rift.players` also works in `on_message` and `on_http`
+when extensions use API v2. Configuration loading, `rift check` and candidate reload validation
 never execute jobs, HTTP requests or storage operations. Capture API references
 in initialization freely (`local store = require("rift.store")`); calling them
-there is an error. `require("rift.http")` and `require("rift.permissions")` work
-in the same way. All methods use a dot, not a colon.
+there is an error. `require("rift.http")`, `require("rift.permissions")` and
+`require("rift.players")` work in the same way. All methods use a dot, not a colon.
 
 ### Persistent state
 
@@ -391,6 +394,75 @@ existing `before_transfer` policy. Revocation does not eject someone already on
 a server or undo an action whose authorization check has completed. The extension
 example optionally refreshes a staff grant from HTTP and revokes it before each
 request so a failed refresh leaves that grant denied.
+
+### Online players
+
+```lua
+rift.config.extensions.jobs.announcements = {
+    every_ms = 300000,
+    run = function()
+        rift.players.broadcast("Vote for the network at example.com/vote")
+    end,
+}
+rift.config.extensions.commands.alert = {
+    permission = "network.staff",
+    run = function(ctx)
+        local sent = 0
+        for _, player in ipairs(rift.players.list()) do
+            if rift.permissions.has(player.uuid, "network.staff")
+                and rift.players.message(player.uuid, "[Staff] " .. ctx.name .. ": " .. ctx.args)
+            then
+                sent = sent + 1
+            end
+        end
+        return { message = "Alert sent to " .. sent .. " staff members." }
+    end,
+}
+```
+
+`rift.players` lists the players who are in a world on this Rift process and
+queues actions for them. It works in callbacks, jobs, and (with API v2)
+`on_message` and `on_http`, so a messaging handler can relay cross-server chat or
+an HTTP endpoint can kick a player. A `player` argument is a lowercase UUID
+(32 hex digits, no hyphens) or a case-insensitive name. A `server` argument
+names a configured backend or service group; a group matches all its instances.
+
+| Method | Result |
+| --- | --- |
+| `rift.players.list(server)` | Array of player tables; `server` is optional |
+| `rift.players.get(player)` | Player table, or nil when the player is offline |
+| `rift.players.message(player, text)` | Boolean: a chat message was queued |
+| `rift.players.action_bar(player, text)` | Boolean: action-bar text was queued |
+| `rift.players.title(player, title)` | Boolean: a title was queued; `title` is text or an options table |
+| `rift.players.kick(player, reason)` | Boolean: a disconnect with this reason was queued |
+| `rift.players.transfer(player, server)` | Boolean: a transfer request was queued |
+| `rift.players.broadcast(text, server)` | Number of players a chat message was queued for; `server` is optional |
+
+Player tables contain `uuid`, `name`, `server` (the last committed backend),
+`connection_id` (a decimal string, matching `ctx.connection_id`) and `protocol`.
+Players appear after their first usable Join Game and disappear when the session
+closes. Pending logins and players on other Rift processes are not listed.
+
+Title options are `title` and `subtitle` (at least one), plus `fade_in_ms`,
+`stay_ms` and `fade_out_ms` (integers from 0 to 60000; defaults 500, 3500 and
+1000; rounded down to 50 ms ticks). A title without a subtitle clears any earlier
+subtitle. Text, titles and reasons are 1–1024 bytes of UTF-8, shown as plain text.
+
+Actions are delivered asynchronously. A call returns true once the action is
+queued, or false when the player is offline or already has 32 undelivered
+actions; it never waits for the client. The player's own session writes queued
+actions in order while it is in a usable world, so they wait while a transfer is
+in progress. An action other than a kick that meets a backend-initiated
+reconfiguration is dropped. Undelivered actions are lost on disconnect. Each
+callback can make at most 256 action calls; a broadcast counts once.
+
+A transfer takes the same path as `/server`: static access, health and draining
+checks, `before_transfer` with reason `extension`, capacity and queue
+reservation, then `after_transfer`. A denied or unavailable target leaves the
+player where they are without a message, and the current server is never a
+target. A service group selects one of its instances. A kick closes the
+connection with the given reason and runs `disconnect` as usual. Invalid
+arguments, unknown servers and exceeded budgets fail the callback.
 
 ## Queue behavior
 
