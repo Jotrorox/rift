@@ -92,6 +92,7 @@ fn loading_configuration_cannot_execute_runtime_side_effects() {
         "rift.store.set('test','key','value')",
         "rift.permissions.set('01010101010101010101010101010101','route.game',true)",
         "rift.http.request('account',{})",
+        "rift.players.broadcast('hello')",
     ] {
         let extension = format!(
             "api_version=2, storage={{path={}}}, integrations={{account={{url='http://127.0.0.1:9/'}}}}",
@@ -126,6 +127,7 @@ async fn v1_callbacks_cannot_access_v2_host_capabilities() {
         "rift.store.set('test','key','value')",
         "rift.permissions.set('01010101010101010101010101010101','route.game',true)",
         "rift.http.request('account',{})",
+        "rift.players.list()",
     ] {
         let runtime = runtime(&format!("api_version=1,login=function() {operation} end"));
         assert!(
@@ -650,4 +652,247 @@ async fn configured_http_integration_is_available_through_captured_lua_api() {
         .await
         .unwrap()
         .unwrap();
+}
+
+fn joined(runtime: &Extensions, id: u8, name: &str, server: &str) -> Joined {
+    runtime
+        .players()
+        .register(id.into(), &[id; 16], name, 774, server)
+}
+
+type Joined = (PlayerHandle, tokio::sync::mpsc::Receiver<PlayerAction>);
+
+fn drain(queue: &mut tokio::sync::mpsc::Receiver<PlayerAction>) -> Vec<PlayerAction> {
+    std::iter::from_fn(|| queue.try_recv().ok()).collect()
+}
+
+#[tokio::test]
+async fn players_api_lists_and_queues_actions_for_joined_players() {
+    let runtime = runtime(
+        r#"api_version=2, login=function(ctx)
+        local players = require('rift.players')
+        local list = players.list()
+        assert(#list == 2 and list[1].name == 'Alice' and list[1].server == 'lobby')
+        assert(list[1].uuid == '09090909090909090909090909090909')
+        assert(list[1].connection_id == '9' and list[1].protocol == 774)
+        assert(#players.list('game') == 1 and players.list('game')[1].name == 'Bob')
+        assert(players.get('aLiCe').name == 'Alice' and players.get('Nobody') == nil)
+        assert(players.message('alice', 'hello'))
+        assert(players.action_bar('0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a', 'bar'))
+        assert(players.title('Alice', { title = 'Big', subtitle = 'small',
+            fade_in_ms = 0, stay_ms = 1000, fade_out_ms = 99 }))
+        assert(players.title('Alice', 'Plain'))
+        assert(players.title('Alice', { subtitle = 'Only' }))
+        assert(players.transfer('Alice', 'game'))
+        assert(players.kick('Bob', 'Bye'))
+        assert(not players.message('Nobody', 'lost'))
+        assert(players.broadcast('everyone') == 2)
+        assert(players.broadcast('lobby only', 'lobby') == 1)
+    end"#,
+    );
+    let (_alice, mut alice) = joined(&runtime, 9, "Alice", "lobby");
+    let (bob_handle, mut bob) = joined(&runtime, 10, "Bob", "lobby");
+    bob_handle.set_server("game");
+    runtime
+        .session(context(1))
+        .unwrap()
+        .decision("login")
+        .await
+        .unwrap();
+    let title = |title: &str, subtitle: Option<&str>, times| PlayerAction::Title {
+        title: title.into(),
+        subtitle: subtitle.map(Into::into),
+        times,
+    };
+    assert_eq!(
+        drain(&mut alice),
+        [
+            PlayerAction::Message("hello".into()),
+            title("Big", Some("small"), [0, 20, 1]),
+            title("Plain", None, [10, 70, 20]),
+            title("", Some("Only"), [10, 70, 20]),
+            PlayerAction::Transfer("game".into()),
+            PlayerAction::Message("everyone".into()),
+            PlayerAction::Message("lobby only".into()),
+        ]
+    );
+    assert_eq!(
+        drain(&mut bob),
+        [
+            PlayerAction::ActionBar("bar".into()),
+            PlayerAction::Kick("Bye".into()),
+            PlayerAction::Message("everyone".into()),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn invalid_player_actions_fail_without_queueing() {
+    for operation in [
+        "rift.players.message('Alice', '')",
+        "rift.players.message('Alice', string.rep('x', 1025))",
+        "rift.players.message('Alice Smith', 'hello')",
+        "rift.players.message('0909090909090909090909090909090G', 'hello')",
+        "rift.players.get('*')",
+        "rift.players.transfer('Alice', 'missing')",
+        "rift.players.list('missing')",
+        "rift.players.broadcast('hello', 'missing')",
+        "rift.players.title('Alice', {})",
+        "rift.players.title('Alice', 5)",
+        "rift.players.title('Alice', { title = 'x', typo = 1 })",
+        "rift.players.title('Alice', { title = 'x', stay_ms = 60001 })",
+        "rift.players.title('Alice', { title = 'x', fade_in_ms = -1 })",
+        "rift.players.title('Alice', { title = 'x', fade_out_ms = 1.5 })",
+    ] {
+        let runtime = runtime(&format!("api_version=2, login=function() {operation} end"));
+        let (_alice, mut alice) = joined(&runtime, 9, "Alice", "lobby");
+        assert!(
+            runtime
+                .session(context(1))
+                .unwrap()
+                .decision("login")
+                .await
+                .is_err(),
+            "{operation}"
+        );
+        assert!(drain(&mut alice).is_empty(), "{operation}");
+    }
+}
+
+#[tokio::test]
+async fn player_queues_are_bounded_and_actions_are_budgeted_per_callback() {
+    let runtime = runtime(
+        "api_version=2, login=function() for i = 1, 257 do rift.players.message('Alice', 'x') end end",
+    );
+    let (alice_handle, mut alice) = joined(&runtime, 9, "Alice", "lobby");
+    let error = runtime
+        .session(context(1))
+        .unwrap()
+        .decision("login")
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("budget"), "{error}");
+    // A full queue reports false rather than waiting for the session.
+    assert_eq!(drain(&mut alice).len(), 32);
+    let players = runtime.players();
+    for _ in 0..32 {
+        assert!(
+            players
+                .send("Alice", PlayerAction::Message("x".into()))
+                .unwrap()
+        );
+    }
+    assert!(
+        !players
+            .send("Alice", PlayerAction::Message("x".into()))
+            .unwrap()
+    );
+    alice.try_recv().unwrap();
+    assert!(
+        players
+            .send("alice", PlayerAction::Message("x".into()))
+            .unwrap()
+    );
+    drop(alice_handle);
+    assert!(
+        !players
+            .send("Alice", PlayerAction::Message("x".into()))
+            .unwrap()
+    );
+    assert_eq!(drain(&mut alice).len(), 32);
+    assert!(alice.recv().await.is_none(), "disconnect closes the queue");
+}
+
+#[test]
+fn player_filters_and_transfers_accept_service_groups() {
+    let players = Players::new(
+        Arc::new(Mutex::new(
+            ["lobby", "games", "games-1"].map(String::from).into(),
+        )),
+        Arc::new(Mutex::new(BTreeMap::from([(
+            "games".to_owned(),
+            BTreeSet::from(["games-1".to_owned()]),
+        )]))),
+    );
+    let (_alice, mut alice) = players.register(1, &[1; 16], "Alice", 774, "games-1");
+    let (_bob, mut bob) = players.register(2, &[2; 16], "Bob", 774, "lobby");
+    let lua = mlua::Lua::new();
+    let runtime = lua.create_table().unwrap();
+    players
+        .install(&lua, &runtime, Instant::now() + Duration::from_secs(5))
+        .unwrap();
+    lua.globals()
+        .set("players", runtime.get::<Table>("players").unwrap())
+        .unwrap();
+    lua.load(
+        "assert(#players.list('games') == 1 and players.list('games')[1].name == 'Alice')
+        assert(players.broadcast('games only', 'games') == 1)
+        assert(players.transfer('Bob', 'games'))",
+    )
+    .exec()
+    .unwrap();
+    assert_eq!(
+        drain(&mut alice),
+        [PlayerAction::Message("games only".into())]
+    );
+    assert_eq!(drain(&mut bob), [PlayerAction::Transfer("games".into())]);
+}
+
+#[tokio::test]
+async fn message_and_http_handlers_reach_players_only_with_api_v2() {
+    for version in [1, 2] {
+        let config = Config::from_lua(
+            &format!(
+                "return {{ listeners = {{ public = '127.0.0.1:0' }}, backends = {{ lobby = '127.0.0.1:25001' }},
+                routes = {{ public = 'lobby' }}, authentication = {{ online_mode = true }},
+                forwarding = {{ mode = 'velocity', secret_env = 'TEST_SECRET' }},
+                extensions = {{ api_version = {version} }},
+                messaging = {{ subscriptions = {{ {{ subject = 'chat' }} }} }},
+                on_message = function(message) rift.players.broadcast(message.payload) end,
+                on_http = function() return {{ body = tostring(#rift.players.list()) }} end }}"
+            ),
+            "players-handlers.lua",
+        )
+        .unwrap();
+        let broker = Broker::new(Default::default()).unwrap();
+        let runtime = Extensions::new(&config, broker.clone(), None).unwrap();
+        let (_alice, mut alice) = joined(&runtime, 9, "Alice", "lobby");
+        let request = crate::http_script::HttpRequest {
+            method: "GET".into(),
+            path: "/".into(),
+            query: String::new(),
+            body: String::new(),
+            headers: BTreeMap::new(),
+            context: serde_json::Value::Null,
+        };
+        let response = config
+            .on_http
+            .as_ref()
+            .unwrap()
+            .execute_with_host(request, None, runtime.player_api())
+            .await;
+        let handler = crate::message_script::MessageHandler::new(&config, broker.clone())
+            .unwrap()
+            .unwrap()
+            .with_players(runtime.player_api());
+        let worker = tokio::spawn(handler.run());
+        broker
+            .publish("chat", bytes::Bytes::from_static(b"cross-server"))
+            .unwrap();
+        if version == 2 {
+            assert_eq!(response.unwrap().unwrap().body, "1");
+            assert_eq!(
+                timeout(Duration::from_secs(2), alice.recv()).await.unwrap(),
+                Some(PlayerAction::Message("cross-server".into()))
+            );
+        } else {
+            assert!(response.unwrap_err().to_string().contains("on_http"));
+            assert!(
+                timeout(Duration::from_millis(200), alice.recv())
+                    .await
+                    .is_err()
+            );
+        }
+        worker.abort();
+    }
 }

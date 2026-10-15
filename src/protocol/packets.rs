@@ -504,15 +504,30 @@ pub(super) fn boolean(bytes: &mut &[u8]) -> io::Result<bool> {
     }
 }
 
+fn switching(version: ProtocolVersion) -> io::Result<super::switching::SwitchingCapabilities> {
+    version.switching().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Network commands are unavailable for this Minecraft version.",
+        )
+    })
+}
+
 /// Encode a network command response only for an explicitly switchable version.
 pub fn system_message(version: ProtocolVersion, message: &str) -> io::Result<Packet> {
-    version
-        .switching()
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::Unsupported,
-                "Network commands are unavailable for this Minecraft version.",
-            )
-        })?
-        .system_message(version, message)
+    switching(version)?.system_message(version, message)
+}
+
+pub fn action_bar(version: ProtocolVersion, message: &str) -> io::Result<Packet> {
+    switching(version)?.action_bar(version, message)
+}
+
+/// Title packets in send order; `times` are fade-in, stay and fade-out ticks.
+pub fn title(
+    version: ProtocolVersion,
+    title: &str,
+    subtitle: Option<&str>,
+    times: [i32; 3],
+) -> io::Result<Vec<Packet>> {
+    switching(version)?.title(version, title, subtitle, times)
 }
