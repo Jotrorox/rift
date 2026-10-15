@@ -163,7 +163,8 @@ backends with forwarding disabled. Bedrock/UDP, unlisted snapshots and legacy
 pre-1.7 pings are unsupported.
 
 Set `rift.config.network = { bungeecord = true }` for existing backend plugins to
-request transfers and query players/servers over the BungeeCord plugin channel.
+request transfers, query players/servers, forward plugin messages between servers,
+and message or kick players over the BungeeCord plugin channel.
 See the [supported subchannels and configuration](docs/bungeecord.md).
 
 ## Documentation
@@ -178,7 +179,7 @@ also includes for offline use.
 - [Managed servers](https://jotrorox.github.io/rift/docs/managed-servers/): local processes, automatic start/stop and persistent worlds.
 - [HTTP services](https://jotrorox.github.io/rift/docs/http/): web dashboard, status, API and Lua extensions.
 - [Messaging](https://jotrorox.github.io/rift/docs/messaging/): plugin messaging, [Lua API](https://jotrorox.github.io/rift/docs/messaging-lua/) and [QUIC protocol](https://jotrorox.github.io/rift/docs/messaging-protocol/).
-- [BungeeCord compatibility](https://jotrorox.github.io/rift/docs/bungeecord/): backend plugin transfers and player/server queries.
+- [BungeeCord compatibility](https://jotrorox.github.io/rift/docs/bungeecord/): backend plugin transfers, queries, forwarding, messages and kicks.
 - [Network protocol](https://jotrorox.github.io/rift/docs/network-protocol/): backend switching and recovery.
 - [Performance comparison](https://jotrorox.github.io/rift/docs/performance/): CPU, memory, latency and failures against Velocity, with reproducible workloads.
 

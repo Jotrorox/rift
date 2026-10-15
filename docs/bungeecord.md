@@ -1,7 +1,8 @@
 # BungeeCord plugin-message compatibility
 
-Existing Bukkit/Paper plugins can request server transfers and query players
-through the BungeeCord plugin channel. Enable the bridge explicitly:
+Existing Bukkit/Paper plugins can request server transfers, query players,
+forward plugin messages to other servers, and message or kick players through
+the BungeeCord plugin channel. Enable the bridge explicitly:
 
 ```lua
 rift.config.network = {
@@ -51,6 +52,12 @@ table lists the remaining fields in wire order.
 | `UUID` | None | Carrier UUID as 32 hexadecimal digits without hyphens |
 | `UUIDOther` | Player name | Player name, UUID as 32 hexadecimal digits without hyphens |
 | `ServerIP` | Server name | Server name, configured IP address or hostname, unsigned short port |
+| `Forward` | Server name, `ALL` or `ONLINE`; subchannel, unsigned short length, data | No response; the subchannel, length and data reach the target servers |
+| `ForwardToPlayer` | Player name; subchannel, unsigned short length, data | No response; the subchannel, length and data reach the player's server |
+| `Message` | Player name or `ALL`, text | No response; send a chat message |
+| `MessageRaw` | Player name or `ALL`, JSON text component | No response; send a chat message |
+| `KickPlayer` | Player name, text | No response; disconnect the player |
+| `KickPlayerRaw` | Player name, JSON text component | No response; disconnect the player |
 
 `GetPlayerServer` is the Velocity extension to the original BungeeCord queries.
 Player and server lookups ignore ASCII case; responses use the configured server
@@ -75,8 +82,39 @@ Transfer requests have no success or failure reply, as in BungeeCord; plugins
 can query player location when they need to confirm the result.
 The reported backend changes only after the destination becomes ready.
 
-This initial compatibility subset does not implement `Forward`,
-`ForwardToPlayer`, `Message`, `MessageRaw`, `KickPlayer`, or `KickPlayerRaw`.
+## Forwarding, messages and kicks
+
+`Forward` and `ForwardToPlayer` deliver a message to other servers' plugins, for
+example cross-server chat. The data after the target must be a subchannel
+string, an unsigned 16-bit byte length, and exactly that many bytes; Rift
+delivers those fields unchanged as a `BungeeCord` plugin message. A plugin
+message needs a player connection, so each target server receives the message
+through one player connected there, the one connected longest first. Servers
+without players are skipped; nothing is queued for later players. `ALL` and
+`ONLINE` both select every server with players except the sender's own, as in
+Velocity. A named server, including the sender's own, receives the message
+through one of its players. `ForwardToPlayer` uses the named player's current
+server. Forwarded messages travel only from proxy to backend and are never sent
+to the Minecraft client.
+
+`Message` sends text to one player, or to every player for uppercase `ALL`.
+Legacy `§` formatting codes in the text work as in BungeeCord. `KickPlayer`
+disconnects one player with a text reason; `ALL` is a player name there.
+`MessageRaw` and `KickPlayerRaw` take a JSON text component instead, written
+for the player's Minecraft version. Rift checks only that it is a JSON string,
+list or object without `null` list entries, then sends it unchanged to clients
+before 1.20.3 and converts it to NBT for 1.20.3 and newer, as the server does.
+Invalid components are dropped.
+
+These requests enter the target player's queue of pending proxy actions, the
+same bounded queue that `rift.players` uses, and the player's own session sends
+them. A full queue or an absent player drops the request, and a `Forward` whose
+carrier has moved to another server before delivery is dropped as well. As in
+BungeeCord, none of these requests has a reply. Players count once they are in
+a world, so a player still logging in can neither carry nor receive them.
+
+## Limits
+
 Unknown or malformed compatibility messages are consumed without a reply.
 Messages and responses are limited to 32,767 bytes; a response that would exceed
 the limit is omitted. Configured server names must be unique when compared
@@ -100,11 +138,29 @@ For queries, decode the response in the plugin-message listener with
 `DataInputStream`: read the subchannel first, then the fields from the table.
 A connected player is required to carry messages in both directions.
 
+Cross-server chat forwards its own payload to every other server with players:
+
+```java
+byte[] chat = message.getBytes(StandardCharsets.UTF_8);
+ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+try (DataOutputStream out = new DataOutputStream(bytes)) {
+    out.writeUTF("Forward");
+    out.writeUTF("ALL");
+    out.writeUTF("MyChat");
+    out.writeShort(chat.length);
+    out.write(chat);
+}
+player.sendPluginMessage(plugin, "BungeeCord", bytes.toByteArray());
+```
+
+The receiving servers' listeners read `"MyChat"` with `readUTF`, then
+`readUnsignedShort` and that many bytes.
+
 ## Trust and testing
 
 Enable compatibility only when the configured backend servers and their plugins
-are trusted: a backend can query online players and request transfers for another
-player. Client-originated messages on either compatibility channel are consumed
+are trusted: a backend can query online players, transfer, message or kick any
+player, and send plugin messages to every other server. Client-originated messages on either compatibility channel are consumed
 before they can reach backend plugins, including messages that impersonate a
 proxy response. Other plugin channels continue to pass through. With the bridge
 disabled, compatibility channels also pass through unchanged.
@@ -116,7 +172,8 @@ cargo build --locked --release
 python3 tests/bungeecord_wire.py --binary target/release/rift
 ```
 
-It checks all supported queries and transfers, case handling, channel aliases,
+It checks all supported queries and transfers, forwarding to other backends,
+legacy and JSON messages and kicks, case handling, channel aliases,
 backend registration, malformed messages, client spoofing, access rejection,
 ordinary channel passthrough, disabled defaults, and compressed and uncompressed
 backend connections. Protocol codec tests additionally cover the packet mappings

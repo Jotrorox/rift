@@ -5,7 +5,7 @@
 //! See docs/network-protocol.md for the version matrix and source references.
 //! Add a pinned real-server switch AND recovery fixture in tests/servers.json
 //! before adding a version here. Do not infer support from a protocol range.
-use super::packets::{boolean, take};
+use super::packets::{Text, boolean, disconnect_text, take};
 use super::{
     Packet, ProtocolVersion, State, disconnect, invalid, read_string, read_varint, write_string,
     write_varint,
@@ -327,18 +327,18 @@ impl SwitchingCapabilities {
     pub(crate) fn system_message(
         self,
         version: ProtocolVersion,
-        message: &str,
+        message: Text,
     ) -> io::Result<Packet> {
         self.chat(version, message, false)
     }
 
-    pub(crate) fn action_bar(self, version: ProtocolVersion, message: &str) -> io::Result<Packet> {
+    pub(crate) fn action_bar(self, version: ProtocolVersion, message: Text) -> io::Result<Packet> {
         self.chat(version, message, true)
     }
 
-    fn chat(self, version: ProtocolVersion, message: &str, overlay: bool) -> io::Result<Packet> {
+    fn chat(self, version: ProtocolVersion, message: Text, overlay: bool) -> io::Result<Packet> {
         // Disconnect and system chat share the version's component encoding.
-        let mut packet = disconnect(Some(version), State::Play, message)?;
+        let mut packet = disconnect_text(Some(version), State::Play, message)?;
         packet.id = self.system_chat;
         // Through 1.19, position 1 is system text and 2 the action bar (a byte
         // before 1.19, then a VarInt). 1.19.1 replaces it with an overlay boolean.

@@ -14,7 +14,7 @@ import tempfile
 import time
 
 from minecraft import ROOT, process, string, unused_port, wait_ready
-from network_wire import Backend, NetworkClient, identity, read_string
+from network_wire import Backend, NetworkClient, identity, nbt_text, read_string
 
 
 CHANNEL = "bungeecord:main"
@@ -304,6 +304,72 @@ def rejected_transfer_checks(binary):
         assert client.joins == [11] and client.transitions == 0
 
 
+def relay_checks(binary):
+    """Forwarded plugin messages, chat and kicks reach other players' sessions."""
+    with ExitStack() as stack:
+        lobby = Backend("lobby", 11)
+        stack.callback(lobby.close)
+        survival = Backend("survival", 22, threshold=-1)
+        stack.callback(survival.close)
+        port = stack.enter_context(network(binary, dict(lobby=lobby, survival=survival)))
+        clients = {}
+        for name in ("Alice", "Bob", "Carol"):
+            clients[name] = stack.enter_context(PluginClient(port, name))
+            clients[name].joined("lobby")
+        alice, bob, carol = clients.values()
+        source = connection(lobby, "Alice")
+        registered(source)
+        send(connection(lobby, "Carol"), fields("Connect", "survival"))
+        carol.joined("survival")
+        target = connection(survival, "Carol")
+        registered(target)
+
+        def forwarded(data):
+            return fields("rift:sync") + struct.pack(">H", len(data)) + data
+
+        def received(record, data):
+            return (CHANNEL, forwarded(data)) in payloads(record)
+
+        # ALL excludes the sending server; a named server uses one player there.
+        send(source, fields("Forward", "ALL") + forwarded(b"all"), "BungeeCord")
+        eventually(lambda: received(target, b"all"), "Forward ALL at survival")
+        send(target, fields("Forward", "LOBBY") + forwarded(b"lobby"))
+        eventually(lambda: received(source, b"lobby"), "Forward to lobby")
+        send(source, fields("ForwardToPlayer", "cAROL") + forwarded(b"direct"))
+        eventually(lambda: received(target, b"direct"), "ForwardToPlayer at survival")
+        send(source, fields("Forward", "ONLINE") + forwarded(b"online"))
+        eventually(lambda: received(target, b"online"), "Forward ONLINE at survival")
+        alice.probe("lobby")
+        bob.probe("lobby")
+        carol.probe("survival")
+        bob_record = connection(lobby, "Bob")
+        for data in (b"all", b"online"):
+            assert not received(source, data) and not received(bob_record, data)
+        assert not received(bob_record, b"lobby"), "Forward reached two lobby players"
+        assert not received(target, b"lobby")
+
+        # Legacy text is a literal component; raw JSON becomes 1.20.3+ NBT.
+        send(source, fields("Message", "ALL", "§aHello"))
+        for client in clients.values():
+            assert client.until("message", nbt_text("§aHello")) == nbt_text("§aHello") + b"\0"
+        send(target, fields("MessageRaw", "bob", '[{"text":"raw"},"!"]'))
+        raw = (b"\x09\x0a" + struct.pack(">i", 2)
+               + b"\x08" + write_utf("text") + write_utf("raw") + b"\0"
+               + b"\x08" + write_utf("") + write_utf("!") + b"\0")
+        assert bob.until("message", raw) == raw + b"\0"
+        for request in (fields("MessageRaw", "ALL", "{"), fields("KickPlayerRaw", "Bob", "null")):
+            send(source, request)
+
+        send(source, fields("KickPlayer", "BOB", "Bye"))
+        assert bob.until("disconnect") == nbt_text("Bye")
+        send(source, fields("KickPlayerRaw", "carol", '{"text":"Raw bye"}'))
+        assert carol.until("disconnect") == (b"\x0a\x08" + write_utf("text")
+                                             + write_utf("Raw bye") + b"\0")
+        query(source, fields("GetServer"), fields("GetServer", "lobby"))
+        alice.probe("lobby")
+        assert not [body for body in alice.messages if b"raw" in body]
+
+
 def check(binary):
     assert write_utf("\0😀") == b"\0\x08\xc0\x80\xed\xa0\xbd\xed\xb8\x80"
     for threshold in (-1, 0, 256):
@@ -311,7 +377,8 @@ def check(binary):
     disabled_checks(binary, omit=False)
     disabled_checks(binary, omit=True)
     rejected_transfer_checks(binary)
-    print("BungeeCord compatibility wire checks passed (compression off/0/256, aliases, queries, transfers, trust boundary, opt-in)")
+    relay_checks(binary)
+    print("BungeeCord compatibility wire checks passed (compression off/0/256, aliases, queries, transfers, forwards, messages, kicks, trust boundary, opt-in)")
 
 
 if __name__ == "__main__":
