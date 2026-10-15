@@ -36,7 +36,7 @@ pub struct ExtensionScript {
     jobs: BTreeMap<String, Duration>,
     hooks: BTreeSet<String>,
     commands: BTreeMap<String, String>,
-    permissions: BTreeMap<String, BTreeSet<String>>,
+    permissions: permissions::Policy,
     pub queues: BTreeMap<String, usize>,
 }
 
@@ -91,6 +91,7 @@ impl ExtensionScript {
                 "after_transfer",
                 "commands",
                 "permissions",
+                "groups",
                 "queues",
                 "storage",
                 "integrations",
@@ -98,7 +99,7 @@ impl ExtensionScript {
             ],
         )?;
         if api_version == 1 {
-            for name in ["storage", "integrations", "jobs"] {
+            for name in ["storage", "integrations", "jobs", "groups"] {
                 if !table.raw_get::<Value>(name)?.is_nil() {
                     return Err(mlua::Error::runtime(format!(
                         "extensions.{name} requires api_version = 2"
@@ -152,33 +153,7 @@ impl ExtensionScript {
                 commands.insert(name, permission);
             }
         }
-        let mut permissions = BTreeMap::new();
-        if let Some(entries) = table.raw_get::<Option<Table>>("permissions")? {
-            for entry in entries.pairs::<String, Table>() {
-                let (uuid, grants) = entry?;
-                if uuid != "*"
-                    && (uuid.len() != 32
-                        || !uuid
-                            .bytes()
-                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
-                {
-                    return Err(mlua::Error::runtime(
-                        "permission keys must be lowercase UUID hex (32 digits) or *",
-                    ));
-                }
-                let mut nodes = BTreeSet::new();
-                for grant in grants.pairs::<String, bool>() {
-                    let (node, granted) = grant?;
-                    if !token(&node) || !granted {
-                        return Err(mlua::Error::runtime(
-                            "permission grants must be node = true",
-                        ));
-                    }
-                    nodes.insert(node);
-                }
-                permissions.insert(uuid, nodes);
-            }
-        }
+        let permissions = permissions::Policy::parse(&table, api_version)?;
         let mut queues = BTreeMap::new();
         if let Some(entries) = table.raw_get::<Option<Table>>("queues")? {
             for entry in entries.pairs::<String, usize>() {
@@ -200,13 +175,6 @@ impl ExtensionScript {
             permissions,
             queues,
         }))
-    }
-    pub fn permits(&self, uuid: &str, permission: &str) -> bool {
-        ["*", uuid].iter().any(|key| {
-            self.permissions
-                .get(*key)
-                .is_some_and(|nodes| nodes.contains(permission))
-        })
     }
     fn evaluate(
         &self,
@@ -437,6 +405,10 @@ impl Extensions {
                     .and_then(|script| script.storage.as_ref()),
             )?,
         };
+        let permissions = match previous {
+            Some(previous) => previous.permissions.clone(),
+            None => permissions::Permissions::open(store.clone())?,
+        };
         let backends = previous.map_or_else(
             || {
                 Arc::new(Mutex::new(
@@ -464,8 +436,7 @@ impl Extensions {
             groups,
             broker,
             store,
-            permissions: previous
-                .map_or_else(permissions::Permissions::default, |p| p.permissions.clone()),
+            permissions,
             job_gates: previous.map_or_else(
                 || Arc::new(Mutex::new(BTreeMap::new())),
                 |p| p.job_gates.clone(),
@@ -523,7 +494,7 @@ impl Extensions {
             if script.api_version == 2 {
                 self.permissions.has(uuid, node)
             } else {
-                script.permits(uuid, node)
+                script.permissions.grants(uuid, node)
             }
         })
     }
