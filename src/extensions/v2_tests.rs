@@ -654,6 +654,182 @@ async fn configured_http_integration_is_available_through_captured_lua_api() {
         .unwrap();
 }
 
+#[test]
+fn permission_group_and_wildcard_schema_is_validated() {
+    for invalid in [
+        "api_version=1, groups={}",
+        "api_version=1, permissions={['*']={['network.*']=true}}",
+        "api_version=1, permissions={['*']={['network.staff']=false}}",
+        "api_version=1, permissions={['*']={['network.staff']='false'}}",
+        "api_version=2, permissions={['*']={['network.*.ban']=true}}",
+        "api_version=2, permissions={['*']={['*.ban']=true}}",
+        "api_version=2, permissions={['*']={['.*']=true}}",
+        "api_version=2, permissions={['*']={['network.staff']='yes'}}",
+        "api_version=2, groups={staff=true}",
+        "api_version=2, groups={Staff={}}",
+        "api_version=2, groups={staff={typo=true}}",
+        "api_version=2, groups={staff={inherits='default'}}",
+        "api_version=2, groups={staff={inherits={x='default'}}}",
+        "api_version=2, groups={default={}, staff={inherits={'default', [3]='default', y=1}}}",
+        "api_version=2, groups={staff={inherits={'missing'}}}",
+        "api_version=2, groups={staff={inherits={'staff'}}}",
+        "api_version=2, groups={a={inherits={'b'}}, b={inherits={'c'}}, c={inherits={'a'}}}",
+        "api_version=2, groups={staff={permissions={['bad node']=true}}}",
+    ] {
+        assert!(
+            Config::from_lua(&source(invalid), "invalid-groups.lua").is_err(),
+            "{invalid}"
+        );
+    }
+    let many = (0..65)
+        .map(|i| format!("g{i}={{}}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    assert!(
+        Config::from_lua(
+            &source(&format!("api_version=2, groups={{{many}}}")),
+            "many.lua"
+        )
+        .is_err()
+    );
+    config(
+        r#"api_version=2,
+        permissions={['*']={['*']=false, ['network.*']=true}},
+        groups={
+            default={permissions={['chat.*']=true}},
+            staff={inherits={'default'}, permissions={['network.staff']=true, ['chat.color']=false}},
+            admin={inherits={'staff','default'}},
+        }"#,
+    );
+}
+
+const GROUP_PROBES: &str = r#"permissions={['*']={probe=true}},
+    commands={
+        add={permission='probe',run=function(ctx) return {message=tostring(rift.permissions.add_group(ctx.uuid,ctx.args))} end},
+        remove={permission='probe',run=function(ctx) return {message=tostring(rift.permissions.remove_group(ctx.uuid,ctx.args))} end},
+        groups={permission='probe',run=function(ctx) return {message='['..table.concat(rift.permissions.groups(ctx.uuid),',')..']'} end},
+        has={permission='probe',run=function(ctx) return {message=tostring(ctx.has_permission(ctx.args))} end},
+        revoke={permission='probe',run=function(ctx) rift.permissions.set(ctx.uuid,ctx.args,false) end},
+        everyone={permission='probe',run=function(ctx) rift.permissions.add_group('*',ctx.args) end},
+        reserved={permission='probe',run=function(ctx) rift.store.get('rift.groups',ctx.uuid) end},
+    }"#;
+
+/// Run a probe command with a generous budget: disk sync latency on shared
+/// runners can exceed the session's 50 ms deadline.
+fn probe(runtime: &Extensions, command: &str, args: &str) -> io::Result<String> {
+    let mut input = context(1);
+    input.command = Some(command.into());
+    input.args = args.into();
+    let action = runtime.script.as_ref().unwrap().evaluate(
+        "command",
+        &input,
+        Instant::now() + Duration::from_secs(30),
+        runtime,
+    )?;
+    Ok(match action {
+        Action::Message(message) => message,
+        Action::Continue => String::new(),
+        action => panic!("unexpected {action:?}"),
+    })
+}
+
+#[test]
+fn group_memberships_persist_across_restart_and_survive_group_removal() {
+    let state = StateFile::new();
+    let storage = format!(
+        "api_version=2, storage={{path={}}}, {GROUP_PROBES}",
+        state.lua_path()
+    );
+    let settings = format!(
+        r#"{storage}, groups={{
+            default={{permissions={{['network.queue']=true}}}},
+            staff={{inherits={{'default'}}, permissions={{['network.*']=true}}}},
+        }}"#
+    );
+    {
+        let runtime = runtime(&settings);
+        assert_eq!(probe(&runtime, "has", "network.queue").unwrap(), "true");
+        assert_eq!(probe(&runtime, "has", "network.staff").unwrap(), "false");
+        assert_eq!(probe(&runtime, "add", "staff").unwrap(), "true");
+        assert_eq!(probe(&runtime, "add", "staff").unwrap(), "false");
+        assert_eq!(probe(&runtime, "has", "network.staff").unwrap(), "true");
+        assert_eq!(probe(&runtime, "groups", "").unwrap(), "[staff]");
+        for (command, args) in [
+            ("add", "missing"),
+            ("add", "default"),
+            ("add", "Staff"),
+            ("everyone", "staff"),
+            ("reserved", ""),
+        ] {
+            assert!(probe(&runtime, command, args).is_err(), "{command} {args}");
+        }
+        assert_eq!(probe(&runtime, "groups", "").unwrap(), "[staff]");
+        // Live wildcard overrides still revoke group grants.
+        probe(&runtime, "revoke", "network.*").unwrap();
+        assert_eq!(probe(&runtime, "has", "network.staff").unwrap(), "false");
+    }
+    // Memberships are durable; overrides are process-local.
+    let restarted = runtime(&settings);
+    assert_eq!(probe(&restarted, "has", "network.staff").unwrap(), "true");
+    assert_eq!(probe(&restarted, "groups", "").unwrap(), "[staff]");
+    // A reload that drops the group leaves the membership dormant but removable.
+    let reloaded = Extensions::new(
+        &config(&format!("{storage}, groups={{default={{}}}}")),
+        restarted.broker.clone(),
+        Some(&restarted),
+    )
+    .unwrap();
+    reloaded.activate();
+    assert_eq!(probe(&reloaded, "has", "network.staff").unwrap(), "false");
+    assert_eq!(probe(&reloaded, "groups", "").unwrap(), "[staff]");
+    assert_eq!(probe(&reloaded, "remove", "staff").unwrap(), "true");
+    assert_eq!(probe(&reloaded, "remove", "staff").unwrap(), "false");
+    assert_eq!(probe(&reloaded, "groups", "").unwrap(), "[]");
+    drop((restarted, reloaded));
+    let restarted = runtime(&settings);
+    assert_eq!(probe(&restarted, "has", "network.staff").unwrap(), "false");
+}
+
+#[tokio::test]
+async fn commands_honor_group_and_wildcard_grants() {
+    let runtime = runtime(
+        r#"api_version=2,
+        permissions={['01010101010101010101010101010101']={['ranks.manage']=true}},
+        groups={staff={permissions={['network.*']=true}}},
+        commands={
+            staff={permission='network.staff',run=function() return {server='game'} end},
+            rank={permission='ranks.manage',run=function(ctx)
+                local uuid=string.rep('02',16)
+                if ctx.args=='add' then rift.permissions.add_group(uuid,'staff')
+                else rift.permissions.remove_group(uuid,'staff') end
+            end},
+        }"#,
+    );
+    let admin = runtime.session(context(1)).unwrap();
+    let player = runtime.session(context(2)).unwrap();
+    assert!(matches!(
+        player.command("staff").await.unwrap(),
+        Action::Message(_)
+    ));
+    assert!(matches!(
+        player.command("rank add").await.unwrap(),
+        Action::Message(_)
+    ));
+    assert_eq!(admin.command("rank add").await.unwrap(), Action::Continue);
+    assert_eq!(
+        player.command("staff").await.unwrap(),
+        Action::Server("game".into())
+    );
+    assert_eq!(
+        admin.command("rank remove").await.unwrap(),
+        Action::Continue
+    );
+    assert!(matches!(
+        player.command("staff").await.unwrap(),
+        Action::Message(_)
+    ));
+}
+
 fn joined(runtime: &Extensions, id: u8, name: &str, server: &str) -> Joined {
     runtime
         .players()
