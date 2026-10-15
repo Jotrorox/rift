@@ -795,6 +795,7 @@ def test_hostname_routing(name, binary, directory, compression, first_backend):
         wait_ready(server, lambda: status_ready(second_backend, protocol), second_dir / "server.log")
         config_path = directory / "routing.lua"
         config_path.write_text(f"""return {{
+            instance_database = 'routing.sqlite3',
             listeners = {{public = '127.0.0.1:{frontend}'}},
             backends = {{first = '127.0.0.1:{first_backend}', second = 'localhost:{second_backend}'}},
             routes = {{public = {{['survival.example.test']='first', ['creative.example.test']='second',
@@ -803,7 +804,7 @@ def test_hostname_routing(name, binary, directory, compression, first_backend):
         }}""")
         with process([str(binary), "--config", str(config_path)],
                      directory, "routing-proxy.log") as proxy:
-            wait_ready(proxy, lambda: "rift:" in (directory / "routing-proxy.log").read_text(),
+            wait_ready(proxy, lambda: "rift: listening on" in (directory / "routing-proxy.log").read_text(),
                        directory / "routing-proxy.log")
             expected = {
                 "survival.example.test": status(first_backend, protocol),
@@ -841,7 +842,7 @@ def test_server(name, binary, directory, compression):
     }}""")
     with process([str(binary), "--config", str(config_path)],
                  directory, "proxy.log") as proxy:
-        wait_ready(proxy, lambda: "rift:" in proxy_log.read_text(), proxy_log)
+        wait_ready(proxy, lambda: "rift: listening on" in proxy_log.read_text(), proxy_log)
         # An unavailable backend returns a readable login disconnect; status remains available.
         with Client(frontend, 2, protocol) as client:
             packet_id, body = client.receive()

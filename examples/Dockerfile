@@ -9,6 +9,8 @@ ARG RIFT_BINARY=rift
 COPY --chmod=0755 ${RIFT_BINARY} /usr/local/bin/rift
 # Fail the build if the supplied binary cannot execute in the runtime image.
 RUN /usr/local/bin/rift --version
+# Docker copies this directory's ownership/mode into a new state volume.
+RUN install -d -o 65532 -g 65532 -m 0700 /var/lib/rift
 WORKDIR /etc/rift
 USER 65532:65532
 EXPOSE 25565/tcp

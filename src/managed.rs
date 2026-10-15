@@ -88,6 +88,7 @@ struct Inner {
     players: Arc<PlayerRegistry>,
     launched: AtomicBool,
     shutdown: AtomicBool,
+    instance_store: Mutex<Option<Arc<crate::instance_store::Store>>>,
 }
 
 #[derive(Debug)]
@@ -219,7 +220,24 @@ impl ManagedServers {
             players,
             launched: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
+            instance_store: Mutex::new(None),
         }))
+    }
+
+    /// Attach restored stop intent before launching any autostart workers.
+    pub fn with_persistence(&self, store: Arc<crate::instance_store::Store>) -> io::Result<()> {
+        let servers = lock(&self.0.servers);
+        if self.0.launched.load(Ordering::Acquire) {
+            return Err(unavailable(
+                "attach instance persistence before launching workers",
+            ));
+        }
+        let stopped = store.stopped_names()?;
+        for (name, server) in servers.iter() {
+            lock(&server.state).automatic = !stopped.contains(name);
+        }
+        *lock(&self.0.instance_store) = Some(store);
+        Ok(())
     }
 
     /// Call once after startup validation and listener binding have succeeded.
@@ -297,6 +315,9 @@ impl ManagedServers {
                     io::ErrorKind::ResourceBusy,
                     "managed server has connected players or pending connections",
                 ));
+            }
+            if let Some(store) = lock(&self.0.instance_store).as_ref() {
+                store.begin_removal(name)?;
             }
             state.automatic = false;
             state.pending_stop = true;
@@ -534,7 +555,24 @@ impl ManagedServers {
                 ));
             }
         }
-        send_request(server, Request { action, reply })?;
+        // Reserve a queue slot first; a rejected command must never change the
+        // durable intent. Write intent before the worker can execute it.
+        let permit = server
+            .sender
+            .try_reserve()
+            .map_err(|e| unavailable(&e.to_string()))?;
+        if (stopping
+            || matches!(
+                action,
+                Action::Start {
+                    mode: StartMode::Manual
+                }
+            ))
+            && let Some(store) = lock(&self.0.instance_store).as_ref()
+        {
+            store.set_explicit_stop(name, stopping)?;
+        }
+        permit.send(Request { action, reply });
         if stopping {
             state.automatic = false;
             state.pending_stop = true;
@@ -804,8 +842,8 @@ async fn worker(
     mut requests: mpsc::Receiver<Request>,
 ) {
     let mut child = None;
-    if server.config.autostart {
-        let _ = start_process(&server, &mut child, StartMode::Manual).await;
+    if server.config.autostart && lock(&server.state).automatic {
+        let _ = start_process(&server, &mut child, StartMode::Scale).await;
     }
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

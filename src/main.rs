@@ -97,7 +97,7 @@ async fn start() -> io::Result<()> {
         return Ok(());
     }
     let (config, path) = match args.as_slice() {
-        [] => match Config::load(Path::new(DEFAULT_CONFIG_PATH)) {
+        [] => match Config::load_unrestored(Path::new(DEFAULT_CONFIG_PATH)) {
             Ok(config) => (config, Some(PathBuf::from(DEFAULT_CONFIG_PATH))),
             Err(error) if error.kind() == io::ErrorKind::NotFound => (Config::default(), None),
             Err(error) => return Err(error),
@@ -118,9 +118,10 @@ async fn start() -> io::Result<()> {
             );
             return Ok(());
         }
-        [flag, path] if flag == "--config" => {
-            (Config::load(Path::new(path))?, Some(PathBuf::from(path)))
-        }
+        [flag, path] if flag == "--config" => (
+            Config::load_unrestored(Path::new(path))?,
+            Some(PathBuf::from(path)),
+        ),
         [listen, backend] => (Config::from_addresses(listen, backend)?, None),
         [listen, options @ ..] if !options.is_empty() && options.len().is_multiple_of(2) => {
             let mut config = Config::from_addresses(listen, "127.0.0.1:0")?;

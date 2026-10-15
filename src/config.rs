@@ -3,7 +3,7 @@ use std::{
     fs,
     io::{self, Read},
     net::SocketAddr,
-    path::Path,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -36,6 +36,7 @@ pub struct Config {
     pub templates: BTreeMap<String, ServerTemplate>,
     pub service_groups: BTreeMap<String, ServiceGroup>,
     pub instances: BTreeMap<String, ServiceInstance>,
+    pub instance_database: PathBuf,
     pub routes: BTreeMap<String, Route>,
     pub limits: Limits,
     pub authentication: Authentication,
@@ -275,6 +276,7 @@ impl Config {
             templates: BTreeMap::new(),
             service_groups: BTreeMap::new(),
             instances: BTreeMap::new(),
+            instance_database: PathBuf::from("rift.sqlite3"),
             routes: BTreeMap::from([("default".into(), Route::Direct("default".into()))]),
             limits: Limits::default(),
             authentication: Authentication::default(),
@@ -303,6 +305,15 @@ impl Config {
     }
 
     pub fn load(path: &Path) -> io::Result<Self> {
+        Self::load_validated(path, true)
+    }
+
+    /// Startup validates after the durable instance names have been restored.
+    pub fn load_unrestored(path: &Path) -> io::Result<Self> {
+        Self::load_validated(path, false)
+    }
+
+    fn load_validated(path: &Path, validate: bool) -> io::Result<Self> {
         let mut source = String::new();
         let mut read = || -> io::Result<()> {
             if !fs::metadata(path)?.is_file() {
@@ -316,7 +327,11 @@ impl Config {
         read().map_err(|error| {
             io::Error::new(error.kind(), format!("{}: {error}", path.display()))
         })?;
-        Self::from_lua_at(&source, path)
+        if validate {
+            Self::from_lua_at(&source, path)
+        } else {
+            Self::from_lua_at_unrestored(&source, path)
+        }
     }
 
     /// Evaluate an in-memory script without access to local modules or plugins.
@@ -335,6 +350,13 @@ impl Config {
             .map_err(|error| invalid(format!("{}: {error}", path.display())))?;
         let directory = source.root.clone();
         Self::from_source(source, &directory, None)
+    }
+
+    pub fn from_lua_at_unrestored(source: &str, path: &Path) -> io::Result<Self> {
+        let source = crate::script::ScriptSource::from_path(source, path)
+            .map_err(|error| invalid(format!("{}: {error}", path.display())))?;
+        let directory = source.root.clone();
+        Self::parse_source(source, &directory, None, false)
     }
 
     /// Validate edited configuration against the current runtime instances.
@@ -364,6 +386,15 @@ impl Config {
         directory: &Path,
         previous: Option<&Self>,
     ) -> io::Result<Self> {
+        Self::parse_source(source, directory, previous, true)
+    }
+
+    fn parse_source(
+        source: crate::script::ScriptSource,
+        directory: &Path,
+        previous: Option<&Self>,
+        validate: bool,
+    ) -> io::Result<Self> {
         let name = source.entry.name.as_ref();
         let parse = || -> Result<Self, String> {
             let (_lua, value) =
@@ -378,6 +409,7 @@ impl Config {
                     "managed_servers",
                     "templates",
                     "service_groups",
+                    "instance_database",
                     "routes",
                     "limits",
                     "authentication",
@@ -418,6 +450,25 @@ impl Config {
             let managed_servers = managed::parse(&root, directory)?;
             let templates = templates::parse(&root, directory)?;
             let service_groups = services::parse(&_lua, &root, directory)?;
+            let instance_database = match root
+                .raw_get::<Value>("instance_database")
+                .map_err(|e| e.to_string())?
+            {
+                Value::Nil => directory.join("rift.sqlite3"),
+                value => {
+                    let value = string(value, "instance_database")?;
+                    if value.trim().is_empty()
+                        || value.len() > 4096
+                        || value.contains('\0')
+                        || Path::new(&value).file_name().is_none()
+                    {
+                        return Err(
+                            "instance_database: expected a nonblank file path without NUL".into(),
+                        );
+                    }
+                    directory.join(value)
+                }
+            };
             let routes = routes(root.get("routes").map_err(|e| e.to_string())?)?;
             let mut limits = Limits::default();
             let value: Value = root.get("limits").map_err(|e| e.to_string())?;
@@ -619,6 +670,7 @@ impl Config {
                 templates,
                 service_groups,
                 instances: BTreeMap::new(),
+                instance_database,
                 routes,
                 limits,
                 authentication,
@@ -648,13 +700,37 @@ impl Config {
             services::restore_instances(&mut config, previous)
                 .map_err(|error| invalid(format!("{name}: {error}")))?;
         }
-        config
-            .validate()
-            .map_err(|error| invalid(format!("{name}: {error}")))?;
+        if validate {
+            config
+                .validate()
+                .map_err(|error| invalid(format!("{name}: {error}")))?;
+        }
         Ok(config)
     }
 
     pub fn validate(&self) -> io::Result<()> {
+        let path = self.instance_database.as_os_str().as_encoded_bytes();
+        if path.is_empty()
+            || path.len() > 4096
+            || path.contains(&0)
+            || path.iter().all(u8::is_ascii_whitespace)
+        {
+            return Err(invalid(
+                "instance_database: expected a nonblank file path without NUL",
+            ));
+        }
+        let database = managed::canonicalize_existing(&self.instance_database)?;
+        for (name, server) in &self.managed_servers {
+            if !self.instances.contains_key(name) {
+                continue;
+            }
+            let directory = managed::canonicalize_existing(&server.directory)?;
+            if database.starts_with(&directory) || directory.starts_with(&database) {
+                return Err(invalid(format!(
+                    "instance_database: overlaps managed_servers.{name}.directory"
+                )));
+            }
+        }
         services::validate(self).map_err(invalid)?;
         managed::validate(&self.managed_servers, &self.backends).map_err(invalid)?;
         templates::validate(self).map_err(invalid)?;

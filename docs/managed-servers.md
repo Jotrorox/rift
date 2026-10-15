@@ -176,14 +176,49 @@ Removal refuses instances with players or attachment reservations. Drain and
 empty the instance first; removal stops and reaps its child before deregistering
 the backend. Persistent worlds remain on disk; disposable instance files are
 deleted only after the child is reaped. A failed deletion reports a cleanup error
-and leaves the backend deregistered; inspect the remaining directory. Runtime
-instances survive a normal configuration reload but registrations are not
-persisted across a proxy restart. The data lifetime is independent: recreating
-a persistent template instance with the same generated name reuses its owned
-directory without overwriting world changes. Template and group changes apply
+and leaves the backend deregistered; inspect the reported cleanup error. SQLite
+stores instance names, groups, allocated ports, directories, template/storage
+ownership and explicit stop intent. Registrations survive configuration reloads
+and proxy restarts. Template and group changes apply
 on reload while every registered instance keeps its process definition, storage
 policy and an allocated port inside the range; otherwise the reload is rejected
-with the affected instance named. Remove those instances first or restart.
+with the affected instance named. Remove instances before changing their
+directories or storage policy; restart to apply other process-definition changes.
+
+Rift bundles SQLite into its executable. By default, the database is
+`rift.sqlite3` beside the selected configuration, ready to hold other Rift state
+in additional tables. Set a different
+writable location in Lua:
+
+```lua
+instance_database = "state/rift.sqlite3",
+```
+
+Relative paths resolve beside the configuration; changing this path requires a
+restart. Keep the database and generated instance directories on persistent
+storage. One Rift process owns a database at a time, enforced with an OS lock on
+the adjacent `.lock` file. Back up the database while Rift is stopped, or use
+SQLite's backup API while it is running.
+
+Startup restores all registrations before process autostart or scaling. It
+checks group existence, name collisions, port ranges, directory/storage policy
+and ownership markers. A saved port occupied by another process or configured
+backend/listener stops startup with the instance and port named. Rift retains
+the record and its files; correct the conflict and restart. Ports are retained
+even for explicitly stopped instances. Existing instances retain their original
+template ownership when the group's template changes; their worlds are not
+reseeded.
+
+Creation records its intent before copying assets and commits registration
+before launching the worker. An interrupted creation rolls back its unfinished
+owned copy on startup. Removal records intent before retiring its worker, reaps
+the child, then renames disposable storage to an owned `.rift-remove-*`
+directory before deleting it. Startup resumes interrupted deletion without
+restoring the removed registration; persistent worlds remain on disk. If an old
+server still occupies the saved port, recovery stops before deleting storage.
+Failed cleanup retains its journal record and port reservation until recovery
+can finish. Instance name sequences survive removal and restart, so new capacity
+does not reuse a retired world's name.
 
 The authenticated web API exposes `GET /api/groups`,
 `POST /api/groups/{name}/instances` and `DELETE /api/instances/{name}`. Send an
@@ -259,8 +294,8 @@ budget is exhausted. Explicitly Start a repaired instance or remove it when
 appropriate; empty excess instances remain eligible for automatic removal.
 Scaling policy changes apply on reload and take effect at the next scaling
 decision. Adding or removing a policy changes idle shutdown for instances of a
-group with `idle_timeout_ms`, so remove those instances first. Registrations are
-not persisted across proxy restarts.
+group with `idle_timeout_ms`, so remove those instances first. SQLite restores
+registrations and manual stops before the first scaling decision.
 
 ## Local asset templates
 
@@ -326,9 +361,9 @@ directories. For an existing manually prepared world, use a static managed serve
 or a persistent group without an asset template.
 
 Persistent reuse preserves server files and world changes rather than copying
-the seed map again. Instance registrations remain runtime only. After a proxy
-restart, create instances in the same group to reuse retained names/directories;
-check the listing for their newly allocated ports. Disposable recreation copies
+the seed map again. After a proxy restart, existing instances return with the
+same names and ports. Explicit removal retires a name permanently; new instances
+get new names and directories. Disposable recreation copies
 the source assets again. Editing template assets does not update existing
 instances. Templates and group policies can change live through Lua or the
 [structured operator editor](http.md). Existing instances must retain their
@@ -336,11 +371,9 @@ process definitions and storage policy; remove affected instances before
 changing those settings. Static managed definitions require a restart;
 ordinary routes and policies can reload while instances remain registered.
 
-Remove disposable instances before restarting Rift if you want their files
-cleaned up. Proxy shutdown stops their processes and retains their directories;
-it does not reset games. After a restart, creation refuses to overwrite an
-existing disposable directory. Handle any leftover directory before reusing its
-name, or create another instance with the next generated name.
+Proxy shutdown stops disposable processes and retains their registrations and
+directories; it does not reset games. After a restart, Rift restores their owned
+directories. Remove instances explicitly to clean them up and create fresh games.
 See [examples/templates.lua](../examples/templates.lua) for persistent survival
 and disposable game groups using one asset template.
 
@@ -371,9 +404,11 @@ Disabling `start_on_connect` requires an explicit start, `autostart`, or a scali
 policy before players can connect.
 
 Player sessions and pending attachments prevent an idle or manual shutdown. A
-manual stop also disables automatic wake until an explicit start or a Rift
-restart; this allows maintenance without a player immediately restarting the
-server. These runtime decisions are not persisted across proxy restarts.
+manual stop also disables automatic wake until an explicit start. For service
+instances, SQLite preserves this intent across Rift restarts, including groups
+with autostart or scaling. Idle stops and ordinary proxy shutdown do not set
+explicit stop intent. Static managed servers retain their configuration-driven
+startup behavior across proxy restarts.
 An orderly Rift shutdown drains proxy sessions before shutting down its managed
 children. Run Rift under an operating-system service manager for recovery from
 host failure or an uncatchable proxy termination.
@@ -437,8 +472,9 @@ transfers and crash recovery, reload preservation, occupied removal, port reuse
 and cleanup. The scaling scenario checks minimum and spare startup, occupancy
 growth, maximum capacity, empty-only shrink, cooldown, bounded recovery and
 manual reset/stop. The provisioning scenario checks template copies, persistent
-reuse and disposable cleanup. CI runs all four wire scenarios on Linux, macOS
-and Windows.
+reuse and disposable cleanup. The SQLite persistence scenario checks normal
+restarts, explicit stops, port/configuration conflicts, and killed creation and
+removal transactions. CI runs all five wire scenarios on Linux, macOS and Windows.
 
 The real-server harness checks cold login, world/chunk delivery, idle shutdown
 and restart using the pinned server fixtures. It requires the fixture's Java
