@@ -411,6 +411,71 @@ fn with_options(options: &str) -> String {
 }
 
 #[test]
+fn proxy_protocol_requires_trusted_sources_and_known_listeners() {
+    assert!(
+        Config::from_lua(&with_options(""), "proxy.lua")
+            .unwrap()
+            .proxy_protocol
+            .is_none()
+    );
+    let config = Config::from_lua(
+        &with_options("proxy_protocol = { trusted_proxies = { '10.0.0.0/8', '2001:db8::1' } }"),
+        "proxy.lua",
+    )
+    .unwrap();
+    let proxy = config.proxy_protocol.unwrap();
+    assert!(proxy.applies_to("public") && proxy.applies_to("other"));
+    assert!(proxy.trusts("10.1.2.3".parse().unwrap()));
+    assert!(proxy.trusts("2001:db8::1".parse().unwrap()));
+    assert!(!proxy.trusts("192.0.2.1".parse().unwrap()));
+    let config = Config::from_lua(
+        &with_options(
+            "proxy_protocol = { listeners = { 'public' }, trusted_proxies = { '10.0.0.1' } }",
+        ),
+        "proxy.lua",
+    )
+    .unwrap();
+    let proxy = config.proxy_protocol.unwrap();
+    assert!(proxy.applies_to("public") && !proxy.applies_to("other"));
+    for (options, expected) in [
+        ("proxy_protocol = {}", "proxy_protocol.trusted_proxies"),
+        (
+            "proxy_protocol = { trusted_proxies = {} }",
+            "proxy_protocol.trusted_proxies",
+        ),
+        (
+            "proxy_protocol = { trusted_proxies = { '10.0.0.1/8' } }",
+            "host bits",
+        ),
+        (
+            "proxy_protocol = { trusted_proxies = { 'lb.example' } }",
+            "invalid address",
+        ),
+        (
+            "proxy_protocol = { trusted_proxies = { '10.0.0.0/8' }, listeners = {} }",
+            "proxy_protocol.listeners",
+        ),
+        (
+            "proxy_protocol = { trusted_proxies = { '10.0.0.0/8' }, listeners = { 'missing' } }",
+            "unknown listener",
+        ),
+        (
+            "proxy_protocol = { trusted_proxies = { '10.0.0.0/8' }, version = 2 }",
+            "proxy_protocol",
+        ),
+        ("proxy_protocol = true", "proxy_protocol"),
+    ] {
+        let error = Config::from_lua(&with_options(options), "proxy.lua")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("proxy.lua") && error.contains(expected),
+            "{options}: {error}"
+        );
+    }
+}
+
+#[test]
 fn http_services_are_independently_optional_and_have_loopback_defaults() {
     for options in [
         "",
