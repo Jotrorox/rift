@@ -516,6 +516,66 @@ fn switching_requires_an_explicit_capability_and_real_server_fixture() {
 }
 
 #[test]
+fn action_bars_and_titles_use_verified_play_packets() {
+    for (number, subtitle, heading, times) in [
+        (761, 0x59, 0x5b, 0x5c),
+        (762, 0x5d, 0x5f, 0x60),
+        (763, 0x5d, 0x5f, 0x60),
+        (764, 0x5f, 0x61, 0x62),
+        (765, 0x61, 0x63, 0x64),
+        (766, 0x63, 0x65, 0x66),
+        (767, 0x63, 0x65, 0x66),
+        (768, 0x6a, 0x6c, 0x6d),
+        (769, 0x6a, 0x6c, 0x6d),
+        (770, 0x69, 0x6b, 0x6c),
+        (771, 0x69, 0x6b, 0x6c),
+        (772, 0x69, 0x6b, 0x6c),
+        (773, 0x6e, 0x70, 0x71),
+        (774, 0x6e, 0x70, 0x71),
+        (775, 0x70, 0x72, 0x73),
+        (776, 0x70, 0x72, 0x73),
+        (777, 0x72, 0x74, 0x75),
+    ] {
+        let version = ProtocolVersion::new(number).unwrap();
+        let component = |text| disconnect(Some(version), State::Play, text).unwrap().data;
+        assert_eq!(
+            title(version, "Hello", None, [10, 70, 20]).unwrap(),
+            [
+                Packet::new(times, vec![0, 0, 0, 10, 0, 0, 0, 70, 0, 0, 0, 20]),
+                Packet::new(subtitle, component("")),
+                Packet::new(heading, component("Hello")),
+            ],
+            "protocol {number}"
+        );
+        assert_eq!(
+            title(version, "", Some("Sub"), [0, 1, 2]).unwrap()[1],
+            Packet::new(subtitle, component("Sub"))
+        );
+        // Session state tracking must treat these as ordinary play packets.
+        for id in [subtitle, heading, times] {
+            assert_eq!(
+                version.kind(State::Play, Direction::Clientbound, id),
+                PacketKind::Unknown
+            );
+        }
+        let chat = system_message(version, "bar").unwrap();
+        let bar = action_bar(version, "bar").unwrap();
+        assert_eq!(bar.id, chat.id);
+        let (overlay, text) = bar.data.split_last().unwrap();
+        assert_eq!((*overlay, text), (1, chat.data.split_last().unwrap().1));
+    }
+    for number in [47, 340, 758, 760] {
+        let version = ProtocolVersion::new(number).unwrap();
+        assert_eq!(
+            title(version, "Hello", None, [10, 70, 20])
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::Unsupported
+        );
+    }
+}
+
+#[test]
 fn switching_commands_reject_malformed_data_and_preserve_signed_arguments() {
     for number in 767..=777 {
         let caps = ProtocolVersion::new(number).unwrap().switching().unwrap();
