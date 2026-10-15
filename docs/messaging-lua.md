@@ -48,6 +48,18 @@ separated by dots; subscriptions support `*` for one token and a terminal `>` fo
 one or more remaining tokens. Queue subscribers divide matching deliveries;
 ordinary subscribers each receive a copy.
 
+With [authenticated extensions](extensions.md#online-players) on API v2,
+`on_message` and `on_http` can also use `rift.players`. For example, relay chat
+published by another server to everyone on this one:
+
+```lua
+on_message = function(message)
+    if message.subject == 'network.chat' then
+        rift.players.broadcast(message.payload)
+    end
+end,
+```
+
 Callbacks share their existing instruction, memory, and 50 ms execution limits.
 A callback may publish at most 256 messages totaling 1 MiB. HTTP and connection
 hooks retain their usual bounded worker admission, while message handlers wait

@@ -64,7 +64,7 @@ impl HttpScript {
     /// Run with process-wide admission control on a blocking worker. `None`
     /// means that the script declined the request (HTTP 404 at the adapter).
     pub async fn execute(&self, request: HttpRequest) -> Result<Option<HttpResponse>, HttpError> {
-        self.execute_inner(request, None).await
+        self.execute_with_host(request, None, None).await
     }
 
     pub async fn execute_with_messaging(
@@ -72,13 +72,15 @@ impl HttpScript {
         request: HttpRequest,
         broker: crate::messaging::Broker,
     ) -> Result<Option<HttpResponse>, HttpError> {
-        self.execute_inner(request, Some(broker)).await
+        self.execute_with_host(request, Some(broker), None).await
     }
 
-    async fn execute_inner(
+    /// Run with the runtime broker and, for API v2 extensions, `rift.players`.
+    pub async fn execute_with_host(
         &self,
         request: HttpRequest,
         messaging: Option<crate::messaging::Broker>,
+        players: Option<crate::extensions::Players>,
     ) -> Result<Option<HttpResponse>, HttpError> {
         let permit = SLOTS.try_acquire().map_err(|_| HttpError::Busy)?;
         let script = self.clone();
@@ -86,7 +88,7 @@ impl HttpScript {
         let task = spawn_blocking(move || {
             // Retain capacity until the VM stops, even after caller cancellation.
             let _permit = permit;
-            script.evaluate_inner(&request, deadline, messaging)
+            script.evaluate_inner(&request, deadline, messaging, players)
         });
         timeout(crate::script::EXECUTION_TIMEOUT, task)
             .await
@@ -101,7 +103,7 @@ impl HttpScript {
         request: &HttpRequest,
         deadline: Instant,
     ) -> Result<Option<HttpResponse>, HttpError> {
-        self.evaluate_inner(request, deadline, None)
+        self.evaluate_inner(request, deadline, None, None)
     }
 
     fn evaluate_inner(
@@ -109,6 +111,7 @@ impl HttpScript {
         request: &HttpRequest,
         deadline: Instant,
         messaging: Option<crate::messaging::Broker>,
+        players: Option<crate::extensions::Players>,
     ) -> Result<Option<HttpResponse>, HttpError> {
         let run = || -> mlua::Result<Option<HttpResponse>> {
             let input_bytes = request.method.len()
@@ -124,6 +127,9 @@ impl HttpScript {
             }
             let (lua, root) = crate::script::load(&self.source, deadline)?;
             crate::script::install_messaging(&lua, messaging, deadline)?;
+            if let Some(players) = &players {
+                players.install(&lua, &lua.named_registry_value("rift.runtime")?, deadline)?;
+            }
             let Value::Table(root) = root else {
                 return Err(mlua::Error::runtime("configuration must return a table"));
             };

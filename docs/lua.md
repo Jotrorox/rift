@@ -78,7 +78,7 @@ receives its import name as `...`.
 Use dotted names with letters, digits, `_` or `-` in each component, up to 128
 bytes. Filesystem paths, `..`, absolute paths, native libraries and `package.path`
 are not supported. Import errors identify the module and file; circular imports
-fail with an explicit diagnostic. `rift`, `rift.config`, `rift.store`, `rift.http` and `rift.permissions` are reserved modules.
+fail with an explicit diagnostic. `rift`, `rift.config`, `rift.store`, `rift.http`, `rift.permissions` and `rift.players` are reserved modules.
 
 ## Folder-based plugins
 
@@ -173,7 +173,8 @@ inside a callback uses the saved file contents; it never reads live files.
 Modules, globals and upvalues do not persist between callbacks. A successful
 reload captures edited modules and plugins even when `rift.lua` did not change.
 Existing player sessions retain their original code. API v1 also pins permissions;
-API v2 supports live grants, durable state, jobs and HTTP integrations as described
+API v2 supports live grants, durable state, jobs, HTTP integrations and online
+player actions as described
 in the [extension API](extensions.md). A failed reload preserves the active
 configuration.
 

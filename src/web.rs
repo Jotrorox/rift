@@ -1343,7 +1343,11 @@ async fn extension(State(app): State<App>, request: Request) -> Response {
         context: app.status_snapshot(&snapshot, false),
     };
     match script
-        .execute_with_messaging(request, snapshot.messaging.clone())
+        .execute_with_host(
+            request,
+            Some(snapshot.messaging.clone()),
+            snapshot.extensions.player_api(),
+        )
         .await
     {
         Ok(Some(result)) => (

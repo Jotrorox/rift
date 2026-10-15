@@ -12,6 +12,7 @@ use tokio::{
 
 use crate::{
     config::{Config, MessagingSubscription},
+    extensions::Players,
     messaging::{Broker, Error, Message, Subscription},
 };
 
@@ -29,7 +30,12 @@ impl MessageScript {
         }
     }
 
-    async fn execute(&self, message: Message, broker: Broker) -> Result<(), String> {
+    async fn execute(
+        &self,
+        message: Message,
+        broker: Broker,
+        players: Option<Players>,
+    ) -> Result<(), String> {
         // Waiting for a worker leaves subsequent messages in the bounded broker
         // queue. Overload remains visible through the broker's slow-consumer policy.
         let permit = SLOTS.acquire().await.map_err(|error| error.to_string())?;
@@ -37,7 +43,7 @@ impl MessageScript {
         let deadline = Instant::now() + crate::script::EXECUTION_TIMEOUT;
         let task = spawn_blocking(move || {
             let _permit = permit;
-            script.evaluate(message, broker, deadline)
+            script.evaluate(message, broker, players, deadline)
         });
         timeout(crate::script::EXECUTION_TIMEOUT, task)
             .await
@@ -45,10 +51,19 @@ impl MessageScript {
             .map_err(|error| format!("message script worker: {error}"))?
     }
 
-    fn evaluate(&self, message: Message, broker: Broker, deadline: Instant) -> Result<(), String> {
+    fn evaluate(
+        &self,
+        message: Message,
+        broker: Broker,
+        players: Option<Players>,
+        deadline: Instant,
+    ) -> Result<(), String> {
         let run = || -> mlua::Result<()> {
             let (lua, root) = crate::script::load(&self.source, deadline)?;
             crate::script::install_messaging(&lua, Some(broker), deadline)?;
+            if let Some(players) = &players {
+                players.install(&lua, &lua.named_registry_value("rift.runtime")?, deadline)?;
+            }
             let Value::Table(root) = root else {
                 return Err(mlua::Error::runtime("configuration must return a table"));
             };
@@ -75,6 +90,7 @@ impl MessageScript {
 pub struct MessageHandler {
     subscriptions: Vec<(MessagingSubscription, Subscription)>,
     broker: Broker,
+    players: Option<Players>,
     scripts: watch::Receiver<MessageScript>,
     update: watch::Sender<MessageScript>,
 }
@@ -99,9 +115,16 @@ impl MessageHandler {
         Ok(Some(Self {
             subscriptions,
             broker,
+            players: None,
             scripts,
             update,
         }))
+    }
+
+    /// Expose `rift.players`; pass the directory only for API v2 extensions.
+    pub fn with_players(mut self, players: Option<Players>) -> Self {
+        self.players = players;
+        self
     }
 
     pub fn script_updates(&self) -> watch::Sender<MessageScript> {
@@ -113,6 +136,7 @@ impl MessageHandler {
         for (settings, mut subscription) in self.subscriptions {
             let scripts = self.scripts.clone();
             let broker = self.broker.clone();
+            let players = self.players.clone();
             workers.spawn(async move {
                 loop {
                     let message = match subscription.recv().await {
@@ -134,7 +158,7 @@ impl MessageHandler {
                         }
                     };
                     let script = scripts.borrow().clone();
-                    if let Err(error) = script.execute(message, broker.clone()).await {
+                    if let Err(error) = script.execute(message, broker.clone(), players.clone()).await {
                         eprintln!("{error}");
                     }
                 }

@@ -380,7 +380,9 @@ The request table contains `method`, `path`, `query` (raw query string without
 `?`), UTF-8 `body`, lowercase `headers`, and `context` (the public status object
 as a Lua table). Authorization, cookie and proxy authorization headers are
 removed. JSON arrays become one-based Lua arrays. The context is an isolated
-snapshot; modifying it cannot change the live runtime.
+snapshot; modifying it cannot change the live runtime. With API v2
+[authenticated extensions](extensions.md#online-players), the handler can also
+list, message, kick and transfer players through `rift.players`.
 
 Return `nil`, or `{body = "...", status = 200, content_type = "text/plain"}`.
 Only `body` is required. Status must be an integer from 200 to 599; 204, 205 and

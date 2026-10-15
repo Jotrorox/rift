@@ -19,6 +19,16 @@ fn proxy_messages_use_system_position_until_the_1_19_1_overlay_flag() {
             expected.extend([0; 16]);
         }
         assert_eq!(data, expected);
+        // The action bar is position 2, then the overlay flag.
+        let packet = version
+            .switching()
+            .unwrap()
+            .action_bar(version, "proxy")
+            .unwrap();
+        let mut data = packet.data.as_slice();
+        read_string(&mut data, 32767).unwrap();
+        expected[0] = if number <= 759 { 2 } else { 1 };
+        assert_eq!(data, expected);
     }
 }
 

@@ -657,3 +657,62 @@ async fn admin_transfer_rejects_draining_backends_and_unmapped_protocols_before_
     .await
     .unwrap();
 }
+
+#[tokio::test]
+async fn player_actions_reach_the_client_and_kick_closes_the_session() {
+    use rift::extensions::PlayerAction;
+    timeout(Duration::from_secs(5), async {
+        let mut fixture = SessionFixture::new().await;
+        let players = fixture.snapshot.extensions.players().clone();
+        let send = |action| players.send("player", action).unwrap();
+        let version = rift::protocol::ProtocolVersion::new(774).unwrap();
+        // The directory joins right after the admin registration, on the session task.
+        while !send(PlayerAction::Message("hello".into())) {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            receive(&mut fixture.client, fixture.codec).await,
+            rift::protocol::system_message(version, "hello").unwrap()
+        );
+        assert!(send(PlayerAction::ActionBar("bar".into())));
+        assert_eq!(
+            receive(&mut fixture.client, fixture.codec).await,
+            rift::protocol::action_bar(version, "bar").unwrap()
+        );
+        assert!(send(PlayerAction::Title {
+            title: "Big".into(),
+            subtitle: Some("small".into()),
+            times: [1, 2, 3],
+        }));
+        for packet in rift::protocol::title(version, "Big", Some("small"), [1, 2, 3]).unwrap() {
+            assert_eq!(receive(&mut fixture.client, fixture.codec).await, packet);
+        }
+        // An unavailable target leaves the player on the original backend.
+        drop(fixture.second);
+        assert!(send(PlayerAction::Transfer("second".into())));
+        assert!(send(PlayerAction::Message("still here".into())));
+        assert_eq!(
+            receive(&mut fixture.client, fixture.codec).await,
+            rift::protocol::system_message(version, "still here").unwrap()
+        );
+        let packet = Packet::new(0x7f, vec![12; 300]);
+        fixture
+            .codec
+            .write(&mut fixture.client, &packet)
+            .await
+            .unwrap();
+        assert_eq!(receive(&mut fixture.backend, fixture.codec).await, packet);
+        assert_eq!(fixture.metrics.transfers.get(), 0);
+        assert!(send(PlayerAction::Kick("Bye".into())));
+        assert_eq!(
+            receive(&mut fixture.client, fixture.codec).await,
+            rift::protocol::disconnect(Some(version), rift::protocol::State::Play, "Bye").unwrap()
+        );
+        fixture.task.await.unwrap().unwrap();
+        assert!(!send(PlayerAction::Message("gone".into())));
+        assert_eq!(fixture.metrics.players.get(), 0);
+        assert!(fixture.snapshot.control.players.lock().unwrap().is_empty());
+    })
+    .await
+    .unwrap();
+}

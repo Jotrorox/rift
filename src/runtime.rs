@@ -687,6 +687,8 @@ pub async fn handle(
         let control = snapshot.control.clone();
         let mut admin_registration = None;
         let mut transfers: Option<mpsc::Receiver<admin::Transfer>> = None;
+        let mut directory = None;
+        let mut actions: Option<mpsc::Receiver<rift::extensions::PlayerAction>> = None;
         let mut transfer_reply: Option<admin::TransferReply> = None;
         // An administrator may select a backend added after this session's
         // snapshot. Keep its address without indexing the older configuration.
@@ -766,6 +768,43 @@ pub async fn handle(
                         }
                         Ok(None) => {},
                         Err(error) => { timeout(HANDSHAKE_TIMEOUT, session.send_system_message(&error.to_string())).await??; }
+                    }
+                    continue;
+                }
+                action = async { actions.as_mut().expect("registered player").recv().await },
+                    if playing && actions.is_some() && transfer_reply.is_none() => {
+                    let Some(action) = action else { actions = None; continue; };
+                    use rift::extensions::PlayerAction;
+                    // The cancelled forward poll may already have observed a backend
+                    // configuration transition. Drop the action rather than the session.
+                    if !session.client.state.settled(rift::protocol::State::Play) {
+                        phase_deadline = Deadline::now() + Duration::from_secs(30);
+                        if !matches!(action, PlayerAction::Kick(_)) { continue; }
+                    }
+                    match action {
+                        PlayerAction::Message(text) => timeout(HANDSHAKE_TIMEOUT, session.send_system_message(&text)).await??,
+                        PlayerAction::ActionBar(text) => timeout(HANDSHAKE_TIMEOUT, session.send_action_bar(&text)).await??,
+                        PlayerAction::Title { title, subtitle, times } => {
+                            timeout(HANDSHAKE_TIMEOUT, session.send_title(&title, subtitle.as_deref(), times)).await??;
+                        }
+                        PlayerAction::Kick(reason) => {
+                            let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect(&reason)).await;
+                            break;
+                        }
+                        PlayerAction::Transfer(target) => {
+                            if !session.can_switch() { continue; }
+                            let result = match network.switch_for(&mut session, &current_backend, &[target], event, "extension").await {
+                                Ok(target) => Ok(Some(target)),
+                                // Denials and unavailable targets leave the player where they are.
+                                Err(_) if !session.switch_in_progress() && session.backend().is_some() && session.can_switch() => Ok(None),
+                                Err(error) => Err(error),
+                            };
+                            if let Some(target) = settle_switch(&network, &mut session, &current_backend, result, event).await? {
+                                current_address = live_snapshot.config.backends[&target].address().to_owned();
+                                current_backend = target;
+                                phase_deadline = Deadline::now() + Duration::from_secs(30);
+                            }
+                        }
                     }
                     continue;
                 }
@@ -951,10 +990,26 @@ pub async fn handle(
                             );
                             admin_registration = Some(guard);
                             transfers = Some(receiver);
+                            if let Some(identity) = session.identity()
+                                && let Some(uuid) = identity.uuid
+                            {
+                                let (handle, receiver) = snapshot.extensions.players().register(
+                                    event.id(),
+                                    &uuid,
+                                    &identity.name,
+                                    session.handshake.protocol,
+                                    &current_backend,
+                                );
+                                directory = Some(handle);
+                                actions = Some(receiver);
+                            }
                         }
                         if registered_backend != current_backend {
                             if let Some(registration) = &registration {
                                 registration.set_server(&current_backend);
+                            }
+                            if let Some(directory) = &directory {
+                                directory.set_server(&current_backend);
                             }
                             registered_backend.clone_from(&current_backend);
                             if let Some(extension) = &mut session.extension {
@@ -992,7 +1047,7 @@ pub async fn handle(
                         addresses: &live_snapshot.addresses,
                         metrics: &metrics,
                     };
-                    let mut result = match timeout(
+                    let result = match timeout(
                         live_snapshot.config.limits.connect_timeout
                             + HANDSHAKE_TIMEOUT
                             + live_snapshot
@@ -1008,48 +1063,14 @@ pub async fn handle(
                         Ok(result) => result,
                         Err(error) => Err(error.into()),
                     };
-                    if result.is_err()
-                        && let Some(extension) = &mut session.extension
+                    if let Some(target) =
+                        settle_switch(&network, &mut session, &current_backend, result, event)
+                            .await?
                     {
-                        extension.transfer_failed().await;
-                    }
-                    // The old server can fail while a target is being preflighted.
-                    // A failed target must not strand that player without recovery.
-                    if result
-                        .as_ref()
-                        .is_err_and(|error| error.kind() != io::ErrorKind::PermissionDenied)
-                        && session.backend().is_none()
-                        && session.can_switch()
-                    {
-                        result = network
-                            .switch(
-                                &mut session,
-                                &current_backend,
-                                &network.recovery_candidates(&current_backend),
-                                event,
-                            )
-                            .await
-                            .map(Some);
-                        if result.is_ok() {
-                            metrics.fallbacks.inc();
-                        }
-                    }
-                    match result {
-                        Ok(Some(target)) => {
-                            current_address =
-                                live_snapshot.config.backends[&target].address().to_owned();
-                            current_backend = target;
-                            phase_deadline = Deadline::now() + Duration::from_secs(30);
-                        }
-                        Ok(None) => {}
-                        Err(error) => {
-                            let _ = timeout(
-                                HANDSHAKE_TIMEOUT,
-                                session.disconnect("The server switch could not be completed."),
-                            )
-                            .await;
-                            return Err(error);
-                        }
+                        current_address =
+                            live_snapshot.config.backends[&target].address().to_owned();
+                        current_backend = target;
+                        phase_deadline = Deadline::now() + Duration::from_secs(30);
                     }
                 }
                 Ok(SessionEvent::Disconnected) => break,
@@ -1145,6 +1166,7 @@ pub async fn handle(
             }
         }
         drop(admin_registration);
+        drop(directory);
         if let Some(reply) = transfer_reply {
             metrics.transfer_failures.inc();
             let _ = reply.send(Err("player disconnected during transfer".into()));
@@ -1152,6 +1174,50 @@ pub async fn handle(
         drop(registration);
     }
     Ok((session.client.io.sent, session.client.io.received))
+}
+
+/// Settle a player-initiated switch. If the old backend was lost while a target
+/// was being preflighted, recover to an allowed hub; close an unusable session.
+async fn settle_switch<C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    network: &Network<'_>,
+    session: &mut Session<C, TcpStream>,
+    current_backend: &str,
+    mut result: io::Result<Option<String>>,
+    event: &mut Connection,
+) -> io::Result<Option<String>> {
+    if result.is_err()
+        && let Some(extension) = &mut session.extension
+    {
+        extension.transfer_failed().await;
+    }
+    // A failed target must not strand that player without recovery.
+    if result
+        .as_ref()
+        .is_err_and(|error| error.kind() != io::ErrorKind::PermissionDenied)
+        && session.backend().is_none()
+        && session.can_switch()
+    {
+        result = network
+            .switch(
+                session,
+                current_backend,
+                &network.recovery_candidates(current_backend),
+                event,
+            )
+            .await
+            .map(Some);
+        if result.is_ok() {
+            network.metrics.fallbacks.inc();
+        }
+    }
+    if result.is_err() {
+        let _ = timeout(
+            HANDSHAKE_TIMEOUT,
+            session.disconnect("The server switch could not be completed."),
+        )
+        .await;
+    }
+    result
 }
 
 pub(crate) async fn accept(
@@ -1751,7 +1817,8 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     let messaging_server = crate::messaging_runtime::listen(&initial).await?;
     let message_handler =
         rift::message_script::MessageHandler::new(&initial.config, initial.messaging.clone())
-            .map_err(io::Error::other)?;
+            .map_err(io::Error::other)?
+            .map(|handler| handler.with_players(initial.extensions.player_api()));
     let messaging_controls = crate::messaging_runtime::Controls::new(initial.messaging.clone())?;
     initial.addresses = Arc::new(
         initial

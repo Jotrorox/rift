@@ -31,7 +31,7 @@ pub(super) fn install(
     let cache = lua.create_table()?;
     cache.raw_set("rift", api.clone())?;
     cache.raw_set("rift.config", api.raw_get::<Table>("config")?)?;
-    for namespace in ["store", "permissions", "http"] {
+    for namespace in ["store", "permissions", "http", "players"] {
         cache.raw_set(
             format!("rift.{namespace}"),
             api.raw_get::<Table>(namespace)?,
