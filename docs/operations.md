@@ -124,7 +124,36 @@ share an IP allowance. A routing hook can enforce additional IP/listener policy.
 Online mode verifies player names before network access checks; offline-mode
 names are unauthenticated and cannot establish account ownership.
 
-## Inspect health and failed connections
+## Run behind a load balancer (PROXY protocol)
+
+When players reach Rift through TCPShield, Cloudflare Spectrum, HAProxy or a
+cloud TCP load balancer, every socket comes from the load balancer. Enable the
+HAProxy PROXY protocol (v1 or v2) on the load balancer and tell Rift which
+sources may send it:
+
+```lua
+rift.config.proxy_protocol = {
+    -- Addresses or CIDR blocks of your load balancers. Required.
+    trusted_proxies = { "10.0.0.0/8", "2001:db8::/32" },
+    -- Optional. Omit to require the header on every listener.
+    listeners = { "default" },
+}
+```
+
+On an affected listener, Rift rejects connections from sources outside
+`trusted_proxies` before reading any bytes, then requires a valid header within
+the 5-second handshake deadline. Clients cannot connect directly or claim
+another address. Rift reads the header before applying `rate_limit`, and it
+then reports the player's address in `login_rate_limit`, `on_route`
+`peer_ip`/`peer_addr`, extension `peer_ip`, Velocity forwarding and the `peer`
+field of connection events. Rift ignores v2 TLVs. When the header is a v2
+`LOCAL` command, which load balancer health checks often use, or a v1
+`UNKNOWN`, Rift keeps the load balancer's address. Use your provider's
+published ranges for TCPShield or Cloudflare. Keep the list as small as
+possible: a trusted source can claim any client address. Rift reads the
+setting for each new connection, so a reload applies it without reopening
+listeners.
+
 
 Watch player counts, backend health, login latency, error growth and memory
 alongside the process/service status. Prometheus metrics are served at
@@ -138,7 +167,7 @@ authentication; use loopback or a trusted monitoring network.
 | Maintenance | `rift_maintenance_mode`, `rift_backend_draining{backend="name"}` |
 | Login performance | `rift_login_duration_seconds` histogram together with login/connection errors |
 | Connection failures | `rift_connection_errors_total`, `rift_backend_connect_failures_total`, structured events |
-| Capacity/access pressure | `rift_connections_rate_limited_total`, `rift_logins_rate_limited_total`, `rift_connections_access_rejected_total` |
+| Capacity/access pressure | `rift_connections_rate_limited_total`, `rift_logins_rate_limited_total`, `rift_connections_access_rejected_total`, `rift_connections_proxy_rejected_total` |
 | Memory | `rift_process_resident_memory_bytes` and `rift_process_resident_memory_available` on Linux |
 | Changes | `rift_reloads_total`, `rift_reload_failures_total`, `rift_player_transfers_total`, `rift_player_transfer_failures_total` |
 
@@ -177,6 +206,7 @@ results without logging credentials.
 | `handshake` / `handshake_error` | Check client protocol, accidental health probes and connection deadlines |
 | `on_route` / script error or overload | Inspect the named script; simplify/bound the hook or reduce arrival rate |
 | Session/login failure | Check supported versions, authentication-service access, matching Velocity secrets on every Paper backend and the backend's own log |
+| `proxy_untrusted` / `proxy_header` | Add the load balancer to `proxy_protocol.trusted_proxies`, enable PROXY protocol on it, or block direct access to the listener |
 | Rate-limit/capacity rejection | Check legitimate player traffic and NAT concentration before changing limits |
 | Admin permission/authentication failure | Check the CLI secret and the configured operation permission |
 
