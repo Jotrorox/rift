@@ -1,4 +1,5 @@
--- Authenticated network extensions v2: durable state, jobs and live permissions.
+-- Authenticated network extensions v2: durable state, jobs, permission groups and
+-- live permissions.
 -- Use the Paper/Velocity setup documented in examples/online.lua.
 -- RIFT_FORWARDING_SECRET='<shared secret>' rift --config examples/extensions.lua
 -- Validate without credentials or backend servers: rift --check examples/extensions.lua
@@ -29,9 +30,14 @@ rift.config.extensions = {
     -- Relative to this Lua file; use a writable location for production.
     -- Omit storage for process-local state that survives callbacks and reloads.
     storage = { path = "extensions.state" },
+    -- staff_uuid holds every network.* node directly and can manage ranks.
+    -- Other players get permissions from groups; memberships are stored durably.
     permissions = {
-        ["*"] = { ["network.queue"] = true },
-        [staff_uuid] = { ["network.staff"] = true },
+        [staff_uuid] = { ["network.*"] = true },
+    },
+    groups = {
+        default = { permissions = { ["network.queue"] = true } },
+        staff = { inherits = { "default" }, permissions = { ["network.staff"] = true } },
     },
     -- Includes players joining or transferring; all entry paths reserve a
     -- slot. Set this to 1 to try the queue with two authenticated players.
@@ -81,6 +87,21 @@ rift.config.extensions = {
         staff = {
             permission = "network.staff",
             run = function(ctx) return { server = "staff" } end,
+        },
+        rank = {
+            permission = "network.ranks",
+            run = function(ctx)
+                local uuid = string.sub(ctx.args, -32)
+                if ctx.args == "add " .. uuid then
+                    rift.permissions.add_group(uuid, "staff")
+                elseif ctx.args == "remove " .. uuid then
+                    rift.permissions.remove_group(uuid, "staff")
+                else
+                    return { message = "Usage: /rank add|remove <uuid without hyphens>" }
+                end
+                return { message = uuid .. " groups: [" ..
+                    table.concat(rift.permissions.groups(uuid), ", ") .. "]" }
+            end,
         },
     },
     -- Optional observations through the existing in-process message broker.

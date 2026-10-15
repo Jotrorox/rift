@@ -19,7 +19,7 @@ api.publish = function(...) return runtime.publish(...) end
 -- Configuration evaluation (including rift check) never performs these effects.
 for namespace, methods in pairs({
     store = { "get", "set", "delete", "increment" },
-    permissions = { "has", "set" },
+    permissions = { "has", "set", "add_group", "remove_group", "groups" },
     http = { "request" },
 }) do
     local proxy = {}

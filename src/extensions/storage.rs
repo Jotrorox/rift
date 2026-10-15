@@ -26,8 +26,10 @@ const MAX_ENTRIES: usize = 4096;
 const MAX_INTEGER: mlua::Integer = (1 << 53) - 1;
 const MAGIC: &[u8; 8] = b"RIFTKV\0\x01";
 const CHECKSUM_BYTES: usize = 32;
+/// Namespaces beginning with this prefix belong to the host, e.g. group memberships.
+const HOST_PREFIX: &str = "rift.";
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
-type Entries = BTreeMap<(String, String), Vec<u8>>;
+pub(super) type Entries = BTreeMap<(String, String), Vec<u8>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct StorageConfig {
@@ -107,6 +109,16 @@ fn label(value: Value, name: &str) -> mlua::Result<String> {
     Ok(value.to_str()?.to_owned())
 }
 
+fn user_namespace(value: Value) -> mlua::Result<String> {
+    let namespace = label(value, "namespace")?;
+    if namespace.starts_with(HOST_PREFIX) {
+        return Err(mlua::Error::runtime(format!(
+            "store namespaces beginning with {HOST_PREFIX:?} are reserved for Rift"
+        )));
+    }
+    Ok(namespace)
+}
+
 impl Store {
     pub(super) fn open(config: Option<&StorageConfig>) -> io::Result<Self> {
         let path = config.map(|config| config.path.clone());
@@ -161,10 +173,32 @@ impl Store {
         Ok(self.lock(deadline)?.entries.get(&(namespace, key)).cloned())
     }
 
+    /// Committed entries in one namespace, keyed by entry key.
+    pub(super) fn namespace(&self, namespace: &str) -> Vec<(String, Vec<u8>)> {
+        let state = self.0.lock().unwrap();
+        state
+            .entries
+            .iter()
+            .filter(|((entry, _), _)| entry == namespace)
+            .map(|((_, key), value)| (key.clone(), value.clone()))
+            .collect()
+    }
+
     fn mutate<T>(
         &self,
         deadline: Instant,
         change: impl FnOnce(&mut Entries) -> io::Result<T>,
+    ) -> io::Result<T> {
+        self.mutate_then(deadline, change, |_| {})
+    }
+
+    /// Like `mutate`, then runs `committed` before releasing the store lock so
+    /// derived host state observes mutations in commit order.
+    pub(super) fn mutate_then<T>(
+        &self,
+        deadline: Instant,
+        change: impl FnOnce(&mut Entries) -> io::Result<T>,
+        committed: impl FnOnce(&T),
     ) -> io::Result<T> {
         let mut state = self.lock(deadline)?;
         let mut entries = state.entries.clone();
@@ -179,6 +213,7 @@ impl Store {
             // after it: memory must agree with the committed snapshot.
             state.entries = entries;
         }
+        committed(&result);
         Ok(result)
     }
 
@@ -190,7 +225,7 @@ impl Store {
             "get",
             lua.create_function(move |lua, (namespace, key): (Value, Value)| {
                 let value = store
-                    .get(label(namespace, "namespace")?, label(key, "key")?, deadline)
+                    .get(user_namespace(namespace)?, label(key, "key")?, deadline)
                     .map_err(mlua::Error::external)?;
                 value.map(|value| lua.create_string(value)).transpose()
             })?,
@@ -199,7 +234,7 @@ impl Store {
         table.set(
             "set",
             lua.create_function(move |_, (namespace, key, value): (Value, Value, Value)| {
-                let key = (label(namespace, "namespace")?, label(key, "key")?);
+                let key = (user_namespace(namespace)?, label(key, "key")?);
                 let Value::String(value) = value else {
                     return Err(mlua::Error::runtime("store value must be a string"));
                 };
@@ -218,7 +253,7 @@ impl Store {
         table.set(
             "delete",
             lua.create_function(move |_, (namespace, key): (Value, Value)| {
-                let key = (label(namespace, "namespace")?, label(key, "key")?);
+                let key = (user_namespace(namespace)?, label(key, "key")?);
                 store
                     .mutate(deadline, |entries| Ok(entries.remove(&key).is_some()))
                     .map_err(mlua::Error::external)
@@ -228,7 +263,7 @@ impl Store {
         table.set(
             "increment",
             lua.create_function(move |_, (namespace, key, delta): (Value, Value, Value)| {
-                let key = (label(namespace, "namespace")?, label(key, "key")?);
+                let key = (user_namespace(namespace)?, label(key, "key")?);
                 let Value::Integer(delta) = delta else {
                     return Err(mlua::Error::runtime(
                         "store increment delta must be an integer",

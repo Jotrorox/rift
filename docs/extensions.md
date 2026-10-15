@@ -126,7 +126,7 @@ before a callback fails are not rolled back.
 Rust owns session identity, committed server, pending transfer, permissions,
 capacity leases and FIFO tickets. API v1 retains its original permission
 snapshot and admission state contract. API v2 also owns shared storage, live
-permission overrides and job scheduling. Each store/permission mutation and HTTP
+permission overrides, permission group memberships and job scheduling. Each store/permission mutation and HTTP
 request takes effect independently; later callback failure does not roll it back.
 
 ## Permissions and commands
@@ -147,10 +147,10 @@ rift.config.extensions = {
 }
 ```
 
-Configured permissions are exact nodes, granted by authenticated UUID. `*` grants
-nodes to all authenticated players; there are no wildcard permission nodes or
-inheritance. These configuration tables accept grants (`true`) only. An absent
-grant denies. API v2 also supports live grant/deny overrides, described below.
+Configured permissions are granted by authenticated UUID. `*` grants nodes to
+all authenticated players. An absent grant denies. API v1 accepts exact nodes
+and grants (`true`) only. API v2 also accepts wildcards, denials (`false`),
+permission groups and live grant/deny overrides, described below.
 
 Register up to 64 lowercase command names using letters, digits, `_` or `-`
 (maximum 64 bytes). `server` and `hub` are reserved. Each registration must have
@@ -198,6 +198,8 @@ already exist and be writable. Startup loads or creates the snapshot and rejects
 corrupt or oversized files. Without `storage`, the same API uses memory and resets
 on restart. Each file belongs to one Rift process; it is not a distributed database.
 Namespaces organize data; they do not isolate mutually untrusted plugins.
+Namespaces beginning with `rift.` are reserved for host-owned data such as group
+memberships; `rift.store` methods reject them.
 
 | Method | Result |
 | --- | --- |
@@ -287,21 +289,101 @@ lowercase. Bodies are limited to 64 KiB, headers to 32 entries/8 KiB. Configured
 `timeout_ms` defaults to 1000 and must be 1–5000; the enclosing callback's
 remaining deadline always takes precedence. There are no automatic retries.
 
+### Permission groups and wildcards
+
+```lua
+rift.config.extensions = {
+    api_version = 2,
+    storage = { path = "extensions.state" },
+    permissions = {
+        ["0123456789abcdef0123456789abcdef"] = { ["ranks.manage"] = true },
+    },
+    groups = {
+        default = { permissions = { ["network.queue"] = true, ["chat.color"] = false } },
+        staff = {
+            inherits = { "default" },
+            permissions = { ["network.*"] = true, ["chat.color"] = true },
+        },
+        admin = {
+            inherits = { "staff" },
+            permissions = { ["*"] = true, ["network.shutdown"] = false },
+        },
+    },
+    commands = {
+        rank = {
+            permission = "ranks.manage",
+            run = function(ctx)
+                -- /rank <uuid>: add a player to staff.
+                rift.permissions.add_group(ctx.args, "staff")
+                return { message = "Added " .. ctx.args .. " to staff" }
+            end,
+        },
+    },
+}
+```
+
+In API v2, permission tables in `permissions` and in groups map patterns to
+`true` (grant) or `false` (deny). A pattern is an exact node, `prefix.*` or `*`.
+`network.*` matches `network.staff` and `network.staff.kick`, but not `network`.
+`*` matches every node. Within one table, the most specific matching pattern
+wins: the exact node, then the longest `prefix.*`, then `*`. Checks always name
+exact nodes. `ctx.has_permission("network.*")` is false, and
+`rift.permissions.has` rejects it.
+
+Define up to 64 groups. Each has an optional `permissions` table and an optional
+`inherits` list of up to 16 other groups. Group names follow permission node
+rules. Unknown parents and inheritance cycles fail configuration loading.
+Everyone belongs to `default` when it is defined. Other memberships are stored
+per player. When several of a player's groups match a node:
+
+- A group overrides every group it inherits from, directly or transitively.
+- Among the remaining matches, any denial wins.
+
+`vip` granting `chat.color` therefore loses to `default` denying it unless `vip`
+inherits `default`. Most groups should inherit `default`.
+
+| Method | Result |
+| --- | --- |
+| `rift.permissions.add_group(uuid, group)` | Boolean: whether the membership was added |
+| `rift.permissions.remove_group(uuid, group)` | Boolean: whether a membership was removed |
+| `rift.permissions.groups(uuid)` | Sorted list of the player's stored groups, without `default` |
+
+Membership methods take a lowercase 32-digit player UUID; `*` is rejected. Adding
+requires a currently configured group other than `default`. A player can belong
+to at most 16 groups. Memberships live in the extension store under the reserved
+`rift.groups` namespace. With `storage` they survive restarts; without it they
+reset. They count toward the store's size and entry limits, and they follow its
+commit rules: a membership changes only after the snapshot is replaced. A reload
+that removes a group leaves its memberships dormant: they grant nothing, can be
+removed, and apply again if the group returns. Configuration has no static member
+lists. Grant the first manager through `permissions`, as shown above.
+
 ### Live permissions
 
 V2 `ctx.has_permission(node)` and command authorization consult current host
-permissions each time. `rift.permissions.has(uuid, node)` checks any UUID;
-`rift.permissions.set(uuid, node, true)` grants and `false` revokes, including a
-configured default grant. Set nil to remove the override and return to configured
-grants. UUIDs use lowercase 32-digit hex, or `*` for a default override.
+permissions each time. `rift.permissions.has(uuid, node)` checks any UUID.
+`rift.permissions.set(uuid, pattern, true)` grants and `false` revokes, including
+configured and group grants. The pattern may be a wildcard: setting `network.*`
+to false revokes every `network.` node. Set nil to remove the override and return
+to the configured policy. UUIDs use lowercase 32-digit hex, or `*` for a default
+override.
 
-Precedence is the UUID override, then `*` override, then the union of configured
-UUID/default grants. At most 4096 `(UUID, node)` overrides can exist. Overrides
-survive reconnects and reloads within this process but reset on restart; persist
-application policy in the store or refresh it from a service when needed.
+Rift checks layers in this order and uses the first one with a matching pattern:
 
-A committed reload updates configured v2 grants for existing players while their
-callback source and command registrations stay pinned. Overrides continue to
+1. UUID overrides
+2. `*` overrides
+3. Configured UUID permissions
+4. Groups
+5. Configured `*` permissions
+
+Inside a layer, the most specific pattern wins, so a broader pattern in an earlier
+layer beats an exact node in a later one. At most 4096 `(UUID, pattern)` overrides
+can exist. Overrides survive reconnects and reloads within this process but reset
+on restart. Persist application policy in the store or group memberships, or
+refresh it from a service when needed.
+
+A committed reload updates configured v2 grants and groups for existing players
+while their callback source and command registrations stay pinned. Overrides continue to
 apply until explicitly reset. A candidate or rejected reload changes no live
 grants. Commands check permission before invoking Lua, including after worker
 scheduling; transfers and queue admission see updated permissions through their
