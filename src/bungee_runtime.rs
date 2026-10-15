@@ -1,11 +1,14 @@
 //! BungeeCord queries use local presence and configured destinations. Requests
 //! arrive only from the session's backend; transfers enter its bounded control
-//! queue and use the ordinary policy and world-transition machinery.
+//! queue and use the ordinary policy and world-transition machinery. Messages,
+//! kicks and forwarded plugin messages enter the target players' bounded action
+//! queues, which their own sessions drain; a full queue drops the request.
 use crate::runtime::Snapshot;
 use rift::{
     bungeecord::{MAX_PAYLOAD_SIZE, Request, write_utf},
+    extensions::PlayerAction,
     players::Player,
-    protocol::PlayerIdentity,
+    protocol::{PlayerIdentity, validate_component},
 };
 use std::{io, net::SocketAddr, sync::Arc};
 
@@ -30,6 +33,23 @@ fn player(snapshot: &Snapshot, name: &str) -> Option<Player> {
         .snapshot()
         .into_iter()
         .find(|player| player.name.eq_ignore_ascii_case(name))
+}
+
+/// Deliver to a case-insensitive player name, or to every player for uppercase `ALL`.
+fn deliver(snapshot: &Snapshot, target: &str, action: PlayerAction) {
+    let players = snapshot.extensions.players();
+    if target == "ALL" {
+        players.send_all(&action);
+    } else {
+        players.send_named(target, action);
+    }
+}
+
+/// Parse a backend-supplied JSON text component; invalid components are dropped.
+fn component(json: &str) -> Option<serde_json::Value> {
+    let component = serde_json::from_str(json).ok()?;
+    validate_component(&component).ok()?;
+    Some(component)
 }
 
 fn strings(fields: &[&str]) -> io::Result<Vec<u8>> {
@@ -68,6 +88,53 @@ pub fn handle(
                 snapshot
                     .control
                     .plugin_transfer(&player, target, snapshot.clone());
+            }
+            return Ok(None);
+        }
+        Request::Forward {
+            server: target,
+            data,
+        } => {
+            let players = snapshot.extensions.players();
+            // As in Velocity, ALL and ONLINE both exclude the sending server and
+            // skip servers without a player to carry the message.
+            if target == "ALL" || target == "ONLINE" {
+                players.forward_to_servers(|server| server != current, &data);
+            } else if let Some(target) = server(snapshot, &target) {
+                players.forward_to_servers(|server| server == target, &data);
+            }
+            return Ok(None);
+        }
+        Request::ForwardToPlayer { player, data } => {
+            snapshot
+                .extensions
+                .players()
+                .forward_to_player(&player, &data);
+            return Ok(None);
+        }
+        Request::Message { player, message } => {
+            deliver(snapshot, &player, PlayerAction::Message(message));
+            return Ok(None);
+        }
+        Request::MessageRaw { player, message } => {
+            if let Some(message) = component(&message) {
+                deliver(snapshot, &player, PlayerAction::RawMessage(message));
+            }
+            return Ok(None);
+        }
+        Request::KickPlayer { player, reason } => {
+            snapshot
+                .extensions
+                .players()
+                .send_named(&player, PlayerAction::Kick(reason));
+            return Ok(None);
+        }
+        Request::KickPlayerRaw { player, reason } => {
+            if let Some(reason) = component(&reason) {
+                snapshot
+                    .extensions
+                    .players()
+                    .send_named(&player, PlayerAction::RawKick(reason));
             }
             return Ok(None);
         }
@@ -361,5 +428,164 @@ mod tests {
         query(&snapshot, Request::Connect("default".into()));
         query(&snapshot, Request::Connect("missing".into()));
         assert!(receiver.try_recv().is_err());
+    }
+
+    fn joined(
+        snapshot: &Snapshot,
+        id: u64,
+        name: &str,
+        server: &str,
+    ) -> (
+        rift::extensions::PlayerHandle,
+        tokio::sync::mpsc::Receiver<PlayerAction>,
+    ) {
+        snapshot
+            .extensions
+            .players()
+            .register(id, &[id as u8; 16], name, 774, server)
+    }
+
+    fn drain(queue: &mut tokio::sync::mpsc::Receiver<PlayerAction>) -> Vec<PlayerAction> {
+        std::iter::from_fn(|| queue.try_recv().ok()).collect()
+    }
+
+    fn forward(server: &str, data: &[u8]) -> PlayerAction {
+        PlayerAction::Forward {
+            server: server.into(),
+            data: data.to_vec(),
+        }
+    }
+
+    #[test]
+    fn forwards_reach_one_player_per_server_and_all_excludes_the_sender() {
+        let snapshot = snapshot();
+        // Alice sends from "default"; Bob and Carol share Lobby, the oldest
+        // connection carries the message, and Dave is on IPv6.
+        let (_alice, mut alice) = joined(&snapshot, 1, "Alice", "default");
+        let (_bob, mut bob) = joined(&snapshot, 2, "Bob", "Lobby");
+        let (_carol, mut carol) = joined(&snapshot, 3, "Carol", "Lobby");
+        let (_dave, mut dave) = joined(&snapshot, 4, "Dave", "IPv6");
+        for target in ["ALL", "ONLINE"] {
+            let data = target.as_bytes();
+            assert_eq!(
+                query(
+                    &snapshot,
+                    Request::Forward {
+                        server: target.into(),
+                        data: data.to_vec()
+                    }
+                ),
+                None
+            );
+            assert!(drain(&mut alice).is_empty());
+            assert_eq!(drain(&mut bob), [forward("Lobby", data)]);
+            assert!(drain(&mut carol).is_empty());
+            assert_eq!(drain(&mut dave), [forward("IPv6", data)]);
+        }
+        for (target, data) in [("lobby", b"one"), ("default", b"own"), ("all", b"low")] {
+            query(
+                &snapshot,
+                Request::Forward {
+                    server: target.into(),
+                    data: data.to_vec(),
+                },
+            );
+        }
+        assert_eq!(drain(&mut bob), [forward("Lobby", b"one")]);
+        assert_eq!(drain(&mut alice), [forward("default", b"own")]);
+        // "all" is a configured server without players, not a selector.
+        assert!(drain(&mut dave).is_empty() && drain(&mut carol).is_empty());
+
+        // A full queue passes the message to the next player on that server.
+        while snapshot
+            .extensions
+            .players()
+            .send_named("Bob", PlayerAction::Message("fill".into()))
+        {}
+        query(
+            &snapshot,
+            Request::Forward {
+                server: "Lobby".into(),
+                data: b"next".to_vec(),
+            },
+        );
+        assert_eq!(drain(&mut carol), [forward("Lobby", b"next")]);
+
+        query(
+            &snapshot,
+            Request::ForwardToPlayer {
+                player: "dAVE".into(),
+                data: b"direct".to_vec(),
+            },
+        );
+        query(
+            &snapshot,
+            Request::ForwardToPlayer {
+                player: "missing".into(),
+                data: b"lost".to_vec(),
+            },
+        );
+        assert_eq!(drain(&mut dave), [forward("IPv6", b"direct")]);
+    }
+
+    #[test]
+    fn messages_and_kicks_queue_for_named_or_all_players_and_drop_invalid_components() {
+        let snapshot = snapshot();
+        let (_alice, mut alice) = joined(&snapshot, 1, "Alice", "default");
+        let (_bob, mut bob) = joined(&snapshot, 2, "Bob", "Lobby");
+        let message = |player: &str, message: &str| Request::Message {
+            player: player.into(),
+            message: message.into(),
+        };
+        let raw = |player: &str, message: &str| Request::MessageRaw {
+            player: player.into(),
+            message: message.into(),
+        };
+        for request in [
+            message("ALL", "§aeveryone"),
+            message("bob", "only Bob"),
+            message("all", "a player named all"),
+            raw("ALL", r#"{"text":"raw","color":"red"}"#),
+            raw("Alice", "not json"),
+            raw("Alice", "42"),
+            raw("Alice", r#"["a",null]"#),
+            Request::KickPlayer {
+                player: "ALICE".into(),
+                reason: "Bye".into(),
+            },
+            Request::KickPlayerRaw {
+                player: "Bob".into(),
+                reason: r#""Raw bye""#.into(),
+            },
+            Request::KickPlayerRaw {
+                player: "Bob".into(),
+                reason: "{".into(),
+            },
+            Request::KickPlayer {
+                player: "ALL".into(),
+                reason: "Not a selector".into(),
+            },
+        ] {
+            assert_eq!(query(&snapshot, request), None);
+        }
+        let everyone = PlayerAction::Message("§aeveryone".into());
+        let raw = PlayerAction::RawMessage(serde_json::json!({"text": "raw", "color": "red"}));
+        assert_eq!(
+            drain(&mut alice),
+            [
+                everyone.clone(),
+                raw.clone(),
+                PlayerAction::Kick("Bye".into())
+            ]
+        );
+        assert_eq!(
+            drain(&mut bob),
+            [
+                everyone,
+                PlayerAction::Message("only Bob".into()),
+                raw,
+                PlayerAction::RawKick(serde_json::json!("Raw bye")),
+            ]
+        );
     }
 }

@@ -779,7 +779,7 @@ pub async fn handle(
                     // configuration transition. Drop the action rather than the session.
                     if !session.client.state.settled(rift::protocol::State::Play) {
                         phase_deadline = Deadline::now() + Duration::from_secs(30);
-                        if !matches!(action, PlayerAction::Kick(_)) { continue; }
+                        if !matches!(action, PlayerAction::Kick(_) | PlayerAction::RawKick(_)) { continue; }
                     }
                     match action {
                         PlayerAction::Message(text) => timeout(HANDSHAKE_TIMEOUT, session.send_system_message(&text)).await??,
@@ -787,9 +787,21 @@ pub async fn handle(
                         PlayerAction::Title { title, subtitle, times } => {
                             timeout(HANDSHAKE_TIMEOUT, session.send_title(&title, subtitle.as_deref(), times)).await??;
                         }
+                        PlayerAction::RawMessage(component) => timeout(HANDSHAKE_TIMEOUT, session.send_system_component(&component)).await??,
                         PlayerAction::Kick(reason) => {
                             let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect(&reason)).await;
                             break;
+                        }
+                        PlayerAction::RawKick(reason) => {
+                            let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect_component(&reason)).await;
+                            break;
+                        }
+                        // Forwarded plugin messages are addressed to a server, not to
+                        // the player. Drop one that would reach a different backend.
+                        PlayerAction::Forward { server, data } => {
+                            if server == current_backend && session.bungeecord_ready() {
+                                timeout(HANDSHAKE_TIMEOUT, session.send_bungeecord(&data)).await??;
+                            }
                         }
                         PlayerAction::Transfer(target) => {
                             if !session.can_switch() { continue; }

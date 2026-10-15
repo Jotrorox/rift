@@ -12,6 +12,7 @@ pub use framing::{Codec, MAX_FRAME_SIZE, MAX_PACKET_SIZE, Packet, Reader};
 pub(crate) use legacy::LegacyState;
 pub use packets::{Handshake, NextState, PacketKind, ProtocolVersion, disconnect, status_response};
 pub use packets::{PlayerIdentity, action_bar, system_message, title};
+pub use packets::{disconnect_component, system_component, validate_component};
 pub(crate) use packets::{login_identity, start_identity, success_identity};
 pub use state::{ConnectionState, Direction, State};
 use std::io;
@@ -62,6 +63,34 @@ pub fn read_string<'a>(bytes: &mut &'a [u8], max: usize) -> io::Result<&'a str> 
 pub fn write_string(value: &str, bytes: &mut Vec<u8>) {
     write_varint(value.len() as i32, bytes);
     bytes.extend_from_slice(value.as_bytes());
+}
+
+/// Write Java modified UTF-8 with its unsigned 16-bit byte length, as used by
+/// `DataOutput.writeUTF` and NBT strings. Reject overlong values before writing.
+pub fn write_modified_utf8(value: &str, bytes: &mut Vec<u8>) -> io::Result<()> {
+    let length = value
+        .encode_utf16()
+        .map(|unit| match unit {
+            1..=0x7f => 1usize,
+            0..=0x7ff => 2,
+            _ => 3,
+        })
+        .sum::<usize>();
+    let length =
+        u16::try_from(length).map_err(|_| invalid("modified UTF-8 string exceeds size limit"))?;
+    bytes.extend_from_slice(&length.to_be_bytes());
+    for unit in value.encode_utf16() {
+        match unit {
+            1..=0x7f => bytes.push(unit as u8),
+            0..=0x7ff => bytes.extend([0xc0 | (unit >> 6) as u8, 0x80 | (unit & 63) as u8]),
+            _ => bytes.extend([
+                0xe0 | (unit >> 12) as u8,
+                0x80 | ((unit >> 6) & 63) as u8,
+                0x80 | (unit & 63) as u8,
+            ]),
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

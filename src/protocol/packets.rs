@@ -320,10 +320,58 @@ pub enum PacketKind {
     Unknown,
 }
 
+/// Chat component content: literal text from Rift, or a JSON text component
+/// supplied by a trusted backend plugin.
+#[derive(Clone, Copy)]
+pub(crate) enum Text<'a> {
+    Literal(&'a str),
+    Component(&'a serde_json::Value),
+}
+
+impl Text<'_> {
+    /// Login always uses JSON. Configuration and play use network NBT from 1.20.3.
+    fn write(self, nbt: bool, data: &mut Vec<u8>) -> io::Result<()> {
+        match (self, nbt) {
+            // Anonymous NBT TAG_String is a valid literal text component.
+            (Self::Literal(text), true) => {
+                data.push(8);
+                super::write_modified_utf8(text, data)
+                    .map_err(|_| invalid("text component too long"))
+            }
+            (Self::Literal(text), false) => {
+                write_string(&serde_json::json!({"text": text}).to_string(), data);
+                Ok(())
+            }
+            (Self::Component(component), true) => super::nbt::component(component, data),
+            (Self::Component(component), false) => {
+                write_string(&component.to_string(), data);
+                Ok(())
+            }
+        }
+    }
+}
+
 pub fn disconnect(
     version: Option<ProtocolVersion>,
     state: State,
     reason: &str,
+) -> io::Result<Packet> {
+    disconnect_text(version, state, Text::Literal(reason))
+}
+
+/// Disconnect with a JSON text component, as validated by [`validate_component`].
+pub fn disconnect_component(
+    version: Option<ProtocolVersion>,
+    state: State,
+    reason: &serde_json::Value,
+) -> io::Result<Packet> {
+    disconnect_text(version, state, Text::Component(reason))
+}
+
+pub(crate) fn disconnect_text(
+    version: Option<ProtocolVersion>,
+    state: State,
+    reason: Text,
 ) -> io::Result<Packet> {
     let id = match state {
         State::Login => 0,
@@ -336,30 +384,20 @@ pub fn disconnect(
         _ => return Err(invalid("cannot disconnect in this protocol state")),
     };
     let mut data = Vec::new();
-    if state != State::Login && version.is_some_and(ProtocolVersion::nbt_components) {
-        // Anonymous NBT TAG_String is a valid literal text component. Encode Java
-        // modified UTF-8, including supplementary characters as surrogate pairs.
-        let mut text = Vec::new();
-        for unit in reason.encode_utf16() {
-            match unit {
-                1..=0x7f => text.push(unit as u8),
-                0..=0x7ff => text.extend([0xc0 | (unit >> 6) as u8, 0x80 | (unit & 63) as u8]),
-                _ => text.extend([
-                    0xe0 | (unit >> 12) as u8,
-                    0x80 | ((unit >> 6) & 63) as u8,
-                    0x80 | (unit & 63) as u8,
-                ]),
-            }
-        }
-        let length =
-            u16::try_from(text.len()).map_err(|_| invalid("disconnect reason too long"))?;
-        data.push(8);
-        data.extend_from_slice(&length.to_be_bytes());
-        data.extend(text);
-    } else {
-        write_string(&serde_json::json!({"text": reason}).to_string(), &mut data);
-    }
+    reason.write(
+        state != State::Login && version.is_some_and(ProtocolVersion::nbt_components),
+        &mut data,
+    )?;
     Ok(Packet::new(id, data))
+}
+
+/// Check a backend-supplied JSON text component before queueing it: the root
+/// must be text, a list or an object, with an NBT form for 1.20.3+ clients.
+pub fn validate_component(component: &serde_json::Value) -> io::Result<()> {
+    if !(component.is_string() || component.is_array() || component.is_object()) {
+        return Err(invalid("text component must be a string, list or object"));
+    }
+    super::nbt::component(component, &mut Vec::new())
 }
 
 pub fn status_response(protocol: i32, online: u64, maximum: usize, description: &str) -> Packet {
@@ -515,11 +553,19 @@ fn switching(version: ProtocolVersion) -> io::Result<super::switching::Switching
 
 /// Encode a network command response only for an explicitly switchable version.
 pub fn system_message(version: ProtocolVersion, message: &str) -> io::Result<Packet> {
-    switching(version)?.system_message(version, message)
+    switching(version)?.system_message(version, Text::Literal(message))
+}
+
+/// A system chat message from a JSON text component, as validated by [`validate_component`].
+pub fn system_component(
+    version: ProtocolVersion,
+    message: &serde_json::Value,
+) -> io::Result<Packet> {
+    switching(version)?.system_message(version, Text::Component(message))
 }
 
 pub fn action_bar(version: ProtocolVersion, message: &str) -> io::Result<Packet> {
-    switching(version)?.action_bar(version, message)
+    switching(version)?.action_bar(version, Text::Literal(message))
 }
 
 /// Title packets in send order; `times` are fade-in, stay and fade-out ticks.

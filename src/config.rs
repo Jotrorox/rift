@@ -74,7 +74,8 @@ pub struct Config {
 /// Hubs are explicit destinations for `/hub` and outage recovery.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Network {
-    /// Handle trusted backend BungeeCord transfer and query plugin messages.
+    /// Handle trusted backend BungeeCord plugin messages: transfers, queries,
+    /// forwarding, chat messages and kicks.
     pub bungeecord: bool,
     pub initial: Vec<String>,
     pub hubs: Vec<String>,

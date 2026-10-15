@@ -862,6 +862,16 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             .await
     }
 
+    /// Send a JSON text component checked by `protocol::validate_component`.
+    pub async fn send_system_component(&mut self, message: &serde_json::Value) -> io::Result<()> {
+        self.client.flush_pending().await?;
+        if !self.client.state.settled(State::Play) {
+            return Err(protocol::invalid("system messages require play state"));
+        }
+        self.send_client(&protocol::system_component(self.version()?, message)?)
+            .await
+    }
+
     pub async fn send_action_bar(&mut self, message: &str) -> io::Result<()> {
         self.client.flush_pending().await?;
         if !self.client.state.settled(State::Play) {
@@ -888,10 +898,20 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         Ok(())
     }
 
+    /// Whether `send_bungeecord` can currently reach a playing backend.
+    pub fn bungeecord_ready(&self) -> bool {
+        self.bungeecord
+            && self.can_switch()
+            && self
+                .backend
+                .as_ref()
+                .is_some_and(|backend| backend.state.settled(State::Play))
+    }
+
     /// Return a compatibility response to the current backend. Queue the write
     /// through its connection so cancellation cannot truncate or duplicate it.
     pub async fn send_bungeecord(&mut self, payload: &[u8]) -> io::Result<()> {
-        if !self.bungeecord || !self.can_switch() {
+        if !self.bungeecord_ready() {
             return Err(protocol::invalid(
                 "BungeeCord responses require joined play state",
             ));
@@ -1175,10 +1195,26 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
     }
 
     pub async fn disconnect(&mut self, reason: &str) -> io::Result<()> {
+        self.disconnect_with(|version, state| protocol::disconnect(version, state, reason))
+            .await
+    }
+
+    /// Disconnect with a JSON text component checked by `protocol::validate_component`.
+    pub async fn disconnect_component(&mut self, reason: &serde_json::Value) -> io::Result<()> {
+        self.disconnect_with(|version, state| {
+            protocol::disconnect_component(version, state, reason)
+        })
+        .await
+    }
+
+    async fn disconnect_with(
+        &mut self,
+        packet: impl FnOnce(Option<ProtocolVersion>, State) -> io::Result<Packet>,
+    ) -> io::Result<()> {
         self.client.flush_pending().await?;
         let state = self.client.state.phase(Direction::Clientbound);
         if state != State::Closed {
-            let packet = protocol::disconnect(self.version, state, reason)?;
+            let packet = packet(self.version, state)?;
             self.client
                 .codec
                 .write(&mut self.client.io, &packet)

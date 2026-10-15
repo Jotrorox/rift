@@ -718,3 +718,88 @@ fn command_parser_properties_follow_each_registry() {
         }
     }
 }
+
+#[test]
+fn json_components_keep_json_until_1_20_3_and_then_follow_vanilla_nbt_conversion() {
+    let component = serde_json::json!({"extra": ["a", {"bold": true}, 7, 2.5, 10_000_000_000_i64]});
+    let json = component.to_string();
+    for number in [47, 340, 764] {
+        let version = ProtocolVersion::new(number).unwrap();
+        for packet in [
+            system_component(version, &component).unwrap(),
+            disconnect_component(Some(version), State::Play, &component).unwrap(),
+        ] {
+            assert_eq!(
+                read_string(&mut packet.data.as_slice(), 262144).unwrap(),
+                json
+            );
+        }
+    }
+    let version = ProtocolVersion::new(765).unwrap();
+    // Login packets use JSON in every version.
+    let login = disconnect_component(Some(version), State::Login, &component).unwrap();
+    assert_eq!(
+        read_string(&mut login.data.as_slice(), 262144).unwrap(),
+        json
+    );
+
+    let utf = |text: &str| [&(text.len() as u16).to_be_bytes()[..], text.as_bytes()].concat();
+    let wrapped = |tag: u8, payload: &[u8]| [&[tag, 0, 0][..], payload, &[0]].concat();
+    let mut expected = vec![10, 9];
+    expected.extend(utf("extra"));
+    // A mixed list holds compounds; non-compounds are wrapped under "".
+    expected.extend([10, 0, 0, 0, 5]);
+    expected.extend(wrapped(8, &utf("a")));
+    expected.extend([1, 0, 4, b'b', b'o', b'l', b'd', 1, 0]);
+    expected.extend(wrapped(3, &7_i32.to_be_bytes()));
+    expected.extend(wrapped(6, &2.5_f64.to_be_bytes()));
+    expected.extend(wrapped(4, &10_000_000_000_i64.to_be_bytes()));
+    expected.push(0);
+    for state in [State::Configuration, State::Play] {
+        assert_eq!(
+            disconnect_component(Some(version), state, &component)
+                .unwrap()
+                .data,
+            expected
+        );
+    }
+    let mut chat = expected.clone();
+    chat.push(0);
+    assert_eq!(system_component(version, &component).unwrap().data, chat);
+
+    // Strings match literal text; homogeneous and empty lists keep their type.
+    // Object nulls are omitted, as JsonOps does.
+    for (component, expected) in [
+        (serde_json::json!("hi"), vec![8, 0, 2, b'h', b'i']),
+        (
+            serde_json::json!(["a", "b"]),
+            [&[9, 8, 0, 0, 0, 2][..], &utf("a"), &utf("b")].concat(),
+        ),
+        (serde_json::json!([]), vec![9, 0, 0, 0, 0, 0]),
+        (
+            serde_json::json!({"color": null, "text": ""}),
+            [&[10, 8][..], &utf("text"), &utf(""), &[0]].concat(),
+        ),
+    ] {
+        validate_component(&component).unwrap();
+        assert_eq!(
+            disconnect_component(Some(version), State::Play, &component)
+                .unwrap()
+                .data,
+            expected
+        );
+    }
+    assert_eq!(
+        disconnect(Some(version), State::Play, "hi").unwrap().data,
+        [8, 0, 2, b'h', b'i']
+    );
+    for invalid in [
+        serde_json::json!(null),
+        serde_json::json!(1),
+        serde_json::json!(true),
+        serde_json::json!(["a", null]),
+        serde_json::json!({"text": "x".repeat(65536)}),
+    ] {
+        assert!(validate_component(&invalid).is_err(), "{invalid}");
+    }
+}

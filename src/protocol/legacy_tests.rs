@@ -1,14 +1,11 @@
 use super::*;
+use crate::protocol::{action_bar, system_message};
 
 #[test]
 fn proxy_messages_use_system_position_until_the_1_19_1_overlay_flag() {
     for number in [47, 340, 404, 735, 758, 759, 760, 761, 764] {
         let version = ProtocolVersion::new(number).unwrap();
-        let packet = version
-            .switching()
-            .unwrap()
-            .system_message(version, "proxy")
-            .unwrap();
+        let packet = system_message(version, "proxy").unwrap();
         let mut data = packet.data.as_slice();
         assert_eq!(
             read_string(&mut data, 32767).unwrap(),
@@ -20,11 +17,7 @@ fn proxy_messages_use_system_position_until_the_1_19_1_overlay_flag() {
         }
         assert_eq!(data, expected);
         // The action bar is position 2, then the overlay flag.
-        let packet = version
-            .switching()
-            .unwrap()
-            .action_bar(version, "proxy")
-            .unwrap();
+        let packet = action_bar(version, "proxy").unwrap();
         let mut data = packet.data.as_slice();
         read_string(&mut data, 32767).unwrap();
         expected[0] = if number <= 759 { 2 } else { 1 };
