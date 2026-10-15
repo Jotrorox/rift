@@ -14,9 +14,9 @@ pub(super) struct LegacyIds {
     pub keepalive: i32,
     pub keepalive_reply: i32,
     boss: i32,
-    players: i32,
-    remove_players: i32,
-    header: i32,
+    pub players: i32,
+    pub remove_players: i32,
+    pub header: i32,
     title: i32,
 }
 
@@ -115,47 +115,6 @@ pub(super) fn world(version: i32, packet: &Packet) -> io::Result<(Packet, Packet
     Ok((join, Packet::new(ids.respawn, respawn)))
 }
 
-fn count(bytes: &mut &[u8]) -> io::Result<usize> {
-    let n = read_varint(bytes)?;
-    if n < 0 || n as usize > bytes.len() {
-        return Err(invalid("invalid legacy collection length"));
-    }
-    Ok(n as usize)
-}
-fn blob(bytes: &mut &[u8]) -> io::Result<()> {
-    let n = count(bytes)?;
-    take(bytes, n)?;
-    Ok(())
-}
-fn profile(bytes: &mut &[u8]) -> io::Result<()> {
-    read_string(bytes, 16)?;
-    for _ in 0..count(bytes)? {
-        read_string(bytes, 32767)?;
-        read_string(bytes, 32767)?;
-        if boolean(bytes)? {
-            read_string(bytes, 32767)?;
-        }
-    }
-    Ok(())
-}
-fn display(bytes: &mut &[u8]) -> io::Result<()> {
-    if boolean(bytes)? {
-        read_string(bytes, 262144)?;
-    }
-    Ok(())
-}
-fn key(bytes: &mut &[u8], session: bool) -> io::Result<()> {
-    if boolean(bytes)? {
-        if session {
-            take(bytes, 16)?;
-        }
-        take(bytes, 8)?;
-        blob(bytes)?;
-        blob(bytes)?;
-    }
-    Ok(())
-}
-
 #[derive(Default)]
 pub(crate) struct LegacyState {
     players: BTreeSet<[u8; 16]>,
@@ -179,68 +138,20 @@ impl LegacyState {
                 }
                 _ => {}
             }
-        } else if packet.id == ids.remove_players {
-            for _ in 0..count(&mut bytes)? {
-                self.players.remove(take(&mut bytes, 16)?);
-            }
-        } else if packet.id == ids.players {
-            let action = if number >= 761 {
-                i32::from(take(&mut bytes, 1)?[0])
-            } else {
-                read_varint(&mut bytes)?
+        } else {
+            let tab = super::tab_list::TabIds {
+                players: ids.players,
+                remove_players: ids.remove_players,
+                header: ids.header,
             };
-            if (number >= 761 && action & !63 != 0) || (number < 761 && !(0..=4).contains(&action))
-            {
-                return Err(invalid("unknown player list action"));
-            }
-            for _ in 0..count(&mut bytes)? {
-                let uuid: [u8; 16] = take(&mut bytes, 16)?.try_into().unwrap();
-                if number >= 761 {
-                    if action & 1 != 0 {
-                        profile(&mut bytes)?;
-                        self.players.insert(uuid);
-                    }
-                    if action & 2 != 0 {
-                        key(&mut bytes, true)?;
-                    }
-                    if action & 4 != 0 {
-                        read_varint(&mut bytes)?;
-                    }
-                    if action & 8 != 0 {
-                        boolean(&mut bytes)?;
-                    }
-                    if action & 16 != 0 {
-                        read_varint(&mut bytes)?;
-                    }
-                    if action & 32 != 0 {
-                        display(&mut bytes)?;
-                    }
+            let players = &mut self.players;
+            super::tab_list::changes(version, tab, packet, |uuid, added| {
+                if added {
+                    players.insert(uuid);
                 } else {
-                    match action {
-                        0 => {
-                            profile(&mut bytes)?;
-                            read_varint(&mut bytes)?;
-                            read_varint(&mut bytes)?;
-                            display(&mut bytes)?;
-                            if number >= 759 {
-                                key(&mut bytes, false)?;
-                            }
-                            self.players.insert(uuid);
-                        }
-                        1 | 2 => {
-                            read_varint(&mut bytes)?;
-                        }
-                        3 => display(&mut bytes)?,
-                        4 => {
-                            self.players.remove(&uuid);
-                        }
-                        _ => unreachable!(),
-                    }
+                    players.remove(&uuid);
                 }
-            }
-            if !bytes.is_empty() {
-                return Err(invalid("trailing player list data"));
-            }
+            })?;
         }
         if self.players.len() > 65536 || self.bosses.len() > 4096 {
             return Err(invalid("legacy state tracking limit exceeded"));

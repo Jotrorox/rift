@@ -48,6 +48,18 @@ impl SessionFixture {
     }
 
     async fn configured(access: Option<rift::config::ServerAccess>, network_enabled: bool) -> Self {
+        Self::build(access, network_enabled, None).await
+    }
+
+    async fn with_tab_list(tab_list: rift::tab_list::TabList) -> Self {
+        Self::build(None, true, Some(tab_list)).await
+    }
+
+    async fn build(
+        access: Option<rift::config::ServerAccess>,
+        network_enabled: bool,
+        tab_list: Option<rift::tab_list::TabList>,
+    ) -> Self {
         let first = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let second = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let frontend = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -64,6 +76,7 @@ impl SessionFixture {
         if let Some(access) = access {
             config.network.access.insert("second".into(), access);
         }
+        config.tab_list = tab_list;
         let snapshot = Arc::new(Snapshot::new(config, None).unwrap());
         let metrics = Arc::new(Metrics::default());
         let mut client = TcpStream::connect(frontend.local_addr().unwrap())
@@ -712,6 +725,130 @@ async fn player_actions_reach_the_client_and_kick_closes_the_session() {
         assert!(!send(PlayerAction::Message("gone".into())));
         assert_eq!(fixture.metrics.players.get(), 0);
         assert!(fixture.snapshot.control.players.lock().unwrap().is_empty());
+    })
+    .await
+    .unwrap();
+}
+
+/// 1.21.11 tab list packets: NBT string components, then Player Info entries.
+fn tab_header(header: &str, footer: &str) -> Packet {
+    let mut data = Vec::new();
+    for text in [header, footer] {
+        data.push(8);
+        data.extend((text.len() as u16).to_be_bytes());
+        data.extend(text.as_bytes());
+    }
+    Packet::new(0x78, data)
+}
+
+fn tab_add(uuid: u8, name: &str) -> Packet {
+    let mut data = vec![9, 1];
+    data.extend([uuid; 16]);
+    write_string(name, &mut data);
+    data.extend([0, 1]);
+    Packet::new(0x44, data)
+}
+
+#[tokio::test]
+async fn tab_list_shows_header_footer_and_players_on_other_servers() {
+    use rift::extensions::PlayerAction;
+    timeout(Duration::from_secs(10), async {
+        let mut fixture = SessionFixture::with_tab_list(rift::tab_list::TabList {
+            header: Some(serde_json::json!("Hi {player}")),
+            footer: Some(serde_json::json!("{online} on {server}")),
+            network: true,
+        })
+        .await;
+        let codec = fixture.codec;
+        assert_eq!(
+            receive(&mut fixture.client, codec).await,
+            tab_header("Hi Player", "1 on default")
+        );
+        // A player elsewhere joins the list and the count.
+        let remote = fixture
+            .snapshot
+            .players
+            .register([8; 16], "Remote", "second")
+            .unwrap();
+        assert_eq!(
+            receive(&mut fixture.client, codec).await,
+            tab_header("Hi Player", "2 on default")
+        );
+        assert_eq!(
+            receive(&mut fixture.client, codec).await,
+            tab_add(8, "Remote")
+        );
+        // The backend's own header is dropped while Rift owns it; its entry for
+        // the same player replaces Rift's without a removal.
+        let mut backend_add = vec![9, 1];
+        backend_add.extend([8; 16]);
+        write_string("Remote", &mut backend_add);
+        backend_add.extend([0, 1]);
+        for packet in [
+            tab_header("Backend", "header"),
+            Packet::new(0x44, backend_add.clone()),
+        ] {
+            codec.write(&mut fixture.backend, &packet).await.unwrap();
+        }
+        assert_eq!(
+            receive(&mut fixture.client, codec).await,
+            Packet::new(0x44, backend_add)
+        );
+        remote.set_server("default");
+        drop(remote);
+        assert_eq!(
+            receive(&mut fixture.client, codec).await,
+            tab_header("Hi Player", "1 on default")
+        );
+        // Rift removes only its own entries once their player leaves.
+        let other = fixture
+            .snapshot
+            .players
+            .register([9; 16], "Other", "second")
+            .unwrap();
+        assert_eq!(
+            receive(&mut fixture.client, codec).await,
+            tab_header("Hi Player", "2 on default")
+        );
+        assert_eq!(
+            receive(&mut fixture.client, codec).await,
+            tab_add(9, "Other")
+        );
+        drop(other);
+        assert_eq!(
+            receive(&mut fixture.client, codec).await,
+            tab_header("Hi Player", "1 on default")
+        );
+        let mut removal = vec![1];
+        removal.extend([9; 16]);
+        assert_eq!(
+            receive(&mut fixture.client, codec).await,
+            Packet::new(0x43, removal)
+        );
+        // A per-player override from rift.players replaces configured text.
+        let players = fixture.snapshot.extensions.players().clone();
+        assert!(
+            players
+                .send(
+                    "player",
+                    PlayerAction::TabList(Some(rift::tab_list::Override {
+                        header: Some(serde_json::json!("VIP {player}")),
+                        footer: None,
+                    })),
+                )
+                .unwrap()
+        );
+        assert_eq!(
+            receive(&mut fixture.client, codec).await,
+            tab_header("VIP Player", "1 on default")
+        );
+        assert!(players.send("player", PlayerAction::TabList(None)).unwrap());
+        assert_eq!(
+            receive(&mut fixture.client, codec).await,
+            tab_header("Hi Player", "1 on default")
+        );
+        fixture.task.abort();
+        let _ = fixture.task.await;
     })
     .await
     .unwrap();

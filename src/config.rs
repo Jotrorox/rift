@@ -23,6 +23,7 @@ mod managed;
 mod messaging;
 mod server_list;
 mod services;
+mod tab_list;
 mod templates;
 
 // Configuration evaluation includes cold VM setup and can be descheduled on
@@ -59,6 +60,8 @@ pub struct Config {
     pub status_cache: Option<StatusCache>,
     /// Rift-owned server-list responses; replaces backend status passthrough.
     pub server_list: Option<ServerList>,
+    /// Rift-owned tab list header/footer and optional network-wide entries.
+    pub tab_list: Option<crate::tab_list::TabList>,
     pub metrics: Option<SocketAddr>,
     pub admin: Option<Admin>,
     pub maintenance: bool,
@@ -328,6 +331,7 @@ impl Config {
             health_check: None,
             status_cache: None,
             server_list: None,
+            tab_list: None,
             metrics: None,
             admin: None,
             maintenance: false,
@@ -464,6 +468,7 @@ impl Config {
                     "health_check",
                     "status_cache",
                     "server_list",
+                    "tab_list",
                     "metrics",
                     "admin",
                     "maintenance",
@@ -634,6 +639,7 @@ impl Config {
             })
             .transpose()?;
             let server_list = server_list::parse(&root, directory)?;
+            let tab_list = tab_list::parse(&root)?;
             let metrics = match root.get::<Value>("metrics").map_err(|e| e.to_string())? {
                 Value::Nil | Value::Boolean(false) => None,
                 value => Some(
@@ -738,6 +744,7 @@ impl Config {
                 health_check,
                 status_cache,
                 server_list,
+                tab_list,
                 metrics,
                 admin,
                 maintenance,

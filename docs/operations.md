@@ -186,6 +186,45 @@ On an error, overload, an invalid result or an oversized response, Rift logs
 a `status_hook_failed` event and serves the default document, so the server
 list never goes blank because of a script.
 
+## Tab list: header, footer and network-wide players
+
+Set `tab_list` to give every player the same tab list header and footer on
+every backend, and optionally to list everyone on the network:
+
+```lua
+rift.config.tab_list = {
+    -- A string (section-sign codes work) or a chat component table.
+    header = { text = "My Network", color = "gold", bold = true },
+    footer = "\u{00A7}7{online} players online \u{00A7}8| \u{00A7}7You are on {server}",
+    players = "network", -- "server" (the default) lists only the current backend's players.
+}
+```
+
+Header and footer text may use `{player}` (the player's name), `{server}` (their
+current backend), `{online}` (players connected through Rift) and
+`{server_online}` (players on their backend); other text in braces is left as
+it is. Rift sends the header and footer when the player joins, again after each
+server switch, and within half a second of any change to the values they show.
+While Rift sets a header and footer, it drops the ones backends send, such as
+those from a tab list plugin. Setting only one of `header` and `footer` leaves
+the other blank. Each is limited to 4096 bytes before placeholders are replaced.
+
+With `players = "network"`, each player's list also shows the players on every
+other backend. Backends keep listing their own players, with game mode, ping and
+display names from their plugins; Rift only adds players the current backend
+does not list, so a player is never listed twice and moving between servers
+needs no cleanup. Entries Rift adds show the player's skin when authentication
+is enabled and the default skin otherwise, with full signal bars and no game
+mode or display name. Vanished players remain hidden from their own server's list,
+but Rift lists them to players on other servers.
+
+Configuration reloads apply to connected players. Removing `tab_list` removes
+Rift's entries and blanks the header and footer, after which backends' own
+updates show again. Extensions can set a player's header and footer with
+`rift.players.tab_list` (see [extensions](extensions.md#online-players)).
+The tab list works on every Minecraft version Rift can switch players on
+(1.8.9–26.3).
+
 ## Run behind a load balancer (PROXY protocol)
 
 When players reach Rift through TCPShield, Cloudflare Spectrum, HAProxy or a
@@ -404,6 +443,7 @@ isolation and cannot detect changes incompatible with an already running process
 | Routes, backend addresses, fallback, hooks | New connections use the new snapshot; existing sessions keep their sockets and routing |
 | Connection/login limits, configured maintenance/draining | Apply to new admission/attachments; current sessions continue |
 | Health probes, status cache, `server_list` (favicon files are reread) | Rebuilt after successful reload |
+| `tab_list` | Applied to connected players within half a second |
 | Shutdown deadline | New value applies to the later shutdown drain |
 | `web`, `status`, standalone `metrics`, web bearer token | Can enable, disable or move live; replacement sockets bind before commit |
 | Gameplay listeners, operational `admin` bind/token variable/permissions | Restart required; incompatible reload rejects the entire candidate |

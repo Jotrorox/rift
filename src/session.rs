@@ -160,6 +160,7 @@ pub struct Session<C, B> {
     client_eof: bool,
     read_chunk_size: usize,
     legacy_state: protocol::LegacyState,
+    tab_list: protocol::TabList,
 }
 
 impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Session<C, B> {
@@ -195,6 +196,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             client_eof: false,
             read_chunk_size: 32 * 1024,
             legacy_state: protocol::LegacyState::default(),
+            tab_list: protocol::TabList::default(),
         })
     }
 
@@ -515,9 +517,15 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                     }
                     return Err(error);
                 }
+                // Rift's entries name players elsewhere relative to the old
+                // server; the new server's players may be among them.
+                for packet in self.tab_list.remove_remote(version)? {
+                    self.send_client(&packet).await?;
+                }
                 for packet in self.legacy_state.reset(version)? {
                     self.send_client(&packet).await?;
                 }
+                self.tab_list.reset();
                 let (join, respawn) = caps.legacy_world(&join)?;
                 self.send_client(&join).await?;
                 self.send_client(&respawn).await?;
@@ -564,6 +572,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             // Supported clients: ClientPacketListener.handleConfigurationStart /
             // handleLogin; ClientConfigurationPacketListenerImpl.finish.
             self.joined = false;
+            self.tab_list.reset();
             if let Some(settings) = &self.client_information {
                 backend.codec.write(&mut backend.io, settings).await?;
             }
@@ -898,6 +907,35 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         Ok(())
     }
 
+    /// Bring the client's tab list header, footer and extra entries to `view`.
+    /// Entries the backend lists itself, and the player's own, are left alone.
+    pub async fn sync_tab_list(&mut self, view: &protocol::TabView) -> io::Result<()> {
+        self.client.flush_pending().await?;
+        if !self.joined || !self.client.state.settled(State::Play) {
+            return Err(protocol::invalid("tab lists require a joined player"));
+        }
+        let own = self.identity.as_ref().and_then(|identity| identity.uuid);
+        for packet in self.tab_list.sync(self.version()?, own, view)? {
+            self.send_client(&packet).await?;
+        }
+        Ok(())
+    }
+
+    /// Whether `sync_tab_list` can write to the client now.
+    pub fn tab_list_ready(&self) -> bool {
+        self.joined && self.client.state.settled(State::Play)
+    }
+
+    /// Changes whenever the client's tab list changed outside `sync_tab_list`.
+    pub fn tab_list_revision(&self) -> u64 {
+        self.tab_list.revision()
+    }
+
+    /// Whether Rift currently shows a header, footer or entries of its own.
+    pub fn tab_list_modified(&self) -> bool {
+        self.tab_list.modified()
+    }
+
     /// Whether `send_bungeecord` can currently reach a playing backend.
     pub fn bungeecord_ready(&self) -> bool {
         self.bungeecord
@@ -1079,6 +1117,10 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                     }
                     if phase == State::Play {
                         self.legacy_state.observe(version, &packet)?;
+                        if !self.tab_list.observe(version, &packet)? {
+                            // Rift owns the header and footer.
+                            return Ok(SessionEvent::Packet);
+                        }
                     }
                     match kind {
                         PacketKind::LoginPluginRequest => {
@@ -1153,6 +1195,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                         }
                         PacketKind::StartConfiguration => {
                             self.joined = false;
+                            self.tab_list.reset();
                             self.client
                                 .queue(version, Direction::Clientbound, &packet)?;
                         }

@@ -17,3 +17,4 @@ pub mod routing;
 mod script;
 pub mod server_list;
 pub mod session;
+pub mod tab_list;
