@@ -697,6 +697,12 @@ pub async fn handle(
             .to_owned();
         let mut queue_tick = tokio::time::interval(Duration::from_secs(1));
         queue_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // A header and footer from rift.players.tab_list, kept across switches.
+        let mut tab_override: Option<rift::tab_list::Override> = None;
+        let mut tab_override_revision = 0u64;
+        let mut tab_synced = None;
+        let mut tab_tick = tokio::time::interval(Duration::from_millis(500));
+        tab_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             let live_snapshot = snapshot.latest();
             let network = Network {
@@ -727,6 +733,11 @@ pub async fn handle(
                 && (!network_enabled || session.can_switch())
                 && !session.switch_in_progress();
             let extension_enabled = session.extension.is_some();
+            let tab_enabled = playing
+                && session.tab_list_ready()
+                && (live_snapshot.config.tab_list.is_some()
+                    || tab_override.is_some()
+                    || session.tab_list_modified());
             let forward = async {
                 if playing {
                     session.forward().await
@@ -771,6 +782,36 @@ pub async fn handle(
                     }
                     continue;
                 }
+                _ = tab_tick.tick(), if tab_enabled && transfer_reply.is_none() => {
+                    // The cancelled forward poll may already have observed a
+                    // backend configuration transition; sync after the next join.
+                    if !session.tab_list_ready() {
+                        if !session.client.state.settled(rift::protocol::State::Play) {
+                            phase_deadline = Deadline::now() + Duration::from_secs(30);
+                        }
+                        continue;
+                    }
+                    // Rebuild the tab list only after something it shows has changed.
+                    let tab_key = (
+                        live_snapshot.players.generation(),
+                        live_snapshot.generation,
+                        session.tab_list_revision(),
+                        tab_override_revision,
+                    );
+                    if tab_synced == Some(tab_key) {
+                        continue;
+                    }
+                    let view = rift::tab_list::view(
+                        &live_snapshot.players,
+                        live_snapshot.config.tab_list.as_ref(),
+                        tab_override.as_ref(),
+                        session.player_name().unwrap_or_default(),
+                        &current_backend,
+                    );
+                    timeout(HANDSHAKE_TIMEOUT, session.sync_tab_list(&view)).await??;
+                    tab_synced = Some(tab_key);
+                    continue;
+                }
                 action = async { actions.as_mut().expect("registered player").recv().await },
                     if playing && actions.is_some() && transfer_reply.is_none() => {
                     let Some(action) = action else { actions = None; continue; };
@@ -779,7 +820,8 @@ pub async fn handle(
                     // configuration transition. Drop the action rather than the session.
                     if !session.client.state.settled(rift::protocol::State::Play) {
                         phase_deadline = Deadline::now() + Duration::from_secs(30);
-                        if !matches!(action, PlayerAction::Kick(_) | PlayerAction::RawKick(_)) { continue; }
+                        // Tab list overrides are state and apply after the next join.
+                        if !matches!(action, PlayerAction::Kick(_) | PlayerAction::RawKick(_) | PlayerAction::TabList(_)) { continue; }
                     }
                     match action {
                         PlayerAction::Message(text) => timeout(HANDSHAKE_TIMEOUT, session.send_system_message(&text)).await??,
@@ -802,6 +844,10 @@ pub async fn handle(
                             if server == current_backend && session.bungeecord_ready() {
                                 timeout(HANDSHAKE_TIMEOUT, session.send_bungeecord(&data)).await??;
                             }
+                        }
+                        PlayerAction::TabList(custom) => {
+                            tab_override = custom;
+                            tab_override_revision += 1;
                         }
                         PlayerAction::Transfer(target) => {
                             if !session.can_switch() { continue; }
@@ -965,7 +1011,13 @@ pub async fn handle(
                                 .register(uuid, identity.name, &current_backend)
                         };
                         match registered {
-                            Ok(guard) => registration = Some(guard),
+                            Ok(guard) => {
+                                // Skins for other players' network tab lists.
+                                if let Some(profile) = session.authenticated_profile() {
+                                    guard.set_properties(&profile.properties);
+                                }
+                                registration = Some(guard);
+                            }
                             Err(error) => {
                                 let _ = timeout(
                                     HANDSHAKE_TIMEOUT,

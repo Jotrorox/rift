@@ -122,6 +122,11 @@ checks, rate limits and metrics. Hostname routing also works from the CLI:
 Routes prefer exact names, then the longest wildcard suffix, then the default.
 Listeners require an IP and port; backends accept IPs or DNS names with ports.
 
+Rift can also own the server-list entry and the in-game tab list: set a
+network MOTD and favicon with `server_list`, and a tab list header, footer and
+network-wide player list with `tab_list`. See the
+[operations guide](docs/operations.md#tab-list-header-footer-and-network-wide-players).
+
 Validate edits with `rift check rift.lua`. Reload with SIGHUP on Unix,
 Ctrl-Break on Windows, or `rift admin reload` when administration is configured.
 Invalid reloads retain the working configuration; existing sessions keep their
@@ -135,7 +140,7 @@ commands with UUID permission checks, and FIFO server queues. API v2 adds
 durable namespaced state, recurring jobs, configured HTTP integrations,
 permission groups with inheritance and wildcards, permissions that update
 during a session, and an online-player API for messages, titles, action bars,
-kicks, broadcasts and transfers; v1 remains supported. The
+tab list headers, kicks, broadcasts and transfers; v1 remains supported. The
 [extension example](examples/extensions.lua) demonstrates these APIs with a
 survival queue and staff-only server. See the [extension API contract](docs/extensions.md) for
 ordering, deadlines, permissions and reload behavior. Extensions require online

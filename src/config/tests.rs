@@ -1354,3 +1354,55 @@ fn invalid_server_list_settings_are_rejected_with_context() {
         assert!(error.contains(expected), "{settings}: {error}");
     }
 }
+
+#[test]
+fn tab_list_parses_text_components_and_player_scope() {
+    let config = Config::from_lua(
+        &with_security(
+            "tab_list = { header = 'Welcome {player}', \
+             footer = { text = '{online} online', color = 'gray' }, players = 'network' }",
+        ),
+        "tab.lua",
+    )
+    .unwrap();
+    assert_eq!(
+        config.tab_list,
+        Some(crate::tab_list::TabList {
+            header: Some(serde_json::json!("Welcome {player}")),
+            footer: Some(serde_json::json!({ "text": "{online} online", "color": "gray" })),
+            network: true,
+        })
+    );
+    let config = Config::from_lua(
+        &with_security("tab_list = { players = 'server', header = 'x' }"),
+        "tab.lua",
+    )
+    .unwrap();
+    assert!(!config.tab_list.unwrap().network);
+    assert_eq!(Config::from_lua(VALID, "tab.lua").unwrap().tab_list, None);
+}
+
+#[test]
+fn invalid_tab_list_settings_are_rejected_with_context() {
+    for (settings, expected) in [
+        ("tab_list = {}", "set header, footer or players"),
+        (
+            "tab_list = { players = 'server' }",
+            "set header, footer or players",
+        ),
+        ("tab_list = { players = 'all' }", "tab_list.players"),
+        ("tab_list = { header = 1 }", "tab_list.header"),
+        ("tab_list = { footer = {} }", "must not be empty"),
+        (
+            "tab_list = { header = string.rep('x', 4097) }",
+            "tab_list.header",
+        ),
+        ("tab_list = { header = 'x', title = 'y' }", "unknown field"),
+        ("tab_list = 'x'", "tab_list"),
+    ] {
+        let error = Config::from_lua(&with_security(settings), "tab.lua")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(expected), "{settings}: {error}");
+    }
+}
