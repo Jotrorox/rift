@@ -1,9 +1,13 @@
 //! Process-wide player presence. A session owns its registration, so cancellation,
 //! login failure and disconnect all remove the player without a separate cleanup.
+use crate::{auth::ProfileProperty, protocol::TabEntry};
 use std::{
     collections::{BTreeMap, BTreeSet},
     io,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -11,11 +15,16 @@ pub struct Player {
     pub uuid: [u8; 16],
     pub name: String,
     pub server: String,
+    /// Signed profile properties (the skin) of an authenticated player.
+    pub properties: Arc<[ProfileProperty]>,
 }
 
 #[derive(Debug, Default)]
 pub struct PlayerRegistry {
     state: Mutex<RegistryState>,
+    /// Changes on every join, server change and disconnect, so that tab lists
+    /// can skip rebuilding while the network is unchanged.
+    generation: AtomicU64,
 }
 
 #[derive(Debug, Default)]
@@ -65,12 +74,34 @@ impl PlayerRegistry {
                 uuid,
                 name,
                 server: server.into(),
+                properties: Arc::default(),
             },
         );
+        self.generation.fetch_add(1, Ordering::Relaxed);
         Ok(PlayerRegistration {
             registry: self.clone(),
             uuid,
         })
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
+    }
+
+    /// Tab list entries for every connected player who is not on `server`.
+    pub fn tab_entries(&self, server: &str) -> Vec<TabEntry> {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .players
+            .values()
+            .filter(|player| player.server != server)
+            .map(|player| TabEntry {
+                uuid: player.uuid,
+                name: player.name.clone(),
+                properties: player.properties.clone(),
+            })
+            .collect()
     }
 
     pub fn snapshot(&self) -> Vec<Player> {
@@ -161,7 +192,9 @@ impl NameReservation {
             uuid,
             name: self.name.clone(),
             server: server.into(),
+            properties: Arc::default(),
         });
+        self.registry.generation.fetch_add(1, Ordering::Relaxed);
         // Keep the existing name claim without an unreserved interval.
         self.pending = false;
         Ok(PlayerRegistration {
@@ -203,6 +236,22 @@ impl PlayerRegistration {
             .get_mut(&self.uuid)
         {
             player.server = server.to_owned();
+            self.registry.generation.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Record the signed profile properties of an authenticated player.
+    pub fn set_properties(&self, properties: &[ProfileProperty]) {
+        if let Some(player) = self
+            .registry
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .players
+            .get_mut(&self.uuid)
+        {
+            player.properties = properties.into();
+            self.registry.generation.fetch_add(1, Ordering::Relaxed);
         }
     }
 }
@@ -216,6 +265,7 @@ impl Drop for PlayerRegistration {
             .unwrap_or_else(|error| error.into_inner());
         if let Some(player) = state.players.remove(&self.uuid) {
             state.names.remove(&player.name.to_ascii_lowercase());
+            self.registry.generation.fetch_add(1, Ordering::Relaxed);
         }
     }
 }
@@ -368,7 +418,8 @@ mod tests {
             [Player {
                 uuid: [1; 16],
                 name: "Alice".into(),
-                server: "lobby".into()
+                server: "lobby".into(),
+                properties: Arc::default(),
             }]
         );
         assert_eq!(
@@ -399,7 +450,8 @@ mod tests {
             [Player {
                 uuid: [1; 16],
                 name: "Alice".into(),
-                server: "survival".into()
+                server: "survival".into(),
+                properties: Arc::default(),
             }]
         );
         let bob = registry

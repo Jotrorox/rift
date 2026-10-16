@@ -40,6 +40,9 @@ pub enum PlayerAction {
         server: String,
         data: Vec<u8>,
     },
+    /// A tab list header and footer for this player; `None` restores the
+    /// configured ones.
+    TabList(Option<crate::tab_list::Override>),
 }
 
 struct Entry {
@@ -140,6 +143,25 @@ fn title(value: Value) -> mlua::Result<PlayerAction> {
             ticks(&options, "fade_out_ms", 1000)?,
         ],
     })
+}
+
+fn tab_list(value: Option<Table>) -> mlua::Result<PlayerAction> {
+    let Some(options) = value else {
+        return Ok(PlayerAction::TabList(None));
+    };
+    fields(&options, &["header", "footer"])?;
+    let text = |field: &str| -> mlua::Result<Option<serde_json::Value>> {
+        match options.raw_get::<Value>(field)? {
+            Value::Nil => Ok(None),
+            value => crate::server_list::motd(value, &format!("tab list {field}"))
+                .map(Some)
+                .map_err(mlua::Error::runtime),
+        }
+    };
+    Ok(PlayerAction::TabList(Some(crate::tab_list::Override {
+        header: text("header")?,
+        footer: text("footer")?,
+    })))
 }
 
 /// Find a player by lowercase UUID or case-insensitive name.
@@ -387,6 +409,14 @@ impl Players {
             lua.create_function(move |_, (target, options): (String, Value)| {
                 charge()?;
                 players.send(&target, title(options)?)
+            })?,
+        )?;
+        let (players, charge) = (self.clone(), budget.clone());
+        api.raw_set(
+            "tab_list",
+            lua.create_function(move |_, (target, options): (String, Option<Table>)| {
+                charge()?;
+                players.send(&target, tab_list(options)?)
             })?,
         )?;
         let (players, charge) = (self.clone(), budget.clone());

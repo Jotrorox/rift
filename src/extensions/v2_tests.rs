@@ -919,6 +919,10 @@ async fn invalid_player_actions_fail_without_queueing() {
         "rift.players.title('Alice', { title = 'x', stay_ms = 60001 })",
         "rift.players.title('Alice', { title = 'x', fade_in_ms = -1 })",
         "rift.players.title('Alice', { title = 'x', fade_out_ms = 1.5 })",
+        "rift.players.tab_list('Alice', { header = 1 })",
+        "rift.players.tab_list('Alice', { header = {} })",
+        "rift.players.tab_list('Alice', { header = 'x', typo = 1 })",
+        "rift.players.tab_list('Alice', 'header')",
     ] {
         let runtime = runtime(&format!("api_version=2, login=function() {operation} end"));
         let (_alice, mut alice) = joined(&runtime, 9, "Alice", "lobby");
@@ -1071,4 +1075,38 @@ async fn message_and_http_handlers_reach_players_only_with_api_v2() {
         }
         worker.abort();
     }
+}
+
+#[tokio::test]
+async fn players_api_sets_and_restores_tab_lists() {
+    let runtime = runtime(
+        r#"api_version=2, login=function(ctx)
+        local players = require('rift.players')
+        assert(players.tab_list('Alice', { header = 'Top', footer = { text = 'Bottom', color = 'gray' } }))
+        assert(players.tab_list('Alice', { footer = 'Only footer' }))
+        assert(players.tab_list('Alice'))
+        assert(not players.tab_list('Nobody', { header = 'x' }))
+    end"#,
+    );
+    let (_alice, mut alice) = joined(&runtime, 9, "Alice", "lobby");
+    runtime
+        .session(context(1))
+        .unwrap()
+        .decision("login")
+        .await
+        .unwrap();
+    let custom = |header: Option<serde_json::Value>, footer| {
+        PlayerAction::TabList(Some(crate::tab_list::Override { header, footer }))
+    };
+    assert_eq!(
+        drain(&mut alice),
+        [
+            custom(
+                Some(serde_json::json!("Top")),
+                Some(serde_json::json!({ "text": "Bottom", "color": "gray" }))
+            ),
+            custom(None, Some(serde_json::json!("Only footer"))),
+            PlayerAction::TabList(None),
+        ]
+    );
 }

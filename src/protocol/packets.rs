@@ -330,7 +330,7 @@ pub(crate) enum Text<'a> {
 
 impl Text<'_> {
     /// Login always uses JSON. Configuration and play use network NBT from 1.20.3.
-    fn write(self, nbt: bool, data: &mut Vec<u8>) -> io::Result<()> {
+    pub(super) fn write(self, nbt: bool, data: &mut Vec<u8>) -> io::Result<()> {
         match (self, nbt) {
             // Anonymous NBT TAG_String is a valid literal text component.
             (Self::Literal(text), true) => {

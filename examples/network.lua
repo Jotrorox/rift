@@ -42,5 +42,11 @@ rift.config.status_cache = {
     max_entries = 1024,
     max_response_bytes = 65536,
 }
+-- One header and footer on every server, and every network player in the list.
+rift.config.tab_list = {
+    header = { text = "Example Network", color = "gold", bold = true },
+    footer = "{online} online | You are on {server}",
+    players = "network",
+}
 rift.config.metrics = "127.0.0.1:9090"
 rift.config.shutdown_timeout_ms = 30000

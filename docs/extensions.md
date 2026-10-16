@@ -434,6 +434,7 @@ names a configured backend or service group; a group matches all its instances.
 | `rift.players.message(player, text)` | Boolean: a chat message was queued |
 | `rift.players.action_bar(player, text)` | Boolean: action-bar text was queued |
 | `rift.players.title(player, title)` | Boolean: a title was queued; `title` is text or an options table |
+| `rift.players.tab_list(player, options)` | Boolean: a tab list header and footer were queued; omit `options` to restore the configured ones |
 | `rift.players.kick(player, reason)` | Boolean: a disconnect with this reason was queued |
 | `rift.players.transfer(player, server)` | Boolean: a transfer request was queued |
 | `rift.players.broadcast(text, server)` | Number of players a chat message was queued for; `server` is optional |
@@ -447,6 +448,24 @@ Title options are `title` and `subtitle` (at least one), plus `fade_in_ms`,
 `stay_ms` and `fade_out_ms` (integers from 0 to 60000; defaults 500, 3500 and
 1000; rounded down to 50 ms ticks). A title without a subtitle clears any earlier
 subtitle. Text, titles and reasons are 1–1024 bytes of UTF-8, shown as plain text.
+
+Tab list options are `header` and `footer`, each a string or chat component
+table of up to 4096 bytes, with the same placeholders as the `tab_list` setting
+(see [operations](operations.md#tab-list-header-footer-and-network-wide-players)).
+An omitted field keeps the configured text. The player keeps this header and
+footer across server switches until the next call or disconnect, and
+`rift.players.tab_list(player)` returns them to the configured ones:
+
+```lua
+rift.config.extensions = {
+    api_version = 2,
+    join = function(ctx)
+        if rift.permissions.has(ctx.uuid, "network.vip") then
+            rift.players.tab_list(ctx.uuid, { header = { text = "VIP Lounge", color = "light_purple" } })
+        end
+    end,
+}
+```
 
 Actions are delivered asynchronously. A call returns true once the action is
 queued, or false when the player is offline or already has 32 undelivered

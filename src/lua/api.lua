@@ -21,7 +21,7 @@ for namespace, methods in pairs({
     store = { "get", "set", "delete", "increment" },
     permissions = { "has", "set", "add_group", "remove_group", "groups" },
     http = { "request" },
-    players = { "list", "get", "message", "action_bar", "title", "kick", "transfer", "broadcast" },
+    players = { "list", "get", "message", "action_bar", "title", "tab_list", "kick", "transfer", "broadcast" },
 }) do
     local proxy = {}
     local scope = namespace == "players" and "API v2 extension callbacks, on_message and on_http"

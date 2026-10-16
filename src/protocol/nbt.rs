@@ -67,6 +67,12 @@ pub(super) fn named<'a>(bytes: &mut &'a [u8]) -> io::Result<&'a [u8]> {
     Ok(&start[..start.len() - bytes.len()])
 }
 
+/// Skip one anonymous network NBT tag, as used for 1.20.3+ text components.
+pub(super) fn anonymous(bytes: &mut &[u8]) -> io::Result<()> {
+    let kind = take(bytes, 1)?[0];
+    payload(bytes, kind, 0)
+}
+
 /// Encode a JSON text component as anonymous network NBT, following the
 /// vanilla JsonOps-to-NbtOps conversion: integers become TAG_Int (or TAG_Long),
 /// other numbers TAG_Double, booleans TAG_Byte, and object nulls are omitted.

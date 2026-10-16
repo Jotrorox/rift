@@ -7,6 +7,7 @@ mod nbt;
 mod packets;
 mod state;
 mod switching;
+mod tab_list;
 
 pub use framing::{Codec, MAX_FRAME_SIZE, MAX_PACKET_SIZE, Packet, Reader};
 pub(crate) use legacy::LegacyState;
@@ -16,6 +17,8 @@ pub use packets::{disconnect_component, system_component, validate_component};
 pub(crate) use packets::{login_identity, start_identity, success_identity};
 pub use state::{ConnectionState, Direction, State};
 use std::io;
+pub(crate) use tab_list::TabList;
+pub use tab_list::{TabEntry, TabView};
 
 pub(crate) fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
