@@ -230,26 +230,51 @@ impl Store {
     }
 }
 
+/// Lowercase letters, digits, `_`, `.` and `-`, as for extension identifiers.
+fn permission_group_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'.' || b == b'-'
+        })
+}
+
 /// Apply JSON definitions without parsing or rewriting arbitrary user Lua.
 /// A single generated wrapper preserves the original script and hook closures.
+///
+/// Named sections replace one entry; `tab_list` and `server_list` replace the
+/// whole setting (`name` is `None`). A server list edit keeps the configured
+/// favicon and per-host entries, which only Lua can set.
 pub fn edited_source(
     source: &str,
     section: &str,
-    name: &str,
+    name: Option<&str>,
     definition: &Value,
 ) -> Result<String, control::Error> {
-    let maximum_name = if section == "templates" { 128 } else { 107 };
-    if !["templates", "service_groups"].contains(&section)
-        || name.is_empty()
-        || name.len() > maximum_name
-        || !name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-    {
-        return Err(control::Error::invalid(
-            "invalid definition name or section",
-        ));
-    }
+    let named = |maximum: usize| {
+        name.filter(|name| {
+            !name.is_empty()
+                && name.len() <= maximum
+                && name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        })
+        .is_some()
+    };
+    let (path, kept): (&str, &[&str]) = match section {
+        "templates" if named(128) => (section, &[]),
+        "service_groups" if named(107) => (section, &[]),
+        "permission_groups" if name.is_some_and(permission_group_name) => {
+            ("extensions.groups", &[])
+        }
+        "tab_list" if name.is_none() => (section, &[]),
+        "server_list" if name.is_none() => (section, &["favicon", "hosts"]),
+        _ => {
+            return Err(control::Error::invalid(
+                "invalid definition name or section",
+            ));
+        }
+    };
     if !definition.is_object() && !definition.is_null() {
         return Err(control::Error::invalid(
             "definition must be an object or null",
@@ -288,7 +313,19 @@ pub fn edited_source(
             ),
         })
     }
-    let definition = lua(definition)?;
+    let target = format!("__rift_operator_config.{path}");
+    let definition = if kept.is_empty() || definition.is_null() {
+        lua(definition)?
+    } else {
+        let keep: String = kept
+            .iter()
+            .map(|field| format!("new.{field} = old.{field} "))
+            .collect();
+        format!(
+            "(function(new, old) if type(old) == \"table\" then {keep}end return new end)({}, {target})",
+            lua(definition)?
+        )
+    };
     // Reuse our wrapper on subsequent edits rather than nesting the user file.
     const PREFIX: &str =
         "-- Rift structured definitions v1\nlocal __rift_operator_config = (function()\n";
@@ -306,19 +343,22 @@ pub fn edited_source(
     } else {
         (source, "")
     };
-    let prefix = format!("__rift_operator_config.{section}[\"{name}\"] = ");
+    let prefix = match name {
+        Some(name) => format!("{target}[\"{name}\"] = "),
+        None => format!("{target} = "),
+    };
     let overrides: String = overrides
         .lines()
         .filter(|line| !line.starts_with(&prefix))
         .map(|line| format!("{line}\n"))
         .collect();
+    let initializer = format!("{target} = {target} or {{}}\n");
     let initializer =
-        format!("__rift_operator_config.{section} = __rift_operator_config.{section} or {{}}\n");
-    let initializer = if overrides.lines().any(|line| line == initializer.trim_end()) {
-        String::new()
-    } else {
-        initializer
-    };
+        if name.is_none() || overrides.lines().any(|line| line == initializer.trim_end()) {
+            String::new()
+        } else {
+            initializer
+        };
     let edited =
         format!("{PREFIX}{base}{SUFFIX}{initializer}{overrides}{prefix}{definition}\n{END}");
     if edited.len() > control::MAX_SOURCE {
@@ -387,7 +427,7 @@ mod tests {
             source = edited_source(
                 &source,
                 "templates",
-                "game",
+                Some("game"),
                 &json!({"server_jar":"assets/server.jar"}),
             )
             .unwrap();
@@ -398,5 +438,85 @@ mod tests {
         let config = rift::config::Config::from_lua(&source, "structured.lua").unwrap();
         assert!(config.on_http.is_some());
         assert!(config.templates.contains_key("game"));
+    }
+    #[test]
+    fn whole_settings_are_replaced_and_server_list_edits_keep_favicon_and_hosts() {
+        let directory =
+            std::env::temp_dir().join(format!("rift-operator-server-list-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+        png.extend(64u32.to_be_bytes());
+        png.extend(64u32.to_be_bytes());
+        png.extend([8, 6, 0, 0, 0, 0, 0, 0, 0]);
+        fs::write(directory.join("icon.png"), png).unwrap();
+        let path = directory.join("rift.lua");
+        let load = |source: &str| rift::config::Config::from_lua_at(source, &path).unwrap();
+        let original = "rift.setup { listeners={main='127.0.0.1:0'}, backends={lobby='127.0.0.1:1'}, routes={main='lobby'} }\nrift.config.server_list = { motd = 'Old', favicon = 'icon.png', hosts = { ['play.example.com'] = { motd = 'Host' } } }\n";
+        let edit = |source: &str, section: &str, definition: Value| {
+            edited_source(source, section, None, &definition).unwrap()
+        };
+        let mut source = edit(
+            original,
+            "server_list",
+            json!({"motd": {"text": "New", "color": "gold"}, "max_players": 100}),
+        );
+        source = edit(&source, "server_list", json!({"motd": "Newer"}));
+        source = edit(
+            &source,
+            "tab_list",
+            json!({"header": "Hi {player}", "players": "network"}),
+        );
+        let config = load(&source);
+        let list = config.server_list.unwrap();
+        assert_eq!(list.defaults.motd, Some(json!("Newer")));
+        assert_eq!(list.defaults.max_players, None);
+        assert!(list.defaults.favicon.is_some());
+        assert_eq!(list.hosts["play.example.com"].motd, Some(json!("Host")));
+        let tab_list = config.tab_list.unwrap();
+        assert_eq!(tab_list.header, Some(json!("Hi {player}")));
+        assert!(tab_list.network);
+        assert_eq!(
+            source
+                .matches("__rift_operator_config.server_list = ")
+                .count(),
+            1
+        );
+        // Null removes the setting, favicon and hosts included.
+        source = edit(&source, "server_list", Value::Null);
+        source = edit(&source, "tab_list", Value::Null);
+        let config = load(&source);
+        assert!(config.server_list.is_none() && config.tab_list.is_none());
+        fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn permission_groups_are_edited_inside_extensions() {
+        let original = "rift.setup { listeners={main='127.0.0.1:0'}, backends={lobby='127.0.0.1:1'}, routes={main='lobby'}, authentication={online_mode=true}, forwarding={mode='velocity'}, extensions={api_version=2, groups={default={permissions={['chat.send']=true}}}} }\n";
+        let source = edited_source(
+            original,
+            "permission_groups",
+            Some("staff.mod"),
+            &json!({"inherits": ["default"], "permissions": {"network.*": true, "network.ban": false}}),
+        )
+        .unwrap();
+        let groups = rift::config::Config::from_lua(&source, "groups.lua")
+            .unwrap()
+            .extensions
+            .unwrap()
+            .permission_groups()
+            .unwrap();
+        assert_eq!(
+            groups["staff.mod"],
+            json!({"inherits": ["default"], "permissions": {"network.*": true, "network.ban": false}})
+        );
+        assert_eq!(groups["default"]["permissions"], json!({"chat.send": true}));
+        for (section, name) in [
+            ("permission_groups", Some("Staff")),
+            ("permission_groups", None),
+            ("tab_list", Some("header")),
+            ("server_list", Some("motd")),
+            ("routes", None),
+        ] {
+            assert!(edited_source(original, section, name, &json!({})).is_err());
+        }
     }
 }

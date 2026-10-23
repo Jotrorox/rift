@@ -451,6 +451,89 @@ async function testWebAssets(appSource, statusSource) {
     assert(JSON.parse(call.options.body).revision === "rev-1", "Rollback silently refreshed its expected revision");
     assert(h.element("deployment-result").textContent.includes("conflict"), "Stale rollback conflict was hidden");
   });
+  await test("server list edits send components and plain text and keep Lua-only fields out", async () => {
+    const h = fixture(appSource);
+    h.model.definitions.server_list = { motd: { text: "Old", color: "gold" }, version: null, max_players: 20, sample: ["a"], favicon: "data:image/png;base64,AAAA",
+      hosts: { "play.example.com": { motd: [{ text: "<b>Host</b>" }], version: "1.21", max_players: null } } };
+    await flush();
+    assert(h.element("server-list-enabled").checked, "Configured server list shown as off");
+    assert(JSON.parse(h.element("server-list-motd").value).color === "gold", "Component MOTD not rendered as JSON");
+    assert(!h.element("server-list-favicon").hidden && h.element("server-list-favicon").src.startsWith("data:image/png"), "Favicon preview missing");
+    assert(h.element("server-list-hosts").children[0].children[1].textContent === "<b>Host</b>", "Host MOTD summary unsafe or missing");
+    h.element("server-list-motd").value = "{player}'s network\nline two"; h.element("server-list-maintenance-motd").value = '{"text":"Soon","color":"red"}';
+    h.element("server-list-max-players").value = "50"; await h.element("server-list-form").emit("input");
+    let submitted;
+    h.model.intercept = (path, options) => { if (options.method === "PUT") { submitted = { path, body: JSON.parse(options.body) }; return h.response({ revision: "rev-1" }); } return null; };
+    await h.element("server-list-form").emit("submit"); await flush();
+    assert(submitted.path === "/api/definitions/server_list" && submitted.body.revision === "rev-1", "Server list request missing its revision");
+    const value = submitted.body.definition;
+    assert(value.motd === "{player}'s network\nline two", "Brace-prefixed plain text was not kept as text");
+    assert(value.maintenance_motd.color === "red" && value.max_players === 50 && value.sample[0] === "a", "Fields were not serialized");
+    assert(!("favicon" in value) && !("hosts" in value), "Lua-only fields were sent");
+    h.element("server-list-max-players").value = "-1"; const before = h.calls.length;
+    await h.element("server-list-form").emit("submit"); await flush();
+    assert(h.calls.length === before && h.element("server-list-result").textContent.includes("nonnegative"), "Invalid maximum reached the API");
+  });
+  await test("turning the tab list off sends null and network listing is explicit", async () => {
+    const h = fixture(appSource);
+    h.model.definitions.tab_list = { header: "Hi {player}", footer: null, players: "server" };
+    await flush();
+    assert(h.element("tab-list-header").value === "Hi {player}", "Header not rendered");
+    const bodies = [];
+    h.model.intercept = (path, options) => { if (options.method === "PUT") { bodies.push(JSON.parse(options.body).definition); return h.response({ revision: "rev-1" }); } return null; };
+    h.element("tab-list-players").value = "network"; await h.element("tab-list-form").emit("submit"); await flush();
+    assert(!h.element("tab-list-header").disabled, "Enabled tab list fields were disabled");
+    h.element("tab-list-enabled").checked = false; await h.element("tab-list-form").emit("change");
+    assert(h.element("tab-list-header").disabled && h.element("tab-list-players").disabled, "Fields stayed editable for a disabled tab list");
+    await h.element("tab-list-form").emit("submit"); await flush();
+    assert(bodies[0].header === "Hi {player}" && bodies[0].players === "network" && !("footer" in bodies[0]), "Tab list fields incorrect");
+    assert(bodies[1] === null, "Disabled tab list was not removed");
+  });
+  await test("permission groups render, save typed nodes and manage encoded memberships", async () => {
+    const h = fixture(appSource);
+    h.model.definitions.permission_groups = { default: { inherits: [], permissions: { "chat.send": true } }, staff: { inherits: ["default"], permissions: { "network.*": true, "network.ban": false } } };
+    h.model.intercept = (path) => path === "/api/permissions" ? h.response({ enabled: true, truncated: false, members: [{ uuid: "0123456789abcdef0123456789abcdef", name: "<Alice>", groups: ["staff"] }] }) : null;
+    await flush();
+    assert(h.element("permission-groups-panel").className.includes("hidden") === false, "Groups panel hidden with v2 extensions");
+    assert(h.element("permissions-unavailable").className.includes("hidden"), "Unavailable notice shown with v2 extensions");
+    const rows = h.element("permission-groups").children;
+    assert(rows[1].children[2].textContent === "1 granted · 1 denied" && rows[1].children[3].textContent === "1", "Group summary incorrect");
+    assert(h.element("permission-members").children[0].children[0].textContent === "<Alice>", "Member name not rendered safely");
+    assert(h.element("permission-member-group").children.every((option) => option.value !== "default"), "Default group offered for membership");
+    await rows[1].children[4].children[0].emit("click");
+    assert(h.element("permission-group-nodes").value === "network.*\n-network.ban", "Nodes not rendered with denials");
+    h.element("permission-group-nodes").value = "network.*\n- network.ban\n*"; await h.element("permission-group-form").emit("input");
+    const calls = [];
+    h.model.intercept = (path, options) => {
+      if (options.method && options.method !== "GET") { calls.push({ path, method: options.method, body: JSON.parse(options.body) }); return h.response(options.method === "PUT" ? { revision: "rev-1" } : { changed: true }); }
+      return path === "/api/permissions" ? h.response({ enabled: true, members: [] }) : null;
+    };
+    await h.element("permission-group-form").emit("submit"); await flush();
+    assert(calls[0].path === "/api/definitions/permission_groups/staff" && calls[0].body.definition.permissions["network.ban"] === false
+      && calls[0].body.definition.permissions["*"] === true && calls[0].body.definition.inherits[0] === "default", "Group definition incorrect");
+    h.element("permission-member-player").value = "01234567-89AB-CDEF-0123-456789ABCDEF";
+    await h.element("permission-member-form").emit("submit"); await flush();
+    assert(calls[1].path === "/api/permissions/members/0123456789abcdef0123456789abcdef/staff" && calls[1].method === "POST", "Membership UUID was not normalized");
+    h.element("permission-group-nodes").value = "Bad Node"; await h.element("permission-group-form").emit("input");
+    await h.element("permission-group-form").emit("submit"); await flush();
+    assert(calls.length === 2 && h.element("permission-group-result").textContent.includes("Bad Node"), "Invalid node reached the API");
+  });
+  await test("member chips remove encoded memberships and missing extensions explain why", async () => {
+    const h = fixture(appSource);
+    h.model.definitions.permission_groups = { vip: { inherits: [], permissions: {} } };
+    h.model.intercept = (path, options) => {
+      if (options.method === "DELETE") return h.response({ changed: true });
+      return path === "/api/permissions" ? h.response({ enabled: true, members: [{ uuid: "0123456789abcdef0123456789abcdef", name: null, groups: ["vip"] }] }) : null;
+    };
+    await flush();
+    const remove = h.element("permission-members").children[0].children[2].children[0].children[0].children[1];
+    await remove.emit("click"); await flush();
+    assert(h.calls.some(({ path, options }) => path === "/api/permissions/members/0123456789abcdef0123456789abcdef/vip" && options.method === "DELETE"), "Removal request missing");
+    const plain = fixture(appSource); await flush();
+    assert(!plain.element("permissions-unavailable").className.includes("hidden"), "Missing extensions were not explained");
+    assert(plain.element("permission-groups-panel").className.includes("hidden"), "Groups panel shown without extensions");
+    assert(!plain.calls.some(({ path }) => path === "/api/permissions"), "Memberships fetched without extensions");
+  });
   return passed;
 }
 

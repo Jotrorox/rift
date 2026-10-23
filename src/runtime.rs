@@ -701,6 +701,10 @@ pub async fn handle(
         let mut tab_override: Option<rift::tab_list::Override> = None;
         let mut tab_override_revision = 0u64;
         let mut tab_synced = None;
+        // Boss bars from rift.players.boss_bar, kept across switches.
+        let mut boss_bars = std::collections::BTreeMap::new();
+        let mut boss_bars_revision = 0u64;
+        let mut boss_bars_synced = None;
         let mut tab_tick = tokio::time::interval(Duration::from_millis(500));
         tab_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
@@ -738,6 +742,9 @@ pub async fn handle(
                 && (live_snapshot.config.tab_list.is_some()
                     || tab_override.is_some()
                     || session.tab_list_modified());
+            let boss_bars_pending = playing
+                && session.tab_list_ready()
+                && boss_bars_synced != Some((session.boss_bar_revision(), boss_bars_revision));
             let forward = async {
                 if playing {
                     session.forward().await
@@ -782,13 +789,22 @@ pub async fn handle(
                     }
                     continue;
                 }
-                _ = tab_tick.tick(), if tab_enabled && transfer_reply.is_none() => {
+                _ = tab_tick.tick(), if (tab_enabled || boss_bars_pending) && transfer_reply.is_none() => {
                     // The cancelled forward poll may already have observed a
                     // backend configuration transition; sync after the next join.
                     if !session.tab_list_ready() {
                         if !session.client.state.settled(rift::protocol::State::Play) {
                             phase_deadline = Deadline::now() + Duration::from_secs(30);
                         }
+                        continue;
+                    }
+                    // A reconfiguration discarded the client's boss bars.
+                    let boss_key = (session.boss_bar_revision(), boss_bars_revision);
+                    if boss_bars_synced != Some(boss_key) {
+                        timeout(HANDSHAKE_TIMEOUT, session.sync_boss_bars(&boss_bars)).await??;
+                        boss_bars_synced = Some(boss_key);
+                    }
+                    if !tab_enabled {
                         continue;
                     }
                     // Rebuild the tab list only after something it shows has changed.
@@ -820,8 +836,8 @@ pub async fn handle(
                     // configuration transition. Drop the action rather than the session.
                     if !session.client.state.settled(rift::protocol::State::Play) {
                         phase_deadline = Deadline::now() + Duration::from_secs(30);
-                        // Tab list overrides are state and apply after the next join.
-                        if !matches!(action, PlayerAction::Kick(_) | PlayerAction::RawKick(_) | PlayerAction::TabList(_)) { continue; }
+                        // Tab lists and boss bars are state and apply after the next join.
+                        if !matches!(action, PlayerAction::Kick(_) | PlayerAction::RawKick(_) | PlayerAction::TabList(_) | PlayerAction::BossBar { .. }) { continue; }
                     }
                     match action {
                         PlayerAction::Message(text) => timeout(HANDSHAKE_TIMEOUT, session.send_system_message(&text)).await??,
@@ -848,6 +864,17 @@ pub async fn handle(
                         PlayerAction::TabList(custom) => {
                             tab_override = custom;
                             tab_override_revision += 1;
+                        }
+                        PlayerAction::BossBar { name, bar } => {
+                            match bar {
+                                Some(bar) => { boss_bars.insert(name, bar); }
+                                None => { boss_bars.remove(&name); }
+                            }
+                            boss_bars_revision += 1;
+                            if session.tab_list_ready() {
+                                timeout(HANDSHAKE_TIMEOUT, session.sync_boss_bars(&boss_bars)).await??;
+                                boss_bars_synced = Some((session.boss_bar_revision(), boss_bars_revision));
+                            }
                         }
                         PlayerAction::Transfer(target) => {
                             if !session.can_switch() { continue; }

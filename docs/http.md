@@ -165,8 +165,12 @@ Errors use `{"error":"description"}`. `GET /api` provides endpoint discovery.
 | `POST /api/servers/{name}/stop` | Request an unused managed server stop and pause automatic wake with `{}`; returns `202` when accepted |
 | `GET /api/servers/{name}/logs?cursor={byte_offset}` | Up to 64 KiB of log text with the next byte cursor, `truncated` and `has_more`; omit cursor to tail the log |
 | `POST /api/servers/{name}/console` | Write one `{command: "list"}` to a running managed server; commands are limited to 4096 bytes without control characters |
-| `GET /api/definitions` | Structured `templates`, `service_groups` and the active `revision`; includes private paths and executable arguments |
-| `PUT /api/definitions/{section}/{name}` | Apply `{revision, definition}`; section is `templates` or `service_groups`, and `null` removes a definition |
+| `GET /api/definitions` | Structured `templates`, `service_groups`, `permission_groups`, `tab_list`, `server_list` and the active `revision`; includes private paths and executable arguments. Absent settings are `null` |
+| `PUT /api/definitions/{section}/{name}` | Apply `{revision, definition}`; section is `templates`, `service_groups` or `permission_groups`, and `null` removes a definition |
+| `PUT /api/definitions/{section}` | Apply `{revision, definition}` to `tab_list` or `server_list`; `null` turns the setting off |
+| `GET /api/permissions` | `{enabled, members, truncated}`: up to 1000 stored group memberships as `{uuid, name, groups}`, with `name` set for online players |
+| `POST /api/permissions/members/{player}/{group}` | Add a player (lowercase UUID, or the name of an online player) to a permission group with `{}`; returns `{changed}` |
+| `DELETE /api/permissions/members/{player}/{group}` | Remove a player from a permission group with `{}`; returns `{changed}` |
 | `GET /api/deployments` | Retained deployment metadata, active revision, retention limit and durability flag; never includes source |
 | `POST /api/deployments/{id}/rollback` | Validate and restore a retained configuration with `{revision}` |
 | `GET /api/audit` | Latest operator records and durability flag |
@@ -260,6 +264,22 @@ paths; optional fields are omitted. Updates replace one complete definition,
 validate all references and live-instance restrictions, then use the same save
 transaction as source edits. Templates affect future provisioning; existing
 instance files are preserved. Scaling policies can change while instances run.
+
+The same editor covers the network settings on the Server list, Tab list and
+Permissions pages. `tab_list` and `server_list` definitions replace the whole
+setting with the fields of their Lua tables; text fields take a string or a chat
+component. A server list edit keeps the configured `favicon` and `hosts`, which
+can only be set in Lua, so a definition containing either is rejected.
+`GET /api/definitions` returns the favicon as its `data:` URL. Permission group
+definitions take `inherits` and `permissions` as in `extensions.groups` and need
+extensions with `api_version = 2`; edits return `409` otherwise.
+
+Group memberships are runtime state in the extension store, as with
+`rift.permissions.add_group` and `remove_group`. Changing them doesn't create a
+configuration revision; it applies to the next permission check and is
+recorded in the audit log as `group_membership` with a `uuid/group` target.
+Everyone belongs to `default` implicitly, so it can't be assigned. Every
+permissions endpoint requires the `config` permission.
 
 The dashboard follows selected server logs every second, retaining a bounded
 128 KiB view. Logs contain server output and may include private information;

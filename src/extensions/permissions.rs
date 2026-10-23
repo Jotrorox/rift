@@ -23,6 +23,8 @@ const MAX_OVERRIDES: usize = 4096;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Group {
     nodes: Nodes,
+    /// The groups listed in `inherits`.
+    parents: BTreeSet<String>,
     /// Every group this one inherits from, directly or transitively.
     ancestors: BTreeSet<String>,
 }
@@ -140,11 +142,12 @@ impl Policy {
                     Some(nodes) => parse_nodes(nodes, api_version, &format!("{path}.permissions"))?,
                     None => Nodes::new(),
                 };
-                parents.insert(name.clone(), inherits);
+                parents.insert(name.clone(), inherits.clone());
                 groups.insert(
                     name,
                     Group {
                         nodes,
+                        parents: inherits,
                         ancestors: BTreeSet::new(),
                     },
                 );
@@ -171,6 +174,24 @@ impl Policy {
             groups.get_mut(name).unwrap().ancestors = ancestors;
         }
         Ok(Self { grants, groups })
+    }
+
+    /// Group definitions with the field names of `extensions.groups`.
+    pub(super) fn groups_value(&self) -> serde_json::Value {
+        serde_json::Value::Object(
+            self.groups
+                .iter()
+                .map(|(name, group)| {
+                    (
+                        name.clone(),
+                        serde_json::json!({
+                            "inherits": group.parents,
+                            "permissions": group.nodes,
+                        }),
+                    )
+                })
+                .collect(),
+        )
     }
 
     /// API v1 snapshot: exact configured grants only.
@@ -265,6 +286,40 @@ impl Permissions {
             })),
             store,
         })
+    }
+
+    /// Every stored membership: UUID -> group names.
+    pub(super) fn memberships(&self) -> BTreeMap<String, BTreeSet<String>> {
+        self.state.lock().unwrap().memberships.clone()
+    }
+
+    /// Add or remove a membership with the rules of `rift.permissions.add_group`
+    /// and `remove_group`. Returns whether anything changed.
+    pub(super) fn change_group(
+        &self,
+        uuid: &str,
+        group: &str,
+        add: bool,
+        deadline: Instant,
+    ) -> io::Result<bool> {
+        let invalid = |message: String| io::Error::new(io::ErrorKind::InvalidInput, message);
+        if !player_uuid(uuid) || !token(group) {
+            return Err(invalid(
+                "group membership requires a lowercase player UUID (32 hex digits) and a group name"
+                    .into(),
+            ));
+        }
+        if group == DEFAULT_GROUP {
+            return Err(invalid(
+                "every player belongs to the default group implicitly".into(),
+            ));
+        }
+        // Removing an undefined group stays possible to clean up memberships
+        // left behind by a configuration change.
+        if add && !self.state.lock().unwrap().policy.groups.contains_key(group) {
+            return Err(invalid(format!("unknown permission group {group:?}")));
+        }
+        self.update_group(uuid.to_owned(), group.to_owned(), add, deadline)
     }
 
     pub(super) fn replace(&self, policy: &Policy) {
@@ -412,26 +467,12 @@ impl Permissions {
                 name,
                 lua.create_function(move |_, (uuid, group): (String, String)| {
                     crate::script::check_deadline(deadline)?;
-                    if !player_uuid(&uuid) || !token(&group) {
-                        return Err(mlua::Error::runtime(
-                            "group membership requires a lowercase player UUID (32 hex digits) and a group name",
-                        ));
-                    }
-                    if group == DEFAULT_GROUP {
-                        return Err(mlua::Error::runtime(
-                            "every player belongs to the default group implicitly",
-                        ));
-                    }
-                    // Removing an undefined group stays possible to clean up
-                    // memberships left behind by a configuration change.
-                    if add && !permissions.state.lock().unwrap().policy.groups.contains_key(&group) {
-                        return Err(mlua::Error::runtime(format!(
-                            "unknown permission group {group:?}"
-                        )));
-                    }
                     permissions
-                        .update_group(uuid, group, add, deadline)
-                        .map_err(mlua::Error::external)
+                        .change_group(&uuid, &group, add, deadline)
+                        .map_err(|error| match error.kind() {
+                            io::ErrorKind::InvalidInput => mlua::Error::runtime(error.to_string()),
+                            _ => mlua::Error::external(error),
+                        })
                 })?,
             )?;
         }
