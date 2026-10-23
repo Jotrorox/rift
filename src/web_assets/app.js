@@ -6,7 +6,7 @@
     token: "", revision: null, baseline: "", writable: false,
     loaded: false, busy: false, polling: false, fetchingSource: false,
     session: 0, mutation: 0, remoteChanged: false, conflicted: false, online: false,
-    serverButtons: [],
+    serverButtons: [], view: "overview",
     permissions: null, groups: null, logServer: "", logCursor: null, logPolling: false, definitions: {}, definitionRevision: null, definitionDirty: false, definitionVersion: 0, definitionSection: "service_groups", definitionName: "", definitionInputs: new Map(),
   };
   const allowed = (permission) => state.permissions === null || state.permissions.includes(permission);
@@ -59,7 +59,43 @@
     $("definition-delete").disabled = state.busy || !state.definitionRevision || !$("definition-select").value || !allowed("config");
     for (const [id, permission] of [["config-panel", "config"], ["definitions-panel", "config"], ["deployments-panel", "deploy"], ["audit-panel", "audit"], ["extensions-panel", "extensions"]]) $(id).classList.toggle("hidden", !allowed(permission));
     $("live-console-panel").classList.toggle("hidden", !allowed("logs") && !allowed("console"));
+    const visible = { script: allowed("config"), definitions: allowed("config"), extensions: allowed("extensions"),
+      console: allowed("logs") || allowed("console"), deployments: allowed("deploy"), audit: allowed("audit") };
+    for (const [id] of views) $(`nav-${id}`).classList.toggle("hidden", visible[id] === false);
+    for (const [section, ids] of sections) $(`section-${section}`).classList.toggle("hidden", ids.every((id) => visible[id] === false));
+    showView();
   }
+  const views = [["overview", "Overview"], ["routing", "Routing"], ["metrics", "Metrics"], ["servers", "Servers"], ["console", "Console"], ["groups", "Service groups"],
+    ["script", "Lua script"], ["definitions", "Groups & templates"], ["extensions", "Extensions"], ["reference", "Reference"], ["deployments", "Deployments"], ["audit", "Audit log"]];
+  const sections = [["configuration", ["script", "definitions", "extensions"]], ["activity", ["deployments", "audit"]]];
+  function showView() {
+    const available = views.filter(([id]) => !$(`nav-${id}`).className.includes("hidden"));
+    const requested = String(window.location.hash || "").slice(1);
+    // Other fragments, such as the skip link, keep the current view.
+    if (views.some(([id]) => id === requested)) state.view = requested;
+    const [current, label] = available.find(([id]) => id === state.view) || available[0];
+    const changed = $(`view-${current}`).hidden !== false;
+    for (const [id] of views) {
+      $(`view-${id}`).hidden = id !== current;
+      $(`nav-${id}`).children[0]?.setAttribute("aria-current", id === current ? "page" : "false");
+    }
+    text("view-title", label);
+    document.title = `${label} · Rift`;
+    // The audit log is fetched on demand rather than on every poll.
+    if (changed && current === "audit" && allowed("audit")) loadAudit().catch((error) => text("audit-result", error.message));
+  }
+  function sidebar(open) {
+    $("app").classList.toggle("nav-open", open);
+    $("sidebar-toggle").setAttribute("aria-expanded", String(open));
+    if (open) document.querySelector?.(".nav a[aria-current=page]")?.focus();
+  }
+  window.addEventListener("hashchange", () => { sidebar(false); showView(); window.scrollTo?.(0, 0); });
+  $("sidebar-toggle").addEventListener("click", () => sidebar(!$("app").className.includes("nav-open")));
+  $("sidebar-scrim").addEventListener("click", () => sidebar(false));
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || !$("app").className.includes("nav-open")) return;
+    sidebar(false); $("sidebar-toggle").focus();
+  });
   async function request(path, options = {}, raw = false) {
     const headers = new Headers(options.headers || {});
     headers.set("Accept", raw ? "*/*" : "application/json");
@@ -97,7 +133,7 @@
     if (editor) result(message, "error"); else notice(message);
     controls();
   }
-  function table(id, values, width, row) {
+  function table(id, values, width, row, empty = "None configured") {
     const body = $(id);
     body.replaceChildren();
     for (const value of values) {
@@ -107,7 +143,7 @@
     }
     if (!values.length) {
       const tr = document.createElement("tr"), td = document.createElement("td");
-      td.colSpan = width; td.className = "empty"; td.textContent = "None configured";
+      td.colSpan = width; td.className = "empty"; td.textContent = empty;
       tr.append(td); body.append(tr);
     }
   }
@@ -159,7 +195,7 @@
       actions.append(button);
     });
     table("managed-servers", status.managed_servers || [], 9, (tr, server) => {
-      cell(tr, server.name); cell(tr, server.state);
+      cell(tr, server.name); cell(tr, server.state, `state ${server.state}`);
       cell(tr, `${count(server.players)} players · ${count(server.reservations)} attachments`);
       cell(tr, wakeLabel(server));
       cell(tr, server.storage === "disposable" ? "Disposable game" : "Persistent world");
@@ -181,23 +217,27 @@
       }
       if (server.group) {
         const button = document.createElement("button");
-        button.type = "button"; button.className = "button subtle";
+        button.type = "button"; button.className = server.storage === "disposable" ? "button destructive" : "button subtle";
         button.textContent = server.storage === "disposable" ? "Remove & delete files" : "Remove · keep files";
         button.setAttribute("aria-label", `${button.textContent}: ${server.name}`);
         button.title = server.storage === "disposable" ? "Stops the instance and permanently deletes its generated directory, including the world." : "Stops and unregisters the instance; its world and server files remain on disk.";
         const unavailable = number(server.players) > 0 || number(server.reservations) > 0 || ["stopping", "removing"].includes(server.state);
         state.serverButtons.push({ button, unavailable });
-        button.addEventListener("click", () => { if (!button.disabled) instanceOperation(server.name, "remove", server.storage); });
+        button.addEventListener("click", () => {
+          if (button.disabled) return;
+          if (server.storage === "disposable" && !window.confirm(`Remove ${server.name} and permanently delete its files, including its world? This can't be undone.`)) return;
+          instanceOperation(server.name, "remove", server.storage);
+        });
         actions.append(button);
       }
-    });
+    }, "No managed servers yet. Create one from a service group.");
     const selected = $("console-server").value;
     $("console-server").replaceChildren();
     for (const server of [{ name: "", label: "Choose a server" }, ...(status.managed_servers || [])]) {
       const option = document.createElement("option"); option.value = server.name; option.textContent = server.label || server.name; $("console-server").append(option);
     }
     $("console-server").value = (status.managed_servers || []).some((s) => s.name === selected) ? selected : "";
-    if (!$("console-server").value && state.logServer) { state.logServer = ""; state.logCursor = null; text("console-output", "Choose a server to view its logs."); }
+    if (!$("console-server").value && state.logServer) { state.logServer = ""; state.logCursor = null; text("console-output", "Choose a server to view its log."); }
     const routes = Object.entries(status.routes || {}).flatMap(([listener, route]) => typeof route === "string"
       ? [[listener, "All traffic", route]]
       : Object.entries(route).map(([pattern, backend]) => [listener, pattern, backend]));
@@ -394,12 +434,12 @@
         } catch (error) { text("deployment-result", error.message); }
         finally { state.busy = false; controls(); }
       }); actions.append(button);
-    });
+    }, "No deployments recorded yet.");
   }
   async function loadAudit() {
     const session = state.session, data = await request("/api/audit");
     if (session !== state.session) return;
-    table("audit-records", data.records || [], 5, (tr, record) => { cell(tr, time(record.timestamp_unix_ms)); cell(tr, record.actor); cell(tr, record.action); cell(tr, record.target || "—"); cell(tr, `${record.outcome}${record.status ? ` (${record.status})` : ""}`); });
+    table("audit-records", data.records || [], 5, (tr, record) => { cell(tr, time(record.timestamp_unix_ms)); cell(tr, record.actor); cell(tr, record.action); cell(tr, record.target || "—"); cell(tr, `${record.outcome}${record.status ? ` (${record.status})` : ""}`); }, "No audit records yet.");
     text("audit-result", data.durable ? "Records are retained on disk." : "Records are held in memory for this process.");
   }
   function wakeLabel(server) {
@@ -568,7 +608,7 @@
       const data = await request(`/api/servers/${encodeURIComponent(server)}/console`, { method: "POST", body: JSON.stringify({ command }) });
       if (session !== state.session) return;
       if ($("console-command").value === command) $("console-command").value = "";
-      text("console-result", data.message || "Command sent; check logs for its result."); await pollLogs();
+      text("console-result", data.message || "Command sent; check the log for its result."); await pollLogs();
     } catch (error) { if (session === state.session) text("console-result", error.message); }
     finally { state.busy = false; controls(); }
   });
@@ -589,7 +629,6 @@
   });
   $("deployments-refresh").addEventListener("click", async () => { try { await loadDeployments(); } catch (error) { text("deployment-result", error.message); } });
   $("audit-refresh").addEventListener("click", async () => { try { await loadAudit(); } catch (error) { text("audit-result", error.message); } });
-  $("audit-panel").addEventListener("toggle", () => { if ($("audit-panel").open && allowed("audit")) loadAudit().catch((error) => text("audit-result", error.message)); });
   $("validate").addEventListener("click", validate);
   $("save").addEventListener("click", save);
   $("reload").addEventListener("click", reload);

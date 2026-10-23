@@ -48,6 +48,12 @@
     text("metric-directions", `${bytes(metrics.sent)} sent · ${bytes(metrics.received)} received`);
     text("metric-uptime", uptime(status.uptime_seconds));
     text("metric-errors", `${count(metrics.errors)} errors · ${count(metrics.reloads)} reloads`);
+    verdict(unhealthy ? "bad" : !checks || unknown ? "warning" : "good",
+      unhealthy ? `${unhealthy} of ${backends.length} backends unhealthy`
+        : !backends.length ? "Proxy is running"
+          : !checks || unknown === backends.length ? "Proxy is running, health unmonitored"
+            : unknown ? "Proxy is running, some health unknown"
+              : `All ${backends.length === 1 ? "backends" : `${backends.length} backends`} healthy`);
     text("status-summary", unhealthy ? `${unhealthy} backend${unhealthy === 1 ? " is" : "s are"} reporting unhealthy. The proxy status service is reachable.` : !checks ? "Proxy is reachable. Backend health checks are disabled." : unknown ? "Proxy is reachable. Some backends do not have a health result." : "Proxy is reachable. All monitored backends are healthy.");
     text("last-update", `Updated ${new Date().toLocaleTimeString()}`);
     $("metrics-link").classList.toggle("hidden", !status.services?.status?.metrics);
@@ -63,6 +69,10 @@
       cell(tr, key.replaceAll("_", " ")); cell(tr, count(value), "metric-value");
     });
   }
+  function verdict(kind, title) {
+    $("verdict").className = `verdict ${kind}`;
+    text("status-verdict", title);
+  }
   async function refresh() {
     if (pending) return;
     pending = true; $("refresh-status").disabled = true;
@@ -75,6 +85,7 @@
       $("notice").className = "notice hidden";
     } catch (error) {
       text("connection-state", "Unavailable"); $("connection-light").className = "indicator bad";
+      verdict("bad", "Status unavailable");
       text("status-summary", "The status service is unavailable. Displayed values are the last received snapshot.");
       text("notice", error.name === "AbortError" ? "Status request timed out. Retrying automatically." : `${error.message} Retrying automatically.`);
       $("notice").className = "notice error";
