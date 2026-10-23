@@ -18,8 +18,9 @@ allocated ports, storage ownership and manual stops across proxy restarts in
 [managed-server guide](docs/managed-servers.md), [managed-server example](examples/managed.lua),
 [service groups](examples/services.lua) and [provisioning templates](examples/templates.lua).
 The dashboard provides live server logs and commands, structured group/template
-editing, configuration deployment history and rollback, scoped operator tokens,
-and retained audit records. See the [HTTP operator guide](docs/http.md).
+editing, server list, tab list and permission group editing with group
+memberships, configuration deployment history and rollback, scoped operator
+tokens, and retained audit records. See the [HTTP operator guide](docs/http.md).
 Managed Minecraft processes need their own Java runtime and explicit EULA acceptance.
 
 ## Quick start

@@ -62,6 +62,12 @@ fn token(value: &str) -> bool {
         })
 }
 impl ExtensionScript {
+    /// `extensions.groups` with their own permissions and `inherits` lists.
+    /// API v1 has no groups.
+    pub fn permission_groups(&self) -> Option<serde_json::Value> {
+        (self.api_version == 2).then(|| self.permissions.groups_value())
+    }
+
     pub(crate) fn parse(root: &Table, source: &script::ScriptSource) -> mlua::Result<Option<Self>> {
         let value: Value = root.raw_get("extensions")?;
         if value.is_nil() {
@@ -479,6 +485,27 @@ impl Extensions {
             .as_ref()
             .filter(|script| script.api_version == 2)
             .map(|_| self.players.clone())
+    }
+
+    /// Durable permission group memberships (UUID -> groups), or `None`
+    /// without API v2 extensions.
+    pub fn group_memberships(&self) -> Option<BTreeMap<String, BTreeSet<String>>> {
+        self.player_api()?;
+        Some(self.permissions.memberships())
+    }
+
+    /// Add a player to a permission group or remove them from it, as
+    /// `rift.permissions.add_group` and `remove_group` do. This writes to the
+    /// extension store, so call it off the async runtime.
+    pub fn change_group_membership(&self, uuid: &str, group: &str, add: bool) -> io::Result<bool> {
+        if self.player_api().is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "permission groups require extensions with api_version = 2",
+            ));
+        }
+        self.permissions
+            .change_group(uuid, group, add, Instant::now() + Duration::from_secs(5))
     }
 
     /// Publish the permission baseline only after the configuration transaction commits.

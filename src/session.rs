@@ -161,6 +161,7 @@ pub struct Session<C, B> {
     read_chunk_size: usize,
     legacy_state: protocol::LegacyState,
     tab_list: protocol::TabList,
+    boss_bars: protocol::BossBars,
 }
 
 impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Session<C, B> {
@@ -197,6 +198,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             read_chunk_size: 32 * 1024,
             legacy_state: protocol::LegacyState::default(),
             tab_list: protocol::TabList::default(),
+            boss_bars: protocol::BossBars::default(),
         })
     }
 
@@ -573,6 +575,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             // handleLogin; ClientConfigurationPacketListenerImpl.finish.
             self.joined = false;
             self.tab_list.reset();
+            self.boss_bars.reset();
             if let Some(settings) = &self.client_information {
                 backend.codec.write(&mut backend.io, settings).await?;
             }
@@ -936,6 +939,26 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         self.tab_list.modified()
     }
 
+    /// Bring the client's Rift boss bars to `wanted`. Backend bars are untouched.
+    pub async fn sync_boss_bars(
+        &mut self,
+        wanted: &std::collections::BTreeMap<String, protocol::BossBar>,
+    ) -> io::Result<()> {
+        self.client.flush_pending().await?;
+        if !self.joined || !self.client.state.settled(State::Play) {
+            return Err(protocol::invalid("boss bars require a joined player"));
+        }
+        for packet in self.boss_bars.sync(self.version()?, wanted)? {
+            self.send_client(&packet).await?;
+        }
+        Ok(())
+    }
+
+    /// Changes whenever the client discarded Rift's boss bars.
+    pub fn boss_bar_revision(&self) -> u64 {
+        self.boss_bars.revision()
+    }
+
     /// Whether `send_bungeecord` can currently reach a playing backend.
     pub fn bungeecord_ready(&self) -> bool {
         self.bungeecord
@@ -1196,6 +1219,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                         PacketKind::StartConfiguration => {
                             self.joined = false;
                             self.tab_list.reset();
+                            self.boss_bars.reset();
                             self.client
                                 .queue(version, Direction::Clientbound, &packet)?;
                         }

@@ -43,6 +43,11 @@ pub enum PlayerAction {
     /// A tab list header and footer for this player; `None` restores the
     /// configured ones.
     TabList(Option<crate::tab_list::Override>),
+    /// Show, change or (with `None`) remove one of the player's boss bars.
+    BossBar {
+        name: String,
+        bar: Option<crate::protocol::BossBar>,
+    },
 }
 
 struct Entry {
@@ -51,6 +56,8 @@ struct Entry {
     server: String,
     protocol: i32,
     actions: mpsc::Sender<PlayerAction>,
+    /// Names of the boss bars queued for this player and not removed since.
+    boss_bars: BTreeSet<String>,
 }
 
 type Destinations = Arc<Mutex<BTreeSet<String>>>;
@@ -164,6 +171,71 @@ fn tab_list(value: Option<Table>) -> mlua::Result<PlayerAction> {
     })))
 }
 
+fn boss_bar(name: String, value: Option<Table>) -> mlua::Result<PlayerAction> {
+    if !super::token(&name) {
+        return Err(error(
+            "boss bar name must be 1..=64 lowercase letters, digits, '.', '_' or '-'",
+        ));
+    }
+    let Some(options) = value else {
+        return Ok(PlayerAction::BossBar { name, bar: None });
+    };
+    fields(
+        &options,
+        &[
+            "text",
+            "progress",
+            "color",
+            "style",
+            "darken_screen",
+            "play_music",
+            "create_fog",
+        ],
+    )?;
+    let text = crate::server_list::motd(options.raw_get("text")?, "boss bar text")
+        .map_err(mlua::Error::runtime)?;
+    let progress = match options.raw_get::<Value>("progress")? {
+        Value::Nil => 1.0,
+        Value::Integer(value) => value as f64,
+        Value::Number(value) => value,
+        _ => return Err(error("boss bar progress must be a number from 0 to 1")),
+    };
+    if !(0.0..=1.0).contains(&progress) {
+        return Err(error("boss bar progress must be a number from 0 to 1"));
+    }
+    let choice = |field: &str, names: &[&str]| -> mlua::Result<u8> {
+        match options.raw_get::<Option<String>>(field)? {
+            None => Ok(0),
+            Some(value) => names
+                .iter()
+                .position(|name| *name == value)
+                .map(|index| index as u8)
+                .ok_or_else(|| {
+                    mlua::Error::runtime(format!(
+                        "boss bar {field} must be one of {}",
+                        names.join(", ")
+                    ))
+                }),
+        }
+    };
+    let mut flags = 0;
+    for (bit, field) in crate::protocol::FLAG_NAMES.iter().enumerate() {
+        if options.raw_get::<Option<bool>>(*field)?.unwrap_or(false) {
+            flags |= 1 << bit;
+        }
+    }
+    Ok(PlayerAction::BossBar {
+        name,
+        bar: Some(crate::protocol::BossBar {
+            text,
+            progress: progress as f32,
+            color: choice("color", &crate::protocol::COLORS)?,
+            style: choice("style", &crate::protocol::STYLES)?,
+            flags,
+        }),
+    })
+}
+
 /// Find a player by lowercase UUID or case-insensitive name.
 fn find<'a>(
     sessions: &'a BTreeMap<u64, Entry>,
@@ -221,6 +293,7 @@ impl Players {
                 server: server.to_owned(),
                 protocol,
                 actions,
+                boss_bars: BTreeSet::new(),
             },
         );
         (
@@ -230,6 +303,14 @@ impl Players {
             },
             receiver,
         )
+    }
+
+    /// Names of joined players by lowercase UUID.
+    pub fn names(&self) -> BTreeMap<String, String> {
+        self.lock()
+            .values()
+            .map(|entry| (entry.uuid.clone(), entry.name.clone()))
+            .collect()
     }
 
     /// Queue an action for a lowercase UUID or case-insensitive player name.
@@ -418,6 +499,40 @@ impl Players {
                 charge()?;
                 players.send(&target, tab_list(options)?)
             })?,
+        )?;
+        let (players, charge) = (self.clone(), budget.clone());
+        api.raw_set(
+            "boss_bar",
+            lua.create_function(
+                move |_, (target, name, options): (String, String, Option<Table>)| {
+                    charge()?;
+                    let action = boss_bar(name.clone(), options)?;
+                    let mut sessions = players.lock();
+                    let Some(id) = find(&sessions, &target)?.map(|(id, _)| *id) else {
+                        return Ok(false);
+                    };
+                    let entry = sessions.get_mut(&id).unwrap();
+                    if !crate::protocol::boss_bars_supported(entry.protocol) {
+                        return Ok(false);
+                    }
+                    let shown = matches!(action, PlayerAction::BossBar { bar: Some(_), .. });
+                    if shown
+                        && !entry.boss_bars.contains(&name)
+                        && entry.boss_bars.len() >= crate::protocol::MAX_BOSS_BARS
+                    {
+                        return Err(error("a player can have at most 8 boss bars"));
+                    }
+                    if entry.actions.try_send(action).is_err() {
+                        return Ok(false);
+                    }
+                    if shown {
+                        entry.boss_bars.insert(name);
+                    } else {
+                        entry.boss_bars.remove(&name);
+                    }
+                    Ok(true)
+                },
+            )?,
         )?;
         let (players, charge) = (self.clone(), budget.clone());
         api.raw_set(

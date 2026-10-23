@@ -923,6 +923,13 @@ async fn invalid_player_actions_fail_without_queueing() {
         "rift.players.tab_list('Alice', { header = {} })",
         "rift.players.tab_list('Alice', { header = 'x', typo = 1 })",
         "rift.players.tab_list('Alice', 'header')",
+        "rift.players.boss_bar('Alice', 'Event', { text = 'x' })",
+        "rift.players.boss_bar('Alice', 'event', { progress = 1 })",
+        "rift.players.boss_bar('Alice', 'event', { text = 'x', progress = 1.5 })",
+        "rift.players.boss_bar('Alice', 'event', { text = 'x', progress = 'full' })",
+        "rift.players.boss_bar('Alice', 'event', { text = 'x', color = 'orange' })",
+        "rift.players.boss_bar('Alice', 'event', { text = 'x', style = 'notched_7' })",
+        "rift.players.boss_bar('Alice', 'event', { text = 'x', typo = 1 })",
     ] {
         let runtime = runtime(&format!("api_version=2, login=function() {operation} end"));
         let (_alice, mut alice) = joined(&runtime, 9, "Alice", "lobby");
@@ -1109,4 +1116,71 @@ async fn players_api_sets_and_restores_tab_lists() {
             PlayerAction::TabList(None),
         ]
     );
+}
+
+#[tokio::test]
+async fn players_api_shows_changes_and_removes_boss_bars() {
+    let runtime = runtime(
+        r#"api_version=2, login=function(ctx)
+        local players = require('rift.players')
+        assert(players.boss_bar('Alice', 'event', { text = 'Event' }))
+        assert(players.boss_bar('Alice', 'event', {
+            text = { text = 'Event', color = 'gold' }, progress = 0.25, color = 'yellow',
+            style = 'notched_10', darken_screen = true, create_fog = true,
+        }))
+        assert(players.boss_bar('Alice', 'event'))
+        assert(not players.boss_bar('Nobody', 'event', { text = 'x' }))
+        assert(not players.boss_bar('Legacy', 'event', { text = 'x' }))
+        -- Removing and replacing bars keeps a player within the limit.
+        for i = 1, 8 do assert(players.boss_bar('Alice', 'bar' .. i, { text = 'x' })) end
+        assert(players.boss_bar('Alice', 'bar1', { text = 'y' }))
+        assert(players.boss_bar('Alice', 'bar1'))
+        assert(players.boss_bar('Alice', 'bar9', { text = 'x' }))
+        players.boss_bar('Alice', 'bar10', { text = 'x' })
+    end"#,
+    );
+    let (_alice, mut alice) = joined(&runtime, 9, "Alice", "lobby");
+    // 1.8.9 has no boss bars.
+    let (_legacy, mut legacy) = runtime
+        .players()
+        .register(10, &[10; 16], "Legacy", 47, "lobby");
+    let error = runtime
+        .session(context(1))
+        .unwrap()
+        .decision("login")
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("at most 8 boss bars"), "{error}");
+    let actions = drain(&mut alice);
+    assert_eq!(actions.len(), 14);
+    assert_eq!(
+        actions[..3],
+        [
+            PlayerAction::BossBar {
+                name: "event".into(),
+                bar: Some(crate::protocol::BossBar {
+                    text: serde_json::json!("Event"),
+                    progress: 1.0,
+                    color: 0,
+                    style: 0,
+                    flags: 0,
+                }),
+            },
+            PlayerAction::BossBar {
+                name: "event".into(),
+                bar: Some(crate::protocol::BossBar {
+                    text: serde_json::json!({ "text": "Event", "color": "gold" }),
+                    progress: 0.25,
+                    color: 4,
+                    style: 2,
+                    flags: 5,
+                }),
+            },
+            PlayerAction::BossBar {
+                name: "event".into(),
+                bar: None,
+            },
+        ]
+    );
+    assert!(drain(&mut legacy).is_empty());
 }

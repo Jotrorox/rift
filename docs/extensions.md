@@ -435,6 +435,7 @@ names a configured backend or service group; a group matches all its instances.
 | `rift.players.action_bar(player, text)` | Boolean: action-bar text was queued |
 | `rift.players.title(player, title)` | Boolean: a title was queued; `title` is text or an options table |
 | `rift.players.tab_list(player, options)` | Boolean: a tab list header and footer were queued; omit `options` to restore the configured ones |
+| `rift.players.boss_bar(player, name, options)` | Boolean: a boss bar was queued; omit `options` to remove the bar called `name` |
 | `rift.players.kick(player, reason)` | Boolean: a disconnect with this reason was queued |
 | `rift.players.transfer(player, server)` | Boolean: a transfer request was queued |
 | `rift.players.broadcast(text, server)` | Number of players a chat message was queued for; `server` is optional |
@@ -467,12 +468,46 @@ rift.config.extensions = {
 }
 ```
 
+Boss bars are named by the extension (1–64 lowercase letters, digits, `.`, `_`
+or `-`), so a later call with the same name changes that bar. Options are
+`text` (required: a string or chat component table of up to 4096 bytes),
+`progress` (0 to 1; default 1), `color` (`pink`, `blue`, `red`, `green`,
+`yellow`, `purple` or `white`; default `pink`), `style` (`progress`,
+`notched_6`, `notched_10`, `notched_12` or `notched_20`; default `progress`) and
+the booleans `darken_screen`, `play_music` and `create_fog`. Rift sends only the
+fields that changed. A player keeps their bars across server switches until they
+are removed or the player disconnects, and can have at most 8; showing a ninth
+fails the callback. Boss bars need Minecraft 1.9 or newer, so the call returns
+false for 1.8.9 players. They have their own UUIDs and never touch the
+backend's boss bars.
+
+```lua
+rift.config.extensions = {
+    api_version = 2,
+    join = function(ctx)
+        rift.players.boss_bar(ctx.uuid, "event", {
+            text = { text = "Build contest: 40 of 50 entries", color = "gold" },
+            progress = 0.8,
+            color = "yellow",
+            style = "notched_10",
+        })
+    end,
+    commands = {
+        hidebar = {
+            permission = "network.player",
+            run = function(ctx) rift.players.boss_bar(ctx.uuid, "event") end,
+        },
+    },
+}
+```
+
 Actions are delivered asynchronously. A call returns true once the action is
 queued, or false when the player is offline or already has 32 undelivered
 actions; it never waits for the client. The player's own session writes queued
 actions in order while it is in a usable world, so they wait while a transfer is
-in progress. An action other than a kick that meets a backend-initiated
-reconfiguration is dropped. Undelivered actions are lost on disconnect. Each
+in progress. An action other than a kick, tab list or boss bar that meets a
+backend-initiated reconfiguration is dropped; tab lists and boss bars apply
+after the next join. Undelivered actions are lost on disconnect. Each
 callback can make at most 256 action calls; a broadcast counts once.
 
 A transfer takes the same path as `/server`: static access, health and draining

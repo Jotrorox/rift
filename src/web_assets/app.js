@@ -8,7 +8,10 @@
     session: 0, mutation: 0, remoteChanged: false, conflicted: false, online: false,
     serverButtons: [], view: "overview",
     permissions: null, groups: null, logServer: "", logCursor: null, logPolling: false, definitions: {}, definitionRevision: null, definitionDirty: false, definitionVersion: 0, definitionSection: "service_groups", definitionName: "", definitionInputs: new Map(),
+    // Unsaved edits on the server list, tab list and permission group forms.
+    settingsDirty: { serverList: false, tabList: false, permissionGroup: false }, permissionGroup: "", members: [], memberButtons: [],
   };
+  const settingsDirty = () => Object.values(state.settingsDirty).some(Boolean);
   const allowed = (permission) => state.permissions === null || state.permissions.includes(permission);
   const dirty = () => state.loaded && $("source").value !== state.baseline;
   const number = (value) => Number.isFinite(Number(value)) ? Number(value) : 0;
@@ -57,17 +60,29 @@
     $("console-send").disabled = state.busy || !state.logServer || !allowed("console");
     $("definition-save").disabled = state.busy || !state.definitionRevision || !allowed("config");
     $("definition-delete").disabled = state.busy || !state.definitionRevision || !$("definition-select").value || !allowed("config");
-    for (const [id, permission] of [["config-panel", "config"], ["definitions-panel", "config"], ["deployments-panel", "deploy"], ["audit-panel", "audit"], ["extensions-panel", "extensions"]]) $(id).classList.toggle("hidden", !allowed(permission));
+    const groupsEnabled = Boolean(state.definitions.permission_groups);
+    for (const id of ["server-list-save", "tab-list-save", "permission-group-save"]) $(id).disabled = state.busy || !state.definitionRevision || !allowed("config");
+    $("permission-group-delete").disabled = state.busy || !state.definitionRevision || !$("permission-group-select").value || !allowed("config");
+    for (const button of state.memberButtons) button.disabled = state.busy || !allowed("config");
+    // Fields that only matter while their setting is on.
+    for (const id of ["server-list-motd", "server-list-maintenance-motd", "server-list-version", "server-list-max-players", "server-list-sample"]) $(id).disabled = !$("server-list-enabled").checked;
+    for (const id of ["tab-list-header", "tab-list-footer", "tab-list-players"]) $(id).disabled = !$("tab-list-enabled").checked;
+    for (const row of $("permission-groups").children) if (row.dataset) row.setAttribute("aria-current", String(row.dataset.group === state.permissionGroup && Boolean(state.permissionGroup)));
+    $("permission-member-add").disabled = state.busy || !groupsEnabled || !$("permission-member-group").value || !allowed("config");
+    for (const [id, permission] of [["config-panel", "config"], ["definitions-panel", "config"], ["server-list-panel", "config"], ["server-list-lua-panel", "config"], ["tab-list-panel", "config"], ["deployments-panel", "deploy"], ["audit-panel", "audit"], ["extensions-panel", "extensions"]]) $(id).classList.toggle("hidden", !allowed(permission));
+    for (const id of ["permission-groups-panel", "permission-members-panel"]) $(id).classList.toggle("hidden", !allowed("config") || !groupsEnabled);
+    $("permissions-unavailable").classList.toggle("hidden", !allowed("config") || groupsEnabled || !state.definitionRevision);
     $("live-console-panel").classList.toggle("hidden", !allowed("logs") && !allowed("console"));
     const visible = { script: allowed("config"), definitions: allowed("config"), extensions: allowed("extensions"),
+      "server-list": allowed("config"), "tab-list": allowed("config"), permissions: allowed("config"),
       console: allowed("logs") || allowed("console"), deployments: allowed("deploy"), audit: allowed("audit") };
     for (const [id] of views) $(`nav-${id}`).classList.toggle("hidden", visible[id] === false);
     for (const [section, ids] of sections) $(`section-${section}`).classList.toggle("hidden", ids.every((id) => visible[id] === false));
     showView();
   }
-  const views = [["overview", "Overview"], ["routing", "Routing"], ["metrics", "Metrics"], ["servers", "Servers"], ["console", "Console"], ["groups", "Service groups"],
-    ["script", "Lua script"], ["definitions", "Groups & templates"], ["extensions", "Extensions"], ["reference", "Reference"], ["deployments", "Deployments"], ["audit", "Audit log"]];
-  const sections = [["configuration", ["script", "definitions", "extensions"]], ["activity", ["deployments", "audit"]]];
+  const views = [["overview", "Overview"], ["routing", "Routing"], ["server-list", "Server list"], ["tab-list", "Tab list"], ["metrics", "Metrics"], ["servers", "Servers"], ["console", "Console"], ["groups", "Service groups"],
+    ["script", "Lua script"], ["definitions", "Groups & templates"], ["permissions", "Permissions"], ["extensions", "Extensions"], ["reference", "Reference"], ["deployments", "Deployments"], ["audit", "Audit log"]];
+  const sections = [["configuration", ["script", "definitions", "permissions", "extensions"]], ["activity", ["deployments", "audit"]]];
   function showView() {
     const available = views.filter(([id]) => !$(`nav-${id}`).className.includes("hidden"));
     const requested = String(window.location.hash || "").slice(1);
@@ -83,6 +98,7 @@
     document.title = `${label} · Rift`;
     // The audit log is fetched on demand rather than on every poll.
     if (changed && current === "audit" && allowed("audit")) loadAudit().catch((error) => text("audit-result", error.message));
+    if (changed && current === "permissions" && allowed("config") && state.definitions.permission_groups) loadPermissions().catch((error) => text("permission-member-result", error.message));
   }
   function sidebar(open) {
     $("app").classList.toggle("nav-open", open);
@@ -308,7 +324,7 @@
       if (allowed("read")) await refreshStatus();
       if (allowed("config")) await loadSource();
       else { $("source").value = ""; state.baseline = ""; state.revision = null; state.loaded = false; }
-      if (allowed("config")) await loadDefinitions();
+      if (allowed("config")) { await loadDefinitions(); if (state.definitions.permission_groups) await loadPermissions(); }
       if (allowed("deploy")) await loadDeployments();
     } catch (error) { handleError(error); }
     finally { state.busy = false; controls(); }
@@ -375,6 +391,7 @@
     }
     select.value = Object.hasOwn(value[$("definition-section").value || "service_groups"] || {}, previous) ? previous : "";
     renderDefinition();
+    renderSettings();
   }
   function definitionValue() {
     const value = {}, scaling = {}, ports = [], scalingEnabled = state.definitionInputs.get("scaling_enabled")?.input.value === "true";
@@ -413,6 +430,197 @@
     } catch (error) { text("definition-result", error.status === 409 ? `${error.message} Refresh definitions after preserving your edits.` : error.message); }
     finally { state.busy = false; controls(); }
   }
+  // Text fields take plain text or a JSON chat component. Text that merely
+  // starts with a brace, such as "{player} joined", stays plain.
+  const componentText = (value) => value === null || value === undefined ? "" : typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  function componentValue(raw) {
+    if (!raw.trim()) return undefined;
+    if (/^\s*[[{]/.test(raw)) {
+      try { const parsed = JSON.parse(raw); if (parsed && typeof parsed === "object") return parsed; } catch (_) { /* Plain text. */ }
+    }
+    return raw;
+  }
+  const componentSummary = (value) => {
+    const flatten = (part) => typeof part === "string" ? part : Array.isArray(part) ? part.map(flatten).join("") : part && typeof part === "object" ? `${part.text ?? ""}${(part.extra || []).map(flatten).join("")}` : "";
+    return value === null || value === undefined ? "—" : flatten(value).replace(/§./g, "") || "Chat component";
+  };
+  const lines = (value) => value.split("\n").map((line) => line.trim()).filter(Boolean);
+  function markSettings(key) { state.settingsDirty[key] = true; }
+  // Re-render each settings form from the loaded definitions unless it has unsaved edits.
+  function renderSettings() {
+    if (!state.settingsDirty.serverList) renderServerList();
+    if (!state.settingsDirty.tabList) renderTabList();
+    renderPermissionGroups();
+  }
+  function renderServerList() {
+    const list = state.definitions.server_list || null;
+    $("server-list-enabled").checked = Boolean(list);
+    $("server-list-motd").value = componentText(list?.motd);
+    $("server-list-maintenance-motd").value = componentText(list?.maintenance_motd);
+    $("server-list-version").value = list?.version ?? "";
+    $("server-list-max-players").value = list?.max_players ?? "";
+    $("server-list-sample").value = (list?.sample || []).join("\n");
+    const favicon = typeof list?.favicon === "string" && list.favicon.startsWith("data:image/png;base64,") ? list.favicon : "";
+    $("server-list-favicon").hidden = !favicon;
+    if (favicon) $("server-list-favicon").src = favicon;
+    text("server-list-favicon-state", favicon ? "Favicon configured in Lua" : "No favicon configured");
+    table("server-list-hosts", Object.entries(list?.hosts || {}), 4, (tr, [host, entry]) => {
+      cell(tr, host, "address"); cell(tr, componentSummary(entry.motd)); cell(tr, entry.version ?? "—"); cell(tr, entry.max_players ?? "—", "metric-value");
+    }, "No hostname-specific entries.");
+    state.settingsDirty.serverList = false;
+  }
+  function serverListValue() {
+    if (!$("server-list-enabled").checked) return null;
+    const value = {}, maximum = $("server-list-max-players").value.trim();
+    for (const [key, id] of [["motd", "server-list-motd"], ["maintenance_motd", "server-list-maintenance-motd"]]) {
+      const parsed = componentValue($(id).value);
+      if (parsed !== undefined) value[key] = parsed;
+    }
+    if ($("server-list-version").value.trim()) value.version = $("server-list-version").value;
+    if (maximum) {
+      if (!/^\d+$/.test(maximum) || !Number.isSafeInteger(Number(maximum))) throw new Error("Maximum players must be a nonnegative integer.");
+      value.max_players = Number(maximum);
+    }
+    const sample = $("server-list-sample").value.split("\n").filter((line) => line.trim());
+    if (sample.length) value.sample = sample;
+    return value;
+  }
+  function renderTabList() {
+    const list = state.definitions.tab_list || null;
+    $("tab-list-enabled").checked = Boolean(list);
+    $("tab-list-header").value = componentText(list?.header);
+    $("tab-list-footer").value = componentText(list?.footer);
+    $("tab-list-players").value = list?.players === "network" ? "network" : "server";
+    state.settingsDirty.tabList = false;
+  }
+  function tabListValue() {
+    if (!$("tab-list-enabled").checked) return null;
+    const value = {};
+    for (const key of ["header", "footer"]) {
+      const parsed = componentValue($(`tab-list-${key}`).value);
+      if (parsed !== undefined) value[key] = parsed;
+    }
+    if ($("tab-list-players").value === "network") value.players = "network";
+    if (!Object.keys(value).length) throw new Error("Set a header, a footer or list everyone on the network, or turn the tab list off.");
+    return value;
+  }
+  function renderPermissionGroups() {
+    const groups = state.definitions.permission_groups || {};
+    const members = {};
+    for (const member of state.members) for (const group of member.groups || []) members[group] = (members[group] || 0) + 1;
+    const names = Object.keys(groups);
+    text("permission-group-count", `${names.length} defined`);
+    table("permission-groups", names, 5, (tr, name) => {
+      const nodes = Object.values(groups[name].permissions || {});
+      const granted = nodes.filter(Boolean).length;
+      if (tr.dataset) tr.dataset.group = name;
+      cell(tr, name, "address"); cell(tr, (groups[name].inherits || []).join(", ") || "—");
+      cell(tr, nodes.length ? `${granted} granted · ${nodes.length - granted} denied` : "None");
+      cell(tr, name === "default" ? "Everyone" : count(members[name] || 0), "metric-value");
+      const actions = cell(tr, ""), button = document.createElement("button");
+      button.type = "button"; button.className = "button subtle"; button.textContent = "Edit";
+      button.setAttribute("aria-label", `Edit ${name}`);
+      button.addEventListener("click", () => selectPermissionGroup(name));
+      actions.append(button);
+    }, "No groups defined yet. Create one below.");
+    const select = $("permission-group-select"), previous = state.permissionGroup;
+    select.replaceChildren();
+    for (const name of ["", ...names]) {
+      const option = document.createElement("option"); option.value = name; option.textContent = name || "New group"; select.append(option);
+    }
+    select.value = Object.hasOwn(groups, previous) ? previous : "";
+    if (!state.settingsDirty.permissionGroup) renderPermissionGroup();
+    const target = $("permission-member-group"), chosen = target.value;
+    target.replaceChildren();
+    // Everyone is in default implicitly, so it can't be assigned.
+    for (const name of names.filter((name) => name !== "default")) {
+      const option = document.createElement("option"); option.value = name; option.textContent = name; target.append(option);
+    }
+    target.value = names.includes(chosen) && chosen !== "default" ? chosen : names.find((name) => name !== "default") || "";
+    controls();
+  }
+  function renderPermissionGroup() {
+    const name = $("permission-group-select").value, group = state.definitions.permission_groups?.[name] || {};
+    state.permissionGroup = name;
+    $("permission-group-name").value = name;
+    $("permission-group-inherits").value = (group.inherits || []).join("\n");
+    $("permission-group-nodes").value = Object.entries(group.permissions || {}).map(([node, granted]) => `${granted ? "" : "-"}${node}`).join("\n");
+    state.settingsDirty.permissionGroup = false;
+  }
+  function selectPermissionGroup(name) {
+    if (state.settingsDirty.permissionGroup && !window.confirm("Discard unsaved group changes?")) return;
+    $("permission-group-select").value = name; state.settingsDirty.permissionGroup = false; renderPermissionGroup(); controls();
+    $("permission-group-name").focus?.();
+  }
+  function permissionGroupValue() {
+    const permissions = {};
+    for (const line of lines($("permission-group-nodes").value)) {
+      const denied = line.startsWith("-"), node = denied ? line.slice(1).trim() : line;
+      if (!/^(\*|[a-z0-9_.-]{1,64})$/.test(node.replace(/\.\*$/, "")) || node.startsWith(".")) throw new Error(`“${line}” isn’t a permission node, prefix.* wildcard or *.`);
+      permissions[node] = !denied;
+    }
+    return { inherits: lines($("permission-group-inherits").value.replaceAll(",", "\n")), permissions };
+  }
+  async function loadPermissions() {
+    const session = state.session, data = await request("/api/permissions");
+    if (session !== state.session) return;
+    state.members = Array.isArray(data.members) ? data.members : []; state.memberButtons = [];
+    text("permission-member-count", `${state.members.length}${data.truncated ? "+" : ""} with groups`);
+    table("permission-members", state.members, 3, (tr, member) => {
+      cell(tr, member.name || "Offline", member.name ? "" : "unlisted"); cell(tr, member.uuid, "address");
+      const groups = cell(tr, ""), list = document.createElement("div"); list.className = "chip-list";
+      for (const group of member.groups || []) {
+        const chip = document.createElement("span"), label = document.createElement("span"), remove = document.createElement("button");
+        chip.className = "chip"; label.textContent = group;
+        remove.type = "button"; remove.textContent = "×"; state.memberButtons.push(remove);
+        remove.setAttribute("aria-label", `Remove ${member.name || member.uuid} from ${group}`); remove.title = `Remove from ${group}`;
+        remove.addEventListener("click", () => changeMembership(member.uuid, group, false));
+        chip.append(label, remove); list.append(chip);
+      }
+      groups.append(list);
+    }, "No player belongs to a group yet. Everyone is in default when it exists.");
+    if (data.truncated) text("permission-member-result", "Showing the first 1,000 members.");
+    renderPermissionGroups();
+  }
+  async function changeMembership(player, group, add) {
+    if (state.busy || !allowed("config")) return;
+    state.busy = true; controls(); text("permission-member-result", add ? `Adding ${player} to ${group}…` : `Removing ${player} from ${group}…`);
+    try {
+      const changed = await request(`/api/permissions/members/${encodeURIComponent(player)}/${encodeURIComponent(group)}`, { method: add ? "POST" : "DELETE", body: "{}" });
+      text("permission-member-result", changed.changed === false
+        ? add ? `${player} was already in ${group}.` : `${player} wasn’t in ${group}.`
+        : add ? `Added ${player} to ${group}. It applies to their next permission check.` : `Removed ${player} from ${group}.`);
+      if (add && $("permission-member-player").value.trim() === player) $("permission-member-player").value = "";
+      await loadPermissions();
+    } catch (error) { if (error.status === 401 || error.status === 403) $("auth-panel").open = true; text("permission-member-result", error.message); }
+    finally { state.busy = false; controls(); }
+  }
+  // Save one settings form through the structured definition endpoint.
+  async function applySetting({ path, value, result, key, saved }) {
+    if (state.busy || !state.definitionRevision || !allowed("config")) return;
+    if (dirty()) { text(result, "Save or discard your Lua editor changes first."); return; }
+    let definition;
+    try { definition = value(); } catch (error) { text(result, error.message); return; }
+    state.busy = true; controls(); text(result, "Validating and applying…");
+    try {
+      const response = await request(path, { method: "PUT", body: JSON.stringify({ revision: state.definitionRevision, definition }) });
+      state.mutation += 1; state.definitionRevision = response.revision; state.settingsDirty[key] = false;
+      await loadSource(); await loadDefinitions();
+      await refreshStatus({ syncSource: false });
+      if (allowed("deploy")) await loadDeployments();
+      text(result, saved(definition));
+    } catch (error) { text(result, error.status === 409 ? `${error.message} Your edits are kept; refresh, then reapply them.` : error.message); }
+    finally { state.busy = false; controls(); }
+  }
+  async function refreshSettings(key, result) {
+    if (state.busy || (state.settingsDirty[key] && !window.confirm("Discard unsaved changes and refresh?"))) return;
+    state.settingsDirty[key] = false;
+    try {
+      await loadDefinitions();
+      if (state.definitions.permission_groups) await loadPermissions();
+      text(result, "Refreshed.");
+    } catch (error) { text(result, error.message); }
+  }
   async function loadDeployments() {
     const session = state.session, data = await request("/api/deployments");
     if (session !== state.session) return;
@@ -422,7 +630,7 @@
       const actions = cell(tr, ""), button = document.createElement("button"); button.type = "button"; button.className = "button secondary"; button.textContent = "Roll back";
       button.addEventListener("click", async () => {
         if (state.busy || !allowed("deploy")) return;
-        if (dirty() || state.definitionDirty) { text("deployment-result", "Save or discard editor changes before rolling back."); return; }
+        if (dirty() || state.definitionDirty || settingsDirty()) { text("deployment-result", "Save or discard editor changes before rolling back."); return; }
         if (!window.confirm(`Restore deployment ${deployment.id}? Configuration will be validated before applying.`)) return;
         state.busy = true; controls(); text("deployment-result", "Restoring deployment…");
         try {
@@ -568,7 +776,7 @@
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") { event.preventDefault(); save(); }
   });
   window.addEventListener("beforeunload", (event) => {
-    if (dirty() || state.definitionDirty) { event.preventDefault(); event.returnValue = ""; }
+    if (dirty() || state.definitionDirty || settingsDirty()) { event.preventDefault(); event.returnValue = ""; }
   });
   $("auth-form").addEventListener("submit", (event) => {
     event.preventDefault();
@@ -585,12 +793,14 @@
     text("auth-state", "No token set"); connect();
   });
   function resetOperatorView() {
-    if ((dirty() || state.definitionDirty) && !window.confirm("Switch operator and discard unsaved editor changes?")) return false;
+    if ((dirty() || state.definitionDirty || settingsDirty()) && !window.confirm("Switch operator and discard unsaved editor changes?")) return false;
     state.loaded = false; state.baseline = ""; state.revision = null; state.remoteChanged = false; state.conflicted = false;
     state.permissions = []; state.logServer = ""; state.logCursor = null; state.definitions = {}; state.definitionRevision = null; state.definitionDirty = false; state.definitionVersion += 1;
+    state.settingsDirty = { serverList: false, tabList: false, permissionGroup: false }; state.permissionGroup = ""; state.members = []; state.memberButtons = [];
     $("source").value = ""; $("console-server").replaceChildren(); $("definition-fields").replaceChildren();
     for (const id of ["console-output", "config-path", "revision", "deployment-result", "definition-result", "console-result", "extension-output"]) text(id, "");
-    for (const id of ["deployments", "audit-records", "managed-servers", "service-groups", "backends", "routes"]) $(id).replaceChildren();
+    for (const id of ["deployments", "audit-records", "managed-servers", "service-groups", "backends", "routes", "server-list-hosts", "permission-groups", "permission-members"]) $(id).replaceChildren();
+    for (const id of ["server-list-result", "tab-list-result", "permission-group-result", "permission-member-result"]) text(id, "");
     state.serverButtons = []; return true;
   }
   $("refresh-status").addEventListener("click", () => refreshStatus());
@@ -627,6 +837,52 @@
     if (state.busy || (state.definitionDirty && !window.confirm("Discard unsaved definition fields and refresh?"))) return;
     try { await loadDefinitions(); text("definition-result", "Definitions refreshed."); } catch (error) { text("definition-result", error.message); }
   });
+  for (const [form, key] of [["server-list-form", "serverList"], ["tab-list-form", "tabList"], ["permission-group-form", "permissionGroup"]]) {
+    $(form).addEventListener("input", () => markSettings(key));
+    $(form).addEventListener("change", () => { markSettings(key); controls(); });
+  }
+  $("server-list-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (!$("server-list-enabled").checked && state.definitions.server_list && !window.confirm("Turn off the proxy-owned server list? Its favicon and hostname entries are removed too, and backends answer pings again.")) return;
+    applySetting({ path: "/api/definitions/server_list", value: serverListValue, result: "server-list-result", key: "serverList",
+      saved: (value) => value ? "Server list saved and applied." : "Server list turned off; backends answer pings again." });
+  });
+  $("tab-list-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    applySetting({ path: "/api/definitions/tab_list", value: tabListValue, result: "tab-list-result", key: "tabList",
+      saved: (value) => value ? "Tab list saved; players see it within half a second." : "Tab list turned off; backends control it again." });
+  });
+  $("permission-group-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const name = $("permission-group-name").value.trim();
+    if (!/^[a-z0-9_.-]{1,64}$/.test(name)) { text("permission-group-result", "Enter a group name using lowercase letters, digits, dots, underscores or hyphens."); return; }
+    if ($("permission-group-select").value === "" && Object.hasOwn(state.definitions.permission_groups || {}, name) && !window.confirm(`Replace the existing group ${name}?`)) return;
+    state.permissionGroup = name;
+    applySetting({ path: `/api/definitions/permission_groups/${encodeURIComponent(name)}`, value: permissionGroupValue, result: "permission-group-result", key: "permissionGroup",
+      saved: () => `Group ${name} saved and applied.` });
+  });
+  $("permission-group-delete").addEventListener("click", () => {
+    const name = $("permission-group-select").value;
+    if (!name || !window.confirm(`Delete the group ${name}? Players keep the membership until you remove it, but it grants nothing.`)) return;
+    state.permissionGroup = "";
+    applySetting({ path: `/api/definitions/permission_groups/${encodeURIComponent(name)}`, value: () => null, result: "permission-group-result", key: "permissionGroup",
+      saved: () => `Group ${name} deleted.` });
+  });
+  $("permission-group-select").addEventListener("change", () => {
+    const chosen = $("permission-group-select").value;
+    $("permission-group-select").value = state.permissionGroup;
+    selectPermissionGroup(chosen);
+  });
+  $("permission-member-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const raw = $("permission-member-player").value.trim(), compact = raw.replaceAll("-", "").toLowerCase();
+    const player = /^[0-9a-f]{32}$/.test(compact) ? compact : raw;
+    if (!/^[0-9a-f]{32}$/.test(player) && !/^[A-Za-z0-9_]{1,16}$/.test(player)) { text("permission-member-result", "Enter a player UUID or the name of an online player."); return; }
+    changeMembership(player, $("permission-member-group").value, true);
+  });
+  $("server-list-refresh").addEventListener("click", () => refreshSettings("serverList", "server-list-result"));
+  $("tab-list-refresh").addEventListener("click", () => refreshSettings("tabList", "tab-list-result"));
+  $("permissions-refresh").addEventListener("click", () => refreshSettings("permissionGroup", "permission-group-result"));
   $("deployments-refresh").addEventListener("click", async () => { try { await loadDeployments(); } catch (error) { text("deployment-result", error.message); } });
   $("audit-refresh").addEventListener("click", async () => { try { await loadAudit(); } catch (error) { text("audit-result", error.message); } });
   $("validate").addEventListener("click", validate);

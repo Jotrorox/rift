@@ -13,7 +13,7 @@ pub(super) struct LegacyIds {
     pub respawn: i32,
     pub keepalive: i32,
     pub keepalive_reply: i32,
-    boss: i32,
+    pub boss: i32,
     pub players: i32,
     pub remove_players: i32,
     pub header: i32,

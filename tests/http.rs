@@ -1755,3 +1755,147 @@ fn structured_definitions_preserve_lua_and_apply_safe_group_and_template_edits()
     );
     assert_eq!(client.get("/ext/test").expect(200).body, "hook preserved");
 }
+
+#[test]
+fn console_settings_edit_permission_groups_memberships_tab_list_and_server_list() {
+    let fixture = Fixture::new();
+    // The forwarding secret only has to exist; reuse a variable the fixture sets.
+    let source = fixture.source(
+        "",
+        "authentication = { online_mode = true },
+         forwarding = { mode = 'velocity', secret_env = 'RIFT_ADMIN_TOKEN' },
+         extensions = { api_version = 2, groups = { default = { permissions = { ['chat.send'] = true } } } },
+         on_http = function() return { body = 'hook preserved' } end,",
+    );
+    let _process = fixture.start(&source);
+    let client = fixture.client();
+    let values = client.get("/api/definitions").expect(200).value();
+    assert_eq!(
+        values["permission_groups"]["default"],
+        json!({"inherits": [], "permissions": {"chat.send": true}})
+    );
+    assert!(values["tab_list"].is_null() && values["server_list"].is_null());
+    let put = |path: &str, definition: Value| {
+        client.json(
+            "PUT",
+            path,
+            json!({"revision": revision(client), "definition": definition}),
+        )
+    };
+    put(
+        "/api/definitions/permission_groups/staff",
+        json!({"inherits": ["default"], "permissions": {"network.*": true, "network.ban": false}}),
+    )
+    .expect(200);
+    put(
+        "/api/definitions/permission_groups/broken",
+        json!({"inherits": ["missing"]}),
+    )
+    .expect(400);
+    put("/api/definitions/permission_groups/Staff", json!({})).expect(400);
+    put(
+        "/api/definitions/tab_list",
+        json!({"header": "Hi {player}", "footer": {"text": "{online} online", "color": "gray"}, "players": "network"}),
+    )
+    .expect(200);
+    put(
+        "/api/definitions/server_list",
+        json!({"motd": {"text": "Welcome", "color": "gold"}, "max_players": 50, "sample": ["one"]}),
+    )
+    .expect(200);
+    put(
+        "/api/definitions/server_list",
+        json!({"motd": "x", "favicon": "icon.png"}),
+    )
+    .expect(400);
+    let values = client.get("/api/definitions").expect(200).value();
+    assert_eq!(
+        values["permission_groups"]["staff"],
+        json!({"inherits": ["default"], "permissions": {"network.*": true, "network.ban": false}})
+    );
+    assert_eq!(
+        values["tab_list"],
+        json!({"header": "Hi {player}", "footer": {"text": "{online} online", "color": "gray"}, "players": "network"})
+    );
+    assert_eq!(values["server_list"]["motd"]["color"], "gold");
+    assert_eq!(values["server_list"]["max_players"], 50);
+    assert_eq!(values["server_list"]["hosts"], json!({}));
+    assert!(fixture.read().contains(&source));
+    assert_eq!(client.get("/ext/test").expect(200).body, "hook preserved");
+
+    // Memberships are runtime state in the extension store, not configuration.
+    let uuid = "0123456789abcdef0123456789abcdef";
+    let member = |method: &str, group: &str| {
+        client.json(
+            method,
+            &format!("/api/permissions/members/{uuid}/{group}"),
+            json!({}),
+        )
+    };
+    let before = revision(client);
+    assert_eq!(member("POST", "staff").expect(200).value()["changed"], true);
+    assert_eq!(
+        member("POST", "staff").expect(200).value()["changed"],
+        false
+    );
+    member("POST", "unknown").expect(400);
+    member("POST", "default").expect(400);
+    client
+        .json("POST", "/api/permissions/members/Offline/staff", json!({}))
+        .expect(404);
+    client
+        .json(
+            "POST",
+            &format!("/api/permissions/members/{}/staff", uuid.to_uppercase()),
+            json!({}),
+        )
+        .expect(400);
+    assert_eq!(revision(client), before);
+    assert_eq!(
+        client.get("/api/permissions").expect(200).value(),
+        json!({"enabled": true, "members": [{"uuid": uuid, "name": null, "groups": ["staff"]}], "truncated": false})
+    );
+    assert_eq!(
+        member("DELETE", "staff").expect(200).value()["changed"],
+        true
+    );
+    assert_eq!(
+        client.get("/api/permissions").expect(200).value()["members"],
+        json!([])
+    );
+    let audit = client.get("/api/audit").expect(200).value();
+    assert!(audit["records"].as_array().unwrap().iter().any(|record| {
+        record["action"] == "POST group_membership" && record["target"] == format!("{uuid}/staff")
+    }));
+
+    put("/api/definitions/server_list", Value::Null).expect(200);
+    put("/api/definitions/tab_list", Value::Null).expect(200);
+    let values = client.get("/api/definitions").expect(200).value();
+    assert!(values["tab_list"].is_null() && values["server_list"].is_null());
+}
+
+#[test]
+fn permission_groups_require_api_v2_extensions() {
+    let fixture = Fixture::new();
+    let _process = fixture.start(&fixture.source("", ""));
+    let client = fixture.client();
+    assert_eq!(
+        client.get("/api/permissions").expect(200).value()["enabled"],
+        false
+    );
+    assert!(client.get("/api/definitions").expect(200).value()["permission_groups"].is_null());
+    client
+        .json(
+            "PUT",
+            "/api/definitions/permission_groups/staff",
+            json!({"revision": revision(client), "definition": {}}),
+        )
+        .expect(409);
+    client
+        .json(
+            "POST",
+            "/api/permissions/members/0123456789abcdef0123456789abcdef/staff",
+            json!({}),
+        )
+        .expect(409);
+}
