@@ -10,7 +10,7 @@ use axum::{
     http::{HeaderValue, StatusCode, Uri, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
-    routing::{any, delete, get, post},
+    routing::{any, delete, get, post, put},
 };
 use rift::{
     config::Config,
@@ -332,6 +332,12 @@ fn router(kind: Kind, address: SocketAddr, mut app: App) -> Router {
             .route("/api/servers/{name}/console", post(server_console))
             .route("/api/groups", get(service_groups))
             .route("/api/definitions", get(definitions))
+            .route("/api/definitions/{section}", put(edit_setting))
+            .route("/api/permissions", get(permission_groups))
+            .route(
+                "/api/permissions/members/{uuid}/{group}",
+                post(add_member).delete(remove_member),
+            )
             .route(
                 "/api/definitions/{section}/{name}",
                 axum::routing::put(edit_definition),
@@ -573,13 +579,28 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
                 | ["api", "groups", _, "instances"]
                 | ["api", "instances", _]
                 | ["api", "operations", _] => "servers",
-                ["api", "definitions", ..] | ["api", "config", ..] | ["api", "reload"] => "config",
+                ["api", "definitions", ..]
+                | ["api", "permissions", ..]
+                | ["api", "config", ..]
+                | ["api", "reload"] => "config",
                 ["api", "deployments", ..] => "deploy",
                 ["api", "audit"] => "audit",
                 _ => "read",
             }
         };
         let (in_scope, target) = match segments.as_slice() {
+            // Player UUID and group name; both are validated before use.
+            ["api", "permissions", "members", uuid, group] => (
+                true,
+                format!(
+                    "{}/{}",
+                    decode_name(uuid).unwrap_or_default(),
+                    decode_name(group).unwrap_or_default()
+                )
+                .chars()
+                .take(128)
+                .collect(),
+            ),
             ["api", "servers" | "instances", name, ..] => {
                 let name = decode_name(name).unwrap_or_default();
                 (
@@ -613,6 +634,10 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
             ["api", "instances", _] => "remove_instance",
             ["api", "definitions", "templates", _] => "edit_template",
             ["api", "definitions", "service_groups", _] => "edit_group",
+            ["api", "definitions", "permission_groups", _] => "edit_permission_group",
+            ["api", "definitions", "tab_list"] => "edit_tab_list",
+            ["api", "definitions", "server_list"] => "edit_server_list",
+            ["api", "permissions", "members", _, _] => "group_membership",
             ["api", "deployments", _, "rollback"] => "rollback",
             ["api", "config"] => "configuration",
             ["api", "config", "validate"] => "validate",
@@ -904,7 +929,44 @@ fn definition_values(config: &Config) -> Value {
             (name, value)
         })
         .collect();
-    json!({"service_groups":groups,"templates":templates})
+    let text = |entry: &rift::server_list::Entry| {
+        json!({
+            "motd": entry.motd,
+            "maintenance_motd": entry.maintenance_motd,
+            "version": entry.version,
+            "max_players": entry.max_players,
+            "sample": entry.sample,
+            "favicon": entry.favicon.as_deref(),
+        })
+    };
+    let server_list = config.server_list.as_ref().map(|list| {
+        let mut value = text(&list.defaults);
+        value["hosts"] = list
+            .hosts
+            .iter()
+            .map(|(host, entry)| (host.clone(), text(entry)))
+            .collect::<serde_json::Map<_, _>>()
+            .into();
+        value
+    });
+    let tab_list = config.tab_list.as_ref().map(|list| {
+        json!({
+            "header": list.header,
+            "footer": list.footer,
+            "players": if list.network { "network" } else { "server" },
+        })
+    });
+    let permission_groups = config
+        .extensions
+        .as_ref()
+        .and_then(|extensions| extensions.permission_groups());
+    json!({
+        "service_groups": groups,
+        "templates": templates,
+        "permission_groups": permission_groups,
+        "tab_list": tab_list,
+        "server_list": server_list,
+    })
 }
 async fn definitions(State(app): State<App>) -> Json<Value> {
     let snapshot = app.snapshot();
@@ -916,6 +978,24 @@ async fn edit_definition(
     State(app): State<App>,
     Extension(access): Extension<Access>,
     Path((section, name)): Path<(String, String)>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    apply_definition(app, access, &section, Some(&name), body).await
+}
+/// `tab_list` and `server_list`, which have no entry name.
+async fn edit_setting(
+    State(app): State<App>,
+    Extension(access): Extension<Access>,
+    Path(section): Path<String>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    apply_definition(app, access, &section, None, body).await
+}
+async fn apply_definition(
+    app: App,
+    access: Access,
+    section: &str,
+    name: Option<&str>,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
     let value = match payload(body, &["revision", "definition"]) {
@@ -938,7 +1018,30 @@ async fn edit_definition(
     let Some(source) = snapshot.source.as_deref() else {
         return error(StatusCode::CONFLICT, "no configuration source available");
     };
-    let source = match operator::edited_source(source, &section, &name, definition) {
+    if section == "permission_groups"
+        && snapshot
+            .config
+            .extensions
+            .as_ref()
+            .and_then(|extensions| extensions.permission_groups())
+            .is_none()
+    {
+        return error(
+            StatusCode::CONFLICT,
+            "permission groups require extensions with api_version = 2; configure them in Lua first",
+        );
+    }
+    if section == "server_list"
+        && ["favicon", "hosts"]
+            .iter()
+            .any(|field| definition.get(field).is_some())
+    {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "set the favicon and per-host entries in Lua; edits keep the configured ones",
+        );
+    }
+    let source = match operator::edited_source(source, section, name, definition) {
         Ok(s) => s,
         Err(e) => return e.into_response(),
     };
@@ -951,6 +1054,86 @@ async fn edit_definition(
         access.name,
     )
     .await
+}
+/// Members are capped so a large store cannot produce an unbounded response.
+const MAX_LISTED_MEMBERS: usize = 1000;
+async fn permission_groups(State(app): State<App>) -> Json<Value> {
+    let snapshot = app.snapshot();
+    let Some(memberships) = snapshot.extensions.group_memberships() else {
+        return Json(json!({"enabled":false,"members":[],"truncated":false}));
+    };
+    let names = snapshot.extensions.players().names();
+    let members: Vec<Value> = memberships
+        .iter()
+        .take(MAX_LISTED_MEMBERS)
+        .map(|(uuid, groups)| json!({"uuid":uuid,"name":names.get(uuid),"groups":groups}))
+        .collect();
+    Json(json!({
+        "enabled": true,
+        "members": members,
+        "truncated": memberships.len() > MAX_LISTED_MEMBERS,
+    }))
+}
+async fn add_member(
+    State(app): State<App>,
+    Path((uuid, group)): Path<(String, String)>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    membership(app, uuid, group, body, true).await
+}
+async fn remove_member(
+    State(app): State<App>,
+    Path((uuid, group)): Path<(String, String)>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    membership(app, uuid, group, body, false).await
+}
+async fn membership(
+    app: App,
+    uuid: String,
+    group: String,
+    body: Result<Json<Value>, JsonRejection>,
+    add: bool,
+) -> Response {
+    if let Err(error) = payload(body, &[]) {
+        return error.into_response();
+    }
+    let extensions = app.snapshot().extensions.clone();
+    // An online player may be named instead of identified by UUID.
+    let hexadecimal = uuid.len() == 32 && uuid.bytes().all(|b| b.is_ascii_hexdigit());
+    let uuid = if hexadecimal {
+        uuid
+    } else {
+        match extensions
+            .players()
+            .names()
+            .into_iter()
+            .find(|(_, name)| name.eq_ignore_ascii_case(&uuid))
+        {
+            Some((uuid, _)) => uuid,
+            None => {
+                return error(
+                    StatusCode::NOT_FOUND,
+                    "no online player has that name; use their UUID",
+                );
+            }
+        }
+    };
+    let result =
+        tokio::task::spawn_blocking(move || extensions.change_group_membership(&uuid, &group, add))
+            .await;
+    match result {
+        Ok(Ok(changed)) => Json(json!({"changed":changed})).into_response(),
+        Ok(Err(failure)) => error(
+            match failure.kind() {
+                io::ErrorKind::InvalidInput => StatusCode::BAD_REQUEST,
+                io::ErrorKind::Unsupported => StatusCode::CONFLICT,
+                _ => StatusCode::SERVICE_UNAVAILABLE,
+            },
+            failure,
+        ),
+        Err(failure) => error(StatusCode::INTERNAL_SERVER_ERROR, failure),
+    }
 }
 async fn create_instance(
     State(app): State<App>,
@@ -1148,7 +1331,7 @@ async fn standalone_metrics(state: State<App>) -> Response {
 }
 async fn discovery() -> Json<Value> {
     Json(
-        json!({"version":1,"endpoints":["GET /api/access","GET /api/status","GET /api/servers","POST /api/servers/{name}/start","POST /api/servers/{name}/stop","GET /api/servers/{name}/logs","POST /api/servers/{name}/console","GET /api/groups","POST /api/groups/{name}/instances","DELETE /api/instances/{name}","GET /api/definitions","PUT /api/definitions/{section}/{name}","GET /api/deployments","POST /api/deployments/{id}/rollback","GET /api/audit","GET /api/operations/{id}","GET /api/metrics","GET /api/config","POST /api/config/validate","PUT /api/config","POST /api/reload"],"extensions":"/ext/* -> on_http(request)","source_limit_bytes":control::MAX_SOURCE}),
+        json!({"version":1,"endpoints":["GET /api/access","GET /api/status","GET /api/servers","POST /api/servers/{name}/start","POST /api/servers/{name}/stop","GET /api/servers/{name}/logs","POST /api/servers/{name}/console","GET /api/groups","POST /api/groups/{name}/instances","DELETE /api/instances/{name}","GET /api/definitions","PUT /api/definitions/{section}/{name}","PUT /api/definitions/{section}","GET /api/permissions","POST /api/permissions/members/{uuid}/{group}","DELETE /api/permissions/members/{uuid}/{group}","GET /api/deployments","POST /api/deployments/{id}/rollback","GET /api/audit","GET /api/operations/{id}","GET /api/metrics","GET /api/config","POST /api/config/validate","PUT /api/config","POST /api/reload"],"extensions":"/ext/* -> on_http(request)","source_limit_bytes":control::MAX_SOURCE}),
     )
 }
 async fn config_source(State(app): State<App>) -> Json<Value> {
