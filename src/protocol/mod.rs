@@ -1,5 +1,6 @@
 //! Bounded Minecraft Java framing and the control packets used by a session.
-//! Gameplay payloads remain opaque; this is not a protocol translator.
+//! Gameplay payloads remain opaque unless a client and backend speak different
+//! protocols, in which case `translation` rewrites the packets that differ.
 mod boss_bar;
 mod compression;
 mod framing;
@@ -9,6 +10,7 @@ mod packets;
 mod state;
 mod switching;
 mod tab_list;
+pub(crate) mod translation;
 
 pub(crate) use boss_bar::BossBars;
 pub use boss_bar::{
@@ -24,6 +26,7 @@ pub use state::{ConnectionState, Direction, State};
 use std::io;
 pub(crate) use tab_list::TabList;
 pub use tab_list::{TabEntry, TabView};
+pub use translation::supported as translatable;
 
 pub(crate) fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)

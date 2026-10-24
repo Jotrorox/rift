@@ -1,0 +1,13 @@
+{
+  "commit": "1df9432c07c81b47326e4fb1e06d3c8d723bf4aa",
+  "protocols": {
+    "1.21.6": {
+      "path": "1.21.6",
+      "sha256": "3c1f3071c20e22face100fee775841aff78394dfebb78de5b8f1e01ab32301a2"
+    },
+    "1.21.8": {
+      "path": "1.21.8",
+      "sha256": "3c1f3071c20e22face100fee775841aff78394dfebb78de5b8f1e01ab32301a2"
+    }
+  }
+}

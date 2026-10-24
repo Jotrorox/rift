@@ -483,14 +483,7 @@ impl Config {
                 root.get("listeners").map_err(|e| e.to_string())?,
                 "listeners",
             )?;
-            let backends = strings(root.get("backends").map_err(|e| e.to_string())?, "backends")?
-                .into_iter()
-                .map(|(name, value)| {
-                    Backend::parse(&value)
-                        .map(|backend| (name.clone(), backend))
-                        .map_err(|error| format!("backends.{name}: {error}"))
-                })
-                .collect::<Result<_, _>>()?;
+            let backends = backends(root.get("backends").map_err(|e| e.to_string())?)?;
             let managed_servers = managed::parse(&root, directory)?;
             let templates = templates::parse(&root, directory)?;
             let service_groups = services::parse(&_lua, &root, directory)?;
@@ -1598,6 +1591,46 @@ fn fields(table: &Table, allowed: &[&str], path: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Backends are `"host:port"`, or `{ address = "host:port", version = "1.21.6" }`
+/// for a server on another Minecraft version than its players.
+fn backends(value: Value) -> Result<BTreeMap<String, Backend>, String> {
+    let mut result = BTreeMap::new();
+    for pair in table(value, "backends")?.pairs::<Value, Value>() {
+        let (key, value) = pair.map_err(|e| e.to_string())?;
+        let name = string(key, "backends key")?;
+        if name.trim().is_empty() {
+            return Err("backends: names must not be empty".into());
+        }
+        let path = format!("backends.{name}");
+        let backend = match value {
+            Value::Table(entry) => {
+                fields(&entry, &["address", "version"], &path)?;
+                let address = string(
+                    entry.get("address").map_err(|e| e.to_string())?,
+                    &format!("{path}.address"),
+                )?;
+                let backend =
+                    Backend::parse(&address).map_err(|error| format!("{path}: {error}"))?;
+                match entry.get::<Value>("version").map_err(|e| e.to_string())? {
+                    Value::Nil => backend,
+                    version => {
+                        let version = string(version, &format!("{path}.version"))?;
+                        let protocol = crate::protocol::ProtocolVersion::from_release(&version)
+                            .ok_or_else(|| {
+                                format!("{path}.version: unsupported Minecraft version {version:?}")
+                            })?;
+                        backend.with_version(protocol)
+                    }
+                }
+            }
+            value => Backend::parse(&string(value, &path)?)
+                .map_err(|error| format!("{path}: {error}"))?,
+        };
+        result.insert(name, backend);
+    }
+    Ok(result)
 }
 
 fn strings(value: Value, path: &str) -> Result<BTreeMap<String, String>, String> {

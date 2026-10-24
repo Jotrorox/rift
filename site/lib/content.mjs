@@ -31,6 +31,8 @@ export const DOCS = [
     blurb: 'Transfers, queries, forwarding, messages and kicks for existing Bukkit/Paper plugins.' },
   { slug: 'network-protocol', file: 'docs/network-protocol.md', title: 'Network protocol', group: 'Reference',
     blurb: 'Backend switching and recovery for Java 1.8.9 through 26.3.' },
+  { slug: 'translation', file: 'docs/translation.md', title: 'Protocol translation', group: 'Reference',
+    blurb: 'Players and backends on different Minecraft versions.' },
   { slug: 'performance', file: 'docs/performance.md', title: 'Performance', group: 'Reference',
     blurb: 'CPU, memory and latency against Velocity, with reproducible runs.' },
 ];
