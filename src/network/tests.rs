@@ -560,3 +560,103 @@ async fn queue_command_waits_for_capacity_and_transfer_policy_runs_before_target
         assert_eq!(read(&mut client).await,Packet::new(0x42,vec![1,2,3]));
     }).await.unwrap();
 }
+
+#[tokio::test]
+async fn initial_selection_skips_backends_that_cannot_serve_the_client_version() {
+    use rift::protocol::{
+        Codec, Handshake, NextState, Packet, ProtocolVersion, Reader, write_string,
+    };
+    use tokio::{
+        io::DuplexStream,
+        net::TcpListener,
+        time::{Duration, timeout},
+    };
+    timeout(Duration::from_secs(5), async {
+        let modern = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let legacy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let backend = |listener: &TcpListener, release| {
+            rift::routing::Backend::parse(&listener.local_addr().unwrap().to_string())
+                .unwrap()
+                .with_version(ProtocolVersion::from_release(release).unwrap())
+        };
+        let mut cfg = config();
+        cfg.backends
+            .insert("modern".into(), backend(&modern, "1.21.11"));
+        cfg.backends
+            .insert("legacy".into(), backend(&legacy, "1.21.6"));
+        let snapshot = Arc::new(Snapshot::new(cfg, None).unwrap());
+        let metrics = Metrics::default();
+        let network = Network {
+            snapshot: &snapshot,
+            addresses: &[],
+            metrics: &metrics,
+        };
+        let client_session = || async {
+            let (mut client, input) = tokio::io::duplex(65536);
+            let handshake = Handshake {
+                protocol: 772,
+                address: "play.test".into(),
+                port: 25565,
+                next_state: NextState::Login,
+            };
+            Codec::default()
+                .write(&mut client, &handshake.packet())
+                .await
+                .unwrap();
+            let mut session: Session<DuplexStream, TcpStream> =
+                Session::accept(input).await.unwrap();
+            let mut login = Vec::new();
+            write_string("Player", &mut login);
+            login.extend([7; 16]);
+            Codec::default()
+                .write(&mut client, &Packet::new(0, login))
+                .await
+                .unwrap();
+            session.read_login_start().await.unwrap();
+            (session, client)
+        };
+        let mut event = Connection::new("public", "127.0.0.1:1234".parse().unwrap());
+        let (mut session, _client) = client_session().await;
+        let selected = network
+            .connect_initial(
+                &mut session,
+                &["modern".into(), "legacy".into()],
+                &mut (Instant::now() + Duration::from_secs(1)),
+                &mut event,
+            )
+            .await
+            .unwrap();
+        assert_eq!(selected, "legacy");
+        let (mut stream, _) = legacy.accept().await.unwrap();
+        let handshake = Reader::default()
+            .read(&mut stream, Codec::default())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(Handshake::decode(&handshake).unwrap().protocol, 771);
+        assert!(
+            timeout(Duration::from_millis(20), modern.accept())
+                .await
+                .is_err()
+        );
+
+        let (mut session, _client) = client_session().await;
+        let error = network
+            .connect_initial(
+                &mut session,
+                &["modern".into()],
+                &mut (Instant::now() + Duration::from_secs(1)),
+                &mut event,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert!(
+            timeout(Duration::from_millis(20), modern.accept())
+                .await
+                .is_err()
+        );
+    })
+    .await
+    .unwrap();
+}

@@ -162,8 +162,12 @@ plus pinned LuckPerms/EssentialsX and ViaVersion/ViaBackwards combinations.
 CI runs their startup and rejection preflights; full acceptance requires a signed-in
 1.21.11 client and records Paper observations alongside operator confirmations.
 
-Clients and backends must use the same protocol version. Rift does not translate
-between Minecraft versions. Online authentication, Velocity modern forwarding and
+Backends can run a different version than their players: Rift translates between
+1.21.6 and 1.21.7/1.21.8 in both directions, including `/server` switches between
+backends of different versions. Declare a backend's version with
+`config.backends.survival = { address = "127.0.0.1:25567", version = "1.21.6" }`.
+Other pairs still need matching versions. See [protocol translation](docs/translation.md).
+Online authentication, Velocity modern forwarding and
 authenticated extensions require **1.19.3 or newer**; earlier versions use offline
 backends with forwarding disabled. Bedrock/UDP, unlisted snapshots and legacy
 pre-1.7 pings are unsupported.

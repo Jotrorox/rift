@@ -987,7 +987,8 @@ pub async fn handle(
                     }
                     event.stage = "transfer";
                     event.failure = "transfer_failed";
-                    let result = timeout_at(deadline, session.connect_backend(upstream)).await;
+                    let protocol = request.snapshot.config.backends[target].version();
+                    let result = timeout_at(deadline, session.connect_backend_as(upstream, protocol)).await;
                     match result {
                         Ok(Ok(())) => {
                             event.hold_managed_backend(target, lease);

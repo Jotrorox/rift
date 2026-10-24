@@ -11,6 +11,9 @@ mod authenticated_tests;
 #[path = "bungeecord_tests.rs"]
 mod bungeecord_tests;
 
+#[path = "translation_tests.rs"]
+mod translation_tests;
+
 fn login_start() -> Packet {
     let mut data = Vec::new();
     write_string("Player", &mut data);

@@ -14,6 +14,10 @@ require("config.services")
 rift.plugin("greeting")
 ```
 
+A backend may also be a table, `{ address = "127.0.0.1:25567", version = "1.21.6" }`,
+for a server running another Minecraft version than its players; see
+[protocol translation](translation.md).
+
 `rift` is a global, like Neovim's `vim`; `local rift = require("rift")` returns
 that same API. `rift.config` contains the existing configuration fields, with
 empty `listeners`, `backends`, `managed_servers`, `service_groups`, `templates`, `routes` and

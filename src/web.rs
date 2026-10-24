@@ -131,7 +131,7 @@ impl App {
     fn status_snapshot(&self, snapshot: &Snapshot, private: bool) -> Value {
         let config = &snapshot.config;
         let listeners: Vec<_> = config.listeners.iter().map(|(name, address)| json!({"name":name,"address":snapshot.listener_addresses.get(name).unwrap_or(address).to_string()})).collect();
-        let backends: Vec<_> = config.backends.iter().map(|(name, address)| json!({"name":name,"address":address.address(),"healthy":snapshot.health.available(name)})).collect();
+        let backends: Vec<_> = config.backends.iter().map(|(name, address)| json!({"name":name,"address":address.address(),"version":address.version().map(|version| version.release()),"healthy":snapshot.health.available(name)})).collect();
         let mut value = json!({
             "version":env!("CARGO_PKG_VERSION"), "uptime_seconds":self.started.elapsed().as_secs(),
             "revision":snapshot.revision, "listeners":listeners, "backends":backends,
