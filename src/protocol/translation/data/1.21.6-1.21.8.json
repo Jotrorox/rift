@@ -1,0 +1,33 @@
+{
+ "from": 771,
+ "packets": {},
+ "registries": {
+  "minecraft:item": {
+   "inserted": [
+    [
+     1256,
+     "minecraft:music_disc_lava_chicken",
+     1253,
+     "minecraft:music_disc_creator"
+    ]
+   ],
+   "new_size": 1416,
+   "old_size": 1415,
+   "removed": []
+  },
+  "minecraft:sound_event": {
+   "inserted": [
+    [
+     939,
+     "minecraft:music_disc.lava_chicken",
+     948,
+     "minecraft:music_disc.creator"
+    ]
+   ],
+   "new_size": 1728,
+   "old_size": 1727,
+   "removed": []
+  }
+ },
+ "to": 772
+}

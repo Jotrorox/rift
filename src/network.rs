@@ -120,6 +120,23 @@ impl Network<'_> {
         }
     }
 
+    /// Whether `name` runs the client's protocol or one Rift translates to.
+    fn serves<C: AsyncRead + AsyncWrite + Unpin>(
+        &self,
+        name: &str,
+        session: &Session<C, TcpStream>,
+    ) -> bool {
+        let Ok(client) = session.version() else {
+            return false;
+        };
+        self.snapshot
+            .config
+            .backends
+            .get(name)
+            .and_then(|backend| backend.version())
+            .is_none_or(|backend| rift::protocol::translatable(client, backend))
+    }
+
     pub fn initial_candidates(
         &self,
         primary: &str,
@@ -190,8 +207,18 @@ impl Network<'_> {
         deadline: &mut Instant,
         event: &mut Connection,
     ) -> io::Result<String> {
-        let names: Vec<_> = candidates.iter().map(String::as_str).collect();
+        let names: Vec<_> = candidates
+            .iter()
+            .filter(|name| self.serves(name, session))
+            .map(String::as_str)
+            .collect();
         let mut next = 0;
+        if names.is_empty() && !candidates.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "No server on this network supports your Minecraft version.",
+            ));
+        }
         if names.is_empty() {
             return Err(io::Error::other("No initial server is available."));
         }
@@ -262,7 +289,17 @@ impl Network<'_> {
                 event.failure = "io_error";
                 upstream.set_nodelay(true)?;
                 event.stage = "handshake_write";
-                timeout_at(Instant::now() + budget, session.connect_backend(upstream)).await?
+                let protocol = self
+                    .snapshot
+                    .config
+                    .backends
+                    .get(&current)
+                    .and_then(|b| b.version());
+                timeout_at(
+                    Instant::now() + budget,
+                    session.connect_backend_as(upstream, protocol),
+                )
+                .await?
             }
             .await;
             match result {
@@ -322,6 +359,7 @@ impl Network<'_> {
                 server.as_str() != current
                     && config.can_access(server, &identity.name)
                     && self.snapshot.reachable(server)
+                    && self.serves(server, session)
             })
             .collect();
         let mut deadline = Instant::now() + config.limits.connect_timeout;
@@ -368,7 +406,13 @@ impl Network<'_> {
                 .await?;
                 upstream.set_nodelay(true)?;
                 event.stage = "backend_switch";
-                match timeout_at(attempt_deadline, session.connect_backend(upstream)).await {
+                let protocol = config.backends.get(name.as_str()).and_then(|b| b.version());
+                match timeout_at(
+                    attempt_deadline,
+                    session.connect_backend_as(upstream, protocol),
+                )
+                .await
+                {
                     Ok(result) => result,
                     Err(error) => Err(error.into()),
                 }

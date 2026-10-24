@@ -53,7 +53,11 @@ fn dns_name(value: &str) -> bool {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Backend(String);
+pub struct Backend {
+    address: String,
+    /// The backend's protocol when it differs from what clients speak.
+    version: Option<crate::protocol::ProtocolVersion>,
+}
 
 impl std::str::FromStr for Backend {
     type Err = io::Error;
@@ -73,11 +77,26 @@ impl Backend {
                 return Err(invalid(format!("invalid backend: {value}")));
             }
         }
-        Ok(Self(value.to_owned()))
+        Ok(Self {
+            address: value.to_owned(),
+            version: None,
+        })
+    }
+
+    /// Declare the Minecraft version this backend runs. Clients on other
+    /// versions are translated when Rift supports the pair.
+    pub fn with_version(mut self, version: crate::protocol::ProtocolVersion) -> Self {
+        self.version = Some(version);
+        self
+    }
+
+    /// The declared backend protocol; `None` means the client's own protocol.
+    pub fn version(&self) -> Option<crate::protocol::ProtocolVersion> {
+        self.version
     }
 
     pub fn check_loop(&self, listen: SocketAddr) -> io::Result<()> {
-        if let Ok(address) = self.0.parse() {
+        if let Ok(address) = self.address.parse() {
             check_loop(listen, address)?;
         }
         Ok(())
@@ -115,7 +134,7 @@ impl Backend {
     }
 
     async fn resolve(&self) -> io::Result<Vec<SocketAddr>> {
-        let addresses: Vec<_> = lookup_host(self.0.as_str()).await?.collect();
+        let addresses: Vec<_> = lookup_host(self.address.as_str()).await?.collect();
         if addresses.is_empty() {
             return Err(invalid("backend DNS returned no addresses"));
         }
@@ -123,7 +142,7 @@ impl Backend {
     }
 
     pub fn address(&self) -> &str {
-        &self.0
+        &self.address
     }
 }
 
@@ -322,7 +341,7 @@ mod tests {
                 ("badexample.com", "default:4"),
                 ("elsewhere.test", "default:4"),
             ] {
-                assert_eq!(routes.select(host).unwrap().0, expected);
+                assert_eq!(routes.select(host).unwrap().address(), expected);
             }
         }
         assert!(
