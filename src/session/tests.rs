@@ -1043,7 +1043,7 @@ async fn authenticated_session_for(
 }
 
 fn validate_velocity_response(packet: &Packet, id: i32, secret: &[u8]) -> bool {
-    use hmac::{Hmac, Mac};
+    use hmac::{Hmac, KeyInit, Mac};
     use sha2::Sha256;
     assert_eq!(packet.id, 2);
     let mut data = packet.data.as_slice();
