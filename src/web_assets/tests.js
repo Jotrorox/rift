@@ -95,7 +95,7 @@ async function testWebAssets(appSource, statusSource) {
     evaluate(document, window, fetch, TestHeaders, class { abort() {} },
       class { encode(value) { return { length: unescape(encodeURIComponent(value)).length }; } },
       typeof URL === "undefined" ? TestURL : URL, schedule, (id) => timers.delete(id), (callback) => intervals.push(callback));
-    return { element, model, calls, window, intervals, response, advance };
+    return { element, model, calls, window, intervals, response, advance, TestHeaders };
   }
   async function test(name, callback) { await callback(); passed.push(name); }
 
@@ -441,6 +441,81 @@ async function testWebAssets(appSource, statusSource) {
     await h.element("definition-form").emit("submit"); await flush();
     assert(submitted.revision === "rev-1", "Definition revision check was omitted");
     assert(submitted.definition.server_jar === "assets/paper.jar" && submitted.definition.plugins.length === 2, "Fields were not serialized as a structured definition");
+  });
+  await test("software templates serialize a nested software table and suggest versions", async () => {
+    const h = fixture(appSource); await flush();
+    h.element("definition-section").value = "templates"; await h.element("definition-section").emit("change"); await flush();
+    h.element("definition-name").value = "lobby";
+    // Saving re-renders the form, so look fields up each time.
+    const field = (key) => h.element("definition-fields").children.map((wrapper) => wrapper.children[1]).find((input) => input.id === `definition-field-${key}`);
+    h.model.intercept = (path, options) => {
+      if (path === "/api/software/paper/versions") return h.response({ type: "paper", versions: ["1.21.8", "1.21.7"] });
+      if (options.method === "PUT" && path.includes("/definitions/")) { h.submitted = JSON.parse(options.body); return h.response({ revision: "rev-1" }); }
+      return null;
+    };
+    field("software-type").value = "paper"; await field("software-type").emit("change"); await flush();
+    assert(field("software-version").list === "software-versions", "Version input lacks suggestions");
+    assert(h.element("software-versions").children.map((option) => option.value).join() === "latest,1.21.8,1.21.7", "Versions were not suggested");
+    field("software-version").value = "1.21.8";
+    field("software-url").value = "https://ignored.example/server.jar";
+    field("configs").value = "local/templates/Global/server\nlocal/templates/Lobby/default";
+    field("accept_eula").value = "true";
+    await h.element("definition-form").emit("submit"); await flush();
+    const definition = h.submitted.definition;
+    assert(definition.software.type === "paper" && definition.software.version === "1.21.8", "Software was not nested");
+    assert(definition.software.url === "https://ignored.example/server.jar" && definition.server_jar === undefined, "Unexpected jar fields");
+    assert(definition.configs.length === 2 && definition.accept_eula === true, "Template folders or EULA missing");
+    h.element("definition-name").value = "legacy"; field("software-type").value = ""; field("server_jar").value = "assets/paper.jar";
+    await h.element("definition-form").emit("submit"); await flush();
+    assert(h.submitted.definition.software === undefined, "A local jar template still sent software");
+  });
+  await test("templates show cache state and poll software downloads", async () => {
+    const h = fixture(appSource);
+    let polls = 0;
+    h.model.intercept = (path, options) => {
+      if (path === "/api/templates") return h.response({ templates: [
+        { name: "lobby", software: { type: "paper", version: "1.21.8", cached: polls > 1, resolved_version: "1.21.8", build: "60", size: 1048576 }, groups: ["lobby"] },
+        { name: "legacy", software: null, groups: [] },
+      ] });
+      if (path === "/api/templates/lobby/download") { h.downloadBody = JSON.parse(options.body); return h.response({ operation_id: "op1", status: "pending", poll: "/api/operations/op1" }, 202); }
+      if (path === "/api/operations/op1") { polls += 1; return h.response(polls === 1 ? { status: "pending" } : { status: "succeeded", result: { template: "lobby", software: { type: "paper", version: "1.21.8", resolved_version: "1.21.8" } } }); }
+      return null;
+    };
+    await flush();
+    const rows = h.element("templates").children;
+    assert(rows[0].children[1].textContent === "paper 1.21.8" && rows[0].children[2].textContent.startsWith("Not downloaded"), "Software state missing");
+    assert(rows[1].children[1].textContent === "Local server jar" && rows[1].children[4].children.length === 0, "Local jars must not offer downloads");
+    await rows[0].children[4].children[0].emit("click"); await flush();
+    assert(h.downloadBody.refresh === false, "First download must not force a refresh");
+    await h.advance(1000);
+    assert(h.element("template-result").textContent === "Downloaded paper 1.21.8 for lobby.", h.element("template-result").textContent);
+    const updated = h.element("templates").children[0];
+    assert(updated.children[2].textContent.includes("build 60") && updated.children[4].children[0].textContent === "Update", "Cache state did not refresh");
+  });
+  await test("file browser encodes paths, edits text files and deletes entries", async () => {
+    const h = fixture(appSource); await flush();
+    const text = (body, status = 200) => ({ status, statusText: "OK", ok: status < 300, headers: new TestHeaders({ "content-type": "application/octet-stream" }), text: async () => body });
+    h.model.intercept = (path, options) => {
+      if (path === "/api/files/templates/Lobby/my%20default" && options.method !== "DELETE") return h.response({ path: "Lobby/my default", entries: [{ name: "server.properties", type: "file", size: 12, modified: 1 }, { name: "plugins", type: "directory" }], truncated: false });
+      if (path === "/api/files/templates/Lobby/my%20default/server.properties" && !options.method) return text("motd=old\n");
+      if (path.startsWith("/api/files/") && options.method === "PUT") { h.written = { path, body: options.body, type: options.headers.get("Content-Type") }; return h.response({ path, type: "file" }); }
+      if (path.startsWith("/api/files/") && options.method === "DELETE") { h.deleted = path; return h.response({ deleted: path }); }
+      return null;
+    };
+    h.element("files-path").value = "/Lobby//my default/"; await h.element("files-form").emit("submit"); await flush();
+    assert(h.element("files-path").value === "Lobby/my default", "Path was not normalized");
+    const [file, folder] = h.element("files-entries").children;
+    assert(file.children[0].children[0].textContent === "server.properties" && folder.children[0].children[0].textContent === "plugins/", "Entries did not render");
+    await file.children[0].children[0].emit("click"); await flush();
+    assert(h.element("files-content").value === "motd=old\n" && h.element("files-save").disabled, "File did not open unchanged");
+    h.element("files-content").value = "motd=new\n"; await h.element("files-content").emit("input");
+    assert(!h.element("files-save").disabled, "Edited file cannot be saved");
+    await h.element("files-save").emit("click"); await flush();
+    assert(h.written.path === "/api/files/templates/Lobby/my%20default/server.properties" && h.written.body === "motd=new\n" && h.written.type === "application/octet-stream", "File save was not a raw PUT");
+    h.element("files-new-name").value = "worlds"; await h.element("files-new-folder").emit("click"); await flush();
+    assert(h.written.path === "/api/files/templates/Lobby/my%20default/worlds?directory", "Folder creation path was wrong");
+    await h.element("files-entries").children[1].children[3].children[0].emit("click"); await flush();
+    assert(h.deleted === "/api/files/templates/Lobby/my%20default/plugins", "Folder deletion path was wrong");
   });
   await test("rollback uses the displayed history revision and keeps conflicts visible", async () => {
     const h = fixture(appSource); await flush();

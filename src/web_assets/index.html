@@ -33,6 +33,7 @@
           <li id="nav-servers"><a href="#servers"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="3.5" width="14" height="5" rx="1.5"/><rect x="3" y="11.5" width="14" height="5" rx="1.5"/><path d="M6 6h.01M6 14h.01"/></svg>Servers</a></li>
           <li id="nav-console"><a href="#console"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="3.5" width="15" height="13" rx="2"/><path d="m6 8 2.5 2L6 12M10.5 12.5H14"/></svg>Console</a></li>
           <li id="nav-groups"><a href="#groups"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="7" width="10" height="10" rx="2"/><path d="M7 4.5V4a1 1 0 0 1 1-1h8a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1h-.5"/></svg>Service groups</a></li>
+          <li id="nav-files"><a href="#files"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M2.5 5.5A1.5 1.5 0 0 1 4 4h3.5l1.5 2h7a1.5 1.5 0 0 1 1.5 1.5v7A1.5 1.5 0 0 1 16 16H4a1.5 1.5 0 0 1-1.5-1.5z"/></svg>Files</a></li>
         </ul>
       </div>
       <div class="nav-section" id="section-configuration">
@@ -156,8 +157,28 @@
         </section>
 
         <section class="view" id="view-groups" aria-labelledby="view-title" hidden>
-          <div class="page-head"><p class="page-intro">Create instances from a template’s server jar, plugins, configs and map, or from prepared directories. Persistent worlds keep their files when removed; disposable games delete them. Creating an instance doesn’t accept the Minecraft EULA for you.</p><a class="button secondary" href="#definitions">Edit groups</a></div>
+          <div class="page-head"><p class="page-intro">Create instances from a template’s server software, template folders, plugins and map, or from prepared directories. Templates with server software download Paper, Folia, Purpur, Fabric or vanilla on first use and reuse the cached jar. Persistent worlds keep their files when removed; disposable games delete them. Only templates with <code>accept_eula</code> accept the Minecraft EULA.</p><a class="button secondary" href="#definitions">Edit groups</a></div>
           <section class="panel"><div class="table-wrap flush"><table><thead><tr><th scope="col">Group</th><th scope="col">Port range</th><th scope="col">Storage</th><th scope="col">Template</th><th scope="col">Instances</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead><tbody id="service-groups"><tr><td colspan="6" class="empty">Waiting for data</td></tr></tbody></table></div></section>
+          <section class="panel" id="templates-panel" aria-labelledby="templates-heading"><div class="panel-heading"><h2 id="templates-heading">Templates</h2><span class="muted small" id="template-count">—</span></div>
+            <div class="table-wrap flush"><table><thead><tr><th scope="col">Template</th><th scope="col">Server software</th><th scope="col">Download cache</th><th scope="col">Used by</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead><tbody id="templates"><tr><td colspan="5" class="empty">Waiting for data</td></tr></tbody></table></div>
+            <p class="operation-result" id="template-result" role="status" aria-live="polite"></p>
+          </section>
+        </section>
+
+        <section class="view" id="view-files" aria-labelledby="view-title" hidden>
+          <div class="page-head"><p class="page-intro">Browse template folders and server directories. Template folders apply to new instances; changes to a running server take effect when it reloads or restarts.</p><button type="button" class="button secondary" id="files-refresh">Refresh</button></div>
+          <section class="panel" id="files-panel" aria-label="File browser">
+            <form class="form-row top" id="files-form"><div class="field"><label for="files-root">Folder</label><select id="files-root"><option value="templates">Templates</option></select></div><div class="field grow"><label for="files-path">Path</label><input id="files-path" class="mono" maxlength="4096" spellcheck="false" autocomplete="off" placeholder="Lobby/default"></div><button type="submit" class="button secondary" id="files-open">Open</button><button type="button" class="button subtle" id="files-up">Up one level</button></form>
+            <div class="table-wrap flush"><table><thead><tr><th scope="col">Name</th><th scope="col" class="numeric">Size</th><th scope="col">Modified</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead><tbody id="files-entries"><tr><td colspan="4" class="empty">Choose a folder</td></tr></tbody></table></div>
+            <div class="form-row top"><div class="field grow"><label for="files-new-name">New file or folder</label><input id="files-new-name" class="mono" maxlength="255" spellcheck="false" autocomplete="off" placeholder="server.properties"></div><button type="button" class="button secondary" id="files-new-file">New file</button><button type="button" class="button secondary" id="files-new-folder">New folder</button><div class="field"><label for="files-upload">Upload <span class="muted">Up to 64 MiB</span></label><input type="file" id="files-upload"></div></div>
+            <div id="files-editor" class="hidden">
+              <div class="config-meta"><span class="mono" id="files-editing">—</span><span class="tag" id="files-edit-state">Saved</span></div>
+              <label class="sr-only" for="files-content">File contents</label>
+              <textarea id="files-content" class="source-editor" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" wrap="off"></textarea>
+              <div class="editor-actions"><div class="action-group"><button type="button" class="button subtle" id="files-close">Close file</button></div><div class="action-group"><button type="button" class="button" id="files-save">Save file</button></div></div>
+            </div>
+            <p class="operation-result" id="files-result" role="status" aria-live="polite"></p>
+          </section>
         </section>
 
         <section class="view" id="view-script" aria-labelledby="view-title" hidden>
@@ -173,10 +194,10 @@
         </section>
 
         <section class="view" id="view-definitions" aria-labelledby="view-title" hidden>
-          <div class="page-head"><p class="page-intro">Edit one service group or template without touching the rest of your Lua script. Templates apply to new instances; scaling policies apply live. Remove affected instances before changing their process settings or storage type.</p><button type="button" class="button secondary" id="definitions-refresh">Refresh</button></div>
+          <div class="page-head"><p class="page-intro">Edit one service group or template without touching the rest of your Lua script. Choose server software to have Rift download it, or point to a local jar. Templates apply to new instances; scaling policies apply live. Remove affected instances before changing their process settings or storage type.</p><button type="button" class="button secondary" id="definitions-refresh">Refresh</button></div>
           <section class="panel" id="definitions-panel" aria-label="Definition editor">
             <form id="definition-form"><div class="form-row top"><div class="field"><label for="definition-section">Type</label><select id="definition-section"><option value="service_groups">Service group</option><option value="templates">Template</option></select></div><div class="field grow"><label for="definition-select">Definition</label><select id="definition-select"><option value="">New definition</option></select></div><div class="field grow"><label for="definition-name">Name</label><input id="definition-name" class="mono" pattern="[A-Za-z0-9_\-]{1,107}" maxlength="107" required></div></div>
-            <div class="definition-grid" id="definition-fields"></div><div class="editor-actions"><div class="action-group"><button type="button" class="button destructive" id="definition-delete">Delete definition</button></div><div class="action-group"><button type="submit" class="button" id="definition-save">Save &amp; apply</button></div></div></form>
+            <div class="definition-grid" id="definition-fields"></div><datalist id="software-versions"></datalist><div class="editor-actions"><div class="action-group"><button type="button" class="button destructive" id="definition-delete">Delete definition</button></div><div class="action-group"><button type="submit" class="button" id="definition-save">Save &amp; apply</button></div></div></form>
             <p class="operation-result" id="definition-result" role="status" aria-live="polite">Saving validates the complete configuration and checks its revision.</p>
           </section>
         </section>

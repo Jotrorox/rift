@@ -1615,6 +1615,22 @@ async fn create_instance(group: String, snapshot: &Arc<Snapshot>) -> InstanceRes
             "service group reached scaling.max_instances",
         ));
     }
+    // Fetch template software before reserving a port or name; cached jars
+    // return immediately and concurrent creations share one download.
+    if let Some(software) = definition
+        .template
+        .as_ref()
+        .and_then(|template| config.templates.get(template))
+        .and_then(|template| template.software.clone())
+    {
+        rift::software::ensure(&config.software_cache, &software)
+            .await
+            .map_err(|error| Error {
+                status: 502,
+                message: format!("downloading {} failed: {error}", software.key()),
+            })?;
+    }
+    let definition = &config.service_groups[&group];
     let reserved = snapshot
         .instance_store
         .as_ref()
@@ -1737,6 +1753,18 @@ async fn remove_instance(name: String, snapshot: &Arc<Snapshot>) -> InstanceResu
         "cleanup_error": cleanup_error,
     });
     Ok((Arc::new(next), response))
+}
+
+/// Announce committed instance changes so plugins can follow capacity, like
+/// CloudNet's service lifecycle events.
+fn instance_event(snapshot: &Snapshot, response: &serde_json::Value) {
+    let mut event = response.clone();
+    event["event"] = serde_json::json!(if response["created"] == true {
+        "created"
+    } else {
+        "removed"
+    });
+    crate::messaging_runtime::emit(&snapshot.messaging, "rift.events.instances", event);
 }
 
 /// Run filesystem provisioning work off the async runtime.
@@ -2011,6 +2039,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                 let response = match result {
                     Ok((next, response)) => {
                         publish(&mut snapshot, next, &current, &mut health, &metrics).await;
+                        instance_event(&snapshot, &response);
                         Ok(response)
                     }
                     Err(error) => Err(error),
@@ -2158,6 +2187,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         }));
     }
     stop.send_replace(true);
+    rift::software::cancel_downloads();
     crate::messaging_runtime::emit(
         &snapshot.messaging,
         "rift.events.lifecycle",

@@ -1,5 +1,6 @@
 use std::{
     cell::Cell,
+    rc::Rc,
     time::{Duration, Instant},
 };
 
@@ -76,8 +77,28 @@ pub(crate) fn install_messaging(
     let api: Table = lua.named_registry_value("rift.api")?;
     api.raw_set("enabled", broker.is_some())?;
     let runtime: Table = lua.named_registry_value("rift.runtime")?;
-    let publications = Cell::new(0usize);
-    let bytes = Cell::new(0usize);
+    let publications = Rc::new(Cell::new(0usize));
+    let bytes = Rc::new(Cell::new(0usize));
+    // Every publication, including `rift.servers` requests, shares one budget.
+    let send = move |subject: &str, reply: Option<&str>, payload: &[u8]| {
+        check_deadline(deadline)?;
+        let broker = broker
+            .as_ref()
+            .ok_or_else(|| mlua::Error::runtime("messaging broker unavailable"))?;
+        let count = publications.get() + 1;
+        let total = bytes.get().saturating_add(payload.len());
+        if count > 256 || total > 1024 * 1024 {
+            return Err(mlua::Error::runtime(
+                "script messaging budget exceeded (256 messages / 1 MiB)",
+            ));
+        }
+        publications.set(count);
+        bytes.set(total);
+        broker
+            .publish_with_reply(subject, reply, bytes::Bytes::copy_from_slice(payload))
+            .map_err(mlua::Error::external)
+    };
+    let publish = send.clone();
     runtime.raw_set(
         "publish",
         lua.create_function(
@@ -87,35 +108,80 @@ pub(crate) fn install_messaging(
                 mlua::LuaString,
                 Option<mlua::LuaString>,
             )| {
-                check_deadline(deadline)?;
-                let broker = broker
-                    .as_ref()
-                    .ok_or_else(|| mlua::Error::runtime("messaging broker unavailable"))?;
-                let count = publications.get() + 1;
-                let total = bytes.get().saturating_add(payload.as_bytes().len());
-                if count > 256 || total > 1024 * 1024 {
-                    return Err(mlua::Error::runtime(
-                        "script messaging budget exceeded (256 messages / 1 MiB)",
-                    ));
-                }
-                publications.set(count);
-                bytes.set(total);
                 let subject = subject.to_str()?;
                 let reply = reply.as_ref().map(mlua::LuaString::to_str).transpose()?;
-                let report = broker
-                    .publish_with_reply(
-                        subject.as_ref(),
-                        reply.as_ref().map(|value| value.as_ref()),
-                        bytes::Bytes::copy_from_slice(payload.as_bytes().as_ref()),
-                    )
-                    .map_err(mlua::Error::external)?;
+                let report = publish(
+                    subject.as_ref(),
+                    reply.as_ref().map(|value| value.as_ref()),
+                    payload.as_bytes().as_ref(),
+                )?;
                 let result = lua.create_table()?;
                 result.raw_set("delivered", report.delivered)?;
                 result.raw_set("slow_consumers", report.slow_consumers)?;
                 Ok(result)
             },
         )?,
-    )
+    )?;
+    install_servers(lua, &runtime, send)
+}
+
+/// `rift.servers` submits the same `rift.control.*` requests as server
+/// plugins on the message bus. Requests are asynchronous: the result is
+/// published to `reply` (an `_INBOX.` subject) once the operation finishes,
+/// and creations and removals are announced on `rift.events.instances`.
+fn install_servers(
+    lua: &Lua,
+    runtime: &Table,
+    send: impl Fn(&str, Option<&str>, &[u8]) -> mlua::Result<crate::messaging::PublishReport>
+    + Clone
+    + 'static,
+) -> mlua::Result<()> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let servers = lua.create_table()?;
+    for (method, field) in [
+        ("create", "group"),
+        ("remove", "name"),
+        ("start", "name"),
+        ("stop", "name"),
+        ("download", "template"),
+    ] {
+        let send = send.clone();
+        servers.raw_set(
+            method,
+            lua.create_function(move |_, (target, reply): (String, Option<String>)| {
+                if target.is_empty() || target.len() > 256 {
+                    return Err(mlua::Error::runtime(format!(
+                        "rift.servers.{method}: expected a {field} name of 1..=256 bytes"
+                    )));
+                }
+                let reply = match reply {
+                    Some(reply) if reply.starts_with("_INBOX.") && reply.len() <= 256 => reply,
+                    Some(_) => {
+                        return Err(mlua::Error::runtime(format!(
+                            "rift.servers.{method}: reply subjects must start with _INBOX."
+                        )));
+                    }
+                    None => format!(
+                        "_INBOX.rift.lua.{}",
+                        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    ),
+                };
+                let payload = serde_json::json!({ field: target }).to_string();
+                let report = send(
+                    &format!("rift.control.{method}"),
+                    Some(&reply),
+                    payload.as_bytes(),
+                )?;
+                if report.delivered == 0 {
+                    return Err(mlua::Error::runtime(
+                        "rift.servers: the control service is unavailable",
+                    ));
+                }
+                Ok(reply)
+            })?,
+        )?;
+    }
+    runtime.raw_set("servers", servers)
 }
 
 pub(crate) fn check_deadline(deadline: Instant) -> mlua::Result<()> {
