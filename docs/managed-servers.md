@@ -6,8 +6,10 @@ named backend on the same host. Service groups create and remove named instances
 with allocated ports while the proxy stays running. Local asset templates copy
 server jars, plugins, configs and maps into new instance directories. Persistent
 worlds retain their files after removal; disposable game instances delete their
-generated files after removal. Rift does not provision remote machines, download
-server jars or manage containers.
+generated files after removal. Templates can also download Paper, Folia,
+Purpur, Fabric or vanilla servers automatically and lay instances out like
+CloudNet v4 (see [automatic server software](#automatic-server-software-and-cloudnet-style-folders)).
+Rift does not provision remote machines or manage containers.
 
 Start with [examples/managed.lua](../examples/managed.lua). Its lobby starts with
 Rift; survival starts on demand and stops after five empty minutes. Players use
@@ -131,7 +133,13 @@ config.routes.public = "lobby"
 
 Groups accept the managed-server lifecycle fields above plus an inclusive
 `port_range`, an optional `template` name and a `storage` policy. The directory
-must contain `{name}` to isolate instance data. `{name}`, `{group}` and `{port}`
+must contain `{name}` to isolate instance data. When `directory` is omitted it
+defaults to `local/services/{name}` for persistent and `temp/services/{name}`
+for disposable storage, relative to the configuration. Groups with a `template`
+may also omit `command`; Rift then runs
+`java -Xms{memory_mb}M -Xmx{memory_mb}M -jar server.jar nogui` with
+`memory_mb` defaulting to `1024` (accepted range `128` through `1048576`).
+`memory_mb` cannot be combined with an explicit `command`. `{name}`, `{group}` and `{port}`
 expand in the directory and command arguments for each instance.
 
 Without an asset template, creation makes a working directory when needed;
@@ -324,13 +332,16 @@ config.service_groups.games = {
 
 | Template field | Required | Instance destination |
 | --- | --- | --- |
-| `server_jar` | Yes | `server.jar` in the working root |
+| `server_jar` | One of `server_jar` or `software` | `server.jar` in the working root |
+| `software` | One of `server_jar` or `software` | A downloaded jar, copied to `server.jar`; see [below](#automatic-server-software-and-cloudnet-style-folders) |
 | `plugins` | No | Each jar's filename under `plugins/` |
-| `configs` | No | Contents of this directory overlaid onto the working root |
+| `configs` | No | A directory, or a list of up to 16 directories, overlaid onto the working root in order |
 | `map` | No | Contents of this directory under `world/` |
+| `accept_eula` | No (`false`) | Writes `eula=true` to `eula.txt` |
 
-Configs are copied first, followed by the jar, plugins and map. Explicit jar,
-plugin and map assets replace matching files supplied by the configs directory.
+Config layers are copied first, in order, so later folders override files from
+earlier ones (like CloudNet template priorities). The jar, plugins and map follow
+and replace matching files supplied by the config layers.
 
 Template names contain ASCII letters, digits, underscores or hyphens (up to
 128 bytes). Asset paths do not expand `{name}`, `{group}` or `{port}`. The
@@ -341,13 +352,15 @@ Sources and instance directories must not overlap.
 
 Provisioning writes `server-ip` to the group's loopback address, `server-port`
 to its allocated port, and `level-name=world` in the instance's
-`server.properties`, preserving other settings. Supply `online-mode=false`,
-forwarding configuration and any server/plugin settings required by your network
-in `configs`. Minecraft server plugins copied here are separate from Rift's
+`server.properties`, preserving other settings. For a local `server_jar`,
+supply `online-mode=false`, forwarding configuration and any server/plugin
+settings required by your network in `configs`; templates with `software` set
+the proxy-related settings themselves. Minecraft server plugins copied here are separate from Rift's
 Lua folder plugins.
 
-Rift never writes `eula=true` automatically. If you accept the Minecraft EULA,
-provide your own `eula.txt` in the configs directory or in each generated
+Rift writes `eula=true` only for templates with `accept_eula = true`; setting it
+records that you accept the [Minecraft EULA](https://aka.ms/MinecraftEULA).
+Otherwise provide your own `eula.txt` in a config layer or in each generated
 instance directory before start. `autostart=false` avoids immediate starts at
 creation, but `start_on_connect=true` can still start the process when an
 eligible player arrives. Complete setup before routing players to it.
@@ -376,6 +389,94 @@ directories; it does not reset games. After a restart, Rift restores their owned
 directories. Remove instances explicitly to clean them up and create fresh games.
 See [examples/templates.lua](../examples/templates.lua) for persistent survival
 and disposable game groups using one asset template.
+
+## Automatic server software and CloudNet-style folders
+
+Instead of a local `server_jar`, a template can name server software. Rift
+downloads it on first use, verifies it and keeps it in a cache, similar to
+CloudNet's version installer:
+
+```lua
+local config = require("rift.config")
+config.templates.lobby = {
+    software = { type = "paper", version = "1.21.8" }, -- or version = "latest"
+    configs = { "local/templates/Global/server", "local/templates/Lobby/default" },
+    accept_eula = true,
+}
+config.service_groups.lobby = {
+    template = "lobby",
+    storage = "disposable", -- Instances live in temp/services/{name}.
+    port_range = { 25600, 25649 },
+    memory_mb = 2048,
+}
+```
+
+| `type` | Source | `version` | Verification |
+| --- | --- | --- | --- |
+| `paper`, `folia` | PaperMC Fill API, latest build of the version | Release such as `1.21.8`, or `latest` (default) | SHA-256 published by PaperMC |
+| `purpur` | Purpur API, latest build of the version | Release or `latest` | HTTPS only |
+| `vanilla` | Mojang version manifest | Release or `latest` | SHA-1 published by Mojang |
+| `fabric` | Fabric meta server launcher with the latest stable loader and installer | Minecraft release or `latest` | HTTPS only |
+| `url` | `url = "https://…"`, optionally pinned with `sha256 = "…"` | Not used | SHA-256 when given |
+
+`latest` resolves to the newest release when the jar is first downloaded.
+Downloads are cached under `software_cache` (default `local/versioncache`
+beside the configuration) as `{type}-{version}/server.jar` with a
+`rift-software.json` record of the resolved version, build and digest, and are
+reused for every later instance. Instance creation downloads a missing jar
+before it reserves a port or name; concurrent creations share one download.
+Downloads are limited to 512 MiB, must use HTTPS (plain HTTP is accepted only
+for loopback mirrors), stop following redirects after five hops, and are
+cancelled when Rift shuts down. A failed or interrupted download leaves no jar
+behind. `rift check` and configuration loading never download anything.
+
+Fetch or update a jar ahead of time with the dashboard's **Download**/**Update**
+button on the Service groups page, `rift admin download lobby [refresh]`,
+`POST /api/templates/lobby/download`, `rift.control.download`, or
+`rift.servers.download("lobby")` from Lua. Refreshing replaces the cached jar
+for new instances; existing instances keep the jar they were created with.
+`rift admin templates` and `GET /api/templates` report the cache state. Install
+the Java version the server needs (for example Java 21 or newer for current
+Paper releases) on the Rift host.
+
+For downloaded software Rift also prepares the server to run behind the proxy:
+`server.properties` gets `online-mode=false`, and `white-list=false` unless a
+config layer sets `white-list` (new 26.x servers otherwise turn their whitelist
+on; use `network.access` to restrict players). Offline networks without
+`forwarding` also get `enforce-secure-profile=false` unless a layer sets it.
+With `forwarding = { mode = "velocity", ... }`, Paper, Folia and Purpur
+instances get `config/paper-global.yml` with Velocity forwarding enabled and the
+secret from `secret_env`, unless a config layer supplies that file. The file is
+created with mode `0600`. Templates with a local `server_jar` keep the previous
+behavior and receive only the endpoint settings.
+
+The resulting layout matches CloudNet v4:
+
+| Folder | Contents |
+| --- | --- |
+| `local/templates/` | Template folders used as `configs` layers (`template_storage`) |
+| `local/versioncache/` | Downloaded server software (`software_cache`) |
+| `local/services/{name}` | Persistent instances (default group `directory`) |
+| `temp/services/{name}` | Disposable instances (default group `directory`) |
+
+Both `software_cache` and `template_storage` accept a different path relative
+to the configuration. The dashboard's **Files** page (and `/api/files`) browses
+and edits `template_storage` and every managed server's directory; see
+[HTTP services](http.md#template-and-server-files).
+
+Servers can be spun up from any of these places:
+
+- the dashboard's **Create instance** button, or `POST /api/groups/{name}/instances`;
+- `rift admin create <group>`;
+- server plugins over the message bus with `rift.control.create`
+  (see [control subjects](messaging.md#rift-control-subjects));
+- Lua plugins with `rift.servers.create(group)`
+  (see [Lua plugins](messaging-lua.md));
+- automatic scaling.
+
+All of them use the same serialized instance transaction. Each committed creation
+or removal is published on `rift.events.instances`. See
+[examples/cloud.lua](../examples/cloud.lua) for a complete setup.
 
 ## Lifecycle and readiness
 

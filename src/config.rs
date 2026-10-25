@@ -31,6 +31,13 @@ mod templates;
 // deadline; the shared instruction, memory and source limits still apply.
 const CONFIGURATION_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// CloudNet v4 layout: `local/versioncache`, `local/templates`,
+/// `local/services` for persistent and `temp/services` for disposable servers.
+pub const DEFAULT_SOFTWARE_CACHE: &str = "local/versioncache";
+pub const DEFAULT_TEMPLATE_STORAGE: &str = "local/templates";
+pub const DEFAULT_PERSISTENT_DIRECTORY: &str = "local/services/{name}";
+pub const DEFAULT_DISPOSABLE_DIRECTORY: &str = "temp/services/{name}";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub listeners: BTreeMap<String, SocketAddr>,
@@ -40,6 +47,10 @@ pub struct Config {
     pub service_groups: BTreeMap<String, ServiceGroup>,
     pub instances: BTreeMap<String, ServiceInstance>,
     pub instance_database: PathBuf,
+    /// Downloaded template software, like CloudNet's `local/versioncache`.
+    pub software_cache: PathBuf,
+    /// Template folders served by the web file browser (`local/templates`).
+    pub template_storage: PathBuf,
     pub routes: BTreeMap<String, Route>,
     pub limits: Limits,
     pub authentication: Authentication,
@@ -182,6 +193,7 @@ pub const WEB_PERMISSIONS: &[&str] = &[
     "deploy",
     "audit",
     "extensions",
+    "files",
 ];
 
 /// These grants can affect the whole proxy, so they require unrestricted scope.
@@ -313,6 +325,8 @@ impl Config {
             service_groups: BTreeMap::new(),
             instances: BTreeMap::new(),
             instance_database: PathBuf::from("rift.sqlite3"),
+            software_cache: PathBuf::from(DEFAULT_SOFTWARE_CACHE),
+            template_storage: PathBuf::from(DEFAULT_TEMPLATE_STORAGE),
             routes: BTreeMap::from([("default".into(), Route::Direct("default".into()))]),
             limits: Limits::default(),
             authentication: Authentication::default(),
@@ -450,6 +464,8 @@ impl Config {
                     "templates",
                     "service_groups",
                     "instance_database",
+                    "software_cache",
+                    "template_storage",
                     "routes",
                     "limits",
                     "authentication",
@@ -485,7 +501,27 @@ impl Config {
             )?;
             let backends = backends(root.get("backends").map_err(|e| e.to_string())?)?;
             let managed_servers = managed::parse(&root, directory)?;
-            let templates = templates::parse(&root, directory)?;
+            let directory_option = |key: &str, default: &str| -> Result<PathBuf, String> {
+                match root.raw_get::<Value>(key).map_err(|e| e.to_string())? {
+                    Value::Nil => Ok(directory.join(default)),
+                    value => {
+                        let value = string(value, key)?;
+                        if value.trim().is_empty()
+                            || value.len() > 4096
+                            || value.contains('\0')
+                            || value.contains(['{', '}'])
+                        {
+                            return Err(format!(
+                                "{key}: expected a nonblank directory path without NUL or placeholders"
+                            ));
+                        }
+                        Ok(directory.join(value))
+                    }
+                }
+            };
+            let software_cache = directory_option("software_cache", DEFAULT_SOFTWARE_CACHE)?;
+            let template_storage = directory_option("template_storage", DEFAULT_TEMPLATE_STORAGE)?;
+            let templates = templates::parse(&root, directory, &software_cache)?;
             let service_groups = services::parse(&_lua, &root, directory)?;
             let instance_database = match root
                 .raw_get::<Value>("instance_database")
@@ -719,6 +755,8 @@ impl Config {
                 service_groups,
                 instances: BTreeMap::new(),
                 instance_database,
+                software_cache,
+                template_storage,
                 routes,
                 limits,
                 authentication,

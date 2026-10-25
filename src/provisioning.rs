@@ -111,7 +111,12 @@ pub fn provision_planned(config: &Config, name: &str, plan: &Plan) -> io::Result
             return Err(invalid("instance ownership changed after planning"));
         }
         validate_tree(&directory, false)?;
-        write_properties(&directory, instance.port)?;
+        let template = config.templates.get(template_name);
+        write_properties(
+            &directory,
+            instance.port,
+            &managed_properties(config, template),
+        )?;
         return Ok(Provisioned {
             created: false,
             marker: Some(marker),
@@ -122,12 +127,31 @@ pub fn provision_planned(config: &Config, name: &str, plan: &Plan) -> io::Result
         .get(template_name)
         .ok_or_else(|| invalid("unknown server template"))?;
     // Check every input before creating any output, including directory aliases.
+    if let Some(software) = &template.software
+        && !template.server_jar.is_file()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("software {} has not been downloaded yet", software.key()),
+        ));
+    }
     let jar = source(&template.server_jar, &directory, false)?;
     let configs = template
         .configs
-        .as_ref()
+        .iter()
         .map(|path| source(path, &directory, true))
-        .transpose()?;
+        .collect::<io::Result<Vec<_>>>()?;
+    let forwarding = match (&template.software, &config.forwarding) {
+        (Some(software), Some(forwarding)) if software.kind.paper_family() => {
+            Some(std::env::var(&forwarding.secret_env).map_err(|_| {
+                invalid(format!(
+                    "set {} so new instances can be configured for Velocity forwarding",
+                    forwarding.secret_env
+                ))
+            })?)
+        }
+        _ => None,
+    };
     let map = template
         .map
         .as_ref()
@@ -159,8 +183,9 @@ pub fn provision_planned(config: &Config, name: &str, plan: &Plan) -> io::Result
     let result = (|| {
         // Write ownership before copying; recovery can recognize a partial tree.
         fs::write(stage.join(MARKER), serde_json::to_vec_pretty(&plan.marker)?)?;
-        if let Some(configs) = configs {
-            copy_tree(&configs, stage, true)?;
+        // Later layers override earlier ones, like CloudNet template priorities.
+        for layer in &configs {
+            copy_tree(layer, stage, true)?;
         }
         copy_file(&jar, &stage.join("server.jar"))?;
         if !plugins.is_empty() {
@@ -172,7 +197,20 @@ pub fn provision_planned(config: &Config, name: &str, plan: &Plan) -> io::Result
         if let Some(map) = map {
             copy_tree(&map, &stage.join("world"), false)?;
         }
-        write_properties(stage, instance.port)?;
+        if template.accept_eula {
+            write_file(
+                &stage.join("eula.txt"),
+                b"# Accepted in Rift's template configuration.\neula=true\n",
+            )?;
+        }
+        if let Some(secret) = forwarding {
+            write_forwarding(stage, &secret, config.authentication.online_mode)?;
+        }
+        write_properties(
+            stage,
+            instance.port,
+            &managed_properties(config, Some(template)),
+        )?;
         sync_tree(stage)?;
         // Recheck immediately before publishing, so an existing world is never replaced.
         checked_path(&directory)?;
@@ -574,7 +612,69 @@ fn verify_marker(marker: &Value, instance: &ServiceInstance, name: &str) -> io::
     Ok(())
 }
 
-fn write_properties(directory: &Path, port: u16) -> io::Result<()> {
+fn write_file(path: &Path, contents: &[u8]) -> io::Result<()> {
+    checked_path(path)?;
+    if fs::symlink_metadata(path).is_ok_and(|metadata| !metadata.is_file()) {
+        return Err(invalid(format!(
+            "{} must be a regular file",
+            path.display()
+        )));
+    }
+    fs::write(path, contents)
+}
+
+/// Paper reads modern forwarding from `config/paper-global.yml` and merges
+/// its defaults into a partial file. A file supplied by a config layer wins.
+fn write_forwarding(directory: &Path, secret: &str, online_mode: bool) -> io::Result<()> {
+    let path = directory.join("config").join("paper-global.yml");
+    if exists(&path)? {
+        return Ok(());
+    }
+    fs::create_dir_all(directory.join("config"))?;
+    let secret = serde_json::to_string(secret)?;
+    write_file(
+        &path,
+        format!(
+            "# Written by Rift for Velocity modern forwarding.\nproxies:\n  velocity:\n    enabled: true\n    online-mode: {online_mode}\n    secret: {secret}\n"
+        )
+        .as_bytes(),
+    )?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+/// Settings Rift manages for downloaded software, besides the endpoint:
+/// `Replace` always wins, `Default` applies only when no template folder set it.
+#[derive(Clone, Copy)]
+enum Property {
+    Replace(&'static str, &'static str),
+    Default(&'static str, &'static str),
+}
+
+/// Rift authenticates players and gates access, so downloaded servers run
+/// offline behind it. New 26.x servers otherwise enable their whitelist.
+fn managed_properties(
+    config: &Config,
+    template: Option<&crate::config::ServerTemplate>,
+) -> Vec<Property> {
+    if template.is_none_or(|template| template.software.is_none()) {
+        return Vec::new();
+    }
+    let mut properties = vec![
+        Property::Replace("online-mode", "false"),
+        Property::Default("white-list", "false"),
+    ];
+    if config.forwarding.is_none() {
+        properties.push(Property::Default("enforce-secure-profile", "false"));
+    }
+    properties
+}
+
+fn write_properties(directory: &Path, port: u16, managed: &[Property]) -> io::Result<()> {
     let path = directory.join("server.properties");
     checked_path(&path)?;
     match fs::symlink_metadata(&path) {
@@ -593,11 +693,24 @@ fn write_properties(directory: &Path, port: u16) -> io::Result<()> {
     let mut output = String::new();
     let mut continuation = false;
     let mut generated = false;
+    let mut defaults: Vec<(&str, &str)> = managed
+        .iter()
+        .filter_map(|property| match property {
+            Property::Default(name, value) => Some((*name, *value)),
+            Property::Replace(..) => None,
+        })
+        .collect();
     for line in contents.lines() {
         if !continuation {
             let trimmed = line.trim_start();
             let key = trimmed.split(['=', ':', ' ', '\t']).next().unwrap_or("");
-            generated = matches!(key, "server-port" | "server-ip" | "level-name");
+            generated = matches!(key, "server-port" | "server-ip" | "level-name")
+                || managed
+                    .iter()
+                    .any(|property| matches!(property, Property::Replace(name, _) if *name == key));
+            if let Some(index) = defaults.iter().position(|(name, _)| *name == key) {
+                defaults.remove(index);
+            }
         }
         if !generated {
             output.push_str(line);
@@ -621,6 +734,14 @@ fn write_properties(directory: &Path, port: u16) -> io::Result<()> {
     output.push_str(&format!(
         "server-port={port}\nserver-ip=127.0.0.1\nlevel-name=world\n"
     ));
+    for property in managed {
+        if let Property::Replace(name, value) = property {
+            output.push_str(&format!("{name}={value}\n"));
+        }
+    }
+    for (name, value) in defaults {
+        output.push_str(&format!("{name}={value}\n"));
+    }
     let temporary = directory.join(format!(".rift-properties-{}", generation()));
     let result = (|| {
         let mut file = fs::OpenOptions::new()
@@ -1033,12 +1154,113 @@ mod tests {
     }
 
     #[test]
+    fn software_templates_layer_configs_accept_the_eula_and_configure_forwarding() {
+        let root = std::env::temp_dir().join(format!("rift-provision-software-{}", generation()));
+        fs::create_dir_all(root.join("local/templates/Global/server/config")).unwrap();
+        let root = fs::canonicalize(root).unwrap();
+        fs::create_dir_all(root.join("local/templates/Lobby/default")).unwrap();
+        fs::write(
+            root.join("local/templates/Global/server/server.properties"),
+            "motd=global\nonline-mode=true\nwhite-list=true\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("local/templates/Global/server/shared.txt"),
+            "global",
+        )
+        .unwrap();
+        fs::write(
+            root.join("local/templates/Lobby/default/shared.txt"),
+            "lobby",
+        )
+        .unwrap();
+        let variable = format!(
+            "RIFT_PROVISION_TEST_SECRET_{}",
+            generation().replace('-', "_")
+        );
+        let source = format!(
+            "rift.config.listeners.public='127.0.0.1:25565'
+rift.config.routes.public='lobby'
+rift.config.authentication={{online_mode=true}}
+rift.config.forwarding={{mode='velocity',secret_env='{variable}'}}
+rift.config.templates.lobby={{software={{type='paper',version='1.21.8'}},configs={{'local/templates/Global/server','local/templates/Lobby/default'}},accept_eula=true}}
+rift.config.service_groups.lobby={{template='lobby',storage='disposable',port_range={{25600,25609}}}}"
+        );
+        let mut config = Config::from_lua_at(&source, &root.join("rift.lua")).unwrap();
+        config.add_instance("lobby", "lobby-1", 25600).unwrap();
+        let error = provision(&config, "lobby-1").unwrap_err();
+        assert!(
+            error.to_string().contains("has not been downloaded"),
+            "{error}"
+        );
+
+        let jar = &config.templates["lobby"].server_jar;
+        fs::create_dir_all(jar.parent().unwrap()).unwrap();
+        fs::write(jar, b"downloaded paper").unwrap();
+        let error = provision(&config, "lobby-1").unwrap_err();
+        assert!(error.to_string().contains(&variable), "{error}");
+        // SAFETY: the variable name is unique to this test.
+        unsafe { std::env::set_var(&variable, "forwarding \"secret\"") };
+        provision(&config, "lobby-1").unwrap();
+        let directory = config.managed_servers["lobby-1"].directory.clone();
+        assert!(directory.starts_with(root.join("temp/services")));
+        assert_eq!(
+            fs::read(directory.join("server.jar")).unwrap(),
+            b"downloaded paper"
+        );
+        assert_eq!(
+            fs::read_to_string(directory.join("shared.txt")).unwrap(),
+            "lobby"
+        );
+        assert!(
+            fs::read_to_string(directory.join("eula.txt"))
+                .unwrap()
+                .contains("eula=true")
+        );
+        let properties = fs::read_to_string(directory.join("server.properties")).unwrap();
+        assert!(properties.contains("motd=global"));
+        assert!(
+            properties.contains("online-mode=false") && !properties.contains("online-mode=true")
+        );
+        assert!(properties.contains("server-port=25600"));
+        // Defaults never override a template folder; forwarding keeps secure profiles.
+        assert_eq!(properties.matches("white-list=").count(), 1);
+        assert!(properties.contains("white-list=true"));
+        assert!(!properties.contains("enforce-secure-profile"));
+        fs::write(
+            root.join("local/templates/Global/server/server.properties"),
+            "motd=global\n",
+        )
+        .unwrap();
+        config.add_instance("lobby", "lobby-2", 25601).unwrap();
+        provision(&config, "lobby-2").unwrap();
+        let properties = fs::read_to_string(
+            config.managed_servers["lobby-2"]
+                .directory
+                .join("server.properties"),
+        )
+        .unwrap();
+        assert!(
+            properties.contains("white-list=false") && properties.contains("online-mode=false")
+        );
+        let paper = fs::read_to_string(directory.join("config/paper-global.yml")).unwrap();
+        assert!(paper.contains("enabled: true"));
+        assert!(paper.contains("online-mode: true"));
+        assert!(
+            paper.contains(r#"secret: "forwarding \"secret\"""#),
+            "{paper}"
+        );
+        unsafe { std::env::remove_var(&variable) };
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn refuses_source_destination_overlap_and_nested_server_directories() {
         let mut fixture = Fixture::new("disposable");
-        fixture.config.templates.get_mut("game").unwrap().configs = Some(fixture.root.clone());
+        fixture.config.templates.get_mut("game").unwrap().configs = vec![fixture.root.clone()];
         assert!(provision(&fixture.config, "games-1").is_err());
         fixture.config.templates.get_mut("game").unwrap().configs =
-            Some(fixture.template("configs"));
+            vec![fixture.template("configs")];
         fixture
             .config
             .managed_servers

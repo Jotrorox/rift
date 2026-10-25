@@ -1899,3 +1899,169 @@ fn permission_groups_require_api_v2_extensions() {
         )
         .expect(409);
 }
+
+#[test]
+fn templates_list_software_and_files_serve_template_and_server_folders() {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.directory.join("assets")).unwrap();
+    fs::write(fixture.directory.join("assets/server.jar"), b"jar").unwrap();
+    let source = fixture.source(&format!("token = '{TOKEN}', operators = {{ lobby_staff = {{ token = '{OPERATOR_TOKEN}', permissions = {{'read','servers','files'}}, groups = {{'lobby'}} }} }},"),
+        "templates = { local_jar = { server_jar = 'assets/server.jar' }, paper = { software = { type = 'paper', version = '1.21.8' }, configs = { 'local/templates/Lobby/default' }, accept_eula = true } },\n\
+         service_groups = { lobby = { command = {'unused'}, directory = 'lobby/{name}', port_range = {26310,26312} }, games = { template = 'paper', storage = 'disposable', port_range = {26313,26315} } },");
+    let _process = fixture.start(&source);
+    let admin = fixture.client().authenticated();
+    let staff = Client {
+        token: Some(OPERATOR_TOKEN),
+        ..fixture.client()
+    };
+
+    let templates = admin.get("/api/templates").expect(200).value();
+    let paper = templates["templates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|template| template["name"] == "paper")
+        .unwrap()
+        .clone();
+    assert_eq!(paper["software"]["type"], "paper");
+    assert_eq!(paper["software"]["version"], "1.21.8");
+    assert_eq!(paper["software"]["cached"], false);
+    assert_eq!(paper["groups"], json!(["games"]));
+    assert!(!templates.to_string().contains("assets/server.jar"));
+    let definitions = admin.get("/api/definitions").expect(200).value();
+    assert_eq!(
+        definitions["templates"]["paper"]["software"],
+        json!({"type":"paper","version":"1.21.8"})
+    );
+    // Generated defaults stay implicit so structured edits keep them.
+    let games = &definitions["service_groups"]["games"];
+    assert!(games.get("directory").is_none() && games.get("command").is_none());
+    assert_eq!(games["memory_mb"], 1024);
+    assert!(definitions["service_groups"]["lobby"]["command"].is_array());
+    admin
+        .json("POST", "/api/templates/local_jar/download", json!({}))
+        .expect(409);
+    admin
+        .json("POST", "/api/templates/missing/download", json!({}))
+        .expect(404);
+    admin
+        .json(
+            "POST",
+            "/api/templates/paper/download",
+            json!({"refresh":"no"}),
+        )
+        .expect(400);
+    admin.get("/api/software/spigot/versions").expect(404);
+    staff
+        .json("POST", "/api/templates/paper/download", json!({}))
+        .expect(403);
+    // Scoped listings omit templates and groups outside the operator's groups.
+    assert_eq!(
+        staff.get("/api/templates").expect(200).value()["templates"],
+        json!([])
+    );
+
+    // Template folders: write, list, read, create folders and delete.
+    admin.get("/api/files/templates").expect(200);
+    admin
+        .send(
+            "PUT",
+            "/api/files/templates/Lobby/default/server.properties",
+            &[("Content-Type", "application/octet-stream")],
+            "motd=from web",
+        )
+        .expect(200);
+    assert_eq!(
+        fs::read_to_string(
+            fixture
+                .directory
+                .join("local/templates/Lobby/default/server.properties")
+        )
+        .unwrap(),
+        "motd=from web"
+    );
+    let listing = admin
+        .get("/api/files/templates/Lobby/default")
+        .expect(200)
+        .value();
+    assert_eq!(listing["entries"][0]["name"], "server.properties");
+    assert_eq!(listing["entries"][0]["type"], "file");
+    let file = admin
+        .get("/api/files/templates/Lobby/default/server.properties")
+        .expect(200);
+    assert_eq!(file.body, "motd=from web");
+    assert!(file.headers.contains("content-disposition: attachment"));
+    admin
+        .send(
+            "PUT",
+            "/api/files/templates/Lobby/default/plugins?directory",
+            &[],
+            "",
+        )
+        .expect(201);
+    assert!(
+        fixture
+            .directory
+            .join("local/templates/Lobby/default/plugins")
+            .is_dir()
+    );
+    // Uploads may exceed the configuration editor's request limit.
+    let large = "x".repeat(3 * 1024 * 1024);
+    admin
+        .send(
+            "PUT",
+            "/api/files/templates/Lobby/default/plugins/big.jar",
+            &[],
+            &large,
+        )
+        .expect(200);
+    admin
+        .send(
+            "DELETE",
+            "/api/files/templates/Lobby/default/plugins",
+            &[],
+            "",
+        )
+        .expect(200);
+    assert!(
+        !fixture
+            .directory
+            .join("local/templates/Lobby/default/plugins")
+            .exists()
+    );
+    admin
+        .get("/api/files/templates/%2e%2e/rift.lua")
+        .expect(400);
+    admin
+        .get("/api/files/templates/Lobby/missing.txt")
+        .expect(404);
+    admin
+        .send("DELETE", "/api/files/templates", &[], "")
+        .expect(400);
+    staff.get("/api/files/templates").expect(403);
+
+    // Server folders follow group scope; ownership markers are protected.
+    admin
+        .instance("POST", "/api/groups/lobby/instances", json!({}))
+        .expect(201);
+    staff
+        .send("PUT", "/api/files/servers/lobby-1/ops.json", &[], "[]")
+        .expect(200);
+    assert_eq!(
+        fs::read_to_string(fixture.directory.join("lobby/lobby-1/ops.json")).unwrap(),
+        "[]"
+    );
+    staff.get("/api/files/servers/lobby-1").expect(200);
+    staff
+        .send(
+            "PUT",
+            "/api/files/servers/lobby-1/.rift-instance.json",
+            &[],
+            "{}",
+        )
+        .expect(403);
+    staff.get("/api/files/servers/primary").expect(403);
+    admin.get("/api/files/servers/primary").expect(404);
+    let audit = admin.get("/api/audit").expect(200).body;
+    assert!(audit.contains("PUT files"), "{audit}");
+}

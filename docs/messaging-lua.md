@@ -60,6 +60,30 @@ on_message = function(message)
 end,
 ```
 
+`rift.servers` lets a plugin spin servers up and down through the same
+[control subjects](messaging.md#rift-control-subjects) as server plugins:
+
+```lua
+messaging = { subscriptions = { { subject = 'rift.events.instances' } } },
+on_http = function(request)
+    if request.path == '/ext/games/new' then
+        -- Returns the _INBOX subject that receives the result.
+        return { status = 202, body = rift.servers.create('games') }
+    end
+end,
+on_message = function(message)
+    -- {"event":"created","name":"games-3","group":"games","port":25602,...}
+    rift.publish('network.capacity', message.payload)
+end,
+```
+
+`rift.servers.create(group)`, `remove(name)`, `start(name)`, `stop(name)` and
+`download(template)` submit a request and return immediately, without waiting
+for the server or the download. Each accepts an optional reply subject starting
+with `_INBOX.` (otherwise Rift generates one) and returns it; subscribe to it or
+to `rift.events.instances` to learn the outcome. Requests count toward the
+messaging budget below and are available wherever `rift.publish` is.
+
 Callbacks share their existing instruction, memory, and 50 ms execution limits.
 A callback may publish at most 256 messages totaling 1 MiB. HTTP and connection
 hooks retain their usual bounded worker admission, while message handlers wait

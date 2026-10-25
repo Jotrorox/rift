@@ -127,6 +127,7 @@ rift.config.web = {
 | `deploy` | View configuration deployment metadata and restore retained deployments |
 | `audit` | View operator records; group-scoped operators see only their own records |
 | `extensions` | Invoke configured Lua `/ext` handlers |
+| `files` | Browse, download, upload, edit and delete files in template folders (unrestricted scope only) and managed server directories within scope |
 
 Omitting `groups` permits all groups and static managed servers. A list restricts
 server actions and logs to instances of those groups; an empty list permits no
@@ -177,7 +178,14 @@ Errors use `{"error":"description"}`. `GET /api` provides endpoint discovery.
 | `GET /api/groups` | `{groups: [...]}` with group names, inclusive port ranges, instance names, template and storage policy |
 | `POST /api/groups/{name}/instances` | Submit provisioning with `{}`; returns `202` with `{operation_id, status: "pending", poll}` (autostart follows group policy) |
 | `DELETE /api/instances/{name}` | Submit removal of an unused instance with `{}`; returns `202` with `{operation_id, status: "pending", poll}` |
-| `GET /api/operations/{id}` | Retrieve instance operation state and its completed result; requires current `servers` permission and the operation's group scope |
+| `GET /api/operations/{id}` | Retrieve instance or download operation state and its completed result; requires current `servers` permission and the operation's group scope |
+| `GET /api/templates` | `{templates: [...]}` with names, the groups using them, counts of config layers and plugins, and `software` with its download cache state (`cached`, `resolved_version`, `build`, `size`, `sha256`); never includes asset paths |
+| `POST /api/templates/{name}/download` | Download (`{}`) or refresh (`{"refresh":true}`) a template's server software ahead of instance creation; `servers` permission, returns `202` with an operation to poll |
+| `GET /api/software/{type}/versions` | Release names for `paper`, `folia`, `purpur`, `vanilla` or `fabric`, newest first, fetched upstream and cached for 10 minutes; `servers` permission |
+| `GET /api/files/templates/{path}` | List a folder in `template_storage` as `{path, entries, truncated}`, or download a file (at most 64 MiB); `files` permission and unrestricted scope |
+| `PUT /api/files/templates/{path}` | Write the raw request body to a file (at most 64 MiB), creating parent folders; add `?directory` to create a folder instead |
+| `DELETE /api/files/templates/{path}` | Delete a file, or a folder with its contents |
+| `GET`/`PUT`/`DELETE /api/files/servers/{name}/{path}` | The same operations inside a managed server's directory, within the operator's group scope |
 | `GET /api/metrics` | Counter values as JSON |
 | `GET /api/config` | `{source, revision, writable}` for the active configuration |
 | `POST /api/config/validate` | Validate `{source}` including live listener restrictions; does not save or bind sockets |
@@ -368,6 +376,26 @@ final check-and-rename interval can race a save. Use the admin API for competing
 automated writers, or finish an external edit and reload it before editing in
 the website. File replacement is atomic, but does not promise power-loss durability
 of the directory entry.
+
+## Template and server files
+
+The Files page and `/api/files` serve two kinds of folders, like CloudNet's
+template storage: `template_storage` (default `local/templates` beside the
+configuration) and each managed server's working directory. Point template
+`configs` layers at folders under `template_storage` to edit them from the
+dashboard; see [managed servers](managed-servers.md#automatic-server-software-and-cloudnet-style-folders).
+Paths are relative to the selected folder. `.`/`..` segments, backslashes,
+colons, control characters and symlinks anywhere below the root are rejected,
+and Rift-owned `.rift-*` files (such as the instance ownership marker) cannot
+be written or deleted. Uploads are written to a temporary file and renamed into
+place. Downloads are sent as `application/octet-stream` attachments. Folder
+listings return at most 2000 entries. Writes to a running server's directory
+take effect when the server reads them, usually on reload or restart. File
+mutations are recorded in the audit log as `PUT files` and `DELETE files`.
+
+Writing a server's plugins or configuration runs code with that server's
+operating-system identity; grant `files` only to operators you would also
+trust with `console`.
 
 ## Lua websites and endpoints
 

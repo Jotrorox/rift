@@ -97,6 +97,11 @@ main:focus{outline:none}
 td.action-group{display:table-cell;white-space:nowrap;text-align:right}
 td.action-group .button+.button{margin-left:4px}
 .text-link{font-size:.8125rem;font-weight:500;white-space:nowrap}
+button.text-link{padding:0;border:0;background:none;color:var(--link);font-family:var(--mono,inherit);cursor:pointer;text-align:left}
+button.text-link:hover:not(:disabled){text-decoration:underline}
+button.text-link:disabled{color:var(--secondary);cursor:default}
+#files-editor{margin-top:16px}
+#files-content{min-height:320px}
 
 /* API access: a disclosure in the toolbar that opens a popover panel. */
 .auth-panel{position:relative}

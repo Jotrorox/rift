@@ -10,7 +10,14 @@ empty servers, and operate their lifecycle from the CLI or web dashboard.
 Service groups can maintain minimum and spare capacity, scale from occupancy or
 queue pressure, and recover failed processes with bounded retries. Define
 local templates from server jars, plugins, configs and maps, then create instances
-with allocated ports and live backend registration. Persistent worlds retain
+with allocated ports and live backend registration. Like CloudNet v4, templates
+can instead name server software (Paper, Folia, Purpur, Fabric, vanilla or a
+pinned URL) that Rift downloads, verifies and caches in `local/versioncache`,
+layer template folders from `local/templates`, and place instances in
+`local/services` or `temp/services`. Spin servers up from the dashboard,
+`rift admin create`, Lua plugins (`rift.servers.create`) or `rift.control.create`
+on the message bus; the dashboard's Files page edits template and server folders.
+See [examples/cloud.lua](examples/cloud.lua). Persistent worlds retain
 files after removal; disposable game instances delete their generated files on
 removal. Both retain files across stop/start. Bundled SQLite saves registrations,
 allocated ports, storage ownership and manual stops across proxy restarts in

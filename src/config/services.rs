@@ -10,6 +10,10 @@ pub struct ServiceGroup {
     pub port_end: u16,
     /// Absent for groups managed entirely through explicit instance operations.
     pub scaling: Option<ServiceScaling>,
+    /// Heap size of a generated default command; `None` for explicit commands.
+    pub memory_mb: Option<usize>,
+    /// The directory came from the CloudNet-style default for its storage.
+    pub default_directory: bool,
 }
 
 /// Occupancy and queue policy for automatically managed service instances.
@@ -66,6 +70,7 @@ pub(super) fn parse(
     let mut ranges = BTreeMap::new();
     let mut policies = BTreeMap::new();
     let mut scaling_policies = BTreeMap::new();
+    let mut defaults = BTreeMap::new();
     for pair in values.pairs::<Value, Value>() {
         let (name, value) = pair.map_err(|e| e.to_string())?;
         let name = string(name, "service_groups key")?;
@@ -93,11 +98,20 @@ pub(super) fn parse(
                 }
             },
         };
+        let has_template = template.is_some();
         policies.insert(name.clone(), (template, storage));
-        let directory = string(
-            value.raw_get("directory").map_err(|e| e.to_string())?,
-            &format!("{path}.directory"),
-        )?;
+        let directory_value = value
+            .raw_get::<Value>("directory")
+            .map_err(|e| e.to_string())?;
+        let default_directory = directory_value.is_nil();
+        let directory = match directory_value {
+            Value::Nil => match storage {
+                InstanceStorage::Persistent => DEFAULT_PERSISTENT_DIRECTORY,
+                InstanceStorage::Disposable => DEFAULT_DISPOSABLE_DIRECTORY,
+            }
+            .to_owned(),
+            value => string(value, &format!("{path}.directory"))?,
+        };
         if !directory.contains("{name}") {
             return Err(format!(
                 "{path}.directory: must contain {{name}} to isolate instances"
@@ -146,12 +160,45 @@ pub(super) fn parse(
             if key.as_string().is_some_and(|key| {
                 matches!(
                     key.as_bytes().as_ref(),
-                    b"port_range" | b"template" | b"storage" | b"scaling"
+                    b"port_range" | b"template" | b"storage" | b"scaling" | b"memory_mb"
                 )
             }) {
                 continue;
             }
             definition.raw_set(key, field).map_err(|e| e.to_string())?;
+        }
+        definition
+            .raw_set("directory", directory)
+            .map_err(|e| e.to_string())?;
+        let memory = value
+            .raw_get::<Value>("memory_mb")
+            .map_err(|e| e.to_string())?;
+        let command = value
+            .raw_get::<Value>("command")
+            .map_err(|e| e.to_string())?;
+        match (command, memory) {
+            (Value::Nil, memory) if has_template => {
+                let memory = if memory.is_nil() {
+                    DEFAULT_MEMORY_MB
+                } else {
+                    integer(&value, &path, "memory_mb", DEFAULT_MEMORY_MB, 1_048_576)?
+                };
+                if memory < 128 {
+                    return Err(format!("{path}.memory_mb: expected 128..=1048576 MiB"));
+                }
+                definition
+                    .raw_set("command", default_command(memory))
+                    .map_err(|e| e.to_string())?;
+                defaults.insert(name.clone(), (Some(memory), default_directory));
+            }
+            (_, Value::Nil) => {
+                defaults.insert(name.clone(), (None, default_directory));
+            }
+            _ => {
+                return Err(format!(
+                    "{path}.memory_mb: only applies to the default command of a template group; set -Xmx in command instead"
+                ));
+            }
         }
         definitions
             .raw_set(name, definition)
@@ -167,6 +214,7 @@ pub(super) fn parse(
             let (port_start, port_end) = ranges[&name];
             let (template, storage) = policies.remove(&name).unwrap();
             let scaling = scaling_policies.remove(&name).unwrap();
+            let (memory_mb, default_directory) = defaults.remove(&name).unwrap();
             (
                 name,
                 ServiceGroup {
@@ -176,6 +224,8 @@ pub(super) fn parse(
                     port_start,
                     port_end,
                     scaling,
+                    memory_mb,
+                    default_directory,
                 },
             )
         })
@@ -271,6 +321,21 @@ fn validate_scaling(scaling: &ServiceScaling, path: &str, ports: usize) -> Resul
         ));
     }
     Ok(())
+}
+
+const DEFAULT_MEMORY_MB: usize = 1024;
+
+/// The launch command for template groups without an explicit `command`.
+/// Provisioning writes the port to `server.properties`.
+fn default_command(memory: usize) -> Vec<String> {
+    vec![
+        "java".into(),
+        format!("-Xms{memory}M"),
+        format!("-Xmx{memory}M"),
+        "-jar".into(),
+        crate::software::JAR.into(),
+        "nogui".into(),
+    ]
 }
 
 /// Names that are safe in paths, URLs and audit records.

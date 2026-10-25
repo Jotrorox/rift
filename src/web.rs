@@ -1,4 +1,5 @@
 //! Axum control and observability services. Assets are embedded in the binary.
+mod files;
 mod operations;
 
 use crate::{admin, control, metrics::Metrics, operator, runtime::Snapshot};
@@ -346,6 +347,25 @@ fn router(kind: Kind, address: SocketAddr, mut app: App) -> Router {
             .route("/api/deployments", get(deployments))
             .route("/api/deployments/{id}/rollback", post(rollback))
             .route("/api/audit", get(audit_records))
+            .route("/api/templates", get(templates))
+            .route("/api/templates/{name}/download", post(download_template))
+            .route("/api/software/{kind}/versions", get(software_versions))
+            .route(
+                "/api/files/templates",
+                any(files::templates).layer(DefaultBodyLimit::max(files::MAX_FILE)),
+            )
+            .route(
+                "/api/files/templates/{*path}",
+                any(files::templates).layer(DefaultBodyLimit::max(files::MAX_FILE)),
+            )
+            .route(
+                "/api/files/servers/{name}",
+                any(files::server).layer(DefaultBodyLimit::max(files::MAX_FILE)),
+            )
+            .route(
+                "/api/files/servers/{name}/{*path}",
+                any(files::server).layer(DefaultBodyLimit::max(files::MAX_FILE)),
+            )
             .route("/api/groups/{name}/instances", post(create_instance))
             .route("/api/instances/{name}", delete(remove_instance))
             .route("/api/operations/{id}", get(instance_result))
@@ -573,6 +593,8 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
         } else {
             match segments.as_slice() {
                 ["api", "access"] | ["api"] => "",
+                ["api", "files", ..] => "files",
+                ["api", "templates", _, "download"] | ["api", "software", ..] => "servers",
                 ["api", "servers", _, "logs"] => "logs",
                 ["api", "servers", _, "console"] => "console",
                 ["api", "servers", _, _]
@@ -601,6 +623,45 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
                 .take(128)
                 .collect(),
             ),
+            // Template folders are shared by every group.
+            ["api", "files", "templates", rest @ ..] => (
+                access.groups.is_none(),
+                decode_name(&rest.join("/"))
+                    .unwrap_or_default()
+                    .chars()
+                    .take(128)
+                    .collect(),
+            ),
+            ["api", "files", "servers", name, rest @ ..] => {
+                let name = decode_name(name).unwrap_or_default();
+                let target = format!(
+                    "{name}/{}",
+                    decode_name(&rest.join("/")).unwrap_or_default()
+                );
+                (
+                    access.server(&snapshot, &name),
+                    target.chars().take(128).collect(),
+                )
+            }
+            ["api", "templates", name, ..] => {
+                let name = decode_name(name).unwrap_or_default();
+                (
+                    access.groups.is_none()
+                        || snapshot
+                            .config
+                            .service_groups
+                            .iter()
+                            .any(|(group, definition)| {
+                                definition.template.as_deref() == Some(name.as_str())
+                                    && access.group(group)
+                            }),
+                    if snapshot.config.templates.contains_key(&name) {
+                        name
+                    } else {
+                        String::new()
+                    },
+                )
+            }
             ["api", "servers" | "instances", name, ..] => {
                 let name = decode_name(name).unwrap_or_default();
                 (
@@ -632,6 +693,7 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
             ["api", "servers", _, "console"] => "console",
             ["api", "groups", _, "instances"] => "create_instance",
             ["api", "instances", _] => "remove_instance",
+            ["api", "templates", _, "download"] => "download_software",
             ["api", "definitions", "templates", _] => "edit_template",
             ["api", "definitions", "service_groups", _] => "edit_group",
             ["api", "definitions", "permission_groups", _] => "edit_permission_group",
@@ -904,6 +966,14 @@ fn definition_values(config: &Config) -> Value {
         .iter()
         .map(|(name, group)| {
             let mut value = server(&group.server);
+            // Keep generated defaults implicit so edits round-trip to Lua unchanged.
+            if let Some(memory) = group.memory_mb {
+                value.as_object_mut().unwrap().remove("command");
+                value["memory_mb"] = json!(memory);
+            }
+            if group.default_directory {
+                value.as_object_mut().unwrap().remove("directory");
+            }
             value["port_range"] = json!([group.port_start, group.port_end]);
             value["storage"] = json!(group.storage.as_str());
             if let Some(template) = &group.template {
@@ -919,12 +989,19 @@ fn definition_values(config: &Config) -> Value {
         .templates
         .iter()
         .map(|(name, t)| {
-            let mut value = json!({"server_jar":t.server_jar,"plugins":t.plugins});
-            if let Some(v) = &t.configs {
-                value["configs"] = json!(v);
+            let mut value = json!({"plugins":t.plugins});
+            match &t.software {
+                Some(software) => value["software"] = software_value(software),
+                None => value["server_jar"] = json!(t.server_jar),
+            }
+            if !t.configs.is_empty() {
+                value["configs"] = json!(t.configs);
             }
             if let Some(v) = &t.map {
                 value["map"] = json!(v);
+            }
+            if t.accept_eula {
+                value["accept_eula"] = json!(true);
             }
             (name, value)
         })
@@ -967,6 +1044,20 @@ fn definition_values(config: &Config) -> Value {
         "tab_list": tab_list,
         "server_list": server_list,
     })
+}
+/// The same field names as `templates.*.software` in Lua.
+pub(crate) fn software_value(software: &rift::software::Software) -> Value {
+    let mut value = json!({"type": software.kind.as_str()});
+    if !software.version.is_empty() {
+        value["version"] = json!(software.version);
+    }
+    if let Some(url) = &software.url {
+        value["url"] = json!(url);
+    }
+    if let Some(sha256) = &software.sha256 {
+        value["sha256"] = json!(sha256);
+    }
+    value
 }
 async fn definitions(State(app): State<App>) -> Json<Value> {
     let snapshot = app.snapshot();
@@ -1239,6 +1330,114 @@ async fn instance_operation(
         .into_response()
 }
 
+/// Scoped operators see only templates used by their groups, and only those groups.
+async fn templates(State(app): State<App>, Extension(access): Extension<Access>) -> Response {
+    let snapshot = app.snapshot();
+    match tokio::task::spawn_blocking(move || admin::templates(&snapshot)).await {
+        Ok(mut value) => {
+            if access.groups.is_some()
+                && let Some(templates) = value["templates"].as_array_mut()
+            {
+                for template in templates.iter_mut() {
+                    if let Some(groups) = template["groups"].as_array_mut() {
+                        groups.retain(|group| {
+                            group.as_str().is_some_and(|group| access.group(group))
+                        });
+                    }
+                }
+                templates.retain(|template| {
+                    template["groups"]
+                        .as_array()
+                        .is_some_and(|groups| !groups.is_empty())
+                });
+            }
+            Json(value).into_response()
+        }
+        Err(failure) => error(StatusCode::INTERNAL_SERVER_ERROR, failure),
+    }
+}
+/// Fill a template's software cache ahead of creation; poll like instance operations.
+async fn download_template(
+    State(app): State<App>,
+    Extension(access): Extension<Access>,
+    Path(name): Path<String>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    let value = match payload(body, &["refresh"]) {
+        Ok(value) => value,
+        Err(failure) => return failure.into_response(),
+    };
+    let refresh = match value.get("refresh") {
+        None => false,
+        Some(Value::Bool(refresh)) => *refresh,
+        Some(_) => return error(StatusCode::BAD_REQUEST, "refresh must be a boolean"),
+    };
+    let snapshot = app.snapshot();
+    let Some(template) = snapshot.config.templates.get(&name) else {
+        return error(StatusCode::NOT_FOUND, format!("unknown template {name:?}"));
+    };
+    if template.software.is_none() {
+        return error(
+            StatusCode::CONFLICT,
+            "this template uses a local server_jar; set software to download one",
+        );
+    }
+    let group = snapshot
+        .config
+        .service_groups
+        .iter()
+        .find(|(group, definition)| {
+            definition.template.as_deref() == Some(name.as_str()) && access.group(group)
+        })
+        .map(|(group, _)| group.clone())
+        .filter(|_| access.groups.is_some());
+    let id = match app.operations.reserve(group, "download_software", &name) {
+        Ok(id) => id,
+        Err(failure) => return failure.into_response(),
+    };
+    let operation_id = id.clone();
+    tokio::spawn(async move {
+        let reply = admin::download_template(&snapshot, &name, refresh)
+            .await
+            .map(|value| value.to_string())
+            .map_err(|message| control::Error {
+                status: 502,
+                message,
+            });
+        let (outcome, code) = match &reply {
+            Ok(_) => ("completed", 200),
+            Err(failure) => ("failed", failure.status),
+        };
+        if let Err(failure) =
+            record_audit(&app, &access, "download_software", &name, outcome, code).await
+        {
+            eprintln!("rift: download result audit failed: {failure}");
+        }
+        app.operations.complete(&operation_id, reply, 200);
+    });
+    let location = format!("/api/operations/{id}");
+    (
+        StatusCode::ACCEPTED,
+        [(header::LOCATION, location.clone())],
+        Json(json!({"operation_id":id,"status":"pending","poll":location})),
+    )
+        .into_response()
+}
+async fn software_versions(Path(kind): Path<String>) -> Response {
+    let Some(kind) = rift::software::Kind::parse(&kind) else {
+        return error(
+            StatusCode::NOT_FOUND,
+            format!("unknown software type {kind:?}"),
+        );
+    };
+    match rift::software::versions(kind).await {
+        Ok(versions) => Json(json!({"type": kind.as_str(), "versions": versions})).into_response(),
+        Err(failure) => error(
+            StatusCode::BAD_GATEWAY,
+            format!("could not list {} versions: {failure}", kind.as_str()),
+        ),
+    }
+}
 async fn instance_result(
     State(app): State<App>,
     Extension(access): Extension<Access>,
@@ -1331,7 +1530,7 @@ async fn standalone_metrics(state: State<App>) -> Response {
 }
 async fn discovery() -> Json<Value> {
     Json(
-        json!({"version":1,"endpoints":["GET /api/access","GET /api/status","GET /api/servers","POST /api/servers/{name}/start","POST /api/servers/{name}/stop","GET /api/servers/{name}/logs","POST /api/servers/{name}/console","GET /api/groups","POST /api/groups/{name}/instances","DELETE /api/instances/{name}","GET /api/definitions","PUT /api/definitions/{section}/{name}","PUT /api/definitions/{section}","GET /api/permissions","POST /api/permissions/members/{uuid}/{group}","DELETE /api/permissions/members/{uuid}/{group}","GET /api/deployments","POST /api/deployments/{id}/rollback","GET /api/audit","GET /api/operations/{id}","GET /api/metrics","GET /api/config","POST /api/config/validate","PUT /api/config","POST /api/reload"],"extensions":"/ext/* -> on_http(request)","source_limit_bytes":control::MAX_SOURCE}),
+        json!({"version":1,"endpoints":["GET /api/access","GET /api/status","GET /api/servers","POST /api/servers/{name}/start","POST /api/servers/{name}/stop","GET /api/servers/{name}/logs","POST /api/servers/{name}/console","GET /api/groups","POST /api/groups/{name}/instances","GET /api/templates","POST /api/templates/{name}/download","GET /api/software/{type}/versions","GET|PUT|DELETE /api/files/templates/{path}","GET|PUT|DELETE /api/files/servers/{name}/{path}","DELETE /api/instances/{name}","GET /api/definitions","PUT /api/definitions/{section}/{name}","PUT /api/definitions/{section}","GET /api/permissions","POST /api/permissions/members/{uuid}/{group}","DELETE /api/permissions/members/{uuid}/{group}","GET /api/deployments","POST /api/deployments/{id}/rollback","GET /api/audit","GET /api/operations/{id}","GET /api/metrics","GET /api/config","POST /api/config/validate","PUT /api/config","POST /api/reload"],"extensions":"/ext/* -> on_http(request)","source_limit_bytes":control::MAX_SOURCE}),
     )
 }
 async fn config_source(State(app): State<App>) -> Json<Value> {

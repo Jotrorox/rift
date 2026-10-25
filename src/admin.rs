@@ -228,7 +228,7 @@ fn request(value: &Value, settings: &Admin, secret: &str) -> Result<Vec<String>,
         .collect::<Result<Vec<_>, _>>()?;
     let command = args.first().ok_or("missing command")?;
     let permission = match command.as_str() {
-        "start" | "stop" | "groups" | "create" | "remove" => "servers",
+        "start" | "stop" | "groups" | "create" | "remove" | "templates" | "download" => "servers",
         command => command,
     };
     if !settings.permissions.contains(permission) {
@@ -293,6 +293,56 @@ pub(crate) fn service_groups(snapshot: &Snapshot) -> Value {
     }).collect::<Vec<_>>()})
 }
 
+/// Creation may first download template software; reads have their own timeouts.
+pub(crate) const DOWNLOAD_DEADLINE: Duration = Duration::from_secs(15 * 60);
+
+/// Template metadata and software cache state; asset paths stay private.
+pub(crate) fn templates(snapshot: &Snapshot) -> Value {
+    let config = &snapshot.config;
+    json!({"templates":config.templates.iter().map(|(name, template)| {
+        json!({
+            "name": name,
+            "software": template.software.as_ref()
+                .map(|software| rift::software::status(&config.software_cache, software)),
+            "config_layers": template.configs.len(),
+            "plugins": template.plugins.len(),
+            "map": template.map.is_some(),
+            "accept_eula": template.accept_eula,
+            "groups": config.service_groups.iter()
+                .filter(|(_, group)| group.template.as_deref() == Some(name))
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>(),
+        })
+    }).collect::<Vec<_>>()})
+}
+
+/// Download a template's software into the cache, outside the instance
+/// queue, so creation later starts without waiting for the network.
+pub(crate) async fn download_template(
+    snapshot: &Snapshot,
+    name: &str,
+    refresh: bool,
+) -> Result<Value, String> {
+    let template = snapshot
+        .config
+        .templates
+        .get(name)
+        .ok_or_else(|| format!("unknown template {name:?}"))?;
+    let software = template
+        .software
+        .as_ref()
+        .ok_or_else(|| format!("template {name:?} uses a local server_jar; nothing to download"))?;
+    let status = rift::software::download(
+        &snapshot.config.software_cache,
+        software,
+        refresh,
+        &rift::software::Endpoints::default(),
+    )
+    .await
+    .map_err(|error| format!("downloading {} failed: {error}", software.key()))?;
+    Ok(json!({"template": name, "software": status}))
+}
+
 /// The same field names as `service_groups.*.scaling` in Lua.
 pub(crate) fn scaling_values(policy: &rift::config::ServiceScaling) -> Value {
     json!({
@@ -338,6 +388,9 @@ pub(crate) async fn execute(
         [command] if command == "status" => Ok(control.status(&snapshot, metrics)),
         [command] if command == "servers" => Ok(json!({"servers":managed_servers(&snapshot)})),
         [command] if command == "groups" => Ok(service_groups(&snapshot)),
+        [command] if command == "templates" => Ok(templates(&snapshot)),
+        [command, template] if command == "download" => download_template(&snapshot, template, false).await,
+        [command, template, refresh] if command == "download" && refresh == "refresh" => download_template(&snapshot, template, true).await,
         [command, group] if command == "create" => {
             let (reply, receiver) = oneshot::channel();
             commands.try_send(Command::CreateInstance { group: group.clone(), reply })
@@ -390,7 +443,7 @@ pub(crate) async fn execute(
             commands.try_send(Command::Reload(reply)).map_err(|_| "administrator command queue is full or shutting down")?;
             receiver.await.map_err(|_| "proxy is shutting down".to_owned())?
         }
-        _ => Err("usage: status | servers | groups | create <group> | remove <instance> | start <backend> | stop <backend> | maintenance on/off | drain <backend> on/off | transfer <connection-id> <backend> | reload | shutdown".into()),
+        _ => Err("usage: status | servers | groups | templates | download <template> [refresh] | create <group> | remove <instance> | start <backend> | stop <backend> | maintenance on/off | drain <backend> on/off | transfer <connection-id> <backend> | reload | shutdown".into()),
     }
 }
 
@@ -445,6 +498,9 @@ pub async fn serve(
                                         && let Some(server) = snapshot.config.managed_servers.get(backend)
                                     {
                                         deadline += server.start_timeout;
+                                    }
+                                    if matches!(args.first().map(String::as_str), Some("create" | "download")) {
+                                        deadline += DOWNLOAD_DEADLINE;
                                     }
                                     if let [command, name] = args.as_slice()
                                         && command == "remove"
@@ -507,10 +563,12 @@ pub async fn client(args: &[String]) -> io::Result<()> {
             "set RIFT_ADMIN_TOKEN to the server's admin secret",
         )
     })?;
-    let deadline = if args
-        .first()
-        .is_some_and(|command| command == "transfer" || command == "remove")
-    {
+    let deadline = if args.first().is_some_and(|command| {
+        matches!(
+            command.as_str(),
+            "transfer" | "remove" | "create" | "download"
+        )
+    }) {
         Duration::from_secs(24 * 60 * 60 + 45)
     } else {
         Duration::from_secs(40)
