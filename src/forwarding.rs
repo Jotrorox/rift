@@ -7,7 +7,7 @@ use crate::{
         self, Packet, ProtocolVersion, read_string, read_varint, write_string, write_varint,
     },
 };
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use std::{collections::HashSet, io, net::IpAddr, sync::Arc};
 
