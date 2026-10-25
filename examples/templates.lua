@@ -1,7 +1,7 @@
 -- Run: rift check examples/templates.lua
 -- Install Java and put your jars, configs and map under examples/assets/.
 -- Paths below are local and relative to this configuration file.
--- Rift does not download assets or accept the Minecraft EULA for you.
+-- For downloaded server software and CloudNet-style folders, see examples/cloud.lua.
 -- If you accept the EULA, supply your eula.txt in assets/configs/ or each instance.
 -- Configure assets/configs/ for the authentication and forwarding settings below.
 local config = require("rift.config")

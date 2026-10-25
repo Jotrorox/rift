@@ -97,6 +97,7 @@ pub async fn listen(snapshot: &Snapshot) -> io::Result<Option<quic::Server>> {
 pub struct Controls {
     broker: Broker,
     subscription: Subscription,
+    long_running: Arc<tokio::sync::Semaphore>,
 }
 
 impl Controls {
@@ -107,6 +108,7 @@ impl Controls {
         Ok(Self {
             broker,
             subscription,
+            long_running: Arc::new(tokio::sync::Semaphore::new(16)),
         })
     }
 
@@ -141,44 +143,86 @@ impl Controls {
                 continue;
             };
             let snapshot = current.borrow().clone();
-            let result = match arguments(&message) {
-                Ok(args) => timeout(
-                    Duration::from_secs(40),
-                    admin::execute(&args, snapshot, &metrics, &commands),
-                )
-                .await
-                .unwrap_or_else(|_| {
-                    Err("control request timed out; inspect status before retrying".into())
-                }),
-                Err(error) => Err(error),
-            };
             let command = message
                 .subject
                 .strip_prefix("rift.control.")
-                .unwrap_or("unknown");
-            let response = match result {
-                Ok(data) => {
-                    events::admin("messaging_control", "ok", command, &"command completed");
-                    json!({"ok": true, "data": data})
-                }
-                Err(error) => {
-                    events::admin("messaging_control", "rejected", command, &error);
-                    json!({"ok": false, "error": error})
-                }
+                .unwrap_or("unknown")
+                .to_owned();
+            let args = arguments(&message);
+            let broker = self.broker.clone();
+            let reply = reply.to_owned();
+            let (metrics, commands) = (metrics.clone(), commands.clone());
+            let work = async move {
+                let (args, deadline) = match args {
+                    // Instance and download work is serialized by Rift itself
+                    // and may wait for a download; keep answering other controls.
+                    Ok(args) if LONG_RUNNING.contains(&command.as_str()) => {
+                        (Ok(args), CONTROL_DEADLINE + admin::DOWNLOAD_DEADLINE)
+                    }
+                    args => (args, CONTROL_DEADLINE),
+                };
+                let result = match args {
+                    Ok(args) => timeout(
+                        deadline,
+                        admin::execute(&args, snapshot, &metrics, &commands),
+                    )
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err("control request timed out; inspect status before retrying".into())
+                    }),
+                    Err(error) => Err(error),
+                };
+                respond(&broker, &reply, &command, result);
             };
-            let _ = self
-                .broker
-                .publish(reply, Bytes::from(response.to_string()));
-            // Emit bounded operational results; status contains player details
-            // and is deliberately returned only to its requester's inbox.
-            if command != "status" {
-                emit(
-                    &self.broker,
-                    "rift.events.control",
-                    json!({"command":command,"ok":response["ok"]}),
-                );
+            if LONG_RUNNING.contains(&message.subject.trim_start_matches("rift.control.")) {
+                match self.long_running.clone().try_acquire_owned() {
+                    Ok(permit) => {
+                        tokio::spawn(async move {
+                            work.await;
+                            drop(permit);
+                        });
+                    }
+                    Err(_) => respond(
+                        &self.broker,
+                        message.reply.as_deref().unwrap_or_default(),
+                        message.subject.trim_start_matches("rift.control."),
+                        Err(
+                            "too many instance or download requests in progress; retry later"
+                                .into(),
+                        ),
+                    ),
+                }
+            } else {
+                work.await;
             }
         }
+    }
+}
+
+const CONTROL_DEADLINE: Duration = Duration::from_secs(40);
+/// Subjects answered from their own task rather than the serialized loop.
+const LONG_RUNNING: &[&str] = &["create", "remove", "download"];
+
+fn respond(broker: &Broker, reply: &str, command: &str, result: Result<Value, String>) {
+    let response = match result {
+        Ok(data) => {
+            events::admin("messaging_control", "ok", command, &"command completed");
+            json!({"ok": true, "data": data})
+        }
+        Err(error) => {
+            events::admin("messaging_control", "rejected", command, &error);
+            json!({"ok": false, "error": error})
+        }
+    };
+    let _ = broker.publish(reply, Bytes::from(response.to_string()));
+    // Emit bounded operational results; status contains player details
+    // and is deliberately returned only to its requester's inbox.
+    if command != "status" {
+        emit(
+            broker,
+            "rift.events.control",
+            json!({"command":command,"ok":response["ok"]}),
+        );
     }
 }
 
@@ -198,10 +242,13 @@ fn arguments(message: &Message) -> Result<Vec<String>, String> {
         .strip_prefix("rift.control.")
         .ok_or("invalid control subject")?;
     let fields: &[&str] = match command {
-        "status" | "reload" => &[],
+        "status" | "reload" | "servers" | "groups" | "templates" => &[],
         "maintenance" => &["enabled"],
         "drain" => &["backend", "enabled"],
         "transfer" => &["connection_id", "backend"],
+        "create" => &["group"],
+        "remove" | "start" | "stop" => &["name"],
+        "download" => &["template", "refresh"],
         _ => return Err("unknown control subject".into()),
     };
     if object.keys().any(|key| !fields.contains(&key.as_str())) {
@@ -220,8 +267,27 @@ fn arguments(message: &Message) -> Result<Vec<String>, String> {
             .map(str::to_owned)
             .ok_or("backend must be a nonempty string of at most 256 bytes".to_owned())
     };
+    let name = |field: &str| {
+        value[field]
+            .as_str()
+            .filter(|s| !s.is_empty() && s.len() <= 256)
+            .map(str::to_owned)
+            .ok_or(format!(
+                "{field} must be a nonempty string of at most 256 bytes"
+            ))
+    };
     let mut args = vec![command.to_owned()];
     match command {
+        "create" => args.push(name("group")?),
+        "remove" | "start" | "stop" => args.push(name("name")?),
+        "download" => {
+            args.push(name("template")?);
+            match value.get("refresh") {
+                None | Some(Value::Bool(false)) => {}
+                Some(Value::Bool(true)) => args.push("refresh".into()),
+                Some(_) => return Err("refresh must be a boolean".into()),
+            }
+        }
         "maintenance" => args.push(enabled()?),
         "drain" => {
             args.push(backend()?);
@@ -272,7 +338,51 @@ mod tests {
             .unwrap(),
             ["transfer", "1", "lobby"]
         );
+        for (subject, payload, expected) in [
+            (
+                "rift.control.create",
+                r#"{"group":"lobby"}"#,
+                &["create", "lobby"][..],
+            ),
+            (
+                "rift.control.remove",
+                r#"{"name":"lobby-1"}"#,
+                &["remove", "lobby-1"],
+            ),
+            (
+                "rift.control.start",
+                r#"{"name":"lobby-1"}"#,
+                &["start", "lobby-1"],
+            ),
+            (
+                "rift.control.stop",
+                r#"{"name":"lobby-1"}"#,
+                &["stop", "lobby-1"],
+            ),
+            ("rift.control.servers", "{}", &["servers"]),
+            ("rift.control.groups", "{}", &["groups"]),
+            ("rift.control.templates", "{}", &["templates"]),
+            (
+                "rift.control.download",
+                r#"{"template":"paper"}"#,
+                &["download", "paper"],
+            ),
+            (
+                "rift.control.download",
+                r#"{"template":"paper","refresh":true}"#,
+                &["download", "paper", "refresh"],
+            ),
+        ] {
+            assert_eq!(arguments(&message(subject, payload)).unwrap(), expected);
+        }
         for (subject, payload) in [
+            ("rift.control.create", r#"{"group":""}"#),
+            ("rift.control.create", r#"{"name":"lobby"}"#),
+            ("rift.control.remove", r#"{"name":7}"#),
+            (
+                "rift.control.download",
+                r#"{"template":"paper","refresh":"yes"}"#,
+            ),
             ("rift.control.status", r#"{"unexpected":1}"#),
             ("rift.control.maintenance", r#"{"enabled":"true"}"#),
             (

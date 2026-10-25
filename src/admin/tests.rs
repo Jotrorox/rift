@@ -853,3 +853,93 @@ async fn tab_list_shows_header_footer_and_players_on_other_servers() {
     .await
     .unwrap();
 }
+
+#[tokio::test]
+async fn boss_bars_survive_reconfiguration_and_can_be_removed() {
+    use rift::extensions::PlayerAction;
+    timeout(Duration::from_secs(10), async {
+        let mut fixture = SessionFixture::new().await;
+        let codec = fixture.codec;
+        let players = fixture.snapshot.extensions.players().clone();
+        let bar = rift::protocol::BossBar {
+            text: serde_json::json!("Event"),
+            progress: 0.5,
+            color: 1,
+            style: 0,
+            flags: 0,
+        };
+        assert!(
+            players
+                .send(
+                    "player",
+                    PlayerAction::BossBar {
+                        name: "event".into(),
+                        bar: Some(bar),
+                    },
+                )
+                .unwrap()
+        );
+        // 1.21.11 Boss Event: UUID, Add, NBT string, progress, color, style, flags.
+        let added = receive(&mut fixture.client, codec).await;
+        assert_eq!(added.id, 0x09);
+        let mut body = vec![0, 8, 0, 5];
+        body.extend(b"Event");
+        body.extend(0.5f32.to_be_bytes());
+        body.extend([1, 0, 0]);
+        assert_eq!(added.data[16..], body);
+        // A backend-initiated reconfiguration clears the client's boss bars.
+        codec
+            .write(&mut fixture.backend, &Packet::empty(0x74))
+            .await
+            .unwrap();
+        assert_eq!(
+            receive(&mut fixture.client, codec).await,
+            Packet::empty(0x74)
+        );
+        codec
+            .write(&mut fixture.client, &Packet::empty(0x0f))
+            .await
+            .unwrap();
+        assert_eq!(
+            receive(&mut fixture.backend, codec).await,
+            Packet::empty(0x0f)
+        );
+        codec
+            .write(&mut fixture.backend, &Packet::empty(3))
+            .await
+            .unwrap();
+        assert_eq!(receive(&mut fixture.client, codec).await, Packet::empty(3));
+        codec
+            .write(&mut fixture.client, &Packet::empty(3))
+            .await
+            .unwrap();
+        assert_eq!(receive(&mut fixture.backend, codec).await, Packet::empty(3));
+        codec
+            .write(&mut fixture.backend, &join_game(12))
+            .await
+            .unwrap();
+        assert_eq!(receive(&mut fixture.client, codec).await, join_game(12));
+        assert_eq!(receive(&mut fixture.client, codec).await, added);
+        assert!(
+            players
+                .send(
+                    "player",
+                    PlayerAction::BossBar {
+                        name: "event".into(),
+                        bar: None,
+                    },
+                )
+                .unwrap()
+        );
+        let mut removal = added.data[..16].to_vec();
+        removal.push(1);
+        assert_eq!(
+            receive(&mut fixture.client, codec).await,
+            Packet::new(0x09, removal)
+        );
+        fixture.task.abort();
+        let _ = fixture.task.await;
+    })
+    .await
+    .unwrap();
+}

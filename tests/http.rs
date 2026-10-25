@@ -1755,3 +1755,313 @@ fn structured_definitions_preserve_lua_and_apply_safe_group_and_template_edits()
     );
     assert_eq!(client.get("/ext/test").expect(200).body, "hook preserved");
 }
+
+#[test]
+fn console_settings_edit_permission_groups_memberships_tab_list_and_server_list() {
+    let fixture = Fixture::new();
+    // The forwarding secret only has to exist; reuse a variable the fixture sets.
+    let source = fixture.source(
+        "",
+        "authentication = { online_mode = true },
+         forwarding = { mode = 'velocity', secret_env = 'RIFT_ADMIN_TOKEN' },
+         extensions = { api_version = 2, groups = { default = { permissions = { ['chat.send'] = true } } } },
+         on_http = function() return { body = 'hook preserved' } end,",
+    );
+    let _process = fixture.start(&source);
+    let client = fixture.client();
+    let values = client.get("/api/definitions").expect(200).value();
+    assert_eq!(
+        values["permission_groups"]["default"],
+        json!({"inherits": [], "permissions": {"chat.send": true}})
+    );
+    assert!(values["tab_list"].is_null() && values["server_list"].is_null());
+    let put = |path: &str, definition: Value| {
+        client.json(
+            "PUT",
+            path,
+            json!({"revision": revision(client), "definition": definition}),
+        )
+    };
+    put(
+        "/api/definitions/permission_groups/staff",
+        json!({"inherits": ["default"], "permissions": {"network.*": true, "network.ban": false}}),
+    )
+    .expect(200);
+    put(
+        "/api/definitions/permission_groups/broken",
+        json!({"inherits": ["missing"]}),
+    )
+    .expect(400);
+    put("/api/definitions/permission_groups/Staff", json!({})).expect(400);
+    put(
+        "/api/definitions/tab_list",
+        json!({"header": "Hi {player}", "footer": {"text": "{online} online", "color": "gray"}, "players": "network"}),
+    )
+    .expect(200);
+    put(
+        "/api/definitions/server_list",
+        json!({"motd": {"text": "Welcome", "color": "gold"}, "max_players": 50, "sample": ["one"]}),
+    )
+    .expect(200);
+    put(
+        "/api/definitions/server_list",
+        json!({"motd": "x", "favicon": "icon.png"}),
+    )
+    .expect(400);
+    let values = client.get("/api/definitions").expect(200).value();
+    assert_eq!(
+        values["permission_groups"]["staff"],
+        json!({"inherits": ["default"], "permissions": {"network.*": true, "network.ban": false}})
+    );
+    assert_eq!(
+        values["tab_list"],
+        json!({"header": "Hi {player}", "footer": {"text": "{online} online", "color": "gray"}, "players": "network"})
+    );
+    assert_eq!(values["server_list"]["motd"]["color"], "gold");
+    assert_eq!(values["server_list"]["max_players"], 50);
+    assert_eq!(values["server_list"]["hosts"], json!({}));
+    assert!(fixture.read().contains(&source));
+    assert_eq!(client.get("/ext/test").expect(200).body, "hook preserved");
+
+    // Memberships are runtime state in the extension store, not configuration.
+    let uuid = "0123456789abcdef0123456789abcdef";
+    let member = |method: &str, group: &str| {
+        client.json(
+            method,
+            &format!("/api/permissions/members/{uuid}/{group}"),
+            json!({}),
+        )
+    };
+    let before = revision(client);
+    assert_eq!(member("POST", "staff").expect(200).value()["changed"], true);
+    assert_eq!(
+        member("POST", "staff").expect(200).value()["changed"],
+        false
+    );
+    member("POST", "unknown").expect(400);
+    member("POST", "default").expect(400);
+    client
+        .json("POST", "/api/permissions/members/Offline/staff", json!({}))
+        .expect(404);
+    client
+        .json(
+            "POST",
+            &format!("/api/permissions/members/{}/staff", uuid.to_uppercase()),
+            json!({}),
+        )
+        .expect(400);
+    assert_eq!(revision(client), before);
+    assert_eq!(
+        client.get("/api/permissions").expect(200).value(),
+        json!({"enabled": true, "members": [{"uuid": uuid, "name": null, "groups": ["staff"]}], "truncated": false})
+    );
+    assert_eq!(
+        member("DELETE", "staff").expect(200).value()["changed"],
+        true
+    );
+    assert_eq!(
+        client.get("/api/permissions").expect(200).value()["members"],
+        json!([])
+    );
+    let audit = client.get("/api/audit").expect(200).value();
+    assert!(audit["records"].as_array().unwrap().iter().any(|record| {
+        record["action"] == "POST group_membership" && record["target"] == format!("{uuid}/staff")
+    }));
+
+    put("/api/definitions/server_list", Value::Null).expect(200);
+    put("/api/definitions/tab_list", Value::Null).expect(200);
+    let values = client.get("/api/definitions").expect(200).value();
+    assert!(values["tab_list"].is_null() && values["server_list"].is_null());
+}
+
+#[test]
+fn permission_groups_require_api_v2_extensions() {
+    let fixture = Fixture::new();
+    let _process = fixture.start(&fixture.source("", ""));
+    let client = fixture.client();
+    assert_eq!(
+        client.get("/api/permissions").expect(200).value()["enabled"],
+        false
+    );
+    assert!(client.get("/api/definitions").expect(200).value()["permission_groups"].is_null());
+    client
+        .json(
+            "PUT",
+            "/api/definitions/permission_groups/staff",
+            json!({"revision": revision(client), "definition": {}}),
+        )
+        .expect(409);
+    client
+        .json(
+            "POST",
+            "/api/permissions/members/0123456789abcdef0123456789abcdef/staff",
+            json!({}),
+        )
+        .expect(409);
+}
+
+#[test]
+fn templates_list_software_and_files_serve_template_and_server_folders() {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.directory.join("assets")).unwrap();
+    fs::write(fixture.directory.join("assets/server.jar"), b"jar").unwrap();
+    let source = fixture.source(&format!("token = '{TOKEN}', operators = {{ lobby_staff = {{ token = '{OPERATOR_TOKEN}', permissions = {{'read','servers','files'}}, groups = {{'lobby'}} }} }},"),
+        "templates = { local_jar = { server_jar = 'assets/server.jar' }, paper = { software = { type = 'paper', version = '1.21.8' }, configs = { 'local/templates/Lobby/default' }, accept_eula = true } },\n\
+         service_groups = { lobby = { command = {'unused'}, directory = 'lobby/{name}', port_range = {26310,26312} }, games = { template = 'paper', storage = 'disposable', port_range = {26313,26315} } },");
+    let _process = fixture.start(&source);
+    let admin = fixture.client().authenticated();
+    let staff = Client {
+        token: Some(OPERATOR_TOKEN),
+        ..fixture.client()
+    };
+
+    let templates = admin.get("/api/templates").expect(200).value();
+    let paper = templates["templates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|template| template["name"] == "paper")
+        .unwrap()
+        .clone();
+    assert_eq!(paper["software"]["type"], "paper");
+    assert_eq!(paper["software"]["version"], "1.21.8");
+    assert_eq!(paper["software"]["cached"], false);
+    assert_eq!(paper["groups"], json!(["games"]));
+    assert!(!templates.to_string().contains("assets/server.jar"));
+    let definitions = admin.get("/api/definitions").expect(200).value();
+    assert_eq!(
+        definitions["templates"]["paper"]["software"],
+        json!({"type":"paper","version":"1.21.8"})
+    );
+    // Generated defaults stay implicit so structured edits keep them.
+    let games = &definitions["service_groups"]["games"];
+    assert!(games.get("directory").is_none() && games.get("command").is_none());
+    assert_eq!(games["memory_mb"], 1024);
+    assert!(definitions["service_groups"]["lobby"]["command"].is_array());
+    admin
+        .json("POST", "/api/templates/local_jar/download", json!({}))
+        .expect(409);
+    admin
+        .json("POST", "/api/templates/missing/download", json!({}))
+        .expect(404);
+    admin
+        .json(
+            "POST",
+            "/api/templates/paper/download",
+            json!({"refresh":"no"}),
+        )
+        .expect(400);
+    admin.get("/api/software/spigot/versions").expect(404);
+    staff
+        .json("POST", "/api/templates/paper/download", json!({}))
+        .expect(403);
+    // Scoped listings omit templates and groups outside the operator's groups.
+    assert_eq!(
+        staff.get("/api/templates").expect(200).value()["templates"],
+        json!([])
+    );
+
+    // Template folders: write, list, read, create folders and delete.
+    admin.get("/api/files/templates").expect(200);
+    admin
+        .send(
+            "PUT",
+            "/api/files/templates/Lobby/default/server.properties",
+            &[("Content-Type", "application/octet-stream")],
+            "motd=from web",
+        )
+        .expect(200);
+    assert_eq!(
+        fs::read_to_string(
+            fixture
+                .directory
+                .join("local/templates/Lobby/default/server.properties")
+        )
+        .unwrap(),
+        "motd=from web"
+    );
+    let listing = admin
+        .get("/api/files/templates/Lobby/default")
+        .expect(200)
+        .value();
+    assert_eq!(listing["entries"][0]["name"], "server.properties");
+    assert_eq!(listing["entries"][0]["type"], "file");
+    let file = admin
+        .get("/api/files/templates/Lobby/default/server.properties")
+        .expect(200);
+    assert_eq!(file.body, "motd=from web");
+    assert!(file.headers.contains("content-disposition: attachment"));
+    admin
+        .send(
+            "PUT",
+            "/api/files/templates/Lobby/default/plugins?directory",
+            &[],
+            "",
+        )
+        .expect(201);
+    assert!(
+        fixture
+            .directory
+            .join("local/templates/Lobby/default/plugins")
+            .is_dir()
+    );
+    // Uploads may exceed the configuration editor's request limit.
+    let large = "x".repeat(3 * 1024 * 1024);
+    admin
+        .send(
+            "PUT",
+            "/api/files/templates/Lobby/default/plugins/big.jar",
+            &[],
+            &large,
+        )
+        .expect(200);
+    admin
+        .send(
+            "DELETE",
+            "/api/files/templates/Lobby/default/plugins",
+            &[],
+            "",
+        )
+        .expect(200);
+    assert!(
+        !fixture
+            .directory
+            .join("local/templates/Lobby/default/plugins")
+            .exists()
+    );
+    admin
+        .get("/api/files/templates/%2e%2e/rift.lua")
+        .expect(400);
+    admin
+        .get("/api/files/templates/Lobby/missing.txt")
+        .expect(404);
+    admin
+        .send("DELETE", "/api/files/templates", &[], "")
+        .expect(400);
+    staff.get("/api/files/templates").expect(403);
+
+    // Server folders follow group scope; ownership markers are protected.
+    admin
+        .instance("POST", "/api/groups/lobby/instances", json!({}))
+        .expect(201);
+    staff
+        .send("PUT", "/api/files/servers/lobby-1/ops.json", &[], "[]")
+        .expect(200);
+    assert_eq!(
+        fs::read_to_string(fixture.directory.join("lobby/lobby-1/ops.json")).unwrap(),
+        "[]"
+    );
+    staff.get("/api/files/servers/lobby-1").expect(200);
+    staff
+        .send(
+            "PUT",
+            "/api/files/servers/lobby-1/.rift-instance.json",
+            &[],
+            "{}",
+        )
+        .expect(403);
+    staff.get("/api/files/servers/primary").expect(403);
+    admin.get("/api/files/servers/primary").expect(404);
+    let audit = admin.get("/api/audit").expect(200).body;
+    assert!(audit.contains("PUT files"), "{audit}");
+}

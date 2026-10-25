@@ -2,7 +2,8 @@
 //! with their own framing, compression and protocol phases.
 use crate::protocol::{
     self, Codec, ConnectionState, Direction, Handshake, NextState, Packet, PacketKind,
-    PlayerIdentity, ProtocolVersion, Reader, State, read_varint, write_varint,
+    PlayerIdentity, ProtocolVersion, Reader, State, read_varint, translation::Translator,
+    write_varint,
 };
 use crate::{
     auth::{AuthenticatedProfile, Authenticator, CryptoStream},
@@ -28,6 +29,10 @@ pub struct Connection<S> {
     pending: Option<PendingWrite>,
     login_plugins: LoginPlugins,
     bungeecord_registered: bool,
+    /// A backend's own protocol; `None` when it is the client's protocol.
+    version: Option<ProtocolVersion>,
+    /// Converts between the client's and this backend's protocol.
+    translator: Option<Translator>,
 }
 
 struct PendingWrite {
@@ -52,6 +57,21 @@ impl<S> Connection<S> {
             pending: None,
             login_plugins: LoginPlugins::default(),
             bungeecord_registered: false,
+            version: None,
+            translator: None,
+        }
+    }
+
+    /// The protocol this connection speaks; a backend may differ from the client.
+    fn version_or(&self, client: ProtocolVersion) -> ProtocolVersion {
+        self.version.unwrap_or(client)
+    }
+
+    /// Convert a client-format packet into this backend's protocol.
+    fn translate_serverbound(&mut self, state: State, packet: Packet) -> io::Result<Packet> {
+        match &mut self.translator {
+            Some(translator) => translator.serverbound(state, packet),
+            None => Ok(packet),
         }
     }
 }
@@ -161,6 +181,7 @@ pub struct Session<C, B> {
     read_chunk_size: usize,
     legacy_state: protocol::LegacyState,
     tab_list: protocol::TabList,
+    boss_bars: protocol::BossBars,
 }
 
 impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Session<C, B> {
@@ -197,6 +218,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             read_chunk_size: 32 * 1024,
             legacy_state: protocol::LegacyState::default(),
             tab_list: protocol::TabList::default(),
+            boss_bars: protocol::BossBars::default(),
         })
     }
 
@@ -375,7 +397,19 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
     /// Once the transition starts the owner must disconnect on cancellation:
     /// direct transition writes may be partial. Callers must supply a deadline.
     pub async fn connect_backend(&mut self, stream: B) -> io::Result<()> {
+        self.connect_backend_as(stream, None).await
+    }
+
+    /// Attach a backend that speaks `protocol`, or the client's own protocol
+    /// when `None`. A different protocol is translated in both directions.
+    pub async fn connect_backend_as(
+        &mut self,
+        stream: B,
+        protocol: Option<ProtocolVersion>,
+    ) -> io::Result<()> {
         let version = self.version()?;
+        let backend_version = protocol.unwrap_or(version);
+        let translator = Translator::new(version, backend_version)?;
         if self.authenticated_profile.is_some() && self.forwarding.is_none() {
             return Err(protocol::invalid(
                 "Authenticated backend login requires Velocity forwarding.",
@@ -398,7 +432,10 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         }
         let mut backend = Connection::new(stream, State::Login);
         backend.reader.set_read_chunk_size(self.read_chunk_size);
+        backend.version = protocol.filter(|protocol| *protocol != version);
+        backend.translator = translator;
         let mut handshake = self.handshake.clone();
+        handshake.protocol = backend_version.number();
         if replacing || self.authenticated_profile.is_some() {
             handshake.next_state = NextState::Login;
         }
@@ -406,11 +443,12 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             .codec
             .write(&mut backend.io, &handshake.packet())
             .await?;
-        if let Some(start) = &self.login_start {
+        if let Some(start) = self.login_start.clone() {
+            let start = backend.translate_serverbound(State::Login, start)?;
             backend
                 .state
-                .observe(version, Direction::Serverbound, start)?;
-            backend.codec.write(&mut backend.io, start).await?;
+                .observe(backend_version, Direction::Serverbound, &start)?;
+            backend.codec.write(&mut backend.io, &start).await?;
         }
         if replacing {
             let expected = self.identity.clone().unwrap();
@@ -418,7 +456,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             let legacy_join = {
                 let login = Self::login_replacement(
                     &mut backend,
-                    version,
+                    backend_version,
                     &expected,
                     forwarding.as_ref(),
                     self.bungeecord,
@@ -499,7 +537,9 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                     {
                         let result = async {
                             old.flush_pending().await?;
-                            old.queue(version, Direction::Serverbound, &packet)?;
+                            let old_version = old.version_or(version);
+                            let packet = old.translate_serverbound(State::Play, packet)?;
+                            old.queue(old_version, Direction::Serverbound, &packet)?;
                             old.flush_pending().await
                         }
                         .await;
@@ -529,12 +569,8 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                 let (join, respawn) = caps.legacy_world(&join)?;
                 self.send_client(&join).await?;
                 self.send_client(&respawn).await?;
-                if let Some(settings) = &self.client_information {
-                    backend.codec.write(&mut backend.io, settings).await?;
-                }
-                if let Some(brand) = &self.client_brand {
-                    backend.codec.write(&mut backend.io, brand).await?;
-                }
+                self.replay_client_options(&mut backend, State::Play)
+                    .await?;
                 self.backend = Some(backend);
                 self.backend_error = None;
                 self.joined = true;
@@ -573,12 +609,9 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             // handleLogin; ClientConfigurationPacketListenerImpl.finish.
             self.joined = false;
             self.tab_list.reset();
-            if let Some(settings) = &self.client_information {
-                backend.codec.write(&mut backend.io, settings).await?;
-            }
-            if let Some(brand) = &self.client_brand {
-                backend.codec.write(&mut backend.io, brand).await?;
-            }
+            self.boss_bars.reset();
+            self.replay_client_options(&mut backend, State::Configuration)
+                .await?;
             // Resource packs are common-listener state and survive a fresh play
             // listener. Pop the old server's stack before new configuration.
             let pop = version.switching().unwrap().config_pack_pop;
@@ -592,10 +625,11 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
     }
 
     async fn check_legacy_cutover(&mut self) -> io::Result<()> {
-        let version = self.version()?;
+        let client_version = self.version()?;
         let Some(old) = self.backend.as_mut() else {
             return Ok(());
         };
+        let version = old.version_or(client_version);
         // Inspect late traffic without delivering it past the client barrier.
         // Keep packets unobserved for rollback; a successful cutover drops them
         // with the old attachment. Bound work, time and retained packet bytes.
@@ -620,8 +654,12 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                     if kind == PacketKind::Disconnect {
                         old.state
                             .observe(version, Direction::Clientbound, &packet)?;
+                        let packet = match &mut old.translator {
+                            Some(translator) => translator.clientbound(State::Play, packet)?,
+                            None => packet,
+                        };
                         self.client
-                            .queue(version, Direction::Clientbound, &packet)?;
+                            .queue(client_version, Direction::Clientbound, &packet)?;
                         return Err(io::Error::new(
                             io::ErrorKind::PermissionDenied,
                             "The current backend disconnected the player.",
@@ -818,6 +856,22 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         }
     }
 
+    /// Replay persistent client options and brand to a new backend, in its protocol.
+    async fn replay_client_options(
+        &self,
+        backend: &mut Connection<B>,
+        state: State,
+    ) -> io::Result<()> {
+        for packet in [&self.client_information, &self.client_brand]
+            .into_iter()
+            .flatten()
+        {
+            let packet = backend.translate_serverbound(state, packet.clone())?;
+            backend.codec.write(&mut backend.io, &packet).await?;
+        }
+        Ok(())
+    }
+
     fn remember_client_packet(&mut self, state: State, packet: &Packet) -> io::Result<()> {
         // Administrator transfers also need client options, even when player
         // commands are disabled by omitting the network configuration.
@@ -936,6 +990,26 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         self.tab_list.modified()
     }
 
+    /// Bring the client's Rift boss bars to `wanted`. Backend bars are untouched.
+    pub async fn sync_boss_bars(
+        &mut self,
+        wanted: &std::collections::BTreeMap<String, protocol::BossBar>,
+    ) -> io::Result<()> {
+        self.client.flush_pending().await?;
+        if !self.joined || !self.client.state.settled(State::Play) {
+            return Err(protocol::invalid("boss bars require a joined player"));
+        }
+        for packet in self.boss_bars.sync(self.version()?, wanted)? {
+            self.send_client(&packet).await?;
+        }
+        Ok(())
+    }
+
+    /// Changes whenever the client discarded Rift's boss bars.
+    pub fn boss_bar_revision(&self) -> u64 {
+        self.boss_bars.revision()
+    }
+
     /// Whether `send_bungeecord` can currently reach a playing backend.
     pub fn bungeecord_ready(&self) -> bool {
         self.bungeecord
@@ -957,12 +1031,13 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         if payload.len() > crate::bungeecord::MAX_PAYLOAD_SIZE {
             return Err(protocol::invalid("BungeeCord payload exceeds size limit"));
         }
-        let version = self.version()?;
+        let client_version = self.version()?;
         let backend = self
             .backend
             .as_mut()
             .filter(|backend| backend.state.settled(State::Play))
             .ok_or_else(|| protocol::invalid("BungeeCord responses require a playing backend"))?;
+        let version = backend.version_or(client_version);
         backend.flush_pending().await?;
         let packet =
             crate::bungeecord::packet(version, crate::bungeecord::channel(version), payload);
@@ -989,15 +1064,16 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                 .backend
                 .as_mut()
                 .ok_or_else(|| protocol::invalid("no backend attached"))?;
+            let backend_version = backend.version_or(version);
             if self.bungeecord
                 && !backend.bungeecord_registered
                 && backend.pending.is_none()
                 && backend.state.settled(State::Play)
             {
                 backend.queue(
-                    version,
+                    backend_version,
                     Direction::Serverbound,
-                    &crate::bungeecord::registration(version),
+                    &crate::bungeecord::registration(backend_version),
                 )?;
                 backend.bungeecord_registered = true;
             }
@@ -1082,20 +1158,28 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                             caps.proxy_command_with(&packet, &self.extension_commands)?
                     {
                         if let Some(acknowledgement) = acknowledgement {
-                            backend.queue(version, Direction::Serverbound, &acknowledgement)?;
+                            let acknowledgement =
+                                backend.translate_serverbound(phase, acknowledgement)?;
+                            backend.queue(
+                                backend_version,
+                                Direction::Serverbound,
+                                &acknowledgement,
+                            )?;
                         }
                         return Ok(SessionEvent::ProxyCommand(command));
                     }
-                    backend.queue(version, Direction::Serverbound, &packet)?;
+                    let packet = backend.translate_serverbound(phase, packet)?;
+                    backend.queue(backend_version, Direction::Serverbound, &packet)?;
                 }
                 Incoming::Backend(Ok(ConnectionEvent::Read(Some(packet)))) => {
                     let phase = backend.state.phase(Direction::Clientbound);
-                    let kind = backend
-                        .state
-                        .observe(version, Direction::Clientbound, &packet)?;
+                    let kind =
+                        backend
+                            .state
+                            .observe(backend_version, Direction::Clientbound, &packet)?;
                     if self.bungeecord
                         && let Some(payload) = crate::bungeecord::payload(
-                            version,
+                            backend_version,
                             phase,
                             Direction::Clientbound,
                             &packet,
@@ -1115,6 +1199,17 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                     if kind == PacketKind::CookieRequest {
                         self.initial_retry_safe = false;
                     }
+                    // Backend-level handling reads `kind` and, during login, the
+                    // backend's own encoding. Everything the client sees,
+                    // including Rift's views of it, uses the client's protocol.
+                    let (packet, untranslated) = match &mut backend.translator {
+                        Some(translator) if phase == State::Login => {
+                            (translator.clientbound(phase, packet.clone())?, Some(packet))
+                        }
+                        Some(translator) => (translator.clientbound(phase, packet)?, None),
+                        None => (packet, None),
+                    };
+                    let backend_packet = untranslated.as_ref().unwrap_or(&packet);
                     if phase == State::Play {
                         self.legacy_state.observe(version, &packet)?;
                         if !self.tab_list.observe(version, &packet)? {
@@ -1126,9 +1221,13 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                         PacketKind::LoginPluginRequest => {
                             if let Some(response) = backend
                                 .login_plugins
-                                .request(&packet, self.forwarding.as_ref())?
+                                .request(backend_packet, self.forwarding.as_ref())?
                             {
-                                backend.queue(version, Direction::Serverbound, &response)?;
+                                backend.queue(
+                                    backend_version,
+                                    Direction::Serverbound,
+                                    &response,
+                                )?;
                             } else {
                                 self.initial_retry_safe = false;
                                 self.client
@@ -1153,7 +1252,8 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                             backend
                                 .login_plugins
                                 .require_forwarded(self.forwarding.is_some())?;
-                            let identity = protocol::success_identity(version, &packet)?;
+                            let identity =
+                                protocol::success_identity(backend_version, backend_packet)?;
                             let requested = protocol::start_identity(
                                 version,
                                 self.login_start
@@ -1196,6 +1296,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                         PacketKind::StartConfiguration => {
                             self.joined = false;
                             self.tab_list.reset();
+                            self.boss_bars.reset();
                             self.client
                                 .queue(version, Direction::Clientbound, &packet)?;
                         }

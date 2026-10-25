@@ -97,6 +97,11 @@ main:focus{outline:none}
 td.action-group{display:table-cell;white-space:nowrap;text-align:right}
 td.action-group .button+.button{margin-left:4px}
 .text-link{font-size:.8125rem;font-weight:500;white-space:nowrap}
+button.text-link{padding:0;border:0;background:none;color:var(--link);font-family:var(--mono,inherit);cursor:pointer;text-align:left}
+button.text-link:hover:not(:disabled){text-decoration:underline}
+button.text-link:disabled{color:var(--secondary);cursor:default}
+#files-editor{margin-top:16px}
+#files-content{min-height:320px}
 
 /* API access: a disclosure in the toolbar that opens a popover panel. */
 .auth-panel{position:relative}
@@ -174,6 +179,24 @@ input:focus-visible,select:focus-visible,textarea:focus-visible{outline:3px soli
 .field-help{margin:0;color:var(--secondary);font-size:.75rem}
 .definition-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:16px;padding:16px var(--pad);border-top:1px solid var(--separator);background:var(--well)}
 .definition-grid textarea{min-height:84px;font-family:var(--mono);font-size:.8125rem}
+.definition-grid code{font-size:.75rem}
+.definition-grid.group-editor{grid-template-columns:minmax(200px,1fr) minmax(280px,2fr)}
+.definition-grid.group-editor textarea{min-height:156px}
+@media(max-width:640px){.definition-grid.group-editor{grid-template-columns:1fr}}
+.definition-grid :is(input,select,textarea):disabled{opacity:.5;cursor:not-allowed}
+.member-group{min-width:160px}
+tbody tr[aria-current=true] td{background:var(--accent-soft)}
+td.unlisted{color:var(--secondary)}
+
+/* Server list favicon and permission group memberships. */
+.favicon-row{display:flex;align-items:center;gap:12px;padding:0 var(--pad) 14px}
+.favicon-row img{width:64px;height:64px;border:1px solid var(--separator);border-radius:8px;image-rendering:pixelated}
+.chip-list{display:flex;flex-wrap:wrap;gap:6px}
+.chip{display:inline-flex;align-items:center;gap:2px;min-height:24px;padding:0 2px 0 10px;border-radius:999px;background:var(--fill);color:var(--label);font-size:.75rem;font-weight:500;white-space:nowrap}
+.chip button{display:inline-grid;place-items:center;width:20px;height:20px;padding:0;border:0;border-radius:50%;background:transparent;color:var(--secondary);font-size:.875rem;line-height:1;cursor:pointer}
+.chip button:hover:not(:disabled){background:var(--fill-strong);color:var(--label)}
+.chip button:disabled{opacity:.4;cursor:default}
+.chip button:focus-visible{outline:3px solid var(--accent-soft);outline-offset:1px;box-shadow:0 0 0 1px var(--link)}
 
 /* Editor and log output. */
 .config-meta{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;padding:12px var(--pad);color:var(--secondary);font-size:.8125rem;overflow-wrap:anywhere}

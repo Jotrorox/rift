@@ -127,6 +127,7 @@ rift.config.web = {
 | `deploy` | View configuration deployment metadata and restore retained deployments |
 | `audit` | View operator records; group-scoped operators see only their own records |
 | `extensions` | Invoke configured Lua `/ext` handlers |
+| `files` | Browse, download, upload, edit and delete files in template folders (unrestricted scope only) and managed server directories within scope |
 
 Omitting `groups` permits all groups and static managed servers. A list restricts
 server actions and logs to instances of those groups; an empty list permits no
@@ -165,15 +166,26 @@ Errors use `{"error":"description"}`. `GET /api` provides endpoint discovery.
 | `POST /api/servers/{name}/stop` | Request an unused managed server stop and pause automatic wake with `{}`; returns `202` when accepted |
 | `GET /api/servers/{name}/logs?cursor={byte_offset}` | Up to 64 KiB of log text with the next byte cursor, `truncated` and `has_more`; omit cursor to tail the log |
 | `POST /api/servers/{name}/console` | Write one `{command: "list"}` to a running managed server; commands are limited to 4096 bytes without control characters |
-| `GET /api/definitions` | Structured `templates`, `service_groups` and the active `revision`; includes private paths and executable arguments |
-| `PUT /api/definitions/{section}/{name}` | Apply `{revision, definition}`; section is `templates` or `service_groups`, and `null` removes a definition |
+| `GET /api/definitions` | Structured `templates`, `service_groups`, `permission_groups`, `tab_list`, `server_list` and the active `revision`; includes private paths and executable arguments. Absent settings are `null` |
+| `PUT /api/definitions/{section}/{name}` | Apply `{revision, definition}`; section is `templates`, `service_groups` or `permission_groups`, and `null` removes a definition |
+| `PUT /api/definitions/{section}` | Apply `{revision, definition}` to `tab_list` or `server_list`; `null` turns the setting off |
+| `GET /api/permissions` | `{enabled, members, truncated}`: up to 1000 stored group memberships as `{uuid, name, groups}`, with `name` set for online players |
+| `POST /api/permissions/members/{player}/{group}` | Add a player (lowercase UUID, or the name of an online player) to a permission group with `{}`; returns `{changed}` |
+| `DELETE /api/permissions/members/{player}/{group}` | Remove a player from a permission group with `{}`; returns `{changed}` |
 | `GET /api/deployments` | Retained deployment metadata, active revision, retention limit and durability flag; never includes source |
 | `POST /api/deployments/{id}/rollback` | Validate and restore a retained configuration with `{revision}` |
 | `GET /api/audit` | Latest operator records and durability flag |
 | `GET /api/groups` | `{groups: [...]}` with group names, inclusive port ranges, instance names, template and storage policy |
 | `POST /api/groups/{name}/instances` | Submit provisioning with `{}`; returns `202` with `{operation_id, status: "pending", poll}` (autostart follows group policy) |
 | `DELETE /api/instances/{name}` | Submit removal of an unused instance with `{}`; returns `202` with `{operation_id, status: "pending", poll}` |
-| `GET /api/operations/{id}` | Retrieve instance operation state and its completed result; requires current `servers` permission and the operation's group scope |
+| `GET /api/operations/{id}` | Retrieve instance or download operation state and its completed result; requires current `servers` permission and the operation's group scope |
+| `GET /api/templates` | `{templates: [...]}` with names, the groups using them, counts of config layers and plugins, and `software` with its download cache state (`cached`, `resolved_version`, `build`, `size`, `sha256`); never includes asset paths |
+| `POST /api/templates/{name}/download` | Download (`{}`) or refresh (`{"refresh":true}`) a template's server software ahead of instance creation; `servers` permission, returns `202` with an operation to poll |
+| `GET /api/software/{type}/versions` | Release names for `paper`, `folia`, `purpur`, `vanilla` or `fabric`, newest first, fetched upstream and cached for 10 minutes; `servers` permission |
+| `GET /api/files/templates/{path}` | List a folder in `template_storage` as `{path, entries, truncated}`, or download a file (at most 64 MiB); `files` permission and unrestricted scope |
+| `PUT /api/files/templates/{path}` | Write the raw request body to a file (at most 64 MiB), creating parent folders; add `?directory` to create a folder instead |
+| `DELETE /api/files/templates/{path}` | Delete a file, or a folder with its contents |
+| `GET`/`PUT`/`DELETE /api/files/servers/{name}/{path}` | The same operations inside a managed server's directory, within the operator's group scope |
 | `GET /api/metrics` | Counter values as JSON |
 | `GET /api/config` | `{source, revision, writable}` for the active configuration |
 | `POST /api/config/validate` | Validate `{source}` including live listener restrictions; does not save or bind sockets |
@@ -260,6 +272,22 @@ paths; optional fields are omitted. Updates replace one complete definition,
 validate all references and live-instance restrictions, then use the same save
 transaction as source edits. Templates affect future provisioning; existing
 instance files are preserved. Scaling policies can change while instances run.
+
+The same editor covers the network settings on the Server list, Tab list and
+Permissions pages. `tab_list` and `server_list` definitions replace the whole
+setting with the fields of their Lua tables; text fields take a string or a chat
+component. A server list edit keeps the configured `favicon` and `hosts`, which
+can only be set in Lua, so a definition containing either is rejected.
+`GET /api/definitions` returns the favicon as its `data:` URL. Permission group
+definitions take `inherits` and `permissions` as in `extensions.groups` and need
+extensions with `api_version = 2`; edits return `409` otherwise.
+
+Group memberships are runtime state in the extension store, as with
+`rift.permissions.add_group` and `remove_group`. Changing them doesn't create a
+configuration revision; it applies to the next permission check and is
+recorded in the audit log as `group_membership` with a `uuid/group` target.
+Everyone belongs to `default` implicitly, so it can't be assigned. Every
+permissions endpoint requires the `config` permission.
 
 The dashboard follows selected server logs every second, retaining a bounded
 128 KiB view. Logs contain server output and may include private information;
@@ -348,6 +376,26 @@ final check-and-rename interval can race a save. Use the admin API for competing
 automated writers, or finish an external edit and reload it before editing in
 the website. File replacement is atomic, but does not promise power-loss durability
 of the directory entry.
+
+## Template and server files
+
+The Files page and `/api/files` serve two kinds of folders, like CloudNet's
+template storage: `template_storage` (default `local/templates` beside the
+configuration) and each managed server's working directory. Point template
+`configs` layers at folders under `template_storage` to edit them from the
+dashboard; see [managed servers](managed-servers.md#automatic-server-software-and-cloudnet-style-folders).
+Paths are relative to the selected folder. `.`/`..` segments, backslashes,
+colons, control characters and symlinks anywhere below the root are rejected,
+and Rift-owned `.rift-*` files (such as the instance ownership marker) cannot
+be written or deleted. Uploads are written to a temporary file and renamed into
+place. Downloads are sent as `application/octet-stream` attachments. Folder
+listings return at most 2000 entries. Writes to a running server's directory
+take effect when the server reads them, usually on reload or restart. File
+mutations are recorded in the audit log as `PUT files` and `DELETE files`.
+
+Writing a server's plugins or configuration runs code with that server's
+operating-system identity; grant `files` only to operators you would also
+trust with `console`.
 
 ## Lua websites and endpoints
 

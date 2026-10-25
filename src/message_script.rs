@@ -244,6 +244,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn servers_api_submits_control_requests_with_inbox_replies() {
+        let broker = Broker::default();
+        let mut controls = broker.subscribe("rift.control.*", None).unwrap();
+        let mut replies = broker.subscribe("reply", None).unwrap();
+        let handler = MessageHandler::new(
+            &config(
+                "local inbox = rift.servers.create(message.payload)
+                rift.servers.remove('lobby-1', '_INBOX.plugin.removed')
+                rift.servers.download('paper')
+                rift.publish('reply', inbox)",
+            ),
+            broker.clone(),
+        )
+        .unwrap()
+        .unwrap();
+        let worker = tokio::spawn(handler.run());
+        broker
+            .publish("plugin.echo", Bytes::from_static(b"lobby"))
+            .unwrap();
+        let mut received = Vec::new();
+        for _ in 0..3 {
+            let request = timeout(Duration::from_secs(2), controls.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            received.push((
+                request.subject.to_string(),
+                String::from_utf8(request.payload.to_vec()).unwrap(),
+                request
+                    .reply
+                    .map(|reply| reply.to_string())
+                    .unwrap_or_default(),
+            ));
+        }
+        assert_eq!(received[0].0, "rift.control.create");
+        assert_eq!(received[0].1, r#"{"group":"lobby"}"#);
+        assert!(received[0].2.starts_with("_INBOX.rift.lua."));
+        assert_eq!(
+            received[1],
+            (
+                "rift.control.remove".to_owned(),
+                r#"{"name":"lobby-1"}"#.to_owned(),
+                "_INBOX.plugin.removed".to_owned()
+            )
+        );
+        assert_eq!(received[2].1, r#"{"template":"paper"}"#);
+        let reply = timeout(Duration::from_secs(2), replies.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(reply.payload.to_vec()).unwrap(),
+            received[0].2
+        );
+        worker.abort();
+        let _ = worker.await;
+    }
+
+    #[tokio::test]
     async fn callback_error_does_not_stop_later_messages() {
         let broker = Broker::default();
         let mut replies = broker.subscribe("reply", None).unwrap();

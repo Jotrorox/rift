@@ -1406,3 +1406,68 @@ fn invalid_tab_list_settings_are_rejected_with_context() {
         assert!(error.contains(expected), "{settings}: {error}");
     }
 }
+
+#[test]
+fn backends_may_declare_the_minecraft_version_they_run() {
+    let config = |backends: &str| {
+        Config::from_lua(
+            &format!(
+                "return {{ listeners = {{ public = '127.0.0.1:0' }},
+                  backends = {backends}, routes = {{ public = 'lobby' }} }}"
+            ),
+            "versions.lua",
+        )
+    };
+    let parsed = config(
+        "{ lobby = '127.0.0.1:25566', legacy = { address = 'localhost:25567', version = '1.21.6' },
+           current = { address = '127.0.0.1:25568' } }",
+    )
+    .unwrap();
+    assert_eq!(parsed.backends["lobby"].version(), None);
+    assert_eq!(parsed.backends["legacy"].address(), "localhost:25567");
+    assert_eq!(
+        parsed.backends["legacy"].version(),
+        crate::protocol::ProtocolVersion::from_release("1.21.6")
+    );
+    assert_eq!(parsed.backends["legacy"].version().unwrap().number(), 771);
+    assert_eq!(parsed.backends["current"].version(), None);
+    for (backends, expected) in [
+        (
+            "{ lobby = { address = '127.0.0.1:1', version = '1.21.99' } }",
+            "backends.lobby.version: unsupported Minecraft version \"1.21.99\"",
+        ),
+        (
+            "{ lobby = { address = '127.0.0.1:1', protocol = 771 } }",
+            "backends.lobby.protocol: unknown field",
+        ),
+        (
+            "{ lobby = { version = '1.21.6' } }",
+            "backends.lobby.address",
+        ),
+        (
+            "{ lobby = { address = 'not an address', version = '1.21.6' } }",
+            "backends.lobby",
+        ),
+    ] {
+        let error = config(backends).unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+}
+
+#[test]
+fn release_names_map_to_their_protocols() {
+    use crate::protocol::ProtocolVersion;
+    for (release, protocol) in [
+        ("1.8.9", 47),
+        ("1.21.7", 772),
+        ("1.21.8", 772),
+        ("26.3", 777),
+    ] {
+        assert_eq!(
+            ProtocolVersion::from_release(release).map(ProtocolVersion::number),
+            Some(protocol)
+        );
+    }
+    assert_eq!(ProtocolVersion::new(772).unwrap().release(), "1.21.8");
+    assert_eq!(ProtocolVersion::from_release("1.21.99"), None);
+}

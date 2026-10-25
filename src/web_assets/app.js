@@ -8,7 +8,12 @@
     session: 0, mutation: 0, remoteChanged: false, conflicted: false, online: false,
     serverButtons: [], view: "overview",
     permissions: null, groups: null, logServer: "", logCursor: null, logPolling: false, definitions: {}, definitionRevision: null, definitionDirty: false, definitionVersion: 0, definitionSection: "service_groups", definitionName: "", definitionInputs: new Map(),
+    // Unsaved edits on the server list, tab list and permission group forms.
+    settingsDirty: { serverList: false, tabList: false, permissionGroup: false }, permissionGroup: "", members: [], memberButtons: [],
+    // Template downloads and the file browser.
+    templateButtons: [], files: { root: "templates", path: "", editing: null, baseline: "", buttons: [] },
   };
+  const settingsDirty = () => Object.values(state.settingsDirty).some(Boolean);
   const allowed = (permission) => state.permissions === null || state.permissions.includes(permission);
   const dirty = () => state.loaded && $("source").value !== state.baseline;
   const number = (value) => Number.isFinite(Number(value)) ? Number(value) : 0;
@@ -57,17 +62,37 @@
     $("console-send").disabled = state.busy || !state.logServer || !allowed("console");
     $("definition-save").disabled = state.busy || !state.definitionRevision || !allowed("config");
     $("definition-delete").disabled = state.busy || !state.definitionRevision || !$("definition-select").value || !allowed("config");
-    for (const [id, permission] of [["config-panel", "config"], ["definitions-panel", "config"], ["deployments-panel", "deploy"], ["audit-panel", "audit"], ["extensions-panel", "extensions"]]) $(id).classList.toggle("hidden", !allowed(permission));
+    const groupsEnabled = Boolean(state.definitions.permission_groups);
+    for (const id of ["server-list-save", "tab-list-save", "permission-group-save"]) $(id).disabled = state.busy || !state.definitionRevision || !allowed("config");
+    $("permission-group-delete").disabled = state.busy || !state.definitionRevision || !$("permission-group-select").value || !allowed("config");
+    for (const button of state.memberButtons) button.disabled = state.busy || !allowed("config");
+    // Fields that only matter while their setting is on.
+    for (const id of ["server-list-motd", "server-list-maintenance-motd", "server-list-version", "server-list-max-players", "server-list-sample"]) $(id).disabled = !$("server-list-enabled").checked;
+    for (const id of ["tab-list-header", "tab-list-footer", "tab-list-players"]) $(id).disabled = !$("tab-list-enabled").checked;
+    for (const row of $("permission-groups").children) if (row.dataset) row.setAttribute("aria-current", String(row.dataset.group === state.permissionGroup && Boolean(state.permissionGroup)));
+    $("permission-member-add").disabled = state.busy || !groupsEnabled || !$("permission-member-group").value || !allowed("config");
+    for (const [id, permission] of [["config-panel", "config"], ["definitions-panel", "config"], ["server-list-panel", "config"], ["server-list-lua-panel", "config"], ["tab-list-panel", "config"], ["deployments-panel", "deploy"], ["audit-panel", "audit"], ["extensions-panel", "extensions"]]) $(id).classList.toggle("hidden", !allowed(permission));
+    for (const id of ["permission-groups-panel", "permission-members-panel"]) $(id).classList.toggle("hidden", !allowed("config") || !groupsEnabled);
+    $("permissions-unavailable").classList.toggle("hidden", !allowed("config") || groupsEnabled || !state.definitionRevision);
     $("live-console-panel").classList.toggle("hidden", !allowed("logs") && !allowed("console"));
+    for (const { button, unavailable } of state.templateButtons) button.disabled = state.busy || unavailable || !allowed("servers");
+    const filesDirty = state.files.editing !== null && $("files-content").value !== state.files.baseline;
+    for (const id of ["files-open", "files-up", "files-new-file", "files-new-folder", "files-upload", "files-refresh"]) $(id).disabled = state.busy || !allowed("files");
+    $("files-save").disabled = state.busy || !allowed("files") || state.files.editing === null || !filesDirty;
+    for (const button of state.files.buttons) button.disabled = state.busy || !allowed("files");
+    $("files-editor").classList.toggle("hidden", state.files.editing === null);
+    text("files-edit-state", filesDirty ? "Unsaved changes" : "Saved");
+    $("files-edit-state").className = `tag ${filesDirty ? "warning" : "good"}`;
     const visible = { script: allowed("config"), definitions: allowed("config"), extensions: allowed("extensions"),
-      console: allowed("logs") || allowed("console"), deployments: allowed("deploy"), audit: allowed("audit") };
+      "server-list": allowed("config"), "tab-list": allowed("config"), permissions: allowed("config"),
+      console: allowed("logs") || allowed("console"), deployments: allowed("deploy"), audit: allowed("audit"), files: allowed("files") };
     for (const [id] of views) $(`nav-${id}`).classList.toggle("hidden", visible[id] === false);
     for (const [section, ids] of sections) $(`section-${section}`).classList.toggle("hidden", ids.every((id) => visible[id] === false));
     showView();
   }
-  const views = [["overview", "Overview"], ["routing", "Routing"], ["metrics", "Metrics"], ["servers", "Servers"], ["console", "Console"], ["groups", "Service groups"],
-    ["script", "Lua script"], ["definitions", "Groups & templates"], ["extensions", "Extensions"], ["reference", "Reference"], ["deployments", "Deployments"], ["audit", "Audit log"]];
-  const sections = [["configuration", ["script", "definitions", "extensions"]], ["activity", ["deployments", "audit"]]];
+  const views = [["overview", "Overview"], ["routing", "Routing"], ["server-list", "Server list"], ["tab-list", "Tab list"], ["metrics", "Metrics"], ["servers", "Servers"], ["console", "Console"], ["groups", "Service groups"], ["files", "Files"],
+    ["script", "Lua script"], ["definitions", "Groups & templates"], ["permissions", "Permissions"], ["extensions", "Extensions"], ["reference", "Reference"], ["deployments", "Deployments"], ["audit", "Audit log"]];
+  const sections = [["configuration", ["script", "definitions", "permissions", "extensions"]], ["activity", ["deployments", "audit"]]];
   function showView() {
     const available = views.filter(([id]) => !$(`nav-${id}`).className.includes("hidden"));
     const requested = String(window.location.hash || "").slice(1);
@@ -83,6 +108,9 @@
     document.title = `${label} · Rift`;
     // The audit log is fetched on demand rather than on every poll.
     if (changed && current === "audit" && allowed("audit")) loadAudit().catch((error) => text("audit-result", error.message));
+    if (changed && current === "permissions" && allowed("config") && state.definitions.permission_groups) loadPermissions().catch((error) => text("permission-member-result", error.message));
+    if (changed && current === "groups" && allowed("read")) loadTemplates().catch((error) => text("template-result", error.message));
+    if (changed && current === "files" && allowed("files")) loadFiles().catch((error) => text("files-result", error.message));
   }
   function sidebar(open) {
     $("app").classList.toggle("nav-open", open);
@@ -231,6 +259,12 @@
         actions.append(button);
       }
     }, "No managed servers yet. Create one from a service group.");
+    const root = $("files-root").value || state.files.root;
+    $("files-root").replaceChildren();
+    for (const [value, label] of [["templates", "Templates"], ...(status.managed_servers || []).map((server) => [`server:${server.name}`, `Server · ${server.name}`])]) {
+      const option = document.createElement("option"); option.value = value; option.textContent = label; $("files-root").append(option);
+    }
+    $("files-root").value = root === "templates" || (status.managed_servers || []).some((server) => `server:${server.name}` === root) ? root : "templates";
     const selected = $("console-server").value;
     $("console-server").replaceChildren();
     for (const server of [{ name: "", label: "Choose a server" }, ...(status.managed_servers || [])]) {
@@ -305,10 +339,10 @@
       state.permissions = Array.isArray(access.permissions) ? access.permissions : null;
       state.groups = access.groups;
       text("operator-name", access.name || "Local operator");
-      if (allowed("read")) await refreshStatus();
+      if (allowed("read")) { await refreshStatus(); await loadTemplates().catch((error) => text("template-result", error.message)); }
       if (allowed("config")) await loadSource();
       else { $("source").value = ""; state.baseline = ""; state.revision = null; state.loaded = false; }
-      if (allowed("config")) await loadDefinitions();
+      if (allowed("config")) { await loadDefinitions(); if (state.definitions.permission_groups) await loadPermissions(); }
       if (allowed("deploy")) await loadDeployments();
     } catch (error) { handleError(error); }
     finally { state.busy = false; controls(); }
@@ -331,7 +365,8 @@
     finally { state.logPolling = false; }
   }
   const groupFields = [
-    ["directory", "Instance directory ({name} required)", "text"], ["command", "Command arguments (one per line)", "array"],
+    ["directory", "Instance directory (optional; {name} required)", "text"], ["command", "Command arguments (one per line; optional with a template)", "array"],
+    ["memory_mb", "Memory in MiB (default command only)", "number"],
     ["port_range.0", "First port", "number"], ["port_range.1", "Last port", "number"],
     ["template", "Template (optional)", "text"], ["storage", "Storage", ["persistent", "disposable"]],
     ["autostart", "Start new instances automatically", "boolean"], ["start_on_connect", "Start on player connection", "boolean"],
@@ -340,7 +375,14 @@
     ["scaling_enabled", "Automatic scaling", "boolean"],
     ...[["min_instances", "Minimum instances"], ["max_instances", "Maximum instances"], ["spare_instances", "Spare instances"], ["capacity_per_instance", "Players per instance"], ["target_occupancy_percent", "Target occupancy (%)"], ["queue_threshold", "Queue threshold"], ["cooldown_ms", "Scaling cooldown (ms)"]].map(([key, label]) => [`scaling.${key}`, label, "number"]),
   ];
-  const templateFields = [["server_jar", "Server jar path", "text"], ["plugins", "Plugin paths (one per line)", "array"], ["configs", "Configuration directory (optional)", "text"], ["map", "Map directory (optional)", "text"]];
+  const softwareTypes = ["", "paper", "folia", "purpur", "vanilla", "fabric", "url"];
+  const templateFields = [
+    ["software.type", "Server software", softwareTypes], ["software.version", "Version (latest or a release such as 1.21.8)", "text"],
+    ["software.url", "Download URL (type url)", "text"], ["software.sha256", "SHA-256 (type url; optional)", "text"],
+    ["server_jar", "Local server jar path (without software)", "text"], ["plugins", "Plugin paths (one per line)", "array"],
+    ["configs", "Template folders, overlaid in order (one per line)", "array"], ["map", "Map directory (optional)", "text"],
+    ["accept_eula", "Accept the Minecraft EULA for new instances", "boolean"],
+  ];
   function renderDefinition() {
     const section = $("definition-section").value || "service_groups", name = $("definition-select").value;
     state.definitionSection = section; state.definitionName = name;
@@ -354,13 +396,25 @@
       input.id = `definition-field-${key.replaceAll(".", "-")}`; title.setAttribute("for", input.id); title.textContent = label;
       let current = key === "scaling_enabled" ? Boolean(value.scaling) : key.split(".").reduce((v, k) => v?.[k], value);
       if (Array.isArray(type) || type === "boolean") {
-        for (const item of type === "boolean" ? ["false", "true"] : type) { const option = document.createElement("option"); option.value = item; option.textContent = item === "true" ? "Enabled" : item === "false" ? "Disabled" : item; input.append(option); }
+        for (const item of type === "boolean" ? ["false", "true"] : type) { const option = document.createElement("option"); option.value = item; option.textContent = item === "true" ? "Enabled" : item === "false" ? "Disabled" : item || "None (local jar)"; input.append(option); }
         input.value = String(current ?? (type === "boolean" ? false : type[0]));
-      } else { if (type !== "array") input.type = type === "number" ? "number" : "text"; if (type === "number") { input.min = "0"; input.step = "1"; } input.value = type === "array" ? (current || []).join("\n") : current ?? ""; }
+      } else { if (type !== "array") input.type = type === "number" ? "number" : "text"; if (type === "number") { input.min = "0"; input.step = "1"; } input.value = type === "array" ? [current || []].flat().join("\n") : current ?? ""; }
+      if (key === "software.version") input.setAttribute("list", "software-versions");
+      if (key === "software.type") input.addEventListener("change", () => loadVersions(input.value));
       input.addEventListener("input", () => { state.definitionDirty = true; state.definitionVersion += 1; });
       state.definitionInputs.set(key, { input, type }); wrapper.append(title, input); $("definition-fields").append(wrapper);
     }
     state.definitionDirty = false; controls();
+    if (section === "templates") loadVersions(value.software?.type || "");
+  }
+  // Suggest releases for the chosen software; typing any version still works.
+  async function loadVersions(type) {
+    const list = $("software-versions"); list.replaceChildren();
+    if (!type || type === "url" || !allowed("servers")) return;
+    try {
+      const data = await request(`/api/software/${encodeURIComponent(type)}/versions`);
+      for (const version of ["latest", ...(data.versions || [])]) { const option = document.createElement("option"); option.value = version; list.append(option); }
+    } catch (_) { /* Suggestions are optional; upstream may be unreachable. */ }
   }
   async function loadDefinitions() {
     const session = state.session, version = state.definitionVersion;
@@ -375,21 +429,26 @@
     }
     select.value = Object.hasOwn(value[$("definition-section").value || "service_groups"] || {}, previous) ? previous : "";
     renderDefinition();
+    renderSettings();
   }
   function definitionValue() {
-    const value = {}, scaling = {}, ports = [], scalingEnabled = state.definitionInputs.get("scaling_enabled")?.input.value === "true";
+    const value = {}, scaling = {}, software = {}, ports = [], scalingEnabled = state.definitionInputs.get("scaling_enabled")?.input.value === "true";
+    const softwareEnabled = Boolean(state.definitionInputs.get("software.type")?.input.value);
     for (const [key, { input, type }] of state.definitionInputs) {
       if (key === "scaling_enabled") continue;
       const raw = String(input.value);
       if (key.startsWith("scaling.") && !scalingEnabled) continue;
+      if (key.startsWith("software.") && !softwareEnabled) continue;
       if (raw === "") continue;
       let parsed = type === "array" ? raw.split("\n").filter((line) => line.trim()) : type === "number" ? Number(raw) : type === "boolean" ? raw === "true" : raw;
       if (type === "number" && (!Number.isSafeInteger(parsed) || parsed < 0)) throw new Error("Numeric fields must be nonnegative integers.");
       if (key.startsWith("scaling.")) scaling[key.split(".")[1]] = parsed;
+      else if (key.startsWith("software.")) software[key.split(".")[1]] = parsed;
       else if (key.startsWith("port_range.")) ports[Number(key.split(".")[1])] = parsed;
       else value[key] = parsed;
     }
     if (scalingEnabled) value.scaling = scaling;
+    if (softwareEnabled) value.software = software;
     if ($("definition-section").value !== "templates") value.port_range = ports;
     return value;
   }
@@ -413,6 +472,197 @@
     } catch (error) { text("definition-result", error.status === 409 ? `${error.message} Refresh definitions after preserving your edits.` : error.message); }
     finally { state.busy = false; controls(); }
   }
+  // Text fields take plain text or a JSON chat component. Text that merely
+  // starts with a brace, such as "{player} joined", stays plain.
+  const componentText = (value) => value === null || value === undefined ? "" : typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  function componentValue(raw) {
+    if (!raw.trim()) return undefined;
+    if (/^\s*[[{]/.test(raw)) {
+      try { const parsed = JSON.parse(raw); if (parsed && typeof parsed === "object") return parsed; } catch (_) { /* Plain text. */ }
+    }
+    return raw;
+  }
+  const componentSummary = (value) => {
+    const flatten = (part) => typeof part === "string" ? part : Array.isArray(part) ? part.map(flatten).join("") : part && typeof part === "object" ? `${part.text ?? ""}${(part.extra || []).map(flatten).join("")}` : "";
+    return value === null || value === undefined ? "—" : flatten(value).replace(/§./g, "") || "Chat component";
+  };
+  const lines = (value) => value.split("\n").map((line) => line.trim()).filter(Boolean);
+  function markSettings(key) { state.settingsDirty[key] = true; }
+  // Re-render each settings form from the loaded definitions unless it has unsaved edits.
+  function renderSettings() {
+    if (!state.settingsDirty.serverList) renderServerList();
+    if (!state.settingsDirty.tabList) renderTabList();
+    renderPermissionGroups();
+  }
+  function renderServerList() {
+    const list = state.definitions.server_list || null;
+    $("server-list-enabled").checked = Boolean(list);
+    $("server-list-motd").value = componentText(list?.motd);
+    $("server-list-maintenance-motd").value = componentText(list?.maintenance_motd);
+    $("server-list-version").value = list?.version ?? "";
+    $("server-list-max-players").value = list?.max_players ?? "";
+    $("server-list-sample").value = (list?.sample || []).join("\n");
+    const favicon = typeof list?.favicon === "string" && list.favicon.startsWith("data:image/png;base64,") ? list.favicon : "";
+    $("server-list-favicon").hidden = !favicon;
+    if (favicon) $("server-list-favicon").src = favicon;
+    text("server-list-favicon-state", favicon ? "Favicon configured in Lua" : "No favicon configured");
+    table("server-list-hosts", Object.entries(list?.hosts || {}), 4, (tr, [host, entry]) => {
+      cell(tr, host, "address"); cell(tr, componentSummary(entry.motd)); cell(tr, entry.version ?? "—"); cell(tr, entry.max_players ?? "—", "metric-value");
+    }, "No hostname-specific entries.");
+    state.settingsDirty.serverList = false;
+  }
+  function serverListValue() {
+    if (!$("server-list-enabled").checked) return null;
+    const value = {}, maximum = $("server-list-max-players").value.trim();
+    for (const [key, id] of [["motd", "server-list-motd"], ["maintenance_motd", "server-list-maintenance-motd"]]) {
+      const parsed = componentValue($(id).value);
+      if (parsed !== undefined) value[key] = parsed;
+    }
+    if ($("server-list-version").value.trim()) value.version = $("server-list-version").value;
+    if (maximum) {
+      if (!/^\d+$/.test(maximum) || !Number.isSafeInteger(Number(maximum))) throw new Error("Maximum players must be a nonnegative integer.");
+      value.max_players = Number(maximum);
+    }
+    const sample = $("server-list-sample").value.split("\n").filter((line) => line.trim());
+    if (sample.length) value.sample = sample;
+    return value;
+  }
+  function renderTabList() {
+    const list = state.definitions.tab_list || null;
+    $("tab-list-enabled").checked = Boolean(list);
+    $("tab-list-header").value = componentText(list?.header);
+    $("tab-list-footer").value = componentText(list?.footer);
+    $("tab-list-players").value = list?.players === "network" ? "network" : "server";
+    state.settingsDirty.tabList = false;
+  }
+  function tabListValue() {
+    if (!$("tab-list-enabled").checked) return null;
+    const value = {};
+    for (const key of ["header", "footer"]) {
+      const parsed = componentValue($(`tab-list-${key}`).value);
+      if (parsed !== undefined) value[key] = parsed;
+    }
+    if ($("tab-list-players").value === "network") value.players = "network";
+    if (!Object.keys(value).length) throw new Error("Set a header, a footer or list everyone on the network, or turn the tab list off.");
+    return value;
+  }
+  function renderPermissionGroups() {
+    const groups = state.definitions.permission_groups || {};
+    const members = {};
+    for (const member of state.members) for (const group of member.groups || []) members[group] = (members[group] || 0) + 1;
+    const names = Object.keys(groups);
+    text("permission-group-count", `${names.length} defined`);
+    table("permission-groups", names, 5, (tr, name) => {
+      const nodes = Object.values(groups[name].permissions || {});
+      const granted = nodes.filter(Boolean).length;
+      if (tr.dataset) tr.dataset.group = name;
+      cell(tr, name, "address"); cell(tr, (groups[name].inherits || []).join(", ") || "—");
+      cell(tr, nodes.length ? `${granted} granted · ${nodes.length - granted} denied` : "None");
+      cell(tr, name === "default" ? "Everyone" : count(members[name] || 0), "metric-value");
+      const actions = cell(tr, ""), button = document.createElement("button");
+      button.type = "button"; button.className = "button subtle"; button.textContent = "Edit";
+      button.setAttribute("aria-label", `Edit ${name}`);
+      button.addEventListener("click", () => selectPermissionGroup(name));
+      actions.append(button);
+    }, "No groups defined yet. Create one below.");
+    const select = $("permission-group-select"), previous = state.permissionGroup;
+    select.replaceChildren();
+    for (const name of ["", ...names]) {
+      const option = document.createElement("option"); option.value = name; option.textContent = name || "New group"; select.append(option);
+    }
+    select.value = Object.hasOwn(groups, previous) ? previous : "";
+    if (!state.settingsDirty.permissionGroup) renderPermissionGroup();
+    const target = $("permission-member-group"), chosen = target.value;
+    target.replaceChildren();
+    // Everyone is in default implicitly, so it can't be assigned.
+    for (const name of names.filter((name) => name !== "default")) {
+      const option = document.createElement("option"); option.value = name; option.textContent = name; target.append(option);
+    }
+    target.value = names.includes(chosen) && chosen !== "default" ? chosen : names.find((name) => name !== "default") || "";
+    controls();
+  }
+  function renderPermissionGroup() {
+    const name = $("permission-group-select").value, group = state.definitions.permission_groups?.[name] || {};
+    state.permissionGroup = name;
+    $("permission-group-name").value = name;
+    $("permission-group-inherits").value = (group.inherits || []).join("\n");
+    $("permission-group-nodes").value = Object.entries(group.permissions || {}).map(([node, granted]) => `${granted ? "" : "-"}${node}`).join("\n");
+    state.settingsDirty.permissionGroup = false;
+  }
+  function selectPermissionGroup(name) {
+    if (state.settingsDirty.permissionGroup && !window.confirm("Discard unsaved group changes?")) return;
+    $("permission-group-select").value = name; state.settingsDirty.permissionGroup = false; renderPermissionGroup(); controls();
+    $("permission-group-name").focus?.();
+  }
+  function permissionGroupValue() {
+    const permissions = {};
+    for (const line of lines($("permission-group-nodes").value)) {
+      const denied = line.startsWith("-"), node = denied ? line.slice(1).trim() : line;
+      if (!/^(\*|[a-z0-9_.-]{1,64})$/.test(node.replace(/\.\*$/, "")) || node.startsWith(".")) throw new Error(`“${line}” isn’t a permission node, prefix.* wildcard or *.`);
+      permissions[node] = !denied;
+    }
+    return { inherits: lines($("permission-group-inherits").value.replaceAll(",", "\n")), permissions };
+  }
+  async function loadPermissions() {
+    const session = state.session, data = await request("/api/permissions");
+    if (session !== state.session) return;
+    state.members = Array.isArray(data.members) ? data.members : []; state.memberButtons = [];
+    text("permission-member-count", `${state.members.length}${data.truncated ? "+" : ""} with groups`);
+    table("permission-members", state.members, 3, (tr, member) => {
+      cell(tr, member.name || "Offline", member.name ? "" : "unlisted"); cell(tr, member.uuid, "address");
+      const groups = cell(tr, ""), list = document.createElement("div"); list.className = "chip-list";
+      for (const group of member.groups || []) {
+        const chip = document.createElement("span"), label = document.createElement("span"), remove = document.createElement("button");
+        chip.className = "chip"; label.textContent = group;
+        remove.type = "button"; remove.textContent = "×"; state.memberButtons.push(remove);
+        remove.setAttribute("aria-label", `Remove ${member.name || member.uuid} from ${group}`); remove.title = `Remove from ${group}`;
+        remove.addEventListener("click", () => changeMembership(member.uuid, group, false));
+        chip.append(label, remove); list.append(chip);
+      }
+      groups.append(list);
+    }, "No player belongs to a group yet. Everyone is in default when it exists.");
+    if (data.truncated) text("permission-member-result", "Showing the first 1,000 members.");
+    renderPermissionGroups();
+  }
+  async function changeMembership(player, group, add) {
+    if (state.busy || !allowed("config")) return;
+    state.busy = true; controls(); text("permission-member-result", add ? `Adding ${player} to ${group}…` : `Removing ${player} from ${group}…`);
+    try {
+      const changed = await request(`/api/permissions/members/${encodeURIComponent(player)}/${encodeURIComponent(group)}`, { method: add ? "POST" : "DELETE", body: "{}" });
+      text("permission-member-result", changed.changed === false
+        ? add ? `${player} was already in ${group}.` : `${player} wasn’t in ${group}.`
+        : add ? `Added ${player} to ${group}. It applies to their next permission check.` : `Removed ${player} from ${group}.`);
+      if (add && $("permission-member-player").value.trim() === player) $("permission-member-player").value = "";
+      await loadPermissions();
+    } catch (error) { if (error.status === 401 || error.status === 403) $("auth-panel").open = true; text("permission-member-result", error.message); }
+    finally { state.busy = false; controls(); }
+  }
+  // Save one settings form through the structured definition endpoint.
+  async function applySetting({ path, value, result, key, saved }) {
+    if (state.busy || !state.definitionRevision || !allowed("config")) return;
+    if (dirty()) { text(result, "Save or discard your Lua editor changes first."); return; }
+    let definition;
+    try { definition = value(); } catch (error) { text(result, error.message); return; }
+    state.busy = true; controls(); text(result, "Validating and applying…");
+    try {
+      const response = await request(path, { method: "PUT", body: JSON.stringify({ revision: state.definitionRevision, definition }) });
+      state.mutation += 1; state.definitionRevision = response.revision; state.settingsDirty[key] = false;
+      await loadSource(); await loadDefinitions();
+      await refreshStatus({ syncSource: false });
+      if (allowed("deploy")) await loadDeployments();
+      text(result, saved(definition));
+    } catch (error) { text(result, error.status === 409 ? `${error.message} Your edits are kept; refresh, then reapply them.` : error.message); }
+    finally { state.busy = false; controls(); }
+  }
+  async function refreshSettings(key, result) {
+    if (state.busy || (state.settingsDirty[key] && !window.confirm("Discard unsaved changes and refresh?"))) return;
+    state.settingsDirty[key] = false;
+    try {
+      await loadDefinitions();
+      if (state.definitions.permission_groups) await loadPermissions();
+      text(result, "Refreshed.");
+    } catch (error) { text(result, error.message); }
+  }
   async function loadDeployments() {
     const session = state.session, data = await request("/api/deployments");
     if (session !== state.session) return;
@@ -422,7 +672,7 @@
       const actions = cell(tr, ""), button = document.createElement("button"); button.type = "button"; button.className = "button secondary"; button.textContent = "Roll back";
       button.addEventListener("click", async () => {
         if (state.busy || !allowed("deploy")) return;
-        if (dirty() || state.definitionDirty) { text("deployment-result", "Save or discard editor changes before rolling back."); return; }
+        if (dirty() || state.definitionDirty || settingsDirty()) { text("deployment-result", "Save or discard editor changes before rolling back."); return; }
         if (!window.confirm(`Restore deployment ${deployment.id}? Configuration will be validated before applying.`)) return;
         state.busy = true; controls(); text("deployment-result", "Restoring deployment…");
         try {
@@ -568,7 +818,7 @@
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") { event.preventDefault(); save(); }
   });
   window.addEventListener("beforeunload", (event) => {
-    if (dirty() || state.definitionDirty) { event.preventDefault(); event.returnValue = ""; }
+    if (dirty() || state.definitionDirty || settingsDirty()) { event.preventDefault(); event.returnValue = ""; }
   });
   $("auth-form").addEventListener("submit", (event) => {
     event.preventDefault();
@@ -585,12 +835,17 @@
     text("auth-state", "No token set"); connect();
   });
   function resetOperatorView() {
-    if ((dirty() || state.definitionDirty) && !window.confirm("Switch operator and discard unsaved editor changes?")) return false;
+    const filesDirty = state.files.editing !== null && $("files-content").value !== state.files.baseline;
+    if ((dirty() || state.definitionDirty || settingsDirty() || filesDirty) && !window.confirm("Switch operator and discard unsaved editor changes?")) return false;
     state.loaded = false; state.baseline = ""; state.revision = null; state.remoteChanged = false; state.conflicted = false;
     state.permissions = []; state.logServer = ""; state.logCursor = null; state.definitions = {}; state.definitionRevision = null; state.definitionDirty = false; state.definitionVersion += 1;
+    state.settingsDirty = { serverList: false, tabList: false, permissionGroup: false }; state.permissionGroup = ""; state.members = []; state.memberButtons = [];
     $("source").value = ""; $("console-server").replaceChildren(); $("definition-fields").replaceChildren();
     for (const id of ["console-output", "config-path", "revision", "deployment-result", "definition-result", "console-result", "extension-output"]) text(id, "");
-    for (const id of ["deployments", "audit-records", "managed-servers", "service-groups", "backends", "routes"]) $(id).replaceChildren();
+    for (const id of ["deployments", "audit-records", "managed-servers", "service-groups", "backends", "routes", "server-list-hosts", "permission-groups", "permission-members", "templates", "files-entries"]) $(id).replaceChildren();
+    state.templateButtons = []; state.files = { root: "templates", path: "", editing: null, baseline: "", buttons: [] };
+    for (const id of ["template-result", "files-result"]) text(id, "");
+    for (const id of ["server-list-result", "tab-list-result", "permission-group-result", "permission-member-result"]) text(id, "");
     state.serverButtons = []; return true;
   }
   $("refresh-status").addEventListener("click", () => refreshStatus());
@@ -627,6 +882,52 @@
     if (state.busy || (state.definitionDirty && !window.confirm("Discard unsaved definition fields and refresh?"))) return;
     try { await loadDefinitions(); text("definition-result", "Definitions refreshed."); } catch (error) { text("definition-result", error.message); }
   });
+  for (const [form, key] of [["server-list-form", "serverList"], ["tab-list-form", "tabList"], ["permission-group-form", "permissionGroup"]]) {
+    $(form).addEventListener("input", () => markSettings(key));
+    $(form).addEventListener("change", () => { markSettings(key); controls(); });
+  }
+  $("server-list-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    if (!$("server-list-enabled").checked && state.definitions.server_list && !window.confirm("Turn off the proxy-owned server list? Its favicon and hostname entries are removed too, and backends answer pings again.")) return;
+    applySetting({ path: "/api/definitions/server_list", value: serverListValue, result: "server-list-result", key: "serverList",
+      saved: (value) => value ? "Server list saved and applied." : "Server list turned off; backends answer pings again." });
+  });
+  $("tab-list-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    applySetting({ path: "/api/definitions/tab_list", value: tabListValue, result: "tab-list-result", key: "tabList",
+      saved: (value) => value ? "Tab list saved; players see it within half a second." : "Tab list turned off; backends control it again." });
+  });
+  $("permission-group-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const name = $("permission-group-name").value.trim();
+    if (!/^[a-z0-9_.-]{1,64}$/.test(name)) { text("permission-group-result", "Enter a group name using lowercase letters, digits, dots, underscores or hyphens."); return; }
+    if ($("permission-group-select").value === "" && Object.hasOwn(state.definitions.permission_groups || {}, name) && !window.confirm(`Replace the existing group ${name}?`)) return;
+    state.permissionGroup = name;
+    applySetting({ path: `/api/definitions/permission_groups/${encodeURIComponent(name)}`, value: permissionGroupValue, result: "permission-group-result", key: "permissionGroup",
+      saved: () => `Group ${name} saved and applied.` });
+  });
+  $("permission-group-delete").addEventListener("click", () => {
+    const name = $("permission-group-select").value;
+    if (!name || !window.confirm(`Delete the group ${name}? Players keep the membership until you remove it, but it grants nothing.`)) return;
+    state.permissionGroup = "";
+    applySetting({ path: `/api/definitions/permission_groups/${encodeURIComponent(name)}`, value: () => null, result: "permission-group-result", key: "permissionGroup",
+      saved: () => `Group ${name} deleted.` });
+  });
+  $("permission-group-select").addEventListener("change", () => {
+    const chosen = $("permission-group-select").value;
+    $("permission-group-select").value = state.permissionGroup;
+    selectPermissionGroup(chosen);
+  });
+  $("permission-member-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const raw = $("permission-member-player").value.trim(), compact = raw.replaceAll("-", "").toLowerCase();
+    const player = /^[0-9a-f]{32}$/.test(compact) ? compact : raw;
+    if (!/^[0-9a-f]{32}$/.test(player) && !/^[A-Za-z0-9_]{1,16}$/.test(player)) { text("permission-member-result", "Enter a player UUID or the name of an online player."); return; }
+    changeMembership(player, $("permission-member-group").value, true);
+  });
+  $("server-list-refresh").addEventListener("click", () => refreshSettings("serverList", "server-list-result"));
+  $("tab-list-refresh").addEventListener("click", () => refreshSettings("tabList", "tab-list-result"));
+  $("permissions-refresh").addEventListener("click", () => refreshSettings("permissionGroup", "permission-group-result"));
   $("deployments-refresh").addEventListener("click", async () => { try { await loadDeployments(); } catch (error) { text("deployment-result", error.message); } });
   $("audit-refresh").addEventListener("click", async () => { try { await loadAudit(); } catch (error) { text("audit-result", error.message); } });
   $("validate").addEventListener("click", validate);
@@ -665,6 +966,186 @@
     } catch (error) { text("extension-output", error.message); }
     finally { $("extension-send").disabled = false; }
   });
+  // Templates: software, download cache and the groups that use them.
+  async function loadTemplates() {
+    const session = state.session, data = await request("/api/templates");
+    if (session !== state.session) return;
+    const templates = data.templates || [];
+    text("template-count", `${templates.length} defined`);
+    state.templateButtons = [];
+    table("templates", templates, 5, (tr, template) => {
+      const software = template.software;
+      cell(tr, template.name);
+      cell(tr, software ? (software.type === "url" ? `URL · ${software.url || ""}` : `${software.type} ${software.version}`) : "Local server jar", software?.type === "url" ? "address" : "");
+      cell(tr, !software ? "—" : software.cached
+        ? `Downloaded${software.resolved_version ? ` · ${software.resolved_version}` : ""}${software.build ? ` (build ${software.build})` : ""}${software.size ? ` · ${bytes(software.size)}` : ""}`
+        : "Not downloaded · fetched on first create");
+      cell(tr, (template.groups || []).join(", ") || "Unused");
+      const actions = cell(tr, "");
+      if (!software) return;
+      const button = document.createElement("button");
+      button.type = "button"; button.className = "button secondary";
+      button.textContent = software.cached ? "Update" : "Download";
+      button.title = software.cached ? "Download the newest matching build again. Existing instances keep their jar." : "Download now so new instances start without waiting.";
+      button.setAttribute("aria-label", `${button.textContent} ${template.name}`);
+      state.templateButtons.push({ button, unavailable: false });
+      button.addEventListener("click", () => { if (!button.disabled) downloadTemplate(template.name, Boolean(software.cached)); });
+      actions.append(button);
+    }, "No templates configured. Add one under Groups & templates.");
+    controls();
+  }
+  async function downloadTemplate(name, refresh) {
+    if (state.busy) return;
+    state.busy = true; controls();
+    text("template-result", `${refresh ? "Updating" : "Downloading"} the server software for ${name}…`);
+    $("template-result").className = "operation-result";
+    try {
+      const accepted = await request(`/api/templates/${encodeURIComponent(name)}/download`, { method: "POST", body: JSON.stringify({ refresh }) });
+      let operation;
+      for (;;) {
+        operation = await request(accepted.poll);
+        if (operation.status !== "pending") break;
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+      if (operation.status !== "succeeded") throw new Error(operation.error || "The download failed.");
+      const software = operation.result?.software || {};
+      text("template-result", `Downloaded ${software.type || "server"} ${software.resolved_version || software.version || ""} for ${name}.`.replace(/\s+\./, "."));
+      $("template-result").className = "operation-result success";
+      await loadTemplates();
+    } catch (error) {
+      if (error.status === 401 || error.status === 403) $("auth-panel").open = true;
+      text("template-result", error.message); $("template-result").className = "operation-result error";
+    } finally { state.busy = false; controls(); }
+  }
+
+  // File browser for template folders and server directories.
+  const filePath = (path) => path.split("/").filter(Boolean).map(encodeURIComponent).join("/");
+  function fileUrl(path = state.files.path, root = state.files.root) {
+    const base = root === "templates" ? "/api/files/templates" : `/api/files/servers/${encodeURIComponent(root.slice("server:".length))}`;
+    const encoded = filePath(path);
+    return encoded ? `${base}/${encoded}` : base;
+  }
+  const joinPath = (...parts) => parts.flatMap((part) => String(part).split("/")).filter(Boolean).join("/");
+  function filesDirty() { return state.files.editing !== null && $("files-content").value !== state.files.baseline; }
+  async function loadFiles(path = $("files-path").value, root = $("files-root").value || "templates") {
+    if (filesDirty() && !window.confirm("Discard unsaved file changes?")) return;
+    const session = state.session, clean = joinPath(path);
+    const data = await request(fileUrl(clean, root));
+    if (session !== state.session) return;
+    state.files.root = root; state.files.path = clean; state.files.editing = null; state.files.buttons = [];
+    $("files-path").value = clean; $("files-root").value = root;
+    table("files-entries", data.entries || [], 4, (tr, entry) => {
+      const name = cell(tr, ""), open = document.createElement("button");
+      open.type = "button"; open.className = "text-link"; open.textContent = entry.type === "directory" ? `${entry.name}/` : entry.name;
+      if (entry.type === "directory") open.addEventListener("click", () => loadFiles(joinPath(clean, entry.name), root).catch((error) => text("files-result", error.message)));
+      else if (entry.type === "file") open.addEventListener("click", () => openFile(joinPath(clean, entry.name), entry.size));
+      else open.disabled = true;
+      name.append(open);
+      cell(tr, entry.type === "file" ? bytes(entry.size) : "—", "metric-value");
+      cell(tr, entry.modified ? new Date(entry.modified).toLocaleString() : "—");
+      const actions = cell(tr, ""); actions.className = "action-group";
+      if (entry.type === "file") {
+        const download = document.createElement("button");
+        download.type = "button"; download.className = "button subtle"; download.textContent = "Download";
+        download.setAttribute("aria-label", `Download ${entry.name}`);
+        download.addEventListener("click", () => downloadFile(joinPath(clean, entry.name)));
+        state.files.buttons.push(download); actions.append(download);
+      }
+      const remove = document.createElement("button");
+      remove.type = "button"; remove.className = "button destructive"; remove.textContent = "Delete";
+      remove.setAttribute("aria-label", `Delete ${entry.name}`);
+      remove.addEventListener("click", () => deleteFile(joinPath(clean, entry.name), entry.type === "directory"));
+      state.files.buttons.push(remove); actions.append(remove);
+    }, data.truncated ? "Too many entries to list." : "This folder is empty.");
+    text("files-result", data.truncated ? "Showing the first 2,000 entries." : "");
+    controls();
+  }
+  async function openFile(path, size) {
+    if (filesDirty() && !window.confirm("Discard unsaved file changes?")) return;
+    if (number(size) > 1024 * 1024) { text("files-result", "Files over 1 MiB open as downloads."); downloadFile(path); return; }
+    try {
+      const { response, body } = await request(fileUrl(path), {}, true);
+      if (!response.ok) { let message = `Request failed (HTTP ${response.status}).`; try { message = JSON.parse(body).error || message; } catch (_) { /* Not JSON. */ } throw new Error(message); }
+      if (body.includes("\u0000")) { text("files-result", "This looks like a binary file. Download it instead."); return; }
+      state.files.editing = path; state.files.baseline = body;
+      $("files-content").value = body; text("files-editing", path); text("files-result", "");
+      controls(); $("files-content").focus?.();
+    } catch (error) { text("files-result", error.message); }
+  }
+  async function writeFile(path, body, { directory = false } = {}) {
+    return request(`${fileUrl(path)}${directory ? "?directory" : ""}`, { method: "PUT", body, headers: { "Content-Type": "application/octet-stream" } });
+  }
+  async function fileMutation(message, work) {
+    if (state.busy || !allowed("files")) return;
+    state.busy = true; controls(); text("files-result", message);
+    try { text("files-result", await work()); }
+    catch (error) { if (error.status === 401 || error.status === 403) $("auth-panel").open = true; text("files-result", error.message); }
+    finally { state.busy = false; controls(); }
+  }
+  function downloadFile(path) {
+    fileMutation(`Preparing ${path}…`, async () => {
+      const headers = new Headers(); if (state.token) headers.set("Authorization", `Bearer ${state.token}`);
+      const response = await fetch(fileUrl(path), { headers, cache: "no-store", credentials: "omit", redirect: "error", mode: "same-origin" });
+      if (!response.ok) throw new Error(`Download failed (HTTP ${response.status}).`);
+      const link = document.createElement("a"), url = URL.createObjectURL(await response.blob());
+      link.href = url; link.download = path.split("/").pop(); link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+      return `Downloaded ${path}.`;
+    });
+  }
+  function deleteFile(path, directory) {
+    if (!window.confirm(`Delete ${path}${directory ? " and everything inside it" : ""}? This can't be undone.`)) return;
+    fileMutation(`Deleting ${path}…`, async () => {
+      await request(fileUrl(path), { method: "DELETE" });
+      if (state.files.editing === path) state.files.editing = null;
+      state.busy = false; await loadFiles(state.files.path, state.files.root);
+      return `Deleted ${path}.`;
+    });
+  }
+  function newEntry(directory) {
+    const name = $("files-new-name").value.trim();
+    if (!name || name.includes("/") || name === "." || name === "..") { text("files-result", "Enter a file or folder name without slashes."); return; }
+    const path = joinPath(state.files.path, name);
+    fileMutation(`Creating ${path}…`, async () => {
+      await writeFile(path, "", { directory });
+      $("files-new-name").value = ""; state.busy = false;
+      await loadFiles(state.files.path, state.files.root);
+      if (!directory) await openFile(path, 0);
+      return `Created ${path}.`;
+    });
+  }
+  $("files-form").addEventListener("submit", (event) => { event.preventDefault(); loadFiles().catch((error) => text("files-result", error.message)); });
+  $("files-refresh").addEventListener("click", () => loadFiles(state.files.path, state.files.root).catch((error) => text("files-result", error.message)));
+  $("files-root").addEventListener("change", () => loadFiles("", $("files-root").value).catch((error) => text("files-result", error.message)));
+  $("files-up").addEventListener("click", () => loadFiles(state.files.path.split("/").slice(0, -1).join("/"), state.files.root).catch((error) => text("files-result", error.message)));
+  $("files-new-file").addEventListener("click", () => newEntry(false));
+  $("files-new-folder").addEventListener("click", () => newEntry(true));
+  $("files-content").addEventListener("input", () => controls());
+  $("files-close").addEventListener("click", () => {
+    if (filesDirty() && !window.confirm("Discard unsaved file changes?")) return;
+    state.files.editing = null; controls();
+  });
+  $("files-save").addEventListener("click", () => {
+    const path = state.files.editing, body = $("files-content").value;
+    if (path === null) return;
+    fileMutation(`Saving ${path}…`, async () => {
+      await writeFile(path, body);
+      state.files.baseline = body;
+      return `Saved ${path}.`;
+    });
+  });
+  $("files-upload").addEventListener("change", () => {
+    const file = $("files-upload").files?.[0];
+    if (!file) return;
+    if (file.size > 64 * 1024 * 1024) { text("files-result", "Uploads are limited to 64 MiB."); return; }
+    const path = joinPath(state.files.path, file.name);
+    fileMutation(`Uploading ${file.name}…`, async () => {
+      await writeFile(path, await file.arrayBuffer());
+      $("files-upload").value = ""; state.busy = false;
+      await loadFiles(state.files.path, state.files.root);
+      return `Uploaded ${path}.`;
+    });
+  });
+
   setInterval(() => { if (!document.hidden && !state.busy && allowed("read")) refreshStatus(); }, 5000);
   setInterval(() => { if (!document.hidden && !state.busy && $("console-follow").checked) pollLogs(); }, 1000);
   document.addEventListener("visibilitychange", () => { if (!document.hidden && !state.busy) refreshStatus(); });

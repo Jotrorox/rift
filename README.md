@@ -10,7 +10,14 @@ empty servers, and operate their lifecycle from the CLI or web dashboard.
 Service groups can maintain minimum and spare capacity, scale from occupancy or
 queue pressure, and recover failed processes with bounded retries. Define
 local templates from server jars, plugins, configs and maps, then create instances
-with allocated ports and live backend registration. Persistent worlds retain
+with allocated ports and live backend registration. Like CloudNet v4, templates
+can instead name server software (Paper, Folia, Purpur, Fabric, vanilla or a
+pinned URL) that Rift downloads, verifies and caches in `local/versioncache`,
+layer template folders from `local/templates`, and place instances in
+`local/services` or `temp/services`. Spin servers up from the dashboard,
+`rift admin create`, Lua plugins (`rift.servers.create`) or `rift.control.create`
+on the message bus; the dashboard's Files page edits template and server folders.
+See [examples/cloud.lua](examples/cloud.lua). Persistent worlds retain
 files after removal; disposable game instances delete their generated files on
 removal. Both retain files across stop/start. Bundled SQLite saves registrations,
 allocated ports, storage ownership and manual stops across proxy restarts in
@@ -18,8 +25,9 @@ allocated ports, storage ownership and manual stops across proxy restarts in
 [managed-server guide](docs/managed-servers.md), [managed-server example](examples/managed.lua),
 [service groups](examples/services.lua) and [provisioning templates](examples/templates.lua).
 The dashboard provides live server logs and commands, structured group/template
-editing, configuration deployment history and rollback, scoped operator tokens,
-and retained audit records. See the [HTTP operator guide](docs/http.md).
+editing, server list, tab list and permission group editing with group
+memberships, configuration deployment history and rollback, scoped operator
+tokens, and retained audit records. See the [HTTP operator guide](docs/http.md).
 Managed Minecraft processes need their own Java runtime and explicit EULA acceptance.
 
 ## Quick start
@@ -161,8 +169,12 @@ plus pinned LuckPerms/EssentialsX and ViaVersion/ViaBackwards combinations.
 CI runs their startup and rejection preflights; full acceptance requires a signed-in
 1.21.11 client and records Paper observations alongside operator confirmations.
 
-Clients and backends must use the same protocol version. Rift does not translate
-between Minecraft versions. Online authentication, Velocity modern forwarding and
+Backends can run a different version than their players: Rift translates between
+1.21.6 and 1.21.7/1.21.8 in both directions, including `/server` switches between
+backends of different versions. Declare a backend's version with
+`config.backends.survival = { address = "127.0.0.1:25567", version = "1.21.6" }`.
+Other pairs still need matching versions. See [protocol translation](docs/translation.md).
+Online authentication, Velocity modern forwarding and
 authenticated extensions require **1.19.3 or newer**; earlier versions use offline
 backends with forwarding disabled. Bedrock/UDP, unlisted snapshots and legacy
 pre-1.7 pings are unsupported.

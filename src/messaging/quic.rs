@@ -12,7 +12,7 @@ use std::{
 };
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use quinn::{Connection, Endpoint, RecvStream, SendStream};
 use rustls::pki_types::{
     CertificateDer, PrivateKeyDer,
@@ -178,7 +178,12 @@ impl Identity {
         digest.update((self.name.len() as u64).to_be_bytes());
         digest.update(self.name.as_bytes());
         digest.update(name.as_bytes());
-        Ok(format!("remote_{:x}", digest.finalize()))
+        let hex: String = digest
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        Ok(format!("remote_{hex}"))
     }
 }
 fn valid_name(name: &str) -> bool {
