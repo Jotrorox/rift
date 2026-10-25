@@ -22,9 +22,11 @@ for namespace, methods in pairs({
     permissions = { "has", "set", "add_group", "remove_group", "groups" },
     http = { "request" },
     players = { "list", "get", "message", "action_bar", "title", "tab_list", "boss_bar", "kick", "transfer", "broadcast" },
+    servers = { "create", "remove", "start", "stop", "download" },
 }) do
     local proxy = {}
     local scope = namespace == "players" and "API v2 extension callbacks, on_message and on_http"
+        or namespace == "servers" and "callbacks such as on_message, on_http and extensions"
         or "API v2 extension callbacks"
     for _, method in ipairs(methods) do
         proxy[method] = function(...)

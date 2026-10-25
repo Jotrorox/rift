@@ -140,6 +140,23 @@ request helpers create one automatically. Control requests are serialized.
 | `rift.control.drain` | `{"backend":"lobby","enabled":true}` | Enable/disable draining for a backend |
 | `rift.control.transfer` | `{"connection_id":123,"backend":"lobby"}` | Transfer an online player with existing protocol/access checks |
 | `rift.control.reload` | `{}` | Reload the selected configuration file |
+| `rift.control.servers` | `{}` | Managed servers with lifecycle state, usage, group, template and storage |
+| `rift.control.groups` | `{}` | Service groups with port ranges, templates, storage, scaling and instances |
+| `rift.control.templates` | `{}` | Templates with their server software and download cache state |
+| `rift.control.create` | `{"group":"lobby"}` | Create an instance from a service group, downloading template software first when needed |
+| `rift.control.remove` | `{"name":"lobby-1"}` | Remove an unused instance; disposable storage is deleted |
+| `rift.control.start` | `{"name":"lobby-1"}` | Request a managed server start (accepted asynchronously) |
+| `rift.control.stop` | `{"name":"lobby-1"}` | Request an unused managed server stop and pause automatic wake |
+| `rift.control.download` | `{"template":"paper","refresh":false}` | Download (or with `refresh`, update) a template's server software |
+
+`create`, `remove` and `download` reply when the operation finishes, which can
+include a first-time download of up to 15 minutes; they run alongside other
+control requests (at most 16 at once), while Rift still applies instance changes
+one at a time. Use a request timeout long enough for downloads, or subscribe to
+`rift.events.instances` instead of waiting. That subject carries the creation
+or removal result with `"event":"created"` or `"event":"removed"` after each
+committed instance change, including automatic scaling, so plugins can follow
+capacity the way CloudNet plugins follow service lifecycle events.
 
 `rift.events.control` reports command name and success, excluding status/player
 details. `rift.events.reload` reports the active revision after successful reload.
