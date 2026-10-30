@@ -82,6 +82,86 @@ Transfer requests have no success or failure reply, as in BungeeCord; plugins
 can query player location when they need to confirm the result.
 The reported backend changes only after the destination becomes ready.
 
+## Rift requests
+
+Rift adds two requests to the same channel for information the standard set
+does not carry. They use the same envelope and string encoding. BungeeCord and
+Velocity ignore unknown subchannels, so a plugin that sends them keeps working
+behind those proxies; it just gets no reply there.
+
+| Subchannel | Request fields | Response fields |
+| --- | --- | --- |
+| `RiftServers` | Server name, service group name or `ALL` | Target, integer entry count, then per running server: name, service group, state, integer players, integer player limit |
+| `RiftInGroup` | Player name, permission group | Player name, permission group, boolean membership |
+
+`RiftServers` lists only servers that are up, sorted by name, so a lobby
+selector can show them without a separate query per server. `ALL` selects every
+configured server, a service group name selects that group's instances, and a
+server name selects that server. Lookups ignore ASCII case except for uppercase
+`ALL`, as with `PlayerCount`; the response repeats the configured name. A group
+without running instances returns zero entries, and an unknown target produces
+no reply.
+
+A managed server is up while its process is `running`; Rift leaves it out while
+it is stopped, starting, stopping or failed. An unmanaged backend is up unless
+health checks mark it down. Without `health_check` it always counts as up. The
+state is `draining` for a server that is draining, through the `draining`
+setting or the administrator `drain` command, and `running` otherwise. Draining
+servers keep their players but accept no new ones.
+
+The service group is the group a server is an instance of, or an empty string.
+The player count matches `PlayerCount` for that server. The player limit is the
+server's `extensions.queues` capacity, which Rift enforces, then the
+per-instance capacity of its service group's queue, then the group's
+`scaling.capacity_per_instance`, the occupancy automatic scaling plans for.
+Zero means Rift knows no limit for the server; the backend's own `max-players`
+still applies.
+
+`RiftInGroup` answers whether a player belongs to a permission group defined in
+`extensions.groups`. Membership follows the same rules as permission checks: a
+player belongs to the groups added with `rift.permissions.add_group` or the
+dashboard, to every group those inherit from, and to `default` and its parents
+when `default` is defined. Memberships of groups the current configuration no
+longer defines do not count, and an undefined group returns false. The player
+name ignores ASCII case and the response uses the canonical name; the group
+name is compared exactly and repeated as sent. The boolean is a single byte
+(`DataInput.readBoolean`). Missing players produce no reply, and so does every
+`RiftInGroup` request without extensions using `api_version = 2`, since
+permission groups do not exist then.
+
+A lobby selector can list a group's servers:
+
+```java
+ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+try (DataOutputStream out = new DataOutputStream(bytes)) {
+    out.writeUTF("RiftServers");
+    out.writeUTF("lobby");
+}
+player.sendPluginMessage(plugin, "BungeeCord", bytes.toByteArray());
+```
+
+and read the reply in its plugin-message listener:
+
+```java
+DataInputStream in = new DataInputStream(new ByteArrayInputStream(message));
+if (in.readUTF().equals("RiftServers")) {
+    String target = in.readUTF();
+    int count = in.readInt();
+    for (int i = 0; i < count; i++) {
+        String name = in.readUTF();
+        String group = in.readUTF();
+        String state = in.readUTF();
+        int players = in.readInt();
+        int maxPlayers = in.readInt();
+        // Show the server; "draining" servers accept no new players.
+    }
+}
+```
+
+`RiftInGroup` is written as `writeUTF("RiftInGroup")`, the player name and the
+group name, and its reply is read with `readUTF`, `readUTF`, `readUTF` and
+`readBoolean`.
+
 ## Forwarding, messages and kicks
 
 `Forward` and `ForwardToPlayer` deliver a message to other servers' plugins, for
@@ -159,8 +239,9 @@ The receiving servers' listeners read `"MyChat"` with `readUTF`, then
 ## Trust and testing
 
 Enable compatibility only when the configured backend servers and their plugins
-are trusted: a backend can query online players, transfer, message or kick any
-player, and send plugin messages to every other server. Client-originated messages on either compatibility channel are consumed
+are trusted: a backend can query online players and their permission group
+memberships, transfer, message or kick any player, and send plugin messages to
+every other server. Client-originated messages on either compatibility channel are consumed
 before they can reach backend plugins, including messages that impersonate a
 proxy response. Other plugin channels continue to pass through. With the bridge
 disabled, compatibility channels also pass through unchanged.
@@ -172,7 +253,8 @@ cargo build --locked --release
 python3 tests/bungeecord_wire.py --binary target/release/rift
 ```
 
-It checks all supported queries and transfers, forwarding to other backends,
+It checks all supported queries and transfers, Rift's server list including
+draining servers, forwarding to other backends,
 legacy and JSON messages and kicks, case handling, channel aliases,
 backend registration, malformed messages, client spoofing, access rejection,
 ordinary channel passthrough, disabled defaults, and compressed and uncompressed

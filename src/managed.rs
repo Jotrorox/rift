@@ -583,6 +583,18 @@ impl ManagedServers {
         Ok(())
     }
 
+    /// The state `snapshot` reports for one server; `None` if Rift does not
+    /// manage it.
+    pub fn phase(&self, name: &str) -> Option<Phase> {
+        let servers = lock(&self.0.servers);
+        let state = lock(&servers.get(name)?.state);
+        Some(if state.pending_stop {
+            Phase::Stopping
+        } else {
+            state.phase
+        })
+    }
+
     pub fn snapshot(&self) -> Vec<ManagedServerSnapshot> {
         // Read presence once so transfers cannot be counted on both backends
         // (or neither) while this snapshot visits individual server states.
