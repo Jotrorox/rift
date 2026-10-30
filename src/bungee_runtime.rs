@@ -3,28 +3,75 @@
 //! queue and use the ordinary policy and world-transition machinery. Messages,
 //! kicks and forwarded plugin messages enter the target players' bounded action
 //! queues, which their own sessions drain; a full queue drops the request.
+//! `RiftServers` and `RiftInGroup` are Rift's own additions to the channel;
+//! other proxies ignore them like any unknown subchannel.
 use crate::runtime::Snapshot;
 use rift::{
     bungeecord::{MAX_PAYLOAD_SIZE, Request, write_utf},
     extensions::PlayerAction,
+    managed::Phase,
     players::Player,
     protocol::{PlayerIdentity, validate_component},
 };
-use std::{io, net::SocketAddr, sync::Arc};
+use std::{collections::BTreeMap, io, net::SocketAddr, sync::Arc};
 
-fn server<'a>(snapshot: &'a Snapshot, name: &str) -> Option<&'a str> {
-    snapshot
-        .config
-        .backends
+/// The configured key for `name`, preferring an exact match over one that
+/// only ignores ASCII case.
+fn key<'a, V>(entries: &'a BTreeMap<String, V>, name: &str) -> Option<&'a str> {
+    entries
         .get_key_value(name)
         .or_else(|| {
-            snapshot
-                .config
-                .backends
+            entries
                 .iter()
                 .find(|(key, _)| key.eq_ignore_ascii_case(name))
         })
         .map(|(name, _)| name.as_str())
+}
+
+fn server<'a>(snapshot: &'a Snapshot, name: &str) -> Option<&'a str> {
+    key(&snapshot.config.backends, name)
+}
+
+/// `running` or `draining` for a server that is up; `None` while a managed
+/// server is stopped, starting, stopping or failed, or a health check fails.
+fn running_state(snapshot: &Snapshot, name: &str) -> Option<&'static str> {
+    let up = match snapshot.managed.phase(name) {
+        Some(phase) => phase == Phase::Running,
+        None => snapshot.health.available(name),
+    };
+    up.then(|| {
+        if snapshot.control.draining(&snapshot.config, name) {
+            "draining"
+        } else {
+            "running"
+        }
+    })
+}
+
+/// A server's player limit: its extension queue capacity, then its service
+/// group's per-instance queue capacity or `capacity_per_instance`. Zero means
+/// Rift knows no limit.
+fn max_players(snapshot: &Snapshot, name: &str, group: Option<&str>) -> usize {
+    let config = &snapshot.config;
+    let queue = |name: &str| {
+        config
+            .extensions
+            .as_ref()
+            .and_then(|extensions| extensions.queues.get(name).copied())
+    };
+    queue(name)
+        .or_else(|| group.and_then(queue))
+        .or_else(|| {
+            let scaling = config.service_groups.get(group?)?.scaling.as_ref()?;
+            Some(scaling.capacity_per_instance)
+        })
+        .unwrap_or(0)
+}
+
+fn int(value: usize, data: &mut Vec<u8>) -> io::Result<()> {
+    let value = i32::try_from(value).map_err(io::Error::other)?;
+    data.extend_from_slice(&value.to_be_bytes());
+    Ok(())
 }
 
 fn player(snapshot: &Snapshot, name: &str) -> Option<Player> {
@@ -218,6 +265,61 @@ pub fn handle(
                 return Ok(None);
             };
             strings(&["GetPlayerServer", &player.name, &player.server])?
+        }
+        Request::RiftServers(target) => {
+            let config = &snapshot.config;
+            let all = target == "ALL";
+            let (target, names) = if all {
+                ("ALL", config.backends.keys().cloned().collect())
+            } else {
+                let Some(target) =
+                    key(&config.service_groups, &target).or_else(|| server(snapshot, &target))
+                else {
+                    return Ok(None);
+                };
+                (target, config.destination_names(target))
+            };
+            let mut players = BTreeMap::<String, usize>::new();
+            for player in snapshot.players.snapshot() {
+                *players.entry(player.server).or_default() += 1;
+            }
+            let mut count = 0;
+            let mut entries = Vec::new();
+            for name in &names {
+                let Some(state) = running_state(snapshot, name) else {
+                    continue;
+                };
+                let group = config
+                    .instances
+                    .get(name)
+                    .map(|instance| instance.group.as_str());
+                write_utf(name, &mut entries)?;
+                write_utf(group.unwrap_or(""), &mut entries)?;
+                write_utf(state, &mut entries)?;
+                int(players.get(name).copied().unwrap_or(0), &mut entries)?;
+                int(max_players(snapshot, name, group), &mut entries)?;
+                count += 1;
+            }
+            let mut data = strings(&["RiftServers", target])?;
+            int(count, &mut data)?;
+            data.extend(entries);
+            data
+        }
+        Request::RiftInGroup {
+            player: name,
+            group,
+        } => {
+            let Some(player) = player(snapshot, &name) else {
+                return Ok(None);
+            };
+            // Groups exist only with API v2 extensions; without them the
+            // request goes unanswered like on other proxies.
+            let Some(member) = snapshot.extensions.in_group(&uuid(&player.uuid), &group) else {
+                return Ok(None);
+            };
+            let mut data = strings(&["RiftInGroup", &player.name, &group])?;
+            data.push(member.into());
+            data
         }
         Request::ServerIp(target) => {
             let Some(target) = server(snapshot, &target) else {
@@ -586,6 +688,180 @@ mod tests {
                 raw,
                 PlayerAction::RawKick(serde_json::json!("Raw bye")),
             ]
+        );
+    }
+
+    /// Lobby has a queue, survival drains, down fails its health check and
+    /// game-1 is a stopped instance of a group with a scaling capacity.
+    fn network() -> Arc<Snapshot> {
+        network_with_queues(&[])
+    }
+
+    fn network_with_queues(queues: &[(&str, usize)]) -> Arc<Snapshot> {
+        let mut config = Config::from_lua(
+            "return {listeners={public='127.0.0.1:0'},
+                backends={Lobby='127.0.0.1:1',survival='127.0.0.1:2',down='127.0.0.1:3'},
+                routes={public='Lobby'}, draining={'survival'},
+                network={bungeecord=true}, health_check={unhealthy_threshold=1},
+                service_groups={game={command={'unused'},directory='instances/{name}',
+                    port_range={26000,26003},scaling={capacity_per_instance=10,min_instances=0}}}}",
+            "rift-servers.lua",
+        )
+        .unwrap();
+        config.add_instance("game", "game-1", 26001).unwrap();
+        let extensions = Config::from_lua(
+            "return {listeners={public='127.0.0.1:0'},backends={Lobby='127.0.0.1:1'},
+                routes={public='Lobby'},authentication={online_mode=true},
+                forwarding={mode='velocity',secret_env='TEST_SECRET'},
+                extensions={api_version=2, queues={Lobby=50}, groups={default={},
+                    staff={inherits={'default'}}, admin={inherits={'staff'}}}}}",
+            "rift-groups.lua",
+        )
+        .unwrap();
+        // Extensions need online mode, which these offline sessions do not
+        // use; only the queues and groups matter here.
+        let mut snapshot = Snapshot::new(config, None).unwrap();
+        snapshot.config.extensions = extensions.extensions.clone();
+        if let Some(extensions) = &mut snapshot.config.extensions {
+            for (name, capacity) in queues {
+                extensions.queues.insert((*name).into(), *capacity);
+            }
+        }
+        snapshot.extensions =
+            rift::extensions::Extensions::new(&extensions, snapshot.messaging.clone(), None)
+                .unwrap();
+        snapshot.health.record("down", false);
+        Arc::new(snapshot)
+    }
+
+    /// Name, group, state, players and player limit.
+    type ServerEntry = (String, String, String, i32, i32);
+
+    /// Decode a `RiftServers` reply into its target and entries.
+    fn servers(data: &[u8]) -> (String, Vec<ServerEntry>) {
+        let mut bytes = data;
+        assert_eq!(read_utf(&mut bytes).unwrap(), "RiftServers");
+        let target = read_utf(&mut bytes).unwrap();
+        let int = |bytes: &mut &[u8]| {
+            let (value, rest) = bytes.split_at(4);
+            *bytes = rest;
+            i32::from_be_bytes(value.try_into().unwrap())
+        };
+        let count = int(&mut bytes);
+        let entries = (0..count)
+            .map(|_| {
+                (
+                    read_utf(&mut bytes).unwrap(),
+                    read_utf(&mut bytes).unwrap(),
+                    read_utf(&mut bytes).unwrap(),
+                    int(&mut bytes),
+                    int(&mut bytes),
+                )
+            })
+            .collect();
+        assert!(bytes.is_empty());
+        (target, entries)
+    }
+
+    #[test]
+    fn rift_servers_lists_running_servers_with_state_players_and_limits() {
+        let snapshot = network();
+        let _alice = snapshot
+            .players
+            .register([1; 16], "Alice", "Lobby")
+            .unwrap();
+        let _bob = snapshot
+            .players
+            .register([2; 16], "Bob", "survival")
+            .unwrap();
+        let entry = |name: &str, state: &str, players, max| {
+            (
+                name.to_owned(),
+                String::new(),
+                state.to_owned(),
+                players,
+                max,
+            )
+        };
+        // The stopped instance and the unhealthy backend are left out.
+        assert_eq!(
+            servers(&query(&snapshot, Request::RiftServers("ALL".into())).unwrap()),
+            (
+                "ALL".into(),
+                vec![
+                    entry("Lobby", "running", 1, 50),
+                    entry("survival", "draining", 1, 0),
+                ]
+            )
+        );
+        assert_eq!(
+            servers(&query(&snapshot, Request::RiftServers("lobby".into())).unwrap()),
+            ("Lobby".into(), vec![entry("Lobby", "running", 1, 50)])
+        );
+        assert_eq!(
+            servers(&query(&snapshot, Request::RiftServers("GAME".into())).unwrap()),
+            ("game".into(), vec![])
+        );
+        for target in ["all", "missing", "game-2"] {
+            assert_eq!(query(&snapshot, Request::RiftServers(target.into())), None);
+        }
+    }
+
+    #[test]
+    fn player_limits_prefer_queues_then_group_capacity() {
+        let snapshot = network();
+        assert_eq!(max_players(&snapshot, "Lobby", None), 50);
+        assert_eq!(max_players(&snapshot, "survival", None), 0);
+        assert_eq!(max_players(&snapshot, "game-1", Some("game")), 10);
+        let snapshot = network_with_queues(&[("game", 4)]);
+        assert_eq!(max_players(&snapshot, "game-1", Some("game")), 4);
+    }
+
+    #[test]
+    fn rift_in_group_follows_memberships_inheritance_and_default() {
+        let snapshot = network();
+        let alice = [0xa1; 16];
+        let _alice = snapshot.players.register(alice, "Alice", "Lobby").unwrap();
+        let _bob = snapshot
+            .players
+            .register([0xb0; 16], "Bob", "Lobby")
+            .unwrap();
+        assert!(
+            snapshot
+                .extensions
+                .change_group_membership(&uuid(&alice), "admin", true)
+                .unwrap()
+        );
+        let in_group = |player: &str, group: &str| {
+            query(
+                &snapshot,
+                Request::RiftInGroup {
+                    player: player.into(),
+                    group: group.into(),
+                },
+            )
+        };
+        let reply = |player: &str, group: &str, member: bool| {
+            let mut data = strings(&["RiftInGroup", player, group]).unwrap();
+            data.push(member.into());
+            Some(data)
+        };
+        assert_eq!(in_group("aLiCe", "staff"), reply("Alice", "staff", true));
+        assert_eq!(in_group("Alice", "admin"), reply("Alice", "admin", true));
+        assert_eq!(in_group("Bob", "default"), reply("Bob", "default", true));
+        assert_eq!(in_group("Bob", "staff"), reply("Bob", "staff", false));
+        assert_eq!(in_group("Bob", "missing"), reply("Bob", "missing", false));
+        assert_eq!(in_group("Carol", "default"), None);
+        // Without API v2 extensions there are no groups to ask about.
+        assert_eq!(
+            query(
+                &self::snapshot(),
+                Request::RiftInGroup {
+                    player: "Alice".into(),
+                    group: "default".into()
+                }
+            ),
+            None
         );
     }
 }

@@ -361,6 +361,9 @@ that removes a group leaves its memberships dormant: they grant nothing, can be
 removed, and apply again if the group returns. Configuration has no static member
 lists. Grant the first manager through `permissions`, as shown above.
 
+Backend plugins can ask whether a player is in a group with the `RiftInGroup`
+request on the [BungeeCord channel](bungeecord.md#rift-requests).
+
 ### Live permissions
 
 V2 `ctx.has_permission(node)` and command authorization consult current host

@@ -52,6 +52,14 @@ pub enum Request {
         player: String,
         reason: String,
     },
+    /// Rift extension: running servers with state and player limits. The
+    /// target is a server name, a service group name or `ALL`.
+    RiftServers(String),
+    /// Rift extension: whether a player belongs to a proxy permission group.
+    RiftInGroup {
+        player: String,
+        group: String,
+    },
 }
 
 /// Unknown subchannels have no effect. Invalid known requests are rejected by
@@ -99,6 +107,11 @@ pub fn decode(mut bytes: &[u8]) -> io::Result<Option<Request>> {
         "KickPlayerRaw" => Request::KickPlayerRaw {
             player: read_utf(&mut bytes)?,
             reason: read_utf(&mut bytes)?,
+        },
+        "RiftServers" => Request::RiftServers(read_utf(&mut bytes)?),
+        "RiftInGroup" => Request::RiftInGroup {
+            player: read_utf(&mut bytes)?,
+            group: read_utf(&mut bytes)?,
         },
         _ => return Ok(None),
     };
@@ -297,6 +310,17 @@ mod tests {
                     reason: "\"Bye\"".into(),
                 },
             ),
+            (
+                vec!["RiftServers", "lobby"],
+                Request::RiftServers("lobby".into()),
+            ),
+            (
+                vec!["RiftInGroup", "Player", "staff"],
+                Request::RiftInGroup {
+                    player: "Player".into(),
+                    group: "staff".into(),
+                },
+            ),
         ] {
             assert_eq!(decode(&fields(&values)).unwrap(), Some(expected));
         }
@@ -363,6 +387,8 @@ mod tests {
         assert!(decode(&fields(&["IP", "unexpected"])).is_err());
         assert!(decode(&fields(&["Message", "ALL"])).is_err());
         assert!(decode(&fields(&["KickPlayer", "Player", "Bye", "extra"])).is_err());
+        assert!(decode(&fields(&["RiftServers"])).is_err());
+        assert!(decode(&fields(&["RiftInGroup", "Player"])).is_err());
         assert!(decode(&vec![0; MAX_PAYLOAD_SIZE + 1]).is_err());
         assert_eq!(decode(&fields(&["Unknown", "opaque"])).unwrap(), None);
         let mut bytes = vec![42];

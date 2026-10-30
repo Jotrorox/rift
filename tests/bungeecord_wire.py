@@ -80,6 +80,13 @@ def send(record, payload, channel=CHANNEL):
     record["peer"].send(0x18, string(channel) + payload)
 
 
+def servers(target, *entries):
+    """A RiftServers reply: name, group, state, players and limit per server."""
+    return (fields("RiftServers", target) + struct.pack(">i", len(entries))
+            + b"".join(fields(name, group, state) + struct.pack(">ii", players, limit)
+                       for name, group, state, players, limit in entries))
+
+
 def query(record, request, expected, channel=CHANNEL):
     start = len(record["packets"])
     send(record, request, channel)
@@ -173,6 +180,12 @@ def enabled_checks(binary, threshold):
                   + struct.pack(">i", alice.frontend[1]), channel)
             query(source, fields("IPOther", "bOb"), fields("IPOther", "Bob", "127.0.0.1")
                   + struct.pack(">i", bob.frontend[1]), channel)
+            # Without health checks, unmanaged backends count as running.
+            query(source, fields("RiftServers", "ALL"), servers(
+                "ALL", ("dns", "", "running", 0, 0), ("ipv6", "", "running", 0, 0),
+                ("lobby", "", "running", 3, 0), ("survival", "", "running", 0, 0)), channel)
+            query(source, fields("RiftServers", "LOBBY"),
+                  servers("lobby", ("lobby", "", "running", 3, 0)), channel)
             for name, host, backend_port in (("lObBy", "127.0.0.1", lobby.port),
                                              ("dns", "localhost", 25565), ("ipv6", "::1", 25566)):
                 query(source, fields("ServerIP", name), fields("ServerIP", name.lower(), host)
@@ -188,7 +201,11 @@ def enabled_checks(binary, threshold):
                    fields("UUIDOther", "absent"), fields("IPOther", "absent"),
                    fields("GetPlayerServer", "absent"), fields("ServerIP", "absent"),
                    fields("PlayerCount", "absent"), fields("PlayerList", "absent"),
-                   fields("PlayerCount", "all"), fields("PlayerList", "all")]
+                   fields("PlayerCount", "all"), fields("PlayerList", "all"),
+                   fields("RiftServers"), fields("RiftServers", "absent"),
+                   fields("RiftServers", "all"), fields("RiftInGroup", "Alice"),
+                   # Groups need API v2 extensions, which this network lacks.
+                   fields("RiftInGroup", "Alice", "default")]
         for channel in ALIASES:
             for request in invalid:
                 send(source, request, channel)
@@ -293,6 +310,10 @@ def rejected_transfer_checks(binary):
                    "rejected destination connection closed")
         client.probe("lobby")
         query(source, fields("GetServer"), fields("GetServer", "lobby"))
+        query(source, fields("RiftServers", "ALL"), servers(
+            "ALL", ("banned", "", "running", 0, 0), ("dns", "", "running", 0, 0),
+            ("drained", "", "draining", 0, 0), ("ipv6", "", "running", 0, 0),
+            ("lobby", "", "running", 1, 0)))
         for request in (fields("Connect", "drained"), fields("Connect", "missing"),
                         fields("ConnectOther", "missing", "lobby")):
             send(source, request)
@@ -378,7 +399,7 @@ def check(binary):
     disabled_checks(binary, omit=True)
     rejected_transfer_checks(binary)
     relay_checks(binary)
-    print("BungeeCord compatibility wire checks passed (compression off/0/256, aliases, queries, transfers, forwards, messages, kicks, trust boundary, opt-in)")
+    print("BungeeCord compatibility wire checks passed (compression off/0/256, aliases, queries, server states, transfers, forwards, messages, kicks, trust boundary, opt-in)")
 
 
 if __name__ == "__main__":
