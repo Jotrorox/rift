@@ -181,7 +181,9 @@ pre-1.7 pings are unsupported.
 
 Set `rift.config.network = { bungeecord = true }` for existing backend plugins to
 request transfers, query players/servers, forward plugin messages between servers,
-and message or kick players over the BungeeCord plugin channel.
+and message or kick players over the BungeeCord plugin channel. Rift also answers
+two requests of its own on that channel: running servers with their state and
+player limits, and permission group membership.
 See the [supported subchannels and configuration](docs/bungeecord.md).
 
 ## Documentation

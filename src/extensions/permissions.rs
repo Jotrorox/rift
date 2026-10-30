@@ -203,6 +203,24 @@ impl Policy {
         })
     }
 
+    /// Whether `group` is configured and reachable from the player's stored
+    /// memberships or `default`, directly or by inheritance.
+    fn reaches(&self, members: Option<&BTreeSet<String>>, group: &str) -> bool {
+        self.groups.contains_key(group)
+            && members
+                .into_iter()
+                .flatten()
+                .map(String::as_str)
+                .chain([DEFAULT_GROUP])
+                .any(|name| {
+                    name == group
+                        || self
+                            .groups
+                            .get(name)
+                            .is_some_and(|member| member.ancestors.contains(group))
+                })
+    }
+
     /// A group overrides every group it inherits from; unrelated groups that
     /// disagree resolve to deny. Everyone belongs to `default` when it exists.
     fn group_decision(&self, members: Option<&BTreeSet<String>>, node: &str) -> Option<bool> {
@@ -344,6 +362,13 @@ impl Permissions {
             })
             .or_else(|| layer(state.policy.grants.get("*")))
             .unwrap_or(false)
+    }
+
+    /// Group membership as permission checks see it: dormant memberships of
+    /// removed groups do not count, and inherited groups do.
+    pub(super) fn in_group(&self, uuid: &str, group: &str) -> bool {
+        let state = self.state.lock().unwrap();
+        state.policy.reaches(state.memberships.get(uuid), group)
     }
 
     fn set(
@@ -629,6 +654,38 @@ mod tests {
                 assert_eq!(permissions.has(PLAYER, node), *granted, "{groups:?} {node}");
             }
         }
+    }
+
+    #[test]
+    fn group_membership_includes_default_and_inherited_groups_but_not_dormant_ones() {
+        let permissions = permissions(
+            r#"{ groups = {
+                base = {},
+                default = { inherits = { 'base' } },
+                staff = { inherits = { 'default' } },
+                admin = { inherits = { 'staff' } },
+                vip = {},
+            } }"#,
+        );
+        const OTHER: &str = "02020202020202020202020202020202";
+        join(&permissions, &["admin", "removed"]);
+        for (uuid, group, member) in [
+            (PLAYER, "admin", true),
+            (PLAYER, "staff", true),
+            (PLAYER, "default", true),
+            (PLAYER, "base", true),
+            (PLAYER, "vip", false),
+            (PLAYER, "removed", false),
+            (PLAYER, "missing", false),
+            (OTHER, "default", true),
+            (OTHER, "base", true),
+            (OTHER, "staff", false),
+        ] {
+            assert_eq!(permissions.in_group(uuid, group), member, "{uuid} {group}");
+        }
+        // Without a configured default group, nobody belongs to it.
+        let permissions = self::permissions("{ groups = { staff = {} } }");
+        assert!(!permissions.in_group(OTHER, "default"));
     }
 
     #[test]

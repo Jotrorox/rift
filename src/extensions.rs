@@ -494,6 +494,13 @@ impl Extensions {
         Some(self.permissions.memberships())
     }
 
+    /// Whether a player belongs to a permission group, directly, through
+    /// `default` or by inheritance; `None` without API v2 extensions.
+    pub fn in_group(&self, uuid: &str, group: &str) -> Option<bool> {
+        self.player_api()?;
+        Some(self.permissions.in_group(uuid, group))
+    }
+
     /// Add a player to a permission group or remove them from it, as
     /// `rift.permissions.add_group` and `remove_group` do. This writes to the
     /// extension store, so call it off the async runtime.
