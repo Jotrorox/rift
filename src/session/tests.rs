@@ -590,6 +590,142 @@ async fn commands_are_intercepted_only_in_network_mode_without_signed_arguments(
 }
 
 #[tokio::test]
+async fn proxy_suggestions_are_answered_rate_limited_and_permission_filtered() {
+    let (mut session, mut client, mut backend) = session().await;
+    session.enable_network().unwrap();
+    let config = crate::config::Config::from_lua(r#"return {
+        listeners={public='127.0.0.1:0'}, backends={lobby='127.0.0.1:1'}, routes={public='lobby'},
+        authentication={online_mode=true}, forwarding={mode='velocity', secret_env='TEST_SECRET'},
+        extensions={api_version=1, permissions={['*']={['mod.ban']=true}}, commands={
+            ban={permission='mod.ban', run=function() end, suggest=function() return {'Alice', 'Bob'} end},
+            staff={permission='staff.only', run=function() end, suggest='players'},
+        }}
+    }"#, "wire.lua").unwrap();
+    let runtime = crate::extensions::Extensions::new(
+        &config,
+        crate::messaging::Broker::new(Default::default()).unwrap(),
+        None,
+    )
+    .unwrap();
+    session.set_extension(
+        runtime
+            .session(crate::extensions::Context::authenticated(
+                1,
+                &AuthenticatedProfile {
+                    uuid: [7; 16],
+                    name: "Player".into(),
+                    properties: vec![],
+                },
+            ))
+            .unwrap(),
+    );
+    play(&mut session, &mut client, &mut backend, Codec::default()).await;
+    let codec = Codec::default();
+    // 1.21.11: Commands 0x10, suggestion request 0x0e and response 0x0f.
+    codec
+        .write(&mut backend, &Packet::new(0x10, vec![1, 0, 0, 0]))
+        .await
+        .unwrap();
+    assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+    let tree = receive(&mut client, codec).await;
+    let has = |needle: &[u8]| tree.data.windows(needle.len()).any(|w| w == needle);
+    assert!(has(b"\x03ban") && has(b"\x06server") && !has(b"staff"));
+
+    let request = |id: i32, text: &str| {
+        let mut data = Vec::new();
+        write_varint(id, &mut data);
+        write_string(text, &mut data);
+        Packet::new(0x0e, data)
+    };
+    let response = |id: i32, start: u8, length: u8, matches: &[&str]| {
+        let mut data = Vec::new();
+        write_varint(id, &mut data);
+        data.extend([start, length, matches.len() as u8]);
+        for text in matches {
+            write_string(text, &mut data);
+            data.push(0);
+        }
+        Packet::new(0x0f, data)
+    };
+    // Backend commands keep their own suggestions.
+    let give = request(1, "/give Al");
+    codec.write(&mut client, &give).await.unwrap();
+    assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+    assert_eq!(receive(&mut backend, codec).await, give);
+
+    // Ranges count UTF-16 code units: "ä" is two bytes but one unit.
+    codec
+        .write(&mut client, &request(2, "/ban ä A"))
+        .await
+        .unwrap();
+    let SessionEvent::Suggestions(ban) = session.forward().await.unwrap() else {
+        panic!("suggestion request reached the backend");
+    };
+    assert_eq!(
+        ban,
+        SuggestionRequest {
+            id: 2,
+            text: "/ban ä A".into()
+        }
+    );
+    session.answer_suggestions(&ban, Vec::new).await.unwrap();
+    assert_eq!(
+        receive(&mut client, codec).await,
+        response(2, 7, 1, &["Alice"])
+    );
+
+    codec
+        .write(&mut client, &request(3, "/server l"))
+        .await
+        .unwrap();
+    let SessionEvent::Suggestions(server) = session.forward().await.unwrap() else {
+        panic!("suggestion request reached the backend");
+    };
+    session
+        .answer_suggestions(&server, || vec!["lobby".into(), "game".into()])
+        .await
+        .unwrap();
+    assert_eq!(
+        receive(&mut client, codec).await,
+        response(3, 8, 1, &["lobby"])
+    );
+
+    // The registered but forbidden command is still Rift's: an empty answer.
+    codec
+        .write(&mut client, &request(4, "/staff "))
+        .await
+        .unwrap();
+    let SessionEvent::Suggestions(staff) = session.forward().await.unwrap() else {
+        panic!("suggestion request reached the backend");
+    };
+    session.answer_suggestions(&staff, Vec::new).await.unwrap();
+    assert_eq!(receive(&mut client, codec).await, response(4, 7, 0, &[]));
+
+    // Ten requests per second reach the owner; the rest are answered empty.
+    for id in 5..=11 {
+        codec
+            .write(&mut client, &request(id, "/server "))
+            .await
+            .unwrap();
+        assert!(matches!(
+            session.forward().await.unwrap(),
+            SessionEvent::Suggestions(_)
+        ));
+    }
+    codec
+        .write(&mut client, &request(12, "/ban "))
+        .await
+        .unwrap();
+    assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+    assert_eq!(receive(&mut client, codec).await, response(12, 0, 0, &[]));
+    assert!(
+        timeout(Duration::from_millis(10), receive(&mut backend, codec))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn initial_retry_is_disabled_after_backend_login_plugin_exchange() {
     let (mut session, mut client, mut backend) = session().await;
     let request = Packet::new(4, vec![1, 0]);

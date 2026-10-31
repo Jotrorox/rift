@@ -152,8 +152,43 @@ pub enum SessionEvent {
     BackendClosed,
     BackendFailed,
     ProxyCommand(String),
+    /// A Command Suggestions Request for a proxy command's arguments; answer
+    /// it with [`Session::answer_suggestions`].
+    Suggestions(SuggestionRequest),
     BungeeCord(crate::bungeecord::Request),
     Disconnected,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SuggestionRequest {
+    pub id: i32,
+    /// The client's full input, including any leading slash.
+    pub text: String,
+}
+
+/// Suggestion requests answered per session and second. Clients send one per
+/// keystroke; extra requests get an empty answer without running Lua.
+const SUGGESTIONS_PER_SECOND: u32 = 10;
+
+#[derive(Default)]
+struct SuggestionBudget {
+    window: Option<std::time::Instant>,
+    used: u32,
+}
+
+impl SuggestionBudget {
+    fn allow(&mut self) -> bool {
+        let now = std::time::Instant::now();
+        if self
+            .window
+            .is_none_or(|start| now.duration_since(start) >= std::time::Duration::from_secs(1))
+        {
+            self.window = Some(now);
+            self.used = 0;
+        }
+        self.used += 1;
+        self.used <= SUGGESTIONS_PER_SECOND
+    }
 }
 
 pub struct Session<C, B> {
@@ -182,6 +217,7 @@ pub struct Session<C, B> {
     legacy_state: protocol::LegacyState,
     tab_list: protocol::TabList,
     boss_bars: protocol::BossBars,
+    suggestions: SuggestionBudget,
 }
 
 impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Session<C, B> {
@@ -219,6 +255,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             legacy_state: protocol::LegacyState::default(),
             tab_list: protocol::TabList::default(),
             boss_bars: protocol::BossBars::default(),
+            suggestions: SuggestionBudget::default(),
         })
     }
 
@@ -466,7 +503,8 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                     tokio::select! {
                         result = &mut login => { break result?; }
                         event = self.forward(), if self.backend.is_some() => match event? {
-                            SessionEvent::Packet | SessionEvent::ProxyCommand(_) | SessionEvent::BungeeCord(_) => {}
+                            // Dropped: the client asks again for its next keystroke.
+                            SessionEvent::Packet | SessionEvent::ProxyCommand(_) | SessionEvent::Suggestions(_) | SessionEvent::BungeeCord(_) => {}
                             SessionEvent::BackendClosed | SessionEvent::BackendFailed => {}
                             SessionEvent::ClientClosed => return Err(io::Error::new(
                                 io::ErrorKind::UnexpectedEof, "client closed during replacement login")),
@@ -712,6 +750,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                 Poll::Ready(Ok(
                     SessionEvent::Packet
                     | SessionEvent::ProxyCommand(_)
+                    | SessionEvent::Suggestions(_)
                     | SessionEvent::BungeeCord(_),
                 )) => {}
                 Poll::Ready(Ok(SessionEvent::BackendClosed | SessionEvent::BackendFailed)) => {
@@ -1045,6 +1084,57 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         backend.flush_pending().await
     }
 
+    /// Answer a [`SessionEvent::Suggestions`] request. `/server` completes
+    /// from `servers`, the destinations this player may join; extension
+    /// commands use their `suggest` definition. A request that is stale after
+    /// a switch began is dropped; the client asks again as the player types.
+    pub async fn answer_suggestions(
+        &mut self,
+        request: &SuggestionRequest,
+        servers: impl FnOnce() -> Vec<String>,
+    ) -> io::Result<()> {
+        let text = request.text.as_str();
+        let input = text.strip_prefix('/').unwrap_or(text);
+        let (name, args) = input
+            .split_once(' ')
+            .ok_or_else(|| protocol::invalid("suggestion request without arguments"))?;
+        let word = args.rsplit(' ').next().unwrap_or_default();
+        let matches = match name {
+            "server" if !args.contains(' ') => crate::extensions::complete_names(servers(), word),
+            "server" | "hub" => Vec::new(),
+            _ => match &self.extension {
+                Some(extension) => {
+                    extension
+                        .suggest(name, args, servers)
+                        .await
+                        .unwrap_or_else(|error| {
+                            eprintln!("rift: {error}");
+                            Vec::new()
+                        })
+                }
+                None => Vec::new(),
+            },
+        };
+        self.client.flush_pending().await?;
+        if !self.joined || !self.client.state.settled(State::Play) {
+            return Ok(());
+        }
+        let version = self.version()?;
+        let caps = version
+            .switching()
+            .ok_or_else(|| protocol::invalid("suggestions require a switchable version"))?;
+        // Brigadier ranges count UTF-16 code units of the full input.
+        let start = text.len() - word.len();
+        let packet = caps.suggestions(
+            version,
+            request.id,
+            text[..start].encode_utf16().count(),
+            word.encode_utf16().count(),
+            &matches,
+        )?;
+        self.send_client(&packet).await
+    }
+
     async fn send_client(&mut self, packet: &Packet) -> io::Result<()> {
         let version = self.version()?;
         // Commit the state only after the complete packet has been written.
@@ -1149,6 +1239,21 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                     }
                     if kind == PacketKind::EncryptionResponse {
                         return Err(protocol::invalid("unexpected client encryption response"));
+                    }
+                    if self.network
+                        && phase == State::Play
+                        && self.joined
+                        && let Some(caps) = version.switching()
+                        && let Some((id, text)) =
+                            caps.proxy_suggestion_request(&packet, &self.extension_commands)?
+                    {
+                        if self.suggestions.allow() {
+                            return Ok(SessionEvent::Suggestions(SuggestionRequest { id, text }));
+                        }
+                        // The loop writes the queued answer and reports it.
+                        let empty = caps.suggestions(version, id, 0, 0, &[])?;
+                        self.client.queue(version, Direction::Clientbound, &empty)?;
+                        continue;
                     }
                     if self.network
                         && phase == State::Play
@@ -1306,7 +1411,13 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                                 && let Some(caps) = version.switching()
                                 && packet.id == caps.commands
                             {
-                                caps.network_commands_with(&packet, &self.extension_commands)?
+                                // Rebuilt per tree, so permission changes
+                                // show with the backend's next Commands packet.
+                                let commands =
+                                    self.extension.as_ref().map_or_else(Vec::new, |extension| {
+                                        extension.visible_commands()
+                                    });
+                                caps.network_commands_with(&packet, &commands)?
                             } else {
                                 packet
                             };

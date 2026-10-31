@@ -159,6 +159,15 @@ signatures are forwarded unchanged, including commands named `server` or `hub`.
 For a signed-command packet with zero argument signatures, consuming a proxy
 command preserves its last-seen offset using a separate acknowledgement packet.
 
+On 1.19.3+, `server <name>` and extension commands with `suggest` mark their
+argument with `minecraft:ask_server`. Rift answers Command Suggestions Requests
+whose text (with or without a leading `/`) starts with `server `, `hub ` or a
+registered extension command and a space. It never forwards those to the backend.
+Every other request, including one for a command name still being typed, reaches
+the backend unchanged. Response ranges count UTF-16 code units, as Brigadier
+does. Tooltips are JSON text before 1.20.3 and anonymous network NBT from then on.
+Older clients get no `ask_server` marks, so they never ask.
+
 Cancellation during preflight leaves the old session usable. Cancellation after
 `switch_in_progress()` becomes true requires disconnection, because transition
 writes may be partial. Runtime supplies deadlines for login/configuration and
@@ -219,6 +228,8 @@ Implementation references checked for this change:
   `ServerboundAcceptTeleportationPacket` and `ArgumentTypeInfos`, inspected with
   `javap -c -private`. 26.2 adds the session UUID and online-mode flag; 26.3 changes
   game-mode encoding and adds property-free command parsers through registry ID 61.
+  The same `GameProtocols` registration order gives Command Suggestions Request
+  `0x0f` and Response `0x0f` for both.
   No decompiled Mojang source is included in this repository.
 
 - [Velocity legacy client transitions](https://github.com/PaperMC/Velocity/blob/dev/3.0.0/proxy/src/main/java/com/velocitypowered/proxy/connection/client/ClientPlaySessionHandler.java): Join Game/Respawn reset and persistent tab/boss/title cleanup.

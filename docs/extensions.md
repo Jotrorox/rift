@@ -158,11 +158,50 @@ permission groups and live grant/deny overrides, described below.
 Register up to 64 lowercase command names using letters, digits, `_` or `-`
 (maximum 64 bytes). `server` and `hub` are reserved. Each registration must have
 an explicit permission and `run` function. The host checks permission **before**
-invoking it, even for manually crafted command packets. Command names are
-advertised to all players; visibility is not an authorization check. A registered
-name replaces the same backend command root in the advertised tree.
+invoking it, even for manually crafted command packets. A registered name
+replaces the same backend command root in the advertised tree. Each player's tree
+only lists the commands they have permission for. Rift rebuilds it whenever a
+backend sends its command tree (after every server switch, or when a plugin
+resends commands), so permission changes show in the tree from then on. Hiding a
+command is not an authorization check; the permission check above is.
 
 Command context adds `command` and trimmed `args` (the remaining unsigned text).
+
+### Tab completion
+
+A command can complete its arguments with `suggest`:
+
+```lua
+rift.command("ban", {
+    permission = "relaxoban.ban",
+    suggest = function(ctx)
+        if ctx.position == 1 then return rift.players.names(ctx.word) end
+        if ctx.position == 2 then
+            return { { text = "1d", tooltip = "One day" }, "7d", "30d" }
+        end
+    end,
+    run = function(ctx) ... end,
+})
+```
+
+`suggest = "players"` completes every argument from the names of players on
+this Rift process, and `suggest = "servers"` from the destinations the player
+may join with `/server`. Neither runs Lua. A `suggest` function gets the command
+context with `args` untrimmed, plus `word` (the argument being typed, possibly
+empty) and `position` (its 1-based number). It returns nil or an array of up to
+1024 entries. Each entry is a string or `{ text = ..., tooltip = ... }`, both
+1–256 bytes without control characters, with a plain-text tooltip. It runs
+under the usual 50 ms deadline, like every callback.
+
+Rift keeps entries that start with `word` (ignoring ASCII case), drops
+duplicates and sends at most 100. The client replaces `word` with the chosen
+entry. Players without the command's permission get no suggestions, and the
+function never runs for them. A failing function is logged and suggests
+nothing. Each session gets 10 answered requests per second; the client asks on
+every keystroke, and further requests get an empty answer. `/server <name>`
+completes from the destinations the player may join, without extensions.
+Completion needs Minecraft 1.19.3 or newer and network mode. Commands without
+`suggest` show no suggestions.
 Commands may return nil, `{ message = "text" }`, `{ server = "name" }`,
 `{ queue = "name" }` or `{ leave_queue = true }`. Server actions still pass
 `before_transfer` and all host admission checks. Signed backend arguments stay
@@ -519,6 +558,7 @@ names a configured backend or service group; a group matches all its instances.
 | --- | --- |
 | `rift.players.list(server)` | Array of player tables; `server` is optional |
 | `rift.players.get(player)` | Player table, or nil when the player is offline |
+| `rift.players.names(prefix)` | Sorted array of player names; `prefix` (optional) keeps names starting with it, ignoring ASCII case |
 | `rift.players.message(player, text)` | Boolean: a chat message was queued |
 | `rift.players.action_bar(player, text)` | Boolean: action-bar text was queued |
 | `rift.players.title(player, title)` | Boolean: a title was queued; `title` is text or an options table |

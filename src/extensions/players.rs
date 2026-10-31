@@ -507,6 +507,28 @@ impl Players {
             })?,
         )?;
 
+        let players = self.clone();
+        api.raw_set(
+            "names",
+            lua.create_function(move |lua, prefix: Option<String>| {
+                crate::script::check_deadline(deadline)?;
+                let prefix = prefix.unwrap_or_default();
+                let mut names: Vec<_> = players
+                    .lock()
+                    .values()
+                    .filter(|entry| {
+                        entry
+                            .name
+                            .get(..prefix.len())
+                            .is_some_and(|start| start.eq_ignore_ascii_case(&prefix))
+                    })
+                    .map(|entry| entry.name.clone())
+                    .collect();
+                names.sort_by_key(|name| name.to_ascii_lowercase());
+                lua.create_sequence_from(names)
+            })?,
+        )?;
+
         let text_actions = [
             (
                 "message",

@@ -94,6 +94,13 @@ impl Network<'_> {
                             command_notice_sent = true;
                         }
                     }
+                    SessionEvent::Suggestions(request) => {
+                        let servers = self.joinable(session, current);
+                        timeout(
+                            Duration::from_secs(5),
+                            session.answer_suggestions(&request, || servers),
+                        ).await??;
+                    }
                     SessionEvent::BungeeCord(request) => {
                         if let Some(identity) = session.identity()
                             && let Ok(Some(payload)) = crate::bungee_runtime::handle(
@@ -438,6 +445,26 @@ impl Network<'_> {
             }
         }
         Err(last_error)
+    }
+
+    /// Destinations `/server` would accept from this player, other than the
+    /// current one, for suggestions.
+    pub fn joinable<C: AsyncRead + AsyncWrite + Unpin>(
+        &self,
+        session: &Session<C, TcpStream>,
+        current: &str,
+    ) -> Vec<String> {
+        let config = &self.snapshot.config;
+        let Some(identity) = session.identity() else {
+            return Vec::new();
+        };
+        config
+            .backends
+            .keys()
+            .chain(config.service_groups.keys())
+            .filter(|name| *name != current && config.can_access(name, &identity.name))
+            .cloned()
+            .collect()
     }
 
     pub async fn command<C: AsyncRead + AsyncWrite + Unpin>(

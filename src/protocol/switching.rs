@@ -6,11 +6,18 @@
 //! Add a pinned real-server switch AND recovery fixture in tests/servers.json
 //! before adding a version here. Do not infer support from a protocol range.
 use super::packets::{Text, boolean, disconnect_text, take};
+use std::io;
+
+/// One Command Suggestions Response entry. Tooltips are plain text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Suggestion {
+    pub text: String,
+    pub tooltip: Option<String>,
+}
 use super::{
     Packet, ProtocolVersion, State, disconnect, invalid, read_string, read_varint, write_string,
     write_varint,
 };
-use std::io;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct SwitchingCapabilities {
@@ -27,6 +34,10 @@ pub(crate) struct SwitchingCapabilities {
     signed_command: i32,
     chat_acknowledgement: i32,
     system_chat: i32,
+    /// Serverbound Command Suggestions Request and clientbound Response; -1
+    /// before 1.19.3, where Rift does not answer suggestion requests.
+    suggestion_request: i32,
+    suggestion_response: i32,
     sea_level: bool,
     varint_game_modes: bool,
     online_mode: bool,
@@ -52,6 +63,8 @@ const V1_21_8: SwitchingCapabilities = SwitchingCapabilities {
     signed_command: 0x07,
     chat_acknowledgement: 0x05,
     system_chat: 0x72,
+    suggestion_request: 0x0e,
+    suggestion_response: 0x0f,
     sea_level: true,
     varint_game_modes: false,
     online_mode: false,
@@ -70,6 +83,8 @@ const V1_21: SwitchingCapabilities = SwitchingCapabilities {
     signed_command: 0x05,
     chat_acknowledgement: 0x03,
     system_chat: 0x6c,
+    suggestion_request: 0x0b,
+    suggestion_response: 0x10,
     sea_level: false,
     chat_checksum: false,
     score_holder_parser: 30,
@@ -87,6 +102,7 @@ const V1_21_2: SwitchingCapabilities = SwitchingCapabilities {
     signed_command: 0x06,
     chat_acknowledgement: 0x04,
     system_chat: 0x73,
+    suggestion_request: 0x0d,
     sea_level: true,
     ..V1_21
 };
@@ -94,6 +110,7 @@ const V1_21_5: SwitchingCapabilities = SwitchingCapabilities {
     join_game: 0x2b,
     commands: 0x10,
     system_chat: 0x72,
+    suggestion_response: 0x0f,
     chat_checksum: true,
     last_resource_parser: 47,
     last_parser: 54,
@@ -112,6 +129,7 @@ const V26_1: SwitchingCapabilities = SwitchingCapabilities {
     signed_command: 0x08,
     chat_acknowledgement: 0x06,
     system_chat: 0x79,
+    suggestion_request: 0x0f,
     ..V1_21_8
 };
 const V26_2: SwitchingCapabilities = SwitchingCapabilities {
@@ -152,6 +170,18 @@ impl SwitchingCapabilities {
             write_string("brigadier:string", data);
         } else {
             write_varint(5, data);
+        }
+    }
+    /// An executable greedy string leaf. Suggestions use
+    /// `minecraft:ask_server`, which Rift answers itself.
+    fn string_argument(self, name: &str, suggest: bool, data: &mut Vec<u8>) {
+        data.push(if suggest { 0x16 } else { 0x06 });
+        write_varint(0, data);
+        write_string(name, data);
+        self.string_parser(data);
+        write_varint(2, data);
+        if suggest {
+            write_string("minecraft:ask_server", data);
         }
     }
     pub(crate) fn legacy_world(self, packet: &Packet) -> io::Result<(Packet, Packet)> {
@@ -324,6 +354,72 @@ impl SwitchingCapabilities {
         Ok(Some((command.to_owned(), acknowledgement)))
     }
 
+    /// The transaction id and full text of a Command Suggestions Request for a
+    /// proxy command's arguments. Requests for backend commands, and for a root
+    /// name still being typed, are not ours and must reach the backend unchanged.
+    pub(crate) fn proxy_suggestion_request(
+        self,
+        packet: &Packet,
+        commands: &[String],
+    ) -> io::Result<Option<(i32, String)>> {
+        if self.suggestion_request < 0 || packet.id != self.suggestion_request {
+            return Ok(None);
+        }
+        let mut bytes = packet.data.as_slice();
+        let id = read_varint(&mut bytes)?;
+        let text = read_string(&mut bytes, 32767)?;
+        if !bytes.is_empty() {
+            return Err(invalid("trailing command suggestion data"));
+        }
+        // Chat input keeps its slash; the command block editor has none.
+        let input = text.strip_prefix('/').unwrap_or(text);
+        let Some((root, _)) = input.split_once(' ') else {
+            return Ok(None);
+        };
+        if !matches!(root, "server" | "hub") && !commands.iter().any(|name| name == root) {
+            return Ok(None);
+        }
+        Ok(Some((id, text.to_owned())))
+    }
+
+    /// Command Suggestions Response. `start` and `length` select the replaced
+    /// range of the request text in UTF-16 code units, as Brigadier counts.
+    pub(crate) fn suggestions(
+        self,
+        version: ProtocolVersion,
+        id: i32,
+        start: usize,
+        length: usize,
+        matches: &[Suggestion],
+    ) -> io::Result<Packet> {
+        if self.suggestion_response < 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Command suggestions require Minecraft 1.19.3 or newer.",
+            ));
+        }
+        let range = |value: usize| {
+            i32::try_from(value).map_err(|_| invalid("suggestion range out of bounds"))
+        };
+        let mut data = Vec::new();
+        write_varint(id, &mut data);
+        write_varint(range(start)?, &mut data);
+        write_varint(range(length)?, &mut data);
+        write_varint(range(matches.len())?, &mut data);
+        for suggestion in matches {
+            write_string(&suggestion.text, &mut data);
+            match &suggestion.tooltip {
+                Some(tooltip) => {
+                    data.push(1);
+                    // JSON text before 1.20.3, anonymous network NBT since.
+                    Text::Literal(tooltip).write(version.nbt_components(), &mut data)?;
+                }
+                None => data.push(0),
+            }
+        }
+        Ok(Packet::new(self.suggestion_response, data))
+    }
+
     pub(crate) fn system_message(
         self,
         version: ProtocolVersion,
@@ -401,6 +497,8 @@ impl SwitchingCapabilities {
     /// tree. Existing node indexes and redirects stay valid; only root children
     /// with the same names are replaced. A brigadier:string argument is deliberately
     /// used instead of minecraft:message, which would require a signed argument.
+    /// Each command is a name and whether its arguments ask the server for
+    /// suggestions; `/server <name>` always does where Rift can answer.
     #[cfg(test)]
     pub(crate) fn network_commands(self, packet: &Packet) -> io::Result<Packet> {
         self.network_commands_with(packet, &[])
@@ -409,7 +507,7 @@ impl SwitchingCapabilities {
     pub(crate) fn network_commands_with(
         self,
         packet: &Packet,
-        commands: &[String],
+        commands: &[(String, bool)],
     ) -> io::Result<Packet> {
         if packet.id != self.commands {
             return Err(invalid("expected command tree"));
@@ -529,7 +627,7 @@ impl SwitchingCapabilities {
                     !matches!(nodes[*child as usize].name, Some("server" | "hub"))
                         && !commands
                             .iter()
-                            .any(|name| Some(name.as_str()) == nodes[*child as usize].name)
+                            .any(|(name, _)| Some(name.as_str()) == nodes[*child as usize].name)
                 })
                 .collect();
             data.push(node.flags);
@@ -544,28 +642,21 @@ impl SwitchingCapabilities {
             }
             data.extend_from_slice(node.tail);
         }
+        let suggestions = self.suggestion_response >= 0;
         data.push(5);
         write_varint(1, &mut data);
         write_varint(count + 1, &mut data);
         write_string("server", &mut data);
-        data.push(6);
-        write_varint(0, &mut data);
-        write_string("name", &mut data);
-        self.string_parser(&mut data);
-        write_varint(2, &mut data);
+        self.string_argument("name", suggestions, &mut data);
         data.push(5);
         write_varint(0, &mut data);
         write_string("hub", &mut data);
-        for (i, name) in commands.iter().enumerate() {
+        for (i, (name, suggest)) in commands.iter().enumerate() {
             data.push(5); // executable literal, optional greedy unsigned string
             write_varint(1, &mut data);
             write_varint(count + 4 + i as i32 * 2, &mut data);
             write_string(name, &mut data);
-            data.push(6);
-            write_varint(0, &mut data);
-            write_string("args", &mut data);
-            self.string_parser(&mut data);
-            write_varint(2, &mut data);
+            self.string_argument("args", suggestions && *suggest, &mut data);
         }
         write_varint(root as i32, &mut data);
         Ok(Packet::new(packet.id, data))

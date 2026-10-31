@@ -1,6 +1,8 @@
 //! Authenticated extensions. Rust owns durable state, live permissions, scheduled
 //! work, admission leases and FIFO tickets; Lua invocations remain isolated.
-use crate::{auth::AuthenticatedProfile, config::Config, messaging::Broker, script};
+use crate::{
+    auth::AuthenticatedProfile, config::Config, messaging::Broker, protocol::Suggestion, script,
+};
 use mlua::{Function, Table, Value};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -36,11 +38,32 @@ pub struct ExtensionScript {
     integrations: integrations::Integrations,
     jobs: BTreeMap<String, Duration>,
     hooks: BTreeSet<String>,
-    commands: BTreeMap<String, String>,
+    commands: BTreeMap<String, Command>,
     permissions: permissions::Policy,
     pub queues: BTreeMap<String, usize>,
     decisions: BTreeMap<String, decisions::Decision>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Command {
+    permission: String,
+    suggest: Suggest,
+}
+
+/// How a command's arguments are completed: not at all, from online player
+/// names, from the servers the player may join, or by a Lua function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Suggest {
+    None,
+    Players,
+    Servers,
+    Lua,
+}
+
+/// Suggestions per response after prefix filtering, and entries a `suggest`
+/// function may return before filtering.
+const MAX_SUGGESTIONS: usize = 100;
+const MAX_SUGGESTION_RESULTS: usize = 1024;
 
 fn invalid(message: impl ToString) -> io::Error {
     io::Error::other(message.to_string())
@@ -143,7 +166,7 @@ impl ExtensionScript {
         if let Some(entries) = table.raw_get::<Option<Table>>("commands")? {
             for entry in entries.pairs::<String, Table>() {
                 let (name, command) = entry?;
-                fields(&command, &["permission", "run"])?;
+                fields(&command, &["permission", "run", "suggest"])?;
                 if !token(&name)
                     || name.contains('.')
                     || matches!(name.as_str(), "server" | "hub")
@@ -160,7 +183,28 @@ impl ExtensionScript {
                     ));
                 }
                 command.raw_get::<Function>("run")?;
-                commands.insert(name, permission);
+                let suggest = match command.raw_get::<Value>("suggest")? {
+                    Value::Nil => Suggest::None,
+                    Value::Function(_) => Suggest::Lua,
+                    Value::String(kind) if kind.as_bytes().as_ref() == b"players" => {
+                        Suggest::Players
+                    }
+                    Value::String(kind) if kind.as_bytes().as_ref() == b"servers" => {
+                        Suggest::Servers
+                    }
+                    _ => {
+                        return Err(mlua::Error::runtime(format!(
+                            "commands.{name}.suggest must be a function, \"players\" or \"servers\""
+                        )));
+                    }
+                };
+                commands.insert(
+                    name,
+                    Command {
+                        permission,
+                        suggest,
+                    },
+                );
             }
         }
         let permissions = permissions::Policy::parse(&table, api_version)?;
@@ -194,7 +238,28 @@ impl ExtensionScript {
         deadline: Instant,
         runtime: &Extensions,
     ) -> io::Result<Action> {
-        let run = || -> mlua::Result<Action> {
+        self.run(
+            hook,
+            input,
+            deadline,
+            runtime,
+            || Action::Message("You do not have permission to use this command.".into()),
+            parse_action,
+        )
+    }
+
+    /// Run one callback. `denied` answers a command or suggestion whose
+    /// permission was revoked after the host's first check.
+    fn run<T>(
+        &self,
+        hook: &str,
+        input: &Context,
+        deadline: Instant,
+        runtime: &Extensions,
+        denied: impl FnOnce() -> T,
+        parse: impl FnOnce(&str, Value) -> mlua::Result<T>,
+    ) -> io::Result<T> {
+        let run = || -> mlua::Result<T> {
             let (lua, root) = script::load(&self.source, deadline)?;
             script::install_messaging(&lua, Some(runtime.broker.clone()), deadline)?;
             if self.api_version == 2 {
@@ -208,11 +273,11 @@ impl ExtensionScript {
                 return Err(mlua::Error::runtime("configuration must return a table"));
             };
             let extensions: Table = root.raw_get("extensions")?;
-            let callback: Function = if hook == "command" {
+            let callback: Function = if hook == "command" || hook == "suggest" {
                 extensions
                     .raw_get::<Table>("commands")?
                     .raw_get::<Table>(input.command.as_deref().unwrap())?
-                    .raw_get("run")?
+                    .raw_get(if hook == "command" { "run" } else { "suggest" })?
             } else if hook == "job" {
                 extensions
                     .raw_get::<Table>("jobs")?
@@ -222,15 +287,13 @@ impl ExtensionScript {
                 extensions.raw_get(hook)?
             };
             // Recheck after worker scheduling/source evaluation, before executing user code.
-            if hook == "command"
+            if (hook == "command" || hook == "suggest")
                 && !runtime.permits(
                     &input.uuid,
-                    &self.commands[input.command.as_deref().unwrap()],
+                    &self.commands[input.command.as_deref().unwrap()].permission,
                 )
             {
-                return Ok(Action::Message(
-                    "You do not have permission to use this command.".into(),
-                ));
+                return Ok(denied());
             }
             let ctx = lua.create_table()?;
             ctx.set("api_version", self.api_version)?;
@@ -238,7 +301,7 @@ impl ExtensionScript {
                 ctx.set("job", input.command.as_deref())?;
                 let value: Value = callback.call(ctx)?;
                 script::check_deadline(deadline)?;
-                return parse_action(hook, value);
+                return parse(hook, value);
             }
             ctx.set("connection_id", input.id.to_string())?;
             ctx.set("uuid", input.uuid.as_str())?;
@@ -255,6 +318,10 @@ impl ExtensionScript {
             ctx.set("success", input.success)?;
             ctx.set("command", input.command.as_deref())?;
             ctx.set("args", input.args.as_str())?;
+            if hook == "suggest" {
+                ctx.set("word", input.word.as_str())?;
+                ctx.set("position", input.position)?;
+            }
             let permissions = runtime.clone();
             let uuid = input.uuid.clone();
             ctx.set(
@@ -266,7 +333,7 @@ impl ExtensionScript {
             )?;
             let value: Value = callback.call(ctx)?;
             script::check_deadline(deadline)?;
-            parse_action(hook, value)
+            parse(hook, value)
         };
         run().map_err(|error| invalid(format!("extensions.{hook}: {error:.2048}")))
     }
@@ -329,6 +396,93 @@ fn parse_action(hook: &str, value: Value) -> mlua::Result<Action> {
     })
 }
 
+/// A `suggest` result: an array of strings or `{ text = ..., tooltip = ... }`.
+fn parse_suggestions(_hook: &str, value: Value) -> mlua::Result<Vec<Suggestion>> {
+    let wrong = || {
+        mlua::Error::runtime(
+            "suggest must return an array of strings or { text = ..., tooltip = ... } tables",
+        )
+    };
+    let text = |value: Value, field: &str| -> mlua::Result<String> {
+        let Value::String(value) = value else {
+            return Err(wrong());
+        };
+        let value = value.to_str()?.to_owned();
+        if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
+            return Err(mlua::Error::runtime(format!(
+                "suggestion {field} must contain 1..=256 bytes without control characters"
+            )));
+        }
+        Ok(value)
+    };
+    let Value::Table(table) = value else {
+        return if value.is_nil() {
+            Ok(Vec::new())
+        } else {
+            Err(wrong())
+        };
+    };
+    let length = table.raw_len();
+    if length > MAX_SUGGESTION_RESULTS {
+        return Err(mlua::Error::runtime(format!(
+            "suggest may return at most {MAX_SUGGESTION_RESULTS} entries"
+        )));
+    }
+    if table.clone().pairs::<Value, Value>().count() != length {
+        return Err(wrong());
+    }
+    let mut suggestions = Vec::with_capacity(length);
+    for entry in table.sequence_values::<Value>() {
+        suggestions.push(match entry? {
+            Value::Table(entry) => {
+                fields(&entry, &["text", "tooltip"])?;
+                Suggestion {
+                    text: text(entry.raw_get("text")?, "text")?,
+                    tooltip: match entry.raw_get::<Value>("tooltip")? {
+                        Value::Nil => None,
+                        tooltip => Some(text(tooltip, "tooltip")?),
+                    },
+                }
+            }
+            entry => Suggestion {
+                text: text(entry, "text")?,
+                tooltip: None,
+            },
+        });
+    }
+    Ok(suggestions)
+}
+
+/// Suggestions for `word` from plain names, sorted ignoring ASCII case.
+pub(crate) fn complete_names(mut names: Vec<String>, word: &str) -> Vec<Suggestion> {
+    names.sort_by_key(|name| name.to_ascii_lowercase());
+    let suggestions = names
+        .into_iter()
+        .map(|text| Suggestion {
+            text,
+            tooltip: None,
+        })
+        .collect();
+    filter_suggestions(suggestions, word)
+}
+
+/// Keep suggestions that extend `word`, ignoring ASCII case, without
+/// duplicates and at most [`MAX_SUGGESTIONS`].
+fn filter_suggestions(suggestions: Vec<Suggestion>, word: &str) -> Vec<Suggestion> {
+    let mut seen = BTreeSet::new();
+    suggestions
+        .into_iter()
+        .filter(|suggestion| {
+            suggestion
+                .text
+                .get(..word.len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(word))
+                && seen.insert(suggestion.text.clone())
+        })
+        .take(MAX_SUGGESTIONS)
+        .collect()
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Context {
     pub id: u64,
@@ -345,6 +499,9 @@ pub struct Context {
     pub success: Option<bool>,
     pub command: Option<String>,
     pub args: String,
+    /// The argument being completed and its 1-based position, for `suggest`.
+    pub word: String,
+    pub position: usize,
 }
 impl Context {
     pub fn authenticated(id: u64, profile: &AuthenticatedProfile) -> Self {
@@ -598,7 +755,23 @@ impl Extensions {
         input: &Context,
         jobs: &Arc<Semaphore>,
     ) -> io::Result<Action> {
-        let script = self.script.as_ref().unwrap();
+        let hook = hook.to_owned();
+        self.spawn(input, jobs, move |script, input, deadline, runtime| {
+            script.evaluate(&hook, input, deadline, runtime)
+        })
+        .await
+    }
+
+    /// Run `work` on a blocking worker under the session's single callback
+    /// slot and the process-wide extension capacity, within the Lua deadline.
+    async fn spawn<T: Send + 'static>(
+        &self,
+        input: &Context,
+        jobs: &Arc<Semaphore>,
+        work: impl FnOnce(&ExtensionScript, &Context, Instant, &Extensions) -> io::Result<T>
+        + Send
+        + 'static,
+    ) -> io::Result<T> {
         let session_job = jobs
             .clone()
             .try_acquire_owned()
@@ -608,15 +781,14 @@ impl Extensions {
             .clone()
             .try_acquire_owned()
             .map_err(|_| invalid("extension capacity exhausted"))?;
-        let script = script.clone();
+        let script = self.script.clone().unwrap();
         let input = input.clone();
-        let hook = hook.to_owned();
         let runtime = self.clone();
         let deadline = Instant::now() + script::EXECUTION_TIMEOUT;
         let task = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let _session_job = session_job;
-            script.evaluate(&hook, &input, deadline, &runtime)
+            work(&script, &input, deadline, &runtime)
         });
         tokio::time::timeout(script::EXECUTION_TIMEOUT, task)
             .await
@@ -642,6 +814,77 @@ impl ExtensionSession {
             .cloned()
             .collect()
     }
+    /// Commands for this player's command tree with whether their arguments
+    /// ask for suggestions. Commands the player lacks permission for are left
+    /// out; the tree is rebuilt whenever a backend sends one.
+    pub fn visible_commands(&self) -> Vec<(String, bool)> {
+        self.runtime
+            .script
+            .as_ref()
+            .unwrap()
+            .commands
+            .iter()
+            .filter(|(_, command)| {
+                self.runtime
+                    .permits(&self.context.uuid, &command.permission)
+            })
+            .map(|(name, command)| (name.clone(), command.suggest != Suggest::None))
+            .collect()
+    }
+
+    /// Suggestions for the last word of a command's `args` (the text after
+    /// the command name and one space). Players without the command's
+    /// permission, and commands without `suggest`, get none. `servers` lists
+    /// the destinations this player may join.
+    pub async fn suggest(
+        &self,
+        name: &str,
+        args: &str,
+        servers: impl FnOnce() -> Vec<String>,
+    ) -> io::Result<Vec<Suggestion>> {
+        let script = self.runtime.script.as_ref().unwrap();
+        let Some(command) = script.commands.get(name) else {
+            return Ok(Vec::new());
+        };
+        if !self
+            .runtime
+            .permits(&self.context.uuid, &command.permission)
+        {
+            return Ok(Vec::new());
+        }
+        let word = args.rsplit(' ').next().unwrap_or_default();
+        let suggestions = match command.suggest {
+            Suggest::None => Vec::new(),
+            Suggest::Players => {
+                return Ok(complete_names(
+                    self.runtime.players.names().into_values().collect(),
+                    word,
+                ));
+            }
+            Suggest::Servers => return Ok(complete_names(servers(), word)),
+            Suggest::Lua => {
+                let mut input = self.context.clone();
+                input.command = Some(name.into());
+                input.args = args.into();
+                input.word = word.into();
+                input.position = args.split(' ').count();
+                self.runtime
+                    .spawn(&input, &self.jobs, |script, input, deadline, runtime| {
+                        script.run(
+                            "suggest",
+                            input,
+                            deadline,
+                            runtime,
+                            Vec::new,
+                            parse_suggestions,
+                        )
+                    })
+                    .await?
+            }
+        };
+        Ok(filter_suggestions(suggestions, word))
+    }
+
     pub async fn decision(&self, hook: &str) -> io::Result<Action> {
         self.runtime.call(hook, &self.context, &self.jobs).await
     }
@@ -650,10 +893,11 @@ impl ExtensionSession {
             .split_once(char::is_whitespace)
             .unwrap_or((command, ""));
         let script = self.runtime.script.as_ref().unwrap();
-        let permission = script
+        let permission = &script
             .commands
             .get(name)
-            .ok_or_else(|| invalid("unknown extension command"))?;
+            .ok_or_else(|| invalid("unknown extension command"))?
+            .permission;
         if !self.runtime.permits(&self.context.uuid, permission) {
             return Ok(Action::Message(
                 "You do not have permission to use this command.".into(),

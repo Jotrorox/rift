@@ -1132,6 +1132,20 @@ pub async fn handle(
                         timeout(HANDSHAKE_TIMEOUT, session.send_bungeecord(&payload)).await??;
                     }
                 }
+                Ok(SessionEvent::Suggestions(request)) => {
+                    let live_snapshot = snapshot.latest();
+                    let network = Network {
+                        snapshot: &live_snapshot,
+                        addresses: &live_snapshot.addresses,
+                        metrics: &metrics,
+                    };
+                    let servers = network.joinable(&session, &current_backend);
+                    timeout(
+                        HANDSHAKE_TIMEOUT,
+                        session.answer_suggestions(&request, || servers),
+                    )
+                    .await??;
+                }
                 Ok(SessionEvent::ProxyCommand(command)) => {
                     let live_snapshot = snapshot.latest();
                     let network = Network {

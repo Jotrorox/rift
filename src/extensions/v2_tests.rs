@@ -853,6 +853,10 @@ async fn players_api_lists_and_queues_actions_for_joined_players() {
         assert(list[1].connection_id == '9' and list[1].protocol == 774)
         assert(#players.list('game') == 1 and players.list('game')[1].name == 'Bob')
         assert(players.get('aLiCe').name == 'Alice' and players.get('Nobody') == nil)
+        local names = players.names()
+        assert(#names == 2 and names[1] == 'Alice' and names[2] == 'Bob')
+        assert(#players.names('b') == 1 and players.names('b')[1] == 'Bob')
+        assert(#players.names('Carol') == 0)
         assert(players.message('alice', 'hello'))
         assert(players.action_bar('0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a', 'bar'))
         assert(players.title('Alice', { title = 'Big', subtitle = 'small',
