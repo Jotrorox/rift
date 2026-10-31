@@ -35,6 +35,7 @@ const USAGE: &str = "Usage: rift [<listen-ip:port> <backend-ip:port>]\n\
     rift check [path] (validate configuration; default ./rift.lua)\n\
     rift --check [path] (alias for rift check; default ./rift.lua)\n\
     rift admin [--address <loopback-ip:port>] <command> (run an authenticated administrator command)\n\
+    rift node --controller <host:port> --name <node> --root <dir> --ca <pem> (run servers for a controller; see rift node --help)\n\
     rift --version (print package version)\n\
     rift --license (print project license and third-party notices)\n\
     Routing: rift <listen-ip:port> [--route <hostname=backend:port>]... [--default <backend:port>]\n\
@@ -62,6 +63,17 @@ async fn start() -> io::Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
     if args.first().is_some_and(|arg| arg == "admin") {
         return crate::admin::client(&args[1..]).await;
+    }
+    if args.first().is_some_and(|arg| arg == "node") {
+        if args
+            .get(1)
+            .is_some_and(|arg| arg == "--help" || arg == "-h")
+        {
+            println!("{}", rift::node::agent::USAGE);
+            return Ok(());
+        }
+        let options = rift::node::agent::Options::parse(&args[1..])?;
+        return rift::node::agent::run(options).await;
     }
     if args
         .first()

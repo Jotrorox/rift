@@ -19,6 +19,8 @@ export const DOCS = [
     blurb: 'systemd, containers, reloads, maintenance, upgrades and rollback.' },
   { slug: 'managed-servers', file: 'docs/managed-servers.md', title: 'Managed servers', group: 'Run',
     blurb: 'Local processes, service groups, scaling, templates and persistent worlds.' },
+  { slug: 'nodes', file: 'docs/nodes.md', title: 'Multiple hosts', group: 'Run',
+    blurb: 'Game servers on more machines with rift node agents, placement and failure handling.' },
   { slug: 'http', file: 'docs/http.md', title: 'Web dashboard and HTTP', group: 'Run',
     blurb: 'The bundled dashboard, status site, config API and Lua endpoints.' },
   { slug: 'messaging', file: 'docs/messaging.md', title: 'Messaging', group: 'Integrate',

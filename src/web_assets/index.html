@@ -141,8 +141,12 @@
         <section class="view" id="view-servers" aria-labelledby="view-title" hidden>
           <div class="page-head"><p class="page-intro">Servers wake when players need them and stop after their idle timeout. Stop pauses automatic wake until you choose Start. Servers with connected players or pending attachments can’t be stopped or removed.</p><a class="button secondary" href="#groups">New instance</a></div>
           <section class="panel">
-            <div class="table-wrap flush"><table><thead><tr><th scope="col">Name</th><th scope="col">State</th><th scope="col">Usage</th><th scope="col">Automatic wake</th><th scope="col">Storage</th><th scope="col">Template</th><th scope="col">Group / address</th><th scope="col">Last error</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead><tbody id="managed-servers"><tr><td colspan="9" class="empty">Waiting for data</td></tr></tbody></table></div>
+            <div class="table-wrap flush"><table><thead><tr><th scope="col">Name</th><th scope="col">State</th><th scope="col">Usage</th><th scope="col">Automatic wake</th><th scope="col">Storage</th><th scope="col">Template</th><th scope="col">Group / address</th><th scope="col">Node</th><th scope="col">Last error</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead><tbody id="managed-servers"><tr><td colspan="10" class="empty">Waiting for data</td></tr></tbody></table></div>
             <p class="operation-result" id="server-result" role="status" aria-live="polite"></p>
+          </section>
+          <section class="panel" id="nodes-panel" aria-labelledby="nodes-heading" hidden><div class="panel-heading"><h2 id="nodes-heading">Nodes</h2><span class="muted small" id="node-count">—</span></div>
+            <p class="muted small">Hosts running <code>rift node</code>. Servers on an unreachable node show as unknown: disposable games are replaced on other nodes, persistent worlds wait for their node.</p>
+            <div class="table-wrap flush"><table><thead><tr><th scope="col">Node</th><th scope="col">State</th><th scope="col">Address</th><th scope="col">Labels</th><th scope="col">Instances</th><th scope="col">Memory</th></tr></thead><tbody id="nodes"><tr><td colspan="6" class="empty">Waiting for data</td></tr></tbody></table></div>
           </section>
         </section>
 
