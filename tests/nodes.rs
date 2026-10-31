@@ -278,7 +278,11 @@ async fn named_servers_on_a_node_start_stop_log_recover_and_reconcile() {
     })
     .await;
 
-    // Reconciliation stops servers the controller no longer assigns.
+    // Reconciliation stops servers the controller no longer assigns. Detach
+    // this controller first; a controller that still manages the server
+    // would correctly restart it after the unexpected exit.
+    restarted.shutdown().await;
+    std::net::TcpStream::connect(("127.0.0.1", fixture.port)).unwrap();
     let result = fixture
         .nodes
         .request(
@@ -293,7 +297,10 @@ async fn named_servers_on_a_node_start_stop_log_recover_and_reconcile() {
         std::net::TcpStream::connect(("127.0.0.1", fixture.port)).is_err()
     })
     .await;
-    restarted.shutdown().await;
+    // Nothing restarts it afterwards.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(std::net::TcpStream::connect(("127.0.0.1", fixture.port)).is_err());
+    assert!(agent.state().await.servers.is_empty());
     connection.abort();
 }
 
