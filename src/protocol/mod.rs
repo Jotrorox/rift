@@ -24,6 +24,7 @@ pub use packets::{disconnect_component, system_component, validate_component};
 pub(crate) use packets::{login_identity, start_identity, success_identity};
 pub use state::{ConnectionState, Direction, State};
 use std::io;
+pub use switching::Suggestion;
 pub(crate) use tab_list::TabList;
 pub use tab_list::{TabEntry, TabView};
 pub use translation::supported as translatable;

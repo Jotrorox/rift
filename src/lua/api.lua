@@ -21,7 +21,7 @@ for namespace, methods in pairs({
     store = { "get", "set", "delete", "increment" },
     permissions = { "has", "set", "add_group", "remove_group", "groups" },
     http = { "request" },
-    players = { "list", "get", "message", "action_bar", "title", "tab_list", "boss_bar", "kick", "transfer", "broadcast" },
+    players = { "list", "get", "names", "message", "action_bar", "title", "tab_list", "boss_bar", "kick", "transfer", "broadcast" },
     servers = { "create", "remove", "start", "stop", "download" },
 }) do
     local proxy = {}
