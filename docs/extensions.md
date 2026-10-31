@@ -56,7 +56,8 @@ For a new player the order is:
 1. Legacy `on_route`, handshake, maintenance/rate admission and login parsing.
 2. Mojang identity verification and encryption. A claimed Login Start UUID is
    never passed to an extension as an authenticated identity.
-3. `login`, then `initial_server`, access checks and duplicate-name reservation.
+3. `login`, then `initial_server` (each Lua first, then its [bus decision](#decisions-answered-over-the-message-bus)),
+   access checks and duplicate-name reservation.
 4. Initial backend capacity reservation, connect, login, configuration and Join Game.
 5. Presence/administration registration, then `join`. Registration at backend
    Login Success may be visible before Join Game; the join hook waits for the world.
@@ -168,6 +169,90 @@ Commands may return nil, `{ message = "text" }`, `{ server = "name" }`,
 with their original backend; proxy arguments use unsigned Brigadier strings.
 Protect destinations in both `initial_server` and `before_transfer`: a command
 permission alone does not protect a server against `/server` or admin routing.
+
+## Decisions answered over the message bus
+
+A service with its own database, such as a ban system, can decide `login`,
+`initial_server` and `before_transfer` without running in Lua. Rust sends a
+request on the [message bus](messaging.md) and waits asynchronously, so a slow
+responder holds no Lua worker and no extension slot. Decisions require
+`api_version = 2`.
+
+```lua
+rift.config.extensions = {
+    api_version = 2,
+    decisions = {
+        login = {
+            subject = "relaxoban.login", timeout_ms = 2000,
+            on_timeout = "deny", on_no_responders = "deny",
+            deny_message = "Ban status unavailable, please retry",
+            max_in_flight = 256,
+        },
+        before_transfer = { subject = "network.transfer", timeout_ms = 300, on_timeout = "allow" },
+    },
+}
+```
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `subject` | required | Literal subject the request is sent to, outside `rift.*` and `_INBOX.*` |
+| `timeout_ms` | `1000` | How long to wait for a reply, 1–10000 |
+| `on_timeout` | `"deny"` | `"allow"` or `"deny"` when no reply arrives in time |
+| `on_no_responders` | `"deny"` | Applied at once when nobody subscribes to `subject` |
+| `deny_message` | `"Unable to check your access, please try again later."` | Shown to the player when a policy denies |
+| `max_in_flight` | `256` | Open requests for this hook, 1–65536. When it is full, `on_timeout` applies at once |
+
+Decisions fail closed by default. `on_no_responders` takes effect immediately,
+without waiting for the timeout, because the broker knows nobody is subscribed.
+The `max_in_flight` limit protects the proxy and the responder against login
+floods. Decisions can change on reload; open requests keep counting against the
+limit while it stays the same.
+
+**Order.** The Lua hook (a direct callback or `rift.on` handlers) runs first,
+because it is cheap and local. The bus is asked only when Lua continues. Any deny
+wins. A hook without Lua code goes straight to the bus.
+
+**Request.** A JSON object with `hook`, `uuid` (lowercase 32-digit hex),
+`name`, `connection_id` (decimal string), `peer_ip`, `hostname`, `protocol`,
+`default_server`, `server`, `target` and `reason`. Fields a hook does not have
+are `null`, as in the Lua context.
+
+**Reply.** One of these JSON objects, with no other fields:
+
+| Reply | Allowed for |
+| --- | --- |
+| `{"action":"continue"}` | every decided hook |
+| `{"action":"deny","reason":"…"}` | every decided hook |
+| `{"action":"server","server":"lobby-2"}` | `initial_server` only |
+
+Replies are validated exactly like Lua results: strings must contain 1–1024
+bytes, a server must be configured, and an invalid reply is an error, so login
+is rejected and a transfer target is skipped. A reply that arrives after the
+timeout is dropped. A timed-out request may still have been processed, so
+**decisions must not have side effects**.
+
+**Responders.** Subscribe with a queue group so several instances share the
+load and none is a single point of failure. A remote principal needs
+`subscribe` on the decision subject and `publish` on `_INBOX.>` to reply:
+
+```lua
+principals = {
+    {
+        name = "relaxoban",
+        token_env = "RIFT_RELAXOBAN_TOKEN",
+        subscribe = { "relaxoban.login" },
+        publish = { "_INBOX.>" },
+    },
+}
+```
+
+> **Do not run a login decider only on backends that Rift starts on demand.**
+> With no responder the first login is denied, so the lobby never starts and no
+> responder ever appears. Run the decider independently of the backends, for
+> example as a small standalone service using a messaging client.
+
+[`rift.events.players`](messaging.md#rift-control-subjects) reports joins, server
+switches and quits, so services that only follow players need no Lua at all.
 
 ## API v2 host services
 

@@ -10,6 +10,7 @@ use std::{
 };
 use tokio::sync::Semaphore;
 
+mod decisions;
 mod integrations;
 mod permissions;
 mod players;
@@ -38,6 +39,7 @@ pub struct ExtensionScript {
     commands: BTreeMap<String, String>,
     permissions: permissions::Policy,
     pub queues: BTreeMap<String, usize>,
+    decisions: BTreeMap<String, decisions::Decision>,
 }
 
 fn invalid(message: impl ToString) -> io::Error {
@@ -102,10 +104,11 @@ impl ExtensionScript {
                 "storage",
                 "integrations",
                 "jobs",
+                "decisions",
             ],
         )?;
         if api_version == 1 {
-            for name in ["storage", "integrations", "jobs", "groups"] {
+            for name in ["storage", "integrations", "jobs", "groups", "decisions"] {
                 if !table.raw_get::<Value>(name)?.is_nil() {
                     return Err(mlua::Error::runtime(format!(
                         "extensions.{name} requires api_version = 2"
@@ -121,6 +124,7 @@ impl ExtensionScript {
         }
         let integrations = integrations::parse(table.raw_get("integrations")?)?;
         let jobs = scheduler::parse(table.raw_get("jobs")?)?;
+        let decisions = decisions::parse(table.raw_get("decisions")?)?;
         let mut hooks = BTreeSet::new();
         for hook in HOOKS {
             match table.raw_get::<Value>(*hook)? {
@@ -180,6 +184,7 @@ impl ExtensionScript {
             commands,
             permissions,
             queues,
+            decisions,
         }))
     }
     fn evaluate(
@@ -368,6 +373,8 @@ pub struct Extensions {
     permissions: permissions::Permissions,
     players: Players,
     job_gates: Arc<Mutex<BTreeMap<String, Weak<Semaphore>>>>,
+    /// Open bus decisions per hook, kept across reloads while the limit is unchanged.
+    decision_slots: Arc<BTreeMap<String, Arc<Semaphore>>>,
 }
 impl Extensions {
     /// Live FIFO pressure, excluding expired tickets even while their session
@@ -432,10 +439,26 @@ impl Extensions {
             || Arc::new(Mutex::new(group_members(config))),
             |previous| previous.groups.clone(),
         );
+        let decision_slots = config
+            .extensions
+            .iter()
+            .flat_map(|script| &script.decisions)
+            .map(|(hook, decision)| {
+                let reused = previous
+                    .and_then(|previous| previous.script.as_ref())
+                    .and_then(|old| old.decisions.get(hook))
+                    .filter(|old| old.max_in_flight == decision.max_in_flight)
+                    .and_then(|_| previous?.decision_slots.get(hook).cloned());
+                let slots =
+                    reused.unwrap_or_else(|| Arc::new(Semaphore::new(decision.max_in_flight)));
+                (hook.clone(), slots)
+            })
+            .collect();
         let runtime = Self {
             script: config.extensions.clone(),
+            decision_slots: Arc::new(decision_slots),
             players: previous.map_or_else(
-                || Players::new(backends.clone(), groups.clone()),
+                || Players::new(backends.clone(), groups.clone(), broker.clone()),
                 |previous| previous.players.clone(),
             ),
             backends,
@@ -542,11 +565,40 @@ impl Extensions {
             jobs: Arc::new(Semaphore::new(1)),
         })
     }
+    /// The Lua hook runs first because it is cheap and local. Only when it
+    /// continues does a configured bus decision get asked.
     async fn call(&self, hook: &str, input: &Context, jobs: &Arc<Semaphore>) -> io::Result<Action> {
         let script = self.script.as_ref().unwrap();
-        if hook != "command" && !script.hooks.contains(hook) {
-            return Ok(Action::Continue);
+        let mut action = if hook == "command" || script.hooks.contains(hook) {
+            self.evaluate(hook, input, jobs).await?
+        } else {
+            Action::Continue
+        };
+        if action == Action::Continue
+            && let Some(decision) = script.decisions.get(hook)
+        {
+            action = decision
+                .decide(hook, input, &self.broker, &self.decision_slots[hook])
+                .await?;
         }
+        if let Action::Server(server) | Action::Queue(server) = &action
+            && !self
+                .backends
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(server)
+        {
+            return Err(invalid("extension selected an unknown backend"));
+        }
+        Ok(action)
+    }
+    async fn evaluate(
+        &self,
+        hook: &str,
+        input: &Context,
+        jobs: &Arc<Semaphore>,
+    ) -> io::Result<Action> {
+        let script = self.script.as_ref().unwrap();
         let session_job = jobs
             .clone()
             .try_acquire_owned()
@@ -566,20 +618,10 @@ impl Extensions {
             let _session_job = session_job;
             script.evaluate(&hook, &input, deadline, &runtime)
         });
-        let action = tokio::time::timeout(script::EXECUTION_TIMEOUT, task)
+        tokio::time::timeout(script::EXECUTION_TIMEOUT, task)
             .await
             .map_err(invalid)?
-            .map_err(invalid)??;
-        if let Action::Server(server) | Action::Queue(server) = &action
-            && !self
-                .backends
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .contains(server)
-        {
-            return Err(invalid("extension selected an unknown backend"));
-        }
-        Ok(action)
+            .map_err(invalid)?
     }
 }
 pub struct ExtensionSession {
@@ -866,6 +908,8 @@ impl Drop for ExtensionSession {
     }
 }
 
+#[cfg(test)]
+mod decision_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

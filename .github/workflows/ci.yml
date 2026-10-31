@@ -122,7 +122,7 @@ jobs:
           - os: ubuntu-24.04
             platform: linux-x86_64
             executable: rift-linux-x86_64
-          - os: macos-14
+          - os: macos-15
             platform: macos-aarch64
             executable: rift-macos-aarch64
           - os: windows-2022
