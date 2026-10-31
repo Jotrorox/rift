@@ -24,6 +24,9 @@ allocated ports, storage ownership and manual stops across proxy restarts in
 `rift.sqlite3` beside the config. See the
 [managed-server guide](docs/managed-servers.md), [managed-server example](examples/managed.lua),
 [service groups](examples/services.lua) and [provisioning templates](examples/templates.lua).
+Run servers on more machines with `rift node` agents that the proxy controls
+over its message bus, with label- and capacity-based placement; see
+[multiple hosts](docs/nodes.md) and [examples/nodes.lua](examples/nodes.lua).
 The dashboard provides live server logs and commands, structured group/template
 editing, server list, tab list and permission group editing with group
 memberships, configuration deployment history and rollback, scoped operator
@@ -196,6 +199,7 @@ also includes for offline use.
 - [Authenticated extensions](https://jotrorox.github.io/rift/docs/extensions/): lifecycle hooks, commands, permissions and queues.
 - [Operations](https://jotrorox.github.io/rift/docs/operations/): installation, systemd/containers, administration and upgrades.
 - [Managed servers](https://jotrorox.github.io/rift/docs/managed-servers/): local processes, automatic start/stop and persistent worlds.
+- [Multiple hosts](https://jotrorox.github.io/rift/docs/nodes/): `rift node` agents, placement across machines and failure handling.
 - [HTTP services](https://jotrorox.github.io/rift/docs/http/): web dashboard, status, API and Lua extensions.
 - [Messaging](https://jotrorox.github.io/rift/docs/messaging/): plugin messaging, [Lua API](https://jotrorox.github.io/rift/docs/messaging-lua/) and [QUIC protocol](https://jotrorox.github.io/rift/docs/messaging-protocol/).
 - [BungeeCord compatibility](https://jotrorox.github.io/rift/docs/bungeecord/): backend plugin transfers, queries, forwarding, messages and kicks.

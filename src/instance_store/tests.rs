@@ -482,3 +482,107 @@ fn database_paths_resolve_beside_config_and_cannot_overlap_instance_storage() {
     );
     assert!(config.instances.is_empty());
 }
+
+#[test]
+fn version_one_databases_migrate_and_ports_become_unique_per_node() {
+    let fixture = Fixture::new("disposable");
+    let path = fixture.root.join("rift.sqlite3");
+    {
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE instances (
+                    name TEXT PRIMARY KEY NOT NULL,
+                    port INTEGER UNIQUE NOT NULL CHECK(port BETWEEN 1 AND 65535),
+                    phase TEXT NOT NULL CHECK(phase IN ('creating','ready','removing','deleting')),
+                    explicitly_stopped INTEGER NOT NULL DEFAULT 0 CHECK(explicitly_stopped IN (0,1)),
+                    definition TEXT NOT NULL
+                ) STRICT;
+                CREATE TABLE sequences (group_name TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL) STRICT;
+                INSERT INTO sequences VALUES ('games','4');
+                PRAGMA user_version=1;",
+            )
+            .unwrap();
+    }
+    let store = fixture.store();
+    let version: u32 = store
+        .connection
+        .lock()
+        .unwrap()
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 2);
+    // The sequence survives, so names are never reused after the upgrade.
+    let (_, name, _) = fixture.ready(&store);
+    assert_eq!(name, "games-5");
+    let port = fixture.config().service_groups["games"].port_start;
+    assert_eq!(store.reserved_ports().unwrap(), BTreeSet::from([port]));
+    assert!(store.reserved_ports_on(Some("node1")).unwrap().is_empty());
+    let insert = |name: &str, node: &str| {
+        store.connection.lock().unwrap().execute(
+            "INSERT INTO instances (name,node,port,phase,definition) VALUES (?1,?2,?3,'ready','{}')",
+            params![name, node, port],
+        )
+    };
+    insert("games-90", "node1").unwrap();
+    assert!(
+        insert("games-91", "node1").is_err(),
+        "same port twice on one node"
+    );
+    assert!(
+        insert("games-92", "").is_err(),
+        "same port twice on this host"
+    );
+}
+
+#[test]
+fn remote_registrations_never_touch_local_storage() {
+    let fixture = Fixture::new("disposable");
+    let source = fixture
+        .source
+        .replace(
+            "return {",
+            "return {messaging={listen='127.0.0.1:0',certificate='c.pem',private_key='k.pem'},nodes={node1={address='10.0.0.11'}},",
+        )
+        .replace("directory='instances/{name}',", "nodes={'node1'},");
+    let path = fixture.root.join("rift.lua");
+    let mut config = Config::from_lua_at(&source, &path).unwrap();
+    let store = fixture.store();
+    let name = store.allocate_name(&config, "games").unwrap();
+    let port = config.service_groups["games"].port_start;
+    config
+        .add_instance_on("games", &name, port, Some("node1"))
+        .unwrap();
+    assert_eq!(
+        config.backends[&name].address(),
+        format!("10.0.0.11:{port}")
+    );
+    let directory = config.managed_servers[&name].directory.clone();
+    assert_eq!(directory, PathBuf::from(format!("temp/services/{name}")));
+    let plan = Plan {
+        directory: directory.clone(),
+        marker: None,
+        stage: None,
+        created: false,
+    };
+    // Node directories must be relative and staged by the agent.
+    let mut absolute = plan.clone();
+    absolute.directory = fixture.root.join("x");
+    assert!(store.begin_creation(&config, &name, &absolute).is_err());
+    store.begin_creation(&config, &name, &plan).unwrap();
+    store.commit_creation(&name).unwrap();
+    assert_eq!(
+        store.reserved_ports_on(Some("node1")).unwrap(),
+        BTreeSet::from([port])
+    );
+    assert!(store.reserved_ports().unwrap().is_empty());
+    // Restoring needs no local directory, port or files for the instance.
+    let mut restored = Config::from_lua_at(&source, &path).unwrap();
+    store.restore(&mut restored).unwrap();
+    assert_eq!(restored.instances[&name].node.as_deref(), Some("node1"));
+    assert!(store.reserve_restored_ports(&restored).unwrap().is_empty());
+    store.begin_removal(&name).unwrap();
+    store.finish_removal(&name).unwrap();
+    assert!(store.records().unwrap().is_empty());
+    assert!(!fixture.root.join("temp").exists());
+}

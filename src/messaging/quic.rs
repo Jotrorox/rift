@@ -142,10 +142,18 @@ fn token_mac(token: &str) -> Hmac<Sha256> {
     mac
 }
 impl Identity {
+    /// `rift.node.<n>.*` belongs to the agent authenticated as `node.<n>`;
+    /// commands come from the in-process controller only.
+    fn node_scope(&self, pattern: &str) -> bool {
+        self.name
+            .strip_prefix("node.")
+            .is_some_and(|node| covers(&format!("rift.node.{node}.>"), pattern))
+    }
     fn can_publish(&self, subject: &str, reply: Option<&str>) -> Result<()> {
         validate_literal(subject)?;
         if reserved(subject, "rift.events")
             || (!self.control && reserved(subject, "rift.control"))
+            || (reserved(subject, "rift.node") && !self.node_scope(subject))
             || !self.publish.iter().any(|p| covers(p, subject))
         {
             return Err(denied("publication not permitted"));
@@ -162,6 +170,10 @@ impl Identity {
         validate_pattern(pattern)?;
         if (!self.control
             && (overlaps(pattern, "rift.control.>") || covers(pattern, "rift.control")))
+            // Node commands carry secrets such as the forwarding secret.
+            || (!self.control
+                && !self.node_scope(pattern)
+                && (overlaps(pattern, "rift.node.>") || covers(pattern, "rift.node")))
             || !self.subscribe.iter().any(|p| covers(p, pattern))
         {
             return Err(denied("subscription not permitted"));
