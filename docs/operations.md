@@ -108,7 +108,8 @@ administration.
 The `servers` permission grants `rift admin servers`, `rift admin start <backend>`
 and `rift admin stop <backend>` for configured [managed servers](managed-servers.md).
 It also grants `rift admin groups`, `rift admin create <group>` and
-`rift admin remove <instance>` for [service groups](managed-servers.md#service-groups-and-dynamic-instances).
+`rift admin remove <instance>` for [service groups](managed-servers.md#service-groups-and-dynamic-instances),
+and `rift admin nodes` for [node agents](nodes.md).
 Creation allocates a port and registers a stopped backend; removal waits for
 child cleanup and refuses players or pending attachments.
 Start and stop return an accepted response immediately; poll `servers` to verify
@@ -450,7 +451,8 @@ isolation and cannot detect changes incompatible with an already running process
 | `managed_servers` definitions or addresses of managed backends | Restart required; running processes and their lifecycle policy remain attached to the original definition |
 | `service_groups`, `templates` and scaling policies | Apply live while each registered instance keeps its process definition, storage policy and an in-range port; otherwise the reload names the instance to remove first. Create and remove instances with admin or web operations |
 | `instance_database` | Bundled SQLite file, default `rift.sqlite3` beside the config; restores registrations before scaling. Path changes require a restart |
-| Runtime service instances | SQLite preserves names, groups, ports, storage ownership and explicit stops across reloads and proxy restarts |
+| `nodes` and `messaging` | Restart required; agents keep their servers running while the controller restarts and are adopted again. See [multiple hosts](nodes.md) |
+| Runtime service instances | SQLite preserves names, groups, nodes, ports, storage ownership and explicit stops across reloads and proxy restarts |
 
 Already accepted connections keep their original configuration snapshot while
 initial login completes. A route edit never transfers a connected player.

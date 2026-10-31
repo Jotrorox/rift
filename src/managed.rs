@@ -1,13 +1,11 @@
-//! Local process ownership for managed backends. Workers own child processes,
-//! so cancelling a login or an administrator request cannot abandon a start.
+//! Process ownership for managed backends. Workers own their processes, so
+//! cancelling a login or an administrator request cannot abandon a start.
+//! Processes run on this host or on a `rift node` agent; see [`backend`].
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fmt,
-    fs::OpenOptions,
-    io,
+    fmt, io,
     net::SocketAddr,
     path::Path,
-    process::Stdio,
     sync::{
         Arc, Mutex, MutexGuard,
         atomic::{AtomicBool, Ordering},
@@ -15,17 +13,17 @@ use std::{
     time::{Duration, Instant},
 };
 
-use tokio::{
-    io::AsyncWriteExt,
-    net::TcpStream,
-    process::{Child, Command},
-    sync::{Notify, mpsc, oneshot, watch},
-};
+use tokio::sync::{Notify, mpsc, oneshot, watch};
 
 use crate::{
     config::{Config, ManagedServer},
+    node::{Nodes, protocol},
     players::PlayerRegistry,
 };
+
+mod backend;
+use backend::{Local, ProcessBackend, Remote, Status};
+pub(crate) use backend::{spawn as spawn_process, stop_child, write_console};
 
 /// Observable lifecycle state of a supervised process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +33,8 @@ pub enum Phase {
     Running,
     Stopping,
     Failed,
+    /// The server's node is unreachable; its process may still be running.
+    Unknown,
 }
 
 impl Phase {
@@ -45,6 +45,7 @@ impl Phase {
             Self::Running => "running",
             Self::Stopping => "stopping",
             Self::Failed => "failed",
+            Self::Unknown => "unknown",
         }
     }
 }
@@ -73,10 +74,12 @@ pub struct ManagedServerSnapshot {
     pub last_error: Option<String>,
     pub restart_attempts: usize,
     pub restart_exhausted: bool,
+    /// The node agent running this server; `None` for this host.
+    pub node: Option<String>,
 }
 
 /// Child stdout and stderr, appended in the server's working directory.
-const LOG_FILE: &str = "rift-server.log";
+pub(crate) const LOG_FILE: &str = "rift-server.log";
 
 #[derive(Debug, Clone)]
 pub struct ManagedServers(Arc<Inner>);
@@ -89,6 +92,7 @@ struct Inner {
     launched: AtomicBool,
     shutdown: AtomicBool,
     instance_store: Mutex<Option<Arc<crate::instance_store::Store>>>,
+    nodes: Nodes,
 }
 
 #[derive(Debug)]
@@ -96,10 +100,14 @@ struct Server {
     name: String,
     config: ManagedServer,
     address: Option<SocketAddr>,
+    /// The backend address the proxy connects to, also for remote servers.
+    endpoint: Option<String>,
     state: Mutex<State>,
     sender: mpsc::Sender<Request>,
     receiver: Mutex<Option<mpsc::Receiver<Request>>>,
     shutdown: AtomicBool,
+    /// Controller shutdown rather than removal: remote processes keep running.
+    detach: AtomicBool,
     wake: Notify,
 }
 
@@ -203,15 +211,21 @@ impl Drop for ManagedLease {
 impl ManagedServers {
     /// Construction is side-effect free and does not need a Tokio runtime.
     pub fn new(config: &Config, players: Arc<PlayerRegistry>) -> Self {
+        let nodes = Nodes::new(crate::messaging::Broker::default(), config);
+        Self::with_nodes(config, players, nodes)
+    }
+
+    /// Servers with a `node` run through that node's agent in `nodes`.
+    pub fn with_nodes(config: &Config, players: Arc<PlayerRegistry>, nodes: Nodes) -> Self {
         let servers = config
             .managed_servers
             .iter()
             .map(|(name, definition)| {
-                let address = config
+                let endpoint = config
                     .backends
                     .get(name)
-                    .and_then(|backend| backend.address().parse().ok());
-                (name.clone(), new_server(name, definition.clone(), address))
+                    .map(|backend| backend.address().to_owned());
+                (name.clone(), new_server(name, definition.clone(), endpoint))
             })
             .collect();
         Self(Arc::new(Inner {
@@ -221,7 +235,26 @@ impl ManagedServers {
             launched: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
             instance_store: Mutex::new(None),
+            nodes,
         }))
+    }
+
+    pub fn nodes(&self) -> &Nodes {
+        &self.0.nodes
+    }
+
+    /// The node running `name`, or `None` for this host and unknown names.
+    pub fn node_of(&self, name: &str) -> Option<String> {
+        lock(&self.0.servers).get(name)?.config.node.clone()
+    }
+
+    /// Managed servers that the controller assigns to `node`.
+    pub fn names_on(&self, node: &str) -> Vec<String> {
+        lock(&self.0.servers)
+            .values()
+            .filter(|server| server.config.node.as_deref() == Some(node))
+            .map(|server| server.name.clone())
+            .collect()
     }
 
     /// Attach restored stop intent before launching any autostart workers.
@@ -252,7 +285,7 @@ impl ManagedServers {
             return Ok(());
         }
         for server in servers.values() {
-            launch_worker(&runtime, server, &self.0.players);
+            launch_worker(&runtime, server, &self.0.players, &self.0.nodes);
         }
         Ok(())
     }
@@ -272,20 +305,26 @@ impl ManagedServers {
         let definition = config.managed_servers.get(name).ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotFound, "unknown managed server definition")
         })?;
-        let address = loopback_address(
-            config
-                .backends
-                .get(name)
-                .and_then(|backend| backend.address().parse().ok()),
-        )?;
+        let endpoint = config
+            .backends
+            .get(name)
+            .map(|backend| backend.address().to_owned());
+        if definition.node.is_none() {
+            loopback_address(endpoint.as_deref().and_then(|e| e.parse().ok()))?;
+        } else if endpoint.is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a managed server on a node requires a backend address",
+            ));
+        }
         if definition.command.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "managed server command is empty",
             ));
         }
-        let server = new_server(name, definition.clone(), Some(address));
-        launch_worker(&runtime, &server, &self.0.players);
+        let server = new_server(name, definition.clone(), endpoint);
+        launch_worker(&runtime, &server, &self.0.players, &self.0.nodes);
         servers.insert(name.to_owned(), server);
         lock(&self.0.retired).remove(name);
         Ok(())
@@ -476,14 +515,31 @@ impl ManagedServers {
 
     /// Bounded incremental reads from the same file used by stdout/stderr.
     /// An absent cursor tails the file; a cursor past EOF reports truncation.
+    /// Remote servers read the same file on their node through its agent.
     pub async fn logs(&self, name: &str, cursor: Option<u64>) -> io::Result<serde_json::Value> {
-        let path = {
+        let (directory, node) = {
             let servers = lock(&self.0.servers);
             let server = servers
                 .get(name)
                 .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "unknown managed server"))?;
-            server.config.directory.join(LOG_FILE)
+            (server.config.directory.clone(), server.config.node.clone())
         };
+        if let Some(node) = node {
+            return self
+                .0
+                .nodes
+                .request(
+                    &node,
+                    &protocol::Command::Logs {
+                        server: name.to_owned(),
+                        directory,
+                        cursor,
+                    },
+                    Duration::from_secs(15),
+                )
+                .await;
+        }
+        let path = directory.join(LOG_FILE);
         tokio::task::spawn_blocking(move || read_log(&path, cursor))
             .await
             .map_err(io::Error::other)?
@@ -618,6 +674,7 @@ impl ManagedServers {
                     last_error: state.last_error.clone(),
                     restart_attempts: state.restart_attempts,
                     restart_exhausted: restart_exhausted(server, &state),
+                    node: server.config.node.clone(),
                 }
             })
             .collect()
@@ -630,6 +687,7 @@ impl ManagedServers {
             let servers = lock(&self.0.servers);
             self.0.shutdown.store(true, Ordering::Release);
             for server in servers.values() {
+                server.detach.store(true, Ordering::Release);
                 server.shutdown.store(true, Ordering::Release);
                 server.wake.notify_one();
             }
@@ -653,21 +711,26 @@ impl Drop for Inner {
             .unwrap_or_else(|e| e.into_inner())
             .values()
         {
+            server.detach.store(true, Ordering::Release);
             server.shutdown.store(true, Ordering::Release);
             server.wake.notify_one();
         }
     }
 }
 
-fn new_server(name: &str, config: ManagedServer, address: Option<SocketAddr>) -> Arc<Server> {
+fn new_server(name: &str, config: ManagedServer, endpoint: Option<String>) -> Arc<Server> {
     let (sender, receiver) = mpsc::channel(64);
     Arc::new(Server {
         name: name.to_owned(),
+        address: endpoint
+            .as_deref()
+            .and_then(|endpoint| endpoint.parse().ok()),
+        endpoint,
         config,
-        address,
         sender,
         receiver: Mutex::new(Some(receiver)),
         shutdown: AtomicBool::new(false),
+        detach: AtomicBool::new(false),
         wake: Notify::new(),
         state: Mutex::new(State {
             phase: Phase::Stopped,
@@ -689,9 +752,23 @@ fn launch_worker(
     runtime: &tokio::runtime::Handle,
     server: &Arc<Server>,
     players: &Arc<PlayerRegistry>,
+    nodes: &Nodes,
 ) {
     let receiver = lock(&server.receiver).take().expect("single launch");
-    runtime.spawn(worker(server.clone(), players.clone(), receiver));
+    match &server.config.node {
+        None => runtime.spawn(worker(
+            server.clone(),
+            players.clone(),
+            receiver,
+            Local::default(),
+        )),
+        Some(node) => runtime.spawn(worker(
+            server.clone(),
+            players.clone(),
+            receiver,
+            Remote::new(nodes.clone(), node.clone()),
+        )),
+    };
 }
 
 /// Process ownership must survive a panic in an unrelated lock holder.
@@ -699,7 +776,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|error| error.into_inner())
 }
 
-fn read_log(path: &Path, cursor: Option<u64>) -> io::Result<serde_json::Value> {
+pub(crate) fn read_log(path: &Path, cursor: Option<u64>) -> io::Result<serde_json::Value> {
     use std::io::{Read, Seek, SeekFrom};
     const LIMIT: u64 = 64 * 1024;
     let missing =
@@ -736,31 +813,6 @@ fn read_log(path: &Path, cursor: Option<u64>) -> io::Result<serde_json::Value> {
         "truncated": cursor.is_some_and(|cursor| cursor > size),
         "has_more": end < size,
     }))
-}
-
-async fn write_console(child: &mut Option<Child>, command: &str) -> io::Result<()> {
-    let stdin = child
-        .as_mut()
-        .and_then(|process| process.stdin.as_mut())
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotConnected,
-                "managed server console is unavailable",
-            )
-        })?;
-    let write = async {
-        stdin.write_all(command.as_bytes()).await?;
-        stdin.write_all(b"\n").await?;
-        stdin.flush().await
-    };
-    tokio::time::timeout(Duration::from_secs(2), write)
-        .await
-        .unwrap_or_else(|_| {
-            Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "server console write timed out",
-            ))
-        })
 }
 
 /// Rift only supervises processes listening on a local, explicitly numbered port.
@@ -801,6 +853,9 @@ fn connect_allowed(server: &Server, state: &State) -> io::Result<()> {
         return Err(unavailable(
             "managed server is stopped by an administrator or shutting down",
         ));
+    }
+    if state.phase == Phase::Unknown {
+        return Err(node_unreachable(server));
     }
     if state.phase == Phase::Failed && state.recover {
         return Err(recovery_pending(server, state));
@@ -845,17 +900,31 @@ fn automatic_start_allowed(server: &Server, state: &State) -> io::Result<()> {
     if state.phase == Phase::Failed {
         return Err(recovery_pending(server, state));
     }
+    if state.phase == Phase::Unknown {
+        return Err(node_unreachable(server));
+    }
     Ok(())
 }
 
-async fn worker(
+fn node_unreachable(server: &Server) -> io::Error {
+    unavailable(&format!(
+        "node {} is unreachable",
+        server.config.node.as_deref().unwrap_or("local")
+    ))
+}
+
+async fn worker<B: ProcessBackend>(
     server: Arc<Server>,
     players: Arc<PlayerRegistry>,
     mut requests: mpsc::Receiver<Request>,
+    mut backend: B,
 ) {
-    let mut child = None;
-    if server.config.autostart && lock(&server.state).automatic {
-        let _ = start_process(&server, &mut child, StartMode::Scale).await;
+    // A remote server autostarts once its node is reachable, which may be
+    // after the controller itself started.
+    let mut autostart = server.config.autostart && lock(&server.state).automatic;
+    if autostart && backend.available().is_ok() {
+        autostart = false;
+        let _ = start_process(&server, &mut backend, StartMode::Scale).await;
     }
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -867,15 +936,28 @@ async fn worker(
             _ = server.wake.notified() => {}
             request = requests.recv() => {
                 let Some(request) = request else { break };
-                let result = perform(&server, &mut child, request.action).await;
+                if matches!(request.action, Action::Start { .. } | Action::Stop) {
+                    autostart = false;
+                }
+                let result = perform(&server, &mut backend, request.action).await;
                 if let Some(reply) = request.reply {
                     let _ = reply.send(result);
                 }
             }
-            _ = tick.tick() => supervise(&server, &players, &mut child).await,
+            _ = tick.tick() => {
+                if autostart && backend.available().is_ok() {
+                    autostart = false;
+                    if lock(&server.state).automatic {
+                        let _ = start_process(&server, &mut backend, StartMode::Scale).await;
+                    }
+                }
+                supervise(&server, &players, &mut backend).await;
+            }
         }
     }
-    let _ = stop_process(&server, &mut child).await;
+    if !(server.detach.load(Ordering::Acquire) && backend.survives_controller()) {
+        let _ = stop_process(&server, &mut backend).await;
+    }
     // Reject queued callers promptly instead of executing stale operations.
     requests.close();
     while let Some(request) = requests.recv().await {
@@ -892,30 +974,35 @@ async fn worker(
     }
 }
 
-async fn perform(server: &Server, child: &mut Option<Child>, action: Action) -> io::Result<()> {
+async fn perform<B: ProcessBackend>(
+    server: &Server,
+    backend: &mut B,
+    action: Action,
+) -> io::Result<()> {
     match action {
-        Action::Start { mode } => start_process(server, child, mode).await,
+        Action::Start { mode } => start_process(server, backend, mode).await,
         Action::Demand(startup) => {
             let completed = startup.result.borrow().clone();
             match completed {
                 // Autostart or an earlier manual start may already have
                 // satisfied this queued demand, even on failure.
                 Some(result) => copy_result(&result),
-                None => start_process(server, child, StartMode::Demand).await,
+                None => start_process(server, backend, StartMode::Demand).await,
             }
         }
         Action::Stop => {
-            let result = stop_process(server, child).await;
+            let result = stop_process(server, backend).await;
             lock(&server.state).pending_stop = false;
             result
         }
-        Action::Console(command) => write_console(child, &command).await,
+        Action::Console(command) => backend.send_command(server, &command).await,
     }
 }
 
 /// Reap unexpected exits, run due recovery attempts and apply idle shutdown.
-async fn supervise(server: &Server, players: &PlayerRegistry, child: &mut Option<Child>) {
-    check_exit(server, child).await;
+async fn supervise<B: ProcessBackend>(server: &Server, players: &PlayerRegistry, backend: &mut B) {
+    check_exit(server, backend).await;
+    adopt(server, backend).await;
     let should_recover = {
         let state = lock(&server.state);
         state.phase == Phase::Failed
@@ -926,9 +1013,11 @@ async fn supervise(server: &Server, players: &PlayerRegistry, child: &mut Option
             && state
                 .retry_at
                 .is_some_and(|deadline| Instant::now() >= deadline)
+            // Recovery waits for an unreachable node instead of spending retries.
+            && backend.available().is_ok()
     };
     if should_recover {
-        let _ = start_process(server, child, StartMode::Recovery).await;
+        let _ = start_process(server, backend, StartMode::Recovery).await;
     }
     let should_stop = {
         let mut state = lock(&server.state);
@@ -952,28 +1041,55 @@ async fn supervise(server: &Server, players: &PlayerRegistry, child: &mut Option
         }
     };
     if should_stop {
-        let _ = stop_process(server, child).await;
+        let _ = stop_process(server, backend).await;
     }
 }
 
-async fn check_exit(server: &Server, child: &mut Option<Child>) {
-    let Some(process) = child.as_mut() else {
+/// Take over a remote process that kept running while this worker did not
+/// own it, e.g. across a controller restart. Administrator stops still win.
+async fn adopt<B: ProcessBackend>(server: &Server, backend: &mut B) {
+    if backend.owns() || server.shutdown.load(Ordering::Acquire) {
+        return;
+    }
+    let Some(pid) = backend.adoptable(server) else {
         return;
     };
-    match process.try_wait() {
-        Ok(Some(status)) => {
-            *child = None;
-            record_failure(server, format!("managed server exited: {status}"));
+    let keep = {
+        let mut state = lock(&server.state);
+        if !matches!(state.phase, Phase::Stopped | Phase::Failed) || state.pending_stop {
+            return;
         }
-        Ok(None) => {}
-        Err(error) => {
-            // Reap an uninspectable child before replacement so two processes
-            // can never be owned for the same managed backend.
-            if let Some(mut process) = child.take() {
-                let _ = process.kill().await;
-                let _ = process.wait().await;
+        if state.automatic {
+            state.phase = Phase::Running;
+            state.pid = pid;
+            state.recover = true;
+            state.retry_at = None;
+            state.last_error = None;
+            state.last_activity = Instant::now();
+        }
+        state.automatic
+    };
+    backend.adopt(server, pid);
+    if !keep {
+        let _ = stop_process(server, backend).await;
+    }
+}
+
+async fn check_exit<B: ProcessBackend>(server: &Server, backend: &mut B) {
+    match backend.status(server).await {
+        Status::Idle => {}
+        Status::Running => {
+            let mut state = lock(&server.state);
+            if state.phase == Phase::Unknown {
+                state.phase = Phase::Running;
             }
-            record_failure(server, format!("cannot inspect managed process: {error}"));
+        }
+        Status::Unknown => backend::mark_unknown(server),
+        Status::Exited(status) => {
+            record_failure(server, format!("managed server exited: {status}"))
+        }
+        Status::Broken(error) => {
+            record_failure(server, format!("cannot inspect managed process: {error}"))
         }
     }
 }
@@ -986,16 +1102,16 @@ fn record_failure(server: &Server, error: String) {
     state.retry_at = Some(Instant::now() + server.config.restart_delay);
 }
 
-async fn start_process(
+async fn start_process<B: ProcessBackend>(
     server: &Server,
-    child: &mut Option<Child>,
+    backend: &mut B,
     mode: StartMode,
 ) -> io::Result<()> {
     let startup = {
         let mut state = lock(&server.state);
         state.startup.get_or_insert_with(Startup::new).clone()
     };
-    let result = start_process_inner(server, child, mode).await;
+    let result = start_process_inner(server, backend, mode).await;
     finish_startup(server, &startup, copy_result(&result));
     result
 }
@@ -1014,12 +1130,13 @@ fn finish_startup(server: &Server, startup: &Arc<Startup>, result: io::Result<()
     }
 }
 
-async fn start_process_inner(
+async fn start_process_inner<B: ProcessBackend>(
     server: &Server,
-    child: &mut Option<Child>,
+    backend: &mut B,
     mode: StartMode,
 ) -> io::Result<()> {
-    check_exit(server, child).await;
+    check_exit(server, backend).await;
+    adopt(server, backend).await;
     {
         let mut state = lock(&server.state);
         if server.shutdown.load(Ordering::Acquire) || state.pending_stop {
@@ -1039,6 +1156,9 @@ async fn start_process_inner(
             }
             _ => {}
         }
+        if state.phase == Phase::Unknown {
+            return Err(node_unreachable(server));
+        }
         if state.phase == Phase::Running {
             if mode == StartMode::Manual {
                 state.automatic = true;
@@ -1054,6 +1174,11 @@ async fn start_process_inner(
                 "managed server is cooling down after a failed start",
             ));
         }
+        // An unreachable node refuses the start without spending a retry.
+        if let Err(error) = backend.available() {
+            state.last_error = Some(error.to_string());
+            return Err(error);
+        }
         if mode == StartMode::Manual {
             state.automatic = true;
             state.restart_attempts = 0;
@@ -1065,7 +1190,7 @@ async fn start_process_inner(
         state.phase = Phase::Starting;
         state.last_error = None;
     }
-    let result = spawn_ready(server, child).await;
+    let result = spawn_ready(server, backend).await;
     match result {
         Ok(()) => {
             let mut state = lock(&server.state);
@@ -1075,9 +1200,8 @@ async fn start_process_inner(
             Ok(())
         }
         Err(error) => {
-            if let Some(mut process) = child.take() {
-                let _ = process.kill().await;
-                let _ = process.wait().await;
+            if backend.owns() {
+                backend.kill(server).await;
             }
             if error.kind() == io::ErrorKind::Interrupted {
                 // An intentional stop during startup is not a failed launch
@@ -1096,41 +1220,9 @@ async fn start_process_inner(
     }
 }
 
-async fn spawn_ready(server: &Server, child: &mut Option<Child>) -> io::Result<()> {
-    let address = loopback_address(server.address)?;
-    // Probe local port ownership directly. Closed-port TCP refusal can take
-    // longer than a short preflight deadline on Windows.
-    match std::net::TcpListener::bind(address) {
-        Ok(listener) => drop(listener),
-        Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
-            return Err(io::Error::new(
-                io::ErrorKind::AddrInUse,
-                "managed backend port is in use; Rift will not adopt an unowned process",
-            ));
-        }
-        Err(error) => return Err(error),
-    }
-    let (program, arguments) = server.config.command.split_first().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "managed server command is empty",
-        )
-    })?;
-    let log = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(server.config.directory.join(LOG_FILE))?;
-    let mut command = Command::new(program);
-    command
-        .args(arguments)
-        .current_dir(&server.config.directory)
-        .stdin(Stdio::piped())
-        .stderr(Stdio::from(log.try_clone()?))
-        .stdout(Stdio::from(log))
-        .kill_on_drop(true);
-    let process = command.spawn()?;
-    lock(&server.state).pid = process.id();
-    *child = Some(process);
+async fn spawn_ready<B: ProcessBackend>(server: &Server, backend: &mut B) -> io::Result<()> {
+    backend.start(server).await?;
+    lock(&server.state).pid = backend.pid();
     let deadline = tokio::time::Instant::now() + server.config.start_timeout;
     loop {
         if server.shutdown.load(Ordering::Acquire) || lock(&server.state).pending_stop {
@@ -1139,12 +1231,7 @@ async fn spawn_ready(server: &Server, child: &mut Option<Child>) -> io::Result<(
                 "managed server startup was stopped",
             ));
         }
-        let process = child.as_mut().expect("owned startup process");
-        if let Some(status) = process.try_wait()? {
-            return Err(io::Error::other(format!(
-                "managed server exited before becoming ready: {status}"
-            )));
-        }
+        exited_during_startup(server, backend, "before becoming ready").await?;
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
             return Err(io::Error::new(
@@ -1152,17 +1239,11 @@ async fn spawn_ready(server: &Server, child: &mut Option<Child>) -> io::Result<(
                 "managed server startup timed out",
             ));
         }
-        if let Ok(Ok(_)) = tokio::time::timeout(
-            remaining.min(Duration::from_millis(100)),
-            TcpStream::connect(address),
-        )
-        .await
+        if backend
+            .ready(server, remaining.min(Duration::from_millis(100)))
+            .await
         {
-            if let Some(status) = process.try_wait()? {
-                return Err(io::Error::other(format!(
-                    "managed server exited during readiness: {status}"
-                )));
-            }
+            exited_during_startup(server, backend, "during readiness").await?;
             return Ok(());
         }
         let retry = deadline.min(tokio::time::Instant::now() + Duration::from_millis(50));
@@ -1173,25 +1254,31 @@ async fn spawn_ready(server: &Server, child: &mut Option<Child>) -> io::Result<(
     }
 }
 
-async fn stop_process(server: &Server, child: &mut Option<Child>) -> io::Result<()> {
+async fn exited_during_startup<B: ProcessBackend>(
+    server: &Server,
+    backend: &mut B,
+    when: &str,
+) -> io::Result<()> {
+    match backend.status(server).await {
+        Status::Idle | Status::Running => Ok(()),
+        Status::Exited(status) => Err(io::Error::other(format!(
+            "managed server exited {when}: {status}"
+        ))),
+        Status::Broken(error) => Err(io::Error::other(error)),
+        Status::Unknown => Err(io::Error::new(
+            io::ErrorKind::NotConnected,
+            format!(
+                "node {} became unreachable while the server was starting",
+                server.config.node.as_deref().unwrap_or("local")
+            ),
+        )),
+    }
+}
+
+async fn stop_process<B: ProcessBackend>(server: &Server, backend: &mut B) -> io::Result<()> {
     lock(&server.state).phase = Phase::Stopping;
-    let result = if let Some(mut process) = child.take() {
-        let graceful = async {
-            if let Some(mut stdin) = process.stdin.take() {
-                let _ = stdin.write_all(b"stop\n").await;
-                let _ = stdin.shutdown().await;
-            }
-            process.wait().await
-        };
-        match tokio::time::timeout(server.config.stop_timeout, graceful).await {
-            Ok(result) => result.map(|_| ()),
-            Err(_) => {
-                let result = process.kill().await;
-                // `kill` normally waits too; explicitly reap on error as well.
-                let waited = process.wait().await;
-                result.and(waited.map(|_| ()))
-            }
-        }
+    let result = if backend.owns() {
+        backend.stop(server, server.config.stop_timeout).await
     } else {
         Ok(())
     };

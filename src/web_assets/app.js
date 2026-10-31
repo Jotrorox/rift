@@ -222,13 +222,25 @@
       button.addEventListener("click", () => { if (!button.disabled) instanceOperation(group.name, "create", group.storage); });
       actions.append(button);
     });
-    table("managed-servers", status.managed_servers || [], 9, (tr, server) => {
+    const nodes = status.nodes || [];
+    $("nodes-panel").hidden = !nodes.length;
+    text("node-count", `${nodes.filter((node) => node.state === "online").length} of ${nodes.length} online`);
+    table("nodes", nodes, 6, (tr, node) => {
+      cell(tr, node.name);
+      cell(tr, node.state === "never_connected" ? "never connected" : node.state, `state ${node.state === "online" ? "running" : node.state === "unreachable" ? "failed" : "stopped"}`);
+      cell(tr, node.address, "address");
+      cell(tr, (node.labels || []).join(", ") || "—");
+      cell(tr, `${count(node.instances)} of ${count(node.max_instances)}`);
+      cell(tr, node.memory_mb ? `${count(node.allocated_memory_mb)} of ${count(node.memory_mb)} MiB` : `${count(node.allocated_memory_mb)} MiB, no limit`);
+    }, "No nodes configured.");
+    table("managed-servers", status.managed_servers || [], 10, (tr, server) => {
       cell(tr, server.name); cell(tr, server.state, `state ${server.state}`);
       cell(tr, `${count(server.players)} players · ${count(server.reservations)} attachments`);
       cell(tr, wakeLabel(server));
       cell(tr, server.storage === "disposable" ? "Disposable game" : "Persistent world");
       cell(tr, server.template || "Prepared directory");
       cell(tr, server.group ? `${server.group} · ${server.address}` : server.address, "address");
+      cell(tr, server.node || "local");
       cell(tr, server.last_error || "—");
       const actions = cell(tr, ""); actions.className = "action-group";
       for (const action of ["start", "stop"]) {

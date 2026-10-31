@@ -23,6 +23,9 @@ pub struct ManagedServer {
     /// Maximum recovery attempts after a failed start or unexpected process exit.
     /// Zero disables automatic recovery.
     pub restart_retries: usize,
+    /// The `rift node` agent running this server; `None` runs it on this host.
+    /// Remote directories are relative to the agent's `--root`.
+    pub node: Option<String>,
 }
 
 pub(super) fn parse(root: &Table, base: &Path) -> Result<BTreeMap<String, ManagedServer>, String> {
@@ -47,9 +50,14 @@ pub(super) fn parse(root: &Table, base: &Path) -> Result<BTreeMap<String, Manage
                 "stop_timeout_ms",
                 "restart_delay_ms",
                 "restart_retries",
+                "node",
             ],
             &path,
         )?;
+        let node = match values.raw_get::<Value>("node").map_err(|e| e.to_string())? {
+            Value::Nil => None,
+            value => Some(string(value, &format!("{path}.node"))?),
+        };
         let command = string_list(
             values
                 .raw_get("command")
@@ -64,8 +72,13 @@ pub(super) fn parse(root: &Table, base: &Path) -> Result<BTreeMap<String, Manage
             &format!("{path}.directory"),
         )?;
         validate_directory(Path::new(&directory), &path)?;
-        let directory = resolve_directory(&base.join(directory))
-            .map_err(|error| format!("{path}.directory: {error}"))?;
+        let directory = if node.is_some() {
+            // Resolved by the agent below its own root, never on this host.
+            PathBuf::from(directory)
+        } else {
+            resolve_directory(&base.join(directory))
+                .map_err(|error| format!("{path}.directory: {error}"))?
+        };
         let idle_timeout = match values
             .raw_get::<Value>("idle_timeout_ms")
             .map_err(|error| error.to_string())?
@@ -109,6 +122,7 @@ pub(super) fn parse(root: &Table, base: &Path) -> Result<BTreeMap<String, Manage
                     MAX_TIMEOUT_MS,
                 )? as u64),
                 restart_retries: bounded_count(&values, &path, "restart_retries", 3, 100)?,
+                node,
             },
         );
     }
@@ -118,6 +132,7 @@ pub(super) fn parse(root: &Table, base: &Path) -> Result<BTreeMap<String, Manage
 pub(super) fn validate(
     servers: &BTreeMap<String, ManagedServer>,
     backends: &BTreeMap<String, Backend>,
+    nodes: &BTreeMap<String, NodeConfig>,
 ) -> Result<(), String> {
     if servers.len() > MAX_SERVERS {
         return Err(format!("managed_servers: at most {MAX_SERVERS} servers"));
@@ -136,19 +151,45 @@ pub(super) fn validate(
         let backend = backends
             .get(name)
             .ok_or_else(|| format!("{path}: unknown backend"))?;
-        let address = backend
-            .address()
-            .parse::<SocketAddr>()
-            .ok()
-            .filter(|address| address.ip().to_canonical().is_loopback() && address.port() != 0)
-            .ok_or_else(|| {
-                format!("{path}: backend must be a literal loopback IP address with a nonzero port")
-            })?;
-        for (other_name, other) in backends {
-            if other_name != name && endpoint_alias(address, other) {
+        if let Some(node) = &server.node {
+            let definition = nodes
+                .get(node)
+                .ok_or_else(|| format!("{path}.node: unknown node {node:?}"))?;
+            let port = backend
+                .address()
+                .rsplit_once(':')
+                .and_then(|(_, port)| port.parse::<u16>().ok())
+                .filter(|port| *port != 0);
+            if port.is_none_or(|port| backend.address() != definition.backend_address(port)) {
                 return Err(format!(
-                    "{path}: backend address conflicts with backends.{other_name}; managed endpoints must have a unique backend name"
+                    "{path}: backend must be the address of node {node:?} ({}) with a nonzero port",
+                    definition.address
                 ));
+            }
+            for (other_name, other) in backends {
+                if other_name != name && other.address() == backend.address() {
+                    return Err(format!(
+                        "{path}: backend address conflicts with backends.{other_name}; managed endpoints must have a unique backend name"
+                    ));
+                }
+            }
+        } else {
+            let address = backend
+                .address()
+                .parse::<SocketAddr>()
+                .ok()
+                .filter(|address| address.ip().to_canonical().is_loopback() && address.port() != 0)
+                .ok_or_else(|| {
+                    format!(
+                        "{path}: backend must be a literal loopback IP address with a nonzero port"
+                    )
+                })?;
+            for (other_name, other) in backends {
+                if other_name != name && endpoint_alias(address, other) {
+                    return Err(format!(
+                        "{path}: backend address conflicts with backends.{other_name}; managed endpoints must have a unique backend name"
+                    ));
+                }
             }
         }
         if server.command.is_empty() || server.command.len() > MAX_ARGUMENTS {
@@ -170,9 +211,18 @@ pub(super) fn validate(
             ));
         }
         validate_directory(&server.directory, &path)?;
-        let directory = resolve_directory(&server.directory)
-            .map_err(|error| format!("{path}.directory: {error}"))?;
-        if let Some(other_name) = directories.insert(directory, name) {
+        let directory = if server.node.is_some() {
+            if !valid_node_directory(&server.directory) {
+                return Err(format!(
+                    "{path}.directory: servers on a node need a relative directory below the agent root, without . or .."
+                ));
+            }
+            server.directory.clone()
+        } else {
+            resolve_directory(&server.directory)
+                .map_err(|error| format!("{path}.directory: {error}"))?
+        };
+        if let Some(other_name) = directories.insert((server.node.clone(), directory), name) {
             return Err(format!(
                 "{path}.directory: directory is already used by managed_servers.{other_name}"
             ));

@@ -77,6 +77,12 @@ impl MessagingConfig {
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        self.validate_with_nodes(false)
+    }
+
+    /// Node agents authenticate with their own principals, so a listener that
+    /// only serves nodes needs no `principals` entry.
+    pub fn validate_with_nodes(&self, nodes: bool) -> Result<(), String> {
         if self.max_subject_bytes < 64 {
             return Err("messaging.max_subject_bytes: at least 64 bytes are required for Rift control and request inbox subjects".into());
         }
@@ -92,7 +98,7 @@ impl MessagingConfig {
                         .into(),
                 );
             }
-            if self.principals.is_empty() {
+            if self.principals.is_empty() && !nodes {
                 return Err("messaging.principals: grant at least one authenticated principal for a QUIC listener".into());
             }
         } else if self.certificate.is_some()

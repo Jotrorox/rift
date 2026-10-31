@@ -332,6 +332,7 @@ fn router(kind: Kind, address: SocketAddr, mut app: App) -> Router {
             .route("/api/servers/{name}/logs", get(server_logs))
             .route("/api/servers/{name}/console", post(server_console))
             .route("/api/groups", get(service_groups))
+            .route("/api/nodes", get(nodes))
             .route("/api/definitions", get(definitions))
             .route("/api/definitions/{section}", put(edit_setting))
             .route("/api/permissions", get(permission_groups))
@@ -545,7 +546,25 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
                 });
             }
         }
-        if settings.token.is_some() || !settings.operators.is_empty() {
+        // Node agents fetch template files with their messaging token.
+        let mut node = false;
+        if access.is_none() && !supplied.is_empty() {
+            for (name, definition) in &snapshot.config.nodes {
+                if std::env::var(&definition.token_env)
+                    .is_ok_and(|token| equal_token(token.as_bytes(), supplied.as_bytes()))
+                {
+                    node = true;
+                    access = Some(Access {
+                        name: format!("node:{name}"),
+                        permissions: Some(BTreeSet::from([NODE_PERMISSION.to_owned()])),
+                        groups: None,
+                    });
+                }
+            }
+        }
+        if node {
+            // Read-only template access is the whole scope of a node token.
+        } else if settings.token.is_some() || !settings.operators.is_empty() {
             if access.is_none() {
                 drop(snapshot);
                 let anonymous = Access {
@@ -686,7 +705,11 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
             }
             _ => (true, String::new()),
         };
-        let authorized = (permission.is_empty() || access.allows(permission)) && in_scope;
+        let authorized = if access.allows(NODE_PERMISSION) && access.permissions.is_some() {
+            !mutation && matches!(segments.as_slice(), ["api", "files", "templates", ..])
+        } else {
+            (permission.is_empty() || access.allows(permission)) && in_scope
+        };
         let operation = match segments.as_slice() {
             ["api", "servers", _, "start"] => "start",
             ["api", "servers", _, "stop"] => "stop",
@@ -744,6 +767,9 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
     drop(snapshot);
     next.run(request).await
 }
+/// The only grant of a node agent's token: reading template files.
+const NODE_PERMISSION: &str = "node";
+
 fn equal_token(expected: &[u8], actual: &[u8]) -> bool {
     let mut difference = expected.len() ^ actual.len();
     for (i, byte) in expected.iter().enumerate() {
@@ -814,6 +840,9 @@ async fn admin_status(State(app): State<App>, Extension(access): Extension<Acces
     let mut value = app.status_snapshot(&snapshot, true);
     value["managed_servers"] = visible_servers(&snapshot, &access);
     value["service_groups"] = visible_groups(&snapshot, &access)["groups"].clone();
+    if !snapshot.nodes.is_empty() {
+        value["nodes"] = admin::nodes(&snapshot)["nodes"].clone();
+    }
     if access.groups.is_some() {
         let names: BTreeSet<_> = snapshot
             .config
@@ -845,6 +874,10 @@ async fn service_groups(
     Extension(access): Extension<Access>,
 ) -> Json<Value> {
     Json(visible_groups(&app.snapshot(), &access))
+}
+
+async fn nodes(State(app): State<App>) -> Json<Value> {
+    Json(admin::nodes(&app.snapshot()))
 }
 
 async fn operator_access(Extension(access): Extension<Access>) -> Json<Value> {
@@ -1530,7 +1563,7 @@ async fn standalone_metrics(state: State<App>) -> Response {
 }
 async fn discovery() -> Json<Value> {
     Json(
-        json!({"version":1,"endpoints":["GET /api/access","GET /api/status","GET /api/servers","POST /api/servers/{name}/start","POST /api/servers/{name}/stop","GET /api/servers/{name}/logs","POST /api/servers/{name}/console","GET /api/groups","POST /api/groups/{name}/instances","GET /api/templates","POST /api/templates/{name}/download","GET /api/software/{type}/versions","GET|PUT|DELETE /api/files/templates/{path}","GET|PUT|DELETE /api/files/servers/{name}/{path}","DELETE /api/instances/{name}","GET /api/definitions","PUT /api/definitions/{section}/{name}","PUT /api/definitions/{section}","GET /api/permissions","POST /api/permissions/members/{uuid}/{group}","DELETE /api/permissions/members/{uuid}/{group}","GET /api/deployments","POST /api/deployments/{id}/rollback","GET /api/audit","GET /api/operations/{id}","GET /api/metrics","GET /api/config","POST /api/config/validate","PUT /api/config","POST /api/reload"],"extensions":"/ext/* -> on_http(request)","source_limit_bytes":control::MAX_SOURCE}),
+        json!({"version":1,"endpoints":["GET /api/access","GET /api/status","GET /api/servers","POST /api/servers/{name}/start","POST /api/servers/{name}/stop","GET /api/servers/{name}/logs","POST /api/servers/{name}/console","GET /api/groups","GET /api/nodes","POST /api/groups/{name}/instances","GET /api/templates","POST /api/templates/{name}/download","GET /api/software/{type}/versions","GET|PUT|DELETE /api/files/templates/{path}","GET|PUT|DELETE /api/files/servers/{name}/{path}","DELETE /api/instances/{name}","GET /api/definitions","PUT /api/definitions/{section}/{name}","PUT /api/definitions/{section}","GET /api/permissions","POST /api/permissions/members/{uuid}/{group}","DELETE /api/permissions/members/{uuid}/{group}","GET /api/deployments","POST /api/deployments/{id}/rollback","GET /api/audit","GET /api/operations/{id}","GET /api/metrics","GET /api/config","POST /api/config/validate","PUT /api/config","POST /api/reload"],"extensions":"/ext/* -> on_http(request)","source_limit_bytes":control::MAX_SOURCE}),
     )
 }
 async fn config_source(State(app): State<App>) -> Json<Value> {

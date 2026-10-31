@@ -31,6 +31,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         stop_timeout: std::time::Duration::from_secs(1),
         restart_delay: std::time::Duration::from_secs(1),
         restart_retries: 0,
+        node: None,
     };
     let names: Vec<_> = (0..SERVERS)
         .map(|index| format!("server_{index:03}"))

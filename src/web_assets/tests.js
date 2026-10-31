@@ -121,18 +121,41 @@ async function testWebAssets(appSource, statusSource) {
     await h.element("refresh-status").emit("click"); await flush();
     const row = h.element("managed-servers").children[0];
     assert(row.children[0].textContent === "lobby west", "Managed server name missing");
-    const [start, stop] = row.children[8].children;
+    const [start, stop] = row.children[9].children;
     assert(!start.disabled && !stop.disabled, "Idle managed server controls unavailable");
     await start.emit("click"); await flush();
     const call = h.calls.find(({ path }) => path === "/api/servers/lobby%20west/start");
     assert(call && call.options.method === "POST" && call.options.body === "{}", "Lifecycle operation missing or incorrectly encoded");
     assert(h.element("server-result").textContent.includes("accepted"), "Accepted operation presented as complete");
   });
+  await test("servers show their node and the nodes panel appears only with nodes", async () => {
+    const h = fixture(appSource); await flush();
+    h.model.status.managed_servers = [
+      { name: "lobby-1", state: "running", players: 0, reservations: 0, automatic_start: true, node: "local" },
+      { name: "bedwars-3", state: "unknown", players: 0, reservations: 0, automatic_start: true, node: "node1" },
+    ];
+    await h.element("refresh-status").emit("click"); await flush();
+    assert(h.element("nodes-panel").hidden, "Nodes panel shown without nodes");
+    const rows = h.element("managed-servers").children;
+    assert(rows[0].children[7].textContent === "local" && rows[1].children[7].textContent === "node1", "Node column missing");
+    assert(rows[1].children[1].className.includes("unknown"), "Unknown state not styled");
+    h.model.status.nodes = [
+      { name: "node1", state: "unreachable", address: "10.0.0.11", labels: ["games"], instances: 1, max_instances: 40, memory_mb: 32768, allocated_memory_mb: 2048 },
+      { name: "node2", state: "online", address: "10.0.0.12", labels: [], instances: 0, max_instances: 128, memory_mb: null, allocated_memory_mb: 0 },
+    ];
+    await h.element("refresh-status").emit("click"); await flush();
+    assert(!h.element("nodes-panel").hidden, "Nodes panel hidden with nodes");
+    assert(h.element("node-count").textContent === "1 of 2 online", "Online node count wrong");
+    const nodes = h.element("nodes").children;
+    assert(nodes[0].children[0].textContent === "node1" && nodes[0].children[3].textContent === "games", "Node row missing");
+    assert(nodes[0].children[5].textContent.includes("2,048") || nodes[0].children[5].textContent.includes("2048"), `Node memory missing: ${nodes[0].children[5].textContent}`);
+    assert(nodes[1].children[5].textContent.includes("no limit"), "Unlimited memory not explained");
+  });
   await test("managed servers cannot be stopped from dashboard while occupied", async () => {
     const h = fixture(appSource); await flush();
     h.model.status.managed_servers = [{ name: "lobby", state: "running", players: 1, reservations: 0, automatic_start: true }];
     await h.element("refresh-status").emit("click"); await flush();
-    const [start, stop] = h.element("managed-servers").children[0].children[8].children;
+    const [start, stop] = h.element("managed-servers").children[0].children[9].children;
     assert(start.disabled && stop.disabled, "Occupied running server controls must be disabled");
   });
   await test("lifecycle conflicts do not mark the source editor stale", async () => {
@@ -140,7 +163,7 @@ async function testWebAssets(appSource, statusSource) {
     h.model.status.managed_servers = [{ name: "lobby", state: "running", players: 0, reservations: 0, automatic_start: true }];
     await h.element("refresh-status").emit("click"); await flush();
     h.model.intercept = (path) => path === "/api/servers/lobby/stop" ? h.response({ error: "Backend became occupied" }, 409) : undefined;
-    await h.element("managed-servers").children[0].children[8].children[1].emit("click"); await flush();
+    await h.element("managed-servers").children[0].children[9].children[1].emit("click"); await flush();
     assert(h.element("server-result").textContent.includes("occupied"), "Lifecycle error was not displayed");
     assert(h.element("conflict").className.includes("hidden"), "Lifecycle conflict incorrectly affected configuration revision");
   });
@@ -192,14 +215,14 @@ async function testWebAssets(appSource, statusSource) {
     assert(rows[0].children[4].textContent === "Disposable game", "Disposable policy missing");
     assert(rows[1].children[4].textContent === "Persistent world", "Persistent policy missing");
     assert(rows[0].children[5].textContent === "arena", "Instance template missing");
-    assert(rows[0].children[8].children[2].textContent === "Remove & delete files", "Destructive removal label missing");
-    assert(rows[1].children[8].children[2].textContent === "Remove · keep files", "Persistent removal label missing");
-    assert(rows[2].children[8].children.length === 2, "Static managed servers must not expose dynamic removal");
-    await rows[0].children[8].children[2].emit("click"); await flush();
+    assert(rows[0].children[9].children[2].textContent === "Remove & delete files", "Destructive removal label missing");
+    assert(rows[1].children[9].children[2].textContent === "Remove · keep files", "Persistent removal label missing");
+    assert(rows[2].children[9].children.length === 2, "Static managed servers must not expose dynamic removal");
+    await rows[0].children[9].children[2].emit("click"); await flush();
     const call = h.calls.find(({ path }) => path === "/api/instances/game%20west");
     assert(call && call.options.method === "DELETE" && call.options.body === "{}", "Instance removal request incorrect");
     assert(h.element("server-result").textContent.includes("deleted"), "Disposable cleanup outcome missing");
-    await h.element("managed-servers").children[1].children[8].children[2].emit("click"); await flush();
+    await h.element("managed-servers").children[1].children[9].children[2].emit("click"); await flush();
     assert(h.element("server-result").textContent.includes("remain on disk"), "Persistent retention outcome missing");
   });
   await test("dashboard polls a removal beyond 15 seconds and prevents duplicate submissions", async () => {
@@ -212,7 +235,7 @@ async function testWebAssets(appSource, statusSource) {
         : { status: "pending" });
     };
     await h.element("refresh-status").emit("click"); await flush();
-    const remove = h.element("managed-servers").children[0].children[8].children[2];
+    const remove = h.element("managed-servers").children[0].children[9].children[2];
     await remove.emit("click"); await flush();
     assert(h.element("server-result").textContent.includes("slow-removal"), "Pending operation ID missing");
     await h.advance(16000);
@@ -223,7 +246,7 @@ async function testWebAssets(appSource, statusSource) {
     assert(h.calls.filter(({ options }) => options.method === "DELETE").length === 1, "Pending removal was duplicated");
     complete = true; await h.advance(1000);
     assert(h.element("server-result").textContent.includes("deleted"), "Completed removal outcome missing");
-    assert(!h.element("managed-servers").children[0].children[8].children[2].disabled, "Completion did not restore controls");
+    assert(!h.element("managed-servers").children[0].children[9].children[2].disabled, "Completion did not restore controls");
   });
   await test("asynchronous failures show their operation ID and preserve the configuration editor", async () => {
     const h = fixture(appSource); await flush();
@@ -262,7 +285,7 @@ async function testWebAssets(appSource, statusSource) {
       if (path === "/api/operations/cleanup") return h.response({ status: "succeeded", result: { removed: true, files_removed: false, cleanup_error: "Directory is read-only" } });
     };
     await h.element("refresh-status").emit("click"); await flush();
-    await h.element("managed-servers").children[0].children[8].children[2].emit("click"); await flush();
+    await h.element("managed-servers").children[0].children[9].children[2].emit("click"); await flush();
     assert(h.element("server-result").textContent.includes("read-only"), "Asynchronous cleanup error missing");
     assert(h.element("server-result").className.includes("warning"), "Asynchronous cleanup error presented as success");
   });
@@ -276,7 +299,7 @@ async function testWebAssets(appSource, statusSource) {
     ];
     await h.element("refresh-status").emit("click"); await flush();
     for (const row of h.element("managed-servers").children) {
-      const remove = row.children[8].children[2];
+      const remove = row.children[9].children[2];
       assert(remove.disabled, "Unsafe instance removal enabled");
       await remove.emit("click"); await flush();
     }
@@ -300,12 +323,12 @@ async function testWebAssets(appSource, statusSource) {
     h.model.status.managed_servers = [{ name: "arena-1", group: "arena", storage: "disposable", state: "stopped" }];
     h.model.intercept = (path) => path === "/api/instances/arena-1" ? h.response({ removed: true, files_removed: false, cleanup_error: "Directory is read-only" }) : undefined;
     await h.element("refresh-status").emit("click"); await flush();
-    await h.element("managed-servers").children[0].children[8].children[2].emit("click"); await flush();
+    await h.element("managed-servers").children[0].children[9].children[2].emit("click"); await flush();
     assert(h.element("server-result").textContent.includes("read-only"), "Cleanup error missing");
     assert(h.element("server-result").className.includes("warning"), "Incomplete cleanup presented as success");
     assert(!h.element("server-result").textContent.includes("deleted"), "Failed cleanup claimed deletion");
     h.model.intercept = (path) => path === "/api/instances/arena-1" ? h.response({ error: "Instance became occupied" }, 409) : undefined;
-    await h.element("managed-servers").children[0].children[8].children[2].emit("click"); await flush();
+    await h.element("managed-servers").children[0].children[9].children[2].emit("click"); await flush();
     assert(h.element("server-result").textContent.includes("occupied"), "Removal conflict missing");
     assert(h.element("conflict").className.includes("hidden"), "Removal conflict changed editor revision state");
   });
@@ -411,7 +434,7 @@ async function testWebAssets(appSource, statusSource) {
     assert(h.element("config-panel").className.includes("hidden"), "Privileged editor was exposed");
     assert(h.element("source").value === "", "Previous operator source was retained");
     assert(!h.calls.slice(before).some(({ path }) => path === "/api/config" || path === "/api/definitions"), "Scoped operator fetched privileged data");
-    assert(h.element("managed-servers").children[0].children[8].children[0].disabled, "Ungrantable server mutation was enabled");
+    assert(h.element("managed-servers").children[0].children[9].children[0].disabled, "Ungrantable server mutation was enabled");
   });
   await test("server logs resume their cursor and discard responses for a previous selection", async () => {
     const h = fixture(appSource); await flush();

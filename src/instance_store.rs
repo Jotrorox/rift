@@ -14,6 +14,16 @@ use std::{
     time::Duration,
 };
 
+const INSTANCES_V2: &str = "CREATE TABLE instances (
+    name TEXT PRIMARY KEY NOT NULL,
+    node TEXT NOT NULL DEFAULT '',
+    port INTEGER NOT NULL CHECK(port BETWEEN 1 AND 65535),
+    phase TEXT NOT NULL CHECK(phase IN ('creating','ready','removing','deleting')),
+    explicitly_stopped INTEGER NOT NULL DEFAULT 0 CHECK(explicitly_stopped IN (0,1)),
+    definition TEXT NOT NULL,
+    UNIQUE(node, port)
+) STRICT;";
+
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct Definition {
     instance: ServiceInstance,
@@ -26,6 +36,14 @@ struct Record {
     phase: String,
     stopped: bool,
     definition: Definition,
+}
+
+impl Record {
+    /// Remote instances keep their files on their node; this host never
+    /// touches, validates or reserves anything for them.
+    fn remote(&self) -> bool {
+        self.definition.instance.node.is_some()
+    }
 }
 
 #[derive(Debug)]
@@ -95,19 +113,23 @@ impl Store {
             let version: u32 = connection
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .map_err(|e| store.error(e))?;
+            // Version 2 stores each instance's node ('' for this host); ports
+            // are unique per node, since every node has its own port range.
             match version {
-                0 => connection.execute_batch("BEGIN IMMEDIATE;
-                    CREATE TABLE instances (
-                        name TEXT PRIMARY KEY NOT NULL,
-                        port INTEGER UNIQUE NOT NULL CHECK(port BETWEEN 1 AND 65535),
-                        phase TEXT NOT NULL CHECK(phase IN ('creating','ready','removing','deleting')),
-                        explicitly_stopped INTEGER NOT NULL DEFAULT 0 CHECK(explicitly_stopped IN (0,1)),
-                        definition TEXT NOT NULL
-                    ) STRICT;
+                0 => connection.execute_batch(&format!("BEGIN IMMEDIATE;
+                    {INSTANCES_V2}
                     CREATE TABLE sequences (group_name TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL) STRICT;
-                    PRAGMA user_version=1; COMMIT;")
+                    PRAGMA user_version=2; COMMIT;"))
                     .map_err(|e| store.error(e))?,
-                1 => {},
+                1 => connection.execute_batch(&format!("BEGIN IMMEDIATE;
+                    ALTER TABLE instances RENAME TO instances_v1;
+                    {INSTANCES_V2}
+                    INSERT INTO instances (name,node,port,phase,explicitly_stopped,definition)
+                        SELECT name,'',port,phase,explicitly_stopped,definition FROM instances_v1;
+                    DROP TABLE instances_v1;
+                    PRAGMA user_version=2; COMMIT;"))
+                    .map_err(|e| store.error(e))?,
+                2 => {},
                 _ => return Err(store.error(format!("unsupported schema version {version}"))),
             }
             let check: String = connection
@@ -131,7 +153,7 @@ impl Store {
         let connection = self.connection.lock().unwrap();
         let mut statement = connection
             .prepare(
-                "SELECT name,port,phase,explicitly_stopped,definition FROM instances ORDER BY name",
+                "SELECT name,port,phase,explicitly_stopped,definition,node FROM instances ORDER BY name",
             )
             .map_err(|e| self.error(e))?;
         let rows = statement
@@ -142,19 +164,29 @@ impl Store {
                     row.get::<_, String>(2)?,
                     row.get::<_, bool>(3)?,
                     row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
                 ))
             })
             .map_err(|e| self.error(e))?;
         rows.map(|row| {
-            let (name, port, phase, stopped, json) = row.map_err(|e| self.error(e))?;
+            let (name, port, phase, stopped, json, node) = row.map_err(|e| self.error(e))?;
             let definition: Definition = serde_json::from_str(&json).map_err(|e| self.error(e))?;
             if port != definition.instance.port
+                || node != definition.instance.node.clone().unwrap_or_default()
                 || !["creating", "ready", "removing", "deleting"].contains(&phase.as_str())
             {
                 return Err(self.error(format!("invalid registration for {name}")));
             }
-            provisioning::validate_plan(&definition.instance, &name, &definition.plan)
-                .map_err(|e| self.error(format!("instances.{name}: {e}")))?;
+            if definition.instance.node.is_some() {
+                if !crate::config::valid_node_directory(&definition.plan.directory)
+                    || definition.plan.stage.is_some()
+                {
+                    return Err(self.error(format!("instances.{name}: invalid node directory")));
+                }
+            } else {
+                provisioning::validate_plan(&definition.instance, &name, &definition.plan)
+                    .map_err(|e| self.error(format!("instances.{name}: {e}")))?;
+            }
             Ok(Record {
                 name,
                 phase,
@@ -170,7 +202,7 @@ impl Store {
         let records = self.records()?;
         let mut recovery_ports = Vec::new();
         for record in &records {
-            if ["removing", "deleting"].contains(&record.phase.as_str()) {
+            if ["removing", "deleting"].contains(&record.phase.as_str()) && !record.remote() {
                 let address = SocketAddr::from(([127, 0, 0, 1], record.definition.instance.port));
                 recovery_ports.push(TcpListener::bind(address).map_err(|e| self.error(format!(
                     "instances.{}: port {address} is still in use during removal recovery: {e}; stop the old server before retrying", record.name)))?);
@@ -189,6 +221,25 @@ impl Store {
         for record in &records {
             let definition = &record.definition;
             let directory = &definition.plan.directory;
+            if record.remote() {
+                if record.phase == "ready" {
+                    let group = &candidate.service_groups[&definition.instance.group];
+                    if group.storage != definition.instance.storage {
+                        return Err(self.error(format!(
+                            "instances.{}: service_groups.{}.storage changed",
+                            record.name, definition.instance.group
+                        )));
+                    }
+                    if candidate.managed_servers[&record.name].directory != *directory {
+                        return Err(self.error(format!(
+                            "instances.{}: node directory changed (stored {})",
+                            record.name,
+                            directory.display()
+                        )));
+                    }
+                }
+                continue;
+            }
             let mut storage_paths = vec![directory.clone()];
             if record.phase != "ready" {
                 storage_paths.extend(definition.plan.stage.iter().cloned());
@@ -205,9 +256,10 @@ impl Store {
                     )));
                 }
                 for (name, server) in &candidate.managed_servers {
-                    if record.phase == "ready"
-                        && name == &record.name
-                        && directory == &definition.plan.directory
+                    if server.node.is_some()
+                        || (record.phase == "ready"
+                            && name == &record.name
+                            && directory == &definition.plan.directory)
                     {
                         continue;
                     }
@@ -220,7 +272,7 @@ impl Store {
                     }
                 }
                 for other in &records {
-                    if other.name == record.name {
+                    if other.name == record.name || other.remote() {
                         continue;
                     }
                     let other_directory = &other.definition.plan.directory;
@@ -291,7 +343,7 @@ impl Store {
 
     /// Keep these sockets until startup validation finishes; fail before autostart.
     pub fn reserve_restored_ports(&self, config: &Config) -> io::Result<Vec<TcpListener>> {
-        config.instances.iter().map(|(name, instance)| {
+        config.instances.iter().filter(|(_, instance)| instance.node.is_none()).map(|(name, instance)| {
             check_configured_port(config, name, instance.port)?;
             let address = SocketAddr::from(([127,0,0,1], instance.port));
             TcpListener::bind(address).map_err(|e| self.error(format!("instances.{name}: port {address} is unavailable: {e}; stop the conflicting process or correct the configuration")))
@@ -359,7 +411,13 @@ impl Store {
             .instances
             .get(name)
             .ok_or_else(|| self.error("unknown instance"))?;
-        provisioning::validate_plan(instance, name, plan)?;
+        if instance.node.is_some() {
+            if !crate::config::valid_node_directory(&plan.directory) || plan.stage.is_some() {
+                return Err(self.error("invalid node directory"));
+            }
+        } else {
+            provisioning::validate_plan(instance, name, plan)?;
+        }
         let definition = serde_json::to_string(&Definition {
             instance: instance.clone(),
             plan: plan.clone(),
@@ -369,8 +427,13 @@ impl Store {
             .lock()
             .unwrap()
             .execute(
-                "INSERT INTO instances (name,port,phase,definition) VALUES (?1,?2,'creating',?3)",
-                params![name, instance.port, definition],
+                "INSERT INTO instances (name,node,port,phase,definition) VALUES (?1,?2,?3,'creating',?4)",
+                params![
+                    name,
+                    instance.node.clone().unwrap_or_default(),
+                    instance.port,
+                    definition
+                ],
             )
             .map_err(|e| self.error(e))?;
         Ok(())
@@ -417,7 +480,11 @@ impl Store {
             .into_iter()
             .find(|r| r.name == name && r.phase == "creating")
             .ok_or_else(|| self.error("no pending creation"))?;
-        provisioning::rollback_plan(&record.definition.plan)?;
+        // A node agent deletes unregistered disposable directories itself
+        // when it reconciles with the controller.
+        if !record.remote() {
+            provisioning::rollback_plan(&record.definition.plan)?;
+        }
         self.forget(name)
     }
 
@@ -427,7 +494,7 @@ impl Store {
             .into_iter()
             .find(|r| r.name == name && ["removing", "deleting"].contains(&r.phase.as_str()))
             .ok_or_else(|| self.error("no pending removal"))?;
-        if record.definition.instance.storage == InstanceStorage::Disposable {
+        if record.definition.instance.storage == InstanceStorage::Disposable && !record.remote() {
             if record.phase == "removing" {
                 provisioning::retire_storage(&record.definition.plan)?;
                 self.transition(name, "removing", "deleting")?;
@@ -450,10 +517,17 @@ impl Store {
         Ok(())
     }
 
+    /// Ports registered on this host, including unfinished creations.
     pub fn reserved_ports(&self) -> io::Result<BTreeSet<u16>> {
+        self.reserved_ports_on(None)
+    }
+
+    /// Ports registered on `node` (`None` for this host).
+    pub fn reserved_ports_on(&self, node: Option<&str>) -> io::Result<BTreeSet<u16>> {
         Ok(self
             .records()?
             .into_iter()
+            .filter(|r| r.definition.instance.node.as_deref() == node)
             .map(|r| r.definition.instance.port)
             .collect())
     }

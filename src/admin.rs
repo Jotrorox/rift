@@ -228,7 +228,9 @@ fn request(value: &Value, settings: &Admin, secret: &str) -> Result<Vec<String>,
         .collect::<Result<Vec<_>, _>>()?;
     let command = args.first().ok_or("missing command")?;
     let permission = match command.as_str() {
-        "start" | "stop" | "groups" | "create" | "remove" | "templates" | "download" => "servers",
+        "start" | "stop" | "groups" | "create" | "remove" | "templates" | "download" | "nodes" => {
+            "servers"
+        }
         command => command,
     };
     if !settings.permissions.contains(permission) {
@@ -266,6 +268,7 @@ pub(crate) fn managed_servers(snapshot: &Snapshot) -> Value {
                 "group": instance.map(|instance| &instance.group),
                 "template": instance.and_then(|instance| instance.template.as_ref()),
                 "storage": instance.map_or("persistent", |instance| instance.storage.as_str()),
+                "node": server.node.as_deref().unwrap_or(rift::config::LOCAL_NODE),
                 "address": address,
                 "port": address
                     .and_then(|address| address.parse::<SocketAddr>().ok())
@@ -274,6 +277,11 @@ pub(crate) fn managed_servers(snapshot: &Snapshot) -> Value {
         })
         .collect();
     json!(servers)
+}
+
+/// Node agents with reachability, capacity and allocation; never tokens.
+pub(crate) fn nodes(snapshot: &Snapshot) -> Value {
+    json!({"nodes": snapshot.nodes.describe(&snapshot.config)})
 }
 
 /// Group metadata only: templates contain executable arguments and filesystem paths.
@@ -285,6 +293,8 @@ pub(crate) fn service_groups(snapshot: &Snapshot) -> Value {
             "storage":group.storage.as_str(),
             "port_range":[group.port_start,group.port_end],
             "scaling":group.scaling.as_ref().map(scaling_values),
+            "nodes":group.nodes.as_ref().map(|nodes| json!({"names":nodes.names,"labels":nodes.labels})),
+            "placement":group.nodes.as_ref().map(|_| group.placement.as_str()),
             "instances":snapshot.config.instances.iter()
                 .filter(|(_, instance)| instance.group == *name)
                 .map(|(name, _)| name)
@@ -388,6 +398,7 @@ pub(crate) async fn execute(
         [command] if command == "status" => Ok(control.status(&snapshot, metrics)),
         [command] if command == "servers" => Ok(json!({"servers":managed_servers(&snapshot)})),
         [command] if command == "groups" => Ok(service_groups(&snapshot)),
+        [command] if command == "nodes" => Ok(nodes(&snapshot)),
         [command] if command == "templates" => Ok(templates(&snapshot)),
         [command, template] if command == "download" => download_template(&snapshot, template, false).await,
         [command, template, refresh] if command == "download" && refresh == "refresh" => download_template(&snapshot, template, true).await,
@@ -443,7 +454,7 @@ pub(crate) async fn execute(
             commands.try_send(Command::Reload(reply)).map_err(|_| "administrator command queue is full or shutting down")?;
             receiver.await.map_err(|_| "proxy is shutting down".to_owned())?
         }
-        _ => Err("usage: status | servers | groups | templates | download <template> [refresh] | create <group> | remove <instance> | start <backend> | stop <backend> | maintenance on/off | drain <backend> on/off | transfer <connection-id> <backend> | reload | shutdown".into()),
+        _ => Err("usage: status | servers | groups | nodes | templates | download <template> [refresh] | create <group> | remove <instance> | start <backend> | stop <backend> | maintenance on/off | drain <backend> on/off | transfer <connection-id> <backend> | reload | shutdown".into()),
     }
 }
 

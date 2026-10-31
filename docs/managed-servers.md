@@ -478,6 +478,13 @@ All of them use the same serialized instance transaction. Each committed creatio
 or removal is published on `rift.events.instances`. See
 [examples/cloud.lua](../examples/cloud.lua) for a complete setup.
 
+## Servers on other hosts
+
+Managed servers and service groups can also run on other machines through
+`rift node` agents, with placement by labels and capacity, per-node port ranges
+and templates mirrored from this host. Servers on an unreachable node show the
+state `unknown`. See [multiple hosts](nodes.md).
+
 ## Lifecycle and readiness
 
 The observable states are `stopped`, `starting`, `running`, `stopping` and `failed`.

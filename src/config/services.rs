@@ -14,6 +14,9 @@ pub struct ServiceGroup {
     pub memory_mb: Option<usize>,
     /// The directory came from the CloudNet-style default for its storage.
     pub default_directory: bool,
+    /// Nodes that run this group's instances; `None` runs them on this host.
+    pub nodes: Option<NodeSelector>,
+    pub placement: Placement,
 }
 
 /// Occupancy and queue policy for automatically managed service instances.
@@ -55,6 +58,9 @@ pub struct ServiceInstance {
     /// Ownership policy captured at creation and preserved across reloads.
     pub template: Option<String>,
     pub storage: InstanceStorage,
+    /// The node running this instance, fixed at creation; `None` is this host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
 }
 
 pub(super) fn parse(
@@ -71,11 +77,36 @@ pub(super) fn parse(
     let mut policies = BTreeMap::new();
     let mut scaling_policies = BTreeMap::new();
     let mut defaults = BTreeMap::new();
+    let mut placements = BTreeMap::new();
     for pair in values.pairs::<Value, Value>() {
         let (name, value) = pair.map_err(|e| e.to_string())?;
         let name = string(name, "service_groups key")?;
         let path = format!("service_groups.{name}");
         let value = table(value, &path)?;
+        if !value
+            .raw_get::<Value>("node")
+            .map_err(|e| e.to_string())?
+            .is_nil()
+        {
+            return Err(format!(
+                "{path}.node: service groups select nodes with nodes = {{ labels = {{...}} }}"
+            ));
+        }
+        let selector = match value.raw_get::<Value>("nodes").map_err(|e| e.to_string())? {
+            Value::Nil => None,
+            selector => Some(nodes::parse_selector(selector, &format!("{path}.nodes"))?),
+        };
+        let placement = match value
+            .raw_get::<Value>("placement")
+            .map_err(|e| e.to_string())?
+        {
+            Value::Nil => Placement::default(),
+            _ if selector.is_none() => {
+                return Err(format!("{path}.placement: only applies with nodes"));
+            }
+            placement => nodes::parse_placement(placement, &format!("{path}.placement"))?,
+        };
+        placements.insert(name.clone(), (selector, placement));
         let template = match value
             .raw_get::<Value>("template")
             .map_err(|e| e.to_string())?
@@ -160,7 +191,13 @@ pub(super) fn parse(
             if key.as_string().is_some_and(|key| {
                 matches!(
                     key.as_bytes().as_ref(),
-                    b"port_range" | b"template" | b"storage" | b"scaling" | b"memory_mb"
+                    b"port_range"
+                        | b"template"
+                        | b"storage"
+                        | b"scaling"
+                        | b"memory_mb"
+                        | b"nodes"
+                        | b"placement"
                 )
             }) {
                 continue;
@@ -215,6 +252,7 @@ pub(super) fn parse(
             let (template, storage) = policies.remove(&name).unwrap();
             let scaling = scaling_policies.remove(&name).unwrap();
             let (memory_mb, default_directory) = defaults.remove(&name).unwrap();
+            let (nodes, placement) = placements.remove(&name).unwrap();
             (
                 name,
                 ServiceGroup {
@@ -226,6 +264,8 @@ pub(super) fn parse(
                     scaling,
                     memory_mb,
                     default_directory,
+                    nodes,
+                    placement,
                 },
             )
         })
@@ -380,8 +420,24 @@ pub(super) fn render(
     server
 }
 
-fn render_group(group: &str, name: &str, port: u16, definition: &ServiceGroup) -> ManagedServer {
+fn render_group(
+    group: &str,
+    name: &str,
+    port: u16,
+    definition: &ServiceGroup,
+    node: Option<&str>,
+) -> ManagedServer {
     let mut server = render(group, name, port, &definition.server);
+    if let Some(node) = node {
+        // Agents keep CloudNet's layout below their own root.
+        server.node = Some(node.to_owned());
+        server.directory = match definition.storage {
+            InstanceStorage::Persistent => DEFAULT_PERSISTENT_DIRECTORY,
+            InstanceStorage::Disposable => DEFAULT_DISPOSABLE_DIRECTORY,
+        }
+        .replace("{name}", name)
+        .into();
+    }
     // The scaler owns idle capacity, so the process supervisor must not stop
     // instances that satisfy the minimum or spare-capacity policy.
     if definition.scaling.is_some() {
@@ -442,7 +498,7 @@ pub(super) fn validate(config: &Config) -> Result<(), String> {
             ));
         }
         // Apply all ordinary managed-server command, directory and policy bounds.
-        let server = render_group(name, &format!("{name}-1"), group.port_start, group);
+        let server = render_group(name, &format!("{name}-1"), group.port_start, group, None);
         let backends = BTreeMap::from([(
             name.clone(),
             Backend::parse(&format!("127.0.0.1:{}", group.port_start))
@@ -452,6 +508,7 @@ pub(super) fn validate(config: &Config) -> Result<(), String> {
             managed::validate(
                 &BTreeMap::from([(name.clone(), definition.clone())]),
                 &backends,
+                &config.nodes,
             )
             .map_err(|e| e.replace("managed_servers", "service_groups"))?;
         }
@@ -468,13 +525,19 @@ pub(super) fn validate(config: &Config) -> Result<(), String> {
         if !(group.port_start..=group.port_end).contains(&instance.port) {
             return Err(format!("{path}: port is outside the service group range"));
         }
-        let expected = render_group(&instance.group, name, instance.port, group);
+        let expected = render_group(
+            &instance.group,
+            name,
+            instance.port,
+            group,
+            instance.node.as_deref(),
+        );
         if config.managed_servers.get(name) != Some(&expected) {
             return Err(format!(
                 "{path}: managed definition does not match the service group"
             ));
         }
-        let address = format!("127.0.0.1:{}", instance.port);
+        let address = instance_address(config, instance).map_err(|e| format!("{path}: {e}"))?;
         if !config
             .backends
             .get(name)
@@ -486,6 +549,18 @@ pub(super) fn validate(config: &Config) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Local instances listen on loopback; remote ones on their node's address.
+fn instance_address(config: &Config, instance: &ServiceInstance) -> Result<String, String> {
+    match &instance.node {
+        None => Ok(format!("127.0.0.1:{}", instance.port)),
+        Some(node) => config
+            .nodes
+            .get(node)
+            .map(|definition| definition.backend_address(instance.port))
+            .ok_or_else(|| format!("unknown node {node:?}")),
+    }
 }
 
 /// Populate all live names before validating references between instances.
@@ -503,11 +578,17 @@ pub(super) fn restore_instances(config: &mut Config, previous: &Config) -> Resul
                 instance.group
             )
         })?;
-        let server = render_group(&instance.group, name, instance.port, group);
+        let server = render_group(
+            &instance.group,
+            name,
+            instance.port,
+            group,
+            instance.node.as_deref(),
+        );
+        let address = instance_address(config, instance)?;
         config.backends.insert(
             name.clone(),
-            Backend::parse(&format!("127.0.0.1:{}", instance.port))
-                .map_err(|error| error.to_string())?,
+            Backend::parse(&address).map_err(|error| error.to_string())?,
         );
         config.managed_servers.insert(name.clone(), server);
         config.instances.insert(name.clone(), instance.clone());
@@ -555,6 +636,17 @@ impl Config {
 
     /// Atomically render and register an instance. Runtime code allocates the port.
     pub fn add_instance(&mut self, group: &str, name: &str, port: u16) -> io::Result<()> {
+        self.add_instance_on(group, name, port, None)
+    }
+
+    /// Register an instance on a node chosen by placement, or locally for `None`.
+    pub fn add_instance_on(
+        &mut self,
+        group: &str,
+        name: &str,
+        port: u16,
+        node: Option<&str>,
+    ) -> io::Result<()> {
         let definition = self
             .service_groups
             .get(group)
@@ -569,21 +661,21 @@ impl Config {
         {
             return Err(invalid(format!("instance {name:?} already exists")));
         }
-        let server = render_group(group, name, port, definition);
+        let server = render_group(group, name, port, definition, node);
+        let instance = ServiceInstance {
+            group: group.into(),
+            port,
+            template: definition.template.clone(),
+            storage: definition.storage,
+            node: node.map(str::to_owned),
+        };
+        let address = instance_address(self, &instance).map_err(invalid)?;
         let mut candidate = self.clone();
         candidate
             .backends
-            .insert(name.into(), Backend::parse(&format!("127.0.0.1:{port}"))?);
+            .insert(name.into(), Backend::parse(&address)?);
         candidate.managed_servers.insert(name.into(), server);
-        candidate.instances.insert(
-            name.into(),
-            ServiceInstance {
-                group: group.into(),
-                port,
-                template: definition.template.clone(),
-                storage: definition.storage,
-            },
-        );
+        candidate.instances.insert(name.into(), instance);
         candidate.validate()?;
         *self = candidate;
         Ok(())
@@ -840,6 +932,7 @@ mod tests {
                 port: 25601,
                 template: None,
                 storage: InstanceStorage::Persistent,
+                node: None,
             }
         );
         let server = &config.managed_servers["lobby-2"];

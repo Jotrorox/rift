@@ -32,6 +32,7 @@ pub async fn listen(snapshot: &Snapshot) -> io::Result<Option<quic::Server>> {
     let Some(address) = settings.listen else {
         return Ok(None);
     };
+    let nodes = snapshot.config.nodes.clone();
     let (tls, auth) = tokio::task::spawn_blocking(move || -> io::Result<_> {
         let tls = quic::tls_server_config(
             settings
@@ -44,7 +45,18 @@ pub async fn listen(snapshot: &Snapshot) -> io::Result<Option<quic::Server>> {
                 .ok_or_else(|| io::Error::other("missing messaging private key"))?,
         )
         .map_err(io::Error::other)?;
-        let mut identities = Vec::with_capacity(settings.principals.len());
+        let mut identities = Vec::with_capacity(settings.principals.len() + nodes.len());
+        for (name, node) in nodes {
+            let token = node_token(&name, &node.token_env)?;
+            let (publish, subscribe) = rift::node::protocol::principal_grants(&name);
+            identities.push(quic::Identity {
+                name: rift::config::NodeConfig::principal(&name),
+                token,
+                publish,
+                subscribe,
+                control: false,
+            });
+        }
         for principal in settings.principals {
             let token = std::env::var(&principal.token_env).map_err(|_| {
                 io::Error::new(
@@ -91,6 +103,23 @@ pub async fn listen(snapshot: &Snapshot) -> io::Result<Option<quic::Server>> {
     )
     .map(Some)
     .map_err(io::Error::other)
+}
+
+/// A node agent's token, shared by its QUIC principal and template downloads.
+pub fn node_token(name: &str, variable: &str) -> io::Result<String> {
+    let token = std::env::var(variable).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("nodes.{name}: set {variable} to a secret of at least 32 bytes"),
+        )
+    })?;
+    if !(32..=1024).contains(&token.len()) || token.chars().any(char::is_control) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("nodes.{name}: token must contain 32..=1024 bytes without control characters"),
+        ));
+    }
+    Ok(token)
 }
 
 /// Subscribing before returning prevents a readiness race for control requests.
@@ -242,7 +271,7 @@ fn arguments(message: &Message) -> Result<Vec<String>, String> {
         .strip_prefix("rift.control.")
         .ok_or("invalid control subject")?;
     let fields: &[&str] = match command {
-        "status" | "reload" | "servers" | "groups" | "templates" => &[],
+        "status" | "reload" | "servers" | "groups" | "nodes" | "templates" => &[],
         "maintenance" => &["enabled"],
         "drain" => &["backend", "enabled"],
         "transfer" => &["connection_id", "backend"],
@@ -361,6 +390,7 @@ mod tests {
             ),
             ("rift.control.servers", "{}", &["servers"]),
             ("rift.control.groups", "{}", &["groups"]),
+            ("rift.control.nodes", "{}", &["nodes"]),
             ("rift.control.templates", "{}", &["templates"]),
             (
                 "rift.control.download",

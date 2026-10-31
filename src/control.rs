@@ -68,6 +68,9 @@ pub fn live_compatible(config: &Config, previous: &Config) -> Result<(), String>
     if config.messaging != previous.messaging {
         return Err("messaging changes require a restart".into());
     }
+    if config.nodes != previous.nodes {
+        return Err("nodes: node changes require a restart".into());
+    }
     let names = config
         .managed_servers
         .keys()

@@ -2065,3 +2065,110 @@ fn templates_list_software_and_files_serve_template_and_server_folders() {
     let audit = admin.get("/api/audit").expect(200).body;
     assert!(audit.contains("PUT files"), "{audit}");
 }
+
+#[test]
+fn nodes_are_listed_and_node_tokens_only_read_template_files() {
+    const NODE_TOKEN: &str = "test-node-token-with-at-least-32-bytes";
+    let fixture = Fixture::new();
+    let directory = &fixture.directory;
+    let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+    fs::write(directory.join("cert.pem"), cert.cert.pem()).unwrap();
+    fs::write(directory.join("key.pem"), cert.signing_key.serialize_pem()).unwrap();
+    fs::create_dir_all(directory.join("local/templates/game")).unwrap();
+    fs::write(directory.join("local/templates/game/server.jar"), "hello").unwrap();
+    // SAFETY: the variable name is unique to this test; children inherit it.
+    unsafe { std::env::set_var("RIFT_NODE_HTTPNODE_TOKEN", NODE_TOKEN) };
+    let source = format!(
+        "return {{
+  listeners = {{ main = '127.0.0.1:0' }},
+  backends = {{ primary = '127.0.0.1:1', survival = '10.255.0.11:25570' }},
+  routes = {{ main = 'primary' }},
+  web = {{ listen = '{}', token = '{TOKEN}' }},
+  messaging = {{ listen = '127.0.0.1:0', certificate = 'cert.pem', private_key = 'key.pem' }},
+  nodes = {{ httpnode = {{ address = '10.255.0.11', memory_mb = 8192, labels = {{ 'games' }} }} }},
+  managed_servers = {{ survival = {{ node = 'httpnode', directory = 'survival', command = {{ 'java', '-jar', 'server.jar' }} }} }},
+  templates = {{ game = {{ server_jar = 'local/templates/game/server.jar' }} }},
+  service_groups = {{ game = {{ template = 'game', storage = 'disposable', port_range = {{ 30000, 30009 }}, nodes = {{ labels = {{ 'games' }} }} }} }},
+}}
+",
+        fixture.web
+    );
+    let _process = fixture.start(&source);
+    let admin = fixture.client().authenticated();
+    let nodes = admin.get("/api/nodes").expect(200).value();
+    let node = &nodes["nodes"][0];
+    assert_eq!(node["name"], "httpnode");
+    assert_eq!(node["state"], "never_connected");
+    assert_eq!(node["address"], "10.255.0.11");
+    assert_eq!(node["labels"], json!(["games"]));
+    assert_eq!(node["instances"], 1);
+    assert!(!nodes.to_string().contains(NODE_TOKEN));
+    let servers = admin.get("/api/servers").expect(200).value();
+    let survival = servers["servers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|server| server["name"] == "survival")
+        .unwrap()
+        .clone();
+    assert_eq!(survival["node"], "httpnode");
+    assert_eq!(survival["state"], "stopped");
+    assert_eq!(
+        admin.get("/api/status").expect(200).value()["nodes"][0]["name"],
+        "httpnode"
+    );
+    // Starting a server on an unreachable node reports why.
+    admin
+        .json("POST", "/api/servers/survival/start", json!({}))
+        .expect(202);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let servers = admin.get("/api/servers").expect(200).value();
+        let error = servers["servers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|server| server["name"] == "survival")
+            .unwrap()["last_error"]
+            .clone();
+        if error
+            .as_str()
+            .is_some_and(|error| error.contains("unreachable"))
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "missing node error: {servers}");
+        thread::sleep(Duration::from_millis(10));
+    }
+    // Placement refuses to create capacity while no node is online.
+    let created = admin.instance("POST", "/api/groups/game/instances", json!({}));
+    assert_eq!(created.status, 409, "{}", created.body);
+    assert!(created.body.contains("online"), "{}", created.body);
+    // A node token reads templates, with a manifest, and nothing else.
+    let agent = Client {
+        address: fixture.web,
+        token: Some(NODE_TOKEN),
+    };
+    let manifest = agent
+        .get("/api/files/templates/game?manifest")
+        .expect(200)
+        .value();
+    assert_eq!(manifest["files"][0]["path"], "server.jar");
+    assert_eq!(
+        manifest["files"][0]["sha256"],
+        "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+    );
+    assert_eq!(
+        agent
+            .get("/api/files/templates/game/server.jar")
+            .expect(200)
+            .body,
+        "hello"
+    );
+    agent.get("/api/servers").expect(403);
+    agent.get("/api/nodes").expect(403);
+    agent
+        .send("PUT", "/api/files/templates/game/evil.jar", &[], "x")
+        .expect(403);
+    assert!(!directory.join("local/templates/game/evil.jar").exists());
+}

@@ -28,7 +28,10 @@ Subscriptions must be contained within an allowed pattern: permission for
 not grant rights for bare `game`.
 
 Publishing or subscribing to any overlapping `rift.control` subject requires
-both a matching ACL and `control = true`. This includes bare `rift.control` and
+both a matching ACL and `control = true`. `rift.node.<n>` subjects belong to the
+[node agent](nodes.md) authenticated as `node.<n>`: other identities may not
+publish to `rift.node` subjects, and only control identities may subscribe to
+patterns that overlap them. This includes bare `rift.control` and
 broad subscriptions such as `>`. Remote publishing to `rift.events` and its
 children is always rejected because Rift owns those events. Explicit reply
 subjects must be literal `_INBOX.*` subjects covered by the requester's subscribe
