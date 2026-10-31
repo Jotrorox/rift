@@ -88,6 +88,8 @@ fn version_schema_and_authenticated_mode_are_required() {
         "api_version = 1, login = true",
         "api_version = 1, commands = { hub = { permission = 'use', run = function() end } }",
         "api_version = 1, commands = { game = { run = function() end } }",
+        "api_version = 1, commands = { game = { permission = 'use', run = function() end, suggest = 'worlds' } }",
+        "api_version = 1, commands = { game = { permission = 'use', run = function() end, suggest = true } }",
         "api_version = 1, permissions = { Player = { use = true } }",
         "api_version = 1, queues = { missing = 1 }",
         "api_version = 1, queues = { game = 0 }",
@@ -139,6 +141,175 @@ async fn verified_identity_permissions_and_command_arguments_reach_lua() {
         denied.command("game wrong").await.unwrap(),
         Action::Message(_)
     ));
+}
+
+#[tokio::test]
+async fn command_suggestions_follow_permissions_and_complete_the_last_word() {
+    let runtime = runtime(
+        r#"api_version = 1,
+        permissions = { ['01010101010101010101010101010101'] = { ['mod.ban'] = true, ['mod.go'] = true } },
+        commands = {
+            ban = { permission = 'mod.ban', run = function() end, suggest = function(ctx)
+                assert(ctx.command == 'ban' and ctx.name == 'Player1')
+                if ctx.position == 2 then
+                    assert(ctx.args == 'Alice 1' and ctx.word == '1')
+                    return { { text = '1d', tooltip = 'One day' }, '1h', '30m' }
+                end
+                assert(ctx.position == 1 and ctx.args == ctx.word)
+                return { 'Alice', 'alfred', 'Bob', 'Alice' }
+            end },
+            go = { permission = 'mod.go', run = function() end, suggest = 'servers' },
+            who = { permission = 'mod.who', run = function() end, suggest = 'players' },
+            plain = { permission = 'mod.go', run = function() end },
+        },
+    "#,
+    );
+    let texts = |suggestions: Vec<Suggestion>| -> Vec<String> {
+        suggestions.into_iter().map(|s| s.text).collect()
+    };
+    let servers = || vec!["lobby".to_owned(), "Game".to_owned(), "lounge".to_owned()];
+    let allowed = runtime.session(context(1)).unwrap();
+    assert_eq!(
+        allowed.visible_commands(),
+        [
+            ("ban".into(), true),
+            ("go".into(), true),
+            ("plain".into(), false)
+        ]
+    );
+    assert_eq!(
+        texts(allowed.suggest("ban", "AL", servers).await.unwrap()),
+        ["Alice", "alfred"]
+    );
+    assert_eq!(
+        texts(allowed.suggest("ban", "", servers).await.unwrap()).len(),
+        3
+    );
+    assert_eq!(
+        allowed.suggest("ban", "Alice 1", servers).await.unwrap(),
+        [
+            Suggestion {
+                text: "1d".into(),
+                tooltip: Some("One day".into())
+            },
+            Suggestion {
+                text: "1h".into(),
+                tooltip: None
+            },
+        ]
+    );
+    assert_eq!(
+        texts(allowed.suggest("go", "", servers).await.unwrap()),
+        ["Game", "lobby", "lounge"]
+    );
+    assert_eq!(
+        texts(allowed.suggest("go", "lo", servers).await.unwrap()),
+        ["lobby", "lounge"]
+    );
+    assert!(
+        allowed
+            .suggest("plain", "", servers)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        allowed
+            .suggest("missing", "", servers)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    // Without the permission there are neither tree entries nor suggestions,
+    // and the suggest function never runs.
+    assert!(
+        allowed
+            .suggest("who", "", servers)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let denied = runtime.session(context(2)).unwrap();
+    assert!(denied.visible_commands().is_empty());
+    assert!(denied.suggest("ban", "", servers).await.unwrap().is_empty());
+    assert!(denied.suggest("go", "", servers).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn declarative_player_suggestions_list_joined_players() {
+    let runtime = runtime(
+        r#"api_version = 1, permissions = { ['*'] = { ['use'] = true } },
+        commands = { msg = { permission = 'use', run = function() end, suggest = 'players' } }"#,
+    );
+    let _bob = runtime.players().register(3, &[3; 16], "bob", 774, "lobby");
+    let _alice = runtime
+        .players()
+        .register(4, &[4; 16], "Alice", 774, "game");
+    let session = runtime.session(context(1)).unwrap();
+    let texts = |suggestions: Vec<Suggestion>| -> Vec<String> {
+        suggestions.into_iter().map(|s| s.text).collect()
+    };
+    assert_eq!(
+        texts(session.suggest("msg", "", Vec::new).await.unwrap()),
+        ["Alice", "bob"]
+    );
+    // Every word completes, as Bukkit's default does.
+    assert_eq!(
+        texts(session.suggest("msg", "Alice B", Vec::new).await.unwrap()),
+        ["bob"]
+    );
+}
+
+#[tokio::test]
+async fn malformed_or_slow_suggestions_fail_without_suggesting() {
+    for body in [
+        "return 'Alice'",
+        "return { 1 }",
+        "return { '' }",
+        "return { 'a\\nb' }",
+        "return { string.rep('a', 257) }",
+        "return { { text = 'a', typo = 1 } }",
+        "return { { tooltip = 'a' } }",
+        "return { first = 'a' }",
+        "local t = {} for i = 1, 1025 do t[i] = 'a' end return t",
+        "while true do end",
+        "error('broken')",
+    ] {
+        let runtime = runtime(&format!(
+            "api_version = 1, permissions = {{ ['*'] = {{ use = true }} }}, commands = {{ ban = {{ permission = 'use', run = function() end, suggest = function() {body} end }} }}"
+        ));
+        let session = runtime.session(context(1)).unwrap();
+        assert!(
+            timeout(Duration::from_secs(1), session.suggest("ban", "", Vec::new))
+                .await
+                .unwrap()
+                .is_err(),
+            "{body}"
+        );
+    }
+    let runtime = runtime(
+        "api_version = 1, permissions = { ['*'] = { use = true } }, commands = { ban = { permission = 'use', run = function() end, suggest = function() local t = {} for i = 1, 1000 do t[i] = 'p' .. i end return t end } }",
+    );
+    let session = runtime.session(context(1)).unwrap();
+    assert_eq!(
+        session.suggest("ban", "", Vec::new).await.unwrap().len(),
+        MAX_SUGGESTIONS
+    );
+    assert!(
+        session
+            .suggest("ban", "", Vec::new)
+            .await
+            .unwrap()
+            .iter()
+            .all(|s| s.tooltip.is_none())
+    );
+    assert!(
+        session
+            .suggest("ban", "nil", Vec::new)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]

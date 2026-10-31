@@ -629,11 +629,9 @@ fn extension_commands_replace_backend_roots_and_keep_unsigned_arguments() {
         write_string("queue", &mut data);
         data.push(0);
         let commands = vec!["queue".to_owned(), "staff".to_owned()];
+        let tree: Vec<_> = commands.iter().map(|name| (name.clone(), false)).collect();
         let expanded = caps
-            .network_commands_with(
-                &Packet::new(command_tree_id(number), data.clone()),
-                &commands,
-            )
+            .network_commands_with(&Packet::new(command_tree_id(number), data.clone()), &tree)
             .unwrap();
         let mut bytes = expanded.data.as_slice();
         assert_eq!(read_varint(&mut bytes).unwrap(), 9);
@@ -668,6 +666,178 @@ fn extension_commands_replace_backend_roots_and_keep_unsigned_arguments() {
             caps.proxy_command_with(&Packet::new(command_id(number) + 1, unsigned), &commands)
                 .unwrap()
                 .is_none()
+        );
+    }
+}
+
+/// Command Suggestions Request and Response IDs from PrismarineJS
+/// minecraft-data through 26.1, and from the 26.2 and 26.3 server artifacts'
+/// `GameProtocols` registration order (javap).
+fn suggestion_ids(number: i32) -> (i32, i32) {
+    match number {
+        761 => (0x08, 0x0d),
+        762 | 763 => (0x09, 0x0f),
+        764 | 765 => (0x0a, 0x10),
+        766 | 767 => (0x0b, 0x10),
+        768 | 769 => (0x0d, 0x10),
+        770 => (0x0d, 0x0f),
+        771..=774 => (0x0e, 0x0f),
+        775..=777 => (0x0f, 0x0f),
+        _ => panic!("unmapped test protocol"),
+    }
+}
+
+#[test]
+fn proxy_suggestion_requests_are_taken_only_for_proxy_command_arguments() {
+    for number in 761..=777 {
+        let caps = ProtocolVersion::new(number).unwrap().switching().unwrap();
+        let (request_id, _) = suggestion_ids(number);
+        let request = |text: &str| {
+            let mut data = Vec::new();
+            write_varint(300, &mut data);
+            write_string(text, &mut data);
+            Packet::new(request_id, data)
+        };
+        let commands = ["ban".to_owned()];
+        for text in ["/server lo", "/hub ", "/ban Al", "ban Al", "/ban Alice 1d"] {
+            assert_eq!(
+                caps.proxy_suggestion_request(&request(text), &commands)
+                    .unwrap(),
+                Some((300, text.to_owned())),
+                "protocol {number}: {text}"
+            );
+        }
+        // Backend commands, unregistered names and root names being typed
+        // belong to the backend.
+        for text in ["/give Al", "/serverx a", "/server", "/ban", "/kick Al", ""] {
+            assert_eq!(
+                caps.proxy_suggestion_request(&request(text), &commands)
+                    .unwrap(),
+                None,
+                "protocol {number}: {text}"
+            );
+        }
+        let mut other = request("/server lo");
+        other.id = request_id - 1;
+        assert_eq!(
+            caps.proxy_suggestion_request(&other, &commands).unwrap(),
+            None
+        );
+        let mut trailing = request("/server lo");
+        trailing.data.push(0);
+        assert!(caps.proxy_suggestion_request(&trailing, &commands).is_err());
+        let truncated = Packet::new(request_id, request("/server lo").data[..4].to_vec());
+        assert!(
+            caps.proxy_suggestion_request(&truncated, &commands)
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn suggestion_responses_use_each_versions_id_and_tooltip_encoding() {
+    for number in 761..=777 {
+        let version = ProtocolVersion::new(number).unwrap();
+        let caps = version.switching().unwrap();
+        let (_, response_id) = suggestion_ids(number);
+        let matches = [
+            Suggestion {
+                text: "lobby".into(),
+                tooltip: None,
+            },
+            Suggestion {
+                text: "lounge".into(),
+                tooltip: Some("Chill".into()),
+            },
+        ];
+        let packet = caps.suggestions(version, 300, 8, 2, &matches).unwrap();
+        let mut expected = Vec::new();
+        write_varint(300, &mut expected);
+        expected.extend([8, 2, 2]);
+        write_string("lobby", &mut expected);
+        expected.push(0);
+        write_string("lounge", &mut expected);
+        expected.push(1);
+        if number >= 765 {
+            expected.extend([8, 0, 5]); // Anonymous NBT TAG_String.
+            expected.extend(b"Chill");
+        } else {
+            write_string(r#"{"text":"Chill"}"#, &mut expected);
+        }
+        assert_eq!(
+            packet,
+            Packet::new(response_id, expected),
+            "protocol {number}"
+        );
+        assert_eq!(
+            version.kind(State::Play, Direction::Clientbound, response_id),
+            PacketKind::Unknown
+        );
+        assert_eq!(
+            caps.suggestions(version, 1, 0, 0, &[]).unwrap().data,
+            [1, 0, 0, 0]
+        );
+    }
+    for number in [47, 340, 758, 760] {
+        let version = ProtocolVersion::new(number).unwrap();
+        let caps = version.switching().unwrap();
+        assert_eq!(
+            caps.suggestions(version, 1, 0, 0, &[]).unwrap_err().kind(),
+            io::ErrorKind::Unsupported
+        );
+        for id in 0..0x80 {
+            let mut data = Vec::new();
+            write_varint(1, &mut data);
+            write_string("/server lo", &mut data);
+            assert_eq!(
+                caps.proxy_suggestion_request(&Packet::new(id, data), &[])
+                    .unwrap(),
+                None
+            );
+        }
+    }
+}
+
+#[test]
+fn proxy_command_arguments_ask_the_server_only_where_rift_answers() {
+    for number in [758, 760, 761, 765, 767, 774, 777] {
+        let caps = ProtocolVersion::new(number).unwrap().switching().unwrap();
+        let root = Packet::new(caps.commands, vec![1, 0, 0, 0]);
+        let commands = [("ban".to_owned(), true), ("staff".to_owned(), false)];
+        let expanded = caps.network_commands_with(&root, &commands).unwrap();
+        // Rift's own parser accepts the suggestion type it wrote.
+        caps.network_commands_with(&expanded, &commands).unwrap();
+        let find = |needle: &[u8], from: usize| {
+            expanded.data[from..]
+                .windows(needle.len())
+                .position(|window| window == needle)
+                .map(|at| at + from)
+        };
+        let ask = b"minecraft:ask_server";
+        if number < 761 {
+            assert_eq!(find(ask, 0), None, "protocol {number}");
+            continue;
+        }
+        // `/server <name>` and `/ban <args>` ask; `/staff <args>` does not.
+        let server = find(ask, 0).unwrap();
+        let ban = find(b"ban", 0).unwrap();
+        let staff = find(b"staff", 0).unwrap();
+        assert!(server < ban, "protocol {number}");
+        let second = find(ask, server + 1).unwrap();
+        assert!(ban < second && second < staff, "protocol {number}");
+        assert_eq!(find(ask, second + 1), None, "protocol {number}");
+        // Suggesting arguments carry flag 0x10 on their executable argument node.
+        let args = find(b"\x04args", ban).unwrap();
+        assert_eq!(
+            expanded.data[args - 2..args],
+            [0x16, 0],
+            "protocol {number}"
+        );
+        let args = find(b"\x04args", staff).unwrap();
+        assert_eq!(
+            expanded.data[args - 2..args],
+            [0x06, 0],
+            "protocol {number}"
         );
     }
 }
