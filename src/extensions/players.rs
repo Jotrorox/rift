@@ -1,7 +1,10 @@
 //! Online players and the actions Lua and the BungeeCord bridge can queue for
 //! them. Each session drains its own bounded queue from its connection loop;
 //! callers never touch a socket.
+//!
+//! Joins, server switches and quits are published on `rift.events.players`.
 use super::fields;
+use crate::messaging::Broker;
 use mlua::{Lua, Table, Value};
 use std::{
     cell::Cell,
@@ -69,7 +72,10 @@ pub struct Players {
     sessions: Arc<Mutex<BTreeMap<u64, Entry>>>,
     destinations: Destinations,
     groups: Groups,
+    events: Broker,
 }
+
+pub const EVENTS: &str = "rift.events.players";
 
 /// Presence in the directory. Dropping it removes the player and closes its queue.
 pub struct PlayerHandle {
@@ -80,15 +86,29 @@ pub struct PlayerHandle {
 impl PlayerHandle {
     /// Commit the server only after the player has joined it.
     pub fn set_server(&self, server: &str) {
-        if let Some(entry) = self.players.lock().get_mut(&self.id) {
-            server.clone_into(&mut entry.server);
+        let mut sessions = self.players.lock();
+        let Some(entry) = sessions.get_mut(&self.id) else {
+            return;
+        };
+        if entry.server == server {
+            return;
         }
+        let previous = std::mem::replace(&mut entry.server, server.to_owned());
+        let event = self
+            .players
+            .event("switch", self.id, entry, Some(&previous));
+        drop(sessions);
+        self.players.publish(event);
     }
 }
 
 impl Drop for PlayerHandle {
     fn drop(&mut self) {
-        self.players.lock().remove(&self.id);
+        let removed = self.players.lock().remove(&self.id);
+        if let Some(entry) = removed {
+            let event = self.players.event("quit", self.id, &entry, None);
+            self.players.publish(event);
+        }
     }
 }
 
@@ -260,12 +280,34 @@ fn find<'a>(
 }
 
 impl Players {
-    pub(super) fn new(destinations: Destinations, groups: Groups) -> Self {
+    pub(super) fn new(destinations: Destinations, groups: Groups, events: Broker) -> Self {
         Self {
             sessions: Arc::default(),
             destinations,
             groups,
+            events,
         }
+    }
+
+    /// Only the owning session changes its entry, one step at a time, so the
+    /// events for one player are published in order.
+    fn event(&self, kind: &str, id: u64, entry: &Entry, previous: Option<&str>) -> String {
+        let mut event = serde_json::json!({
+            "event": kind,
+            "connection_id": id.to_string(),
+            "uuid": entry.uuid,
+            "name": entry.name,
+            "server": entry.server,
+        });
+        if let Some(previous) = previous {
+            event["previous"] = previous.into();
+        }
+        event.to_string()
+    }
+
+    fn publish(&self, event: String) {
+        // Ephemeral: nobody listening, or a slow listener, never delays a session.
+        let _ = self.events.publish(EVENTS, event.into());
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<u64, Entry>> {
@@ -285,17 +327,17 @@ impl Players {
         server: &str,
     ) -> (PlayerHandle, mpsc::Receiver<PlayerAction>) {
         let (actions, receiver) = mpsc::channel(QUEUE);
-        self.lock().insert(
-            id,
-            Entry {
-                uuid: uuid.iter().map(|b| format!("{b:02x}")).collect(),
-                name: name.to_owned(),
-                server: server.to_owned(),
-                protocol,
-                actions,
-                boss_bars: BTreeSet::new(),
-            },
-        );
+        let entry = Entry {
+            uuid: uuid.iter().map(|b| format!("{b:02x}")).collect(),
+            name: name.to_owned(),
+            server: server.to_owned(),
+            protocol,
+            actions,
+            boss_bars: BTreeSet::new(),
+        };
+        let event = self.event("join", id, &entry, None);
+        self.lock().insert(id, entry);
+        self.publish(event);
         (
             PlayerHandle {
                 players: self.clone(),
