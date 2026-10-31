@@ -1000,6 +1000,7 @@ fn player_filters_and_transfers_accept_service_groups() {
             "games".to_owned(),
             BTreeSet::from(["games-1".to_owned()]),
         )]))),
+        Broker::new(Default::default()).unwrap(),
     );
     let (_alice, mut alice) = players.register(1, &[1; 16], "Alice", 774, "games-1");
     let (_bob, mut bob) = players.register(2, &[2; 16], "Bob", 774, "lobby");

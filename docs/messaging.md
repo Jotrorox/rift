@@ -160,6 +160,10 @@ capacity the way CloudNet plugins follow service lifecycle events.
 
 `rift.events.control` reports command name and success, excluding status/player
 details. `rift.events.reload` reports the active revision after successful reload.
+`rift.events.players` reports players as they join, switch servers and quit:
+`{"event":"join","connection_id":"7","uuid":"…","name":"Alice","server":"lobby"}`.
+A `switch` also carries the `previous` server, and a `quit` names the last one.
+`uuid` is lowercase 32-digit hex without hyphens. Events for one player arrive in order.
 `rift.events.lifecycle` reports `ready` and `draining`. These are ephemeral events;
 query status to get current state. A timed-out command may already have executed;
 check status before retrying a mutation. No automatic mutation retry is performed.
