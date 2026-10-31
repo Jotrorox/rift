@@ -161,7 +161,7 @@ Errors use `{"error":"description"}`. `GET /api` provides endpoint discovery.
 | --- | --- |
 | `GET /api/access` | Current operator name, permissions (`null` for full access) and group scopes |
 | `GET /api/status` | Runtime version, uptime, revision, actual listeners, backends, health, managed server state, service groups, routes, fallbacks, limits, counters and enabled services |
-| `GET /api/servers` | `{servers: [...]}` with managed server lifecycle state and usage |
+| `GET /api/servers` | `{servers: [...]}` with managed server lifecycle state, usage and `node` (`local` for this host) |
 | `POST /api/servers/{name}/start` | Request a managed server start with `{}`; returns `202` when accepted |
 | `POST /api/servers/{name}/stop` | Request an unused managed server stop and pause automatic wake with `{}`; returns `202` when accepted |
 | `GET /api/servers/{name}/logs?cursor={byte_offset}` | Up to 64 KiB of log text with the next byte cursor, `truncated` and `has_more`; omit cursor to tail the log |
@@ -175,17 +175,18 @@ Errors use `{"error":"description"}`. `GET /api` provides endpoint discovery.
 | `GET /api/deployments` | Retained deployment metadata, active revision, retention limit and durability flag; never includes source |
 | `POST /api/deployments/{id}/rollback` | Validate and restore a retained configuration with `{revision}` |
 | `GET /api/audit` | Latest operator records and durability flag |
-| `GET /api/groups` | `{groups: [...]}` with group names, inclusive port ranges, instance names, template and storage policy |
+| `GET /api/groups` | `{groups: [...]}` with group names, inclusive port ranges, instance names, template and storage policy, and `nodes`/`placement` for groups on [nodes](nodes.md) |
+| `GET /api/nodes` | `{nodes: [...]}` with each [node](nodes.md)'s `state` (`online`, `unreachable`, `never_connected`), address, labels, `instances`, `max_instances`, `memory_mb`, `allocated_memory_mb`, agent `version` and `last_seen_ms` |
 | `POST /api/groups/{name}/instances` | Submit provisioning with `{}`; returns `202` with `{operation_id, status: "pending", poll}` (autostart follows group policy) |
 | `DELETE /api/instances/{name}` | Submit removal of an unused instance with `{}`; returns `202` with `{operation_id, status: "pending", poll}` |
 | `GET /api/operations/{id}` | Retrieve instance or download operation state and its completed result; requires current `servers` permission and the operation's group scope |
 | `GET /api/templates` | `{templates: [...]}` with names, the groups using them, counts of config layers and plugins, and `software` with its download cache state (`cached`, `resolved_version`, `build`, `size`, `sha256`); never includes asset paths |
 | `POST /api/templates/{name}/download` | Download (`{}`) or refresh (`{"refresh":true}`) a template's server software ahead of instance creation; `servers` permission, returns `202` with an operation to poll |
 | `GET /api/software/{type}/versions` | Release names for `paper`, `folia`, `purpur`, `vanilla` or `fabric`, newest first, fetched upstream and cached for 10 minutes; `servers` permission |
-| `GET /api/files/templates/{path}` | List a folder in `template_storage` as `{path, entries, truncated}`, or download a file (at most 64 MiB); `files` permission and unrestricted scope |
+| `GET /api/files/templates/{path}` | List a folder in `template_storage` as `{path, entries, truncated}`, or download a file (at most 64 MiB); `files` permission and unrestricted scope. `?manifest` returns `{files: [{path, size, sha256}], directories}` for the whole tree, which node agents use to fetch only changed files |
 | `PUT /api/files/templates/{path}` | Write the raw request body to a file (at most 64 MiB), creating parent folders; add `?directory` to create a folder instead |
 | `DELETE /api/files/templates/{path}` | Delete a file, or a folder with its contents |
-| `GET`/`PUT`/`DELETE /api/files/servers/{name}/{path}` | The same operations inside a managed server's directory, within the operator's group scope |
+| `GET`/`PUT`/`DELETE /api/files/servers/{name}/{path}` | The same operations inside a managed server's directory, within the operator's group scope. For servers on a node they go through its agent and files are limited to 512 KiB |
 | `GET /api/metrics` | Counter values as JSON |
 | `GET /api/config` | `{source, revision, writable}` for the active configuration |
 | `POST /api/config/validate` | Validate `{source}` including live listener restrictions; does not save or bind sockets |
@@ -396,6 +397,11 @@ mutations are recorded in the audit log as `PUT files` and `DELETE files`.
 Writing a server's plugins or configuration runs code with that server's
 operating-system identity; grant `files` only to operators you would also
 trust with `console`.
+
+[Node agents](nodes.md) authenticate to `GET /api/files/templates` with their
+node token (`rift.config.nodes.<name>.token_env`) to mirror template folders.
+That token can only read template files; every other request, and every write,
+is refused with `403`. Node reads are not audited, like other reads.
 
 ## Lua websites and endpoints
 

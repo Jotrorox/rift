@@ -56,6 +56,8 @@ pub struct Snapshot {
     cache: status::Cache,
     pub players: Arc<PlayerRegistry>,
     pub managed: rift::managed::ManagedServers,
+    /// Node agents; fixed at startup because node changes require a restart.
+    pub nodes: rift::node::Nodes,
     live: Arc<Mutex<Weak<Snapshot>>>,
     instance_sequence: Arc<Mutex<BTreeMap<String, u64>>>,
     instance_store: Option<Arc<rift::instance_store::Store>>,
@@ -138,8 +140,12 @@ impl Snapshot {
             || Arc::new(PlayerRegistry::default()),
             |old| old.players.clone(),
         );
+        let nodes = previous.map_or_else(
+            || rift::node::Nodes::new(messaging.clone(), &config),
+            |old| old.nodes.clone(),
+        );
         let managed = previous.map_or_else(
-            || rift::managed::ManagedServers::new(&config, players.clone()),
+            || rift::managed::ManagedServers::with_nodes(&config, players.clone(), nodes.clone()),
             |old| old.managed.clone(),
         );
         Ok(Self {
@@ -170,6 +176,7 @@ impl Snapshot {
             cache: status::Cache::default(),
             players,
             managed,
+            nodes,
         })
     }
 
@@ -1615,6 +1622,9 @@ async fn create_instance(group: String, snapshot: &Arc<Snapshot>) -> InstanceRes
             "service group reached scaling.max_instances",
         ));
     }
+    if definition.nodes.is_some() {
+        return create_remote_instance(group, config, snapshot).await;
+    }
     // Fetch template software before reserving a port or name; cached jars
     // return immediately and concurrent creations share one download.
     if let Some(software) = definition
@@ -1710,6 +1720,130 @@ async fn create_instance(group: String, snapshot: &Arc<Snapshot>) -> InstanceRes
     Ok((Arc::new(next), response))
 }
 
+/// Software and templates are fetched by the agent; this host only places
+/// the instance, records it and asks the node to prepare its directory.
+async fn create_remote_instance(
+    group: String,
+    mut config: Config,
+    snapshot: &Arc<Snapshot>,
+) -> InstanceResult {
+    use crate::control::Error;
+    let node = crate::scaling::place(&config, &group, &snapshot.nodes).map_err(Error::conflict)?;
+    let definition = &config.service_groups[&group];
+    let mut reserved = snapshot
+        .instance_store
+        .as_ref()
+        .map(|store| store.reserved_ports_on(Some(&node)))
+        .transpose()?
+        .unwrap_or_default();
+    reserved.extend(
+        config
+            .instances
+            .values()
+            .filter(|instance| instance.node.as_deref() == Some(node.as_str()))
+            .map(|instance| instance.port),
+    );
+    let port = (definition.port_start..=definition.port_end)
+        .find(|port| !reserved.contains(port))
+        .ok_or_else(|| {
+            Error::conflict(format!(
+                "service group port range is exhausted on node {node}"
+            ))
+        })?;
+    let name = next_instance_name(snapshot, &config, &group)?;
+    config.add_instance_on(&group, &name, port, Some(&node))?;
+    let next = instance_snapshot(config, snapshot)?;
+    let prepare = rift::provisioning::remote_prepare(&next.config, &name)?;
+    let plan = rift::provisioning::Plan {
+        directory: prepare.directory.clone(),
+        marker: None,
+        stage: None,
+        created: false,
+    };
+    let store = snapshot.instance_store.clone();
+    if let Some(store) = &store {
+        let (store, config, name, plan) = (store.clone(), next.config.clone(), name.clone(), plan);
+        blocking(move || store.begin_creation(&config, &name, &plan)).await?;
+    }
+    let abort = |store: Option<Arc<rift::instance_store::Store>>, name: String| async move {
+        if let Some(store) = store {
+            let _ = blocking(move || store.abort_creation(&name)).await;
+        }
+    };
+    // Software downloads on the node can take as long as they do locally.
+    let prepared = snapshot
+        .nodes
+        .request(
+            &node,
+            &rift::node::protocol::Command::Prepare(Box::new(prepare.clone())),
+            admin::DOWNLOAD_DEADLINE,
+        )
+        .await;
+    let prepared = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            abort(store, name.clone()).await;
+            return Err(Error {
+                status: 502,
+                message: format!("node {node} could not prepare {name}: {error}"),
+            });
+        }
+    };
+    let committed = match &store {
+        Some(store) => {
+            let (store, name) = (store.clone(), name.clone());
+            blocking(move || store.commit_creation(&name)).await
+        }
+        None => Ok(()),
+    };
+    let registered = committed.and_then(|()| next.managed.add(&next.config, &name));
+    if let Err(error) = registered {
+        if let Some(store) = &store {
+            let (store, name) = (store.clone(), name.clone());
+            let _ = blocking(move || {
+                store
+                    .undo_registration(&name)
+                    .or_else(|_| store.abort_creation(&name))
+            })
+            .await;
+        }
+        if prepared["created"] == true {
+            let _ = snapshot
+                .nodes
+                .request(
+                    &node,
+                    &rift::node::protocol::Command::Remove {
+                        server: name.clone(),
+                        directory: prepare.directory.clone(),
+                        storage: prepare.storage,
+                    },
+                    Duration::from_secs(60),
+                )
+                .await;
+        }
+        return Err(error.into());
+    }
+    let instance = &next.config.instances[&name];
+    let group = &next.config.service_groups[&instance.group];
+    if group.scaling.is_some()
+        && !group.server.autostart
+        && let Err(error) = next.managed.request_scale_start(&name)
+    {
+        eprintln!("rift: automatic start of {name} rejected: {error}");
+    }
+    let response = serde_json::json!({
+        "name": name,
+        "group": instance.group,
+        "port": instance.port,
+        "address": next.config.backends[&name].address(),
+        "node": node,
+        "template": group.template,
+        "storage": group.storage.as_str(),
+        "created": true,
+    });
+    Ok((Arc::new(next), response))
+}
+
 async fn remove_instance(name: String, snapshot: &Arc<Snapshot>) -> InstanceResult {
     use crate::control::Error;
     let mut config = snapshot.config.clone();
@@ -1719,6 +1853,9 @@ async fn remove_instance(name: String, snapshot: &Arc<Snapshot>) -> InstanceResu
             message: format!("unknown service instance {name:?}"),
         });
     };
+    if let Some(node) = instance.node.clone() {
+        return remove_remote_instance(name, node, instance, config, snapshot).await;
+    }
     config.backends.remove(&name);
     config.managed_servers.remove(&name);
     config.draining.remove(&name);
@@ -1753,6 +1890,85 @@ async fn remove_instance(name: String, snapshot: &Arc<Snapshot>) -> InstanceResu
         "cleanup_error": cleanup_error,
     });
     Ok((Arc::new(next), response))
+}
+
+/// Stop the process through its agent, then delete disposable files there. An
+/// unreachable node cleans up on reconnection, when it reconciles its list.
+async fn remove_remote_instance(
+    name: String,
+    node: String,
+    instance: rift::config::ServiceInstance,
+    mut config: Config,
+    snapshot: &Arc<Snapshot>,
+) -> InstanceResult {
+    use crate::control::Error;
+    let directory = snapshot.config.managed_servers[&name].directory.clone();
+    config.backends.remove(&name);
+    config.managed_servers.remove(&name);
+    config.draining.remove(&name);
+    config.validate().map_err(|error| {
+        Error::conflict(format!("instance is referenced by configuration: {error}"))
+    })?;
+    let next = instance_snapshot(config, snapshot)?;
+    next.managed.remove(&name).await.map_err(Error::conflict)?;
+    let cleanup_error = snapshot
+        .nodes
+        .request(
+            &node,
+            &rift::node::protocol::Command::Remove {
+                server: name.clone(),
+                directory,
+                storage: instance.storage,
+            },
+            Duration::from_secs(60),
+        )
+        .await
+        .err()
+        .map(|error| error.to_string());
+    if let Some(store) = snapshot.instance_store.clone() {
+        let name = name.clone();
+        blocking(move || store.finish_removal(&name)).await?;
+    }
+    let files_removed =
+        instance.storage == rift::config::InstanceStorage::Disposable && cleanup_error.is_none();
+    let response = serde_json::json!({
+        "name": name,
+        "node": node,
+        "removed": true,
+        "storage": instance.storage.as_str(),
+        "files_removed": files_removed,
+        "cleanup_error": cleanup_error,
+    });
+    Ok((Arc::new(next), response))
+}
+
+/// Tell every (re)connected node which servers it still runs for this
+/// controller; it stops and deletes the rest. Runs for the process lifetime.
+async fn reconcile_nodes(current: watch::Receiver<Arc<Snapshot>>) {
+    let nodes = current.borrow().nodes.clone();
+    loop {
+        for node in nodes.reconnected().await {
+            let snapshot = current.borrow().clone();
+            let servers = snapshot.managed.names_on(&node);
+            let nodes = nodes.clone();
+            tokio::spawn(async move {
+                let command = rift::node::protocol::Command::Reconcile { servers };
+                match nodes
+                    .request(&node, &command, Duration::from_secs(120))
+                    .await
+                {
+                    Ok(result) => {
+                        let changed = result["stopped"].as_array().is_some_and(|v| !v.is_empty())
+                            || result["removed"].as_array().is_some_and(|v| !v.is_empty());
+                        if changed {
+                            eprintln!("rift: node {node} reconciled: {result}");
+                        }
+                    }
+                    Err(error) => eprintln!("rift: node {node} reconciliation failed: {error}"),
+                }
+            });
+        }
+    }
 }
 
 /// Announce committed instance changes so plugins can follow capacity, like
@@ -1973,6 +2189,10 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         ));
     }
     let mut background = JoinSet::new();
+    if !snapshot.nodes.is_empty() {
+        background.spawn(snapshot.nodes.listen()?);
+        background.spawn(reconcile_nodes(receiver.clone()));
+    }
     let (admin_commands, mut admin_requests) = mpsc::channel(16);
     background.spawn(messaging_controls.run(
         receiver.clone(),

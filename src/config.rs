@@ -16,11 +16,13 @@ pub use crate::server_list::{ServerList, StatusScript};
 pub use crate::{http_script::HttpScript, script::RouteScript};
 pub use managed::ManagedServer;
 pub use messaging::{MessagingConfig, MessagingPrincipal, MessagingStream, MessagingSubscription};
+pub use nodes::{LOCAL_NODE, NodeConfig, NodeSelector, Placement, valid_node_directory};
 pub use services::{InstanceStorage, ServiceGroup, ServiceInstance, ServiceScaling};
 pub use templates::ServerTemplate;
 
 mod managed;
 mod messaging;
+mod nodes;
 mod server_list;
 mod services;
 mod tab_list;
@@ -46,6 +48,8 @@ pub struct Config {
     pub templates: BTreeMap<String, ServerTemplate>,
     pub service_groups: BTreeMap<String, ServiceGroup>,
     pub instances: BTreeMap<String, ServiceInstance>,
+    /// Hosts running `rift node`; servers without a node run on this host.
+    pub nodes: BTreeMap<String, NodeConfig>,
     pub instance_database: PathBuf,
     /// Downloaded template software, like CloudNet's `local/versioncache`.
     pub software_cache: PathBuf,
@@ -324,6 +328,7 @@ impl Config {
             templates: BTreeMap::new(),
             service_groups: BTreeMap::new(),
             instances: BTreeMap::new(),
+            nodes: BTreeMap::new(),
             instance_database: PathBuf::from("rift.sqlite3"),
             software_cache: PathBuf::from(DEFAULT_SOFTWARE_CACHE),
             template_storage: PathBuf::from(DEFAULT_TEMPLATE_STORAGE),
@@ -463,6 +468,7 @@ impl Config {
                     "managed_servers",
                     "templates",
                     "service_groups",
+                    "nodes",
                     "instance_database",
                     "software_cache",
                     "template_storage",
@@ -523,6 +529,7 @@ impl Config {
             let template_storage = directory_option("template_storage", DEFAULT_TEMPLATE_STORAGE)?;
             let templates = templates::parse(&root, directory, &software_cache)?;
             let service_groups = services::parse(&_lua, &root, directory)?;
+            let nodes = nodes::parse(&root)?;
             let instance_database = match root
                 .raw_get::<Value>("instance_database")
                 .map_err(|e| e.to_string())?
@@ -754,6 +761,7 @@ impl Config {
                 templates,
                 service_groups,
                 instances: BTreeMap::new(),
+                nodes,
                 instance_database,
                 software_cache,
                 template_storage,
@@ -811,7 +819,7 @@ impl Config {
         }
         let database = managed::canonicalize_existing(&self.instance_database)?;
         for (name, server) in &self.managed_servers {
-            if !self.instances.contains_key(name) {
+            if !self.instances.contains_key(name) || server.node.is_some() {
                 continue;
             }
             let directory = managed::canonicalize_existing(&server.directory)?;
@@ -821,8 +829,9 @@ impl Config {
                 )));
             }
         }
+        nodes::validate(self).map_err(invalid)?;
         services::validate(self).map_err(invalid)?;
-        managed::validate(&self.managed_servers, &self.backends).map_err(invalid)?;
+        managed::validate(&self.managed_servers, &self.backends, &self.nodes).map_err(invalid)?;
         templates::validate(self).map_err(invalid)?;
         if let Some(extensions) = &self.extensions {
             if !self.authentication.online_mode {
@@ -838,7 +847,9 @@ impl Config {
             }
         }
         if let Some(messaging) = &self.messaging {
-            messaging.validate().map_err(invalid)?;
+            messaging
+                .validate_with_nodes(!self.nodes.is_empty())
+                .map_err(invalid)?;
         }
         if self.server_list.is_some() && self.status_cache.is_some() {
             return Err(invalid(

@@ -140,8 +140,9 @@ request helpers create one automatically. Control requests are serialized.
 | `rift.control.drain` | `{"backend":"lobby","enabled":true}` | Enable/disable draining for a backend |
 | `rift.control.transfer` | `{"connection_id":123,"backend":"lobby"}` | Transfer an online player with existing protocol/access checks |
 | `rift.control.reload` | `{}` | Reload the selected configuration file |
-| `rift.control.servers` | `{}` | Managed servers with lifecycle state, usage, group, template and storage |
-| `rift.control.groups` | `{}` | Service groups with port ranges, templates, storage, scaling and instances |
+| `rift.control.servers` | `{}` | Managed servers with lifecycle state, usage, group, template, storage and node |
+| `rift.control.groups` | `{}` | Service groups with port ranges, templates, storage, scaling, node selection and instances |
+| `rift.control.nodes` | `{}` | [Nodes](nodes.md) with reachability, address, labels, instances and allocated memory |
 | `rift.control.templates` | `{}` | Templates with their server software and download cache state |
 | `rift.control.create` | `{"group":"lobby"}` | Create an instance from a service group, downloading template software first when needed |
 | `rift.control.remove` | `{"name":"lobby-1"}` | Remove an unused instance; disposable storage is deleted |

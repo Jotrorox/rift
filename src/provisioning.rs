@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 
 use crate::config::{Config, InstanceStorage, ServiceInstance};
 
-const MARKER: &str = ".rift-instance.json";
+pub(crate) const MARKER: &str = ".rift-instance.json";
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 /// A receipt allows failed registration to roll back only newly created data.
@@ -115,6 +115,7 @@ pub fn provision_planned(config: &Config, name: &str, plan: &Plan) -> io::Result
         write_properties(
             &directory,
             instance.port,
+            LOCAL_BIND,
             &managed_properties(config, template),
         )?;
         return Ok(Provisioned {
@@ -135,32 +136,92 @@ pub fn provision_planned(config: &Config, name: &str, plan: &Plan) -> io::Result
             format!("software {} has not been downloaded yet", software.key()),
         ));
     }
-    let jar = source(&template.server_jar, &directory, false)?;
-    let configs = template
-        .configs
-        .iter()
-        .map(|path| source(path, &directory, true))
-        .collect::<io::Result<Vec<_>>>()?;
     let forwarding = match (&template.software, &config.forwarding) {
-        (Some(software), Some(forwarding)) if software.kind.paper_family() => {
-            Some(std::env::var(&forwarding.secret_env).map_err(|_| {
+        (Some(software), Some(forwarding)) if software.kind.paper_family() => Some((
+            std::env::var(&forwarding.secret_env).map_err(|_| {
                 invalid(format!(
                     "set {} so new instances can be configured for Velocity forwarding",
                     forwarding.secret_env
                 ))
-            })?)
-        }
+            })?,
+            config.authentication.online_mode,
+        )),
         _ => None,
     };
-    let map = template
+    let assets = Assets {
+        jar: template.server_jar.clone(),
+        configs: template.configs.clone(),
+        plugins: template.plugins.clone(),
+        map: template.map.clone(),
+        accept_eula: template.accept_eula,
+        forwarding,
+        properties: managed_properties(config, Some(template)),
+    };
+    let stage = plan
+        .stage
+        .as_ref()
+        .ok_or_else(|| invalid("missing provisioning stage"))?;
+    let marker = plan
+        .marker
+        .as_ref()
+        .ok_or_else(|| invalid("missing stored storage ownership"))?;
+    materialize(
+        &directory,
+        stage,
+        marker,
+        &assets,
+        instance.port,
+        LOCAL_BIND,
+    )?;
+    Ok(Provisioned {
+        created: true,
+        marker: plan.marker.clone(),
+    })
+}
+
+/// Local servers bind loopback; Rift is their only client.
+const LOCAL_BIND: &str = "127.0.0.1";
+
+/// The files a new instance is built from, all already present on this host.
+#[derive(Debug, Clone)]
+pub(crate) struct Assets {
+    pub jar: PathBuf,
+    /// Overlaid onto the server root in order; later layers win.
+    pub configs: Vec<PathBuf>,
+    pub plugins: Vec<PathBuf>,
+    pub map: Option<PathBuf>,
+    pub accept_eula: bool,
+    /// Velocity secret and whether players are authenticated online.
+    pub forwarding: Option<(String, bool)>,
+    pub properties: Vec<Property>,
+}
+
+/// Build a new instance in `stage`, then publish it as `directory`. Fails
+/// without leaving anything behind if any input is missing or unsafe. Shared
+/// by local provisioning and `rift node` agents.
+pub(crate) fn materialize(
+    directory: &Path,
+    stage: &Path,
+    marker: &Value,
+    assets: &Assets,
+    port: u16,
+    bind: &str,
+) -> io::Result<()> {
+    let jar = source(&assets.jar, directory, false)?;
+    let configs = assets
+        .configs
+        .iter()
+        .map(|path| source(path, directory, true))
+        .collect::<io::Result<Vec<_>>>()?;
+    let map = assets
         .map
         .as_ref()
-        .map(|path| source(path, &directory, true))
+        .map(|path| source(path, directory, true))
         .transpose()?;
     let mut plugins = Vec::new();
     let mut plugin_names = std::collections::BTreeSet::new();
-    for path in &template.plugins {
-        let path = source(path, &directory, false)?;
+    for path in &assets.plugins {
+        let path = source(path, directory, false)?;
         let basename = path
             .file_name()
             .ok_or_else(|| invalid("plugin has no filename"))?
@@ -175,14 +236,10 @@ pub fn provision_planned(config: &Config, name: &str, plan: &Plan) -> io::Result
         .ok_or_else(|| invalid("instance directory has no parent"))?;
     fs::create_dir_all(parent)?;
     checked_path(parent)?;
-    let stage = plan
-        .stage
-        .as_ref()
-        .ok_or_else(|| invalid("missing provisioning stage"))?;
     fs::create_dir(stage)?;
     let result = (|| {
         // Write ownership before copying; recovery can recognize a partial tree.
-        fs::write(stage.join(MARKER), serde_json::to_vec_pretty(&plan.marker)?)?;
+        fs::write(stage.join(MARKER), serde_json::to_vec_pretty(marker)?)?;
         // Later layers override earlier ones, like CloudNet template priorities.
         for layer in &configs {
             copy_tree(layer, stage, true)?;
@@ -197,37 +254,241 @@ pub fn provision_planned(config: &Config, name: &str, plan: &Plan) -> io::Result
         if let Some(map) = map {
             copy_tree(&map, &stage.join("world"), false)?;
         }
-        if template.accept_eula {
+        if assets.accept_eula {
             write_file(
                 &stage.join("eula.txt"),
                 b"# Accepted in Rift's template configuration.\neula=true\n",
             )?;
         }
-        if let Some(secret) = forwarding {
-            write_forwarding(stage, &secret, config.authentication.online_mode)?;
+        if let Some((secret, online_mode)) = &assets.forwarding {
+            write_forwarding(stage, secret, *online_mode)?;
         }
-        write_properties(
-            stage,
-            instance.port,
-            &managed_properties(config, Some(template)),
-        )?;
+        write_properties(stage, port, bind, &assets.properties)?;
         sync_tree(stage)?;
         // Recheck immediately before publishing, so an existing world is never replaced.
-        checked_path(&directory)?;
-        if fs::symlink_metadata(&directory).is_ok() {
+        checked_path(directory)?;
+        if fs::symlink_metadata(directory).is_ok() {
             return Err(invalid("instance directory appeared during provisioning"));
         }
-        fs::rename(stage, &directory)?;
-        sync_directory(parent)?;
-        Ok(Provisioned {
-            created: true,
-            marker: plan.marker.clone(),
-        })
+        fs::rename(stage, directory)?;
+        sync_directory(parent)
     })();
     if result.is_err() {
         let _ = fs::remove_dir_all(stage);
     }
     result
+}
+
+/// The `prepare` command that builds instance `name` on its node. Template
+/// assets must live in `template_storage`, which agents fetch over HTTP.
+pub fn remote_prepare(config: &Config, name: &str) -> io::Result<crate::node::protocol::Prepare> {
+    let instance = config
+        .instances
+        .get(name)
+        .ok_or_else(|| invalid("unknown instance"))?;
+    let node = instance
+        .node
+        .as_ref()
+        .and_then(|node| config.nodes.get(node))
+        .ok_or_else(|| invalid("instance has no configured node"))?;
+    let server = config
+        .managed_servers
+        .get(name)
+        .ok_or_else(|| invalid("instance has no managed server"))?;
+    let template = instance
+        .template
+        .as_ref()
+        .map(|template| {
+            config
+                .templates
+                .get(template)
+                .ok_or_else(|| invalid("unknown server template"))
+        })
+        .transpose()?;
+    let storage = checked_path(&config.template_storage)?;
+    let relative = |path: &Path| -> io::Result<String> {
+        let path = checked_path(path)?;
+        let inside = path.strip_prefix(&storage).map_err(|_| {
+            invalid(format!(
+                "{} must be inside template_storage ({}) to be used on nodes",
+                path.display(),
+                storage.display()
+            ))
+        })?;
+        let segments: Vec<_> = inside
+            .components()
+            .map(|component| component.as_os_str().to_str().map(str::to_owned))
+            .collect::<Option<_>>()
+            .ok_or_else(|| invalid("template paths used on nodes must be UTF-8"))?;
+        if segments.is_empty() {
+            return Err(invalid(
+                "template_storage itself cannot be a template asset",
+            ));
+        }
+        Ok(segments.join("/"))
+    };
+    let mut prepare = crate::node::protocol::Prepare {
+        server: name.to_owned(),
+        group: instance.group.clone(),
+        directory: server.directory.clone(),
+        template: instance.template.clone(),
+        storage: instance.storage,
+        port: instance.port,
+        bind: node.address.clone(),
+        software: None,
+        server_jar: None,
+        configs: Vec::new(),
+        plugins: Vec::new(),
+        map: None,
+        accept_eula: false,
+        forwarding: None,
+        properties: managed_properties(config, template)
+            .into_iter()
+            .map(|property| match property {
+                Property::Replace(name, value) => (name.into(), value.into(), true),
+                Property::Default(name, value) => (name.into(), value.into(), false),
+            })
+            .collect(),
+    };
+    let Some(template) = template else {
+        if instance.storage == InstanceStorage::Disposable {
+            return Err(invalid("disposable instances require a template"));
+        }
+        return Ok(prepare);
+    };
+    match &template.software {
+        Some(software) => {
+            prepare.software = Some(software.into());
+            if let Some(forwarding) = &config.forwarding
+                && software.kind.paper_family()
+            {
+                let secret = std::env::var(&forwarding.secret_env).map_err(|_| {
+                    invalid(format!(
+                        "set {} so new instances can be configured for Velocity forwarding",
+                        forwarding.secret_env
+                    ))
+                })?;
+                prepare.forwarding = Some((secret, config.authentication.online_mode));
+            }
+        }
+        None => prepare.server_jar = Some(relative(&template.server_jar)?),
+    }
+    prepare.configs = template
+        .configs
+        .iter()
+        .map(|path| relative(path))
+        .collect::<io::Result<_>>()?;
+    prepare.plugins = template
+        .plugins
+        .iter()
+        .map(|path| relative(path))
+        .collect::<io::Result<_>>()?;
+    prepare.map = template.map.as_deref().map(relative).transpose()?;
+    prepare.accept_eula = template.accept_eula;
+    Ok(prepare)
+}
+
+/// Agent side of `prepare`: reuse an owned persistent directory, or build a
+/// new one from `assets` (already fetched into the agent's cache).
+pub(crate) fn prepare_on_node(
+    prepare: &crate::node::protocol::Prepare,
+    directory: &Path,
+    assets: Option<&Assets>,
+) -> io::Result<Value> {
+    let instance = ServiceInstance {
+        group: prepare.group.clone(),
+        port: prepare.port,
+        template: prepare.template.clone(),
+        storage: prepare.storage,
+        node: None,
+    };
+    let properties: Vec<Property> = prepare
+        .properties
+        .iter()
+        .map(|(name, value, replace)| {
+            if *replace {
+                Property::Replace(name.clone().into(), value.clone().into())
+            } else {
+                Property::Default(name.clone().into(), value.clone().into())
+            }
+        })
+        .collect();
+    let directory = checked_path(directory)?;
+    if exists(&directory)? {
+        if prepare.storage != InstanceStorage::Persistent {
+            return Err(invalid("disposable instance directory already exists"));
+        }
+        if prepare.template.is_none() {
+            return Ok(json!({"created": false, "marker": Value::Null}));
+        }
+        let marker = read_marker(&directory)?;
+        verify_marker(&marker, &instance, &prepare.server)?;
+        validate_tree(&directory, false)?;
+        write_properties(&directory, prepare.port, &prepare.bind, &properties)?;
+        return Ok(json!({"created": false, "marker": marker}));
+    }
+    let Some(template) = &prepare.template else {
+        if prepare.storage == InstanceStorage::Disposable {
+            return Err(invalid("disposable instances require a template"));
+        }
+        fs::create_dir_all(&directory)?;
+        return Ok(json!({"created": false, "marker": Value::Null}));
+    };
+    let assets = assets.ok_or_else(|| invalid("template assets were not fetched"))?;
+    let generation = generation();
+    let stage = directory
+        .parent()
+        .ok_or_else(|| invalid("instance directory has no parent"))?
+        .join(format!(".rift-stage-{generation}"));
+    let marker = json!({"format":1,"group":prepare.group,"name":prepare.server,
+        "template":template,"storage":prepare.storage.as_str(),"generation":generation});
+    materialize(
+        &directory,
+        &stage,
+        &marker,
+        assets,
+        prepare.port,
+        &prepare.bind,
+    )?;
+    Ok(json!({"created": true, "marker": marker}))
+}
+
+/// Agent side of `remove`: delete a disposable directory Rift created for
+/// exactly this server. Persistent data always stays.
+pub(crate) fn remove_on_node(
+    server: &str,
+    directory: &Path,
+    storage: InstanceStorage,
+) -> io::Result<bool> {
+    if storage == InstanceStorage::Persistent {
+        return Ok(false);
+    }
+    let directory = checked_path(directory)?;
+    if !exists(&directory)? {
+        return Ok(false);
+    }
+    let marker = read_marker(&directory)?;
+    if marker.get("name") != Some(&json!(server))
+        || marker.get("storage") != Some(&json!(InstanceStorage::Disposable.as_str()))
+    {
+        return Err(invalid(
+            "instance ownership marker does not match; refusing to delete",
+        ));
+    }
+    validate_tree(&directory, false)?;
+    fs::remove_dir_all(&directory)?;
+    if let Some(parent) = directory.parent() {
+        sync_directory(parent)?;
+    }
+    Ok(true)
+}
+
+/// The disposable instance a directory belongs to, from its ownership marker.
+pub(crate) fn disposable_owner(directory: &Path) -> Option<String> {
+    let marker = read_marker(directory).ok()?;
+    (marker.get("storage") == Some(&json!(InstanceStorage::Disposable.as_str())))
+        .then(|| marker.get("name")?.as_str().map(str::to_owned))
+        .flatten()
 }
 
 pub(crate) fn validate_plan(instance: &ServiceInstance, name: &str, plan: &Plan) -> io::Result<()> {
@@ -649,10 +910,16 @@ fn write_forwarding(directory: &Path, secret: &str, online_mode: bool) -> io::Re
 
 /// Settings Rift manages for downloaded software, besides the endpoint:
 /// `Replace` always wins, `Default` applies only when no template folder set it.
-#[derive(Clone, Copy)]
-enum Property {
-    Replace(&'static str, &'static str),
-    Default(&'static str, &'static str),
+#[derive(Debug, Clone)]
+pub(crate) enum Property {
+    Replace(
+        std::borrow::Cow<'static, str>,
+        std::borrow::Cow<'static, str>,
+    ),
+    Default(
+        std::borrow::Cow<'static, str>,
+        std::borrow::Cow<'static, str>,
+    ),
 }
 
 /// Rift authenticates players and gates access, so downloaded servers run
@@ -665,16 +932,28 @@ fn managed_properties(
         return Vec::new();
     }
     let mut properties = vec![
-        Property::Replace("online-mode", "false"),
-        Property::Default("white-list", "false"),
+        Property::Replace("online-mode".into(), "false".into()),
+        Property::Default("white-list".into(), "false".into()),
     ];
     if config.forwarding.is_none() {
-        properties.push(Property::Default("enforce-secure-profile", "false"));
+        properties.push(Property::Default(
+            "enforce-secure-profile".into(),
+            "false".into(),
+        ));
     }
     properties
 }
 
-fn write_properties(directory: &Path, port: u16, managed: &[Property]) -> io::Result<()> {
+fn write_properties(
+    directory: &Path,
+    port: u16,
+    bind: &str,
+    managed: &[Property],
+) -> io::Result<()> {
+    // A newline or `=` would inject further settings into server.properties.
+    if bind.is_empty() || bind.contains(|c: char| c.is_control() || c == '=' || c == '\\') {
+        return Err(invalid("invalid server bind address"));
+    }
     let path = directory.join("server.properties");
     checked_path(&path)?;
     match fs::symlink_metadata(&path) {
@@ -696,7 +975,7 @@ fn write_properties(directory: &Path, port: u16, managed: &[Property]) -> io::Re
     let mut defaults: Vec<(&str, &str)> = managed
         .iter()
         .filter_map(|property| match property {
-            Property::Default(name, value) => Some((*name, *value)),
+            Property::Default(name, value) => Some((name.as_ref(), value.as_ref())),
             Property::Replace(..) => None,
         })
         .collect();
@@ -707,7 +986,7 @@ fn write_properties(directory: &Path, port: u16, managed: &[Property]) -> io::Re
             generated = matches!(key, "server-port" | "server-ip" | "level-name")
                 || managed
                     .iter()
-                    .any(|property| matches!(property, Property::Replace(name, _) if *name == key));
+                    .any(|property| matches!(property, Property::Replace(name, _) if name == key));
             if let Some(index) = defaults.iter().position(|(name, _)| *name == key) {
                 defaults.remove(index);
             }
@@ -732,7 +1011,7 @@ fn write_properties(directory: &Path, port: u16, managed: &[Property]) -> io::Re
         output.push('\n');
     }
     output.push_str(&format!(
-        "server-port={port}\nserver-ip=127.0.0.1\nlevel-name=world\n"
+        "server-port={port}\nserver-ip={bind}\nlevel-name=world\n"
     ));
     for property in managed {
         if let Property::Replace(name, value) = property {

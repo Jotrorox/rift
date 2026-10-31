@@ -177,6 +177,7 @@ impl Fixture {
                 stop_timeout: Duration::from_millis(150),
                 restart_delay: Duration::from_millis(200),
                 restart_retries: 3,
+                node: None,
             },
         );
         Self {
