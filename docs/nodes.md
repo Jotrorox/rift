@@ -77,15 +77,28 @@ Agents download template folders from the controller's web API, authenticated
 with the same node token. Enable `web` on an address the nodes can reach. A node
 token can only read `/api/files/templates`; every other request is refused.
 
+Agents only talk to the web API over `https://`, because the requests carry the
+node token and the SHA-256 manifest that decides which template files a node
+trusts. Rift's web server speaks plain HTTP, so put a TLS-terminating reverse
+proxy (Caddy, nginx, ...) in front of it for remote nodes. The agent trusts the
+public CAs plus the certificates in its `--ca` file, so the proxy may use a
+certificate from the same private CA as the message bus. Plain `http://` is
+accepted only for loopback addresses, for an agent on the controller's host.
+
+Agents never receive the Velocity forwarding secret from the controller. If
+`forwarding` is enabled and nodes run Paper-family templates, set the same secret
+on every node, in `RIFT_FORWARDING_SECRET` or the variable named by
+`--forwarding-secret-env`.
+
 ## Run an agent
 
 Copy the `rift` binary to the node and start it as an unprivileged user, for
 example from a systemd unit:
 
 ```sh
-RIFT_NODE_TOKEN=... rift node \
+RIFT_NODE_TOKEN=... RIFT_FORWARDING_SECRET=... rift node \
   --controller 10.0.0.2:7443 --name node1 --root /srv/rift \
-  --ca /etc/rift/messaging-ca.pem --web http://10.0.0.2:8080 \
+  --ca /etc/rift/messaging-ca.pem --web https://rift.internal:8443 \
   --allow-program java
 ```
 
@@ -97,7 +110,8 @@ RIFT_NODE_TOKEN=... rift node \
 | `--ca` | PEM certificate(s) that sign the controller's messaging certificate |
 | `--token-env` | Variable holding this node's token (default `RIFT_NODE_TOKEN`) |
 | `--server-name` | TLS name of the controller certificate (default: the controller host) |
-| `--web` | The controller's web API, needed for templates |
+| `--web` | The controller's web API, needed for templates; `https://` unless loopback |
+| `--forwarding-secret-env` | Variable holding the Velocity forwarding secret (default `RIFT_FORWARDING_SECRET`); required only for Paper-family templates with `forwarding` |
 | `--allow-program` | A program servers may run; repeatable (default: `java`) |
 
 The agent reconnects with backoff when the controller is unreachable. Below its
@@ -205,6 +219,10 @@ address.
 
 - Each node authenticates with its own token and principal. The principal may
   only publish its state and replies and subscribe to its own command subject.
+  A node principal has **one session at a time**: a new login closes the
+  previous connection (the agent logs `replaced by a newer session of this
+  node`), so a second client can never receive the node's commands alongside
+  the real agent.
   Rift refuses `rift.node.*` traffic from every other remote identity, so other
   plugins cannot command agents or read their commands.
 - The agent only runs programs from its `--allow-program` list, matched exactly
@@ -214,8 +232,12 @@ address.
 - The controller is trusted. A stolen node token lets an attacker impersonate
   the node and read template files, but not run commands on the node: only the
   controller can publish node commands.
-- Prepare commands contain the Velocity forwarding secret for Paper instances,
-  inside the TLS-encrypted bus.
+- The node token only travels over TLS: the QUIC bus, and `--web`, which must
+  be `https://` unless it is a loopback address. The agent does not follow
+  redirects, so the token cannot be forwarded elsewhere.
+- The Velocity forwarding secret never crosses the network: Prepare commands
+  only say whether to enable forwarding, and each agent writes the secret from
+  its own environment.
 
 ## Operate nodes
 

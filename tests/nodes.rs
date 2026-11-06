@@ -162,6 +162,8 @@ rift.config.managed_servers.survival={{node='node1',directory='survival',
                 .unwrap()
                 .to_string_lossy()
                 .into_owned()]),
+            forwarding_secret: Some("node secret".into()),
+            forwarding_secret_env: "RIFT_FORWARDING_SECRET".into(),
         })
         .unwrap()
     }
@@ -333,6 +335,39 @@ async fn servers_keep_running_while_the_node_is_unreachable_and_report_unknown()
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_node_principal_has_one_session_and_the_newest_wins() {
+    let fixture = Fixture::new().await;
+    let connect = || {
+        quic::Client::connect(
+            fixture.server.local_addr().unwrap(),
+            "localhost",
+            fixture.client_tls.clone(),
+            TOKEN,
+        )
+    };
+    let subject = protocol::command_subject("node1");
+    let first = connect().await.unwrap();
+    let mut first_commands = first.subscribe(&subject, None).await.unwrap();
+    let second = connect().await.unwrap();
+    let mut second_commands = second.subscribe(&subject, None).await.unwrap();
+    // The older session is closed instead of receiving commands alongside.
+    tokio::time::timeout(Duration::from_secs(5), first_commands.recv())
+        .await
+        .expect("the first session should be closed")
+        .unwrap_err();
+    fixture
+        .broker
+        .publish(&subject, bytes::Bytes::from_static(b"{}"))
+        .unwrap();
+    let message = tokio::time::timeout(Duration::from_secs(5), second_commands.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&message.payload[..], b"{}");
+    assert!(first.subscribe(&subject, None).await.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn agents_refuse_unlisted_programs_and_paths_outside_their_root() {
     let fixture = Fixture::new().await;
     let agent = fixture.agent(None);
@@ -499,7 +534,7 @@ async fn agents_build_instances_from_fetched_templates_and_delete_only_disposabl
         plugins: vec!["bedwars/game.jar".into()],
         map: Some("bedwars/map".into()),
         accept_eula: true,
-        forwarding: Some(("secret".into(), true)),
+        forwarding: Some(true),
         properties: vec![("online-mode".into(), "false".into(), true)],
     };
     let wait = Duration::from_secs(20);
@@ -543,7 +578,7 @@ async fn agents_build_instances_from_fetched_templates_and_delete_only_disposabl
     assert!(
         fs::read_to_string(directory.join("config/paper-global.yml"))
             .unwrap()
-            .contains("secret: \"secret\"")
+            .contains("secret: \"node secret\"")
     );
     // Template changes reach the next instance; removed files disappear.
     fs::write(storage.join("Global/server/config/a.yml"), "a: 2\n").unwrap();
@@ -674,16 +709,39 @@ fn agent_options_require_a_token_and_default_to_java() {
         "--allow-program",
         "/usr/bin/java",
         "--web",
-        "http://10.0.0.2:8080/",
+        "https://10.0.0.2:8443/",
     ]))
     .unwrap();
     assert_eq!(
         options.allowed_programs,
         BTreeSet::from(["/usr/bin/java".to_owned()])
     );
-    assert_eq!(options.web.as_deref(), Some("http://10.0.0.2:8080"));
+    assert_eq!(options.web.as_deref(), Some("https://10.0.0.2:8443"));
+    // Plain HTTP would expose the token and template hashes; loopback only.
+    for web in [
+        "http://127.0.0.1:8080",
+        "http://[::1]:8080",
+        "http://localhost:8080",
+    ] {
+        agent::Options::parse(&args(&["--web", web])).unwrap();
+    }
+    let error = agent::Options::parse(&args(&["--web", "http://10.0.0.2:8080"])).unwrap_err();
+    assert!(error.to_string().contains("https://"), "{error}");
+    // The forwarding secret comes from the node's own environment.
+    assert_eq!(options.forwarding_secret_env, "RIFT_FORWARDING_SECRET");
+    let secret_env = ["--forwarding-secret-env", "RIFT_NODE_OPTIONS_TEST_SECRET"];
+    let error = agent::Options::parse(&args(&secret_env)).unwrap_err();
+    assert!(
+        error.to_string().contains("RIFT_NODE_OPTIONS_TEST_SECRET"),
+        "{error}"
+    );
+    // SAFETY: the variable name is unique to this test.
+    unsafe { std::env::set_var("RIFT_NODE_OPTIONS_TEST_SECRET", "velocity") };
+    let options = agent::Options::parse(&args(&secret_env)).unwrap();
+    assert_eq!(options.forwarding_secret.as_deref(), Some("velocity"));
     for extra in [
         &["--web", "ftp://x"][..],
+        &["--web", "http://rift.example"],
         &["--bogus", "1"],
         &["--name", "a"],
     ] {
