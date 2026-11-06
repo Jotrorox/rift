@@ -148,8 +148,10 @@ pub struct Prepare {
     pub plugins: Vec<String>,
     pub map: Option<String>,
     pub accept_eula: bool,
-    /// Velocity secret and online mode for Paper-family software.
-    pub forwarding: Option<(String, bool)>,
+    /// `Some(online_mode)`: configure Velocity forwarding for Paper-family
+    /// software. The secret never crosses the bus; agents read their own copy
+    /// from `--forwarding-secret-env`.
+    pub forwarding: Option<bool>,
     /// `(name, value, replace)`: replaced settings always win, others are defaults.
     pub properties: Vec<(String, String, bool)>,
 }

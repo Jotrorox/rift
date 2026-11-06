@@ -359,16 +359,8 @@ pub fn remote_prepare(config: &Config, name: &str) -> io::Result<crate::node::pr
     match &template.software {
         Some(software) => {
             prepare.software = Some(software.into());
-            if let Some(forwarding) = &config.forwarding
-                && software.kind.paper_family()
-            {
-                let secret = std::env::var(&forwarding.secret_env).map_err(|_| {
-                    invalid(format!(
-                        "set {} so new instances can be configured for Velocity forwarding",
-                        forwarding.secret_env
-                    ))
-                })?;
-                prepare.forwarding = Some((secret, config.authentication.online_mode));
+            if config.forwarding.is_some() && software.kind.paper_family() {
+                prepare.forwarding = Some(config.authentication.online_mode);
             }
         }
         None => prepare.server_jar = Some(relative(&template.server_jar)?),
