@@ -139,7 +139,7 @@
       try { data = body ? JSON.parse(body) : {}; } catch (_) { data = {}; }
       if (!response.ok) {
         const fallback = response.status === 401 || response.status === 403
-          ? "Access denied. Enter the configured admin token under API access."
+          ? "Access denied. Enter web.token, or the token Rift printed at startup, under API access."
           : response.status === 404
             ? "The admin API is unavailable. Enable web.api in the Lua configuration, or check that this is the admin service address."
             : `Request failed (HTTP ${response.status}).`;

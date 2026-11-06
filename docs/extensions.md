@@ -106,8 +106,10 @@ not promise a detailed transport failure diagnosis.
 
 Each player callback has a 50 ms wall deadline including blocking-worker scheduling and
 configuration evaluation, 100,000 Lua instructions, an 8 MiB VM limit and a
-256 KiB combined entry/module/plugin source limit. At most four extension invocations execute or wait for workers
-per process, shared across reload generations. Saturation fails immediately.
+256 KiB combined entry/module/plugin source limit. At most four player callbacks execute or wait for workers
+per process, shared across reload generations. A callback waits up to 25 ms for
+one of them, which counts toward its deadline only after it gets a worker; if
+none frees up, it fails. Scheduled jobs have separate workers and never hold these.
 Workers retain permits until execution actually stops, including after caller
 cancellation. A cancelled callback may finish and publish within its remaining
 budget; its returned action is discarded. A per-session worker permit prevents
@@ -367,10 +369,11 @@ player identity. Return nil. The first run waits a full interval, and each next
 run waits a full interval after completion. Jobs never overlap by name, including
 across reloads. Missed intervals are skipped, never queued for catch-up.
 
-Jobs share the four-worker extension limit, 100,000 instructions and 8 MiB VM
-limit with player callbacks. Their wall deadline is five seconds including worker
-scheduling and HTTP requests; player callbacks still have only 50 ms. Exhausted
-capacity skips a tick. Errors are logged and the job retries at its next interval.
+Jobs run on two workers of their own, so a job waiting seconds on an HTTP call
+cannot make logins or commands fail. They share the 100,000-instruction and
+8 MiB VM limits with player callbacks. Their wall deadline is five seconds including worker
+scheduling and HTTP requests; player callbacks still have only 50 ms. When both
+job workers are busy, the tick is skipped. Errors are logged and the job retries at its next interval.
 Use jobs for external I/O and keep player policy checks local.
 
 Only the committed configuration schedules jobs. Successful reload replaces the

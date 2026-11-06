@@ -208,7 +208,72 @@ async fn scripts_cannot_bypass_budgets_or_access_external_resources() {
 }
 
 #[tokio::test]
-async fn overload_is_immediate_and_capacity_is_shared_by_clones() {
+async fn a_short_burst_waits_for_a_worker_instead_of_dropping_the_connection() {
+    let router = Router::new(&config("return nil"));
+    let slots = router
+        .slots
+        .clone()
+        .acquire_many_owned(crate::script::MAX_CONCURRENT as u32)
+        .await
+        .unwrap();
+    let waiting = tokio::spawn({
+        let router = router.clone();
+        async move { router.route(connection()).await }
+    });
+    tokio::time::sleep(crate::script::SLOT_WAIT / 5).await;
+    drop(slots);
+    assert_eq!(waiting.await.unwrap().unwrap(), RouteDecision::Default);
+}
+
+#[tokio::test]
+async fn status_pings_and_routing_have_separate_workers() {
+    let mut config = config("return nil");
+    let status = Config::from_lua(
+        "return { listeners = { public = '127.0.0.1:0' }, backends = { lobby = '127.0.0.1:25566' },
+            routes = { public = 'lobby' }, on_status = function() return { motd = 'hi' } end }",
+        "status.lua",
+    )
+    .unwrap();
+    config.on_status = status.on_status;
+    let router = Router::new(&config);
+    let ping = Ping {
+        listener: "public".into(),
+        hostname: "localhost".into(),
+        protocol: 767,
+        peer_addr: "[::1]:12345".parse().unwrap(),
+        backend: Some("lobby".into()),
+        maintenance: false,
+        online: 0,
+        max_players: 20,
+    };
+    // A flood of pings cannot take routing workers...
+    let status_slots = router
+        .status_slots
+        .clone()
+        .acquire_many_owned(crate::script::MAX_CONCURRENT_STATUS as u32)
+        .await
+        .unwrap();
+    assert_eq!(
+        router.status(ping.clone()).await.unwrap_err(),
+        RouteError::Busy
+    );
+    assert_eq!(
+        router.route(connection()).await.unwrap(),
+        RouteDecision::Default
+    );
+    drop(status_slots);
+    // ...and busy routing does not stop the server list from answering.
+    let _route_slots = router
+        .slots
+        .clone()
+        .acquire_many_owned(crate::script::MAX_CONCURRENT as u32)
+        .await
+        .unwrap();
+    assert!(router.status(ping).await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn sustained_overload_is_rejected_and_capacity_is_shared_by_clones() {
     let router = Router::new(&config("return nil"));
     let slots = router
         .slots

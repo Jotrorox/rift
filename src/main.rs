@@ -103,8 +103,20 @@ async fn start() -> io::Result<()> {
             file.write_all(include_bytes!("../examples/rift.lua"))?;
             println!("rift: created {path}; edit your backends, then run: rift check {path}");
         } else {
-            Config::load(Path::new(path))?;
+            let (_, cost) = Config::check(Path::new(path))?;
             println!("rift: configuration valid: {path}");
+            // Every Lua callback evaluates the configuration again before it
+            // runs, so this cost is paid in time on each connection and hook.
+            let limit = rift::config::LUA_INSTRUCTION_LIMIT;
+            println!(
+                "rift: configuration evaluation uses about {cost} of {limit} Lua instructions ({}%); each callback re-evaluates it and then gets its own {limit}",
+                u64::from(cost) * 100 / u64::from(limit)
+            );
+            if u64::from(cost) * 2 >= u64::from(limit) {
+                eprintln!(
+                    "rift: warning: configuration evaluation is heavy; move expensive work into callbacks that need it, or callbacks may miss their 50 ms deadline"
+                );
+            }
         }
         return Ok(());
     }

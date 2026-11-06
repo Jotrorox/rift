@@ -166,7 +166,13 @@ fn init_creates_a_valid_documented_config_and_never_overwrites() {
             "{}",
             String::from_utf8_lossy(&checked.stderr)
         );
-        assert!(String::from_utf8_lossy(&checked.stdout).contains("configuration valid"));
+        let stdout = String::from_utf8_lossy(&checked.stdout);
+        assert!(stdout.contains("configuration valid"));
+        assert!(
+            stdout.contains("configuration evaluation uses about ")
+                && stdout.contains(" of 100000 Lua instructions"),
+            "{stdout}"
+        );
 
         fs::write(fixture.0.join(filename), "keep my configuration").unwrap();
         let output = fixture.run(&init_args);
