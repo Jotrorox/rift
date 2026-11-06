@@ -74,10 +74,20 @@ routes and are never interrupted by an HTTP configuration change.
 
 ## Authentication and access
 
-Loopback web binds may omit `token` for local development. A non-loopback bind
-requires `web.token` or at least one named operator token. Tokens contain 16–4096
-printable, non-whitespace ASCII characters. When credentials are configured,
-every `/api` and `/ext` request requires:
+A non-loopback bind requires `web.token` or at least one named operator token.
+Tokens contain 16–4096 printable, non-whitespace ASCII characters. A loopback
+bind may omit both: Rift then generates a random token when it starts and prints
+it once to standard error:
+
+```text
+rift: web token for this run: 3f9c…(64 hex digits)… (enter it under API access; set web.token to choose a permanent one)
+```
+
+It is valid until Rift exits, across reloads, and grants full access. Loopback
+alone is not treated as a credential, because any local process could use it,
+including plugins on managed servers, which could otherwise define a service
+group with an arbitrary command and run code as Rift's user. Every `/api` and
+`/ext` request requires:
 
 ```http
 Authorization: Bearer your-token
@@ -89,7 +99,7 @@ held in memory and forgotten on page reload. API responses never include a
 separate token field, but authenticated `/api/config` returns the original Lua
 source, including any credentials it contains. The source is administrative data.
 
-Tokenless access accepts only loopback IP or `localhost` Host headers. Requests
+The generated token is accepted only with loopback IP or `localhost` Host headers. Requests
 with mismatched Origin headers or cross-site Fetch Metadata are rejected, and
 mutations require JSON. There is no CORS allowance or cookie-based login. Use
 HTTPS at a trusted reverse proxy or an SSH tunnel for remote administration;
@@ -136,8 +146,8 @@ configuration paths. Global counters and listener information remain visible.
 `config`, `deploy` and `extensions` require unrestricted scope because Lua and
 configuration changes can affect the whole proxy. `config` exposes any secrets
 in the Lua source and can change credentials. The legacy `web.token` and
-credential-free loopback access retain full privileges. Once any named operator
-is configured, loopback requests also require a valid token. Tokens must be
+the generated token retain full privileges. Once `web.token` or any named
+operator is configured, no token is generated. Tokens must be
 unique, names must be distinct from reserved system/admin audit identities,
 and permission/credential changes apply on the next request after reload.
 `GET /api/access` reports the current identity and grants without credentials.
@@ -316,8 +326,13 @@ directory fails startup. A post-commit history write failure is reported in Rift
 stderr; the already-applied configuration remains active.
 
 HTTP mutations record the named actor, operation, target, timestamp and admission
-result. Authentication/scope denials, local CLI commands and signal reload results
-are also recorded. Bodies, console text, authorization headers and query strings
+result. Scope denials, local CLI commands and signal reload results are also
+recorded. Requests without a valid token are summarised rather than recorded one
+by one: the first in each minute writes an `authentication` record by
+`anonymous` whose `count` is the number of such requests since the previous
+one, and `GET /api/audit` reports the requests not yet written as
+`unrecorded_denials`. The latest 64 of these summaries are kept apart from
+operator records, so a flood of bad requests cannot push operator actions out. Bodies, console text, authorization headers and query strings
 are excluded. Lifecycle `accepted` means queued; follow server state for completion.
 An intent record precedes HTTP/CLI mutation execution; a timeout can leave an
 intent without a final result. HTTP/CLI operations are refused if that intent
