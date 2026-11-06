@@ -44,7 +44,8 @@ pub const USAGE: &str = "Usage: rift node --controller <host:port> --name <node>
     --ca <file>               PEM certificate(s) that sign the controller's messaging certificate\n\
     --token-env <variable>    environment variable with this node's token (default RIFT_NODE_TOKEN)\n\
     --server-name <name>      TLS name of the controller certificate (default: the controller host)\n\
-    --web <url>               the controller's web API, e.g. http://10.0.0.2:8080, for templates\n\
+    --web <url>               the controller's web API over https://, e.g. https://rift.example:8443, for templates\n\
+    --forwarding-secret-env <variable>  environment variable with the Velocity forwarding secret (default RIFT_FORWARDING_SECRET)\n\
     --allow-program <name>    a program servers may run; repeatable (default: java)";
 
 /// Parsed `rift node` arguments.
@@ -58,6 +59,9 @@ pub struct Options {
     pub root: PathBuf,
     pub web: Option<String>,
     pub allowed_programs: BTreeSet<String>,
+    /// Written into new Paper instances; never sent by the controller.
+    pub forwarding_secret: Option<String>,
+    pub forwarding_secret_env: String,
 }
 
 impl Options {
@@ -77,6 +81,7 @@ impl Options {
                     | "--token-env"
                     | "--server-name"
                     | "--web"
+                    | "--forwarding-secret-env"
                     | "--allow-program"
             ) {
                 return Err(invalid(format!("unknown option {flag:?}\n{USAGE}")));
@@ -132,13 +137,29 @@ impl Options {
         let web = values
             .remove("--web")
             .map(|web| web.trim_end_matches('/').to_owned());
-        if let Some(web) = &web
-            && reqwest::Url::parse(web)
-                .ok()
-                .is_none_or(|url| !matches!(url.scheme(), "http" | "https"))
-        {
-            return Err(invalid("--web must be an http:// or https:// URL".into()));
+        if let Some(web) = &web {
+            check_web(web).map_err(|message| invalid(message.into()))?;
         }
+        let explicit_secret_env = values.remove("--forwarding-secret-env");
+        let forwarding_secret_env = explicit_secret_env
+            .clone()
+            .unwrap_or_else(|| "RIFT_FORWARDING_SECRET".into());
+        let forwarding_secret = match std::env::var(&forwarding_secret_env) {
+            Ok(secret)
+                if !(1..=1024).contains(&secret.len()) || secret.chars().any(char::is_control) =>
+            {
+                return Err(invalid(format!(
+                    "{forwarding_secret_env} must contain 1..=1024 bytes without control characters"
+                )));
+            }
+            Ok(secret) => Some(secret),
+            Err(_) if explicit_secret_env.is_some() => {
+                return Err(invalid(format!(
+                    "set {forwarding_secret_env} to the controller's Velocity forwarding secret"
+                )));
+            }
+            Err(_) => None,
+        };
         if allowed_programs.is_empty() {
             allowed_programs.insert("java".into());
         }
@@ -151,7 +172,30 @@ impl Options {
             root,
             web,
             allowed_programs,
+            forwarding_secret,
+            forwarding_secret_env,
         })
+    }
+}
+
+/// `--web` carries the node token and the template hashes, so it must use
+/// TLS unless it stays on this host.
+fn check_web(web: &str) -> Result<(), &'static str> {
+    let url = reqwest::Url::parse(web).map_err(|_| "--web must be an https:// URL")?;
+    let loopback = url.host_str().is_some_and(|host| {
+        host.eq_ignore_ascii_case("localhost")
+            || host
+                .trim_matches(['[', ']'])
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|address| address.is_loopback())
+    });
+    match url.scheme() {
+        "https" => Ok(()),
+        "http" if loopback => Ok(()),
+        "http" => Err(
+            "--web must use https://: plain http:// would expose the node token and template files on the network; it is only allowed for loopback addresses",
+        ),
+        _ => Err("--web must be an https:// URL"),
     }
 }
 
@@ -230,11 +274,25 @@ impl Agent {
         let root = std::fs::canonicalize(&options.root)?;
         let mut random = [0u8; 16];
         aws_lc_rs::rand::fill(&mut random).map_err(|_| io::Error::other("random source failed"))?;
-        let http = reqwest::Client::builder()
+        let mut http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(600))
-            .build()
-            .map_err(io::Error::other)?;
+            // The bearer token must never follow a redirect elsewhere.
+            .redirect(reqwest::redirect::Policy::none());
+        if options
+            .web
+            .as_deref()
+            .is_some_and(|web| web.starts_with("https://"))
+        {
+            // Trust the messaging CA as well, so a private CA works for both.
+            http = http.https_only(true);
+            for certificate in quic::read_certificates(&options.ca)? {
+                http = http.add_root_certificate(
+                    reqwest::Certificate::from_der(&certificate).map_err(io::Error::other)?,
+                );
+            }
+        }
+        let http = http.build().map_err(io::Error::other)?;
         Ok(Arc::new(Self {
             options,
             root,
@@ -702,6 +760,18 @@ impl Agent {
     }
 
     async fn fetch_assets(&self, prepare: &protocol::Prepare) -> io::Result<provisioning::Assets> {
+        let forwarding = prepare
+            .forwarding
+            .map(|online_mode| {
+                let secret = self.options.forwarding_secret.clone().ok_or_else(|| {
+                    invalid(format!(
+                        "set {} on node {} to the controller's Velocity forwarding secret",
+                        self.options.forwarding_secret_env, self.options.name
+                    ))
+                })?;
+                Ok::<_, io::Error>((secret, online_mode))
+            })
+            .transpose()?;
         let jar = match (&prepare.software, &prepare.server_jar) {
             (Some(software), _) => {
                 let software = crate::software::Software::try_from(software)?;
@@ -739,7 +809,7 @@ impl Agent {
             plugins,
             map,
             accept_eula: prepare.accept_eula,
-            forwarding: prepare.forwarding.clone(),
+            forwarding,
             properties,
         })
     }
