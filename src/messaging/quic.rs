@@ -7,7 +7,10 @@ use std::{
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::Path,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -314,7 +317,8 @@ pub fn tls_client_config(ca_certificates: impl AsRef<Path>) -> Result<quinn::Cli
     let certs = read_certificates(ca_certificates.as_ref())?;
     client_config_from_der(certs)
 }
-fn read_certificates(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
+/// The certificates in a PEM file; fails if there are none.
+pub fn read_certificates(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
     let certs = CertificateDer::pem_file_iter(path)
         .map_err(|error| pem_error("certificate", path, error))?
         .collect::<std::result::Result<Vec<_>, _>>()
@@ -391,6 +395,8 @@ impl Server {
             broker,
             auth,
             streams,
+            node_sessions: std::sync::Mutex::new(HashMap::new()),
+            next_session: AtomicU64::new(0),
         });
         let task = tokio::spawn(async move {
             let mut tasks = JoinSet::new();
@@ -437,6 +443,53 @@ struct Context {
     broker: Broker,
     auth: AuthConfig,
     streams: HashMap<String, Stream>,
+    /// The one live connection of each `node.*` principal, by session id.
+    /// Node commands are addressed to the principal, so a second session must
+    /// never receive them alongside the first.
+    node_sessions: std::sync::Mutex<HashMap<String, (u64, Connection)>>,
+    next_session: AtomicU64,
+}
+impl Context {
+    /// Register `connection` as the only session of node principal `name`,
+    /// closing an older one: after a silent network drop the agent must be
+    /// able to reconnect before the old connection's idle timeout.
+    fn claim_node_session(self: &Arc<Self>, name: &str, connection: &Connection) -> NodeSession {
+        let id = self.next_session.fetch_add(1, Ordering::Relaxed);
+        let previous = self
+            .node_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(name.to_owned(), (id, connection.clone()));
+        if let Some((_, previous)) = previous {
+            previous.close(4u32.into(), b"replaced by a newer session of this node");
+        }
+        NodeSession {
+            context: self.clone(),
+            name: name.to_owned(),
+            id,
+        }
+    }
+}
+/// Releases a node principal's session slot when its connection ends.
+struct NodeSession {
+    context: Arc<Context>,
+    name: String,
+    id: u64,
+}
+impl Drop for NodeSession {
+    fn drop(&mut self) {
+        let mut sessions = self
+            .context
+            .node_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if sessions
+            .get(&self.name)
+            .is_some_and(|(id, _)| *id == self.id)
+        {
+            sessions.remove(&self.name);
+        }
+    }
 }
 async fn serve_connection(connection: Connection, context: Arc<Context>) {
     let auth_result = timeout(context.auth.handshake_timeout, async {
@@ -453,9 +506,13 @@ async fn serve_connection(connection: Connection, context: Arc<Context>) {
         exhausted(&frame)?;
         match context.auth.authenticate(&token) {
             Ok(identity) => {
+                let session = identity
+                    .name
+                    .starts_with("node.")
+                    .then(|| context.claim_node_session(&identity.name, &connection));
                 write_simple(&mut send, OK).await?;
                 send.finish().map_err(other)?;
-                Ok(identity)
+                Ok((identity, session))
             }
             Err(error) => {
                 let _ = write_error(&mut send, &error).await;
@@ -465,7 +522,7 @@ async fn serve_connection(connection: Connection, context: Arc<Context>) {
         }
     })
     .await;
-    let Ok(Ok(identity)) = auth_result else {
+    let Ok(Ok((identity, _node_session))) = auth_result else {
         connection.close(1u32.into(), b"authentication failed");
         return;
     };
