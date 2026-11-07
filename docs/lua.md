@@ -162,6 +162,53 @@ callbacks. `rift.on`, `rift.command` and `rift.setup` reject late registration.
 callbacks. Imports and top-level initialization cannot publish messages. Captured
 API references, including `local publish = rift.publish`, work in callbacks.
 
+## The Lua environment
+
+Scripts run on LuaJIT (Lua 5.1 syntax) with the JIT compiler off. Only these
+globals exist; everything else in the standard library is removed:
+
+| Global | Contents |
+| --- | --- |
+| Base functions | `assert`, `error`, `ipairs`, `next`, `pairs`, `select`, `tonumber`, `tostring`, `type`, `unpack`, `_G`, `_VERSION` |
+| `string` | `byte`, `char`, `format`, `len`, `lower`, `rep`, `reverse`, `sub`, `upper`; strings also have these as methods (`s:sub(1, 2)`) |
+| `table` | `concat`, `insert`, `remove`, `maxn` |
+| `math` | `abs`, `acos`, `asin`, `atan`, `atan2`, `ceil`, `cos`, `cosh`, `deg`, `exp`, `floor`, `fmod`, `frexp`, `huge`, `ldexp`, `log`, `log10`, `max`, `min`, `modf`, `pi`, `pow`, `rad`, `random`, `randomseed`, `sin`, `sinh`, `sqrt`, `tan`, `tanh` |
+| `require` | Rift's module loader, described above |
+| `rift` | The API described on this page and in the [extension API](extensions.md) |
+
+Missing on purpose: `pcall`, `xpcall`, `coroutine`, `load`, `loadstring`,
+`dofile`, `loadfile`, `setmetatable`, `getmetatable`, `rawget`/`rawset`/`rawequal`,
+`collectgarbage`, `print`, `io`, `os`, `debug`, `package`, `jit`, `ffi`,
+`string.find`, `string.match`, `string.gmatch`, `string.gsub` (Lua patterns can
+run for unbounded time outside the instruction budget) and `table.sort`.
+`table.insert` is reimplemented in Lua so that it counts against the budget.
+
+`rift` provides, besides configuration (`rift.config`, `rift.setup`, `rift.on`,
+`rift.command`, `rift.plugin`):
+
+- `rift.try(f, ...)` calls `f(...)` like Lua's `pcall`: it returns `true` and
+  `f`'s results, or `false` and the error value. It does not catch an exhausted
+  budget: when the instruction limit, the deadline or the memory limit is
+  reached, the error passes through and the callback fails as it would without
+  `rift.try`. Use it for errors you can handle, such as a failed
+  `rift.http.request`:
+
+  ```lua
+  local ok, response = rift.try(rift.http.request, "directory", { path = uuid })
+  if not ok then return nil end -- fall back to the default
+  ```
+
+- `rift.clock()` returns seconds, with sub-millisecond precision, from a fixed
+  point in the process's life. Subtract two readings to measure elapsed time.
+- `rift.time()` returns the current Unix time in whole seconds.
+- `rift.publish`, `rift.enabled` and `rift.servers` (callbacks only), and
+  `rift.store`, `rift.permissions`, `rift.http` and `rift.players` (API v2
+  extension callbacks; `rift.players` also in `on_message` and `on_http`).
+
+`string.format` follows Lua 5.1: `%d`, `%i`, `%u`, `%c`, `%x`, `%X`, `%o`,
+`%e`, `%E`, `%f`, `%g`, `%G`, `%q`, `%s` and `%%`, with widths and precisions
+up to 99.
+
 ## Reloads and execution limits
 
 Startup, validation and reload capture the entry script and all `.lua` files
@@ -193,11 +240,14 @@ web-editor validation/saves has a five-second wall deadline, allowing for cold V
 setup and scheduling delays on busy hosts. Runtime callbacks retain their 50 ms
 execution deadline (v2 scheduled jobs have a five-second wall deadline). Direct
 filesystem/process I/O, native modules, arbitrary code loaders and the other
-restricted facilities remain unavailable. This is a local Lua plugin API, not
+facilities listed under [the Lua environment](#the-lua-environment) remain
+unavailable. This is a local Lua plugin API, not
 the full Neovim runtime.
 
 `rift check path/to/rift.lua`, reloads, and web-editor validation/saves resolve
-the same local module directories. The web editor edits the entry script;
+the same local module directories. `rift check --strict` also checks
+environment secrets, the instance database, extension store, port binds and
+reload compatibility; see [strict checks](operations.md#strict-checks). The web editor edits the entry script;
 edit module/plugin files on disk and reload to apply them. Rust embedders can
 use `Config::load(path)` or `Config::from_lua_at(source, path)` for local imports;
 `Config::from_lua(source, name)` has no filesystem access and only exposes the

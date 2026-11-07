@@ -1234,10 +1234,13 @@ fn messaging_quic_requires_tls_and_explicit_principal_acls() {
             listen = '127.0.0.1:4222', certificate = 'server.pem', private_key = 'server.key',
             principals = {{name = 'paper', token_env = 'PAPER_MESSAGE_TOKEN', publish = {'server.>', 'rift.control.status'}, subscribe = {'reply.*'}, control = true}},
             streams = {events = {storage_path = 'data/events', subjects = {'events.>'}, max_messages = 20, max_bytes = 2048, max_payload_bytes = 1024}},
+            max_connections_per_principal = 12, max_connections_per_address = 34,
         }
     "#), "quic.lua").unwrap();
     let messaging = config.messaging.unwrap();
     assert_eq!(messaging.listen.unwrap(), "127.0.0.1:4222".parse().unwrap());
+    assert_eq!(messaging.max_connections_per_principal, 12);
+    assert_eq!(messaging.max_connections_per_address, 34);
     assert!(messaging.principals[0].control);
     assert_eq!(messaging.principals[0].token_env, "PAPER_MESSAGE_TOKEN");
     assert_eq!(messaging.streams["events"].config.max_messages, 20);
@@ -1262,6 +1265,14 @@ fn messaging_malformed_settings_fail_closed() {
         (
             "messaging = { subscription_capacity = 0 }",
             "subscription_capacity",
+        ),
+        (
+            "messaging = { max_connections_per_address = 0 }",
+            "max_connections_per_address",
+        ),
+        (
+            "messaging = { max_connections_per_principal = 0 }",
+            "max_connections_per_principal",
         ),
         (
             "messaging = { max_payload_bytes = 1.5 }",

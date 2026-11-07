@@ -120,7 +120,7 @@ impl ProcessBackend for Local {
                 // Reap an uninspectable child before replacement so two processes
                 // can never be owned for the same managed backend.
                 if let Some(mut process) = self.child.take() {
-                    let _ = process.kill().await;
+                    let _ = kill(&mut process).await;
                     let _ = process.wait().await;
                 }
                 Status::Broken(error.to_string())
@@ -137,7 +137,7 @@ impl ProcessBackend for Local {
 
     async fn kill(&mut self, _server: &Server) {
         if let Some(mut process) = self.child.take() {
-            let _ = process.kill().await;
+            let _ = kill(&mut process).await;
             let _ = process.wait().await;
         }
     }
@@ -179,6 +179,12 @@ static SPAWN: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Spawn `command` in `directory`, appending stdout and stderr to its log.
 /// Shared with the node agent, which runs the same launch locally.
+///
+/// The child leads its own process group, so a kill also reaches helper
+/// processes a start script left behind. `kill_on_drop` covers normal exits
+/// only: after SIGKILL or the OOM killer an orphaned server would keep its
+/// port, and the next start would refuse to take the port over. On Linux the
+/// kernel therefore kills the child when Rift dies (`PR_SET_PDEATHSIG`).
 pub(crate) fn spawn(command: &[String], directory: &std::path::Path) -> io::Result<Child> {
     let (program, arguments) = command.split_first().ok_or_else(|| {
         io::Error::new(
@@ -198,8 +204,86 @@ pub(crate) fn spawn(command: &[String], directory: &std::path::Path) -> io::Resu
         .stderr(Stdio::from(log.try_clone()?))
         .stdout(Stdio::from(log))
         .kill_on_drop(true);
-    let _spawning = SPAWN.lock().unwrap_or_else(|e| e.into_inner());
-    command.spawn()
+    #[cfg(unix)]
+    command.process_group(0);
+    #[cfg(target_os = "linux")]
+    {
+        let parent = std::process::id() as libc::pid_t;
+        // SAFETY: runs in the forked child before exec and only makes
+        // async-signal-safe calls, building errors without allocating.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                // Rift may have died before the signal was armed.
+                if libc::getppid() != parent {
+                    return Err(io::Error::from_raw_os_error(libc::ESRCH));
+                }
+                Ok(())
+            });
+        }
+    }
+    spawner::spawn(command)
+}
+
+/// Spawns every child from one thread that lives as long as the process.
+///
+/// `PR_SET_PDEATHSIG` fires when the spawning *thread* exits, not the
+/// process. Tokio retires idle blocking threads, and `block_in_place` can turn
+/// a worker into one, so a child spawned from a runtime thread could be
+/// killed long before Rift exits.
+mod spawner {
+    use std::{
+        io,
+        sync::{OnceLock, mpsc},
+    };
+    use tokio::process::{Child, Command};
+
+    type Job = Box<dyn FnOnce() + Send>;
+
+    pub(super) fn spawn(mut command: Command) -> io::Result<Child> {
+        static JOBS: OnceLock<io::Result<mpsc::Sender<Job>>> = OnceLock::new();
+        let jobs = JOBS
+            .get_or_init(|| {
+                let (sender, receiver) = mpsc::channel::<Job>();
+                std::thread::Builder::new()
+                    .name("rift-spawner".into())
+                    .spawn(move || {
+                        for job in receiver {
+                            job();
+                        }
+                    })
+                    .map(|_| sender)
+            })
+            .as_ref()
+            .map_err(|error| io::Error::new(error.kind(), error.to_string()))?;
+        // The child registers with the caller's runtime, which reaps it.
+        let runtime = tokio::runtime::Handle::try_current().map_err(io::Error::other)?;
+        let (result, received) = mpsc::sync_channel(1);
+        let stopped = || io::Error::other("the process spawner thread stopped");
+        jobs.send(Box::new(move || {
+            let _runtime = runtime.enter();
+            let _spawning = super::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+            let _ = result.send(command.spawn());
+        }))
+        .map_err(|_| stopped())?;
+        received.recv().map_err(|_| stopped())?
+    }
+}
+
+/// Kill `process` together with its process group, then reap it.
+pub(crate) async fn kill(process: &mut Child) -> io::Result<()> {
+    #[cfg(unix)]
+    if let Some(pid) = process.id() {
+        // The group is the child's own (see `spawn`). Its id stays reserved
+        // until the leader is reaped below.
+        // SAFETY: a plain syscall without memory arguments.
+        unsafe {
+            libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+        }
+    }
+    process.kill().await
 }
 
 /// Graceful `stop` on stdin, then kill and reap after `grace`.
@@ -214,7 +298,7 @@ pub(crate) async fn stop_child(mut process: Child, grace: Duration) -> io::Resul
     match tokio::time::timeout(grace, graceful).await {
         Ok(result) => result.map(|_| ()),
         Err(_) => {
-            let result = process.kill().await;
+            let result = kill(&mut process).await;
             // `kill` normally waits too; explicitly reap on error as well.
             let waited = process.wait().await;
             result.and(waited.map(|_| ()))
@@ -438,5 +522,114 @@ pub(super) fn mark_unknown(server: &Server) {
     let mut state = lock(&server.state);
     if state.phase == super::Phase::Running {
         state.phase = super::Phase::Unknown;
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    /// Whether `pid` has exited (gone, or a zombie awaiting its new parent).
+    fn exited(pid: &str) -> bool {
+        let output = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", pid])
+            .output()
+            .unwrap();
+        let state = String::from_utf8_lossy(&output.stdout);
+        state.trim().is_empty() || state.trim_start().starts_with('Z')
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn children_lead_their_own_group_and_kill_reaches_helpers() {
+        let directory =
+            std::env::temp_dir().join(format!("rift-spawn-group-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let command = ["sh", "-c", "sleep 60 & echo $! > helper.pid; wait"].map(String::from);
+        // Spawning from a short-lived blocking thread works like any other.
+        let mut child = {
+            let directory = directory.clone();
+            tokio::task::spawn_blocking(move || spawn(&command, &directory))
+                .await
+                .unwrap()
+                .unwrap()
+        };
+        let pid = child.id().unwrap() as libc::pid_t;
+        // SAFETY: a plain syscall without memory arguments.
+        assert_eq!(unsafe { libc::getpgid(pid) }, pid);
+        let helper = loop {
+            match std::fs::read_to_string(directory.join("helper.pid")) {
+                Ok(text) if text.ends_with('\n') => break text.trim().to_owned(),
+                _ => tokio::time::sleep(Duration::from_millis(10)).await,
+            }
+        };
+        assert!(!exited(&helper));
+        kill(&mut child).await.unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !exited(&helper) {
+            assert!(tokio::time::Instant::now() < deadline, "helper survived");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    /// A server outlives neither a SIGKILLed Rift nor an OOM kill. The test
+    /// binary runs this test again as a stand-in for Rift, which spawns a
+    /// server and waits; the outer run then kills it with SIGKILL.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn children_die_with_a_killed_rift() {
+        const PARENT: &str = "RIFT_TEST_KILLED_PARENT";
+        let name = format!(
+            "{}::children_die_with_a_killed_rift",
+            module_path!().split_once("::").unwrap().1
+        );
+        if let Ok(directory) = std::env::var(PARENT) {
+            let directory = std::path::PathBuf::from(directory);
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let child = spawn(&["sleep".into(), "60".into()], &directory).unwrap();
+                let temporary = directory.join("child.pid.tmp");
+                std::fs::write(&temporary, child.id().unwrap().to_string()).unwrap();
+                std::fs::rename(temporary, directory.join("child.pid")).unwrap();
+                std::future::pending::<()>().await;
+            });
+            unreachable!();
+        }
+        let directory =
+            std::env::temp_dir().join(format!("rift-killed-parent-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut parent = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &name, "--test-threads=1", "--nocapture"])
+            .env(PARENT, &directory)
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let child = loop {
+            if let Ok(pid) = std::fs::read_to_string(directory.join("child.pid")) {
+                break pid;
+            }
+            if let Some(status) = parent.try_wait().unwrap() {
+                panic!("stand-in Rift exited early: {status}");
+            }
+            assert!(std::time::Instant::now() < deadline, "no child spawned");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(!exited(&child));
+        parent.kill().unwrap(); // SIGKILL: no destructors, no kill_on_drop.
+        parent.wait().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !exited(&child) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "server {child} survived a SIGKILLed Rift"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let _ = std::fs::remove_dir_all(directory);
     }
 }

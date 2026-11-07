@@ -264,9 +264,10 @@ async fn login_and_transfer_handshakes_start_independent_backend_connections() {
             payload.extend(frame(&start));
             client.write_all(&payload).await.unwrap();
             let (mut upstream, _) = backend.accept().await.unwrap();
+            // Data after a NUL that is not a Forge marker never reaches backends.
             assert_eq!(
                 frame(&read_frame(&mut upstream).await),
-                handshake("login.test\0metadata", state)
+                handshake("login.test", state)
             );
             assert_eq!(read_frame(&mut upstream).await, start);
             upstream

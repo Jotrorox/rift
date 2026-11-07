@@ -321,11 +321,19 @@ rift.config.extensions = {
 ```
 
 Storage is shared across sessions, jobs and reload generations. With `storage`,
-it survives process restarts in a versioned binary snapshot. Relative paths are
+it survives process restarts in a bundled-SQLite database file. Relative paths are
 resolved against the configuration file's directory; the parent directory must
-already exist and be writable. Startup loads or creates the snapshot and rejects
-corrupt or oversized files. Without `storage`, the same API uses memory and resets
-on restart. Each file belongs to one Rift process; it is not a distributed database.
+already exist and be writable. Startup loads or creates the database and rejects
+corrupt files, SQLite databases that are not Rift extension stores, and entries
+that break the limits below. Without `storage`, the same API uses memory and
+resets on restart. Each file belongs to one Rift process: Rift holds an exclusive
+lock on it while running, and a second process fails at startup. It is not a
+distributed database. While Rift runs, recent commits can be in a `-wal` file
+next to the database; copy both, or stop Rift first, to back it up.
+
+Stores written by earlier Rift versions (versioned binary snapshots) are
+converted at startup. The original snapshot is kept as `<file>.v1-backup`; to go
+back to an earlier Rift version, restore it in place of the database.
 Namespaces organize data; they do not isolate mutually untrusted plugins.
 Namespaces beginning with `rift.` are reserved for host-owned data such as group
 memberships; `rift.store` methods reject them.
@@ -341,13 +349,20 @@ Increment stores a decimal string. The existing value, delta and result must be
 integers in −(2^53−1) through 2^53−1, ensuring exact LuaJIT numbers; invalid values
 or overflow fail without mutation.
 A read followed by a write is not atomic; use increment for concurrent counters.
-Namespaces and keys are UTF-8 strings of 1–128 bytes. Values have a 64 KiB limit;
-the entire store, including snapshot overhead, has a 1 MiB/4096-entry limit.
-Exceeding a limit fails without changing committed state. Durable mutations write
-and sync a temporary sibling file before atomic replacement; memory changes only
-after replacement succeeds. Unix directory syncing is best effort. Filesystem
-calls cannot be interrupted mid-operation; an expired worker retains its permit
-until it stops, and a committed mutation can outlive a timed-out callback.
+Namespaces and keys are UTF-8 strings of 1–128 bytes. Values have a 64 KiB limit.
+Plugin data, everything in `rift.store` namespaces, is limited to 4096 entries
+and 1 MiB, counting each entry as its namespace, key and value plus 8 bytes.
+Host-owned data such as group memberships has a separate limit of 65536 entries
+and 8 MiB, so a full plugin store cannot block membership changes. Exceeding a
+limit fails without changing committed state.
+
+Each mutation commits only the entries it changes, in one SQLite transaction
+that is synced to disk (WAL mode, `synchronous=FULL`) before the call returns.
+Memory changes only after the commit succeeds, so a failed write leaves both
+unchanged. Writes are serialized; reads never wait for a write to sync.
+Filesystem calls cannot be interrupted mid-operation; an expired worker retains
+its permit until it stops, and a committed mutation can outlive a timed-out
+callback.
 
 ### Scheduled work
 
@@ -391,6 +406,8 @@ rift.config.extensions.integrations = {
         url = "https://directory.example.com/permissions/",
         timeout_ms = 1000,
         headers = { ["Accept"] = "text/plain" },
+        -- Header values read from the environment, never written in rift.lua.
+        headers_env = { ["Authorization"] = "DIRECTORY_API_TOKEN" },
     },
 }
 -- Inside a job:
@@ -411,6 +428,18 @@ Absolute URLs/paths, traversal and encoded separators are rejected. Request
 headers override configured headers. Redirects are returned without following
 and environment HTTP proxies are disabled. Configured services may be private
 or loopback addresses; configuration authors choose the allowed endpoints.
+
+Keep credentials out of `headers`: its values are part of `rift.lua`, so they
+end up in deployment history and in the web editor. `headers_env` maps a header
+name to an environment variable name instead, such as
+`DIRECTORY_API_TOKEN`. Rift reads the variable when it sends each request, so
+the value never appears in the configuration, deployment history or
+diagnostics; errors name the variable only. A header may appear in `headers` or
+`headers_env`, not both, and both count toward the 32-header limit. Startup and
+reloads fail while a referenced variable is unset or is not a valid header
+value, and `rift check --strict` reports it before you start. Set the variable
+in the service environment (for example an `EnvironmentFile=` or a Compose
+secret), not on the command line.
 
 The result is `{ status = number, body = string, headers = table }`. HTTP error
 statuses are ordinary responses; transport errors, timeout, malformed options
@@ -482,8 +511,8 @@ Membership methods take a lowercase 32-digit player UUID; `*` is rejected. Addin
 requires a currently configured group other than `default`. A player can belong
 to at most 16 groups. Memberships live in the extension store under the reserved
 `rift.groups` namespace. With `storage` they survive restarts; without it they
-reset. They count toward the store's size and entry limits, and they follow its
-commit rules: a membership changes only after the snapshot is replaced. A reload
+reset. They count toward the store's host data limit, not the plugin one, and
+they follow its commit rules: a membership changes only after its write commits. A reload
 that removes a group leaves its memberships dormant: they grant nothing, can be
 removed, and apply again if the group returns. Configuration has no static member
 lists. Grant the first manager through `permissions`, as shown above.
@@ -701,5 +730,5 @@ transfer policy. Failed reloads leave the active generation intact.
 Host leases, queue order, storage, permission overrides and worker limits survive
 reload. Enabling/disabling extensions, changing API version, storage path or queue
 destinations/capacities requires restart. Restart clears in-memory state and job
-schedules but preserves a configured storage snapshot. There is no automatic
+schedules but preserves a configured storage database. There is no automatic
 state migration or durable replay of callbacks.

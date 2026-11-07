@@ -93,6 +93,64 @@ impl ExtensionScript {
         (self.api_version == 2).then(|| self.permissions.groups_value())
     }
 
+    /// Environment variables the extension configuration reads, as
+    /// `(configuration field, variable name)`. Values are never stored.
+    pub fn environment(&self) -> Vec<(String, String)> {
+        integrations::environment(&self.integrations)
+    }
+
+    /// Fail when a variable from [`ExtensionScript::environment`] is unset or
+    /// unusable. Messages name the variable, never its value.
+    pub fn check_environment(&self) -> Result<(), String> {
+        integrations::check_environment(&self.integrations)
+    }
+
+    /// Whether a reload can replace `old` with `new`: enablement, API version,
+    /// storage path and queue capacities are fixed until a restart.
+    pub fn live_compatible(old: Option<&Self>, new: Option<&Self>) -> Result<(), String> {
+        match (old, new) {
+            (Some(old), Some(new))
+                if old.api_version == new.api_version
+                    && old.storage == new.storage
+                    && old.queues == new.queues =>
+            {
+                Ok(())
+            }
+            (None, None) => Ok(()),
+            _ => Err(
+                "extension enablement, API version, storage path and queue capacities require a restart"
+                    .into(),
+            ),
+        }
+    }
+
+    /// Check that the durable store opens, without creating or migrating it,
+    /// and describe what was found. Returns `None` for in-memory storage.
+    /// While Rift runs it holds the store, so only the path is reported.
+    pub fn check_storage(&self, running: bool) -> io::Result<Option<String>> {
+        let Some(config) = &self.storage else {
+            return Ok(None);
+        };
+        let path = config.path.display();
+        if running {
+            return Ok(Some(format!(
+                "extension store {path} is held by the running Rift; not checked"
+            )));
+        }
+        Ok(Some(match storage::check_file(&config.path)? {
+            storage::Check::Missing => {
+                crate::preflight::check_creatable(&config.path)?;
+                format!("extension store {path} does not exist yet; startup will create it")
+            }
+            storage::Check::Snapshot { entries } => format!(
+                "extension store {path} is a v1 snapshot with {entries} entries; startup will migrate it"
+            ),
+            storage::Check::Database { entries } => {
+                format!("extension store {path} opens ({entries} entries)")
+            }
+        }))
+    }
+
     pub(crate) fn parse(root: &Table, source: &script::ScriptSource) -> mlua::Result<Option<Self>> {
         let value: Value = root.raw_get("extensions")?;
         if value.is_nil() {
@@ -556,18 +614,13 @@ impl Extensions {
 
     pub fn new(config: &Config, broker: Broker, previous: Option<&Self>) -> io::Result<Self> {
         if let Some(previous) = previous {
-            match (&previous.script, &config.extensions) {
-                (Some(old), Some(new))
-                    if old.api_version == new.api_version
-                        && old.storage == new.storage
-                        && old.queues == new.queues => {}
-                (None, None) => {}
-                _ => {
-                    return Err(invalid(
-                        "extension enablement, API version, storage path and queue capacities require a restart",
-                    ));
-                }
-            }
+            ExtensionScript::live_compatible(previous.script.as_ref(), config.extensions.as_ref())
+                .map_err(invalid)?;
+        }
+        if let Some(script) = &config.extensions {
+            script
+                .check_environment()
+                .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
         }
         let store = match previous {
             Some(previous) => previous.store.clone(),

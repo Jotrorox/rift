@@ -12,7 +12,8 @@ use std::{
 /// Permission patterns: exact nodes, `prefix.*` or `*`, mapped to grant/deny.
 pub(super) type Nodes = BTreeMap<String, bool>;
 
-/// Host-owned store namespace: UUID -> comma-separated group names.
+/// Host-owned store namespace: UUID -> comma-separated group names. Host
+/// namespaces have their own store quota, separate from plugin data.
 const MEMBERSHIPS: &str = "rift.groups";
 const DEFAULT_GROUP: &str = "default";
 const MAX_GROUPS: usize = 64;
@@ -737,6 +738,40 @@ mod tests {
             permissions.state.lock().unwrap().memberships[PLAYER].len(),
             MAX_MEMBERSHIPS
         );
+    }
+
+    #[test]
+    fn memberships_do_not_share_the_plugin_store_quota() {
+        let store = Store::open(None).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        store
+            .mutate_then(
+                deadline,
+                |entries| {
+                    for i in 0..4096 {
+                        entries.insert(("plugin".into(), i.to_string()), vec![]);
+                    }
+                    Ok(())
+                },
+                |_| {},
+            )
+            .unwrap();
+        let plugin_full = store.mutate_then(
+            deadline,
+            |entries| {
+                entries.insert(("plugin".into(), "more".into()), vec![]);
+                Ok(())
+            },
+            |_| {},
+        );
+        assert!(plugin_full.is_err());
+        let permissions = Permissions::open(store.clone()).unwrap();
+        assert!(
+            permissions
+                .update_group(PLAYER.into(), "staff".into(), true, deadline)
+                .unwrap()
+        );
+        assert_eq!(store.namespace(MEMBERSHIPS).len(), 1);
     }
 
     #[test]
