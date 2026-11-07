@@ -523,7 +523,10 @@ pub struct Extensions {
     script: Option<ExtensionScript>,
     backends: Arc<Mutex<BTreeSet<String>>>,
     groups: Arc<Mutex<BTreeMap<String, BTreeSet<String>>>>,
+    /// Workers for player callbacks. Scheduled jobs, which may wait seconds
+    /// on HTTP calls, use `job_slots` and never hold these.
     slots: Arc<Semaphore>,
+    job_slots: Arc<Semaphore>,
     host: Arc<Mutex<HostState>>,
     broker: Broker,
     store: storage::Store,
@@ -630,6 +633,10 @@ impl Extensions {
             slots: previous.map_or_else(
                 || Arc::new(Semaphore::new(script::MAX_CONCURRENT)),
                 |p| p.slots.clone(),
+            ),
+            job_slots: previous.map_or_else(
+                || Arc::new(Semaphore::new(scheduler::MAX_CONCURRENT_JOBS)),
+                |p| p.job_slots.clone(),
             ),
             host: previous.map_or_else(
                 || Arc::new(Mutex::new(HostState::default())),
@@ -764,6 +771,7 @@ impl Extensions {
 
     /// Run `work` on a blocking worker under the session's single callback
     /// slot and the process-wide extension capacity, within the Lua deadline.
+    /// A full pool is waited on briefly before the callback fails.
     async fn spawn<T: Send + 'static>(
         &self,
         input: &Context,
@@ -776,11 +784,9 @@ impl Extensions {
             .clone()
             .try_acquire_owned()
             .map_err(|_| invalid("previous session callback is still running"))?;
-        let permit = self
-            .slots
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| invalid("extension capacity exhausted"))?;
+        let permit = script::acquire_slot(&self.slots)
+            .await
+            .ok_or_else(|| invalid("extension capacity exhausted"))?;
         let script = self.script.clone().unwrap();
         let input = input.clone();
         let runtime = self.clone();
@@ -1120,16 +1126,21 @@ impl Drop for ExtensionSession {
         let Ok(session_job) = self.jobs.clone().try_acquire_owned() else {
             return;
         };
-        let Ok(permit) = self.runtime.slots.clone().try_acquire_owned() else {
-            eprintln!("rift: extension teardown notification dropped: capacity exhausted");
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
             return;
         };
-        let deadline = Instant::now() + script::EXECUTION_TIMEOUT;
         let runtime = self.runtime.clone();
         let mut input = self.context.clone();
         let pending = self.pending.take();
         input.reason = Some("session_closed".into());
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        // Wait briefly for a worker, like other player callbacks, instead of
+        // dropping the notification on the first busy moment.
+        handle.clone().spawn(async move {
+            let Some(permit) = script::acquire_slot(&runtime.slots).await else {
+                eprintln!("rift: extension teardown notification dropped: capacity exhausted");
+                return;
+            };
+            let deadline = Instant::now() + script::EXECUTION_TIMEOUT;
             handle.spawn_blocking(move || {
                 let _permit = permit;
                 let _session_job = session_job;
@@ -1148,7 +1159,7 @@ impl Drop for ExtensionSession {
                     eprintln!("rift: {error}");
                 }
             });
-        }
+        });
     }
 }
 

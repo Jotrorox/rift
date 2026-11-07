@@ -16,9 +16,22 @@ pub(crate) use source::ScriptSource;
 
 pub(crate) const MAX_SOURCE_BYTES: usize = 256 * 1024;
 pub(crate) const MAX_CONCURRENT: usize = 4;
-pub(crate) const EXECUTION_TIMEOUT: Duration = Duration::from_millis(50);
+/// Server-list pings run `on_status` on their own workers, so a flood of pings
+/// cannot take the slots that `on_route` needs to admit players, or the reverse.
+pub(crate) const MAX_CONCURRENT_STATUS: usize = 2;
+/// How long a callback may wait for a free worker before it is refused. Short
+/// bursts queue instead of failing; sustained overload still fails fast.
+pub(crate) const SLOT_WAIT: Duration = Duration::from_millis(25);
+/// Wall deadline for one callback. Unit tests allow 500 ms instead: they check
+/// behaviour, not speed, and a debug-build VM on a shared CI machine can be
+/// stalled past 50 ms. Tests of the deadline itself use this constant.
+pub(crate) const EXECUTION_TIMEOUT: Duration = if cfg!(test) {
+    Duration::from_millis(500)
+} else {
+    Duration::from_millis(50)
+};
 const MEMORY_LIMIT: usize = 8 * 1024 * 1024;
-const INSTRUCTION_LIMIT: u32 = 100_000;
+pub(crate) const INSTRUCTION_LIMIT: u32 = 100_000;
 const HOOK_INTERVAL: u32 = 1000;
 const MAX_REASON_BYTES: usize = 1024;
 
@@ -184,6 +197,24 @@ fn install_servers(
     runtime.raw_set("servers", servers)
 }
 
+/// Wait up to [`SLOT_WAIT`] for a worker permit.
+pub(crate) async fn acquire_slot(
+    slots: &std::sync::Arc<tokio::sync::Semaphore>,
+) -> Option<tokio::sync::OwnedSemaphorePermit> {
+    if let Ok(permit) = slots.clone().try_acquire_owned() {
+        return Some(permit);
+    }
+    tokio::time::timeout(SLOT_WAIT, slots.clone().acquire_owned())
+        .await
+        .ok()?
+        .ok()
+}
+
+/// Lua instructions spent evaluating the configuration itself, counted in
+/// steps of the hook interval. Callbacks start with a fresh budget afterwards.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct EvaluationCost(pub u32);
+
 pub(crate) fn check_deadline(deadline: Instant) -> mlua::Result<()> {
     if Instant::now() >= deadline {
         return Err(mlua::Error::runtime("script deadline exceeded"));
@@ -264,13 +295,14 @@ pub(crate) fn load(source: &ScriptSource, deadline: Instant) -> mlua::Result<(Lu
     // pcall/xpcall, coroutines, dynamic loaders, metatables/finalizers, I/O, native
     // modules and debug access are deliberately absent. In particular a script
     // cannot catch a budget error or escape to a thread without an active hook.
-    let instructions = Cell::new(0);
+    let instructions = Rc::new(Cell::new(0));
+    let counter = instructions.clone();
     lua.set_hook(
         HookTriggers::new().every_nth_instruction(HOOK_INTERVAL),
         move |_, _| {
             check_deadline(deadline)?;
-            let count = instructions.get() + HOOK_INTERVAL;
-            instructions.set(count);
+            let count = counter.get() + HOOK_INTERVAL;
+            counter.set(count);
             if count >= INSTRUCTION_LIMIT {
                 return Err(mlua::Error::runtime("script instruction limit exceeded"));
             }
@@ -285,6 +317,10 @@ pub(crate) fn load(source: &ScriptSource, deadline: Instant) -> mlua::Result<(Lu
         .eval()?;
     let root = finalize.call(root)?;
     check_deadline(deadline)?;
+    // Every callback re-evaluates the configuration first. Give the callback
+    // itself the whole budget, so a heavy configuration cannot starve it, and
+    // keep the configuration's own cost for `rift check`.
+    lua.set_app_data(EvaluationCost(instructions.replace(0)));
     Ok((lua, root))
 }
 

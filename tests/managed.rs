@@ -43,7 +43,15 @@ fn managed_process_helper() {
     {
         return;
     }
-    std::thread::sleep(Duration::from_millis(delay));
+    // Tests that need startup to fail or finish at a chosen moment create
+    // `fail-start` or `start-now`, instead of racing a timer on a busy host.
+    let ready_after = Instant::now() + Duration::from_millis(delay);
+    while Instant::now() < ready_after && !Path::new("start-now").exists() {
+        if Path::new("fail-start").exists() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
     let listener = TcpListener::bind(&address).unwrap();
     listener.set_nonblocking(true).unwrap();
     let stopping = Arc::new(AtomicBool::new(false));
@@ -138,6 +146,50 @@ struct Fixture {
     players: Arc<PlayerRegistry>,
 }
 
+/// A free loopback port for a helper, never handed out twice in this process.
+///
+/// Ports come from below the common ephemeral ranges (Linux starts at 32768;
+/// macOS and Windows at 49152), so outgoing connections never use them as
+/// source ports.
+fn unique_address() -> SocketAddr {
+    const PORTS: std::ops::Range<u16> = 20_000..32_000;
+    static NEXT: std::sync::Mutex<Option<u16>> = std::sync::Mutex::new(None);
+    let mut next = NEXT.lock().unwrap();
+    // Start at a per-process offset so concurrent test binaries rarely meet.
+    let mut port = next.unwrap_or(PORTS.start + (std::process::id() % 4_000) as u16 * 3);
+    for _ in 0..PORTS.len() {
+        if !PORTS.contains(&port) {
+            port = PORTS.start;
+        }
+        let address = SocketAddr::from(([127, 0, 0, 1], port));
+        port += 1;
+        if port_is_free(address) {
+            *next = Some(port);
+            return address;
+        }
+    }
+    panic!("no free loopback port in {PORTS:?}");
+}
+
+/// On macOS a socket becomes close-on-exec only after it is created, so a
+/// listener made here could be inherited by a helper another test spawns at
+/// that moment, which would keep this port open and answer this test's
+/// readiness probes. Probe with a connect there instead: a listener accepts
+/// at once, and a free port is refused.
+#[cfg(target_os = "macos")]
+fn port_is_free(address: SocketAddr) -> bool {
+    std::net::TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_err()
+}
+
+/// Elsewhere sockets cannot leak into children, and only a real bind sees
+/// ports that refuse connections but cannot be bound, such as the ranges
+/// Windows reserves for Hyper-V. A closed port also is not refused promptly
+/// on Windows, so a connect probe would be slow there.
+#[cfg(not(target_os = "macos"))]
+fn port_is_free(address: SocketAddr) -> bool {
+    TcpListener::bind(address).is_ok()
+}
+
 impl Fixture {
     fn new(delay: u64, mode: &str) -> Self {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
@@ -147,9 +199,7 @@ impl Fixture {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&directory).unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        drop(listener);
+        let address = unique_address();
         fs::write(
             directory.join("helper-config"),
             format!("{address}\n{delay}\n{mode}\n"),
@@ -197,6 +247,14 @@ impl Fixture {
     fn definition(&mut self) -> &mut ManagedServer {
         self.config.managed_servers.get_mut("default").unwrap()
     }
+
+    /// For tests that assert a graceful stop: a running helper answers `stop`
+    /// at once, but on a loaded host not always within the default 150 ms
+    /// before it would be killed instead.
+    fn expect_graceful_stop(mut self) -> Self {
+        self.definition().stop_timeout = EVENT_DEADLINE;
+        self
+    }
     fn starts(&self) -> usize {
         fs::read_to_string(self.directory.join("starts"))
             .unwrap_or_default()
@@ -212,7 +270,7 @@ impl Drop for Fixture {
 }
 
 async fn wait_state(manager: &ManagedServers, expected: &str) {
-    let deadline = Instant::now() + Duration::from_secs(4);
+    let deadline = Instant::now() + EVENT_DEADLINE;
     loop {
         let snapshot = manager.snapshot();
         if snapshot[0].state == expected {
@@ -226,8 +284,12 @@ async fn wait_state(manager: &ManagedServers, expected: &str) {
     }
 }
 
+/// Generous upper bound for a helper process to launch on a loaded host. It
+/// only delays failing runs; passing ones return as soon as the event happens.
+const EVENT_DEADLINE: Duration = Duration::from_secs(10);
+
 async fn wait_file(path: &Path) {
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + EVENT_DEADLINE;
     while !path.exists() {
         assert!(Instant::now() < deadline, "missing {}", path.display());
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -378,7 +440,7 @@ fn snapshot_occupancy_is_consistent_during_concurrent_transfers() {
 
 #[tokio::test]
 async fn concurrent_demand_starts_once_and_manual_stop_requires_explicit_restart() {
-    let fixture = Fixture::new(500, "normal");
+    let fixture = Fixture::new(500, "normal").expect_graceful_stop();
     let manager = fixture.manager();
     let barrier = Arc::new(tokio::sync::Barrier::new(75));
     let mut tasks = Vec::new();
@@ -450,7 +512,9 @@ async fn concurrent_demand_receives_the_same_startup_failure() {
 
 #[tokio::test]
 async fn cancelling_demand_waiters_releases_leases_without_cancelling_startup() {
-    let fixture = Fixture::new(500, "normal");
+    // The start stays in flight until the test creates `start-now`.
+    let mut fixture = Fixture::new(60_000, "normal").expect_graceful_stop();
+    fixture.definition().start_timeout = Duration::from_secs(60);
     let manager = fixture.manager();
     let task_manager = manager.clone();
     let waiter = tokio::spawn(async move {
@@ -464,7 +528,18 @@ async fn cancelling_demand_waiters_releases_leases_without_cancelling_startup() 
     assert_eq!(manager.snapshot()[0].reservations, 0);
     // Even with every original waiter gone, a new login joins the owned start.
     let lease = manager.reserve("default").unwrap();
-    manager.ensure_running("default").await.unwrap();
+    let demand = manager.ensure_running("default");
+    tokio::pin!(demand);
+    tokio::select! {
+        biased;
+        result = &mut demand => panic!("demand did not join the start: {result:?}"),
+        () = std::future::ready(()) => {}
+    }
+    fs::write(fixture.directory.join("start-now"), "").unwrap();
+    tokio::time::timeout(EVENT_DEADLINE, demand)
+        .await
+        .expect("the joined start did not finish")
+        .unwrap();
     assert_eq!(fixture.starts(), 1);
     drop(lease);
     manager.shutdown().await;
@@ -474,18 +549,35 @@ async fn cancelling_demand_waiters_releases_leases_without_cancelling_startup() 
 #[tokio::test]
 async fn demand_joins_manual_and_autostart_failures() {
     for autostart in [false, true] {
-        let mut fixture = Fixture::new(10_000, "normal");
+        let mut fixture = Fixture::new(60_000, "normal");
         fixture.definition().autostart = autostart;
         fixture.definition().start_on_connect = false;
-        fixture.definition().start_timeout = Duration::from_millis(300);
+        // Never reached: the start fails when the test says so, so a slow
+        // host cannot end it before the demand joins.
+        fixture.definition().start_timeout = Duration::from_secs(60);
         fixture.definition().restart_retries = 0;
         let manager = fixture.manager();
         if !autostart {
             manager.request_start("default").unwrap();
         }
         wait_file(&fixture.directory.join("starts")).await;
-        let error = manager.ensure_running("default").await.unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        // The first poll joins the in-flight start before it is made to fail.
+        let demand = manager.ensure_running("default");
+        tokio::pin!(demand);
+        tokio::select! {
+            biased;
+            result = &mut demand => panic!("demand did not join the start: {result:?}"),
+            () = std::future::ready(()) => {}
+        }
+        fs::write(fixture.directory.join("fail-start"), "").unwrap();
+        let error = tokio::time::timeout(Duration::from_secs(10), demand)
+            .await
+            .expect("the start did not fail")
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("exited before becoming ready"),
+            "{error}"
+        );
         assert_eq!(fixture.starts(), 1);
         assert!(manager.snapshot()[0].restart_exhausted);
         manager.shutdown().await;
@@ -530,7 +622,7 @@ async fn stop_shutdown_and_removal_resolve_all_shared_demand_waiters() {
 
 #[tokio::test]
 async fn cancelling_start_waiter_preserves_process_ownership() {
-    let fixture = Fixture::new(200, "normal");
+    let fixture = Fixture::new(200, "normal").expect_graceful_stop();
     let manager = fixture.manager();
     let task_manager = manager.clone();
     let waiter = tokio::spawn(async move { task_manager.start("default").await });
@@ -832,7 +924,7 @@ async fn wait_removed(manager: &ManagedServers) {
 
 #[tokio::test]
 async fn dynamic_registration_autostarts_and_removal_reaps_before_reuse() {
-    let mut fixture = Fixture::new(0, "normal");
+    let mut fixture = Fixture::new(0, "normal").expect_graceful_stop();
     fixture.definition().autostart = true;
     let manager = empty_manager(&fixture);
     assert!(manager.snapshot().is_empty());

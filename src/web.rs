@@ -47,6 +47,21 @@ pub struct App {
     requests: Arc<Semaphore>,
     validations: Arc<Semaphore>,
     operations: Arc<operations::Store>,
+    /// Stands in for `web.token` while no credentials are configured, so a
+    /// local process (such as a plugin on a managed server) cannot administer
+    /// Rift just by connecting to loopback. Printed once, kept for the run.
+    local_token: Arc<str>,
+    local_token_announced: Arc<std::sync::atomic::AtomicBool>,
+}
+/// A random 256-bit token as 64 hex digits.
+fn generate_token() -> io::Result<String> {
+    let mut random = [0u8; 32];
+    aws_lc_rs::rand::fill(&mut random).map_err(|_| io::Error::other("random source failed"))?;
+    Ok(random.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+/// Neither `web.token` nor a named operator is configured.
+fn uses_local_token(settings: &rift::config::WebConfig) -> bool {
+    settings.token.is_none() && settings.operators.is_empty()
 }
 impl App {
     pub fn new(
@@ -105,7 +120,22 @@ impl App {
             requests: Arc::new(Semaphore::new(64)),
             validations: Arc::new(Semaphore::new(4)),
             operations: Arc::new(operations::Store::default()),
+            local_token: generate_token()?.into(),
+            local_token_announced: Arc::default(),
         })
+    }
+    /// Print the generated token the first time a configuration needs it.
+    fn announce_local_token(&self, config: &Config) {
+        if config.web.as_ref().is_some_and(uses_local_token)
+            && !self
+                .local_token_announced
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            eprintln!(
+                "rift: web token for this run: {} (enter it under API access; set web.token to choose a permanent one)",
+                self.local_token
+            );
+        }
     }
     fn snapshot(&self) -> Arc<Snapshot> {
         self.current.borrow().clone()
@@ -260,6 +290,7 @@ impl Services {
         Ok(addresses)
     }
     pub fn commit(&mut self, config: &Config, mut prepared: Prepared, app: &App) {
+        app.announce_local_token(config);
         for kind in [Kind::Web, Kind::Status, Kind::Metrics] {
             let desired = kind.address(config);
             if self
@@ -546,14 +577,21 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
                 });
             }
         }
+        let local = uses_local_token(settings);
+        if local && equal_token(app.local_token.as_bytes(), supplied.as_bytes()) {
+            access = Some(Access {
+                name: "local".into(),
+                permissions: None,
+                groups: None,
+            });
+        }
         // Node agents fetch template files with their messaging token.
-        let mut node = false;
         if access.is_none() && !supplied.is_empty() {
             for (name, definition) in &snapshot.config.nodes {
                 if std::env::var(&definition.token_env)
                     .is_ok_and(|token| equal_token(token.as_bytes(), supplied.as_bytes()))
                 {
-                    node = true;
+                    // Read-only template access is the whole scope of a node token.
                     access = Some(Access {
                         name: format!("node:{name}"),
                         permissions: Some(BTreeSet::from([NODE_PERMISSION.to_owned()])),
@@ -562,25 +600,17 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
                 }
             }
         }
-        if node {
-            // Read-only template access is the whole scope of a node token.
-        } else if settings.token.is_some() || !settings.operators.is_empty() {
-            if access.is_none() {
-                drop(snapshot);
-                let anonymous = Access {
-                    name: "anonymous".into(),
-                    permissions: Some(BTreeSet::new()),
-                    groups: None,
-                };
-                let _ = record_audit(&app, &anonymous, "authentication", "", "denied", 401).await;
-                let mut response =
-                    error(StatusCode::UNAUTHORIZED, "a valid bearer token is required");
-                response
-                    .headers_mut()
-                    .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
-                return response;
-            }
-        } else {
+        let Some(access) = access else {
+            drop(snapshot);
+            // Summarised and kept apart from operator actions; see operator::Store::deny.
+            let _ = app.workflows.deny_async(401).await;
+            let mut response = error(StatusCode::UNAUTHORIZED, "a valid bearer token is required");
+            response
+                .headers_mut()
+                .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+            return response;
+        };
+        if access.name == "local" && local {
             let local_host = host
                 .parse::<axum::http::uri::Authority>()
                 .ok()
@@ -594,16 +624,10 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
             if !local_host {
                 return error(
                     StatusCode::FORBIDDEN,
-                    "tokenless administration requires a loopback Host header",
+                    "the generated web token requires a loopback Host header",
                 );
             }
-            access = Some(Access {
-                name: "local".into(),
-                permissions: None,
-                groups: None,
-            });
         }
-        let access = access.unwrap();
         let segments: Vec<_> = path.trim_start_matches('/').split('/').collect();
         let mutation = request.method() != axum::http::Method::GET
             && request.method() != axum::http::Method::HEAD;

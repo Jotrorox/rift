@@ -79,9 +79,14 @@ impl ProcessBackend for Local {
     async fn start(&mut self, server: &Server) -> io::Result<()> {
         let address = loopback_address(server.address)?;
         // Probe local port ownership directly. Closed-port TCP refusal can take
-        // longer than a short preflight deadline on Windows.
-        match std::net::TcpListener::bind(address) {
-            Ok(listener) => drop(listener),
+        // longer than a short preflight deadline on Windows. The probe holds
+        // the spawn lock so no child can inherit its listener (see `SPAWN`).
+        let probe = {
+            let _spawning = SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+            std::net::TcpListener::bind(address).map(drop)
+        };
+        match probe {
+            Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
                 return Err(io::Error::new(
                     io::ErrorKind::AddrInUse,
@@ -98,10 +103,7 @@ impl ProcessBackend for Local {
         let Ok(address) = loopback_address(server.address) else {
             return false;
         };
-        matches!(
-            tokio::time::timeout(wait, TcpStream::connect(address)).await,
-            Ok(Ok(_))
-        )
+        accepted(tokio::time::timeout(wait, TcpStream::connect(address)).await)
     }
 
     async fn status(&mut self, _server: &Server) -> Status {
@@ -155,6 +157,26 @@ impl ProcessBackend for Local {
     }
 }
 
+/// Whether a readiness probe reached a listening server.
+///
+/// A connect can report success for a connection the server refused: on a
+/// busy macOS host the refusal may already have closed the socket, with no
+/// error left to report, by the time the runtime checks it. Only a stream
+/// that still has a peer counts, or a server would be marked running before
+/// it listens.
+fn accepted(connect: Result<io::Result<TcpStream>, tokio::time::error::Elapsed>) -> bool {
+    matches!(connect, Ok(Ok(stream)) if stream.peer_addr().is_ok())
+}
+
+/// Held while a child is spawned and while a port is probed with a listener.
+///
+/// On macOS a new socket is marked close-on-exec only after it is created, so
+/// a child spawned by another thread in between inherits it. A probe listener
+/// inherited that way stays open, listening on the probed port, for the
+/// child's whole life: the port's own server then cannot bind it, and its
+/// readiness probes reach the wrong process.
+static SPAWN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Spawn `command` in `directory`, appending stdout and stderr to its log.
 /// Shared with the node agent, which runs the same launch locally.
 pub(crate) fn spawn(command: &[String], directory: &std::path::Path) -> io::Result<Child> {
@@ -176,6 +198,7 @@ pub(crate) fn spawn(command: &[String], directory: &std::path::Path) -> io::Resu
         .stderr(Stdio::from(log.try_clone()?))
         .stdout(Stdio::from(log))
         .kill_on_drop(true);
+    let _spawning = SPAWN.lock().unwrap_or_else(|e| e.into_inner());
     command.spawn()
 }
 
@@ -326,10 +349,7 @@ impl ProcessBackend for Remote {
             return false;
         };
         // The proxy itself must reach the server, so probe from here.
-        matches!(
-            tokio::time::timeout(wait, TcpStream::connect(endpoint)).await,
-            Ok(Ok(_))
-        )
+        accepted(tokio::time::timeout(wait, TcpStream::connect(endpoint)).await)
     }
 
     async fn status(&mut self, server: &Server) -> Status {

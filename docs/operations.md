@@ -119,8 +119,12 @@ backends. `status` also includes the managed server state for read-only inspecti
 
 Connection `rate_limit` runs before handshake parsing. `login_rate_limit` runs
 at login admission and has the same token-bucket fields and defaults; it allows
-status requests without spending login tokens. Both are opt-in, apply globally
-and per IP, and leave established traffic untouched. Clients sharing a NAT also
+status requests without spending login tokens. Both apply globally and per IP,
+and leave established traffic untouched. `login_rate_limit` is opt-in.
+`rate_limit` is on with the defaults above whenever `on_route` or `on_status` is
+configured, because those hooks run a Lua VM for every connection or ping; set
+`rate_limit = false` to turn it off, or a table to tune it. Without those hooks
+it is opt-in. Clients sharing a NAT also
 share an IP allowance. A routing hook can enforce additional IP/listener policy.
 Online mode verifies player names before network access checks; offline-mode
 names are unauthenticated and cannot establish account ownership.
@@ -181,8 +185,11 @@ end)
 
 Results apply on top of `server_list` (or Rift's default response). A
 handler's result also replaces `status_cache` passthrough for that ping;
-returning nil keeps passthrough. The handler shares the `on_route` limits:
-four concurrent scripts, a 50 ms deadline, and a fresh VM for every ping.
+returning nil keeps passthrough. The handler runs on two workers of its own,
+separate from the four `on_route` workers, so a flood of pings cannot delay
+logins and busy routing cannot blank the server list. Both hooks wait up to
+25 ms for a free worker before failing, and each has a 50 ms deadline and a
+fresh VM for every call.
 On an error, overload, an invalid result or an oversized response, Rift logs
 a `status_hook_failed` event and serves the default document, so the server
 list never goes blank because of a script.
