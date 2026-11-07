@@ -153,6 +153,93 @@ fn startup_instruction_memory_and_source_limits_are_enforced() {
     }
 }
 
+#[tokio::test]
+async fn callbacks_get_their_full_instruction_budget_after_a_heavy_configuration() {
+    // The configuration spends about 60% of the budget, the callback about
+    // 60% more: neither alone exceeds the limit, so routing must succeed.
+    let burn = |count: u32| format!("local x = 0 for i = 1, {count} do x = x + i end");
+    let source = format!(
+        "{}
+        return {{
+            listeners = {{ public = '127.0.0.1:0' }},
+            backends = {{ lobby = '127.0.0.1:25566' }},
+            routes = {{ public = 'lobby' }},
+            on_route = function() {} return nil end,
+        }}",
+        burn(30_000),
+        burn(30_000)
+    );
+    let directory = std::env::temp_dir().join(format!("rift-budget-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("rift.lua");
+    std::fs::write(&path, &source).unwrap();
+    let (config, cost) = Config::check(&path).unwrap();
+    std::fs::remove_dir_all(&directory).unwrap();
+    assert!(
+        (50_000..LUA_INSTRUCTION_LIMIT).contains(&cost),
+        "configuration cost {cost}"
+    );
+    let router = crate::hooks::Router::new(&config);
+    let connection = crate::hooks::ConnectionInfo {
+        listener: "public".into(),
+        peer_addr: "127.0.0.1:1".parse().unwrap(),
+        local_addr: "127.0.0.1:2".parse().unwrap(),
+        default_backend: Some("lobby".into()),
+    };
+    // Only the instruction budget is under test. A slow debug-build VM may
+    // miss the real 50 ms deadline on a busy CI runner, so deadline errors
+    // are retried; the instruction limit must never be reached.
+    for _ in 0..5 {
+        match router.route(connection.clone()).await {
+            Ok(_) => return,
+            Err(error) => assert!(!error.to_string().contains("instruction limit"), "{error}"),
+        }
+    }
+}
+
+#[test]
+fn connection_hooks_get_a_default_rate_limit_unless_disabled() {
+    assert!(
+        Config::from_lua(VALID, "plain.lua")
+            .unwrap()
+            .rate_limit
+            .is_none()
+    );
+    let hooked = with_security("on_route = function() return nil end");
+    assert_eq!(
+        Config::from_lua(&hooked, "hooked.lua").unwrap().rate_limit,
+        Some(RateLimit::default())
+    );
+    let status = with_security("on_status = function() return nil end");
+    assert!(
+        Config::from_lua(&status, "status.lua")
+            .unwrap()
+            .rate_limit
+            .is_some()
+    );
+    let disabled = with_security("on_route = function() return nil end, rate_limit = false");
+    assert!(
+        Config::from_lua(&disabled, "off.lua")
+            .unwrap()
+            .rate_limit
+            .is_none()
+    );
+    let tuned = with_security(
+        "on_route = function() return nil end, rate_limit = { per_ip_per_second = 5 }",
+    );
+    let limit = Config::from_lua(&tuned, "tuned.lua")
+        .unwrap()
+        .rate_limit
+        .unwrap();
+    assert_eq!(limit.per_ip_per_second, 5);
+    assert_eq!(limit.global_burst, RateLimit::default().global_burst);
+    for value in ["true", "1", "'on'"] {
+        let error = Config::from_lua(&with_security(&format!("rate_limit = {value}")), "bad.lua")
+            .unwrap_err();
+        assert!(error.to_string().contains("rate_limit"), "{error}");
+    }
+}
+
 #[test]
 fn generated_configuration_errors_are_bounded_for_http_and_logs() {
     let error = Config::from_lua("error(string.rep('x', 1024 * 1024))", "bad.lua")

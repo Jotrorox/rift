@@ -32,6 +32,8 @@ mod templates;
 // busy hosts. Keep it bounded without applying the latency-sensitive callback
 // deadline; the shared instruction, memory and source limits still apply.
 const CONFIGURATION_TIMEOUT: Duration = Duration::from_secs(5);
+/// Lua instructions available to the configuration, and again to each callback.
+pub const LUA_INSTRUCTION_LIMIT: u32 = crate::script::INSTRUCTION_LIMIT;
 
 /// CloudNet v4 layout: `local/versioncache`, `local/templates`,
 /// `local/services` for persistent and `temp/services` for disposable servers.
@@ -273,6 +275,18 @@ pub struct RateLimit {
     pub max_ips: usize,
 }
 
+impl Default for RateLimit {
+    fn default() -> Self {
+        Self {
+            per_ip_per_second: 20,
+            per_ip_burst: 40,
+            global_per_second: 200,
+            global_burst: 400,
+            max_ips: 65536,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HealthCheck {
     pub interval: Duration,
@@ -372,7 +386,17 @@ impl Config {
         Self::load_validated(path, false)
     }
 
-    fn load_validated(path: &Path, validate: bool) -> io::Result<Self> {
+    /// Load and validate like [`Config::load`], also returning the Lua
+    /// instructions the configuration spends on every evaluation.
+    pub fn check(path: &Path) -> io::Result<(Self, u32)> {
+        let source = Self::read_source(path)?;
+        let source = crate::script::ScriptSource::from_path(&source, path)
+            .map_err(|error| invalid(format!("{}: {error}", path.display())))?;
+        let directory = source.root.clone();
+        Self::evaluate_source(source, &directory, None, true)
+    }
+
+    fn read_source(path: &Path) -> io::Result<String> {
         let mut source = String::new();
         let mut read = || -> io::Result<()> {
             if !fs::metadata(path)?.is_file() {
@@ -386,6 +410,11 @@ impl Config {
         read().map_err(|error| {
             io::Error::new(error.kind(), format!("{}: {error}", path.display()))
         })?;
+        Ok(source)
+    }
+
+    fn load_validated(path: &Path, validate: bool) -> io::Result<Self> {
+        let source = Self::read_source(path)?;
         if validate {
             Self::from_lua_at(&source, path)
         } else {
@@ -454,11 +483,23 @@ impl Config {
         previous: Option<&Self>,
         validate: bool,
     ) -> io::Result<Self> {
+        Self::evaluate_source(source, directory, previous, validate).map(|(config, _)| config)
+    }
+
+    fn evaluate_source(
+        source: crate::script::ScriptSource,
+        directory: &Path,
+        previous: Option<&Self>,
+        validate: bool,
+    ) -> io::Result<(Self, u32)> {
         let name = source.entry.name.as_ref();
-        let parse = || -> Result<Self, String> {
-            let (_lua, value) =
-                crate::script::load(&source, Instant::now() + CONFIGURATION_TIMEOUT)
-                    .map_err(|e| e.to_string())?;
+        let mut cost = 0;
+        let mut parse = || -> Result<Self, String> {
+            let (lua, value) = crate::script::load(&source, Instant::now() + CONFIGURATION_TIMEOUT)
+                .map_err(|e| e.to_string())?;
+            cost = lua
+                .app_data_ref::<crate::script::EvaluationCost>()
+                .map_or(0, |cost| cost.0);
             let root = table(value, "configuration")?;
             fields(
                 &root,
@@ -528,7 +569,7 @@ impl Config {
             let software_cache = directory_option("software_cache", DEFAULT_SOFTWARE_CACHE)?;
             let template_storage = directory_option("template_storage", DEFAULT_TEMPLATE_STORAGE)?;
             let templates = templates::parse(&root, directory, &software_cache)?;
-            let service_groups = services::parse(&_lua, &root, directory)?;
+            let service_groups = services::parse(&lua, &root, directory)?;
             let nodes = nodes::parse(&root)?;
             let instance_database = match root
                 .raw_get::<Value>("instance_database")
@@ -592,7 +633,14 @@ impl Config {
                 Value::Function(_) => Some(HttpScript::new(&source)),
                 _ => return Err("config.on_http: expected a function".into()),
             };
-            let connection_rate_limit = rate_limit(&root, "rate_limit")?;
+            let connection_rate_limit = connection_rate_limit(&root)?;
+            let connection_hooks = ["on_route", "on_status"]
+                .into_iter()
+                .any(|hook| root.raw_get::<Value>(hook).is_ok_and(|v| v.is_function()));
+            // Connection hooks run a Lua VM per connection or ping, so they
+            // get a rate limit unless the configuration opts out.
+            let connection_rate_limit =
+                connection_rate_limit.unwrap_or_else(|| connection_hooks.then(RateLimit::default));
             let on_message = match root
                 .raw_get::<Value>("on_message")
                 .map_err(|e| e.to_string())?
@@ -803,7 +851,7 @@ impl Config {
                 .validate()
                 .map_err(|error| invalid(format!("{name}: {error}")))?;
         }
-        Ok(config)
+        Ok((config, cost))
     }
 
     pub fn validate(&self) -> io::Result<()> {
@@ -1575,6 +1623,20 @@ fn proxy_protocol(root: &Table) -> Result<Option<ProxyProtocol>, String> {
     }))
 }
 
+/// `rate_limit = false` turns the connection limit off; `None` means unset,
+/// so the caller applies the default for the configured hooks.
+fn connection_rate_limit(root: &Table) -> Result<Option<Option<RateLimit>>, String> {
+    match root.get::<Value>("rate_limit").map_err(|e| e.to_string())? {
+        Value::Nil => Ok(None),
+        Value::Boolean(false) => Ok(Some(None)),
+        Value::Table(_) => rate_limit(root, "rate_limit").map(Some),
+        value => Err(format!(
+            "rate_limit: expected a table or false, got {}",
+            value.type_name()
+        )),
+    }
+}
+
 fn rate_limit(root: &Table, path: &str) -> Result<Option<RateLimit>, String> {
     options(
         root,
@@ -1588,12 +1650,25 @@ fn rate_limit(root: &Table, path: &str) -> Result<Option<RateLimit>, String> {
         ],
     )?
     .map(|t| {
+        let default = RateLimit::default();
         Ok(RateLimit {
-            per_ip_per_second: integer(&t, path, "per_ip_per_second", 20, 1_000_000)?,
-            per_ip_burst: integer(&t, path, "per_ip_burst", 40, 1_000_000)?,
-            global_per_second: integer(&t, path, "global_per_second", 200, 1_000_000)?,
-            global_burst: integer(&t, path, "global_burst", 400, 1_000_000)?,
-            max_ips: integer(&t, path, "max_ips", 65536, 1_000_000)?,
+            per_ip_per_second: integer(
+                &t,
+                path,
+                "per_ip_per_second",
+                default.per_ip_per_second,
+                1_000_000,
+            )?,
+            per_ip_burst: integer(&t, path, "per_ip_burst", default.per_ip_burst, 1_000_000)?,
+            global_per_second: integer(
+                &t,
+                path,
+                "global_per_second",
+                default.global_per_second,
+                1_000_000,
+            )?,
+            global_burst: integer(&t, path, "global_burst", default.global_burst, 1_000_000)?,
+            max_ips: integer(&t, path, "max_ips", default.max_ips, 1_000_000)?,
         })
     })
     .transpose()

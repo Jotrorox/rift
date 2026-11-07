@@ -18,12 +18,16 @@ use std::{
 const TOKEN: &str = "test-administration-token";
 const ADMIN_TOKEN: &str = "test-local-administration-token-32-bytes";
 const OPERATOR_TOKEN: &str = "test-scoped-operator-token";
+const LOCAL_TOKEN_LOG: &str = "rift: web token for this run: ";
 
 struct Fixture {
     directory: PathBuf,
     web: SocketAddr,
     status: SocketAddr,
     metrics: SocketAddr,
+    /// The token Rift generated and logged at startup when `web` has no
+    /// credentials configured; `fixture.client()` sends it.
+    local_token: Mutex<Option<&'static str>>,
     _serial: MutexGuard<'static, ()>,
 }
 
@@ -49,6 +53,7 @@ impl Fixture {
             web: reservations[0].local_addr().unwrap(),
             status: reservations[1].local_addr().unwrap(),
             metrics: reservations[2].local_addr().unwrap(),
+            local_token: Mutex::new(None),
             _serial: serial,
         }
     }
@@ -94,11 +99,17 @@ impl Fixture {
         });
         let mut process = Process { child, logs };
         process.wait_for(self.web);
+        // The generated token, if any, is logged before the listener line.
+        process.wait_for_log("rift: web on ");
+        *self.local_token.lock().unwrap() = process.logged_token();
         process
     }
 
     fn client(&self) -> Client {
-        Client::new(self.web)
+        Client {
+            token: *self.local_token.lock().unwrap(),
+            ..Client::new(self.web)
+        }
     }
 }
 
@@ -133,6 +144,20 @@ impl Process {
             );
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    fn logged_token(&self) -> Option<&'static str> {
+        self.logs.lock().unwrap().iter().find_map(|line| {
+            let token = line.strip_prefix(LOCAL_TOKEN_LOG)?.split(' ').next()?;
+            Some(&*Box::leak(token.to_owned().into_boxed_str()))
+        })
+    }
+
+    /// Wait for the generated token, which a reload to a configuration
+    /// without credentials may log after startup.
+    fn local_token(&mut self) -> &'static str {
+        self.wait_for_log(LOCAL_TOKEN_LOG);
+        self.logged_token().unwrap()
     }
 
     fn wait_for(&mut self, address: SocketAddr) {
@@ -838,7 +863,13 @@ fn moving_to_tokenless_loopback_cannot_authorize_a_preaccepted_public_socket() {
     drop(reserved);
     save(admin, &updated, &revision(admin)).expect(200);
     process.wait_for(replacement);
-    Client::new(replacement).get("/api/config").expect(200);
+    Client::new(replacement).get("/api/config").expect(401);
+    Client {
+        token: Some(process.local_token()),
+        ..Client::new(replacement)
+    }
+    .get("/api/config")
+    .expect(200);
     match stale.write_all(b"\r\n") {
         Ok(()) => (),
         Err(error)
@@ -1541,6 +1572,59 @@ fn named_operators_enforce_permissions_and_group_scope_and_record_denials() {
     save(admin, &renamed, &revision(admin)).expect(200);
     staff.get("/api/status").expect(401);
     staff.get(lobby_path).expect(401);
+}
+
+#[test]
+fn loopback_without_credentials_requires_the_generated_token_and_denials_are_summarised() {
+    let fixture = Fixture::new();
+    let source = fixture.source("", "");
+    let mut process = fixture.start(&source);
+    let token = process.local_token();
+    assert_eq!(token.len(), 64);
+    assert!(token.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    // A local process without the token, such as a plugin on a managed
+    // server, is refused even though it connects over loopback.
+    let anonymous = Client::new(fixture.web);
+    anonymous.get("/api/status").expect(401);
+    anonymous.get("/api/config").expect(401);
+    anonymous.json("POST", "/api/reload", json!({})).expect(401);
+    // The HTML shell still loads, so the token can be entered there.
+    anonymous.get("/").expect(200);
+    let client = fixture.client();
+    let access = client.get("/api/access").expect(200).value();
+    assert_eq!(access["name"], "local");
+    assert!(access["permissions"].is_null());
+    // The generated token is only valid with a loopback Host header.
+    client
+        .send("GET", "/api/status", &[("Host", "rift.example:8080")], "")
+        .expect(403);
+    client
+        .json("POST", "/api/config/validate", json!({"source": source}))
+        .expect(200);
+    for _ in 0..200 {
+        anonymous.get("/api/status").expect(401);
+    }
+    let audit = client.get("/api/audit").expect(200).value();
+    let records = audit["records"].as_array().unwrap();
+    let denials: Vec<_> = records
+        .iter()
+        .filter(|record| record["actor"] == "anonymous")
+        .collect();
+    assert_eq!(denials.len(), 1, "{audit}");
+    assert_eq!(denials[0]["count"], 1);
+    assert!(audit["unrecorded_denials"].as_u64().unwrap() >= 202);
+    assert!(records.iter().any(|record| record["actor"] == "local"));
+    // The token is printed once and stays the same for the whole run.
+    client.json("POST", "/api/reload", json!({})).expect(200);
+    client.get("/api/status").expect(200);
+    let printed = process
+        .logs
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|line| line.starts_with(LOCAL_TOKEN_LOG))
+        .count();
+    assert_eq!(printed, 1);
 }
 
 #[test]

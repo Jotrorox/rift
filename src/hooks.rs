@@ -75,7 +75,10 @@ pub struct Router {
     backends: Arc<BTreeMap<String, Backend>>,
     groups: Arc<BTreeSet<String>>,
     routes: Arc<BTreeMap<String, Route>>,
+    /// Workers for `on_route`. Server-list pings use `status_slots`, so they
+    /// cannot crowd out connection routing.
     slots: Arc<Semaphore>,
+    status_slots: Arc<Semaphore>,
     messaging: Option<crate::messaging::Broker>,
 }
 
@@ -84,6 +87,7 @@ impl Router {
     pub fn reconfigured(&self, config: &Config) -> Self {
         let mut router = Self::new(config);
         router.slots = self.slots.clone();
+        router.status_slots = self.status_slots.clone();
         router.messaging = self.messaging.clone();
         router
     }
@@ -96,6 +100,7 @@ impl Router {
             groups: Arc::new(config.service_groups.keys().cloned().collect()),
             routes: Arc::new(config.routes.clone()),
             slots: Arc::new(Semaphore::new(crate::script::MAX_CONCURRENT)),
+            status_slots: Arc::new(Semaphore::new(crate::script::MAX_CONCURRENT_STATUS)),
             messaging: None,
         }
     }
@@ -106,11 +111,14 @@ impl Router {
         self
     }
 
-    /// Run once per accepted connection. Overload is rejected without waiting.
+    /// Run once per accepted connection. A short burst waits briefly for a
+    /// worker; sustained overload is rejected.
     pub async fn route(&self, connection: ConnectionInfo) -> Result<RouteDecision, RouteError> {
         let decision = if let Some(script) = self.script.clone() {
-            self.run(move |deadline, messaging| script.evaluate(&connection, deadline, messaging))
-                .await?
+            self.run(&self.slots, move |deadline, messaging| {
+                script.evaluate(&connection, deadline, messaging)
+            })
+            .await?
         } else {
             RouteDecision::Default
         };
@@ -123,32 +131,34 @@ impl Router {
         Ok(decision)
     }
 
-    /// Run `on_status` for a server-list ping. Shares capacity with `on_route`;
-    /// `None` keeps the default response.
+    /// Run `on_status` for a server-list ping on its own workers, separate
+    /// from `on_route`; `None` keeps the default response.
     pub async fn status(&self, ping: Ping) -> Result<Option<StatusOverride>, RouteError> {
         let Some(script) = self.status.clone() else {
             return Ok(None);
         };
-        self.run(move |deadline, messaging| script.evaluate(&ping, deadline, messaging))
-            .await
+        self.run(&self.status_slots, move |deadline, messaging| {
+            script.evaluate(&ping, deadline, messaging)
+        })
+        .await
     }
 
     pub fn has_status_hook(&self) -> bool {
         self.status.is_some()
     }
 
-    /// Overload is rejected without waiting.
+    /// Waits at most [`crate::script::SLOT_WAIT`] for a worker. The execution
+    /// deadline starts once a worker is assigned.
     async fn run<T: Send + 'static>(
         &self,
+        slots: &Arc<Semaphore>,
         evaluate: impl FnOnce(Instant, Option<crate::messaging::Broker>) -> Result<T, RouteError>
         + Send
         + 'static,
     ) -> Result<T, RouteError> {
-        let permit = self
-            .slots
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| RouteError::Busy)?;
+        let permit = crate::script::acquire_slot(slots)
+            .await
+            .ok_or(RouteError::Busy)?;
         let messaging = self.messaging.clone();
         let deadline = Instant::now() + crate::script::EXECUTION_TIMEOUT;
         let task = spawn_blocking(move || {

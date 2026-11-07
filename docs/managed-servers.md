@@ -297,9 +297,16 @@ Scaled instances use this removal policy instead of `idle_timeout_ms` shutdown,
 so the minimum and spare capacity stay running.
 
 Manually stopped and failed instances count toward the maximum while registered.
-Scaling respects a manual Stop and does not force a restart after the retry
-budget is exhausted. Explicitly Start a repaired instance or remove it when
-appropriate; empty excess instances remain eligible for automatic removal.
+Scaling respects a manual Stop and never restarts an instance whose retry
+budget is exhausted. Failed instances do not count as capacity, so a group whose
+instances crash keeps creating replacements instead of sitting at zero capacity.
+Once a replacement exists, empty failed instances are retired first. An empty
+instance that exhausted its retries is also retired when a disposable group is
+at `max_instances`, to make room for its replacement; a persistent group at its
+maximum keeps the instance until an operator starts or removes it. While a
+group has failed instances, each automatic change doubles the group's cooldown,
+up to five minutes (or `cooldown_ms`, if longer), so a broken template is not
+recreated in a tight loop. The backoff resets once no instance is failed.
 Scaling policy changes apply on reload and take effect at the next scaling
 decision. Adding or removing a policy changes idle shutdown for instances of a
 group with `idle_timeout_ms`, so remove those instances first. SQLite restores

@@ -183,7 +183,12 @@ in the [extension API](extensions.md). A failed reload preserves the active
 configuration.
 
 All imports and handlers share the existing 8 MiB VM memory limit and 100,000
-instruction budget. Configuration evaluation during startup, checks, reloads and
+instruction budget. Every callback first evaluates the configuration again;
+that evaluation has its own 100,000 instructions, and the callback then starts
+with a fresh 100,000, so a heavy configuration cannot starve the callbacks.
+`rift check` prints how many instructions the configuration uses. Its cost is
+still paid in time on every callback, against the 50 ms deadline, and `rift
+check` warns when it uses half the budget or more. Configuration evaluation during startup, checks, reloads and
 web-editor validation/saves has a five-second wall deadline, allowing for cold VM
 setup and scheduling delays on busy hosts. Runtime callbacks retain their 50 ms
 execution deadline (v2 scheduled jobs have a five-second wall deadline). Direct
