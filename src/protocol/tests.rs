@@ -114,6 +114,65 @@ fn zlib_decodes_independent_stored_fixed_and_dynamic_streams() {
     assert_eq!(compression::inflate(&encoded, raw.len()).unwrap(), raw);
 }
 
+fn noise(length: usize, mut seed: u32) -> Vec<u8> {
+    (0..length)
+        .map(|_| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            (seed >> 24) as u8
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn incompressible_packets_are_stored_and_fit_the_frame_limit() {
+    // Every byte at or above 144 costs 9 bits as a fixed-Huffman literal.
+    let high: Vec<u8> = noise(1 << 16, 7).iter().map(|byte| byte | 0x90).collect();
+    for raw in [noise(1 << 16, 1), high, Vec::new(), vec![0xff]] {
+        let encoded = compression::deflate(&raw);
+        let blocks = raw.len().div_ceil(16 * 1024).max(1);
+        assert!(encoded.len() <= raw.len() + 6 + 5 * blocks, "{}", raw.len());
+        assert_eq!(compression::inflate(&encoded, raw.len()).unwrap(), raw);
+    }
+    // Mixed data keeps compressing where it can.
+    let mut mixed = noise(40_000, 3);
+    mixed.extend(vec![0; 40_000]);
+    mixed.extend(noise(40_000, 4));
+    let encoded = compression::deflate(&mixed);
+    assert!(encoded.len() < 82_000);
+    assert_eq!(compression::inflate(&encoded, mixed.len()).unwrap(), mixed);
+
+    let packet = Packet::new(0x27, noise(1_900 * 1024, 9));
+    let mut codec = Codec::default();
+    codec.set_compression(256);
+    let frame = codec.encode(&packet).unwrap();
+    assert!(frame.len() <= MAX_FRAME_SIZE + 3);
+    assert_eq!(
+        Reader::default()
+            .read(&mut frame.as_slice(), codec)
+            .await
+            .unwrap(),
+        Some(packet)
+    );
+}
+
+#[test]
+fn inflate_accepts_long_codes_and_overlapping_references() {
+    // Codes up to 15 bits, longer than the single-lookup table, from zlib.
+    let ruler: Vec<u8> = (1..=16384u32).map(|i| i.trailing_zeros() as u8).collect();
+    let long = include_bytes!("../../tests/fixtures/long_codes.zlib");
+    assert_eq!(compression::inflate(long, ruler.len()).unwrap(), ruler);
+    for cut in 1..8 {
+        assert!(compression::inflate(&long[..long.len() - cut], ruler.len()).is_err());
+    }
+    // Run-length references copy bytes the same reference just wrote.
+    let runs: Vec<u8> = [vec![1; 1000], [2, 3].repeat(700), vec![9; 3]].concat();
+    let encoded = compression::deflate(&runs);
+    assert!(encoded.len() < 100);
+    assert_eq!(compression::inflate(&encoded, runs.len()).unwrap(), runs);
+}
+
 #[tokio::test]
 async fn compression_thresholds_and_declared_lengths_are_enforced() {
     for threshold in [-1, 0, 1, 32, 1024] {
@@ -169,6 +228,49 @@ fn handshake_preserves_fields_and_bounds_utf16_address_length() {
     let mut good = handshake;
     good.address = "é".repeat(255);
     assert!(Handshake::decode(&good.packet()).is_ok());
+}
+
+#[test]
+fn handshake_keeps_only_the_hostname_and_forge_markers() {
+    let decode = |address: &str| {
+        Handshake::decode(
+            &Handshake {
+                protocol: 774,
+                address: address.into(),
+                port: 25565,
+                next_state: NextState::Login,
+            }
+            .packet(),
+        )
+        .unwrap()
+        .address
+    };
+    for marker in ["\0FML\0", "\0FML2\0", "\0FML3\0", "\0FORGE", "\0FORGE41"] {
+        assert_eq!(
+            decode(&format!("Play.Test.{marker}")),
+            format!("Play.Test.{marker}")
+        );
+    }
+    // Forge reads the list in any order; only the marker survives.
+    for (address, expected) in [
+        ("play.test\0FML3\x00203.0.113.7", "play.test\0FML3\0"),
+        ("play.test\x00203.0.113.7\0FORGE", "play.test\0FORGE"),
+        ("play.test\0extra\0FORGE2\0more", "play.test\0FORGE2"),
+    ] {
+        assert_eq!(decode(address), expected, "{address:?}");
+    }
+    // BungeeCord IP forwarding: host, client IP, UUID and profile properties.
+    let spoofed = "play.test\x00203.0.113.7\x00069a79f444e94726a5befca90e38aaf5\x00[{\"name\":\"textures\",\"value\":\"x\",\"signature\":\"y\"}]";
+    for address in [
+        spoofed,
+        "play.test\0metadata",
+        "play.test\0FML4\0",
+        "play.test\0FORGE12345",
+        "play.test\0FORGEx",
+        "play.test\0",
+    ] {
+        assert_eq!(decode(address), "play.test", "{address:?}");
+    }
 }
 
 #[test]
@@ -972,4 +1074,26 @@ fn json_components_keep_json_until_1_20_3_and_then_follow_vanilla_nbt_conversion
     ] {
         assert!(validate_component(&invalid).is_err(), "{invalid}");
     }
+}
+
+#[tokio::test]
+async fn skewed_packets_over_the_frame_limit_compress_below_it() {
+    // Few repeats but a skewed byte distribution: fixed codes would spend 8
+    // bits per byte (about 4 MiB); dynamic codes need about 3.
+    let data: Vec<u8> = noise(4 << 20, 11)
+        .iter()
+        .map(|byte| byte.trailing_zeros() as u8 + b'a')
+        .collect();
+    let packet = Packet::new(0x27, data);
+    let mut codec = Codec::default();
+    codec.set_compression(256);
+    let frame = codec.encode(&packet).unwrap();
+    assert!(frame.len() < MAX_FRAME_SIZE - 128 * 1024, "{}", frame.len());
+    assert_eq!(
+        Reader::default()
+            .read(&mut frame.as_slice(), codec)
+            .await
+            .unwrap(),
+        Some(packet)
+    );
 }
