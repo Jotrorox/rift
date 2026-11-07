@@ -126,6 +126,8 @@ messaging = {
         },
     },
     max_connections = 1024,
+    max_connections_per_principal = 256,
+    max_connections_per_address = 256,
     max_streams_per_connection = 128,
     handshake_timeout_ms = 5000,
     io_timeout_ms = 30000,
@@ -148,6 +150,15 @@ publication also requires `control = true`. Local Lua configuration is trusted
 and uses the local broker directly. Remote clients cannot impersonate Rift's
 `rift.events` publisher. Remote reply subjects must be authorized `_INBOX.*`
 subjects. Keep publish and subscribe grants as narrow as the plugin needs.
+
+`max_connections` counts authenticated connections of the configured
+principals. `max_connections_per_principal` caps one principal, so a leaked
+token cannot take every slot, and `max_connections_per_address` caps one IPv4
+address or IPv6 /64, including connections that have not authenticated yet.
+Plugins on managed servers usually share the controller's address, so raise
+both limits above the number of servers whose plugins connect. Node agents
+never count against `max_connections` or the per-principal limit. See
+[Limits and lifecycle](messaging-protocol.md#limits-and-lifecycle).
 
 A stream with `storage_path` stores records and durable consumer state on disk;
 omitting the path selects bounded memory retention. Stream publication is an

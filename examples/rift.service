@@ -20,6 +20,9 @@ ExecStart=/usr/local/bin/rift --config /etc/rift/rift.lua
 ExecReload=/usr/local/bin/rift check /etc/rift/rift.lua
 ExecReload=/bin/kill -HUP $MAINPID
 KillSignal=SIGTERM
+# The systemd default, stated because managed servers depend on it: stopping or
+# restarting the unit also kills server processes left by a killed Rift.
+KillMode=control-group
 # Must exceed shutdown_timeout_ms (30 seconds by default).
 TimeoutStopSec=40s
 Restart=on-failure

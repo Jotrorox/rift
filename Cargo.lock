@@ -1210,6 +1210,7 @@ dependencies = [
  "bytes",
  "cfb8",
  "hmac",
+ "libc",
  "mlua",
  "quinn",
  "rcgen",

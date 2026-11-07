@@ -463,6 +463,90 @@ async fn remote_consumer_names_are_isolated_by_authenticated_identity() {
     server.shutdown().await;
 }
 
+#[tokio::test]
+async fn plugin_connections_are_capped_per_identity_and_never_crowd_out_nodes() {
+    let (server_tls, client_tls) = configs();
+    let other = Identity {
+        name: "other".into(),
+        token: "other-test-only-long-random-token".into(),
+        ..identity()
+    };
+    let node = Identity {
+        name: "node.node1".into(),
+        token: "node-test-only-long-random-token".into(),
+        publish: vec![],
+        subscribe: vec![],
+        control: false,
+    };
+    let server = Server::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        server_tls,
+        Broker::default(),
+        AuthConfig {
+            identities: vec![identity(), other.clone(), node.clone()],
+            max_connections: 2,
+            max_connections_per_identity: 1,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let addr = server.local_addr().unwrap();
+    let connect = |token: String| {
+        let client_tls = client_tls.clone();
+        async move { Client::connect(addr, "localhost", client_tls, &token).await }
+    };
+    let first = connect(identity().token).await.unwrap();
+    let error = connect(identity().token).await.err().unwrap();
+    assert!(
+        error
+            .to_string()
+            .contains("too many connections for this identity"),
+        "{error}"
+    );
+    let _other = connect(other.token.clone()).await.unwrap();
+    // Both plugin slots are taken; a node agent still connects.
+    let _node = connect(node.token.clone()).await.unwrap();
+    drop(first);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while connect(identity().token).await.is_err() {
+        assert!(tokio::time::Instant::now() < deadline, "slot not released");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn connections_are_capped_per_address() {
+    let (server_tls, client_tls) = configs();
+    let server = Server::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        server_tls,
+        Broker::default(),
+        AuthConfig {
+            identities: vec![identity()],
+            max_connections_per_address: 2,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let addr = server.local_addr().unwrap();
+    let token = identity().token;
+    let connect = || Client::connect(addr, "localhost", client_tls.clone(), &token);
+    let _first = connect().await.unwrap();
+    let _second = connect().await.unwrap();
+    assert!(connect().await.is_err());
+    server.shutdown().await;
+}
+
+#[test]
+fn ipv6_hosts_are_counted_per_64() {
+    let key = |ip: &str| address_key(ip.parse().unwrap());
+    assert_eq!(key("2001:db8:1:2:aaaa::1"), key("2001:db8:1:2:bbbb::2"));
+    assert_ne!(key("2001:db8:1:2::1"), key("2001:db8:1:3::1"));
+    assert_eq!(key("::ffff:192.0.2.7"), key("192.0.2.7"));
+    assert_ne!(key("192.0.2.7"), key("192.0.2.8"));
+}
+
 #[test]
 fn pem_helpers_preserve_certificate_chains_and_report_file_errors() {
     struct Directory(std::path::PathBuf);
@@ -517,4 +601,78 @@ fn pem_helpers_preserve_certificate_chains_and_report_file_errors() {
         read_certificates(&certificate).unwrap_err().kind(),
         io::ErrorKind::InvalidData
     );
+}
+
+/// The first datagram the server sends to a new peer is a stateless Retry,
+/// so a spoofed Initial never reaches connection admission or holds a slot.
+#[tokio::test]
+async fn unvalidated_peers_get_a_retry_before_any_handshake() {
+    use std::sync::Mutex;
+    use tokio::net::UdpSocket;
+
+    let (server_tls, client_tls) = configs();
+    let server = Server::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        server_tls,
+        Broker::default(),
+        AuthConfig {
+            identities: vec![identity()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    // Relay client <-> server and record the long-header packet type of every
+    // server datagram (QUIC v1, RFC 9000 17.2: 0 Initial, 2 Handshake, 3 Retry).
+    let relay = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let upstream = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    upstream
+        .connect(server.local_addr().unwrap())
+        .await
+        .unwrap();
+    let peer = Arc::new(Mutex::new(None));
+    let types = Arc::new(Mutex::new(Vec::new()));
+    let forward = {
+        let (relay, upstream, peer) = (relay.clone(), upstream.clone(), peer.clone());
+        tokio::spawn(async move {
+            let mut buffer = vec![0; 65536];
+            loop {
+                let (length, from) = relay.recv_from(&mut buffer).await.unwrap();
+                *peer.lock().unwrap() = Some(from);
+                let _ = upstream.send(&buffer[..length]).await;
+            }
+        })
+    };
+    let backward = {
+        let (relay, upstream, peer, types) = (relay.clone(), upstream, peer, types.clone());
+        tokio::spawn(async move {
+            let mut buffer = vec![0; 65536];
+            loop {
+                let length = upstream.recv(&mut buffer).await.unwrap();
+                if buffer[0] & 0x80 != 0 && buffer[1..5] == [0, 0, 0, 1] {
+                    types.lock().unwrap().push((buffer[0] >> 4) & 0x03);
+                }
+                let to = peer.lock().unwrap().unwrap();
+                let _ = relay.send_to(&buffer[..length], to).await;
+            }
+        })
+    };
+    let client = Client::connect(
+        relay.local_addr().unwrap(),
+        "localhost",
+        client_tls,
+        &identity().token,
+    )
+    .await
+    .unwrap();
+    let types = types.lock().unwrap().clone();
+    assert_eq!(types.first(), Some(&3), "server packet types: {types:?}");
+    assert_eq!(types.iter().filter(|&&kind| kind == 3).count(), 1);
+    assert!(
+        types.contains(&0),
+        "the handshake continues after the Retry"
+    );
+    drop(client);
+    forward.abort();
+    backward.abort();
+    server.shutdown().await;
 }
