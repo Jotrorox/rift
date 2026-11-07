@@ -7,18 +7,34 @@ use std::{
     io::{self, Read, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 const HISTORY: usize = 64;
 const AUDIT: usize = 1024;
 const AUDIT_BYTES: u64 = 8 * 1024 * 1024;
+/// Unauthenticated denials are summarised in their own short window, so a
+/// flood of bad requests cannot push operator actions out of `audit`.
+const DENIALS: usize = 64;
+/// At most one durable denial record per interval; requests in between are
+/// counted and reported in the next record.
+const DENIAL_INTERVAL: Duration = Duration::from_secs(60);
+const DENIAL_ACTOR: &str = "anonymous";
+const DENIAL_ACTION: &str = "authentication";
 
 #[derive(Default)]
 struct Records {
     deployments: VecDeque<Value>,
     audit: VecDeque<Value>,
+    denials: VecDeque<Value>,
     sequence: u64,
+    last_denial: Option<Instant>,
+    unrecorded_denials: u64,
+}
+
+/// Denial summaries (and per-request denial records from older versions).
+fn is_denial(value: &Value) -> bool {
+    value["actor"] == DENIAL_ACTOR && value["action"] == DENIAL_ACTION
 }
 pub struct Store {
     directory: Option<PathBuf>,
@@ -113,7 +129,11 @@ impl Store {
                         break;
                     }
                     let value = serde_json::from_slice(line).map_err(io::Error::other)?;
-                    bounded_push(&mut records.audit, value, AUDIT);
+                    if is_denial(&value) {
+                        bounded_push(&mut records.denials, value, DENIALS);
+                    } else {
+                        bounded_push(&mut records.audit, value, AUDIT);
+                    }
                     complete += line.len();
                 }
                 // A process interrupted during append may leave a partial final
@@ -174,23 +194,68 @@ impl Store {
         // Only caller-selected identity, operation and target. No bodies, tokens,
         // arbitrary diagnostics, queries or console commands are persisted.
         let value = json!({"timestamp_unix_ms":now(), "actor":actor,"action":action.chars().take(128).collect::<String>(),"target":target.chars().take(512).collect::<String>(),"outcome":outcome,"status":status});
-        if let Some(directory) = &self.directory {
-            let path = directory.join("audit.jsonl");
-            if fs::metadata(&path).is_ok_and(|m| m.len() >= AUDIT_BYTES) {
-                let mut file = private_file(&directory.join("audit.tmp"), false, true)?;
-                for value in &records.audit {
-                    writeln!(file, "{value}")?;
-                }
-                file.sync_all()?;
-                drop(file);
-                fs::rename(directory.join("audit.tmp"), &path)?;
-            }
-            let mut file = private_file(&path, true, false)?;
-            writeln!(file, "{value}")?;
-            file.sync_data()?;
-        }
+        self.append(&records, &value)?;
         bounded_push(&mut records.audit, value, AUDIT);
         Ok(())
+    }
+    /// Count a request rejected for lacking valid credentials. The first one
+    /// in each [`DENIAL_INTERVAL`] writes a record carrying the number of
+    /// denials since the previous record; the rest only increment a counter.
+    pub fn deny(&self, status: u16) -> io::Result<()> {
+        let mut records = self.records.lock().unwrap();
+        records.unrecorded_denials += 1;
+        if records
+            .last_denial
+            .is_some_and(|last| last.elapsed() < DENIAL_INTERVAL)
+        {
+            return Ok(());
+        }
+        let value = json!({"timestamp_unix_ms":now(),"actor":DENIAL_ACTOR,"action":DENIAL_ACTION,"target":"","outcome":"denied","status":status,"count":records.unrecorded_denials});
+        // Throttle even when the write fails, so a broken disk is not retried
+        // on every bad request.
+        records.last_denial = Some(Instant::now());
+        self.append(&records, &value)?;
+        records.unrecorded_denials = 0;
+        bounded_push(&mut records.denials, value, DENIALS);
+        Ok(())
+    }
+    /// [`Store::deny`] without blocking the async runtime; requests inside
+    /// the current interval never reach the disk or a blocking thread.
+    pub async fn deny_async(self: &Arc<Self>, status: u16) -> io::Result<()> {
+        {
+            let mut records = self.records.lock().unwrap();
+            if records
+                .last_denial
+                .is_some_and(|last| last.elapsed() < DENIAL_INTERVAL)
+            {
+                records.unrecorded_denials += 1;
+                return Ok(());
+            }
+        }
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || store.deny(status))
+            .await
+            .map_err(io::Error::other)?
+    }
+    /// Append one record, compacting the file to the retained records first
+    /// once it reaches its size limit.
+    fn append(&self, records: &Records, value: &Value) -> io::Result<()> {
+        let Some(directory) = &self.directory else {
+            return Ok(());
+        };
+        let path = directory.join("audit.jsonl");
+        if fs::metadata(&path).is_ok_and(|m| m.len() >= AUDIT_BYTES) {
+            let mut file = private_file(&directory.join("audit.tmp"), false, true)?;
+            for value in records.denials.iter().chain(&records.audit) {
+                writeln!(file, "{value}")?;
+            }
+            file.sync_all()?;
+            drop(file);
+            fs::rename(directory.join("audit.tmp"), &path)?;
+        }
+        let mut file = private_file(&path, true, false)?;
+        writeln!(file, "{value}")?;
+        file.sync_data()
     }
     /// Append an audit record without blocking the async runtime on fsync.
     pub async fn audit_async(
@@ -225,8 +290,19 @@ impl Store {
             .await
             .map_err(io::Error::other)?
     }
+    /// Operator actions and denial summaries, newest first.
     pub fn audits(&self) -> Value {
-        json!({"records":self.records.lock().unwrap().audit.iter().rev().cloned().collect::<Vec<_>>(),"durable":self.directory.is_some()})
+        let records = self.records.lock().unwrap();
+        let mut values: Vec<_> = records
+            .audit
+            .iter()
+            .chain(&records.denials)
+            .cloned()
+            .collect();
+        // Stable sort: records with equal timestamps keep their append order.
+        values.sort_by_key(|value| value["timestamp_unix_ms"].as_u64().unwrap_or(0));
+        values.reverse();
+        json!({"records":values,"durable":self.directory.is_some(),"unrecorded_denials":records.unrecorded_denials})
     }
 }
 
@@ -391,6 +467,46 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(store.audits()["records"].as_array().unwrap().len(), AUDIT);
+    }
+    #[test]
+    fn unauthenticated_denials_are_summarised_outside_the_operator_window() {
+        let directory =
+            std::env::temp_dir().join(format!("rift-operator-denials-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let store = Store::open(Some(directory.clone())).unwrap();
+        for _ in 0..10 {
+            store.audit("tester", "save", "", "accepted", 200).unwrap();
+        }
+        for _ in 0..5000 {
+            store.deny(401).unwrap();
+        }
+        let audits = store.audits();
+        let records = audits["records"].as_array().unwrap();
+        // One durable denial record per interval; operator actions all kept.
+        assert_eq!(records.len(), 11);
+        assert_eq!(records.iter().filter(|r| is_denial(r)).count(), 1);
+        assert_eq!(audits["unrecorded_denials"], 4999);
+        let lines = fs::read_to_string(directory.join("audit.jsonl")).unwrap();
+        assert_eq!(lines.lines().count(), 11);
+        // The next record after the interval carries the count in between.
+        store.records.lock().unwrap().last_denial = Some(Instant::now() - DENIAL_INTERVAL);
+        store.deny(401).unwrap();
+        let audits = store.audits();
+        assert_eq!(audits["records"][0]["count"], 5000);
+        assert_eq!(audits["unrecorded_denials"], 0);
+        drop(store);
+        // Denials, including per-request ones from older versions, reload
+        // into their own window.
+        let mut file = private_file(&directory.join("audit.jsonl"), true, false).unwrap();
+        for _ in 0..200 {
+            writeln!(file, "{}", json!({"timestamp_unix_ms":now(),"actor":"anonymous","action":"authentication","target":"","outcome":"denied","status":401})).unwrap();
+        }
+        drop(file);
+        let reopened = Store::open(Some(directory.clone())).unwrap();
+        let records = reopened.audits()["records"].as_array().unwrap().clone();
+        assert_eq!(records.iter().filter(|r| !is_denial(r)).count(), 10);
+        assert_eq!(records.iter().filter(|r| is_denial(r)).count(), DENIALS);
+        fs::remove_dir_all(directory).unwrap();
     }
     #[test]
     fn interrupted_audit_append_is_recovered_before_subsequent_records() {

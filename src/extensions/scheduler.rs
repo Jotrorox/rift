@@ -10,6 +10,9 @@ use std::{
 use tokio::{sync::Semaphore, task::JoinHandle};
 
 const JOB_TIMEOUT: Duration = Duration::from_secs(5);
+/// Jobs run on their own workers: a job waiting seconds on an HTTP call must
+/// not take a worker that a login or command callback needs within 50 ms.
+pub(super) const MAX_CONCURRENT_JOBS: usize = 2;
 
 pub(super) fn parse(value: Value) -> mlua::Result<BTreeMap<String, Duration>> {
     let mut jobs = BTreeMap::new();
@@ -108,10 +111,10 @@ impl Extensions {
             return Ok(());
         };
         let permit = self
-            .slots
+            .job_slots
             .clone()
             .try_acquire_owned()
-            .map_err(|_| invalid("extension capacity exhausted; tick skipped"))?;
+            .map_err(|_| invalid("extension job capacity exhausted; tick skipped"))?;
         let runtime = self.clone();
         let input = Context {
             command: Some(name.into()),

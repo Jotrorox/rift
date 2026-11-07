@@ -65,7 +65,7 @@
           <details class="auth-panel" id="auth-panel">
             <summary class="button secondary"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="7" cy="10" r="3.5"/><path d="M10.5 10H17v3M14 10v2"/></svg><span class="auth-label">API access</span> <span id="auth-state" class="muted">No token set</span></summary>
             <form id="auth-form" class="auth-form">
-              <div class="field"><label for="token">Admin token</label><input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="Bearer token, if configured" aria-describedby="token-help"><p id="token-help" class="field-help">Kept in memory for this tab only. Never stored or placed in a URL.</p></div>
+              <div class="field"><label for="token">Admin token</label><input id="token" type="password" autocomplete="off" spellcheck="false" placeholder="web.token, or the token Rift printed at startup" aria-describedby="token-help"><p id="token-help" class="field-help">Kept in memory for this tab only. Never stored or placed in a URL.</p></div>
               <div class="action-group end"><button class="button secondary" type="button" id="forget-token">Forget token</button><button class="button" type="submit" id="connect">Connect</button></div>
             </form>
           </details>
@@ -251,7 +251,8 @@ routes = {
     },
 },</code></pre><p>These are fields inside the table returned by your Lua file. Keep existing comments and hooks when making changes.</p></div><div><h3>Choose what to expose</h3><p>The admin and status services are optional. Keep administration on a trusted interface, and configure a token when exposing it.</p><pre><code>web = {
     listen = "127.0.0.1:8080",
-    -- Add token = "a-long-random-secret" to protect API access.
+    -- Without a token, Rift prints a new one at each start.
+    -- Add token = "a-long-random-secret" to choose a permanent one.
     api = true,
     ui = true,
 },

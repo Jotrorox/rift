@@ -491,26 +491,42 @@ async fn scheduler_uses_job_context_delays_first_run_and_stops_on_shutdown() {
 }
 
 #[tokio::test]
-async fn scheduled_jobs_share_the_session_worker_limit_without_backlog() {
+async fn scheduled_jobs_use_their_own_workers_without_backlog() {
     let runtime = runtime(
         r#"api_version=2,jobs={tick={every_ms=100,run=function()
         rift.publish('ticks','tick')
     end}}"#,
     );
     let mut events = runtime.broker.subscribe("ticks", None).unwrap();
-    let permits = runtime
+    // Busy player callbacks do not hold jobs back...
+    let players = runtime
         .slots
         .clone()
         .acquire_many_owned(script::MAX_CONCURRENT as u32)
         .await
         .unwrap();
     let scheduler = runtime.scheduler();
+    timeout(Duration::from_secs(2), events.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    // ...and while every job worker is busy, ticks are skipped, not queued.
+    let jobs = runtime
+        .job_slots
+        .clone()
+        .acquire_many_owned(scheduler::MAX_CONCURRENT_JOBS as u32)
+        .await
+        .unwrap();
+    while timeout(Duration::from_millis(50), events.recv())
+        .await
+        .is_ok()
+    {}
     assert!(
         timeout(Duration::from_millis(220), events.recv())
             .await
             .is_err()
     );
-    drop(permits);
+    drop(jobs);
     timeout(Duration::from_secs(2), events.recv())
         .await
         .unwrap()
@@ -520,6 +536,7 @@ async fn scheduled_jobs_share_the_session_worker_limit_without_backlog() {
             .await
             .is_err()
     );
+    drop(players);
     scheduler.shutdown().await;
 }
 

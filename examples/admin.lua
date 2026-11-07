@@ -18,6 +18,7 @@ rift.config.limits = { max_connections = 1024 }
 
 -- Set web=false to disable this server. ui/api are independent switches.
 -- A non-loopback bind requires a token of at least 16 printable characters.
+-- Without token or operators, Rift prints a random token for each run at startup.
 rift.config.web = {
     listen = "127.0.0.1:8080",
     ui = true,
@@ -42,7 +43,7 @@ rift.config.status = {
 -- Optional separate Prometheus-only server; usually status.metrics is enough.
 rift.config.metrics = false
 
--- All methods under /ext/* share web.token authentication when configured.
+-- All methods under /ext/* share web.token (or the generated token) authentication.
 -- Return nil for unhandled paths. Each request gets a fresh sandboxed VM.
 rift.config.on_http = function(request)
     if request.method == "GET" and request.path == "/ext/network" then
