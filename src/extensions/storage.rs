@@ -286,6 +286,8 @@ impl Store {
             Ok(file) => {
                 validate_metadata(&file.metadata()?)?;
                 let mut bytes = Vec::new();
+                // `take` consumes the handle, so the file is closed before
+                // a migration replaces it (Windows refuses to while open).
                 file.take((MAX_BYTES + 1) as u64).read_to_end(&mut bytes)?;
                 if bytes.starts_with(SQLITE_HEADER) {
                     // The rest is read through SQLite.
@@ -734,7 +736,11 @@ fn create(path: &Path, entries: &Entries) -> io::Result<()> {
         transaction.commit().map_err(error)?;
         // Closing the last connection checkpoints the WAL into the file.
         connection.close().map_err(|(_, e)| error(e))?;
-        File::open(&temporary)?.sync_all()?;
+        // Windows can only flush a file through a handle with write access.
+        OpenOptions::new()
+            .write(true)
+            .open(&temporary)?
+            .sync_all()?;
         fs::rename(&temporary, path)?;
         sync_directory(parent(path));
         Ok(())
