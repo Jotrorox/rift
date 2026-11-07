@@ -114,8 +114,10 @@ RIFT_NODE_TOKEN=... RIFT_FORWARDING_SECRET=... rift node \
 | `--forwarding-secret-env` | Variable holding the Velocity forwarding secret (default `RIFT_FORWARDING_SECRET`); required only for Paper-family templates with `forwarding` |
 | `--allow-program` | A program servers may run; repeatable (default: `java`) |
 
-The agent reconnects with backoff when the controller is unreachable. Below its
-root it keeps CloudNet's layout:
+The agent reconnects with backoff when the controller is unreachable. In a
+systemd unit, keep the default `KillMode=control-group`: stopping or killing the
+unit then also kills every server process the agent started (see
+[Failure behaviour](#failure-behaviour)). Below its root it keeps CloudNet's layout:
 
 ```text
 /srv/rift/local/services/{name}     persistent instances
@@ -213,7 +215,7 @@ address.
 | A node is unreachable (no snapshot for 10 s) | Its servers show `unknown` and refuse new players. Disposable groups create replacement capacity on other nodes and retire empty unreachable instances. **Persistent instances stay tied to their node** and never move automatically, because their data is there; persistent groups do not shrink while one of their nodes is unreachable. Recovery waits for the node instead of spending restart retries. |
 | The node comes back | Servers that are still running return to `running`. Servers that exited meanwhile are recovered with their normal restart policy. |
 | A server crashes on a node | Reported as a failure with its exit status and recovered on the same node within `restart_retries`. |
-| The agent crashes or is killed | Its servers die with it (child processes are killed with the agent). After the agent restarts, the controller restarts them. A later version could run servers under systemd scopes to survive agent restarts. |
+| The agent crashes or is killed | Its servers die with it, and after the agent restarts the controller restarts them. Each server runs in its own process group, which the agent kills when it stops or kills the server. On Linux the kernel also kills each server when the agent dies, even from `SIGKILL` or the OOM killer, but a helper process a start script left behind can survive. Elsewhere, a server whose agent died that way keeps running and keeps its port, so the agent refuses to start it again until it is stopped by hand. Run agents under systemd with `KillMode=control-group` (the default) so that no server outlives its agent. |
 
 ## Security
 

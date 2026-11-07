@@ -65,7 +65,8 @@ impl Kind {
 }
 
 /// A requested build. `version` is a release name or `latest`; `url`
-/// downloads a fixed artifact, optionally pinned by SHA-256.
+/// downloads a fixed artifact pinned by SHA-256. Any exact version may be
+/// pinned too, which matters for sources that publish no checksum.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Software {
     pub kind: Kind,
@@ -84,9 +85,18 @@ impl Software {
                     "version: not used for type 'url'; pin the artifact with sha256".into(),
                 );
             }
+            if self.sha256.is_none() {
+                return Err(
+                    "sha256: required for type 'url', so that a changed artifact is never run"
+                        .into(),
+                );
+            }
         } else {
-            if self.url.is_some() || self.sha256.is_some() {
-                return Err("url and sha256 are only used with type 'url'".into());
+            if self.url.is_some() {
+                return Err("url: only used with type 'url'".into());
+            }
+            if self.sha256.is_some() && self.version == "latest" {
+                return Err("sha256: pins one build; name an exact version, not 'latest'".into());
             }
             if !valid_version(&self.version) {
                 return Err(
@@ -104,13 +114,27 @@ impl Software {
     }
 
     /// CloudNet-style cache entry name, such as `paper-1.21.8` or `paper-latest`.
+    /// A pin is part of the name, so changing it never reuses a jar that
+    /// was verified against another digest.
     pub fn key(&self) -> String {
+        let pin = self.sha256.as_deref().map(str::to_ascii_lowercase);
         match &self.url {
             Some(url) if self.kind == Kind::Url => {
-                let digest = hex(&Sha256::digest(url.as_bytes()));
-                format!("url-{}", &digest[..16])
+                let mut digest = Sha256::new();
+                digest.update(url.as_bytes());
+                digest.update([0]);
+                digest.update(pin.unwrap_or_default().as_bytes());
+                format!("url-{}", &hex(&digest.finalize())[..16])
             }
-            _ => format!("{}-{}", self.kind.as_str(), self.version),
+            _ => match pin {
+                Some(pin) => format!(
+                    "{}-{}-{}",
+                    self.kind.as_str(),
+                    self.version,
+                    pin.get(..12).unwrap_or(&pin)
+                ),
+                None => format!("{}-{}", self.kind.as_str(), self.version),
+            },
         }
     }
 }
@@ -206,7 +230,7 @@ pub async fn download(
     let directory = cache.join(software.key());
     let lock = entry_lock(&directory);
     let _guard = lock.lock().await;
-    if !force && directory.join(JAR).is_file() {
+    if !force && intact(&directory, software).await {
         return Ok(status(cache, software));
     }
     if *cancellation().borrow() {
@@ -227,6 +251,15 @@ pub async fn download(
     }
     let partial = directory.join(format!(".{JAR}.part-{}", std::process::id()));
     let (size, sha256) = fetch(&client, &resolved, &partial).await?;
+    if let Some(pin) = &software.sha256
+        && !pin.eq_ignore_ascii_case(&sha256)
+    {
+        let _ = tokio::fs::remove_file(&partial).await;
+        return Err(io::Error::other(format!(
+            "SHA-256 mismatch for {}: pinned {pin}, received {sha256}",
+            redact(&resolved.url)
+        )));
+    }
     let metadata = json!({
         "format": 1,
         "resolved_version": resolved.version,
@@ -244,6 +277,43 @@ pub async fn download(
     tokio::fs::write(&staged, serde_json::to_vec_pretty(&metadata)?).await?;
     tokio::fs::rename(staged, directory.join(METADATA)).await?;
     Ok(status(cache, software))
+}
+
+/// Whether the cached jar still has the SHA-256 recorded when it was
+/// downloaded, and the pinned one if any. Checked on every cache hit: a
+/// missing, truncated or replaced jar is downloaded again instead of being
+/// copied into new instances.
+async fn intact(directory: &Path, software: &Software) -> bool {
+    let directory = directory.to_owned();
+    let pin = software.sha256.clone();
+    tokio::task::spawn_blocking(move || {
+        let Some(recorded) = fs::read(directory.join(METADATA))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .and_then(|metadata| metadata["sha256"].as_str().map(str::to_owned))
+        else {
+            return false;
+        };
+        if pin.is_some_and(|pin| !pin.eq_ignore_ascii_case(&recorded)) {
+            return false;
+        }
+        let Ok(mut jar) = fs::File::open(directory.join(JAR)) else {
+            return false;
+        };
+        let mut digest = Sha256::new();
+        let mut buffer = vec![0; 256 * 1024];
+        loop {
+            match io::Read::read(&mut jar, &mut buffer) {
+                Ok(0) => break,
+                Ok(read) => digest.update(&buffer[..read]),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(_) => return false,
+            }
+        }
+        hex(&digest.finalize()).eq_ignore_ascii_case(&recorded)
+    })
+    .await
+    .unwrap_or(false)
 }
 
 /// Interrupt active and future downloads; called once Rift starts shutting down.

@@ -86,6 +86,8 @@ pub async fn listen(snapshot: &Snapshot) -> io::Result<Option<quic::Server>> {
             quic::AuthConfig {
                 identities,
                 max_connections: settings.max_connections,
+                max_connections_per_address: settings.max_connections_per_address,
+                max_connections_per_identity: settings.max_connections_per_principal,
                 max_streams_per_connection: settings.max_streams_per_connection,
                 handshake_timeout: settings.handshake_timeout,
                 io_timeout: settings.io_timeout,

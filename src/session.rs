@@ -33,6 +33,14 @@ pub struct Connection<S> {
     version: Option<ProtocolVersion>,
     /// Converts between the client's and this backend's protocol.
     translator: Option<Translator>,
+    /// The frame of the packet `next` last read, for passing it on unchanged.
+    raw: Option<RawFrame>,
+}
+
+/// A frame as read, valid for any connection with the same compression threshold.
+struct RawFrame {
+    frame: Vec<u8>,
+    threshold: Option<usize>,
 }
 
 struct PendingWrite {
@@ -59,6 +67,7 @@ impl<S> Connection<S> {
             bungeecord_registered: false,
             version: None,
             translator: None,
+            raw: None,
         }
     }
 
@@ -83,10 +92,31 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
         direction: Direction,
         packet: &Packet,
     ) -> io::Result<PacketKind> {
+        self.queue_forwarded(version, direction, packet, None)
+    }
+
+    /// Queue `packet`, reusing `raw` when it is the unchanged frame `packet`
+    /// was read from and this connection compresses with the same threshold.
+    /// This skips recompression, which is the costliest step of forwarding.
+    fn queue_forwarded(
+        &mut self,
+        version: ProtocolVersion,
+        direction: Direction,
+        packet: &Packet,
+        raw: Option<RawFrame>,
+    ) -> io::Result<PacketKind> {
         debug_assert!(self.pending.is_none());
         let mut state = self.state.clone();
         let kind = state.observe(version, direction, packet)?;
-        let frame = self.codec.encode(packet)?;
+        let frame = match raw {
+            Some(raw) if raw.threshold == self.codec.threshold() => {
+                let mut frame = Vec::with_capacity(raw.frame.len() + 3);
+                write_varint(raw.frame.len() as i32, &mut frame);
+                frame.extend_from_slice(&raw.frame);
+                frame
+            }
+            _ => self.codec.encode(packet)?,
+        };
         self.pending = Some(PendingWrite {
             frame,
             offset: 0,
@@ -125,12 +155,24 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
                     .is_none_or(|pending| pending.kind == PacketKind::Unknown)
             {
                 if let Some(packet) = self.received.pop_front() {
+                    self.raw = None;
                     return Poll::Ready(Ok(ConnectionEvent::Read(Some(packet))));
                 }
-                let read = self.reader.read(&mut self.io, self.codec);
-                return std::pin::pin!(read)
-                    .poll(cx)
-                    .map(|result| result.map(ConnectionEvent::Read));
+                let read = self
+                    .reader
+                    .read_frame(&mut self.io, protocol::MAX_FRAME_SIZE);
+                let frame = match std::pin::pin!(read).poll(cx) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                    Poll::Ready(Ok(None)) => return Poll::Ready(Ok(ConnectionEvent::Read(None))),
+                    Poll::Ready(Ok(Some(frame))) => frame,
+                };
+                let packet = self.codec.decode(&frame)?;
+                self.raw = Some(RawFrame {
+                    frame,
+                    threshold: self.codec.threshold(),
+                });
+                return Poll::Ready(Ok(ConnectionEvent::Read(Some(packet))));
             }
             Poll::Pending
         })
@@ -1211,6 +1253,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                     return Ok(SessionEvent::BackendClosed);
                 }
                 Incoming::Client(Ok(ConnectionEvent::Read(Some(packet)))) => {
+                    let raw = self.client.raw.take();
                     let phase = self.client.state.phase(Direction::Serverbound);
                     let kind =
                         self.client
@@ -1273,10 +1316,20 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                         }
                         return Ok(SessionEvent::ProxyCommand(command));
                     }
+                    // Untranslated packets reach the backend as the client framed them.
+                    let raw = raw.filter(|_| backend.translator.is_none());
                     let packet = backend.translate_serverbound(phase, packet)?;
-                    backend.queue(backend_version, Direction::Serverbound, &packet)?;
+                    backend.queue_forwarded(
+                        backend_version,
+                        Direction::Serverbound,
+                        &packet,
+                        raw,
+                    )?;
                 }
                 Incoming::Backend(Ok(ConnectionEvent::Read(Some(packet)))) => {
+                    // Packets Rift neither translates nor rewrites reach the
+                    // client as the backend framed them.
+                    let raw = backend.raw.take().filter(|_| backend.translator.is_none());
                     let phase = backend.state.phase(Direction::Clientbound);
                     let kind =
                         backend
@@ -1395,8 +1448,12 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                             if self.network || self.switch_in_progress {
                                 validation?;
                             }
-                            self.client
-                                .queue(version, Direction::Clientbound, &packet)?;
+                            self.client.queue_forwarded(
+                                version,
+                                Direction::Clientbound,
+                                &packet,
+                                raw,
+                            )?;
                         }
                         PacketKind::StartConfiguration => {
                             self.joined = false;
@@ -1406,11 +1463,13 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                                 .queue(version, Direction::Clientbound, &packet)?;
                         }
                         _ => {
+                            let mut raw = raw;
                             let packet = if self.network
                                 && phase == State::Play
                                 && let Some(caps) = version.switching()
                                 && packet.id == caps.commands
                             {
+                                raw = None;
                                 // Rebuilt per tree, so permission changes
                                 // show with the backend's next Commands packet.
                                 let commands =
@@ -1431,8 +1490,12 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                                 }
                                 self.bundle_open = !self.bundle_open;
                             }
-                            self.client
-                                .queue(version, Direction::Clientbound, &packet)?;
+                            self.client.queue_forwarded(
+                                version,
+                                Direction::Clientbound,
+                                &packet,
+                                raw,
+                            )?;
                         }
                     }
                 }

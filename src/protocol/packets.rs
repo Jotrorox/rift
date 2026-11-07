@@ -17,10 +17,29 @@ pub enum NextState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Handshake {
     pub protocol: i32,
-    /// Includes any NUL-delimited mod metadata, for forwarding.
+    /// The client's hostname, followed by its Forge marker if it sent one.
+    /// Decoding drops any other NUL-delimited data, so a client cannot pass
+    /// BungeeCord-style IP, UUID or skin data to a backend.
     pub address: String,
     pub port: u16,
     pub next_state: NextState,
+}
+
+/// Forge clients append a marker to the NUL-delimited list after the
+/// hostname: `\0FML\0` (1.7-1.12), `\0FML2\0` or `\0FML3\0` (1.13-1.20.1),
+/// and `\0FORGE` with an optional network version (1.20.2 onwards; Forge's
+/// `NetworkContext` accepts it anywhere in the list). Returns the first marker
+/// in its canonical form; everything else after the hostname is dropped.
+fn forge_marker(metadata: &str) -> Option<String> {
+    metadata.split('\0').skip(1).find_map(|token| {
+        if matches!(token, "FML" | "FML2" | "FML3") {
+            Some(format!("\0{token}\0"))
+        } else {
+            let version = token.strip_prefix("FORGE")?;
+            (version.len() <= 4 && version.bytes().all(|byte| byte.is_ascii_digit()))
+                .then(|| format!("\0{token}"))
+        }
+    })
 }
 
 impl Handshake {
@@ -30,16 +49,15 @@ impl Handshake {
         }
         let mut bytes = packet.data.as_slice();
         let protocol = read_varint(&mut bytes)?;
-        let address = read_string(&mut bytes, 255)?.to_owned();
-        if address
-            .split('\0')
-            .next()
-            .unwrap()
-            .trim_end_matches('.')
-            .is_empty()
-        {
+        let address = read_string(&mut bytes, 255)?;
+        let (host, metadata) = address.split_at(address.find('\0').unwrap_or(address.len()));
+        if host.trim_end_matches('.').is_empty() {
             return Err(invalid("empty handshake hostname"));
         }
+        let address = match forge_marker(metadata) {
+            Some(marker) => format!("{host}{marker}"),
+            None => host.to_owned(),
+        };
         let port = u16::from_be_bytes(
             bytes
                 .get(..2)

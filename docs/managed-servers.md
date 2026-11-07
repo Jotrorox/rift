@@ -421,16 +421,27 @@ config.service_groups.lobby = {
 | `type` | Source | `version` | Verification |
 | --- | --- | --- | --- |
 | `paper`, `folia` | PaperMC Fill API, latest build of the version | Release such as `1.21.8`, or `latest` (default) | SHA-256 published by PaperMC |
-| `purpur` | Purpur API, latest build of the version | Release or `latest` | HTTPS only |
+| `purpur` | Purpur API, latest build of the version | Release or `latest` | HTTPS only, unless pinned with `sha256` |
 | `vanilla` | Mojang version manifest | Release or `latest` | SHA-1 published by Mojang |
-| `fabric` | Fabric meta server launcher with the latest stable loader and installer | Minecraft release or `latest` | HTTPS only |
-| `url` | `url = "https://…"`, optionally pinned with `sha256 = "…"` | Not used | SHA-256 when given |
+| `fabric` | Fabric meta server launcher with the latest stable loader and installer | Minecraft release or `latest` | HTTPS only, unless pinned with `sha256` |
+| `url` | `url = "https://…"` with the required `sha256 = "…"` | Not used | The pinned SHA-256 |
+
+Any exact version can also be pinned with `sha256`, for example
+`{ type = "purpur", version = "1.21.8", sha256 = "…" }`. A download whose digest
+differs fails and leaves no jar behind. Purpur and Fabric publish no SHA-256 for
+their artifacts, so pin them where integrity matters. A pin names a single build,
+so a refresh fails once upstream ships a newer one, until you update the pin.
+`latest` cannot be pinned.
 
 `latest` resolves to the newest release when the jar is first downloaded.
 Downloads are cached under `software_cache` (default `local/versioncache`
 beside the configuration) as `{type}-{version}/server.jar` with a
 `rift-software.json` record of the resolved version, build and digest, and are
-reused for every later instance. Instance creation downloads a missing jar
+reused for every later instance. A pinned entry's name also carries the start of
+its digest (`purpur-1.21.8-0123456789ab`, or a hash of URL and digest for `url`),
+so changing a pin never reuses a jar checked against another digest. Every reuse
+first checks the jar against its recorded SHA-256 (and the pin), and a missing
+record or altered jar is downloaded again. Instance creation downloads a missing jar
 before it reserves a port or name; concurrent creations share one download.
 Downloads are limited to 512 MiB, must use HTTPS (plain HTTP is accepted only
 for loopback mirrors), stop following redirects after five hops, and are
@@ -503,8 +514,10 @@ existing process or send it shutdown commands.
 
 Output from the child is appended to `rift-server.log` in its directory. Inspect
 this file alongside the lifecycle state when startup fails. Startup timeout and
-shutdown timeout both clean up the supervised child. Programs should run in the
-foreground; wrappers that daemonize or fork detached services are unsupported.
+shutdown timeout both clean up the supervised child. Each child leads its own
+process group, and a kill reaches the whole group, so helper processes started by
+a wrapper script die with it. Programs should run in the foreground; wrappers
+that daemonize or fork detached services are unsupported.
 
 A failed startup or unexpected exit records an error and automatically retries
 after `restart_delay_ms`, up to `restart_retries` times after the initial attempt.
@@ -526,7 +539,12 @@ explicit stop intent. Static managed servers retain their configuration-driven
 startup behavior across proxy restarts.
 An orderly Rift shutdown drains proxy sessions before shutting down its managed
 children. Run Rift under an operating-system service manager for recovery from
-host failure or an uncatchable proxy termination.
+host failure or an uncatchable proxy termination. If Rift is killed with
+`SIGKILL` or by the OOM killer, Linux kills its managed children too. On other
+systems they keep running and hold their ports, so the next start fails until
+they are stopped by hand. Under systemd, keep the default `KillMode=control-group`
+(as in the supplied unit) so that stopping or restarting the unit also ends any
+leftover process.
 
 ## Operate the network
 

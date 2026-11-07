@@ -240,6 +240,8 @@ pub(crate) fn load(source: &ScriptSource, deadline: Instant) -> mlua::Result<(Lu
         .raw_get::<Table>("jit")?
         .raw_get::<Function>("off")?
         .call::<()>(())?;
+    // Kept for rift.try, which rethrows budget errors; pcall itself is removed.
+    let pcall: Function = globals.raw_get("pcall")?;
     retain(
         &globals,
         &[
@@ -252,7 +254,7 @@ pub(crate) fn load(source: &ScriptSource, deadline: Instant) -> mlua::Result<(Lu
     retain(
         &globals.raw_get::<Table>("string")?,
         &[
-            "byte", "char", "len", "lower", "rep", "reverse", "sub", "upper",
+            "byte", "char", "format", "len", "lower", "rep", "reverse", "sub", "upper",
         ],
     )?;
     retain(
@@ -294,7 +296,8 @@ pub(crate) fn load(source: &ScriptSource, deadline: Instant) -> mlua::Result<(Lu
         .raw_set("insert", insert)?;
     // pcall/xpcall, coroutines, dynamic loaders, metatables/finalizers, I/O, native
     // modules and debug access are deliberately absent. In particular a script
-    // cannot catch a budget error or escape to a thread without an active hook.
+    // cannot catch a budget error or escape to a thread without an active hook;
+    // rift.try catches other errors and rethrows budget errors.
     let instructions = Rc::new(Cell::new(0));
     let counter = instructions.clone();
     lua.set_hook(
@@ -310,6 +313,7 @@ pub(crate) fn load(source: &ScriptSource, deadline: Instant) -> mlua::Result<(Lu
         },
     )?;
     let finalize = modules::install(&lua, source, deadline)?;
+    install_helpers(&lua, pcall, instructions.clone(), deadline)?;
     let root: Value = lua
         .load(source.entry.source.as_ref())
         .set_name(source.entry.name.as_ref())
@@ -322,6 +326,71 @@ pub(crate) fn load(source: &ScriptSource, deadline: Instant) -> mlua::Result<(Lu
     // keep the configuration's own cost for `rift check`.
     lua.set_app_data(EvaluationCost(instructions.replace(0)));
     Ok((lua, root))
+}
+
+/// `rift.try`, `rift.clock` and `rift.time`.
+fn install_helpers(
+    lua: &Lua,
+    pcall: Function,
+    instructions: Rc<Cell<u32>>,
+    deadline: Instant,
+) -> mlua::Result<()> {
+    let api: Table = lua.named_registry_value("rift.api")?;
+    // A caught error is rethrown when it comes from an exhausted budget: the
+    // deadline passed, the instruction limit was reached, or memory ran out.
+    // Those conditions persist, so a script cannot keep running past them.
+    let exhausted = lua.create_function(move |_, error: Value| {
+        let memory = match &error {
+            Value::Error(error) => memory_error(error),
+            Value::String(message) => message.as_bytes().as_ref() == b"not enough memory",
+            _ => false,
+        };
+        Ok(memory || Instant::now() >= deadline || instructions.get() >= INSTRUCTION_LIMIT)
+    })?;
+    let try_: Function = lua
+        .load(
+            r#"
+        local pcall, error, exhausted = ...
+        local function finish(ok, ...)
+            if not ok and exhausted((...)) then error((...), 0) end
+            return ok, ...
+        end
+        return function(f, ...)
+            return finish(pcall(f, ...))
+        end
+    "#,
+        )
+        .set_name("=rift.try")
+        .call((
+            pcall,
+            lua.globals().raw_get::<Function>("error")?,
+            exhausted,
+        ))?;
+    api.raw_set("try", try_)?;
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    let start = *START.get_or_init(Instant::now);
+    api.raw_set(
+        "clock",
+        lua.create_function(move |_, ()| Ok(start.elapsed().as_secs_f64()))?,
+    )?;
+    api.raw_set(
+        "time",
+        lua.create_function(|_, ()| {
+            Ok(std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_secs() as i64))
+        })?,
+    )?;
+    Ok(())
+}
+
+fn memory_error(error: &mlua::Error) -> bool {
+    match error {
+        mlua::Error::MemoryError(_) => true,
+        mlua::Error::CallbackError { cause, .. } => memory_error(cause),
+        mlua::Error::WithContext { cause, .. } => memory_error(cause),
+        _ => false,
+    }
 }
 
 fn retain(table: &Table, allowed: &[&str]) -> mlua::Result<()> {

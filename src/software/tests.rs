@@ -119,8 +119,11 @@ fn validates_names_and_derives_cloudnet_style_cache_entries() {
             "{version}"
         );
     }
-    let mut pinned = software(Kind::Paper, "1.21.8");
+    let mut pinned = software(Kind::Purpur, "1.21.8");
     pinned.sha256 = Some("0".repeat(64));
+    pinned.validate().unwrap();
+    assert_eq!(pinned.key(), "purpur-1.21.8-000000000000");
+    pinned.version = "latest".into();
     assert!(pinned.validate().is_err());
 
     let mut custom = Software {
@@ -131,9 +134,15 @@ fn validates_names_and_derives_cloudnet_style_cache_entries() {
     };
     custom.validate().unwrap();
     assert!(custom.key().starts_with("url-") && custom.key().len() == 20);
+    let key = custom.key();
+    custom.sha256 = Some("b".repeat(64));
+    assert_ne!(custom.key(), key, "the pin is part of the cache entry");
     custom.sha256 = Some("xyz".into());
     assert!(custom.validate().is_err());
     custom.sha256 = None;
+    let error = custom.validate().unwrap_err();
+    assert!(error.contains("sha256: required"), "{error}");
+    custom.sha256 = Some("a".repeat(64));
     custom.url = Some("http://example.com/server.jar".into());
     assert!(custom.validate().is_err());
     custom.url = Some("http://127.0.0.1:8080/server.jar".into());
@@ -213,6 +222,55 @@ async fn downloads_paper_once_verifies_its_digest_and_refreshes_on_request() {
         "refresh downloads again"
     );
     assert_eq!(status(&cache, &latest)["cached"], true);
+
+    // Cache hits are verified: an altered jar is replaced, not reused.
+    fs::write(jar_path(&cache, &latest), b"altered server jar").unwrap();
+    download(&cache, &latest, false, &upstream.endpoints())
+        .await
+        .unwrap();
+    assert_eq!(upstream.hits("/objects/paper.jar"), 3);
+    assert_eq!(fs::read(jar_path(&cache, &latest)).unwrap(), jar);
+    fs::remove_file(cache.join("paper-latest").join(METADATA)).unwrap();
+    download(&cache, &latest, false, &upstream.endpoints())
+        .await
+        .unwrap();
+    assert_eq!(
+        upstream.hits("/objects/paper.jar"),
+        4,
+        "a jar without its record is not trusted"
+    );
+    fs::remove_dir_all(cache).unwrap();
+}
+
+#[tokio::test]
+async fn pinned_versions_verify_sources_without_published_checksums() {
+    let jar = b"purpur server jar".to_vec();
+    let upstream = Upstream::start(vec![
+        ("/v2/purpur/1.21.8/latest", br#"{"build":"2400"}"#.to_vec()),
+        ("/v2/purpur/1.21.8/2400/download", jar.clone()),
+    ])
+    .await;
+    let cache = cache();
+    let mut purpur = software(Kind::Purpur, "1.21.8");
+    purpur.sha256 = Some(sha256(b"another build"));
+    let error = download(&cache, &purpur, false, &upstream.endpoints())
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("SHA-256 mismatch"), "{error}");
+    assert_eq!(status(&cache, &purpur)["cached"], false);
+    purpur.sha256 = Some(sha256(&jar).to_ascii_uppercase());
+    download(&cache, &purpur, false, &upstream.endpoints())
+        .await
+        .unwrap();
+    assert_eq!(fs::read(jar_path(&cache, &purpur)).unwrap(), jar);
+    download(&cache, &purpur, false, &upstream.endpoints())
+        .await
+        .unwrap();
+    assert_eq!(
+        upstream.hits("/v2/purpur/1.21.8/2400/download"),
+        2,
+        "the rejected attempt and one download; the hit is cached"
+    );
     fs::remove_dir_all(cache).unwrap();
 }
 
@@ -329,7 +387,6 @@ async fn resolves_vanilla_purpur_fabric_and_pinned_urls() {
     assert!(download(&cache, &pinned, false, &endpoints).await.is_err());
     let missing = Software {
         url: Some(format!("{}/absent.jar", upstream.base)),
-        sha256: None,
         ..pinned
     };
     let error = download(&cache, &missing, false, &endpoints)
