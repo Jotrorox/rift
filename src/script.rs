@@ -22,7 +22,14 @@ pub(crate) const MAX_CONCURRENT_STATUS: usize = 2;
 /// How long a callback may wait for a free worker before it is refused. Short
 /// bursts queue instead of failing; sustained overload still fails fast.
 pub(crate) const SLOT_WAIT: Duration = Duration::from_millis(25);
-pub(crate) const EXECUTION_TIMEOUT: Duration = Duration::from_millis(50);
+/// Wall deadline for one callback. Unit tests allow 500 ms instead: they check
+/// behaviour, not speed, and a debug-build VM on a shared CI machine can be
+/// stalled past 50 ms. Tests of the deadline itself use this constant.
+pub(crate) const EXECUTION_TIMEOUT: Duration = if cfg!(test) {
+    Duration::from_millis(500)
+} else {
+    Duration::from_millis(50)
+};
 const MEMORY_LIMIT: usize = 8 * 1024 * 1024;
 pub(crate) const INSTRUCTION_LIMIT: u32 = 100_000;
 const HOOK_INTERVAL: u32 = 1000;
