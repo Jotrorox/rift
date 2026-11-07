@@ -406,6 +406,8 @@ rift.config.extensions.integrations = {
         url = "https://directory.example.com/permissions/",
         timeout_ms = 1000,
         headers = { ["Accept"] = "text/plain" },
+        -- Header values read from the environment, never written in rift.lua.
+        headers_env = { ["Authorization"] = "DIRECTORY_API_TOKEN" },
     },
 }
 -- Inside a job:
@@ -426,6 +428,18 @@ Absolute URLs/paths, traversal and encoded separators are rejected. Request
 headers override configured headers. Redirects are returned without following
 and environment HTTP proxies are disabled. Configured services may be private
 or loopback addresses; configuration authors choose the allowed endpoints.
+
+Keep credentials out of `headers`: its values are part of `rift.lua`, so they
+end up in deployment history and in the web editor. `headers_env` maps a header
+name to an environment variable name instead, such as
+`DIRECTORY_API_TOKEN`. Rift reads the variable when it sends each request, so
+the value never appears in the configuration, deployment history or
+diagnostics; errors name the variable only. A header may appear in `headers` or
+`headers_env`, not both, and both count toward the 32-header limit. Startup and
+reloads fail while a referenced variable is unset or is not a valid header
+value, and `rift check --strict` reports it before you start. Set the variable
+in the service environment (for example an `EnvironmentFile=` or a Compose
+secret), not on the command line.
 
 The result is `{ status = number, body = string, headers = table }`. HTTP error
 statuses are ordinary responses; transport errors, timeout, malformed options

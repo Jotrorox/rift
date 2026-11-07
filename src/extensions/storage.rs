@@ -632,6 +632,75 @@ fn open_database(path: &Path) -> io::Result<(Connection, Entries)> {
     Ok((connection, entries))
 }
 
+/// What [`check_file`] found at a store path.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Check {
+    /// No file yet; startup creates it.
+    Missing,
+    /// A v1 snapshot that startup will migrate.
+    Snapshot { entries: usize },
+    /// A store database that opens and validates.
+    Database { entries: usize },
+}
+
+/// Validate the store at `path` without changing it. Snapshots are decoded in
+/// memory. A database and any `-wal` file left by a crash are copied to a
+/// private temporary directory and opened there, so recovery, locking and
+/// validation run exactly as at startup without touching the original. Do not
+/// call this while Rift runs: the copy may catch a write halfway.
+pub(super) fn check_file(path: &Path) -> io::Result<Check> {
+    match fs::metadata(path) {
+        Ok(metadata) => validate_metadata(&metadata)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Check::Missing),
+        Err(error) => return Err(error),
+    }
+    let file = File::open(path)?;
+    validate_metadata(&file.metadata()?)?;
+    let mut header = Vec::new();
+    (&file)
+        .take(MAX_BYTES as u64 + 1)
+        .read_to_end(&mut header)?;
+    if header.starts_with(MAGIC) {
+        let entries = decode(&header)?;
+        let count = entries.len();
+        Memory::new(entries)?;
+        return Ok(Check::Snapshot { entries: count });
+    }
+    if !header.starts_with(SQLITE_HEADER) {
+        return Err(invalid("invalid extension store"));
+    }
+    drop(file);
+    let directory = std::env::temp_dir().join(format!(
+        "rift-store-check-{}-{}",
+        std::process::id(),
+        TEMP_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir(&directory)?;
+    let result = (|| {
+        let copy = directory.join("store");
+        fs::copy(path, &copy)?;
+        let mut wal = path.as_os_str().to_owned();
+        wal.push("-wal");
+        match fs::copy(&wal, directory.join("store-wal")) {
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        // Name the original in errors, not the private copy.
+        let (connection, entries) = open_database(&copy).map_err(|error| {
+            let message = error.to_string();
+            let message = message.replace(&copy.display().to_string(), &path.display().to_string());
+            io::Error::new(error.kind(), message)
+        })?;
+        drop(connection);
+        let count = entries.len();
+        Memory::new(entries)?;
+        Ok(Check::Database { entries: count })
+    })();
+    let _ = fs::remove_dir_all(&directory);
+    result
+}
+
 /// Build a database with `entries` beside `path`, then atomically move it into place.
 fn create(path: &Path, entries: &Entries) -> io::Result<()> {
     let (temporary, file) = temporary_file(parent(path))?;
@@ -1154,6 +1223,69 @@ mod tests {
         assert_eq!(reopened.memory().entries, entries);
         assert_eq!(reopened.memory().plugin.entries, 2);
         assert_eq!(reopened.memory().host.entries, 1);
+    }
+
+    #[test]
+    fn checking_a_store_changes_nothing() {
+        let temp = Temporary::new();
+        let config = temp.config();
+        let wal = PathBuf::from(format!("{}-wal", config.path.display()));
+        let listing = || {
+            let mut names: Vec<_> = fs::read_dir(&temp.0)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            names.sort();
+            names
+        };
+
+        assert_eq!(check_file(&config.path).unwrap(), Check::Missing);
+        assert!(listing().is_empty());
+
+        let entries = BTreeMap::from([
+            (("n".into(), "k".into()), b"v".to_vec()),
+            ((MEMBER_NAMESPACE.into(), "m".into()), b"staff".to_vec()),
+        ]);
+        let snapshot = encode(&entries).unwrap();
+        fs::write(&config.path, &snapshot).unwrap();
+        assert_eq!(
+            check_file(&config.path).unwrap(),
+            Check::Snapshot { entries: 2 }
+        );
+        assert_eq!(fs::read(&config.path).unwrap(), snapshot);
+        assert_eq!(listing().len(), 1, "no backup or database is written");
+
+        // Leave committed writes in the WAL, as a crash would.
+        fs::remove_file(&config.path).unwrap();
+        let store = Store::open(Some(&config)).unwrap();
+        lua(&store)
+            .load("rift.store.set('a', 'b', 'c') rift.store.set('a', 'd', 'e')")
+            .exec()
+            .unwrap();
+        let before = (fs::read(&config.path).unwrap(), fs::read(&wal).unwrap());
+        let names = listing();
+        assert_eq!(
+            check_file(&config.path).unwrap(),
+            Check::Database { entries: 2 }
+        );
+        assert_eq!(
+            (fs::read(&config.path).unwrap(), fs::read(&wal).unwrap()),
+            before
+        );
+        assert_eq!(listing(), names);
+        drop(store);
+
+        fs::remove_file(&config.path).unwrap();
+        Connection::open(&config.path)
+            .unwrap()
+            .execute_batch("CREATE TABLE entries (namespace TEXT, key TEXT, value BLOB);")
+            .unwrap();
+        let error = check_file(&config.path).unwrap_err().to_string();
+        assert!(error.contains("not a Rift extension store"), "{error}");
+        assert!(
+            error.contains(&config.path.display().to_string()),
+            "{error}"
+        );
     }
 
     #[test]

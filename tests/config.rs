@@ -1016,3 +1016,121 @@ fn managed_script_style_defaults_and_check_have_no_launch_side_effects() {
         fixture.0.join("servers/lobby")
     );
 }
+
+fn strict_check(fixture: &Fixture, envs: &[(&str, &str)]) -> (bool, String) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_rift"));
+    command
+        .current_dir(&fixture.0)
+        .args(["check", "--strict", "rift.lua"])
+        .env_remove("RIFT_TEST_FORWARDING_SECRET")
+        .env_remove("RIFT_TEST_STRICT_HEADER");
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let output = command.output().unwrap();
+    (
+        output.status.success(),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ),
+    )
+}
+
+#[test]
+fn strict_check_reports_unset_secrets_without_printing_values() {
+    let fixture = Fixture::new();
+    fixture.write(&format!(
+        "{}\nrift.config.extensions = {{ api_version = 2, integrations = {{ account = {{ url = 'http://127.0.0.1:9/', headers_env = {{ Authorization = 'RIFT_TEST_STRICT_HEADER' }} }} }} }}",
+        online_config("127.0.0.1:25566".parse().unwrap()).replacen("return {", "rift.setup {", 1)
+    ));
+    // Plain checks stay offline and ignore the environment.
+    let plain = Command::new(env!("CARGO_BIN_EXE_rift"))
+        .current_dir(&fixture.0)
+        .args(["check", "rift.lua"])
+        .env_remove("RIFT_TEST_FORWARDING_SECRET")
+        .env_remove("RIFT_TEST_STRICT_HEADER")
+        .output()
+        .unwrap();
+    assert!(plain.status.success(), "{:?}", plain.stderr);
+    let (ok, output) = strict_check(&fixture, &[]);
+    assert!(!ok, "{output}");
+    assert!(
+        output.contains("forwarding.secret_env: RIFT_TEST_FORWARDING_SECRET is not set"),
+        "{output}"
+    );
+    assert!(output.contains("set RIFT_TEST_STRICT_HEADER"), "{output}");
+    let (ok, output) = strict_check(
+        &fixture,
+        &[
+            ("RIFT_TEST_FORWARDING_SECRET", "velocity-secret-value"),
+            ("RIFT_TEST_STRICT_HEADER", "Bearer header-secret-value"),
+        ],
+    );
+    assert!(ok, "{output}");
+    assert!(output.contains("strict checks passed"), "{output}");
+    assert!(output.contains("does not exist yet"), "{output}");
+    assert!(
+        !output.contains("velocity-secret-value") && !output.contains("header-secret-value"),
+        "{output}"
+    );
+    // A strict check creates nothing.
+    assert!(!fixture.0.join("rift.sqlite3").exists());
+    assert!(!fixture.0.join("rift.sqlite3.lock").exists());
+}
+
+#[test]
+fn strict_check_binds_ports_and_checks_reloads_against_a_running_rift() {
+    let fixture = Fixture::new();
+    let held = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = held.local_addr().unwrap();
+    let source = format!(
+        "rift.config.listeners.public = '{address}'\nrift.config.backends.lobby = '127.0.0.1:25566'\nrift.config.routes.public = 'lobby'\nrift.config.web = {{ listen = '127.0.0.1:0' }}"
+    );
+    fixture.write(&source);
+    let (ok, output) = strict_check(&fixture, &[]);
+    assert!(!ok, "{output}");
+    assert!(
+        output.contains(&format!("listeners.public: cannot bind {address}")),
+        "{output}"
+    );
+    drop(held);
+    let (ok, output) = strict_check(&fixture, &[]);
+    assert!(ok, "{output}");
+    assert!(output.contains("no deployment history found"), "{output}");
+
+    // The last deployment used another listener. With Rift stopped a restart
+    // applies it, but a running Rift would reject the reload.
+    let records = fixture.0.join("rift.lua.operators");
+    fs::create_dir(&records).unwrap();
+    let previous = source.replace(&address.to_string(), "127.0.0.1:0");
+    fs::write(
+        records.join("deployments.json"),
+        serde_json::to_vec(&serde_json::json!([{"id": 1, "source": previous}])).unwrap(),
+    )
+    .unwrap();
+    let (ok, output) = strict_check(&fixture, &[]);
+    assert!(ok, "{output}");
+    assert!(output.contains("a restart applies it"), "{output}");
+    let store = rift::instance_store::Store::open(&fixture.0.join("rift.sqlite3")).unwrap();
+    let held = TcpListener::bind(address).unwrap();
+    let (ok, output) = strict_check(&fixture, &[]);
+    assert!(!ok, "{output}");
+    assert!(output.contains("locked by a running Rift"), "{output}");
+    assert!(
+        output.contains("would be rejected: gameplay listener changes require a restart"),
+        "{output}"
+    );
+    assert!(!output.contains("cannot bind"), "{output}");
+    drop((store, held));
+    fs::write(
+        records.join("deployments.json"),
+        serde_json::to_vec(&serde_json::json!([{"id": 1, "source": source}])).unwrap(),
+    )
+    .unwrap();
+    let (ok, output) = strict_check(&fixture, &[]);
+    assert!(ok, "{output}");
+    assert!(output.contains("rift.sqlite3 opens"), "{output}");
+    assert!(output.contains("would be accepted"), "{output}");
+}

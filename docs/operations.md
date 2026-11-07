@@ -28,6 +28,40 @@ directory when present, or uses the default addresses when it is absent. Use
 named by any error and rerun the check before starting. Configuration scripts
 are trusted local code.
 
+### Strict checks
+
+`rift check --strict [path]` runs the plain check and then the checks that
+need the host, as the service account would see it. Run it in the same
+environment as the service (for example `sudo -u rift --preserve-env=...` or
+`systemd-run --property=EnvironmentFile=...`), since it reads that environment:
+
+- **Secrets:** every variable the configuration names is set and has the length
+  startup requires: `forwarding.secret_env` (1–1024 bytes), `admin.token_env`,
+  `messaging.principals[].token_env` and `nodes.*.token_env` (32–1024 bytes),
+  and `extensions.integrations.*.headers_env` (a valid header value). Output
+  names the variables, never their values.
+- **Instance database:** `instance_database` opens read-only, passes SQLite's
+  `quick_check`, has a supported schema, and its registered instances fit the
+  configuration. A missing database is fine when its directory is writable.
+- **Extension store:** an existing `extensions.storage.path` decodes; a missing
+  one can be created.
+- **Ports:** every gameplay listener, `admin.listen`, `web.listen`,
+  `status.listen` and `metrics` can be bound over TCP, and `messaging.listen`
+  over UDP. Each socket is released at once.
+- **Reloads:** the configuration is compared with the last deployment in the
+  operator records (`web.records_directory`, or `<config>.operators`) using the
+  same rules as a live reload: listener, admin, messaging, node, managed server,
+  instance database, extension enablement/API version/storage/queue and
+  `web.records_directory` changes need a restart. Modules are read from disk as
+  they are now.
+
+When the instance database is locked, Rift is running: port binds are skipped,
+since Rift holds them, and a reload incompatibility is an error. When Rift is
+stopped, an incompatible change is only reported, because the next start
+applies everything. Strict checks create nothing; testing whether a directory is
+writable creates a temporary file and removes it at once. Exit status is
+non-zero when any strict check fails.
+
 On macOS, rename `rift-macos-aarch64` to `rift`, run `chmod +x rift`, then use the
 same commands. On Windows, rename `rift-windows-x86_64.exe` to `rift.exe` and
 run it with `.\rift.exe`.
@@ -89,7 +123,8 @@ and requires the token on every request. Permissions are explicit: remove operat
 perform, or use `{ "status" }` for a read-only endpoint. Permission and credential
 changes require a restart. There is one configured credential and permission set,
 not a multi-user identity store. `rift check` validates the configuration shape;
-the server verifies the environment secret when it starts. Keep secrets out of
+the server verifies the environment secret when it starts, and `rift check
+--strict` verifies it beforehand. Keep secrets out of
 Lua files, command arguments and committed Compose files.
 
 This endpoint is separate from the optional `web` HTTP dashboard/API and its
@@ -358,7 +393,8 @@ mode 0700, and permits writes there under `ProtectSystem=strict`. The configured
 directory, which survives service stops and restarts. Every file-based startup
 opens this database, even without service groups; the default location beside
 the root-owned config is not writable. `rift check` validates configuration
-without opening the database and cannot verify startup write access. LuaJIT uses
+without opening the database; run `sudo -u rift rift check --strict
+/etc/rift/rift.lua` to verify that the database opens or can be created. LuaJIT uses
 executable memory, so do not add `MemoryDenyWriteExecute=true` to this unit.
 
 ## Container example
@@ -396,7 +432,7 @@ its database, lock and journal there while `/etc/rift` stays read-only. The
 volume survives container recreation and `docker compose down`; `down --volumes`
 removes the stored registrations. An existing volume or replacement image must
 also provide write access for UID/GID 65532. `rift check` alone does not verify
-database write access; confirm the running container reaches `rift: listening`
+database write access (`rift check --strict` does); confirm the running container reaches `rift: listening`
 in its logs after `up -d`.
 
 Loopback in a container refers to that container. Use private, reachable backend
