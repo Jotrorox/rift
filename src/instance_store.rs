@@ -73,6 +73,96 @@ fn private_file(path: &Path) -> io::Result<File> {
     options.open(path)
 }
 
+/// What [`Store::check`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatabaseCheck {
+    /// No database yet; startup can create it.
+    Missing,
+    /// The database opens, passes an integrity check, and its registered
+    /// instances fit the configuration.
+    Ready { instances: usize },
+    /// Another process holds the lock, normally a running Rift. Nothing else
+    /// was checked.
+    InUse,
+}
+
+impl Store {
+    /// Check the database read-only, without creating, locking or migrating
+    /// anything (for `rift check --strict`).
+    pub fn check(path: &Path, config: &Config) -> io::Result<DatabaseCheck> {
+        let path = provisioning::checked_path(path)?;
+        let mut lock_path = path.as_os_str().to_owned();
+        lock_path.push(".lock");
+        let lock_path = PathBuf::from(lock_path);
+        if fs::symlink_metadata(&lock_path).is_ok() {
+            let lock = FileOptions::new().read(true).write(true).open(&lock_path)?;
+            match lock.try_lock() {
+                Ok(()) => {}
+                Err(fs::TryLockError::WouldBlock) => return Ok(DatabaseCheck::InUse),
+                Err(fs::TryLockError::Error(error)) => return Err(error),
+            }
+        }
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if !metadata.is_file() => {
+                return Err(invalid("instance database and lock must be regular files"));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                crate::preflight::check_creatable(&path)?;
+                return Ok(DatabaseCheck::Missing);
+            }
+            Err(error) => return Err(error),
+        }
+        let connection = Connection::open_with_flags(
+            &path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|e| invalid(format!("instance database {}: {e}", path.display())))?;
+        let store = Self {
+            path: path.clone(),
+            connection: Mutex::new(connection),
+            // Read-only placeholder; this handle never takes the lock.
+            _lock: File::open(&path)?,
+        };
+        let (version, check) = {
+            let connection = store.connection.lock().unwrap();
+            connection
+                .busy_timeout(Duration::from_secs(2))
+                .map_err(|e| store.error(e))?;
+            let version: u32 = connection
+                .query_row("PRAGMA user_version", [], |r| r.get(0))
+                .map_err(|e| store.error(e))?;
+            let check: String = connection
+                .query_row("PRAGMA quick_check", [], |r| r.get(0))
+                .map_err(|e| store.error(e))?;
+            (version, check)
+        };
+        if check != "ok" {
+            return Err(store.error(format!("integrity check failed: {check}")));
+        }
+        match version {
+            // Empty, or upgraded in place at startup.
+            0 | 1 => return Ok(DatabaseCheck::Ready { instances: 0 }),
+            2 => {}
+            _ => return Err(store.error(format!("unsupported schema version {version}"))),
+        }
+        let records = store.records()?;
+        let mut candidate = config.clone();
+        candidate
+            .restore_instances(
+                records
+                    .iter()
+                    .filter(|r| r.phase == "ready")
+                    .map(|r| (r.name.clone(), r.definition.instance.clone()))
+                    .collect(),
+            )
+            .map_err(|e| store.error(format!("configuration conflict: {e}")))?;
+        Ok(DatabaseCheck::Ready {
+            instances: records.len(),
+        })
+    }
+}
+
 impl Store {
     pub fn open(path: &Path) -> io::Result<Self> {
         let path = provisioning::checked_path(path)?;

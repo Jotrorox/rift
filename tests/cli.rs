@@ -50,7 +50,8 @@ fn help_is_successful_and_describes_the_interface() {
         assert!(text.contains("--license"));
         assert!(text.contains("rift init"));
         assert!(text.contains("rift check"));
-        assert!(text.contains("rift --check [path]"));
+        assert!(text.contains("rift --check [--strict] [path]"));
+        assert!(text.contains("rift check [--strict] [path]"));
         assert!(text.contains("No arguments: load ./rift.lua if present"));
         assert!(text.contains("rift admin"));
         assert!(text.contains("existing sessions continue"));

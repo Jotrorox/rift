@@ -4,6 +4,7 @@
 //! `docs/messaging-protocol.md` for the language-independent wire protocol.
 use std::{
     collections::{HashMap, HashSet},
+    hash::Hash,
     io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::Path,
@@ -80,7 +81,13 @@ impl std::fmt::Debug for Identity {
 #[derive(Clone, Debug)]
 pub struct AuthConfig {
     pub identities: Vec<Identity>,
+    /// Authenticated connections of all identities except node agents, whose
+    /// one session each never competes with plugins for a slot.
     pub max_connections: usize,
+    /// Connections from one IPv4 address or IPv6 /64, at any stage.
+    pub max_connections_per_address: usize,
+    /// Authenticated connections of one identity other than a node agent.
+    pub max_connections_per_identity: usize,
     pub max_streams_per_connection: usize,
     pub handshake_timeout: Duration,
     pub io_timeout: Duration,
@@ -90,6 +97,8 @@ impl Default for AuthConfig {
         Self {
             identities: vec![],
             max_connections: 1024,
+            max_connections_per_address: 256,
+            max_connections_per_identity: 256,
             max_streams_per_connection: 128,
             handshake_timeout: Duration::from_secs(5),
             io_timeout: Duration::from_secs(30),
@@ -99,6 +108,8 @@ impl Default for AuthConfig {
 impl AuthConfig {
     fn validate(&self) -> Result<()> {
         if self.max_connections == 0
+            || self.max_connections_per_address == 0
+            || self.max_connections_per_identity == 0
             || self.max_streams_per_connection == 0
             || self.max_streams_per_connection > 65535
             || self.handshake_timeout.is_zero()
@@ -390,9 +401,13 @@ impl Server {
         tls.transport_config(Arc::new(transport(auth.max_streams_per_connection as u32)));
         let endpoint = Endpoint::server(tls, addr)?;
         let listener = endpoint.clone();
-        let permits = Arc::new(Semaphore::new(auth.max_connections));
         let context = Arc::new(Context {
             broker,
+            sessions: Arc::new(Semaphore::new(auth.max_connections)),
+            pending: Arc::new(Semaphore::new(MAX_PENDING)),
+            by_address: Tally::default(),
+            pending_by_address: Tally::default(),
+            by_identity: Tally::default(),
             auth,
             streams,
             node_sessions: std::sync::Mutex::new(HashMap::new()),
@@ -404,12 +419,25 @@ impl Server {
                 tokio::select! {
                     incoming = listener.accept() => {
                         let Some(incoming) = incoming else { break };
-                        let Ok(permit) = permits.clone().try_acquire_owned() else { incoming.refuse(); continue };
+                        // An unvalidated source address may be spoofed. Answer
+                        // with a stateless Retry, which only a real peer can
+                        // complete, before the connection holds any slot.
+                        if !incoming.remote_address_validated() {
+                            if incoming.may_retry() {
+                                let _ = incoming.retry();
+                            } else {
+                                incoming.ignore();
+                            }
+                            continue;
+                        }
+                        let Some(admission) = context.admit(incoming.remote_address().ip()) else {
+                            incoming.refuse();
+                            continue;
+                        };
                         let context = context.clone();
                         tasks.spawn(async move {
-                            let _permit = permit;
                             if let Ok(Ok(connection)) = timeout(context.auth.handshake_timeout, incoming).await {
-                                serve_connection(connection, context).await;
+                                serve_connection(connection, context, admission).await;
                             }
                         });
                     }
@@ -439,17 +467,63 @@ impl Drop for Server {
         self.task.abort();
     }
 }
+/// Connections still in their TLS handshake or authentication, in total and
+/// per address. They have their own pool, so authenticated plugins filling
+/// `max_connections` never stop a node agent from authenticating.
+const MAX_PENDING: usize = 256;
+const MAX_PENDING_PER_ADDRESS: usize = 16;
+
 struct Context {
     broker: Broker,
     auth: AuthConfig,
     streams: HashMap<String, Stream>,
+    /// Authenticated connections of identities other than node agents.
+    sessions: Arc<Semaphore>,
+    pending: Arc<Semaphore>,
+    by_address: Tally<IpAddr>,
+    pending_by_address: Tally<IpAddr>,
+    by_identity: Tally<String>,
     /// The one live connection of each `node.*` principal, by session id.
     /// Node commands are addressed to the principal, so a second session must
     /// never receive them alongside the first.
     node_sessions: std::sync::Mutex<HashMap<String, (u64, Connection)>>,
     next_session: AtomicU64,
 }
+/// Slots held by a connection from its validated first packet on.
+struct Admission {
+    _address: Claim<IpAddr>,
+    /// Released once the connection authenticates.
+    pending: (tokio::sync::OwnedSemaphorePermit, Claim<IpAddr>),
+}
+/// Slots held by an authenticated connection of an identity other than a node.
+type Session = (tokio::sync::OwnedSemaphorePermit, Claim<String>);
 impl Context {
+    fn admit(&self, ip: IpAddr) -> Option<Admission> {
+        let address = address_key(ip);
+        let connection = self
+            .by_address
+            .claim(address, self.auth.max_connections_per_address)?;
+        let pending_address = self
+            .pending_by_address
+            .claim(address, MAX_PENDING_PER_ADDRESS)?;
+        let pending = self.pending.clone().try_acquire_owned().ok()?;
+        Some(Admission {
+            _address: connection,
+            pending: (pending, pending_address),
+        })
+    }
+    fn admit_session(&self, identity: &str) -> Result<Session> {
+        let claim = self
+            .by_identity
+            .claim(identity.to_owned(), self.auth.max_connections_per_identity)
+            .ok_or_else(|| denied("too many connections for this identity"))?;
+        let permit = self
+            .sessions
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| denied("too many connections"))?;
+        Ok((permit, claim))
+    }
     /// Register `connection` as the only session of node principal `name`,
     /// closing an older one: after a silent network drop the agent must be
     /// able to reconnect before the old connection's idle timeout.
@@ -491,7 +565,53 @@ impl Drop for NodeSession {
         }
     }
 }
-async fn serve_connection(connection: Connection, context: Arc<Context>) {
+/// Live connections by key, each held by a [`Claim`].
+struct Tally<K: Eq + Hash + Clone>(Arc<std::sync::Mutex<HashMap<K, usize>>>);
+impl<K: Eq + Hash + Clone> Default for Tally<K> {
+    fn default() -> Self {
+        Self(Arc::default())
+    }
+}
+impl<K: Eq + Hash + Clone> Tally<K> {
+    /// Count one more connection for `key`, unless it already has `limit`.
+    fn claim(&self, key: K, limit: usize) -> Option<Claim<K>> {
+        let mut counts = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let count = counts.entry(key.clone()).or_default();
+        if *count >= limit {
+            return None;
+        }
+        *count += 1;
+        Some(Claim {
+            counts: self.0.clone(),
+            key,
+        })
+    }
+}
+struct Claim<K: Eq + Hash + Clone> {
+    counts: Arc<std::sync::Mutex<HashMap<K, usize>>>,
+    key: K,
+}
+impl<K: Eq + Hash + Clone> Drop for Claim<K> {
+    fn drop(&mut self) {
+        let mut counts = self.counts.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(count) = counts.get_mut(&self.key) {
+            *count -= 1;
+            if *count == 0 {
+                counts.remove(&self.key);
+            }
+        }
+    }
+}
+/// The key connection limits count by. An IPv6 host usually controls a
+/// whole /64, so the /64 counts as one address.
+fn address_key(ip: IpAddr) -> IpAddr {
+    match ip.to_canonical() {
+        IpAddr::V6(ip) => IpAddr::V6(Ipv6Addr::from_bits(ip.to_bits() & !u128::from(u64::MAX))),
+        ip => ip,
+    }
+}
+async fn serve_connection(connection: Connection, context: Arc<Context>, admission: Admission) {
+    let Admission { _address, pending } = admission;
     let auth_result = timeout(context.auth.handshake_timeout, async {
         let (mut send, mut recv) = connection.accept_bi().await.map_err(other)?;
         let mut reader = FrameReader {
@@ -504,25 +624,37 @@ async fn serve_connection(connection: Connection, context: Arc<Context>) {
         }
         let token = take_string(&mut frame)?;
         exhausted(&frame)?;
-        match context.auth.authenticate(&token) {
-            Ok(identity) => {
-                let session = identity
-                    .name
-                    .starts_with("node.")
+        let admitted = context.auth.authenticate(&token).and_then(|identity| {
+            // A node agent has at most one session, replaced on reconnect, so
+            // it needs no shared slot and plugins can never crowd it out.
+            let session = if identity.name.starts_with("node.") {
+                None
+            } else {
+                Some(context.admit_session(&identity.name)?)
+            };
+            Ok((identity, session))
+        });
+        match admitted {
+            Ok((identity, session)) => {
+                let node_session = session
+                    .is_none()
                     .then(|| context.claim_node_session(&identity.name, &connection));
                 write_simple(&mut send, OK).await?;
                 send.finish().map_err(other)?;
-                Ok((identity, session))
+                Ok((identity, node_session, session))
             }
             Err(error) => {
                 let _ = write_error(&mut send, &error).await;
                 let _ = send.finish();
+                // Let the client read why before the connection closes.
+                let _ = timeout(Duration::from_secs(1), send.stopped()).await;
                 Err(error)
             }
         }
     })
     .await;
-    let Ok(Ok((identity, _node_session))) = auth_result else {
+    drop(pending);
+    let Ok(Ok((identity, _node_session, _session))) = auth_result else {
         connection.close(1u32.into(), b"authentication failed");
         return;
     };

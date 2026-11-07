@@ -207,6 +207,91 @@ async fn scripts_cannot_bypass_budgets_or_access_external_resources() {
     router.route(connection()).await.unwrap();
 }
 
+/// docs/lua.md lists these names; keep both in step.
+#[tokio::test]
+async fn sandbox_globals_match_the_documented_list() {
+    for (table, expected) in [
+        (
+            "_G",
+            "_G _VERSION assert error ipairs math next pairs require rift select string table tonumber tostring type unpack",
+        ),
+        ("string", "byte char format len lower rep reverse sub upper"),
+        ("table", "concat insert maxn remove"),
+        (
+            "math",
+            "abs acos asin atan atan2 ceil cos cosh deg exp floor fmod frexp huge ldexp log log10 max min modf pi pow rad random randomseed sin sinh sqrt tan tanh",
+        ),
+    ] {
+        let router = Router::new(&config(&format!(
+            "local names = {{}}
+            for name in pairs({table}) do names[#names + 1] = name end
+            return {{ reject = true, reason = table.concat(names, ' ') }}"
+        )));
+        let RouteDecision::Reject {
+            reason: Some(reason),
+        } = router.route(connection()).await.unwrap()
+        else {
+            panic!("expected a list of names");
+        };
+        let mut names: Vec<&str> = reason.split(' ').collect();
+        names.sort_unstable();
+        assert_eq!(names.join(" "), expected, "{table}");
+    }
+}
+
+#[tokio::test]
+async fn rift_try_catches_errors_but_not_exhausted_budgets() {
+    let router = Router::new(&config(
+        "
+        local ok, a, b = rift.try(function(x, y) return x + y, nil end, 1, 2)
+        assert(ok == true and a == 3 and b == nil)
+        local ok, message = rift.try(error, 'boom')
+        assert(ok == false and message == 'boom')
+        local ok, value = rift.try(error, { code = 7 })
+        assert(ok == false and value.code == 7)
+        local ok, message = rift.try(function() local t = nil; return t.x end)
+        assert(ok == false and type(message) == 'string')
+        assert(rift.try(rift.try, error, 'nested'))
+        assert(string.format('%s=%05.1f %d %q', 'x', 3.14159, 42, 'a') == 'x=003.1 42 \"a\"')
+        local clock = rift.clock()
+        assert(type(clock) == 'number' and clock >= 0 and rift.clock() >= clock)
+        assert(type(rift.time()) == 'number' and rift.time() > 1700000000)
+        return nil
+    ",
+    ));
+    router.route(connection()).await.unwrap();
+    for (body, expected) in [
+        (
+            "rift.try(function() while true do end end) return nil",
+            "instruction limit",
+        ),
+        (
+            "while true do rift.try(function() while true do end end) end",
+            "instruction limit",
+        ),
+        (
+            "rift.try(rift.try, function() while true do end end) return nil",
+            "instruction limit",
+        ),
+        (
+            "local ok = rift.try(string.rep, 'a', 16 * 1024 * 1024) return { backend = 'caught' }",
+            "memory",
+        ),
+    ] {
+        let error = tokio::time::timeout(
+            Duration::from_secs(2),
+            Router::new(&config(body)).route(connection()),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(
+            error.to_string().contains(expected) || error.to_string().contains("deadline"),
+            "{body}: {error}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn a_short_burst_waits_for_a_worker_instead_of_dropping_the_connection() {
     let router = Router::new(&config("return nil"));

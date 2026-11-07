@@ -1,6 +1,7 @@
 mod admin;
 mod admission;
 mod bungee_runtime;
+mod check;
 mod control;
 mod events;
 mod health;
@@ -32,8 +33,10 @@ const USAGE: &str = "Usage: rift [<listen-ip:port> <backend-ip:port>]\n\
     Backend may also be a DNS hostname with a port.\n\
     rift --config <path>\n\
     rift init [path] (generate configuration; default ./rift.lua)\n\
-    rift check [path] (validate configuration; default ./rift.lua)\n\
-    rift --check [path] (alias for rift check; default ./rift.lua)\n\
+    rift check [--strict] [path] (validate configuration; default ./rift.lua)\n\
+    rift --check [--strict] [path] (alias for rift check; default ./rift.lua)\n\
+    --strict also checks environment secrets, the instance database and extension store,\n\
+    port binds, and whether a running Rift could reload to this configuration\n\
     rift admin [--address <loopback-ip:port>] <command> (run an authenticated administrator command)\n\
     rift node --controller <host:port> --name <node> --root <dir> --ca <pem> (run servers for a controller; see rift node --help)\n\
     rift --version (print package version)\n\
@@ -79,12 +82,17 @@ async fn start() -> io::Result<()> {
         .first()
         .is_some_and(|arg| arg == "init" || arg == "check" || arg == "--check")
     {
-        if args.len() > 2 {
+        let strict = args[0] != "init" && args[1..].iter().any(|arg| arg == "--strict");
+        let operands: Vec<&String> = args[1..]
+            .iter()
+            .filter(|arg| !(strict && *arg == "--strict"))
+            .collect();
+        if operands.len() > 1 {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, USAGE));
         }
-        let path = args
-            .get(1)
-            .map(String::as_str)
+        let path = operands
+            .first()
+            .map(|arg| arg.as_str())
             .unwrap_or(DEFAULT_CONFIG_PATH);
         if args[0] == "init" {
             let mut file = fs::OpenOptions::new()
@@ -103,7 +111,7 @@ async fn start() -> io::Result<()> {
             file.write_all(include_bytes!("../examples/rift.lua"))?;
             println!("rift: created {path}; edit your backends, then run: rift check {path}");
         } else {
-            let (_, cost) = Config::check(Path::new(path))?;
+            let (config, cost) = Config::check(Path::new(path))?;
             println!("rift: configuration valid: {path}");
             // Every Lua callback evaluates the configuration again before it
             // runs, so this cost is paid in time on each connection and hook.
@@ -116,6 +124,27 @@ async fn start() -> io::Result<()> {
                 eprintln!(
                     "rift: warning: configuration evaluation is heavy; move expensive work into callbacks that need it, or callbacks may miss their 50 ms deadline"
                 );
+            }
+            if strict {
+                let path = fs::canonicalize(path)?;
+                let report = check::strict(&config, &path);
+                for note in &report.notes {
+                    println!("rift: strict: {note}");
+                }
+                for error in &report.errors {
+                    eprintln!("rift: strict: error: {error}");
+                }
+                if !report.errors.is_empty() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "strict check failed with {} error(s): {path}",
+                            report.errors.len(),
+                            path = path.display()
+                        ),
+                    ));
+                }
+                println!("rift: strict checks passed: {}", path.display());
             }
         }
         return Ok(());

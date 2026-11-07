@@ -672,6 +672,25 @@ async fn configured_http_integration_is_available_through_captured_lua_api() {
 }
 
 #[test]
+fn startup_and_reload_require_headers_env_variables() {
+    let cfg = Config::from_lua(
+        &source(
+            "api_version=2, integrations={account={url='http://127.0.0.1:9/',headers_env={Authorization='RIFT_TEST_UNSET_ACCOUNT_TOKEN'}}}",
+        ),
+        "headers-env.lua",
+    )
+    .unwrap();
+    let error = Extensions::new(&cfg, Broker::new(Default::default()).unwrap(), None)
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(
+        error.contains("headers_env") && error.contains("set RIFT_TEST_UNSET_ACCOUNT_TOKEN"),
+        "{error}"
+    );
+}
+
+#[test]
 fn permission_group_and_wildcard_schema_is_validated() {
     for invalid in [
         "api_version=1, groups={}",

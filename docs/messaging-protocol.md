@@ -113,8 +113,20 @@ failover.
 
 ## Limits and lifecycle
 
-The default server allows 1,024 connections and 128 concurrent operation streams
-per connection. TLS/authentication and a stream's first frame have a five-second
+The server answers each new connection with a QUIC Retry before it spends any
+connection slot on it, so packets with spoofed source addresses cannot fill the
+limits below. Every compliant QUIC client follows a Retry automatically; it adds
+one round trip to connection setup.
+
+By default the server allows 1,024 authenticated connections, 256 per principal
+and 256 from one IPv4 address or IPv6 /64 at any stage. Connections that are
+still handshaking or authenticating have their own pool of 256, at most 16 per
+address. Node agents (`node.*` principals) have one session each and count
+against neither the total nor the per-principal limit, so plugin connections
+can never lock out a node. A connection over a limit is refused before
+authentication, or receives an ERROR such as `too many connections for this
+identity` in reply to AUTH. Each connection may run 128 concurrent operation
+streams. TLS/authentication and a stream's first frame have a five-second
 deadline. Partial subsequent frames and blocked outgoing writes have a
 30-second deadline. Idle publisher streams stay usable; QUIC uses ten-second
 keepalives and a 60-second idle timeout. Limits are configurable through the

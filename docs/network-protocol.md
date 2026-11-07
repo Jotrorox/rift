@@ -181,6 +181,26 @@ never used as proof of identity. Encryption wraps the entire client byte stream,
 including packet lengths and compressed frames, and keeps independent read/write
 cipher state across cancellation and backend replacement.
 
+Rift decompresses every packet to inspect it, but a packet it neither translates
+nor rewrites is forwarded in the frame it arrived in when both connections use
+the same compression threshold. Other packets are compressed again. Each block
+is stored or written with fixed or dynamic Huffman codes, whichever is smallest,
+so re-encoding adds at most 5 bytes per 64 KiB block plus 6 bytes of zlib
+framing, and incompressible packets keep fitting the 2 MiB frame limit. Rift's
+matcher is simpler than zlib's (one candidate per position), so its output runs
+roughly 10-30% larger than zlib level 6 on compressible data. A packet over
+2 MiB uncompressed that the backend compressed to just under the limit can
+therefore still exceed it if Rift must rewrite or translate it; Rift then
+disconnects the player instead of sending an oversized frame.
+
+The backend handshake carries the client's hostname and, for Forge clients, its
+`\0FML\0`, `\0FML2\0`, `\0FML3\0` or `\0FORGE` marker (with Forge's optional
+network version, found anywhere in the NUL-delimited list as Forge itself
+reads it). Rift drops any other NUL-delimited data the client sends after the
+hostname, so a client cannot pass BungeeCord-style IP, UUID or skin data to an
+offline backend that has `settings.bungeecord=true`. Rift never sends BungeeCord IP forwarding itself; use
+Velocity modern forwarding to give backends player identities.
+
 Velocity `velocity:player_info` requests stay inside the proxy. Their responses
 use HMAC-SHA256 over the negotiated version, socket peer IP, verified UUID, name
 and profile properties, including property signatures. Rift supports forwarding

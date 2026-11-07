@@ -18,6 +18,10 @@ pub(super) struct Integration {
     url: Url,
     timeout: Duration,
     headers: HeaderMap,
+    /// Header name to environment variable name. Values are read when a
+    /// request is sent, so secrets never appear in the configuration source,
+    /// deployment history or diagnostics.
+    headers_env: Vec<(HeaderName, String)>,
 }
 
 pub(super) type Integrations = BTreeMap<String, Integration>;
@@ -59,6 +63,106 @@ fn check_headers(headers: &HeaderMap) -> mlua::Result<()> {
     Ok(())
 }
 
+fn header_name(key: &str) -> mlua::Result<HeaderName> {
+    let key =
+        HeaderName::from_bytes(key.as_bytes()).map_err(|_| error("invalid HTTP header name"))?;
+    if matches!(
+        key.as_str(),
+        "host"
+            | "connection"
+            | "content-length"
+            | "transfer-encoding"
+            | "upgrade"
+            | "te"
+            | "trailer"
+    ) || key.as_str().starts_with("proxy-")
+    {
+        return Err(error(
+            "HTTP routing and framing headers cannot be overridden",
+        ));
+    }
+    Ok(key)
+}
+
+fn env_name(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    value.len() <= 128
+        && bytes
+            .next()
+            .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+        && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+/// `headers_env = { Authorization = "ACCOUNT_API_TOKEN" }`: header names to
+/// environment variable names.
+fn headers_env(value: Value, headers: &HeaderMap) -> mlua::Result<Vec<(HeaderName, String)>> {
+    let mut result: Vec<(HeaderName, String)> = Vec::new();
+    if value.is_nil() {
+        return Ok(result);
+    }
+    let Value::Table(table) = value else {
+        return Err(error("HTTP headers_env must be a table"));
+    };
+    for entry in table.pairs::<Value, Value>() {
+        let (key, variable) = entry?;
+        let key = header_name(&string(key, "HTTP header name")?)?;
+        let variable = string(variable, "headers_env variable")?;
+        if !env_name(&variable) {
+            return Err(error(
+                "headers_env: expected an environment variable name such as ACCOUNT_API_TOKEN",
+            ));
+        }
+        if headers.contains_key(&key) || result.iter().any(|(name, _)| *name == key) {
+            return Err(error("duplicate HTTP header name"));
+        }
+        result.push((key, variable));
+        if headers.len() + result.len() > MAX_HEADERS {
+            return Err(error("HTTP headers exceed the 32 header / 8 KiB limit"));
+        }
+    }
+    // Lua table order is unspecified; keep comparisons across reloads stable.
+    result.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+    Ok(result)
+}
+
+/// Read one `headers_env` value. Errors name the variable, never its value.
+fn resolve(variable: &str, key: &HeaderName) -> Result<HeaderValue, String> {
+    let value =
+        std::env::var(variable).map_err(|_| format!("set {variable} for HTTP header {key}"))?;
+    let mut value = HeaderValue::from_str(&value)
+        .map_err(|_| format!("{variable} is not a valid HTTP header value for {key}"))?;
+    value.set_sensitive(true);
+    Ok(value)
+}
+
+/// Every environment variable the integrations read, as
+/// `(configuration field, variable)`.
+pub(super) fn environment(settings: &Integrations) -> Vec<(String, String)> {
+    settings
+        .iter()
+        .flat_map(|(name, integration)| {
+            integration.headers_env.iter().map(move |(key, variable)| {
+                (
+                    format!("extensions.integrations.{name}.headers_env.{key}"),
+                    variable.clone(),
+                )
+            })
+        })
+        .collect()
+}
+
+/// Fail before serving when a `headers_env` variable is unset or invalid.
+pub(super) fn check_environment(settings: &Integrations) -> Result<(), String> {
+    for (name, integration) in settings {
+        for (key, variable) in &integration.headers_env {
+            resolve(variable, key).map_err(|message| {
+                format!("extensions.integrations.{name}.headers_env: {message}")
+            })?;
+        }
+    }
+    Ok(())
+}
+
 fn headers(value: Value) -> mlua::Result<HeaderMap> {
     let mut result = HeaderMap::new();
     if value.is_nil() {
@@ -78,23 +182,7 @@ fn headers(value: Value) -> mlua::Result<HeaderMap> {
         if count > MAX_HEADERS || bytes > MAX_HEADER_BYTES {
             return Err(error("HTTP headers exceed the 32 header / 8 KiB limit"));
         }
-        let key = HeaderName::from_bytes(key.as_bytes())
-            .map_err(|_| error("invalid HTTP header name"))?;
-        if matches!(
-            key.as_str(),
-            "host"
-                | "connection"
-                | "content-length"
-                | "transfer-encoding"
-                | "upgrade"
-                | "te"
-                | "trailer"
-        ) || key.as_str().starts_with("proxy-")
-        {
-            return Err(error(
-                "HTTP routing and framing headers cannot be overridden",
-            ));
-        }
+        let key = header_name(&key)?;
         let value =
             HeaderValue::from_str(&value).map_err(|_| error("invalid HTTP header value"))?;
         if result.insert(key, value).is_some() {
@@ -121,7 +209,10 @@ pub(super) fn parse(value: Value) -> mlua::Result<Integrations> {
         let Value::Table(integration) = integration else {
             return Err(error("HTTP integration must be a table"));
         };
-        fields(&integration, &["url", "timeout_ms", "headers"])?;
+        fields(
+            &integration,
+            &["url", "timeout_ms", "headers", "headers_env"],
+        )?;
         let raw_url = string(integration.raw_get("url")?, "integration URL")?;
         if raw_url.len() > 4096 || raw_url.bytes().any(|byte| byte.is_ascii_whitespace()) {
             return Err(error("invalid integration URL"));
@@ -155,12 +246,15 @@ pub(super) fn parse(value: Value) -> mlua::Result<Integrations> {
                 ));
             }
         };
+        let headers = headers(integration.raw_get("headers")?)?;
+        let headers_env = headers_env(integration.raw_get("headers_env")?, &headers)?;
         result.insert(
             name,
             Integration {
                 url,
                 timeout: Duration::from_millis(timeout_ms),
-                headers: headers(integration.raw_get("headers")?)?,
+                headers,
+                headers_env,
             },
         );
     }
@@ -269,6 +363,11 @@ pub(super) fn install(
                 _ => return Err(error("HTTP request body must be a string")),
             };
             let mut request_headers = integration.headers.clone();
+            for (key, variable) in &integration.headers_env {
+                let value = resolve(variable, key)
+                    .map_err(|message| error(format!("HTTP integration {name}: {message}")))?;
+                request_headers.insert(key.clone(), value);
+            }
             request_headers.extend(headers(options.raw_get("headers")?)?);
             check_headers(&request_headers)?;
             let budget = deadline
@@ -483,6 +582,91 @@ mod tests {
         assert!(request.contains("authorization: Bearer token\r\n"));
         assert!(request.contains("x-test: test\r\n"));
         assert!(request.ends_with("request body"));
+    }
+
+    #[tokio::test]
+    async fn headers_env_reads_secrets_at_request_time_without_leaking_them() {
+        const SECRET: &str = "Bearer env-secret-value";
+        // SAFETY: unique variable names; no other test reads or writes them.
+        unsafe { std::env::set_var("RIFT_TEST_INTEGRATION_TOKEN", SECRET) };
+        unsafe { std::env::set_var("RIFT_TEST_INTEGRATION_BAD", "a\r\nb") };
+        let lua = Lua::new();
+        for expression in [
+            "{service={url='https://example.com',headers_env={Authorization='lower-case-ok-but-dash'}}}",
+            "{service={url='https://example.com',headers_env={Authorization='1TOKEN'}}}",
+            "{service={url='https://example.com',headers_env={Authorization=5}}}",
+            "{service={url='https://example.com',headers_env={Host='TOKEN'}}}",
+            "{service={url='https://example.com',headers_env='TOKEN'}}",
+            "{service={url='https://example.com',headers={Authorization='x'},headers_env={authorization='TOKEN'}}}",
+        ] {
+            assert!(config(&lua, expression).is_err(), "{expression}");
+        }
+        let settings = config(
+            &lua,
+            "{service={url='https://example.com',headers_env={Authorization='RIFT_TEST_INTEGRATION_TOKEN'}}}",
+        )
+        .unwrap();
+        assert!(!format!("{settings:?}").contains(SECRET));
+        assert_eq!(
+            environment(&settings),
+            [(
+                "extensions.integrations.service.headers_env.authorization".to_owned(),
+                "RIFT_TEST_INTEGRATION_TOKEN".to_owned()
+            )]
+        );
+        check_environment(&settings).unwrap();
+        for (variable, expected) in [
+            (
+                "RIFT_TEST_INTEGRATION_UNSET",
+                "set RIFT_TEST_INTEGRATION_UNSET",
+            ),
+            ("RIFT_TEST_INTEGRATION_BAD", "not a valid HTTP header value"),
+        ] {
+            let settings = config(
+                &lua,
+                &format!("{{service={{url='https://example.com',headers_env={{Authorization='{variable}'}}}}}}"),
+            )
+            .unwrap();
+            let message = check_environment(&settings).unwrap_err();
+            assert!(message.contains(expected), "{message}");
+            assert!(!message.contains("a\r\nb"));
+            let api = lua.create_table().unwrap();
+            install(
+                &lua,
+                &api,
+                &settings,
+                Instant::now() + Duration::from_secs(1),
+            )
+            .unwrap();
+            lua.globals().set("rift", api).unwrap();
+            let error = lua
+                .load("rift.http.request('service',{})")
+                .exec()
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{error}");
+        }
+
+        let (url, server) = serve(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+            Duration::ZERO,
+        )
+        .await;
+        tokio::task::spawn_blocking(move || {
+            let lua = Lua::new();
+            let settings = config(&lua, &format!("{{service={{url='{url}',headers_env={{Authorization='RIFT_TEST_INTEGRATION_TOKEN'}}}}}}")).unwrap();
+            let api = lua.create_table().unwrap();
+            install(&lua, &api, &settings, Instant::now() + Duration::from_secs(2)).unwrap();
+            lua.globals().set("rift", api).unwrap();
+            lua.load("assert(rift.http.request('service',{}).status == 200)").exec().unwrap();
+        })
+        .await
+        .unwrap();
+        let request = String::from_utf8(server.await.unwrap()).unwrap();
+        assert!(
+            request.contains(&format!("authorization: {SECRET}\r\n")),
+            "{request}"
+        );
     }
 
     #[tokio::test]

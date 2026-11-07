@@ -190,6 +190,69 @@ async fn echo_backpressure_does_not_block_the_opposite_direction() {
     .unwrap();
 }
 
+/// A compressed frame using one stored zlib block, which Rift's own encoder
+/// never produces for compressible data.
+fn stored_frame(packet: &Packet) -> Vec<u8> {
+    let body = packet.body().unwrap();
+    let (mut a, mut b) = (1u32, 0u32);
+    for &byte in &body {
+        a = (a + u32::from(byte)) % 65521;
+        b = (b + a) % 65521;
+    }
+    let mut frame = Vec::new();
+    write_varint(body.len() as i32, &mut frame);
+    frame.extend([0x78, 0x01, 1]);
+    frame.extend((body.len() as u16).to_le_bytes());
+    frame.extend((!(body.len() as u16)).to_le_bytes());
+    frame.extend(&body);
+    frame.extend((b << 16 | a).to_be_bytes());
+    let mut framed = Vec::new();
+    write_varint(frame.len() as i32, &mut framed);
+    framed.extend(frame);
+    framed
+}
+
+async fn read_exact_frame(stream: &mut DuplexStream, length: usize) -> Vec<u8> {
+    use tokio::io::AsyncReadExt;
+    let mut bytes = vec![0; length];
+    stream.read_exact(&mut bytes).await.unwrap();
+    bytes
+}
+
+#[tokio::test]
+async fn unchanged_packets_keep_their_compressed_frames_in_both_directions() {
+    timeout(Duration::from_secs(3), async {
+        let (mut session, mut client, mut backend) = session().await;
+        let compression = Packet::new(3, vec![0]);
+        Codec::default()
+            .write(&mut backend, &compression)
+            .await
+            .unwrap();
+        session.forward().await.unwrap();
+        assert_eq!(receive(&mut client, Codec::default()).await, compression);
+        let mut codec = Codec::default();
+        codec.set_compression(0);
+        play(&mut session, &mut client, &mut backend, codec).await;
+
+        let clientbound = stored_frame(&Packet::new(0x7f, vec![42; 2000]));
+        backend.write_all(&clientbound).await.unwrap();
+        session.forward().await.unwrap();
+        assert_eq!(
+            read_exact_frame(&mut client, clientbound.len()).await,
+            clientbound
+        );
+        let serverbound = stored_frame(&Packet::new(0x20, vec![7; 300]));
+        client.write_all(&serverbound).await.unwrap();
+        session.forward().await.unwrap();
+        assert_eq!(
+            read_exact_frame(&mut backend, serverbound.len()).await,
+            serverbound
+        );
+    })
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 async fn compressed_login_configuration_play_and_backend_loss_keep_client_owned() {
     timeout(Duration::from_secs(3), async {

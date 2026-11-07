@@ -21,12 +21,30 @@ from services_wire import api, available_range
 
 
 def child(port, name, delay):
+    Path("server.pid").write_text(str(os.getpid()))
     with closing(Backend(name, port, port=port)):
         for line in sys.stdin:
             if line.strip() == "stop":
                 Path("stop-requested.txt").write_text("stopping")
                 time.sleep(delay)
                 break
+
+
+def wrapper(port, name, delay):
+    """Like a start script: fork the real server and wait for it. The server
+    inherits stdin, so it receives Rift's stop command directly."""
+    server = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--child", str(port),
+        "--name", name, "--delay-stop", str(delay)])
+    sys.exit(server.wait())
+
+
+def exited(pid):
+    """Whether `pid` is gone or a zombie waiting for its new parent to reap it."""
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+    except (FileNotFoundError, ProcessLookupError):
+        return True
+    return state == "Z"
 
 
 def check(binary):
@@ -65,7 +83,7 @@ def check(binary):
                     scaling={{capacity_per_instance=10,min_instances=1,max_instances=4,cooldown_ms=500}}}},
                 survival={{command={{{argv}}},directory='worlds/{{name}}',template='seed',storage='persistent',
                     port_range={{{first},{first+4}}},autostart=true,start_timeout_ms=5000,stop_timeout_ms=1000}},
-                batch={{command={{{argv},'--delay-stop','10'}},directory='instances/{{name}}',template='slow',storage='disposable',
+                batch={{command={{{argv},'--delay-stop','10','--fork'}},directory='instances/{{name}}',template='slow',storage='disposable',
                     port_range={{{first},{first+4}}},start_timeout_ms=5000,stop_timeout_ms=15000}}
             }}
         }}"""
@@ -161,14 +179,20 @@ def check(binary):
             assert code == 202
             eventually(lambda: (directory / "instances/batch-2/stop-requested.txt").exists(), "child accepted slow stop")
             assert next(row for row in rows() if row[0] == "batch-2")[2] == "removing"
+            server_pid = int((directory / "instances/batch-2/server.pid").read_text())
+            assert server_pid != child_pid
             proxy.kill()
             proxy.wait(timeout=5)
         try:
-            # The old child still owns its port: cleanup must wait for it.
+            if sys.platform == "linux":
+                # PR_SET_PDEATHSIG: the kernel kills Rift's own child with Rift.
+                eventually(lambda: exited(child_pid), "direct child killed with Rift")
+            # The server the start script forked survives and still owns its
+            # port: cleanup must wait for it.
             failure("still in use during removal recovery")
             assert (directory / "instances/batch-2/server.jar").exists()
         finally:
-            os.kill(child_pid, signal.SIGTERM)
+            os.kill(server_pid, signal.SIGTERM)
         eventually(lambda: port_free(batch["port"]), "orphaned child reaped")
         with start("fourth.log") as proxy:
             ready(proxy, "fourth.log")
@@ -198,8 +222,11 @@ if __name__ == "__main__":
     parser.add_argument("--child", type=int)
     parser.add_argument("--name")
     parser.add_argument("--delay-stop", type=float, default=0)
+    parser.add_argument("--fork", action="store_true")
     args = parser.parse_args()
-    if args.child is not None:
+    if args.child is not None and args.fork:
+        wrapper(args.child, args.name, args.delay_stop)
+    elif args.child is not None:
         child(args.child, args.name, args.delay_stop)
     else:
         if not __debug__:

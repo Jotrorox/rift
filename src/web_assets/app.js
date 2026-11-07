@@ -390,7 +390,7 @@
   const softwareTypes = ["", "paper", "folia", "purpur", "vanilla", "fabric", "url"];
   const templateFields = [
     ["software.type", "Server software", softwareTypes], ["software.version", "Version (latest or a release such as 1.21.8)", "text"],
-    ["software.url", "Download URL (type url)", "text"], ["software.sha256", "SHA-256 (type url; optional)", "text"],
+    ["software.url", "Download URL (type url)", "text"], ["software.sha256", "SHA-256 (required for type url; pins an exact version otherwise)", "text"],
     ["server_jar", "Local server jar path (without software)", "text"], ["plugins", "Plugin paths (one per line)", "array"],
     ["configs", "Template folders, overlaid in order (one per line)", "array"], ["map", "Map directory (optional)", "text"],
     ["accept_eula", "Accept the Minecraft EULA for new instances", "boolean"],

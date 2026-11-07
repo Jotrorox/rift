@@ -571,6 +571,8 @@ rift.config.service_groups.lobby={{template='lobby',port_range={{25600,25609}}{g
             "software={type='url'}",
             "software={type='url',url='http://example.com/a.jar'}",
             "software={type='url',url='https://example.com/a.jar',sha256='abc'}",
+            "software={type='url',url='https://example.com/a.jar'}",
+            "software={type='purpur',sha256='abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789'}",
             "software={type='paper',unknown=true}",
             "software='paper'",
             "software={type='paper'},accept_eula='yes'",
