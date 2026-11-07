@@ -443,7 +443,9 @@ async fn boundary(State(app): State<App>, request: Request, next: Next) -> Respo
         ("cache-control", "no-store"),
         ("connection", "close"),
         ("x-content-type-options", "nosniff"),
-        ("referrer-policy", "no-referrer"),
+        // Not "no-referrer": browsers then send `Origin: null` on same-origin
+        // POST/PUT/DELETE, which admin_guard rejects as cross-origin.
+        ("referrer-policy", "same-origin"),
         (
             "content-security-policy",
             "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
