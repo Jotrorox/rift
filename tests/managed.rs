@@ -148,12 +148,9 @@ struct Fixture {
 
 /// A free loopback port for a helper, never handed out twice in this process.
 ///
-/// The port is checked with a connect, not a listener. On macOS a listener
-/// created here could be inherited by a helper that another test spawns at
-/// the same moment, which would then keep this port open and answer this
-/// test's readiness probes. Ports come from below the common ephemeral
-/// ranges (Linux starts at 32768; macOS and Windows at 49152), so outgoing
-/// connections never use them as source ports either.
+/// Ports come from below the common ephemeral ranges (Linux starts at 32768;
+/// macOS and Windows at 49152), so outgoing connections never use them as
+/// source ports.
 fn unique_address() -> SocketAddr {
     const PORTS: std::ops::Range<u16> = 20_000..32_000;
     static NEXT: std::sync::Mutex<Option<u16>> = std::sync::Mutex::new(None);
@@ -166,14 +163,31 @@ fn unique_address() -> SocketAddr {
         }
         let address = SocketAddr::from(([127, 0, 0, 1], port));
         port += 1;
-        let refused = std::net::TcpStream::connect_timeout(&address, Duration::from_millis(200))
-            .is_err_and(|error| error.kind() == std::io::ErrorKind::ConnectionRefused);
-        if refused {
+        if port_is_free(address) {
             *next = Some(port);
             return address;
         }
     }
     panic!("no free loopback port in {PORTS:?}");
+}
+
+/// On macOS a socket becomes close-on-exec only after it is created, so a
+/// listener made here could be inherited by a helper another test spawns at
+/// that moment, which would keep this port open and answer this test's
+/// readiness probes. Probe with a connect there instead: a listener accepts
+/// at once, and a free port is refused.
+#[cfg(target_os = "macos")]
+fn port_is_free(address: SocketAddr) -> bool {
+    std::net::TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_err()
+}
+
+/// Elsewhere sockets cannot leak into children, and only a real bind sees
+/// ports that refuse connections but cannot be bound, such as the ranges
+/// Windows reserves for Hyper-V. A closed port also is not refused promptly
+/// on Windows, so a connect probe would be slow there.
+#[cfg(not(target_os = "macos"))]
+fn port_is_free(address: SocketAddr) -> bool {
+    TcpListener::bind(address).is_ok()
 }
 
 impl Fixture {

@@ -555,7 +555,10 @@ def configuration(scenario, backend, init_iterations):
                           f"assert(#entries == {init_iterations})\n")
     hook = ""
     if scenario in ("lua", "lua_init"):
-        hook = 'on_route = function(connection) assert(connection.listener == "public"); return nil end,'
+        # The default connection rate limit for hook configurations would
+        # refuse these single-address bursts; this measures the hook itself.
+        hook = ('on_route = function(connection) assert(connection.listener == "public"); return nil end,'
+                ' rate_limit = false,')
     cache = "status_cache = { ttl_ms = 86400000 }," if scenario == "status_cached" else ""
     return initialization + f'''return {{
     listeners = {{ public = "127.0.0.1:0" }},
