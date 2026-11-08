@@ -48,6 +48,27 @@ jobs:
       - run: npm run build
         env:
           SITE_BASE: ${{ steps.pages.outputs.base_path || '/rift' }}/
+      # https://jotrorox.github.io/rift/maven: every release attaches its Gradle
+      # output as rift-maven-<version>.zip; unpacking them all and rebuilding the
+      # version lists means the repository needs no state outside the releases.
+      - name: Assemble the Maven repository from release assets
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/maven" dist/maven
+          gh release list --limit 1000 --json tagName --jq '.[].tagName' | while read -r tag; do
+            if gh release view "$tag" --json assets --jq '.assets[].name' | grep -q '^rift-maven-.*[.]zip$'; then
+              gh release download "$tag" --pattern 'rift-maven-*.zip' --dir "$RUNNER_TEMP/maven"
+            fi
+          done
+          for archive in "$RUNNER_TEMP"/maven/*.zip; do
+            if [ -e "$archive" ]; then
+              unzip -oq "$archive" -d dist/maven
+            fi
+          done
+          node maven.mjs dist/maven
       - if: github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
