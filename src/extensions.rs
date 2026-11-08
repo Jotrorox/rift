@@ -15,7 +15,7 @@ use tokio::sync::Semaphore;
 pub(crate) mod decisions;
 mod integrations;
 pub(crate) mod permissions;
-mod players;
+pub(crate) mod players;
 mod scheduler;
 pub(crate) mod storage;
 pub use players::{PlayerAction, PlayerHandle, Players};
@@ -68,7 +68,7 @@ const MAX_SUGGESTION_RESULTS: usize = 1024;
 fn invalid(message: impl ToString) -> io::Error {
     io::Error::other(message.to_string())
 }
-fn fields(table: &Table, allowed: &[&str]) -> mlua::Result<()> {
+pub(crate) fn fields(table: &Table, allowed: &[&str]) -> mlua::Result<()> {
     for pair in table.clone().pairs::<String, Value>() {
         let (key, _) = pair?;
         if !allowed.contains(&key.as_str()) {
@@ -79,7 +79,7 @@ fn fields(table: &Table, allowed: &[&str]) -> mlua::Result<()> {
     }
     Ok(())
 }
-fn token(value: &str) -> bool {
+pub(crate) fn token(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
         && value.bytes().all(|b| {
@@ -431,7 +431,7 @@ pub enum Action {
     Queue(String),
     LeaveQueue,
 }
-fn parse_action(hook: &str, value: Value) -> mlua::Result<Action> {
+pub(crate) fn parse_action(hook: &str, value: Value) -> mlua::Result<Action> {
     if value.is_nil() {
         return Ok(Action::Continue);
     }
@@ -480,7 +480,7 @@ fn parse_action(hook: &str, value: Value) -> mlua::Result<Action> {
 }
 
 /// A `suggest` result: an array of strings or `{ text = ..., tooltip = ... }`.
-fn parse_suggestions(_hook: &str, value: Value) -> mlua::Result<Vec<Suggestion>> {
+pub(crate) fn parse_suggestions(_hook: &str, value: Value) -> mlua::Result<Vec<Suggestion>> {
     let wrong = || {
         mlua::Error::runtime(
             "suggest must return an array of strings or { text = ..., tooltip = ... } tables",

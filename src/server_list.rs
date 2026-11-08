@@ -587,7 +587,7 @@ impl StatusScript {
     }
 }
 
-fn status_override(value: Value) -> Result<Option<StatusOverride>, String> {
+pub(crate) fn status_override(value: Value) -> Result<Option<StatusOverride>, String> {
     let table = match value {
         Value::Nil => return Ok(None),
         Value::Table(table) => table,
