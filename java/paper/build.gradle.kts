@@ -12,6 +12,7 @@ dependencies {
     compileOnly(libs.vault.api) { isTransitive = false }
     compileOnly(libs.placeholderapi) { isTransitive = false }
 
+    testImplementation(project(":rift-permissions-test"))
     testImplementation(libs.paper.api)
     testImplementation(libs.mockbukkit)
 }
