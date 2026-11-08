@@ -364,6 +364,10 @@ fn router(kind: Kind, address: SocketAddr, mut app: App) -> Router {
             .route("/api/servers/{name}/console", post(server_console))
             .route("/api/groups", get(service_groups))
             .route("/api/nodes", get(nodes))
+            .route("/api/plugins", get(plugin_list))
+            .route("/api/plugins/{name}", get(plugin_status))
+            .route("/api/plugins/{name}/logs", get(plugin_logs))
+            .route("/api/plugins/{name}/restart", post(restart_plugin))
             .route("/api/definitions", get(definitions))
             .route("/api/definitions/{section}", put(edit_setting))
             .route("/api/permissions", get(permission_groups))
@@ -640,7 +644,8 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
                 ["api", "access"] | ["api"] => "",
                 ["api", "files", ..] => "files",
                 ["api", "templates", _, "download"] | ["api", "software", ..] => "servers",
-                ["api", "servers", _, "logs"] => "logs",
+                ["api", "servers", _, "logs"] | ["api", "plugins", _, "logs"] => "logs",
+                ["api", "plugins", _, "restart"] => "plugins",
                 ["api", "servers", _, "console"] => "console",
                 ["api", "servers", _, _]
                 | ["api", "groups", _, "instances"]
@@ -718,6 +723,18 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
                     },
                 )
             }
+            // Plugins act on the whole proxy: group-scoped operators see none.
+            ["api", "plugins", rest @ ..] => {
+                let name = rest
+                    .first()
+                    .and_then(|name| decode_name(name))
+                    .unwrap_or_default();
+                let known = snapshot.config.plugins.iter().any(|spec| spec.name == name);
+                (
+                    access.groups.is_none(),
+                    if known { name } else { String::new() },
+                )
+            }
             ["api", "groups", name, ..] => {
                 let name = decode_name(name).unwrap_or_default();
                 (
@@ -753,6 +770,7 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
             ["api", "config"] => "configuration",
             ["api", "config", "validate"] => "validate",
             ["api", "reload"] => "reload",
+            ["api", "plugins", _, "restart"] => "restart_plugin",
             _ => permission,
         };
         let action = format!("{} {}", request.method(), operation);
@@ -1562,6 +1580,70 @@ fn server_operation(
         ),
     }
 }
+/// Every plugin in dispatch order with its state, restarts and calls.
+async fn plugin_list(State(app): State<App>) -> Json<Value> {
+    Json(json!({"plugins": app.snapshot().extensions.plugins().statuses()}))
+}
+async fn plugin_status(State(app): State<App>, Path(name): Path<String>) -> Response {
+    match app
+        .snapshot()
+        .extensions
+        .plugins()
+        .statuses()
+        .into_iter()
+        .find(|status| status.name == name)
+    {
+        Some(status) => Json(json!(status)).into_response(),
+        None => error(StatusCode::NOT_FOUND, format!("no plugin named {name:?}")),
+    }
+}
+/// The plugin's last log lines: its own log calls, captured output and
+/// lifecycle changes, oldest first.
+async fn plugin_logs(State(app): State<App>, Path(name): Path<String>) -> Response {
+    match app.snapshot().extensions.plugins().monitor().logs(&name) {
+        Some(lines) => Json(json!({"plugin": name, "lines": lines})).into_response(),
+        None => error(
+            StatusCode::NOT_FOUND,
+            format!("no persistent plugin named {name:?}"),
+        ),
+    }
+}
+async fn restart_plugin(
+    State(app): State<App>,
+    Extension(access): Extension<Access>,
+    Path(name): Path<String>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    if let Err(error) = payload(body, &[]) {
+        return error.into_response();
+    }
+    match app
+        .snapshot()
+        .extensions
+        .plugins()
+        .restart(&name, &access.name)
+    {
+        Ok(stopping) => {
+            tokio::spawn(stopping);
+            (
+                StatusCode::ACCEPTED,
+                Json(json!({
+                    "plugin":name,"operation":"restart","accepted":true,
+                    "message":"Restart accepted; poll /api/plugins for completion",
+                })),
+            )
+                .into_response()
+        }
+        Err(failure) => error(
+            match failure.kind() {
+                io::ErrorKind::NotFound => StatusCode::NOT_FOUND,
+                io::ErrorKind::Unsupported => StatusCode::CONFLICT,
+                _ => StatusCode::SERVICE_UNAVAILABLE,
+            },
+            failure,
+        ),
+    }
+}
 async fn public_status(State(app): State<App>) -> Json<Value> {
     Json(app.status(false))
 }
@@ -1589,7 +1671,7 @@ async fn standalone_metrics(state: State<App>) -> Response {
 }
 async fn discovery() -> Json<Value> {
     Json(
-        json!({"version":1,"endpoints":["GET /api/access","GET /api/status","GET /api/servers","POST /api/servers/{name}/start","POST /api/servers/{name}/stop","GET /api/servers/{name}/logs","POST /api/servers/{name}/console","GET /api/groups","GET /api/nodes","POST /api/groups/{name}/instances","GET /api/templates","POST /api/templates/{name}/download","GET /api/software/{type}/versions","GET|PUT|DELETE /api/files/templates/{path}","GET|PUT|DELETE /api/files/servers/{name}/{path}","DELETE /api/instances/{name}","GET /api/definitions","PUT /api/definitions/{section}/{name}","PUT /api/definitions/{section}","GET /api/permissions","POST /api/permissions/members/{uuid}/{group}","DELETE /api/permissions/members/{uuid}/{group}","GET /api/deployments","POST /api/deployments/{id}/rollback","GET /api/audit","GET /api/operations/{id}","GET /api/metrics","GET /api/config","POST /api/config/validate","PUT /api/config","POST /api/reload"],"extensions":"/ext/* -> on_http(request)","source_limit_bytes":control::MAX_SOURCE}),
+        json!({"version":1,"endpoints":["GET /api/access","GET /api/status","GET /api/servers","POST /api/servers/{name}/start","POST /api/servers/{name}/stop","GET /api/servers/{name}/logs","POST /api/servers/{name}/console","GET /api/groups","GET /api/nodes","GET /api/plugins","GET /api/plugins/{name}","GET /api/plugins/{name}/logs","POST /api/plugins/{name}/restart","POST /api/groups/{name}/instances","GET /api/templates","POST /api/templates/{name}/download","GET /api/software/{type}/versions","GET|PUT|DELETE /api/files/templates/{path}","GET|PUT|DELETE /api/files/servers/{name}/{path}","DELETE /api/instances/{name}","GET /api/definitions","PUT /api/definitions/{section}/{name}","PUT /api/definitions/{section}","GET /api/permissions","POST /api/permissions/members/{uuid}/{group}","DELETE /api/permissions/members/{uuid}/{group}","GET /api/deployments","POST /api/deployments/{id}/rollback","GET /api/audit","GET /api/operations/{id}","GET /api/metrics","GET /api/config","POST /api/config/validate","PUT /api/config","POST /api/reload"],"extensions":"/ext/* -> on_http(request)","source_limit_bytes":control::MAX_SOURCE}),
     )
 }
 async fn config_source(State(app): State<App>) -> Json<Value> {

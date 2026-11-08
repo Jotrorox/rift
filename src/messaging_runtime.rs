@@ -195,7 +195,7 @@ impl Controls {
                 let result = match args {
                     Ok(args) => timeout(
                         deadline,
-                        admin::execute(&args, snapshot, &metrics, &commands),
+                        admin::execute(&args, snapshot, &metrics, &commands, CONTROL_ACTOR),
                     )
                     .await
                     .unwrap_or_else(|_| {
@@ -231,6 +231,10 @@ impl Controls {
 }
 
 const CONTROL_DEADLINE: Duration = Duration::from_secs(40);
+/// Who `rift.control.*` requests act as in plugin logs and the audit log.
+/// Bus authorization is per principal (`control` and publish grants); the
+/// in-process broker carries no principal identity.
+const CONTROL_ACTOR: &str = "messaging";
 /// Subjects answered from their own task rather than the serialized loop.
 const LONG_RUNNING: &[&str] = &["create", "remove", "download"];
 
@@ -280,6 +284,7 @@ fn arguments(message: &Message) -> Result<Vec<String>, String> {
         "create" => &["group"],
         "remove" | "start" | "stop" => &["name"],
         "download" => &["template", "refresh"],
+        "plugins" => &["action", "name"],
         _ => return Err("unknown control subject".into()),
     };
     if object.keys().any(|key| !fields.contains(&key.as_str())) {
@@ -317,6 +322,18 @@ fn arguments(message: &Message) -> Result<Vec<String>, String> {
                 None | Some(Value::Bool(false)) => {}
                 Some(Value::Bool(true)) => args.push("refresh".into()),
                 Some(_) => return Err("refresh must be a boolean".into()),
+            }
+        }
+        "plugins" => {
+            let action = value["action"]
+                .as_str()
+                .filter(|action| ["list", "status", "logs", "restart"].contains(action))
+                .ok_or("action must be list, status, logs or restart")?;
+            args.push(action.to_owned());
+            match (action, value.get("name")) {
+                ("list", None) => {}
+                ("list", Some(_)) => return Err("list takes no name".into()),
+                (_, _) => args.push(name("name")?),
             }
         }
         "maintenance" => args.push(enabled()?),
@@ -395,6 +412,16 @@ mod tests {
             ("rift.control.nodes", "{}", &["nodes"]),
             ("rift.control.templates", "{}", &["templates"]),
             (
+                "rift.control.plugins",
+                r#"{"action":"list"}"#,
+                &["plugins", "list"],
+            ),
+            (
+                "rift.control.plugins",
+                r#"{"action":"restart","name":"hello-lua"}"#,
+                &["plugins", "restart", "hello-lua"],
+            ),
+            (
                 "rift.control.download",
                 r#"{"template":"paper"}"#,
                 &["download", "paper"],
@@ -416,6 +443,11 @@ mod tests {
                 r#"{"template":"paper","refresh":"yes"}"#,
             ),
             ("rift.control.status", r#"{"unexpected":1}"#),
+            ("rift.control.plugins", "{}"),
+            ("rift.control.plugins", r#"{"action":"stop","name":"a"}"#),
+            ("rift.control.plugins", r#"{"action":"restart"}"#),
+            ("rift.control.plugins", r#"{"action":"list","name":"a"}"#),
+            ("rift.control.plugins", r#"{"action":"status","name":""}"#),
             ("rift.control.maintenance", r#"{"enabled":"true"}"#),
             (
                 "rift.control.transfer",
@@ -468,6 +500,29 @@ mod tests {
             serde_json::from_slice::<Value>(&reply.payload).unwrap()["data"]["maintenance"],
             true
         );
+        for (payload, expected) in [
+            (
+                &br#"{"action":"list"}"#[..],
+                json!({"ok":true,"data":{"plugins":[]}}),
+            ),
+            (
+                br#"{"action":"restart","name":"ghost"}"#,
+                json!({"ok":false,"error":"no persistent plugin named \"ghost\" is running"}),
+            ),
+        ] {
+            let reply = broker
+                .request(
+                    "rift.control.plugins",
+                    Bytes::copy_from_slice(payload),
+                    Duration::from_secs(1),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                serde_json::from_slice::<Value>(&reply.payload).unwrap(),
+                expected
+            );
+        }
         task.abort();
         let _ = task.await;
     }
