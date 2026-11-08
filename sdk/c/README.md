@@ -125,6 +125,6 @@ export. A plugin built with wasi-sdk still satisfies world `plugin`: wasi-libc
 carries its own WASI bindings, so the component imports exactly the WASI
 interfaces libc uses (at the 0.2 patch version wasi-sdk targets; hosts link
 WASI 0.2 semver-compatibly). Generating world `plugin` instead would duplicate
-every WASI binding, and with wit-bindgen 0.41 through 0.63 its `*_free`
-helpers silently skip `option<string>`, `list<string>` and `list<u8>` fields
+every WASI binding, and wit-bindgen (seen with 0.41 and 0.63) emits `*_free`
+helpers that silently skip `option<string>`, `list<string>` and `list<u8>` fields
 whose types are shared with WASI, which leaks memory on every hook.
