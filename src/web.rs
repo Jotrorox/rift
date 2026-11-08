@@ -407,6 +407,12 @@ fn router(kind: Kind, address: SocketAddr, mut app: App) -> Router {
             .route("/api/reload", post(reload))
             .route("/ext", any(extension))
             .route("/ext/{*path}", any(extension))
+            .merge(
+                rift::permissions::http::router().layer(middleware::from_fn_with_state(
+                    app.clone(),
+                    permission_caller,
+                )),
+            )
             .layer(middleware::from_fn_with_state(app.clone(), admin_guard)),
         Kind::Status => Router::new()
             .route("/", get(status_html))
@@ -631,8 +637,10 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
             }
         }
         let segments: Vec<_> = path.trim_start_matches('/').split('/').collect();
+        // A trace only reads, although it is a POST.
         let mutation = request.method() != axum::http::Method::GET
-            && request.method() != axum::http::Method::HEAD;
+            && request.method() != axum::http::Method::HEAD
+            && segments != ["api", "perms", "trace"];
         let permission = if extension {
             "extensions"
         } else {
@@ -646,8 +654,11 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
                 | ["api", "groups", _, "instances"]
                 | ["api", "instances", _]
                 | ["api", "operations", _] => "servers",
+                // Permission data: `perms` (or `config`) reads, `config` writes.
+                ["api", "perms", ..] | ["api", "permissions", ..] if !mutation => "perms",
                 ["api", "definitions", ..]
                 | ["api", "permissions", ..]
+                | ["api", "perms", ..]
                 | ["api", "config", ..]
                 | ["api", "reload"] => "config",
                 ["api", "deployments", ..] => "deploy",
@@ -668,6 +679,20 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
                 .take(128)
                 .collect(),
             ),
+            // Users, groups and tracks; validated by the handlers.
+            [
+                "api",
+                "perms",
+                "users" | "groups" | "tracks",
+                name,
+                rest @ ..,
+            ] => {
+                let mut target = decode_name(name).unwrap_or_default();
+                if let ["nodes", id] = rest {
+                    target = format!("{target}/{}", decode_name(id).unwrap_or_default());
+                }
+                (true, target.chars().take(128).collect())
+            }
             // Template folders are shared by every group.
             ["api", "files", "templates", rest @ ..] => (
                 access.groups.is_none(),
@@ -734,7 +759,11 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
         let authorized = if access.allows(NODE_PERMISSION) && access.permissions.is_some() {
             !mutation && matches!(segments.as_slice(), ["api", "files", "templates", ..])
         } else {
-            (permission.is_empty() || access.allows(permission)) && in_scope
+            // `config` already exposes everything `perms` can read.
+            let granted = permission.is_empty()
+                || access.allows(permission)
+                || (permission == "perms" && access.allows("config"));
+            granted && in_scope
         };
         let operation = match segments.as_slice() {
             ["api", "servers", _, "start"] => "start",
@@ -749,6 +778,17 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
             ["api", "definitions", "tab_list"] => "edit_tab_list",
             ["api", "definitions", "server_list"] => "edit_server_list",
             ["api", "permissions", "members", _, _] => "group_membership",
+            ["api", "perms", "users", _] => "perms_user",
+            ["api", "perms", "users", _, "nodes", ..] => "perms_user_nodes",
+            ["api", "perms", "groups"] => "perms_create_group",
+            ["api", "perms", "groups", _] => "perms_group",
+            ["api", "perms", "groups", _, "nodes", ..] => "perms_group_nodes",
+            ["api", "perms", "tracks", _] => "perms_track",
+            ["api", "perms", "tracks", _, "promote"] => "perms_promote",
+            ["api", "perms", "tracks", _, "demote"] => "perms_demote",
+            ["api", "perms", "apply"] => "perms_apply",
+            ["api", "perms", "bulk"] => "perms_bulk",
+            ["api", "perms", "import"] => "perms_import",
             ["api", "deployments", _, "rollback"] => "rollback",
             ["api", "config"] => "configuration",
             ["api", "config", "validate"] => "validate",
@@ -791,6 +831,22 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
         return response;
     }
     drop(snapshot);
+    next.run(request).await
+}
+/// Give the `/api/perms` handlers the authority and the operator that
+/// `admin_guard` authenticated.
+async fn permission_caller(State(app): State<App>, mut request: Request, next: Next) -> Response {
+    let Some(operator) = request
+        .extensions()
+        .get::<Access>()
+        .map(|access| access.name.clone())
+    else {
+        return error(StatusCode::UNAUTHORIZED, "a valid bearer token is required");
+    };
+    let authority = app.snapshot().extensions.permissions().clone();
+    request
+        .extensions_mut()
+        .insert(rift::permissions::http::Caller::new(authority, &operator));
     next.run(request).await
 }
 /// The only grant of a node agent's token: reading template files.
@@ -1622,7 +1678,7 @@ async fn standalone_metrics(state: State<App>) -> Response {
 }
 async fn discovery() -> Json<Value> {
     Json(
-        json!({"version":1,"endpoints":["GET /api/access","GET /api/status","GET /api/servers","POST /api/servers/{name}/start","POST /api/servers/{name}/stop","GET /api/servers/{name}/logs","POST /api/servers/{name}/console","GET /api/groups","GET /api/nodes","POST /api/groups/{name}/instances","GET /api/templates","POST /api/templates/{name}/download","GET /api/software/{type}/versions","GET|PUT|DELETE /api/files/templates/{path}","GET|PUT|DELETE /api/files/servers/{name}/{path}","DELETE /api/instances/{name}","GET /api/definitions","PUT /api/definitions/{section}/{name}","PUT /api/definitions/{section}","GET /api/permissions","POST /api/permissions/members/{uuid}/{group}","DELETE /api/permissions/members/{uuid}/{group}","GET /api/deployments","POST /api/deployments/{id}/rollback","GET /api/audit","GET /api/operations/{id}","GET /api/metrics","GET /api/config","POST /api/config/validate","PUT /api/config","POST /api/reload"],"extensions":"/ext/* -> on_http(request)","source_limit_bytes":control::MAX_SOURCE}),
+        json!({"version":1,"endpoints":["GET /api/access","GET /api/status","GET /api/servers","POST /api/servers/{name}/start","POST /api/servers/{name}/stop","GET /api/servers/{name}/logs","POST /api/servers/{name}/console","GET /api/groups","GET /api/nodes","POST /api/groups/{name}/instances","GET /api/templates","POST /api/templates/{name}/download","GET /api/software/{type}/versions","GET|PUT|DELETE /api/files/templates/{path}","GET|PUT|DELETE /api/files/servers/{name}/{path}","DELETE /api/instances/{name}","GET /api/definitions","PUT /api/definitions/{section}/{name}","PUT /api/definitions/{section}","GET /api/permissions","POST /api/permissions/members/{uuid}/{group}","DELETE /api/permissions/members/{uuid}/{group}","GET /api/perms/revision","GET /api/perms/backends","GET /api/perms/registered","GET /api/perms/search","GET /api/perms/users","GET|PATCH /api/perms/users/{user}","GET|PUT|DELETE /api/perms/users/{user}/nodes","PUT|DELETE /api/perms/users/{user}/nodes/{id}","GET /api/perms/users/{user}/compiled","GET|POST /api/perms/groups","GET|PATCH|DELETE /api/perms/groups/{name}","GET|PUT|DELETE /api/perms/groups/{name}/nodes","PUT|DELETE /api/perms/groups/{name}/nodes/{id}","GET /api/perms/tracks","GET|PUT|DELETE /api/perms/tracks/{name}","POST /api/perms/tracks/{name}/promote","POST /api/perms/tracks/{name}/demote","GET /api/perms/audit","POST /api/perms/trace","POST /api/perms/apply","POST /api/perms/bulk","POST /api/perms/import","GET /api/perms/export","GET /api/deployments","POST /api/deployments/{id}/rollback","GET /api/audit","GET /api/operations/{id}","GET /api/metrics","GET /api/config","POST /api/config/validate","PUT /api/config","POST /api/reload"],"extensions":"/ext/* -> on_http(request)","source_limit_bytes":control::MAX_SOURCE}),
     )
 }
 async fn config_source(State(app): State<App>) -> Json<Value> {

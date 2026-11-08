@@ -19,6 +19,7 @@
 //! first use and maintained while it exists.
 use super::{
     PermError, audit,
+    http::{BackendDirectory, BackendStatus, NoBackends},
     store::{self, Effects, Work},
 };
 use crate::{config::PermissionsConfig, database::Database};
@@ -94,6 +95,16 @@ pub struct Holder {
 pub struct Member {
     pub uuid: Uuid,
     pub name: Option<String>,
+    pub groups: Vec<String>,
+}
+
+/// A user in a listing: the online or last-seen name and the groups of their
+/// global, positive, unexpired `inherit` nodes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UserSummary {
+    pub uuid: Uuid,
+    pub name: Option<String>,
+    pub online: bool,
     pub groups: Vec<String>,
 }
 
@@ -212,6 +223,8 @@ pub struct Authority {
     state: RwLock<State>,
     config: RwLock<PermissionsConfig>,
     notifications: broadcast::Sender<Notification>,
+    /// What `GET /api/perms/backends` reports; the bus layer installs it.
+    backends: RwLock<Arc<dyn BackendDirectory>>,
 }
 
 impl Authority {
@@ -244,6 +257,7 @@ impl Authority {
             }),
             config: RwLock::new(config.clone()),
             notifications: broadcast::channel(NOTIFICATIONS).0,
+            backends: RwLock::new(Arc::new(NoBackends)),
         })
     }
 
@@ -449,6 +463,115 @@ impl Authority {
             }
         }
         Ok((members, false))
+    }
+
+    /// Users with a row in the store (everyone who joined or was written),
+    /// sorted by name and then UUID, at most `limit` (capped at 1000); `true`
+    /// when more match. `query` matches part of the last-seen name or the
+    /// start of the UUID (dashes ignored); `group` keeps users holding a
+    /// positive, unexpired `inherit` node for it in any context. Everyone is
+    /// in `default`, so that group filters nothing.
+    pub fn users(
+        &self,
+        query: &str,
+        group: Option<&str>,
+        limit: usize,
+    ) -> Result<(Vec<UserSummary>, bool), PermError> {
+        let limit = limit.clamp(1, MAX_RESULTS);
+        let escape = |text: &str| {
+            text.chars().fold(String::new(), |mut out, c| {
+                if matches!(c, '%' | '_' | '\\') {
+                    out.push('\\');
+                }
+                out.push(c);
+                out
+            })
+        };
+        let query = query.trim();
+        let name = format!("%{}%", escape(query));
+        let uuid = format!("{}%", escape(&query.replace('-', "").to_ascii_lowercase()));
+        let group = group
+            .map(|group| group.trim().to_ascii_lowercase())
+            .filter(|group| !group.is_empty() && group != DEFAULT_GROUP);
+        let now = store::sql_time(unix_now());
+        let online: HashMap<Uuid, String> = self
+            .state()
+            .online
+            .iter()
+            .map(|(uuid, online)| (*uuid, online.name.clone()))
+            .collect();
+        let connection = self.database.lock();
+        let mut statement = connection.prepare(
+            "SELECT s.id, s.key, s.last_name FROM perm_subject s
+             WHERE s.kind = 0
+               AND (?1 = '' OR s.last_name LIKE ?2 ESCAPE '\\' OR s.key LIKE ?3 ESCAPE '\\')
+               AND (?4 IS NULL OR EXISTS (SELECT 1 FROM perm_node n WHERE n.subject_id = s.id
+                    AND n.kind = 1 AND n.key = ?4 AND n.value = 'true'
+                    AND (n.expires_at IS NULL OR n.expires_at > ?5)))
+             ORDER BY s.last_name IS NULL, s.last_name COLLATE NOCASE, s.key
+             LIMIT ?6",
+        )?;
+        let rows = statement
+            .query_map(
+                params![query, name, uuid, group, now, (limit + 1) as i64],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        let truncated = rows.len() > limit;
+        let mut groups = connection.prepare(
+            "SELECT key FROM perm_node WHERE subject_id = ?1 AND kind = 1 AND value = 'true'
+             AND contexts = '' AND (expires_at IS NULL OR expires_at > ?2) ORDER BY id",
+        )?;
+        let mut users = Vec::with_capacity(rows.len().min(limit));
+        for (id, key, last_name) in rows.into_iter().take(limit) {
+            let uuid = Uuid::parse(&key)?;
+            let names = groups
+                .query_map(params![id, now], |r| r.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            let current = online.get(&uuid);
+            users.push(UserSummary {
+                uuid,
+                name: current.cloned().or(last_name),
+                online: current.is_some(),
+                groups: names,
+            });
+        }
+        Ok((users, truncated))
+    }
+
+    /// The online or last-seen name of a user, if known.
+    pub fn user_name(&self, uuid: Uuid) -> Result<Option<String>, PermError> {
+        if let Some(online) = self.state().online.get(&uuid) {
+            return Ok(Some(online.name.clone()));
+        }
+        Ok(self.user(uuid)?.last_name)
+    }
+
+    /// Whether the user has at least one session on the proxy.
+    pub fn is_online(&self, uuid: Uuid) -> bool {
+        self.state().online.contains_key(&uuid)
+    }
+
+    /// Install what `GET /api/perms/backends` reports. The bus layer calls
+    /// this once it tracks connected backends; until then the list is empty.
+    pub fn set_backends(&self, directory: Arc<dyn BackendDirectory>) {
+        *self.backends.write().unwrap_or_else(|e| e.into_inner()) = directory;
+    }
+
+    /// Every backend the bus layer knows, with its replica revision.
+    pub fn backends(&self) -> Vec<BackendStatus> {
+        let directory = self
+            .backends
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        directory.backends()
     }
 
     /// Who holds nodes matching `filter`, in insertion order, at most `limit`

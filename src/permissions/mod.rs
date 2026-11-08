@@ -1,8 +1,9 @@
 //! The proxy's permission authority: the SQLite store in the shared database
 //! ([`store`]), compile cache, revisions and change fan-out ([`authority`]),
 //! the change log ([`audit`]), LuckPerms import and export ([`import`]), the
-//! Lua `rift.permissions` module ([`lua`]) and the replication contract a
-//! follower proxy will implement ([`follower`]).
+//! Lua `rift.permissions` module ([`lua`]), the `/api/perms` HTTP routes
+//! ([`http`]) and the replication contract a follower proxy will implement
+//! ([`follower`]).
 //!
 //! The model, the resolver and the wire types live in the `rift-permissions`
 //! crate so backends resolve exactly as the proxy does; nothing here walks
@@ -11,12 +12,14 @@
 mod audit;
 mod authority;
 pub mod follower;
+pub mod http;
 mod import;
 pub(crate) mod lua;
 mod store;
 
 pub use audit::LogQuery;
-pub use authority::{Authority, Bulk, Holder, Member, Notification, Registered};
+pub use authority::{Authority, Bulk, Holder, Member, Notification, Registered, UserSummary};
+pub use http::{BackendDirectory, BackendStatus};
 pub use import::{ImportReport, read_export, write_export};
 
 use rift_permissions::wire::ErrorCode;

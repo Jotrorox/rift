@@ -587,51 +587,194 @@ async function testWebAssets(appSource, statusSource) {
     assert(bodies[0].header === "Hi {player}" && bodies[0].players === "network" && !("footer" in bodies[0]), "Tab list fields incorrect");
     assert(bodies[1] === null, "Disabled tab list was not removed");
   });
-  await test("permission groups render, save typed nodes and manage encoded memberships", async () => {
-    const h = fixture(appSource);
-    h.model.definitions.permission_groups = { default: { inherits: [], permissions: { "chat.send": true } }, staff: { inherits: ["default"], weight: 10, prefix: "&c", permissions: { "network.*": true, "network.ban": false } } };
-    h.model.intercept = (path) => path === "/api/permissions" ? h.response({ enabled: true, truncated: false, members: [{ uuid: "0123456789abcdef0123456789abcdef", name: "<Alice>", groups: ["staff"] }] }) : null;
-    await flush();
-    assert(h.element("permission-groups-panel").className.includes("hidden") === false, "Groups panel hidden with v2 extensions");
-    assert(h.element("permissions-unavailable").className.includes("hidden"), "Unavailable notice shown with v2 extensions");
-    const rows = h.element("permission-groups").children;
-    assert(rows[1].children[2].textContent === "1 granted · 1 denied" && rows[1].children[3].textContent === "1", "Group summary incorrect");
-    assert(h.element("permission-members").children[0].children[0].textContent === "<Alice>", "Member name not rendered safely");
-    assert(h.element("permission-member-group").children.every((option) => option.value !== "default"), "Default group offered for membership");
-    await rows[1].children[4].children[0].emit("click");
-    assert(h.element("permission-group-nodes").value === "network.*\n-network.ban", "Nodes not rendered with denials");
-    h.element("permission-group-nodes").value = "network.*\n- network.ban\n*"; await h.element("permission-group-form").emit("input");
+  const PLAYER = "0123456789abcdef0123456789abcdef";
+  // A small /api/perms model; `calls` records every write with its parsed body.
+  function permsModel(h, overrides = {}) {
     const calls = [];
-    h.model.intercept = (path, options) => {
-      if (options.method && options.method !== "GET") { calls.push({ path, method: options.method, body: JSON.parse(options.body) }); return h.response(options.method === "PUT" ? { revision: "rev-1" } : { changed: true }); }
-      return path === "/api/permissions" ? h.response({ enabled: true, members: [] }) : null;
+    const data = {
+      groups: [
+        { name: "staff", weight: 50, parents: [{ kind: "inherit", group: "vip", value: true }], nodes: 2, tracks: [] },
+        { name: "default", weight: 0, parents: [], nodes: 1, tracks: ["ranks"] },
+        { name: "<b>x</b>", weight: 5, parents: [], nodes: 0, tracks: [] },
+        { name: "vip", weight: 10, display_name: "VIP", parents: [{ kind: "inherit", group: "default", value: true }], nodes: 3, tracks: ["ranks"] },
+      ],
+      tracks: [{ name: "ranks", groups: ["default", "vip"] }],
+      vip: { name: "vip", weight: 10, display_name: "VIP", tracks: ["ranks"], revision: 4, nodes: [
+        { id: "weight:weight", node: { kind: "weight", weight: 10 } },
+        { id: "permission:kit.vip", node: { kind: "permission", key: "kit.vip", value: true } },
+        { id: "prefix:100@server=survival", node: { kind: "prefix", priority: 100, text: "&6", contexts: { server: "survival" }, source: "config" } },
+      ] },
+      user: { uuid: PLAYER, name: "<Alice>", online: true, primary_group: null, effective_primary_group: "vip", tracks: ["ranks"], contexts: { server: "lobby" }, revision: 4,
+        nodes: [{ id: "inherit:vip", node: { kind: "inherit", group: "vip", value: true } }] },
+      compiled: { subject: { revision: 7, uuid: PLAYER, primary_group: "vip", entries: [{ k: "group", key: "vip", v: true, ctx: {}, rank: 1 }, { k: "perm", key: "kit.vip", v: true, ctx: {}, rank: 1 }], prefix: [{ p: 100, t: "&6", ctx: {}, rank: 1 }], suffix: [], meta: [] },
+        contexts: { server: "survival" }, contexts_from: "request", meta: { prefix: "&6", suffix: null, meta: { homes: "5" }, primary_group: "vip" }, groups: ["vip", "default"] },
+      ...overrides,
     };
-    await h.element("permission-group-form").emit("submit"); await flush();
-    assert(calls[0].path === "/api/definitions/permission_groups/staff" && calls[0].body.definition.permissions["network.ban"] === false
-      && calls[0].body.definition.permissions["*"] === true && calls[0].body.definition.inherits[0] === "default", "Group definition incorrect");
-    assert(calls[0].body.definition.weight === 10 && calls[0].body.definition.prefix === "&c", "Fields the form does not edit were dropped");
-    h.element("permission-member-player").value = "01234567-89AB-CDEF-0123-456789ABCDEF";
-    await h.element("permission-member-form").emit("submit"); await flush();
-    assert(calls[1].path === "/api/permissions/members/0123456789abcdef0123456789abcdef/staff" && calls[1].method === "POST", "Membership UUID was not normalized");
-    h.element("permission-group-nodes").value = "Bad Node"; await h.element("permission-group-form").emit("input");
-    await h.element("permission-group-form").emit("submit"); await flush();
-    assert(calls.length === 2 && h.element("permission-group-result").textContent.includes("Bad Node"), "Invalid node reached the API");
+    h.model.intercept = (path, options) => {
+      if (!path.startsWith("/api/perms/")) return null;
+      const method = options.method || "GET";
+      if (method !== "GET" && path !== "/api/perms/trace") {
+        calls.push({ path, method, body: JSON.parse(options.body) });
+        return h.response(method === "POST" && path === "/api/perms/groups" ? { name: "mod", revision: 5, ops: 1 } : { revision: 5, ops: 1, changed_users: [], changed_groups: [] });
+      }
+      if (path === "/api/perms/trace") { calls.push({ path, method, body: JSON.parse(options.body) }); return h.response(data.trace); }
+      if (path === "/api/perms/groups") return h.response({ revision: 4, groups: data.groups });
+      if (path === "/api/perms/tracks") return h.response({ revision: 4, tracks: data.tracks });
+      if (path === "/api/perms/groups/vip") return h.response(data.vip);
+      if (path.startsWith("/api/perms/users?")) { calls.push({ path, method }); return h.response({ users: [{ uuid: PLAYER, name: "<Alice>", online: true, groups: ["vip"] }], truncated: false }); }
+      if (path === `/api/perms/users/${PLAYER}`) return h.response(data.user);
+      if (path.startsWith(`/api/perms/users/${PLAYER}/compiled`)) { calls.push({ path, method }); return h.response(data.compiled); }
+      if (path === "/api/perms/registered") return h.response({ registered: data.registered || [] });
+      if (path.startsWith("/api/perms/search?")) { calls.push({ path, method }); return h.response({ holders: data.holders || [], truncated: false }); }
+      if (path.startsWith("/api/perms/audit?")) { calls.push({ path, method }); return h.response({ revision: 9, events: data.events || [] }); }
+      return h.response({ error: "unknown group \"ghost\"", code: "not_found" }, 404);
+    };
+    return calls;
+  }
+  await test("permission groups render as an inheritance tree and edit groups, nodes and tracks", async () => {
+    const h = fixture(appSource), calls = permsModel(h); await flush();
+    const rows = h.element("perm-groups").children;
+    assert(rows.map((row) => row.children[0].children[0].textContent).join(",") === "default,vip,staff,<b>x</b>", `Tree order wrong: ${rows.map((row) => row.children[0].children[0].textContent)}`);
+    assert(rows[1].children[0].className === "tree-depth-1" && rows[2].children[0].className === "tree-depth-2" && rows[3].children[0].className === "tree-depth-0", "Tree depth missing");
+    assert(rows[0].children[2].textContent === "Everyone" && rows[2].children[2].textContent === "vip", "Parents column wrong");
+    assert(h.element("perm-group-panel").className.includes("hidden"), "Group editor shown before choosing a group");
+    await rows[1].children[5].children[0].emit("click"); await flush();
+    assert(!h.element("perm-group-panel").className.includes("hidden") && h.element("perm-group-weight").value === "10", "Group editor did not open");
+    const nodes = h.element("perm-group-nodes").children;
+    assert(nodes.length === 3 && nodes[0].children[6].children.length === 0, "Weight node must be edited with the group");
+    assert(nodes[2].children[3].textContent === "server=survival" && nodes[2].children[5].children[0].textContent === "config", "Contexts or source missing");
+    // Add a denied node with contexts and an expiry.
+    h.element("perm-group-node-kind").value = "permission"; await h.element("perm-group-node-kind").emit("change");
+    h.element("perm-group-node-key").value = "Essentials.Fly"; h.element("perm-group-node-grant").value = "false";
+    h.element("perm-group-node-contexts").value = "server=survival, region=a; region=b"; h.element("perm-group-node-expiry").value = "3600";
+    await h.element("perm-group-node-form").emit("submit"); await flush();
+    const added = calls.find((call) => call.path === "/api/perms/groups/vip/nodes");
+    assert(added && added.method === "PUT" && added.body.key === "essentials.fly" && added.body.value === false, "Node write incorrect");
+    assert(added.body.contexts.server === "survival" && added.body.contexts.region.join() === "a,b", "Contexts not parsed");
+    assert(Math.abs(added.body.expires_at - (Date.now() / 1000 + 3600)) < 10, "Expiry not computed");
+    // Editing a node replaces it by its id.
+    await h.element("perm-group-nodes").children[2].children[6].children[0].emit("click");
+    assert(h.element("perm-group-node-kind").value === "prefix" && h.element("perm-group-node-key").value === "100" && h.element("perm-group-node-value").value === "&6", "Edit did not fill the form");
+    assert(h.element("perm-group-node-save").textContent === "Save node", "Edit mode not shown");
+    h.element("perm-group-node-value").value = "&e";
+    await h.element("perm-group-node-form").emit("submit"); await flush();
+    const edited = calls.find((call) => call.path === "/api/perms/groups/vip/nodes/prefix%3A100%40server%3Dsurvival");
+    assert(edited && edited.body.text === "&e" && edited.body.priority === 100 && edited.body.contexts.server === "survival", "Node edit incorrect");
+    const before = calls.length;
+    h.element("perm-group-node-kind").value = "permission"; h.element("perm-group-node-key").value = "bad node";
+    await h.element("perm-group-node-form").emit("submit"); await flush();
+    assert(calls.length === before && h.element("perm-group-node-result").textContent.includes("bad node"), "Invalid node reached the API");
+    await h.element("perm-group-nodes").children[1].children[6].children[1].emit("click"); await flush();
+    assert(calls.some((call) => call.path === "/api/perms/groups/vip/nodes/permission%3Akit.vip" && call.method === "DELETE"), "Node removal missing");
+    // Group attributes and creation.
+    h.element("perm-group-weight").value = "15"; h.element("perm-group-display").value = "";
+    await h.element("perm-group-form").emit("submit"); await flush();
+    const patched = calls.find((call) => call.method === "PATCH");
+    assert(patched.path === "/api/perms/groups/vip" && patched.body.weight === 15 && patched.body.display_name === null, "Group patch incorrect");
+    h.element("perm-group-create-name").value = "Mod"; h.element("perm-group-create-weight").value = "20";
+    await h.element("perm-group-create-form").emit("submit"); await flush();
+    const created = calls.find((call) => call.method === "POST" && call.path === "/api/perms/groups");
+    assert(created.body.name === "Mod" && created.body.weight === 20 && !("display_name" in created.body), "Group creation incorrect");
+    // Tracks reorder with buttons and save the whole list.
+    h.element("perm-track-select").value = "ranks"; await h.element("perm-track-select").emit("change");
+    const items = h.element("perm-track-groups").children;
+    assert(items.map((item) => item.children[0].textContent).join() === "default,vip", "Track groups missing");
+    assert(items[0].children[1].children[0].disabled, "The first group cannot move up");
+    await items[0].children[1].children[1].emit("click");
+    h.element("perm-track-add-group").value = "staff"; await h.element("perm-track-add").emit("click");
+    await h.element("perm-track-form").emit("submit"); await flush();
+    const track = calls.find((call) => call.path === "/api/perms/tracks/ranks");
+    assert(track && track.method === "PUT" && track.body.groups.join() === "vip,default,staff", `Track order not saved: ${JSON.stringify(track)}`);
   });
-  await test("member chips remove encoded memberships and missing extensions explain why", async () => {
-    const h = fixture(appSource);
-    h.model.definitions.permission_groups = { vip: { inherits: [], permissions: {} } };
-    h.model.intercept = (path, options) => {
-      if (options.method === "DELETE") return h.response({ changed: true });
-      return path === "/api/permissions" ? h.response({ enabled: true, members: [{ uuid: "0123456789abcdef0123456789abcdef", name: null, groups: ["vip"] }] }) : null;
-    };
+  await test("players show parents, compiled entries and traces, and promote through the API", async () => {
+    const h = fixture(appSource), calls = permsModel(h, { trace: { node: "kit.vip", result: true, winner: { entry: { k: "perm", key: "kit.vip", v: true, ctx: {}, rank: 1 }, specificity: "exact", outcome: "won" },
+      losers: [{ entry: { k: "perm", key: "kit.*", v: false, ctx: { server: "lobby" }, rank: 0 }, specificity: "prefix", outcome: "context_mismatch" }], ranks: [{ rank: 0, subject: `user:${PLAYER}` }, { rank: 1, subject: "group:vip" }] } });
     await flush();
-    const remove = h.element("permission-members").children[0].children[2].children[0].children[0].children[1];
-    await remove.emit("click"); await flush();
-    assert(h.calls.some(({ path, options }) => path === "/api/permissions/members/0123456789abcdef0123456789abcdef/vip" && options.method === "DELETE"), "Removal request missing");
-    const plain = fixture(appSource); await flush();
-    assert(!plain.element("permissions-unavailable").className.includes("hidden"), "Missing extensions were not explained");
-    assert(plain.element("permission-groups-panel").className.includes("hidden"), "Groups panel shown without extensions");
-    assert(!plain.calls.some(({ path }) => path === "/api/permissions"), "Memberships fetched without extensions");
+    h.element("perm-user-query").value = "alice"; await h.element("perm-user-search-form").emit("submit"); await flush();
+    assert(calls.some((call) => call.path === "/api/perms/users?limit=100&q=alice"), "Search request incorrect");
+    const row = h.element("perm-users").children[0];
+    assert(row.children[0].textContent === "<Alice>" && row.children[2].textContent === "Online", "Player row not rendered safely");
+    await row.children[4].children[0].emit("click"); await flush();
+    assert(!h.element("perm-user-panel").className.includes("hidden") && h.element("perm-user-heading").textContent === "<Alice>", "Player panel did not open");
+    const chip = h.element("perm-user-parents").children[0];
+    assert(chip.children[0].textContent === "vip", "Parent chip missing");
+    const entries = h.element("perm-compiled-entries").children;
+    assert(entries[1].children[0].textContent === "kit.vip" && entries[1].children[3].textContent === "vip · rank 1", "Compiled entries or rank names missing");
+    assert(entries[2].children[0].textContent === "prefix 100", "Compiled prefix missing");
+    assert(h.element("perm-compiled-meta").children.some((node) => node.textContent === "homes=5"), "Meta view missing");
+    h.element("perm-compiled-server").value = "survival"; h.element("perm-compiled-extra").value = "region=spawn";
+    await h.element("perm-compiled-form").emit("submit"); await flush();
+    assert(calls.some((call) => call.path === `/api/perms/users/${PLAYER}/compiled?server=survival&region=spawn`), "Compiled contexts not sent");
+    h.element("perm-trace-node").value = "kit.vip"; await h.element("perm-trace-form").emit("submit"); await flush();
+    const traced = calls.find((call) => call.path === "/api/perms/trace");
+    assert(traced.body.user === PLAYER && traced.body.contexts.server === "survival" && traced.body.contexts.region === "spawn", "Trace request incorrect");
+    assert(h.element("perm-trace-result").textContent.includes("granted"), "Trace result missing");
+    const trace = h.element("perm-trace-rows").children;
+    assert(trace[0].children[0].textContent === "Wins" && trace[0].children[4].textContent === "group:vip · rank 1" && trace[1].children[0].textContent === "Contexts not active", "Trace rows wrong");
+    h.element("perm-user-track").value = "ranks"; await h.element("perm-user-promote").emit("click"); await flush();
+    const promoted = calls.find((call) => call.path === "/api/perms/tracks/ranks/promote");
+    assert(promoted && promoted.body.user === PLAYER && !promoted.body.contexts, "Promotion request incorrect");
+    h.element("perm-user-parent-group").value = "staff"; h.element("perm-user-parent-contexts").value = "server=survival";
+    await h.element("perm-user-parent-form").emit("submit"); await flush();
+    const parent = calls.find((call) => call.path === `/api/perms/users/${PLAYER}/nodes`);
+    assert(parent.body.kind === "inherit" && parent.body.group === "staff" && parent.body.contexts.server === "survival", "Parent add incorrect");
+    await h.element("perm-user-parents").children[0].children[1].emit("click"); await flush();
+    assert(calls.some((call) => call.path === `/api/perms/users/${PLAYER}/nodes/inherit%3Avip` && call.method === "DELETE"), "Parent removal missing");
+    h.element("perm-user-primary").value = "vip"; await h.element("perm-user-primary-form").emit("submit"); await flush();
+    assert(calls.some((call) => call.method === "PATCH" && call.path === `/api/perms/users/${PLAYER}` && call.body.primary_group === "vip"), "Primary group not saved");
+    // API errors with a code keep their message instead of the generic 404 text.
+    h.model.intercept = (path) => path.startsWith("/api/perms/groups") ? h.response({ error: "unknown group \"ghost\"", code: "not_found" }, 404) : null;
+    await h.element("perm-groups-refresh").emit("click"); await flush();
+    assert(h.element("perm-groups-result").textContent === "unknown group \"ghost\"", `Coded API error replaced: ${h.element("perm-groups-result").textContent}`);
+  });
+  await test("read-only operators see permissions without forms and others not at all", async () => {
+    const h = fixture(appSource); permsModel(h); await flush();
+    h.model.access = { name: "viewer", permissions: ["perms"], groups: null };
+    h.element("token").value = "viewer-token"; await h.element("auth-form").emit("submit"); await flush();
+    assert(!h.element("nav-perm-groups").className.includes("hidden") && h.element("nav-script").className.includes("hidden"), "Permission views not shown to a perms operator");
+    for (const id of ["perm-group-create-form", "perm-group-node-form", "perm-user-node-form", "perm-track-form", "perm-user-parent-form", "perm-user-track-form"]) assert(h.element(id).className.includes("hidden"), `${id} shown without config`);
+    assert(h.element("perm-groups").children.length === 4, "Groups not listed for a perms operator");
+    const reader = fixture(appSource); await flush();
+    reader.model.access = { name: "reader", permissions: ["read"], groups: null };
+    const before = reader.calls.length;
+    reader.element("token").value = "reader-token"; await reader.element("auth-form").emit("submit"); await flush();
+    assert(reader.element("section-permissions").className.includes("hidden"), "Permissions section shown without perms");
+    assert(!reader.calls.slice(before).some(({ path }) => path.startsWith("/api/perms/")), "Permission data fetched without perms");
+  });
+  await test("registered nodes group by owner, list holders and activity shows revision diffs", async () => {
+    const h = fixture(appSource), calls = permsModel(h, {
+      registered: [{ owner: "server.lobby", plugin: "Essentials", node: "essentials.fly", description: "<i>Fly</i>", default: "op" }, { owner: "server.lobby", node: "rift.x", default: "false" }],
+      holders: [{ subject: { user: PLAYER }, name: "Alice", id: "permission:essentials.fly@server=survival", node: { kind: "permission", key: "essentials.fly", value: false, contexts: { server: "survival" } } }],
+      events: [
+        { revision: 8, at: 1, actor: "operator:admin", reason: "tidy", ops: [{ op: "node", subject: { group: "vip" }, before: { kind: "permission", key: "kit.vip", value: true }, after: { kind: "permission", key: "kit.vip", value: false } }], changed: [], groups: ["vip"] },
+        { revision: 9, at: 2, actor: "cli", ops: [{ op: "track", name: "ranks", before: null, after: ["default", "vip"] }], changed: [], groups: [] },
+      ],
+    });
+    await flush();
+    await h.element("perm-nodes-refresh").emit("click"); await flush();
+    const rows = h.element("perm-registered").children;
+    assert(rows[0].children[0].textContent === "server.lobby" && rows[2].children[0].textContent === "server.lobby · Essentials", "Owner groups missing");
+    assert(rows[3].children[2].textContent === "<i>Fly</i>", "Description not rendered safely");
+    h.element("perm-registered-filter").value = "fly"; await h.element("perm-registered-filter").emit("input");
+    assert(h.element("perm-registered").children.length === 2, "Filter did not narrow the catalogue");
+    await h.element("perm-registered").children[1].children[3].children[0].emit("click"); await flush();
+    assert(calls.some((call) => call.path === "/api/perms/search?kind=permission&limit=200&node=essentials.fly"), "Holder search incorrect");
+    const holder = h.element("perm-holders").children[0];
+    assert(holder.children[0].textContent === `Alice · ${PLAYER}` && holder.children[1].textContent === "Deny" && holder.children[2].textContent === "server=survival", "Holder row wrong");
+    h.element("perm-activity-actor").value = "operator:admin"; await h.element("perm-activity-form").emit("submit"); await flush();
+    assert(calls.some((call) => call.path === "/api/perms/audit?limit=100&actor=operator%3Aadmin"), "Activity filter not sent");
+    let activity = h.element("perm-activity").children;
+    assert(activity[0].children[0].textContent === "9" && activity[1].children[0].textContent === "8", "Newest change must come first");
+    assert(activity[1].children[4].textContent === "tidy" && activity[1].children[3].textContent.includes("group:vip"), "Change summary missing");
+    await activity[1].children[5].children[0].emit("click");
+    activity = h.element("perm-activity").children;
+    const detail = activity[2].children[0], lines = detail.children[1].children.map((span) => span.textContent);
+    assert(detail.children[0].textContent === "Changed group:vip · Permission kit.vip", `Diff title wrong: ${detail.children[0].textContent}`);
+    assert(lines.includes("- value: true\n") && lines.includes("+ value: false\n") && lines.includes("  key: kit.vip\n"), `Diff lines wrong: ${lines}`);
+    assert(activity[1].children[5].children[0].textContent === "Hide diff", "Diff toggle state missing");
+    await activity[0].children[5].children[0].emit("click");
+    const track = h.element("perm-activity").children[1].children[0];
+    assert(track.children[0].textContent === "Added track:ranks" && track.children[1].children[0].textContent === "+ value: default → vip\n", "Track diff wrong");
   });
   return passed;
 }
