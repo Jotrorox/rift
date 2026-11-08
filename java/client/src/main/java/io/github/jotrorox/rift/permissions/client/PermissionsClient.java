@@ -149,8 +149,9 @@ public final class PermissionsClient implements RiftPermissions, AutoCloseable {
             if (error != null) {
                 logger.severe("Cannot subscribe to permission updates: " + unwrap(error).getMessage()
                         + "; grant subscribe on rift.perms.update and rift.perms.update.>");
-            } else if (messaging.isConnected()) {
-                hello(epoch.incrementAndGet(), 0);
+            } else if (messaging.isConnected() && epoch.compareAndSet(0, 1)) {
+                // Connected before this client listened; otherwise connected() sends hello.
+                hello(1, 0);
             }
         });
         scheduler.scheduleWithFixedDelay(this::retryMissing, RETRY.toMillis(), RETRY.toMillis(), TimeUnit.MILLISECONDS);

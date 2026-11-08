@@ -19,6 +19,12 @@ final class Session {
     static final String ALPN = "rift-messaging/1";
     /** Deadline for a frame the server should answer promptly, like the server's I/O timeout. */
     static final Duration IO_DEADLINE = Duration.ofSeconds(30);
+    /**
+     * Idle timeout offered to the server, which offers 60 s and pings every 10 s; kwik pings at half
+     * of it. A restarted server cannot be told apart by a stateless reset (its reset key is new), so
+     * this bounds how long a vanished server goes unnoticed.
+     */
+    static final Duration IDLE_TIMEOUT = Duration.ofSeconds(15);
 
     private final QuicClientConnection connection;
     private final ExecutorService readers;
@@ -42,7 +48,7 @@ final class Session {
                 .applicationProtocol(ALPN)
                 .customTrustStore(settings.trust())
                 .connectTimeout(settings.connectTimeout())
-                .maxIdleTimeout(Duration.ofSeconds(60))
+                .maxIdleTimeout(IDLE_TIMEOUT)
                 .build();
         Session session = new Session(connection, readers, timers);
         connection.setConnectionListener(event -> session.closed.complete(
