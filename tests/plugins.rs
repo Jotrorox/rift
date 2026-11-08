@@ -94,6 +94,44 @@ fn persistent_plugins_are_recorded_with_their_configuration_and_never_evaluated(
 }
 
 #[test]
+fn hidden_paths_neither_hold_the_entry_nor_hide_symbolic_links() {
+    let fixture = Fixture::new();
+    fixture.installed();
+    fixture.write(
+        "plugins/relaxoban/plugin.toml",
+        &MANIFEST.replace("relaxoban.wasm", ".build/relaxoban.wasm"),
+    );
+    fixture.write("plugins/relaxoban/.build/relaxoban.wasm", "\0asm");
+    let error = fixture
+        .load("rift.plugin('relaxoban')")
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("hidden"), "{error}");
+    fixture.write("plugins/relaxoban/plugin.toml", MANIFEST);
+    // Hidden files are still left out of the fingerprint...
+    let before = fixture.load("rift.plugin('relaxoban')").unwrap().plugins[0]
+        .fingerprint
+        .clone();
+    fixture.write("plugins/relaxoban/.notes", "changed");
+    let after = fixture.load("rift.plugin('relaxoban')").unwrap().plugins[0]
+        .fingerprint
+        .clone();
+    assert_eq!(before, after);
+    // ...but a hidden symbolic link is refused like any other.
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&fixture.0, fixture.0.join("plugins/relaxoban/.escape"))
+            .unwrap();
+        let error = fixture
+            .load("rift.plugin('relaxoban')")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("symbolic links"), "{error}");
+        fs::remove_file(fixture.0.join("plugins/relaxoban/.escape")).unwrap();
+    }
+}
+
+#[test]
 fn script_mode_manifests_load_in_the_sandbox_as_before() {
     let fixture = Fixture::new();
     fixture.write(

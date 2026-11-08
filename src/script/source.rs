@@ -181,7 +181,10 @@ const MAX_PLUGIN_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// Hash a persistent plugin's folder: manifest and artifacts, sorted by
 /// path. The entry must be a regular file inside the folder, and the folder
-/// may not contain symbolic links (an artifact must not escape it).
+/// may not contain symbolic links (an artifact must not escape it). Hidden
+/// (dot) entries and the top-level `data/` are not hashed; a hidden entry may
+/// not be a symbolic link either, and the manifest keeps the entry out of
+/// both.
 fn fingerprint(folder: &Path, manifest: &Manifest) -> Result<String, String> {
     use sha2::{Digest, Sha256};
     let fail =
@@ -205,7 +208,7 @@ fn fingerprint(folder: &Path, manifest: &Manifest) -> Result<String, String> {
             let Some(name) = name.to_str() else {
                 return Err(fail(&directory, &"plugin paths must be UTF-8"));
             };
-            if name.starts_with('.') || (relative.as_os_str().is_empty() && name == "data") {
+            if relative.as_os_str().is_empty() && name == "data" {
                 continue;
             }
             let child = relative.join(name);
@@ -217,6 +220,9 @@ fn fingerprint(folder: &Path, manifest: &Manifest) -> Result<String, String> {
                     &folder.join(&child),
                     &"plugin folders must not contain symbolic links",
                 ));
+            }
+            if name.starts_with('.') {
+                continue;
             }
             if kind.is_dir() {
                 pending.push(child);
