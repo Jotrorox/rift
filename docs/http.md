@@ -179,9 +179,9 @@ Errors use `{"error":"description"}`. `GET /api` provides endpoint discovery.
 | `GET /api/definitions` | Structured `templates`, `service_groups`, `permission_groups`, `tab_list`, `server_list` and the active `revision`; includes private paths and executable arguments. Absent settings are `null` |
 | `PUT /api/definitions/{section}/{name}` | Apply `{revision, definition}`; section is `templates`, `service_groups` or `permission_groups`, and `null` removes a definition |
 | `PUT /api/definitions/{section}` | Apply `{revision, definition}` to `tab_list` or `server_list`; `null` turns the setting off |
-| `GET /api/permissions` | `{enabled, members, truncated}`: up to 1000 stored group memberships as `{uuid, name, groups}`, with `name` set for online players |
-| `POST /api/permissions/members/{player}/{group}` | Add a player (lowercase UUID, or the name of an online player) to a permission group with `{}`; returns `{changed}` |
-| `DELETE /api/permissions/members/{player}/{group}` | Remove a player from a permission group with `{}`; returns `{changed}` |
+| `GET /api/permissions` | `{enabled, members, truncated}`: up to 1000 users with global group memberships in the permission store as `{uuid, name, groups}`, with `name` the online or last-seen name |
+| `POST /api/permissions/members/{player}/{group}` | Add a player (UUID, or a known player name) to an existing permission group with `{}`; returns `{changed, revision}` |
+| `DELETE /api/permissions/members/{player}/{group}` | Remove a player from a permission group with `{}`; returns `{changed, revision}` |
 | `GET /api/deployments` | Retained deployment metadata, active revision, retention limit and durability flag; never includes source |
 | `POST /api/deployments/{id}/rollback` | Validate and restore a retained configuration with `{revision}` |
 | `GET /api/audit` | Latest operator records and durability flag |
@@ -290,11 +290,13 @@ setting with the fields of their Lua tables; text fields take a string or a chat
 component. A server list edit keeps the configured `favicon` and `hosts`, which
 can only be set in Lua, so a definition containing either is rejected.
 `GET /api/definitions` returns the favicon as its `data:` URL. Permission group
-definitions take `inherits` and `permissions` as in `extensions.groups` and need
-extensions with `api_version = 2`; edits return `409` otherwise.
+definitions take the fields of `extensions.groups` (`inherits`, `permissions`,
+`weight`, `prefix`, `suffix`, `meta`) and need extensions with `api_version = 2`
+or `3`; edits return `409` otherwise.
 
-Group memberships are runtime state in the extension store, as with
-`rift.permissions.add_group` and `remove_group`. Changing them doesn't create a
+Group memberships are global `inherit` nodes in the [permission
+store](permissions.md), the same as `rift.permissions.user(uuid):add_parent`.
+Changing them creates a permission revision with actor `operator:<name>`, not a
 configuration revision; it applies to the next permission check and is
 recorded in the audit log as `group_membership` with a `uuid/group` target.
 Everyone belongs to `default` implicitly, so it can't be assigned. Every

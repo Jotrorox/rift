@@ -1,0 +1,73 @@
+{
+  "metadata": {
+    "generatedBy": "Console",
+    "generatedAt": "2026-11-01 12:00:00 UTC",
+    "pluginVersion": "5.4.145"
+  },
+  "groups": {
+    "default": {
+      "nodes": [
+        {"type": "permission", "key": "essentials.spawn", "value": true},
+        {"type": "permission", "key": "essentials.{home,sethome}", "value": true},
+        {"type": "meta", "key": "meta.homes.1", "value": true},
+        {"type": "prefix", "key": "prefix.0.&7", "value": true}
+      ]
+    },
+    "vip": {
+      "nodes": [
+        {"type": "inheritance", "key": "group.default", "value": true},
+        {"type": "weight", "key": "weight.10", "value": true},
+        {"type": "display_name", "key": "displayname.VIP", "value": true},
+        {"type": "prefix", "key": "prefix.10.&6[VIP] ", "value": true},
+        {"type": "meta", "key": "meta.homes.5", "value": true},
+        {"type": "permission", "key": "essentials.fly", "value": true, "context": {"server": "survival"}},
+        {"type": "permission", "key": "kit.vip", "value": true, "context": {"server": ["survival", "creative"], "world": "global"}}
+      ]
+    },
+    "mod": {
+      "nodes": [
+        {"type": "inheritance", "key": "group.vip", "value": true},
+        {"type": "weight", "key": "weight.50", "value": true},
+        {"type": "prefix", "key": "prefix.50.&9[Mod] ", "value": true},
+        {"type": "permission", "key": "essentials.kick", "value": true},
+        {"type": "permission", "key": "essentials.ban", "value": false},
+        {"type": "regex_permission", "key": "R=essentials\\.warp\\..*", "value": true}
+      ]
+    },
+    "admin": {
+      "nodes": [
+        {"type": "inheritance", "key": "group.mod", "value": true},
+        {"type": "weight", "key": "weight.100", "value": true},
+        {"type": "prefix", "key": "prefix.100.&c[Admin] ", "value": true},
+        {"type": "permission", "key": "*", "value": true}
+      ]
+    }
+  },
+  "users": {
+    "069a79f4-44e9-4726-a5be-fca90e38aaf5": {
+      "username": "Notch",
+      "primaryGroup": "admin",
+      "nodes": [
+        {"type": "inheritance", "key": "group.admin", "value": true}
+      ]
+    },
+    "853c80ef-3c37-49fd-aa49-938b674adae6": {
+      "username": "jeb_",
+      "primaryGroup": "vip",
+      "nodes": [
+        {"type": "inheritance", "key": "group.vip", "value": true, "expiry": 4102444800},
+        {"type": "permission", "key": "essentials.nick", "value": true},
+        {"type": "suffix", "key": "suffix.1. ✦", "value": true},
+        {"type": "permission", "key": "worldedit.*", "value": true, "context": {"world": "creative_world"}},
+        {"type": "permission", "key": "old.reward", "value": true, "expiry": 1000}
+      ]
+    },
+    "not-a-uuid": {
+      "username": "Broken",
+      "nodes": []
+    }
+  },
+  "tracks": {
+    "staff": {"groups": ["default", "vip", "mod", "admin"]}
+  }
+}

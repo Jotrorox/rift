@@ -201,9 +201,12 @@ run for unbounded time outside the instruction budget) and `table.sort`.
 - `rift.clock()` returns seconds, with sub-millisecond precision, from a fixed
   point in the process's life. Subtract two readings to measure elapsed time.
 - `rift.time()` returns the current Unix time in whole seconds.
-- `rift.publish`, `rift.enabled` and `rift.servers` (callbacks only), and
-  `rift.store`, `rift.permissions`, `rift.http` and `rift.players` (API v2
-  extension callbacks; `rift.players` also in `on_message` and `on_http`).
+- `rift.publish`, `rift.enabled` and `rift.servers` (callbacks only),
+  `rift.store`, `rift.http` and `rift.players` (API v2 and v3 extension
+  callbacks; `rift.players` also in `on_message` and `on_http`), and
+  `rift.permissions` (API v3 extension callbacks; its `on_change` and
+  `contexts.provide` registrations run during configuration, see
+  [permissions](permissions.md#lua-api)).
 
 `string.format` follows Lua 5.1: `%d`, `%i`, `%u`, `%c`, `%x`, `%X`, `%o`,
 `%e`, `%E`, `%f`, `%g`, `%G`, `%q`, `%s` and `%%`, with widths and precisions

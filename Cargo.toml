@@ -58,6 +58,7 @@ aes = { version = "0.9", features = ["zeroize"] }
 cfb8 = { version = "0.9", features = ["zeroize"] }
 aws-lc-rs = { version = "1.18", features = ["prebuilt-nasm"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+flate2 = "1"
 hmac = "0.13"
 sha2 = "0.11"
 bytes.workspace = true
