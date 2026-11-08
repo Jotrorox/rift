@@ -18,7 +18,7 @@ public interface Platform {
 
     /**
      * @param player a host player object
-     * @return its active contexts, including those of {@link PermissionsClient#calculators()}
+     * @return its active contexts, including those of the calculators ({@link PermissionsClient#applyCalculators})
      * @throws IllegalArgumentException for objects that are not players of this host
      */
     ContextSet contexts(Object player);

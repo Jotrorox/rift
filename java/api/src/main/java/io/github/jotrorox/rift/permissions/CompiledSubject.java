@@ -5,7 +5,6 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.UUID;
-import java.util.stream.Stream;
 
 /**
  * The flattened, ranked view of one player that the proxy compiles and every backend evaluates:
@@ -118,25 +117,12 @@ public record CompiledSubject(
 
     /**
      * @param rank a rank above 0
-     * @return the group behind {@code rank}; empty for the player's own rank 0
+     * @return the group behind {@code rank}, as {@code /perms trace} names it; empty for rank 0
      */
     public Optional<String> rankSubject(int rank) {
         return entries.stream()
                 .filter(e -> e.kind == EntryKind.GROUP && e.rank == rank && rank > 0)
                 .map(Entry::key)
                 .findFirst();
-    }
-
-    /** @return the earliest expiry of any item, when a cache might want to refresh */
-    public OptionalLong nextExpiry() {
-        return Stream.of(
-                        entries.stream().map(Entry::expiresAt),
-                        prefix.stream().map(Decoration::expiresAt),
-                        suffix.stream().map(Decoration::expiresAt),
-                        meta.stream().map(MetaEntry::expiresAt))
-                .flatMap(s -> s)
-                .filter(OptionalLong::isPresent)
-                .mapToLong(OptionalLong::getAsLong)
-                .min();
     }
 }
