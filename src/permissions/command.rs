@@ -16,7 +16,9 @@
 //! hold themselves additionally needs `rift.perms.escalate`. A
 //! [`Sender::Console`] (the CLI, an operator, a backend console with
 //! `control = true`) may do everything.
-use super::{Authority, Bulk, LogQuery, PermError, control::Bus, write_export};
+use super::{
+    Authority, Bulk, LogQuery, PermError, control::Bus, store::like_literal, write_export,
+};
 use rift_permissions::{
     Actor, Applied, Change, ChangeEvent, ContextSet, DEFAULT_GROUP, Node, NodeKind, Payload,
     SubjectRef, Trace, Tristate, Uuid,
@@ -2721,18 +2723,6 @@ fn track_action(env: &Env, sender: &Sender, name: &str, action: TrackAction) -> 
         format!("track {name} is unchanged"),
     );
     Ok(output)
-}
-
-/// Escape `text` for a SQL `LIKE` pattern.
-pub fn like_literal(text: &str) -> String {
-    let mut escaped = String::with_capacity(text.len());
-    for c in text.chars() {
-        if matches!(c, '\\' | '%' | '_') {
-            escaped.push('\\');
-        }
-        escaped.push(c);
-    }
-    escaped
 }
 
 /// `node` itself and every wildcard that would grant it: `a.b.c`,

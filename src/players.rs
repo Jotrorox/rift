@@ -289,7 +289,9 @@ fn already_connected() -> io::Error {
 }
 
 /// The UUID an offline-mode server gives `name`: a version 3 UUID of the MD5
-/// of `OfflinePlayer:<name>`, as Bukkit and Pumpkin compute it.
+/// of `OfflinePlayer:<name>`, as vanilla and Bukkit compute it. Pumpkin
+/// derives its own (the first 16 bytes of SHA-256 of the name); sessions then
+/// use the UUID the backend confirms at login.
 pub fn offline_uuid(name: &str) -> [u8; 16] {
     let mut digest = md5(format!("OfflinePlayer:{name}").as_bytes());
     digest[6] = (digest[6] & 0x0f) | 0x30;

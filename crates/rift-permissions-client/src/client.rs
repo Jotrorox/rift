@@ -717,14 +717,21 @@ impl Shared {
                 self.replica.remove(*uuid);
             }
         }
-        let stale = self.replica.sync_revision(hello.revision) || backwards || force;
-        if stale {
+        let differs = self.replica.sync_revision(hello.revision) || backwards;
+        if differs {
             info!(
                 "rift-permissions: replica revision {local} differs from the proxy's {}; refetching {} snapshots",
                 hello.revision,
                 stored.len()
             );
+        } else if force {
+            info!(
+                "rift-permissions: resyncing at revision {}; refetching {} snapshots",
+                hello.revision,
+                stored.len()
+            );
         }
+        let stale = differs || force;
         let refetch: Vec<Uuid> = {
             let mut players = lock(&self.players);
             let now = unix_now();

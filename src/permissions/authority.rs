@@ -494,18 +494,12 @@ impl Authority {
         limit: usize,
     ) -> Result<(Vec<UserSummary>, bool), PermError> {
         let limit = limit.clamp(1, MAX_RESULTS);
-        let escape = |text: &str| {
-            text.chars().fold(String::new(), |mut out, c| {
-                if matches!(c, '%' | '_' | '\\') {
-                    out.push('\\');
-                }
-                out.push(c);
-                out
-            })
-        };
         let query = query.trim();
-        let name = format!("%{}%", escape(query));
-        let uuid = format!("{}%", escape(&query.replace('-', "").to_ascii_lowercase()));
+        let name = format!("%{}%", store::like_literal(query));
+        let uuid = format!(
+            "{}%",
+            store::like_literal(&query.replace('-', "").to_ascii_lowercase())
+        );
         let group = group
             .map(|group| group.trim().to_ascii_lowercase())
             .filter(|group| !group.is_empty() && group != DEFAULT_GROUP);
