@@ -21,6 +21,16 @@ sha2 = "0.11"
 bytes = "1"
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "aws_lc_rs"] }
+http = { version = "1", optional = true }
+http-body-util = { version = "0.1", optional = true }
+wasmtime = { version = "50.0.1", optional = true, default-features = false, features = ["cranelift", "component-model", "parallel-compilation", "runtime", "std"] }
+wasmtime-wasi = { version = "50.0.1", optional = true, default-features = false, features = ["p2"] }
+wasmtime-wasi-http = { version = "50.0.1", optional = true, default-features = false, features = ["default-send-request", "p2"] }
+
+[features]
+default = ["wasm"]
+# WebAssembly plugins (engine = "wasm") through wasmtime.
+wasm = ["dep:http", "dep:http-body-util", "dep:wasmtime", "dep:wasmtime-wasi", "dep:wasmtime-wasi-http"]
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
