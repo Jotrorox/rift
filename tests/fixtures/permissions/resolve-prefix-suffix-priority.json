@@ -1,0 +1,112 @@
+{
+  "kind": "resolve",
+  "name": "prefix-suffix-priority",
+  "description": "Highest priority wins; equal priority goes to the lower rank; contexts filter first.",
+  "now": 1000,
+  "users": {
+    "00000000000000000000000000000001": {
+      "nodes": [
+        {"kind": "inherit", "group": "vip", "value": true},
+        {"kind": "inherit", "group": "admin", "value": true}
+      ]
+    },
+    "00000000000000000000000000000002": {
+      "nodes": [
+        {"kind": "inherit", "group": "admin", "value": true},
+        {"kind": "prefix", "priority": 200, "text": "[Me] "}
+      ]
+    },
+    "00000000000000000000000000000003": {
+      "nodes": [{"kind": "inherit", "group": "vip", "value": true}]
+    }
+  },
+  "groups": {
+    "vip": {
+      "weight": 10,
+      "nodes": [
+        {"kind": "prefix", "priority": 100, "text": "[VIP] "},
+        {"kind": "prefix", "priority": 300, "text": "[Hub] ", "contexts": {"server": "hub"}},
+        {"kind": "suffix", "priority": 5, "text": " +"}
+      ]
+    },
+    "admin": {"weight": 50, "nodes": [{"kind": "prefix", "priority": 200, "text": "[Admin] "}]},
+    "default": {"nodes": [{"kind": "suffix", "priority": 0, "text": ""}]}
+  },
+  "checks": [],
+  "meta": [
+    {
+      "user": "00000000000000000000000000000001",
+      "expect": {"prefix": "[Admin] ", "suffix": " +", "meta": {}, "primary_group": "admin"}
+    },
+    {
+      "user": "00000000000000000000000000000001",
+      "contexts": {"server": "hub"},
+      "expect": {"prefix": "[Hub] ", "suffix": " +", "meta": {}, "primary_group": "admin"}
+    },
+    {
+      "user": "00000000000000000000000000000002",
+      "expect": {"prefix": "[Me] ", "suffix": "", "meta": {}, "primary_group": "admin"}
+    },
+    {
+      "user": "00000000000000000000000000000003",
+      "expect": {"prefix": "[VIP] ", "suffix": " +", "meta": {}, "primary_group": "vip"}
+    }
+  ],
+  "compiled": {
+    "00000000000000000000000000000001": {
+      "revision": 1,
+      "uuid": "00000000000000000000000000000001",
+      "primary_group": "admin",
+      "entries": [
+        {"k": "group", "key": "admin", "v": true, "ctx": {}, "rank": 1},
+        {"k": "group", "key": "vip", "v": true, "ctx": {}, "rank": 2},
+        {"k": "group", "key": "default", "v": true, "ctx": {}, "rank": 3}
+      ],
+      "prefix": [
+        {"p": 200, "t": "[Admin] ", "ctx": {}, "rank": 1},
+        {"p": 100, "t": "[VIP] ", "ctx": {}, "rank": 2},
+        {"p": 300, "t": "[Hub] ", "ctx": {"server": "hub"}, "rank": 2}
+      ],
+      "suffix": [
+        {"p": 5, "t": " +", "ctx": {}, "rank": 2},
+        {"p": 0, "t": "", "ctx": {}, "rank": 3}
+      ],
+      "meta": []
+    },
+    "00000000000000000000000000000002": {
+      "revision": 1,
+      "uuid": "00000000000000000000000000000002",
+      "primary_group": "admin",
+      "entries": [
+        {"k": "group", "key": "admin", "v": true, "ctx": {}, "rank": 1},
+        {"k": "group", "key": "default", "v": true, "ctx": {}, "rank": 2}
+      ],
+      "prefix": [
+        {"p": 200, "t": "[Me] ", "ctx": {}, "rank": 0},
+        {"p": 200, "t": "[Admin] ", "ctx": {}, "rank": 1}
+      ],
+      "suffix": [
+        {"p": 0, "t": "", "ctx": {}, "rank": 2}
+      ],
+      "meta": []
+    },
+    "00000000000000000000000000000003": {
+      "revision": 1,
+      "uuid": "00000000000000000000000000000003",
+      "primary_group": "vip",
+      "entries": [
+        {"k": "group", "key": "vip", "v": true, "ctx": {}, "rank": 1},
+        {"k": "group", "key": "default", "v": true, "ctx": {}, "rank": 2}
+      ],
+      "prefix": [
+        {"p": 100, "t": "[VIP] ", "ctx": {}, "rank": 1},
+        {"p": 300, "t": "[Hub] ", "ctx": {"server": "hub"}, "rank": 1}
+      ],
+      "suffix": [
+        {"p": 5, "t": " +", "ctx": {}, "rank": 1},
+        {"p": 0, "t": "", "ctx": {}, "rank": 2}
+      ],
+      "meta": []
+    }
+  }
+}

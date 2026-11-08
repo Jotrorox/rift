@@ -1,0 +1,21 @@
+{
+  "kind": "wire",
+  "name": "hello-reply",
+  "type": "hello_reply",
+  "json": {
+    "revision": 412,
+    "protocol": 1,
+    "now": 1762790000,
+    "limits": {
+      "groups": 1024,
+      "group_nodes": 256,
+      "user_nodes": 512,
+      "parents": 16,
+      "contexts": 32,
+      "tracks": 64,
+      "compiled_entries": 4096,
+      "batch": 256
+    },
+    "external_contexts": ["region"]
+  }
+}

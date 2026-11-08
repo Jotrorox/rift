@@ -1,0 +1,7 @@
+{
+  "kind": "wire",
+  "name": "context-set-invalid",
+  "type": "context_set",
+  "json": {"server": "a;b"},
+  "error": true
+}

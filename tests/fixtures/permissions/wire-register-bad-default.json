@@ -1,0 +1,7 @@
+{
+  "kind": "wire",
+  "name": "register-bad-default",
+  "type": "register_request",
+  "json": [{"node": "x", "default": "maybe"}],
+  "error": true
+}

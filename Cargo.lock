@@ -1215,12 +1215,42 @@ dependencies = [
  "quinn",
  "rcgen",
  "reqwest",
+ "rift-permissions",
  "rusqlite",
  "rustls",
  "serde",
  "serde_json",
  "sha2",
  "tokio",
+]
+
+[[package]]
+name = "rift-permissions"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "rift-permissions-client"
+version = "0.1.0"
+dependencies = [
+ "rift-permissions",
+]
+
+[[package]]
+name = "rift-permissions-ffi"
+version = "0.1.0"
+dependencies = [
+ "rift-permissions",
+]
+
+[[package]]
+name = "rift-permissions-testing"
+version = "0.1.0"
+dependencies = [
+ "rift-permissions",
 ]
 
 [[package]]

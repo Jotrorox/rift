@@ -1,0 +1,12 @@
+{
+  "kind": "wire",
+  "name": "compiled-subject-unknown-kind",
+  "type": "compiled_subject",
+  "json": {
+    "revision": 1,
+    "uuid": "0123456789abcdef0123456789abcdef",
+    "primary_group": "default",
+    "entries": [{"k": "regex", "key": "a", "v": true, "rank": 0}]
+  },
+  "error": true
+}

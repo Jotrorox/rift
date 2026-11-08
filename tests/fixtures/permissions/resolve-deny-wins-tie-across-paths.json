@@ -1,0 +1,62 @@
+{
+  "kind": "resolve",
+  "name": "deny-wins-tie-across-paths",
+  "description": "A group reached through two contextual edges yields entries of one rank; the tie goes to false.",
+  "now": 1000,
+  "users": {
+    "00000000000000000000000000000001": {
+      "nodes": [
+        {"kind": "inherit", "group": "g", "value": true, "contexts": {"server": "s"}},
+        {"kind": "inherit", "group": "g", "value": true, "contexts": {"world": "w"}}
+      ]
+    }
+  },
+  "groups": {
+    "g": {
+      "nodes": [
+        {"kind": "permission", "key": "x", "value": true, "contexts": {"world": "w"}},
+        {"kind": "permission", "key": "x", "value": false, "contexts": {"server": "s"}}
+      ]
+    }
+  },
+  "checks": [
+    {
+      "user": "00000000000000000000000000000001",
+      "node": "x",
+      "contexts": {"server": "s", "world": "w"},
+      "expect": false
+    },
+    {
+      "user": "00000000000000000000000000000001",
+      "node": "x",
+      "contexts": {"server": "s"},
+      "expect": false
+    },
+    {
+      "user": "00000000000000000000000000000001",
+      "node": "x",
+      "contexts": {"world": "w"},
+      "expect": true
+    },
+    {"user": "00000000000000000000000000000001", "node": "x", "expect": null}
+  ],
+  "compiled": {
+    "00000000000000000000000000000001": {
+      "revision": 1,
+      "uuid": "00000000000000000000000000000001",
+      "primary_group": "default",
+      "entries": [
+        {"k": "group", "key": "g", "v": true, "ctx": {"server": "s"}, "rank": 1},
+        {"k": "perm", "key": "x", "v": true, "ctx": {"server": "s", "world": "w"}, "rank": 1},
+        {"k": "perm", "key": "x", "v": false, "ctx": {"server": "s"}, "rank": 1},
+        {"k": "group", "key": "g", "v": true, "ctx": {"world": "w"}, "rank": 1},
+        {"k": "perm", "key": "x", "v": true, "ctx": {"world": "w"}, "rank": 1},
+        {"k": "perm", "key": "x", "v": false, "ctx": {"server": "s", "world": "w"}, "rank": 1},
+        {"k": "group", "key": "default", "v": true, "ctx": {}, "rank": 2}
+      ],
+      "prefix": [],
+      "suffix": [],
+      "meta": []
+    }
+  }
+}

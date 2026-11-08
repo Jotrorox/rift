@@ -1,0 +1,21 @@
+{
+  "kind": "wire",
+  "name": "compiled-subject-defaults",
+  "description": "Missing ctx, prefix, suffix and meta default to empty; dashed uppercase UUIDs are accepted.",
+  "type": "compiled_subject",
+  "json": {
+    "revision": 1,
+    "uuid": "01234567-89AB-CDEF-0123-456789ABCDEF",
+    "primary_group": "default",
+    "entries": [{"k": "perm", "key": "a", "v": false, "rank": 0}]
+  },
+  "expect": {
+    "revision": 1,
+    "uuid": "0123456789abcdef0123456789abcdef",
+    "primary_group": "default",
+    "entries": [{"k": "perm", "key": "a", "v": false, "ctx": {}, "rank": 0}],
+    "prefix": [],
+    "suffix": [],
+    "meta": []
+  }
+}

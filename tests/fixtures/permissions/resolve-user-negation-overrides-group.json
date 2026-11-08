@@ -1,0 +1,43 @@
+{
+  "kind": "resolve",
+  "name": "user-negation-overrides-group",
+  "description": "At equal specificity and contexts the user's own node (rank 0) beats a group's.",
+  "now": 1000,
+  "users": {
+    "00000000000000000000000000000001": {
+      "nodes": [
+        {"kind": "inherit", "group": "vip", "value": true},
+        {"kind": "permission", "key": "fly", "value": false}
+      ]
+    }
+  },
+  "groups": {
+    "vip": {
+      "nodes": [
+        {"kind": "permission", "key": "fly", "value": true},
+        {"kind": "permission", "key": "heal", "value": true}
+      ]
+    }
+  },
+  "checks": [
+    {"user": "00000000000000000000000000000001", "node": "fly", "expect": false},
+    {"user": "00000000000000000000000000000001", "node": "heal", "expect": true}
+  ],
+  "compiled": {
+    "00000000000000000000000000000001": {
+      "revision": 1,
+      "uuid": "00000000000000000000000000000001",
+      "primary_group": "vip",
+      "entries": [
+        {"k": "perm", "key": "fly", "v": false, "ctx": {}, "rank": 0},
+        {"k": "group", "key": "vip", "v": true, "ctx": {}, "rank": 1},
+        {"k": "perm", "key": "fly", "v": true, "ctx": {}, "rank": 1},
+        {"k": "perm", "key": "heal", "v": true, "ctx": {}, "rank": 1},
+        {"k": "group", "key": "default", "v": true, "ctx": {}, "rank": 2}
+      ],
+      "prefix": [],
+      "suffix": [],
+      "meta": []
+    }
+  }
+}

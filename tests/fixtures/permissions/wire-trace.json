@@ -1,0 +1,27 @@
+{
+  "kind": "wire",
+  "name": "trace",
+  "description": "A /perms trace result: the winner and every other matching entry with the reason it lost.",
+  "type": "trace",
+  "json": {
+    "node": "essentials.fly",
+    "result": false,
+    "winner": {
+      "entry": {"k": "perm", "key": "essentials.*", "v": false, "ctx": {}, "rank": 0},
+      "specificity": {"prefix": 11},
+      "outcome": "won"
+    },
+    "losers": [
+      {
+        "entry": {"k": "perm", "key": "essentials.fly", "v": true, "ctx": {}, "rank": 1, "exp": 900},
+        "specificity": "exact",
+        "outcome": "expired"
+      },
+      {
+        "entry": {"k": "perm", "key": "*", "v": true, "ctx": {}, "rank": 2},
+        "specificity": "any",
+        "outcome": "less_specific"
+      }
+    ]
+  }
+}

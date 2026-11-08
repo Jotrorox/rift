@@ -1,0 +1,43 @@
+{
+  "kind": "resolve",
+  "name": "lowercase-normalisation",
+  "description": "Nodes, group names, contexts and checked nodes are lowercased; invalid checked nodes are undefined.",
+  "now": 1000,
+  "users": {
+    "00000000000000000000000000000001": {
+      "nodes": [
+        {"kind": "permission", "key": "Essentials.Fly", "value": true},
+        {"kind": "inherit", "group": "VIP", "value": true, "contexts": {"Server": "Survival"}}
+      ]
+    }
+  },
+  "groups": {"vip": {"nodes": [{"kind": "permission", "key": "Kit.VIP", "value": true}]}},
+  "checks": [
+    {"user": "00000000000000000000000000000001", "node": "essentials.fly", "expect": true},
+    {"user": "00000000000000000000000000000001", "node": "ESSENTIALS.FLY", "expect": true},
+    {
+      "user": "00000000000000000000000000000001",
+      "node": "kit.vip",
+      "contexts": {"SERVER": "SURVIVAL"},
+      "expect": true
+    },
+    {"user": "00000000000000000000000000000001", "node": "essentials..fly", "expect": null},
+    {"user": "00000000000000000000000000000001", "node": "essentials fly", "expect": null}
+  ],
+  "compiled": {
+    "00000000000000000000000000000001": {
+      "revision": 1,
+      "uuid": "00000000000000000000000000000001",
+      "primary_group": "default",
+      "entries": [
+        {"k": "perm", "key": "essentials.fly", "v": true, "ctx": {}, "rank": 0},
+        {"k": "group", "key": "vip", "v": true, "ctx": {"server": "survival"}, "rank": 1},
+        {"k": "perm", "key": "kit.vip", "v": true, "ctx": {"server": "survival"}, "rank": 1},
+        {"k": "group", "key": "default", "v": true, "ctx": {}, "rank": 2}
+      ],
+      "prefix": [],
+      "suffix": [],
+      "meta": []
+    }
+  }
+}

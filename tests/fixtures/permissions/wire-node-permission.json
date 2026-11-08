@@ -1,0 +1,13 @@
+{
+  "kind": "wire",
+  "name": "node-permission",
+  "type": "node",
+  "json": {
+    "kind": "permission",
+    "key": "essentials.fly",
+    "value": true,
+    "contexts": {"server": "survival", "region": ["a", "b"]},
+    "expires_at": 1762800000,
+    "source": "plugin:essentials"
+  }
+}

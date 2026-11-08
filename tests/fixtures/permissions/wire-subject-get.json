@@ -1,0 +1,6 @@
+{
+  "kind": "wire",
+  "name": "subject-get",
+  "type": "subject_get_request",
+  "json": {"uuid": "0123456789abcdef0123456789abcdef", "server": "survival-1"}
+}

@@ -1,0 +1,102 @@
+{
+  "kind": "resolve",
+  "name": "meta-lowest-rank",
+  "description": "Per key the lowest rank wins; at equal rank more context pairs win.",
+  "now": 1000,
+  "users": {
+    "00000000000000000000000000000001": {
+      "nodes": [
+        {"kind": "inherit", "group": "vip", "value": true},
+        {"kind": "meta", "key": "homes", "value": "10"}
+      ]
+    },
+    "00000000000000000000000000000002": {
+      "nodes": [{"kind": "inherit", "group": "vip", "value": true}]
+    }
+  },
+  "groups": {
+    "vip": {
+      "nodes": [
+        {"kind": "meta", "key": "homes", "value": "5"},
+        {"kind": "meta", "key": "homes", "value": "7", "contexts": {"server": "s"}},
+        {"kind": "meta", "key": "tab-color", "value": "gold"}
+      ]
+    },
+    "default": {
+      "nodes": [
+        {"kind": "meta", "key": "homes", "value": "1"},
+        {"kind": "meta", "key": "tab-color", "value": "gray"}
+      ]
+    }
+  },
+  "checks": [],
+  "meta": [
+    {
+      "user": "00000000000000000000000000000001",
+      "expect": {
+        "prefix": null,
+        "suffix": null,
+        "meta": {"homes": "10", "tab-color": "gold"},
+        "primary_group": "vip"
+      }
+    },
+    {
+      "user": "00000000000000000000000000000002",
+      "expect": {
+        "prefix": null,
+        "suffix": null,
+        "meta": {"homes": "5", "tab-color": "gold"},
+        "primary_group": "vip"
+      }
+    },
+    {
+      "user": "00000000000000000000000000000002",
+      "contexts": {"server": "s"},
+      "expect": {
+        "prefix": null,
+        "suffix": null,
+        "meta": {"homes": "7", "tab-color": "gold"},
+        "primary_group": "vip"
+      }
+    }
+  ],
+  "compiled": {
+    "00000000000000000000000000000001": {
+      "revision": 1,
+      "uuid": "00000000000000000000000000000001",
+      "primary_group": "vip",
+      "entries": [
+        {"k": "group", "key": "vip", "v": true, "ctx": {}, "rank": 1},
+        {"k": "group", "key": "default", "v": true, "ctx": {}, "rank": 2}
+      ],
+      "prefix": [],
+      "suffix": [],
+      "meta": [
+        {"key": "homes", "v": "10", "ctx": {}, "rank": 0},
+        {"key": "homes", "v": "5", "ctx": {}, "rank": 1},
+        {"key": "homes", "v": "7", "ctx": {"server": "s"}, "rank": 1},
+        {"key": "tab-color", "v": "gold", "ctx": {}, "rank": 1},
+        {"key": "homes", "v": "1", "ctx": {}, "rank": 2},
+        {"key": "tab-color", "v": "gray", "ctx": {}, "rank": 2}
+      ]
+    },
+    "00000000000000000000000000000002": {
+      "revision": 1,
+      "uuid": "00000000000000000000000000000002",
+      "primary_group": "vip",
+      "entries": [
+        {"k": "group", "key": "vip", "v": true, "ctx": {}, "rank": 1},
+        {"k": "group", "key": "default", "v": true, "ctx": {}, "rank": 2}
+      ],
+      "prefix": [],
+      "suffix": [],
+      "meta": [
+        {"key": "homes", "v": "5", "ctx": {}, "rank": 1},
+        {"key": "homes", "v": "7", "ctx": {"server": "s"}, "rank": 1},
+        {"key": "tab-color", "v": "gold", "ctx": {}, "rank": 1},
+        {"key": "homes", "v": "1", "ctx": {}, "rank": 2},
+        {"key": "tab-color", "v": "gray", "ctx": {}, "rank": 2}
+      ]
+    }
+  }
+}

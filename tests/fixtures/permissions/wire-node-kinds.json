@@ -1,0 +1,14 @@
+{
+  "kind": "wire",
+  "name": "node-kinds",
+  "description": "Every node kind.",
+  "type": "nodes",
+  "json": [
+    {"kind": "inherit", "group": "vip", "value": true, "expires_at": 1762800000},
+    {"kind": "prefix", "priority": 100, "text": "&6[VIP] "},
+    {"kind": "suffix", "priority": -1, "text": ""},
+    {"kind": "meta", "key": "homes", "value": "5"},
+    {"kind": "weight", "weight": 50},
+    {"kind": "display_name", "name": "Very Important"}
+  ]
+}

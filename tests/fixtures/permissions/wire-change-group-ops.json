@@ -1,0 +1,23 @@
+{
+  "kind": "wire",
+  "name": "change-group-ops",
+  "type": "changes",
+  "json": [
+    {"op": "create_group", "name": "vip", "weight": 10, "display_name": "VIP"},
+    {"op": "delete_group", "name": "old"},
+    {"op": "set_weight", "group": "vip", "weight": 50},
+    {"op": "set_display_name", "group": "vip", "display_name": null},
+    {"op": "set_primary_group", "user": "0123456789abcdef0123456789abcdef", "group": "vip"},
+    {"op": "set_track", "name": "ranks", "groups": ["default", "vip", "mod"]},
+    {"op": "delete_track", "name": "old"},
+    {"op": "promote", "user": "0123456789abcdef0123456789abcdef", "track": "ranks"},
+    {
+      "op": "demote",
+      "user": "0123456789abcdef0123456789abcdef",
+      "track": "ranks",
+      "contexts": {"server": "survival"}
+    },
+    {"op": "clear_subject", "subject": {"user": "0123456789abcdef0123456789abcdef"}},
+    {"op": "clear_subject", "subject": {"group": "vip"}, "contexts": {"server": "survival"}}
+  ]
+}

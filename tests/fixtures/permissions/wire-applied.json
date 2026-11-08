@@ -1,0 +1,11 @@
+{
+  "kind": "wire",
+  "name": "applied",
+  "type": "applied",
+  "json": {
+    "revision": 413,
+    "ops": 1,
+    "changed_users": ["0123456789abcdef0123456789abcdef"],
+    "changed_groups": []
+  }
+}

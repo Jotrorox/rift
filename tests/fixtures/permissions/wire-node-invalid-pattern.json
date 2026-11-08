@@ -1,0 +1,7 @@
+{
+  "kind": "wire",
+  "name": "node-invalid-pattern",
+  "type": "node",
+  "json": {"kind": "permission", "key": "a.*.b", "value": true},
+  "error": true
+}
