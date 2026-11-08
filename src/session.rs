@@ -238,7 +238,6 @@ pub struct Session<C, B> {
     backend: Option<Connection<B>>,
     pub handshake: Handshake,
     pub extension: Option<crate::extensions::ExtensionSession>,
-    extension_commands: Vec<String>,
     version: Option<ProtocolVersion>,
     login_start: Option<Packet>,
     identity: Option<PlayerIdentity>,
@@ -276,7 +275,6 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             version: ProtocolVersion::new(handshake.protocol).ok(),
             backend: None,
             extension: None,
-            extension_commands: Vec::new(),
             handshake,
             login_start: None,
             identity: None,
@@ -311,7 +309,6 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
     }
 
     pub fn set_extension(&mut self, extension: crate::extensions::ExtensionSession) {
-        self.extension_commands = extension.commands();
         self.extension = Some(extension);
     }
 
@@ -1288,7 +1285,11 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                         && self.joined
                         && let Some(caps) = version.switching()
                         && let Some((id, text)) =
-                            caps.proxy_suggestion_request(&packet, &self.extension_commands)?
+                            caps.proxy_suggestion_request(&packet, &|name| {
+                                self.extension
+                                    .as_ref()
+                                    .is_some_and(|extension| extension.intercepts(name))
+                            })?
                     {
                         if self.suggestions.allow() {
                             return Ok(SessionEvent::Suggestions(SuggestionRequest { id, text }));
@@ -1302,8 +1303,14 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                         && phase == State::Play
                         && self.joined
                         && let Some(caps) = version.switching()
+                        // Looked up now, not when the session began: plugins
+                        // register commands when they (re)start.
                         && let Some((command, acknowledgement)) =
-                            caps.proxy_command_with(&packet, &self.extension_commands)?
+                            caps.proxy_command_with(&packet, &|name| {
+                                self.extension
+                                    .as_ref()
+                                    .is_some_and(|extension| extension.intercepts(name))
+                            })?
                     {
                         if let Some(acknowledgement) = acknowledgement {
                             let acknowledgement =
@@ -1476,11 +1483,6 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                                     self.extension.as_ref().map_or_else(Vec::new, |extension| {
                                         extension.visible_commands()
                                     });
-                                // Persistent plugins register commands when
-                                // they (re)start; refresh what is intercepted.
-                                if let Some(extension) = &self.extension {
-                                    self.extension_commands = extension.commands();
-                                }
                                 caps.network_commands_with(&packet, &commands)?
                             } else {
                                 packet
