@@ -135,16 +135,21 @@ fn hidden_paths_neither_hold_the_entry_nor_hide_symbolic_links() {
 fn webassembly_grants_covering_the_plugin_cache_are_refused() {
     let fixture = Fixture::new();
     fixture.installed();
+    // The filesystem root: `/`, or the drive on Windows (a TOML literal
+    // string, so its backslash is not an escape).
+    let root = fixture.0.ancestors().last().unwrap().display().to_string();
     fixture.write(
         "plugins/relaxoban/plugin.toml",
-        &format!("{MANIFEST}[capabilities]\nfilesystem = [\"/\"]\n"),
+        &format!("{MANIFEST}[capabilities]\nfilesystem = ['{root}']\n"),
     );
     let error = fixture
         .load("rift.plugin('relaxoban')")
         .unwrap_err()
         .to_string();
     assert!(
-        error.contains("plugin relaxoban: capabilities.filesystem: / overlaps"),
+        error.contains(&format!(
+            "plugin relaxoban: capabilities.filesystem: {root} overlaps"
+        )),
         "{error}"
     );
 }
