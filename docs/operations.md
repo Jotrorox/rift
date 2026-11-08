@@ -93,7 +93,7 @@ returned Lua configuration table before starting:
 admin = {
     listen = "127.0.0.1:9091",
     token_env = "RIFT_ADMIN_TOKEN",
-    permissions = { "status", "servers", "maintenance", "drain", "transfer", "reload", "shutdown", "plugins" },
+    permissions = { "status", "servers", "maintenance", "drain", "transfer", "reload", "shutdown", "plugins", "logs" },
 },
 maintenance = false,
 draining = {}, -- For example, { "survival" } blocks new attachments to survival.
@@ -152,10 +152,10 @@ completion. A failed start appears in the server's `last_error` field. These
 commands never accept arbitrary process commands or modify ordinary unmanaged
 backends. `status` also includes the managed server state for read-only inspection.
 
-`rift admin plugins list`, `rift admin plugins status <name>` and
-`rift admin plugins logs <name>` show [plugins](plugins.md#operator-surface)
-with their state, restarts, calls, last error and last 200 log lines; they need
-`status`. `rift admin plugins restart <name>` stops a persistent plugin and
+`rift admin plugins list` and `rift admin plugins status <name>` show
+[plugins](plugins.md#operator-surface) with their state, restarts, calls and
+last error; they need `status`. `rift admin plugins logs <name>` shows a
+plugin's last 200 log lines and needs `logs`, like the HTTP log endpoints. `rift admin plugins restart <name>` stops a persistent plugin and
 starts a fresh instance with its current configuration; it needs the `plugins`
 permission, returns once the restart is accepted, and is recorded in the
 operator audit log with the plugin name.

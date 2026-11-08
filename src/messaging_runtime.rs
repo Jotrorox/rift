@@ -233,8 +233,9 @@ impl Controls {
 const CONTROL_DEADLINE: Duration = Duration::from_secs(40);
 /// Who `rift.control.*` requests act as in plugin logs and the audit log.
 /// Bus authorization is per principal (`control` and publish grants); the
-/// in-process broker carries no principal identity.
-const CONTROL_ACTOR: &str = "messaging";
+/// in-process broker carries no principal identity. The dot keeps it apart
+/// from every `web.operators` name, which may not contain one.
+const CONTROL_ACTOR: &str = "rift.control";
 /// Subjects answered from their own task rather than the serialized loop.
 const LONG_RUNNING: &[&str] = &["create", "remove", "download"];
 

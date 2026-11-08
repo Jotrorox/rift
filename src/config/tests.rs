@@ -720,6 +720,15 @@ fn operator_credentials_and_privileged_scopes_are_validated() {
         )
         .is_err()
     );
+    // The bus records itself as `rift.control`, which no operator can be
+    // named, so `messaging` stays an ordinary operator name.
+    assert!(
+        Config::from_lua(
+            &root.replace("%s", valid).replace("staff=", "messaging="),
+            "operators.lua"
+        )
+        .is_ok()
+    );
     let duplicate = root
         .replace("%s", valid)
         .replace("operators=", "token='independent-staff-token',operators=");

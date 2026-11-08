@@ -232,9 +232,11 @@ fn request(value: &Value, settings: &Admin, secret: &str) -> Result<Vec<String>,
             "start" | "stop" | "groups" | "create" | "remove" | "templates" | "download" | "nodes",
             _,
         ) => "servers",
-        // Restarting a plugin changes the running proxy; reading its state
-        // is status.
+        // Restarting a plugin changes the running proxy; its log tail may
+        // carry whatever the plugin logs, as server logs do over HTTP;
+        // reading its state is status.
         ("plugins", Some("restart")) => "plugins",
+        ("plugins", Some("logs")) => "logs",
         ("plugins", _) => "status",
         (command, _) => command,
     };
