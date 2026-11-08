@@ -19,6 +19,8 @@ pub mod manifest;
 pub(crate) mod remote;
 pub mod script;
 pub mod services;
+#[cfg(feature = "wasm")]
+pub mod wasm;
 pub mod worker;
 
 use api::{Action, Context, Event, Hook, Reply, Suggestion};
@@ -186,11 +188,7 @@ impl Host {
             {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,
-                    format!(
-                        "plugin {}: engine \"{}\" is not available in this build of Rift",
-                        spec.name,
-                        engine.name()
-                    ),
+                    format!("plugin {}: {}", spec.name, Engines::unavailable(engine)),
                 ));
             }
         }
@@ -300,11 +298,7 @@ impl Host {
                 let factory = persistent.engines.get(engine).ok_or_else(|| {
                     io::Error::new(
                         io::ErrorKind::Unsupported,
-                        format!(
-                            "plugin {}: engine \"{}\" is not available in this build of Rift",
-                            spec.name,
-                            engine.name()
-                        ),
+                        format!("plugin {}: {}", spec.name, Engines::unavailable(engine)),
                     )
                 })?;
                 Instance::start(

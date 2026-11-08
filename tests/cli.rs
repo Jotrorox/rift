@@ -288,27 +288,36 @@ fn check_lists_plugins_with_their_mode_and_never_starts_them() {
         "{stdout}"
     );
     assert!(
-        stderr.contains("engine \"wasm\" is not available"),
-        "{stderr}"
-    );
-    assert!(
         !fixture.0.join("plugins/relaxoban/data").exists(),
         "init never runs in check"
     );
-    // Startup refuses what check reported, before binding anything.
-    let started = fixture.run(&["--config", "rift.lua"]);
-    assert!(!started.status.success());
-    assert!(
-        String::from_utf8_lossy(&started.stderr)
-            .contains("plugin relaxoban: engine \"wasm\" is not available"),
-        "{}",
-        String::from_utf8_lossy(&started.stderr)
-    );
+    // Without WebAssembly support, check warns and startup and strict check
+    // refuse the plugin before anything starts. With it, both fail on the
+    // invalid component.
+    let refusal = if cfg!(feature = "wasm") {
+        assert!(!stderr.contains("is not available"), "{stderr}");
+        "relaxoban.wasm is not a WebAssembly component"
+    } else {
+        assert!(
+            stderr.contains(
+                "engine \"wasm\" is not available: this Rift was built without WebAssembly support"
+            ),
+            "{stderr}"
+        );
+        "plugin relaxoban: engine \"wasm\" is not available"
+    };
     let strict = fixture.run(&["check", "--strict"]);
     assert!(!strict.status.success());
     assert!(
-        String::from_utf8_lossy(&strict.stderr).contains("engine \"wasm\" is not available"),
+        String::from_utf8_lossy(&strict.stderr).contains(refusal),
         "{}",
         String::from_utf8_lossy(&strict.stderr)
+    );
+    let started = fixture.run(&["--config", "rift.lua"]);
+    assert!(!started.status.success());
+    assert!(
+        String::from_utf8_lossy(&started.stderr).contains(refusal),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
     );
 }

@@ -109,6 +109,14 @@ pub struct LuaOptions {
     pub memory_limit_mb: u32,
 }
 
+/// `[wasm]`: limits for one WebAssembly instance.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WasmOptions {
+    /// Linear memory and tables per instance; 0 means only WebAssembly's
+    /// own 4 GiB bound.
+    pub memory_limit_mb: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Manifest {
     pub name: String,
@@ -126,6 +134,8 @@ pub struct Manifest {
     pub restart: Restart,
     pub capabilities: Capabilities,
     pub lua: Option<LuaOptions>,
+    /// `Some` exactly for `engine = "wasm"`.
+    pub wasm: Option<WasmOptions>,
 }
 
 #[derive(Deserialize)]
@@ -142,6 +152,7 @@ struct Raw {
     failure: Option<RawFailure>,
     capabilities: Option<RawCapabilities>,
     lua: Option<RawLua>,
+    wasm: Option<RawWasm>,
 }
 
 #[derive(Deserialize)]
@@ -158,6 +169,12 @@ struct RawCapabilities {
     filesystem: Option<Vec<String>>,
     network: Option<bool>,
     env: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawWasm {
+    memory_limit_mb: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -256,6 +273,7 @@ impl Manifest {
                 (raw.failure.is_some(), "failure"),
                 (raw.capabilities.is_some(), "capabilities"),
                 (raw.lua.is_some(), "lua"),
+                (raw.wasm.is_some(), "wasm"),
             ] {
                 if present {
                     return Err(format!(
@@ -277,6 +295,7 @@ impl Manifest {
                 restart: Restart::Never,
                 capabilities: Capabilities::default(),
                 lua: None,
+                wasm: None,
             });
         }
         let engine = match raw.engine.as_deref() {
@@ -348,6 +367,21 @@ impl Manifest {
             }
             (None, EngineKind::Wasm) => None,
         };
+        let wasm = match (raw.wasm, engine) {
+            (Some(_), EngineKind::Lua) => {
+                return Err("[wasm] applies only to engine = \"wasm\"".into());
+            }
+            (_, EngineKind::Lua) => None,
+            (raw, EngineKind::Wasm) => {
+                let memory_limit_mb = raw.and_then(|raw| raw.memory_limit_mb).unwrap_or(0);
+                if !(0..=4096).contains(&memory_limit_mb) {
+                    return Err("wasm.memory_limit_mb must be 0..=4096 (0 is unlimited)".into());
+                }
+                Some(WasmOptions {
+                    memory_limit_mb: memory_limit_mb as u32,
+                })
+            }
+        };
         Ok(Self {
             name: raw.name,
             version: raw.version,
@@ -362,6 +396,7 @@ impl Manifest {
             restart,
             capabilities,
             lua,
+            wasm,
         })
     }
 
@@ -443,6 +478,9 @@ impl Manifest {
                 " ffi={} native_modules={} memory_limit_mb={}",
                 lua.ffi, lua.native_modules, lua.memory_limit_mb
             ));
+        }
+        if let Some(wasm) = self.wasm.as_ref().filter(|wasm| wasm.memory_limit_mb > 0) {
+            text.push_str(&format!(" memory_limit_mb={}", wasm.memory_limit_mb));
         }
         text
     }
@@ -549,6 +587,7 @@ mod tests {
         assert_eq!(manifest.restart, Restart::OnFailure);
         assert_eq!(manifest.capabilities, Capabilities::default());
         assert_eq!(manifest.lua, None);
+        assert_eq!(manifest.wasm, Some(WasmOptions::default()));
         assert_eq!(
             manifest.describe_capabilities(),
             "filesystem=data network=yes env=all"
@@ -560,6 +599,22 @@ mod tests {
         .unwrap();
         assert_eq!(lua.entry, Some(PathBuf::from("init.lua")));
         assert_eq!(lua.lua, Some(LuaOptions::default()));
+        assert_eq!(lua.wasm, None);
+        let limited = Manifest::parse(
+            &format!("{MINIMAL}[capabilities]\nfilesystem = []\nnetwork = false\nenv = []\n[wasm]\nmemory_limit_mb = 64\n"),
+            "relaxoban",
+        )
+        .unwrap();
+        assert_eq!(
+            limited.wasm,
+            Some(WasmOptions {
+                memory_limit_mb: 64
+            })
+        );
+        assert_eq!(
+            limited.describe_capabilities(),
+            "filesystem=none network=no env=none memory_limit_mb=64"
+        );
     }
 
     #[test]
@@ -654,6 +709,16 @@ memory_limit_mb = 64
             ),
             ("engine = \"lua\"\n[lua]\nmemory_limit_mb = -1\n", "a"),
             ("engine = \"lua\"\n[lua]\njit = true\n", "a"),
+            ("engine = \"lua\"\n[wasm]\nmemory_limit_mb = 1\n", "a"),
+            (
+                "engine = \"wasm\"\nentry = \"a.wasm\"\n[wasm]\nmemory_limit_mb = 4097\n",
+                "a",
+            ),
+            (
+                "engine = \"wasm\"\nentry = \"a.wasm\"\n[wasm]\nfuel = 1\n",
+                "a",
+            ),
+            ("mode = \"script\"\n[wasm]\nmemory_limit_mb = 1\n", "a"),
         ] {
             let text = format!("{base}{extra}");
             assert!(Manifest::parse(&text, folder).is_err(), "{text}");
