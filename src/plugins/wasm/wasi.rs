@@ -1,9 +1,12 @@
 //! What a WebAssembly plugin may touch, from its manifest's `[capabilities]`:
 //!
 //! - `filesystem`: `data` preopens the plugin's `data/` directory as `/data`
-//!   (created if missing), `host` preopens the configuration directory as
-//!   `/host`, and an absolute path is preopened at the same guest path. All
-//!   preopens are read-write; nothing else of the host is visible.
+//!   (created if missing) read-write, `host` preopens the configuration
+//!   directory as `/host` read-only, and an absolute path is preopened
+//!   read-write at the same guest path (configuration loading refuses one
+//!   that covers the plugin cache or the plugins folder). Nothing else of
+//!   the host is visible. `host` is read-only so that no plugin can rewrite
+//!   the configuration, other plugins or the compiled component cache.
 //! - `network`: TCP, UDP and DNS through `wasi:sockets`, and outbound HTTP
 //!   through `wasi:http`. Without it every socket address is refused, name
 //!   lookups fail and `wasi:http` requests fail with `HTTP-request-denied`.
@@ -54,8 +57,13 @@ pub(super) fn context(
             std::fs::create_dir_all(&host)
                 .map_err(|error| format!("cannot create {}: {error}", host.display()))?;
         }
+        let permissions = if guest == CONFIG_DIR {
+            FsPerms::ReadOnly
+        } else {
+            FsPerms::ReadWrite
+        };
         builder
-            .preopened_dir(&host, &guest, FsPerms::ReadWrite)
+            .preopened_dir(&host, &guest, permissions)
             .map_err(|error| {
                 format!(
                     "capabilities.filesystem: cannot open {} as {guest}: {error}",

@@ -121,7 +121,7 @@ jit = true                  # false: interpret everything so deadlines interrupt
 | `hot_reload` | `false` | See [lifecycle](#lifecycle-failures-restarts-and-reloads). |
 | `[deadlines]` | per hook | Keys are `init`, `reload`, `shutdown` and the awaited hooks; observers have no deadline and are rejected here. Awaited hooks allow 1–10 000 ms, `http` up to 60 000. |
 | `[failure]` | | `on_timeout` overrides the per-hook default for every hook. |
-| `[capabilities]` | `filesystem = ["data"]`, `network = true`, all of `env` | `data` is `plugins/<name>/data/` (created on start); `host` is the configuration directory. WebAssembly enforces all three. Lua enforces `env` (`os.getenv`) and `network` (`rift.http.request`) but not `filesystem`: Lua `io` sees what Rift sees. |
+| `[capabilities]` | `filesystem = ["data"]`, `network = true`, all of `env` | `data` is `plugins/<name>/data/` (created on start, read-write); `host` is the configuration directory, read-only; an absolute path is read-write and, for WebAssembly, may not contain or lie inside `local/plugincache` or `plugins/`. WebAssembly enforces all three. Lua enforces `env` (`os.getenv`) and `network` (`rift.http.request`) but not `filesystem`: Lua `io` sees what Rift sees. |
 | `[lua]` | | `engine = "lua"` only. See [the JIT and deadlines](plugins-lua.md#the-jit-and-deadlines). |
 | `[wasm]` | | `engine = "wasm"` only: per-instance limits; see [WebAssembly plugins](#webassembly-plugins). |
 
@@ -300,12 +300,19 @@ Install only plugins you would run as Rift's user.
   A Lua plugin with `lua.ffi = true` or `lua.native_modules = true` runs native
   code in Rift's address space and can crash or corrupt the proxy.
 - **WebAssembly isolates memory, not privilege.** A WebAssembly plugin cannot
-  touch Rift's memory, and a trap ends only its own instance. But it can do
-  everything its capabilities allow: with full WASI (`filesystem = ["host"]`,
-  `network = true`, the whole environment) a plugin can read `rift.sqlite3`
-  and the configuration with its secrets, fill the disk, read every secret in
-  the environment, or open ports. Every plugin can also use the whole host
-  API: kick players, change permissions, publish on the bus and start servers.
+  touch Rift's memory, and a trap ends only its own instance. This holds
+  whatever it is granted, because no grant lets it change code Rift runs:
+  `host` is read-only, absolute grants may not cover the compiled component
+  cache or `plugins/`, and Rift loads a compiled component only when it
+  carries an HMAC under a per-install secret (`local/plugincache/key`, mode
+  0600, created on first use). But a plugin can do everything its
+  capabilities allow: with full WASI (`filesystem = ["host"]`,
+  `network = true`, the whole environment) it can read `rift.sqlite3` and the
+  configuration with its secrets, fill the disk through `data`, read every
+  secret in the environment, or open ports. Every plugin can also use the
+  whole host API: kick players, change permissions, publish on the bus and
+  start servers. Lua plugins, being trusted, can write anywhere Rift can,
+  the cache included.
 - **Manifests restrict capabilities.** `filesystem = ["data"]`,
   `network = false` and `env = []` (or a list of names) confine a WebAssembly
   plugin to its own folder; Lua honours `env` and `network` for the Rift API

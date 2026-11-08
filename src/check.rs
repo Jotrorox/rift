@@ -85,7 +85,8 @@ pub fn plugins(config: &Config) -> (Vec<String>, Vec<String>) {
 
 /// Run every strict check and collect the results. Nothing is created or
 /// changed except a probe file that is removed at once and the compiled
-/// WebAssembly plugins in `local/plugincache`, which startup then loads.
+/// WebAssembly plugins in `local/plugincache` (and that cache's key), which
+/// startup then loads.
 pub fn strict(config: &Config, path: &Path) -> Report {
     let mut report = Report::default();
     environment(config, &mut report);

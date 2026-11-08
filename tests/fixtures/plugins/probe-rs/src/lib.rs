@@ -10,7 +10,8 @@
 //! - `join(ctx)`: name `Spin` loops forever.
 //! - `command(ctx)`: prints `probe stdout <args>` and a partial line to
 //!   stdout, then replies with a JSON report of what the guest can see:
-//!   whether `/data` is writable and `/host` readable, `meta.data-dir` and
+//!   whether `/data` is writable, `/host` readable and `/host` writable,
+//!   `meta.data-dir` and
 //!   `meta.config-dir`, the environment's variable names and the outcome of
 //!   a TCP connection to 127.0.0.1:9.
 use rift_plugin::{Action, CommandSpec, Context, Hook, Plugin, Registration, meta};
@@ -71,6 +72,7 @@ impl Plugin for Probe {
             .and_then(|()| std::fs::read("/data/probe.txt"))
             .is_ok_and(|contents| contents == b"written");
         let host = std::fs::read_dir("/host").is_ok();
+        let host_writable = std::fs::write("/host/probe-write.txt", b"written").is_ok();
         let network = match std::net::TcpStream::connect("127.0.0.1:9") {
             Ok(_) => "connected".to_owned(),
             Err(error) => format!("{:?}", error.kind()),
@@ -78,6 +80,7 @@ impl Plugin for Probe {
         let report = serde_json::json!({
             "data": data,
             "host": host,
+            "host_writable": host_writable,
             "meta_data": meta::data_dir(),
             "meta_config": meta::config_dir(),
             "env": std::env::vars().map(|(name, _)| name).collect::<Vec<_>>(),
