@@ -125,8 +125,11 @@ jit = true                  # false: interpret everything so deadlines interrupt
 | `[lua]` | | `engine = "lua"` only. See [the JIT and deadlines](plugins-lua.md#the-jit-and-deadlines). |
 | `[wasm]` | | `engine = "wasm"` only: per-instance limits; see [WebAssembly plugins](#webassembly-plugins). |
 
-`rift check` prints each plugin with its mode and effective capabilities, so
-the trust each one gets is visible before anything starts.
+`rift check` prints each plugin with its mode and capabilities, so the trust
+each one gets is visible before anything starts. For Lua plugins it marks what
+is not enforced: `filesystem` is advisory, `network` gates only
+`rift.http.request` and `env` only `os.getenv`, because Lua `io` and `os` run
+with Rift's privileges.
 
 ## Events
 
@@ -305,8 +308,8 @@ Install only plugins you would run as Rift's user.
   plugin to its own folder; Lua honours `env` and `network` for the Rift API
   only. The defaults are permissive: `data`, network on and the whole
   environment.
-- **`rift check` prints the effective set** for every plugin, including the
-  Lua options, before anything runs.
+- **`rift check` prints the grants** for every plugin, including the Lua
+  options and which grants Lua does not enforce, before anything runs.
 - **Rift never downloads or auto-enables plugins.** A plugin runs only when its
   folder is on disk and the configuration names it.
 - **Configuration code stays sandboxed**, as [above](#why-configuration-code-stays-sandboxed).
@@ -319,7 +322,7 @@ Install only plugins you would run as Rift's user.
 
 ```text
 plugin (configuration script): mode script, sandboxed; hooks login, join
-plugin hello-lua 0.1.0: mode persistent, engine lua, trusted; restart on-failure; capabilities filesystem=data network=no env=all ffi=false native_modules=false memory_limit_mb=0
+plugin hello-lua 0.1.0: mode persistent, engine lua, trusted; restart on-failure; capabilities filesystem=data(advisory) network=no(rift.http only) env=all(os.getenv only) ffi=false native_modules=false memory_limit_mb=0; Lua io and os are not sandboxed
 plugin (bus responders): mode remote; hooks login
 ```
 

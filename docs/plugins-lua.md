@@ -64,7 +64,9 @@ end)
 rift.plugin("hello-lua", { deny = "Mallory" })
 ```
 
-`rift check` lists the plugin with its effective capabilities; start or reload
+`rift check` lists the plugin with its capabilities, marking the ones Lua does
+not enforce (`filesystem` is advisory, `network` gates only `rift.http`, `env`
+only `os.getenv`); start or reload
 Rift to run it. [`examples/plugins/hello-lua`](../examples/plugins/hello-lua)
 is the complete example, behaving exactly like the Rust, C and Go examples.
 

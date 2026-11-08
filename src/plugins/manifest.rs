@@ -488,8 +488,15 @@ impl Manifest {
             Some(names) if names.is_empty() => "none".to_owned(),
             Some(names) => names.join(","),
         };
+        // WebAssembly enforces all three grants. Lua plugins run with Rift's
+        // privileges: only the Rift API honours them, so say so.
+        let (filesystem_note, network_note, env_note) = if self.lua.is_some() {
+            ("(advisory)", "(rift.http only)", "(os.getenv only)")
+        } else {
+            ("", "", "")
+        };
         let mut text = format!(
-            "filesystem={} network={} env={env}",
+            "filesystem={}{filesystem_note} network={}{network_note} env={env}{env_note}",
             if filesystem.is_empty() {
                 "none".to_owned()
             } else {
@@ -503,7 +510,7 @@ impl Manifest {
         );
         if let Some(lua) = &self.lua {
             text.push_str(&format!(
-                " ffi={} native_modules={} memory_limit_mb={}",
+                " ffi={} native_modules={} memory_limit_mb={}; Lua io and os are not sandboxed",
                 lua.ffi, lua.native_modules, lua.memory_limit_mb
             ));
         }
@@ -704,7 +711,7 @@ jit = false
         assert!(!manifest.lua.as_ref().unwrap().jit);
         assert_eq!(
             manifest.describe_capabilities(),
-            "filesystem=data,host,/var/lib/relaxoban network=no env=RELAXOBAN_DSN ffi=true native_modules=true memory_limit_mb=64"
+            "filesystem=data,host,/var/lib/relaxoban(advisory) network=no(rift.http only) env=RELAXOBAN_DSN(os.getenv only) ffi=true native_modules=true memory_limit_mb=64; Lua io and os are not sandboxed"
         );
         let script = Manifest::parse(
             "name = \"a\"\nversion = \"1\"\napi = \"0.1\"\nmode = \"script\"\n",
