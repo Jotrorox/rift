@@ -1,0 +1,6 @@
+{
+  "kind": "wire",
+  "name": "command-reply",
+  "type": "command_reply",
+  "json": {"revision": 413, "component": {"text": "Set fly to true for Alice", "color": "green"}}
+}

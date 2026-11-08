@@ -1,0 +1,6 @@
+{
+  "kind": "wire",
+  "name": "groups-get",
+  "type": "groups_get_request",
+  "json": {"names": ["vip"], "permissions": true}
+}

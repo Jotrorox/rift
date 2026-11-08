@@ -1,0 +1,9 @@
+[package]
+name = "rift-permissions-testing"
+description = "In-memory Rift permissions for plugin unit tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rift-permissions.workspace = true

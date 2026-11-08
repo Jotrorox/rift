@@ -1,0 +1,34 @@
+{
+  "kind": "wire",
+  "name": "change-event",
+  "type": "change_event",
+  "json": {
+    "revision": 413,
+    "at": 1762800000,
+    "actor": "uuid:0123456789abcdef0123456789abcdef",
+    "reason": "event reward",
+    "ops": [
+      {
+        "op": "node",
+        "subject": {"user": "0123456789abcdef0123456789abcdef"},
+        "before": null,
+        "after": {"kind": "inherit", "group": "vip", "value": true, "expires_at": 1765392000}
+      },
+      {
+        "op": "group",
+        "name": "vip",
+        "before": {"weight": 0},
+        "after": {"weight": 50, "display_name": "VIP"}
+      },
+      {"op": "track", "name": "ranks", "before": null, "after": ["default", "vip"]},
+      {
+        "op": "primary_group",
+        "user": "0123456789abcdef0123456789abcdef",
+        "before": null,
+        "after": "vip"
+      }
+    ],
+    "changed": ["0123456789abcdef0123456789abcdef"],
+    "groups": ["vip"]
+  }
+}

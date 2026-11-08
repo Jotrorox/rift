@@ -1,0 +1,21 @@
+{
+  "kind": "luckperms",
+  "name": "permission",
+  "node": {
+    "type": "permission",
+    "key": "Essentials.Fly",
+    "value": false,
+    "context": {"server": "survival"},
+    "expiry": 1762800000
+  },
+  "expect": [
+    {
+      "kind": "permission",
+      "key": "essentials.fly",
+      "value": false,
+      "contexts": {"server": "survival"},
+      "expires_at": 1762800000,
+      "source": "import"
+    }
+  ]
+}

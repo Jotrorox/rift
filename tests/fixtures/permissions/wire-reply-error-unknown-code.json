@@ -1,0 +1,8 @@
+{
+  "kind": "wire",
+  "name": "reply-error-unknown-code",
+  "description": "Unknown or missing codes read as internal.",
+  "type": "reply",
+  "json": {"ok": false, "error": "x", "code": "brand_new"},
+  "expect": {"ok": false, "error": "x", "code": "internal"}
+}

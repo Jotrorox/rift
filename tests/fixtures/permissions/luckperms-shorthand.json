@@ -1,0 +1,9 @@
+{
+  "kind": "luckperms",
+  "name": "shorthand",
+  "node": {"type": "permission", "key": "essentials.{fly,heal}", "value": true},
+  "expect": [
+    {"kind": "permission", "key": "essentials.fly", "value": true, "source": "import"},
+    {"kind": "permission", "key": "essentials.heal", "value": true, "source": "import"}
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "kind": "wire",
+  "name": "subject-batch-reply",
+  "type": "subject_batch_reply",
+  "json": {
+    "revision": 412,
+    "subjects": [
+      {
+        "revision": 400,
+        "uuid": "0123456789abcdef0123456789abcdef",
+        "primary_group": "default",
+        "entries": [{"k": "group", "key": "default", "v": true, "ctx": {}, "rank": 1}],
+        "prefix": [],
+        "suffix": [],
+        "meta": []
+      }
+    ]
+  }
+}

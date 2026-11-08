@@ -1,0 +1,9 @@
+[package]
+name = "rift-permissions-client"
+description = "Rift permissions bus client: handshake, snapshots, updates and offline policy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rift-permissions.workspace = true

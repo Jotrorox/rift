@@ -1,0 +1,6 @@
+{
+  "kind": "wire",
+  "name": "subject-batch",
+  "type": "subject_batch_request",
+  "json": {"uuids": ["0123456789abcdef0123456789abcdef", "00000000000000000000000000000001"]}
+}

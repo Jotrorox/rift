@@ -1,0 +1,15 @@
+{
+  "kind": "wire",
+  "name": "change-event-minimal",
+  "type": "change_event",
+  "json": {"revision": 2, "at": 0, "actor": "system", "ops": [], "ops_truncated": true},
+  "expect": {
+    "revision": 2,
+    "at": 0,
+    "actor": "system",
+    "ops": [],
+    "ops_truncated": true,
+    "changed": [],
+    "groups": []
+  }
+}
