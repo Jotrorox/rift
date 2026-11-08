@@ -190,6 +190,7 @@ pub const ADMIN_PERMISSIONS: &[&str] = &[
     "shutdown",
     "servers",
     "plugins",
+    "logs",
 ];
 
 /// Grants available to named `web.operators`.
@@ -218,7 +219,6 @@ const RESERVED_OPERATOR_NAMES: &[&str] = &[
     "signal",
     "local-admin",
     "scaler",
-    "messaging",
 ];
 
 /// Optional administration service. Credentials are mandatory for non-loopback binds.

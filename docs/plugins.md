@@ -332,8 +332,8 @@ rift admin plugins logs hello-lua  # the last 200 log lines
 rift admin plugins restart hello-lua
 ```
 
-`list`, `status` and `logs` need the `status` admin permission; `restart` needs
-`plugins`.
+`list` and `status` need the `status` admin permission, `logs` needs `logs`
+and `restart` needs `plugins`.
 
 **HTTP API and dashboard.** The [dashboard](http.md)'s Plugins page shows
 every plugin's state, restarts, calls and last error, a live log tail, and a
@@ -379,7 +379,7 @@ appear in the [operator audit log](http.md#authentication-and-access) as
 `plugin started`, `plugin stopped`, `plugin restarting`, `plugin failed`,
 `plugin reloaded` and `plugin reload_failed` by `system`, and operator
 restarts as `plugin restart_requested` by the operator (`local-admin` for the
-admin socket, `messaging` for the bus). Records carry the plugin name, never
+admin socket, `rift.control` for the bus, a name no web operator can have). Records carry the plugin name, never
 error text. The HTTP and admin requests themselves are audited as usual.
 
 **Metrics** on the status service's `/metrics`:

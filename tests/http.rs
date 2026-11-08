@@ -2277,7 +2277,7 @@ fn plugins_are_listed_restarted_and_audited_over_http_the_admin_socket_and_metri
         fixture.source(
             &format!("token = '{TOKEN}', operators = {{ viewer = {{ token = '{OPERATOR_TOKEN}', permissions = {{'read','logs','audit'}} }}, lobby_staff = {{ token = 'test-scoped-plugin-operator', permissions = {{'read','logs'}}, groups = {{'lobby'}} }} }},"),
             &format!(
-                "status = {{ listen = '{}' }}, admin = {{ listen = '127.0.0.1:0', permissions = {{ 'status', 'plugins' }} }}, service_groups = {{ lobby = {{ command = {{'unused'}}, directory = 'lobby/{{name}}', port_range = {{26310,26312}} }} }},",
+                "status = {{ listen = '{}' }}, admin = {{ listen = '127.0.0.1:0', permissions = {{ 'status', 'plugins', 'logs' }} }}, service_groups = {{ lobby = {{ command = {{'unused'}}, directory = 'lobby/{{name}}', port_range = {{26310,26312}} }} }},",
                 fixture.status
             ),
         )

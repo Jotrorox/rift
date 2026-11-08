@@ -451,7 +451,7 @@ fn service_group_commands_share_the_servers_permission() {
 }
 
 #[test]
-fn plugin_restarts_need_the_plugins_permission_and_reads_need_status() {
+fn plugin_restarts_need_plugins_logs_need_logs_and_reads_need_status() {
     let mut settings = Admin {
         listen: "127.0.0.1:9091".parse().unwrap(),
         token_env: "RIFT_ADMIN_TOKEN".into(),
@@ -462,10 +462,18 @@ fn plugin_restarts_need_the_plugins_permission_and_reads_need_status() {
     for args in [
         json!(["plugins", "list"]),
         json!(["plugins", "status", "a"]),
-        json!(["plugins", "logs", "a"]),
     ] {
         assert!(request(&value(args), &settings, secret).is_ok());
     }
+    // The log tail needs logs, as it does over HTTP.
+    let logs = value(json!(["plugins", "logs", "a"]));
+    assert!(
+        request(&logs, &settings, secret)
+            .unwrap_err()
+            .contains("permission denied: logs")
+    );
+    settings.permissions.insert("logs".into());
+    assert!(request(&logs, &settings, secret).is_ok());
     let restart = value(json!(["plugins", "restart", "a"]));
     assert!(
         request(&restart, &settings, secret)
