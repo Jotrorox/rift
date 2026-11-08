@@ -1054,6 +1054,135 @@ fn status_and_metrics_servers_expose_only_their_enabled_surfaces() {
 }
 
 #[test]
+fn public_status_exposure_redacts_operator_detail_and_serves_page_cors_and_badge() {
+    let fixture = Fixture::new();
+    let extra = format!(
+        "status = {{ listen = '{}', exposure = 'public', backends = {{ primary = 'Survival <1>' }}, cors = {{ 'https://example.com' }}, ui = {{ title = 'Example & Co', notice = 'Maintenance <Sunday>', accent = '#ff6a00', refresh_ms = 10000, links = {{ {{ label = 'Discord', href = 'https://discord.gg/example' }} }} }} }},",
+        fixture.status
+    );
+    let source = fixture.source(&format!("token = '{TOKEN}',"), &extra);
+    let mut process = fixture.start(&source);
+    process.wait_for(fixture.status);
+    let status = Client::new(fixture.status);
+
+    let state = status.get("/status").expect(200);
+    assert!(!state.headers.contains("access-control-allow-origin"));
+    assert!(state.headers.contains("vary: origin"));
+    let state = state.value();
+    assert_eq!(state["exposure"], "public");
+    assert_eq!(state["players"], 0);
+    assert_eq!(state["backends"][0]["name"], "primary");
+    assert_eq!(state["backends"][0]["display"], "Survival <1>");
+    assert_eq!(state["backends"][0]["players"], 0);
+    assert_eq!(state["page"]["title"], "Example & Co");
+    assert_eq!(state["page"]["refresh_ms"], 10000);
+    assert_eq!(state["page"]["panels"]["listeners"], false);
+    assert_eq!(
+        state["page"]["links"][0]["href"],
+        "https://discord.gg/example"
+    );
+    assert_eq!(state["services"]["status"]["metrics"], false);
+    for private in ["listeners", "metrics", "revision", "version", "http_hook"] {
+        assert!(
+            state.get(private).is_none(),
+            "public status exposed {private}"
+        );
+    }
+    let text = state.to_string();
+    assert!(
+        !text.contains("127.0.0.1"),
+        "public status exposed an address: {text}"
+    );
+    assert!(!text.contains(TOKEN));
+    // Public pages opt in to Prometheus explicitly.
+    status.get("/metrics").expect(404);
+
+    let page = status.get("/").expect(200).body;
+    assert!(
+        page.contains("<title>Network status · Example &amp; Co</title>"),
+        "{page}"
+    );
+    assert!(page.contains(">Maintenance &lt;Sunday&gt;</div>"), "{page}");
+    assert!(!page.contains("{{"), "unfilled placeholder: {page}");
+
+    let allowed = status
+        .send("GET", "/status", &[("Origin", "https://example.com")], "")
+        .expect(200);
+    assert!(
+        allowed
+            .headers
+            .contains("access-control-allow-origin: https://example.com")
+    );
+    assert!(!allowed.headers.contains("access-control-allow-credentials"));
+    let denied = status
+        .send("GET", "/status", &[("Origin", "https://evil.example")], "")
+        .expect(200);
+    assert!(!denied.headers.contains("access-control-allow-origin"));
+    let preflight = status
+        .send(
+            "OPTIONS",
+            "/status",
+            &[
+                ("Origin", "https://example.com"),
+                ("Access-Control-Request-Method", "GET"),
+            ],
+            "",
+        )
+        .expect(204);
+    assert!(
+        preflight
+            .headers
+            .contains("access-control-allow-methods: get")
+    );
+
+    let badge = status.get("/badge.svg").expect(200);
+    assert!(badge.headers.contains("content-type: image/svg+xml"));
+    assert!(badge.body.starts_with("<svg"));
+    assert!(
+        badge.body.contains("Example &amp; Co: 0 online"),
+        "{}",
+        badge.body
+    );
+
+    // The authenticated API keeps operator detail regardless of exposure.
+    let admin = fixture
+        .client()
+        .authenticated()
+        .get("/api/status")
+        .expect(200)
+        .value();
+    assert_eq!(admin["backends"][0]["address"], "127.0.0.1:1");
+    assert!(admin["listeners"].is_array());
+}
+
+#[test]
+fn status_backends_can_be_hidden_from_the_status_server_only() {
+    let fixture = Fixture::new();
+    let extra = format!(
+        "status = {{ listen = '{}', backends = {{ primary = false }} }},",
+        fixture.status
+    );
+    let source = fixture.source(&format!("token = '{TOKEN}',"), &extra);
+    let mut process = fixture.start(&source);
+    process.wait_for(fixture.status);
+    let state = Client::new(fixture.status)
+        .get("/status")
+        .expect(200)
+        .value();
+    assert_eq!(state["exposure"], "operator");
+    assert_eq!(state["backends"], json!([]));
+    assert_eq!(state["listeners"][0]["name"], "main");
+    assert!(state["metrics"]["accepted"].is_number());
+    let admin = fixture
+        .client()
+        .authenticated()
+        .get("/api/status")
+        .expect(200)
+        .value();
+    assert_eq!(admin["backends"][0]["name"], "primary");
+}
+
+#[test]
 fn observability_services_can_be_enabled_reconfigured_and_disabled_live() {
     let fixture = Fixture::new();
     let source = fixture.source("", "status = false, metrics = false,");

@@ -595,10 +595,160 @@ fn http_services_are_independently_optional_and_have_loopback_defaults() {
         StatusConfig {
             listen: "0.0.0.0:9091".parse().unwrap(),
             metrics: false,
-            ui: false
+            ui: false,
+            ..StatusConfig::default()
         }
     );
     assert!(config.on_http.is_some());
+}
+
+#[test]
+fn status_page_exposure_backends_and_cors_are_parsed() {
+    let config = Config::from_lua(
+        &with_options(
+            "status = { exposure = 'public', backends = { lobby = 'Survival' }, cors = { 'https://Example.com', 'http://[::1]:8080' }, ui = { title = ' Example Network ', notice = 'Maintenance Sunday', accent = '#F60', refresh_ms = 10000, panels = { listeners = false }, links = { { label = 'Discord', href = 'https://discord.gg/example' }, { label = 'Rules', href = '/rules' } } } }",
+        ),
+        "status.lua",
+    )
+    .unwrap();
+    let status = config.status.unwrap();
+    assert_eq!(status.exposure, StatusExposure::Public);
+    assert!(!status.metrics, "public status must opt in to Prometheus");
+    assert!(status.ui);
+    assert_eq!(
+        status.backends["lobby"],
+        StatusBackend::Display("Survival".into())
+    );
+    assert_eq!(status.cors, ["https://example.com", "http://[::1]:8080"]);
+    assert!(status.allows_origin("https://EXAMPLE.com"));
+    assert!(!status.allows_origin("https://example.com.evil"));
+    assert_eq!(status.page.title.as_deref(), Some("Example Network"));
+    assert_eq!(status.page.notice.as_deref(), Some("Maintenance Sunday"));
+    assert_eq!(status.page.accent.as_deref(), Some("#ff6600"));
+    assert_eq!(status.page.refresh, Duration::from_secs(10));
+    assert!(!status.page.panels.listeners && status.page.panels.backends);
+    assert_eq!(status.page.links.len(), 2);
+    assert_eq!(status.page.links[1].href, "/rules");
+
+    let status = Config::from_lua(
+        &with_options("status = { exposure = 'public', metrics = true, ui = { enabled = false }, cors = '*' }"),
+        "status.lua",
+    )
+    .unwrap()
+    .status
+    .unwrap();
+    assert!(status.metrics && !status.ui);
+    assert!(status.allows_origin("https://anywhere.example"));
+    assert_eq!(
+        Config::from_lua(&with_options("status = { ui = true }"), "status.lua")
+            .unwrap()
+            .status
+            .unwrap(),
+        StatusConfig::default()
+    );
+}
+
+#[test]
+fn status_page_settings_reject_unsafe_or_unknown_values() {
+    for (options, expected) in [
+        ("status = { exposure = 'everyone' }", "status.exposure"),
+        ("status = { ui = 'yes' }", "status.ui"),
+        ("status = { ui = { colour = '#fff' } }", "status.ui.colour"),
+        ("status = { ui = { title = '' } }", "status.ui.title"),
+        ("status = { ui = { title = 'a\\nb' } }", "status.ui.title"),
+        (
+            "status = { ui = { notice = string.rep('x', 501) } }",
+            "status.ui.notice",
+        ),
+        ("status = { ui = { accent = 'red' } }", "status.ui.accent"),
+        (
+            "status = { ui = { accent = '#ff6a0' } }",
+            "status.ui.accent",
+        ),
+        (
+            "status = { ui = { accent = '#ff6a00; color: red' } }",
+            "status.ui.accent",
+        ),
+        (
+            "status = { ui = { refresh_ms = 999 } }",
+            "status.ui.refresh_ms",
+        ),
+        (
+            "status = { ui = { refresh_ms = 300001 } }",
+            "status.ui.refresh_ms",
+        ),
+        (
+            "status = { ui = { panels = { traffic = false } } }",
+            "status.ui.panels.traffic",
+        ),
+        (
+            "status = { ui = { panels = { backends = 1 } } }",
+            "status.ui.panels.backends",
+        ),
+        (
+            "status = { ui = { links = { { label = 'x', href = 'javascript:alert(1)' } } } }",
+            "status.ui.links[1].href",
+        ),
+        (
+            "status = { ui = { links = { { label = 'x', href = '//evil.example' } } } }",
+            "status.ui.links[1].href",
+        ),
+        (
+            "status = { ui = { links = { { label = 'x', href = 'https://' } } } }",
+            "status.ui.links[1].href",
+        ),
+        (
+            "status = { ui = { links = { { label = 'x', href = 'https://a b' } } } }",
+            "status.ui.links[1].href",
+        ),
+        (
+            "status = { ui = { links = { { label = 'x' } } } }",
+            "status.ui.links[1].href",
+        ),
+        (
+            "status = { ui = { links = { { label = 'x', href = '/', target = '_blank' } } } }",
+            "status.ui.links[1].target",
+        ),
+        (
+            "status = { ui = { links = { [2] = { label = 'x', href = '/' } } } }",
+            "status.ui.links",
+        ),
+        (
+            "status = { backends = { lobby = true } }",
+            "status.backends.lobby",
+        ),
+        (
+            "status = { backends = { missing = false } }",
+            "status.backends.missing: unknown",
+        ),
+        (
+            "status = { cors = { 'https://example.com/' } }",
+            "status.cors",
+        ),
+        ("status = { cors = { 'example.com' } }", "status.cors"),
+        (
+            "status = { cors = { 'https://example.com:0' } }",
+            "status.cors",
+        ),
+        (
+            "status = { cors = { 'https://exa mple.com' } }",
+            "status.cors",
+        ),
+        ("status = { cors = { 'null' } }", "status.cors"),
+        (
+            "status = { cors = { '*', 'https://example.com' } }",
+            "only origin",
+        ),
+        (
+            "status = { cors = { 'https://example.com', '*' } }",
+            "only origin",
+        ),
+    ] {
+        let error = Config::from_lua(&with_options(options), "status.lua")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(expected), "{options}: {error}");
+    }
 }
 
 #[test]

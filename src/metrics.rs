@@ -152,6 +152,11 @@ impl Metrics {
         }
     }
 
+    /// Players currently attached to each backend; backends without players are absent.
+    pub fn backend_players(&self) -> BTreeMap<String, u64> {
+        self.backend_players.lock().unwrap().clone()
+    }
+
     pub fn values(&self) -> serde_json::Value {
         serde_json::json!({
             "accepted": self.accepted.get(),
