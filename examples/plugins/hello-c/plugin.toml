@@ -1,0 +1,17 @@
+# Build with `make WASI_SDK_PATH=/path/to/wasi-sdk` in this directory (see
+# hello.c for the behaviour); the build writes hello_c.wasm next to this file.
+name = "hello-c"
+version = "0.1.0"
+api = "0.1"
+mode = "persistent"
+engine = "wasm"
+entry = "hello_c.wasm"
+
+[failure]
+on_timeout = "deny"
+on_failure = "deny"
+restart = "on-failure"
+
+[capabilities]
+filesystem = ["data"]
+network = false
