@@ -189,6 +189,7 @@ pub const ADMIN_PERMISSIONS: &[&str] = &[
     "reload",
     "shutdown",
     "servers",
+    "plugins",
 ];
 
 /// Grants available to named `web.operators`.
@@ -202,10 +203,11 @@ pub const WEB_PERMISSIONS: &[&str] = &[
     "audit",
     "extensions",
     "files",
+    "plugins",
 ];
 
 /// These grants can affect the whole proxy, so they require unrestricted scope.
-const UNSCOPED_WEB_PERMISSIONS: &[&str] = &["config", "deploy", "extensions"];
+const UNSCOPED_WEB_PERMISSIONS: &[&str] = &["config", "deploy", "extensions", "plugins"];
 
 /// Identities that Rift itself records in operator audit logs.
 const RESERVED_OPERATOR_NAMES: &[&str] = &[
@@ -216,6 +218,7 @@ const RESERVED_OPERATOR_NAMES: &[&str] = &[
     "signal",
     "local-admin",
     "scaler",
+    "messaging",
 ];
 
 /// Optional administration service. Credentials are mandatory for non-loopback binds.
@@ -1166,7 +1169,7 @@ impl Config {
                         .any(|p| UNSCOPED_WEB_PERMISSIONS.contains(&p.as_str()))
                     {
                         return Err(invalid(format!(
-                            "{path}: config, deploy and extensions require unrestricted group access"
+                            "{path}: config, deploy, extensions and plugins require unrestricted group access"
                         )));
                     }
                 }

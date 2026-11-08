@@ -206,7 +206,7 @@ async fn admin_transfer_without_network_keeps_options_bundles_and_current_config
         );
         let args = vec!["transfer".into(), fixture.id.to_string(), "second".into()];
         let (commands, _) = mpsc::channel(1);
-        let operation = execute(&args, current.clone(), &fixture.metrics, &commands);
+        let operation = execute(&args, current.clone(), &fixture.metrics, &commands, "test");
         let peers = async {
             let (mut second, _) = fixture.second.accept().await.unwrap();
             assert_eq!(
@@ -322,10 +322,16 @@ async fn refused_transfer_preserves_original_session() {
         let args = vec!["transfer".into(), fixture.id.to_string(), "second".into()];
         let (commands, _) = mpsc::channel(1);
         assert!(
-            execute(&args, fixture.snapshot.clone(), &fixture.metrics, &commands)
-                .await
-                .unwrap_err()
-                .contains("original backend")
+            execute(
+                &args,
+                fixture.snapshot.clone(),
+                &fixture.metrics,
+                &commands,
+                "test"
+            )
+            .await
+            .unwrap_err()
+            .contains("original backend")
         );
         let packet = Packet::new(0x7f, vec![12; 300]);
         fixture
@@ -358,7 +364,13 @@ async fn replacement_identity_mismatch_preserves_session_and_reports_failure() {
         let mut fixture = SessionFixture::new().await;
         let args = vec!["transfer".into(), fixture.id.to_string(), "second".into()];
         let (commands, _) = mpsc::channel(1);
-        let operation = execute(&args, fixture.snapshot.clone(), &fixture.metrics, &commands);
+        let operation = execute(
+            &args,
+            fixture.snapshot.clone(),
+            &fixture.metrics,
+            &commands,
+            "test",
+        );
         let peers = async {
             let (mut second, _) = fixture.second.accept().await.unwrap();
             receive(&mut second, Codec::default()).await;
@@ -438,6 +450,71 @@ fn service_group_commands_share_the_servers_permission() {
     }
 }
 
+#[test]
+fn plugin_restarts_need_the_plugins_permission_and_reads_need_status() {
+    let mut settings = Admin {
+        listen: "127.0.0.1:9091".parse().unwrap(),
+        token_env: "RIFT_ADMIN_TOKEN".into(),
+        permissions: ["status".into()].into(),
+    };
+    let secret = "test-plugin-administration-secret";
+    let value = |args: Value| json!({"token":secret,"args":args});
+    for args in [
+        json!(["plugins", "list"]),
+        json!(["plugins", "status", "a"]),
+        json!(["plugins", "logs", "a"]),
+    ] {
+        assert!(request(&value(args), &settings, secret).is_ok());
+    }
+    let restart = value(json!(["plugins", "restart", "a"]));
+    assert!(
+        request(&restart, &settings, secret)
+            .unwrap_err()
+            .contains("permission denied: plugins")
+    );
+    settings.permissions = ["plugins".into()].into();
+    assert!(request(&restart, &settings, secret).is_ok());
+    assert!(request(&value(json!(["plugins", "list"])), &settings, secret).is_err());
+    let args = |values: &[&str]| values.iter().map(|v| (*v).to_owned()).collect::<Vec<_>>();
+    assert_eq!(
+        audited(&args(&["plugins", "restart", "hello-lua"])),
+        ("plugins restart".to_owned(), "hello-lua".to_owned())
+    );
+    assert_eq!(
+        audited(&args(&["plugins", "list"])),
+        ("plugins list".to_owned(), String::new())
+    );
+    assert_eq!(
+        audited(&args(&["drain", "lobby", "on"])),
+        ("drain".to_owned(), String::new())
+    );
+}
+
+#[tokio::test]
+async fn plugin_commands_report_unknown_plugins_and_usage() {
+    let snapshot = Snapshot::new(
+        Config::from_addresses("127.0.0.1:0", "127.0.0.1:1").unwrap(),
+        None,
+    )
+    .unwrap();
+    let args = |values: &[&str]| values.iter().map(|v| (*v).to_owned()).collect::<Vec<_>>();
+    assert_eq!(
+        plugins(&snapshot, &args(&["list"]), "test").unwrap(),
+        json!({"plugins": []})
+    );
+    for command in ["status", "logs", "restart"] {
+        let error = plugins(&snapshot, &args(&[command, "ghost"]), "test").unwrap_err();
+        assert!(error.contains("ghost"), "{error}");
+    }
+    for invalid in [&["stop", "a"][..], &["list", "a"], &[]] {
+        assert!(
+            plugins(&snapshot, &args(invalid), "test")
+                .unwrap_err()
+                .starts_with("usage: plugins")
+        );
+    }
+}
+
 #[tokio::test]
 async fn instance_commands_wait_for_runtime_completion_and_report_queue_failure() {
     let snapshot = Arc::new(
@@ -451,7 +528,7 @@ async fn instance_commands_wait_for_runtime_completion_and_report_queue_failure(
     let (commands, mut receiver) = mpsc::channel(1);
     let args = vec!["create".into(), "lobby".into()];
     let (result, ()) = tokio::join!(
-        execute(&args, snapshot.clone(), &metrics, &commands),
+        execute(&args, snapshot.clone(), &metrics, &commands, "test"),
         async {
             match receiver.recv().await.unwrap() {
                 Command::CreateInstance { group, reply } => {
@@ -467,7 +544,7 @@ async fn instance_commands_wait_for_runtime_completion_and_report_queue_failure(
     assert_eq!(result.unwrap()["name"], "lobby-1");
     let args = vec!["remove".into(), "lobby-1".into()];
     let (result, ()) = tokio::join!(
-        execute(&args, snapshot.clone(), &metrics, &commands),
+        execute(&args, snapshot.clone(), &metrics, &commands, "test"),
         async {
             match receiver.recv().await.unwrap() {
                 Command::RemoveInstance { name, reply } => {
@@ -481,7 +558,7 @@ async fn instance_commands_wait_for_runtime_completion_and_report_queue_failure(
     assert_eq!(result.unwrap_err(), "instance is occupied");
     drop(receiver);
     assert!(
-        execute(&args, snapshot, &metrics, &commands)
+        execute(&args, snapshot, &metrics, &commands, "test")
             .await
             .unwrap_err()
             .contains("queue")
@@ -535,7 +612,7 @@ async fn admin_transfer_obeys_both_original_and_current_player_access_rules() {
             let current = Arc::new(Snapshot::new(config, Some(&fixture.snapshot)).unwrap());
             let args = vec!["transfer".into(), fixture.id.to_string(), "second".into()];
             let (commands, _) = mpsc::channel(1);
-            let result = execute(&args, current, &fixture.metrics, &commands).await;
+            let result = execute(&args, current, &fixture.metrics, &commands, "test").await;
             assert!(
                 result.is_err(),
                 "admin transfer bypassed a player's access rule"
@@ -561,7 +638,13 @@ async fn admin_transfer_keeps_the_original_backend_after_an_explicit_target_ban(
         let mut fixture = SessionFixture::new().await;
         let args = vec!["transfer".into(), fixture.id.to_string(), "second".into()];
         let (commands, _) = mpsc::channel(1);
-        let operation = execute(&args, fixture.snapshot.clone(), &fixture.metrics, &commands);
+        let operation = execute(
+            &args,
+            fixture.snapshot.clone(),
+            &fixture.metrics,
+            &commands,
+            "test",
+        );
         let peers = async {
             let (mut second, _) = fixture.second.accept().await.unwrap();
             assert_eq!(receive(&mut second, Codec::default()).await.id, 0);
@@ -602,7 +685,13 @@ async fn admin_transfer_accepts_every_switching_protocol() {
                 entry.transfer = sender.clone();
             }
             let (result, ()) = tokio::join!(
-                execute(&args, fixture.snapshot.clone(), &fixture.metrics, &commands),
+                execute(
+                    &args,
+                    fixture.snapshot.clone(),
+                    &fixture.metrics,
+                    &commands,
+                    "test"
+                ),
                 async {
                     let request = receiver.recv().await.unwrap();
                     assert_eq!(request.backend, "second");
@@ -635,7 +724,14 @@ async fn admin_transfer_rejects_draining_backends_and_unmapped_protocols_before_
             .lock()
             .unwrap()
             .insert("second".into(), true);
-        let result = execute(&args, fixture.snapshot.clone(), &fixture.metrics, &commands).await;
+        let result = execute(
+            &args,
+            fixture.snapshot.clone(),
+            &fixture.metrics,
+            &commands,
+            "test",
+        )
+        .await;
         assert!(result.unwrap_err().contains("draining"));
         fixture
             .snapshot
@@ -654,8 +750,14 @@ async fn admin_transfer_rejects_draining_backends_and_unmapped_protocols_before_
                 .get_mut(&fixture.id)
                 .unwrap()
                 .protocol = protocol;
-            let result =
-                execute(&args, fixture.snapshot.clone(), &fixture.metrics, &commands).await;
+            let result = execute(
+                &args,
+                fixture.snapshot.clone(),
+                &fixture.metrics,
+                &commands,
+                "test",
+            )
+            .await;
             assert!(result.unwrap_err().contains("1.8.9–26.3"));
         }
         assert!(

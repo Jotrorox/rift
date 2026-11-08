@@ -1986,6 +1986,43 @@ async fn reconcile_nodes(current: watch::Receiver<Arc<Snapshot>>) {
     }
 }
 
+/// Plugin starts, stops, restarts, reloads and failures in the operator
+/// audit log: Rift itself (`system`) or the operator who asked for a restart.
+/// Only the event and the plugin name are recorded, never error text.
+async fn audit_plugins(
+    mut lifecycle: tokio::sync::broadcast::Receiver<rift::plugins::monitor::Lifecycle>,
+    workflows: Arc<crate::operator::Store>,
+) {
+    use tokio::sync::broadcast::error::RecvError;
+    loop {
+        match lifecycle.recv().await {
+            Ok(change) => {
+                let outcome = if matches!(change.event.as_str(), "failed" | "reload_failed") {
+                    "failed"
+                } else {
+                    "completed"
+                };
+                if let Err(error) = workflows
+                    .audit_async(
+                        change.actor.as_deref().unwrap_or("system"),
+                        &format!("plugin {}", change.event),
+                        &change.plugin,
+                        outcome,
+                        0,
+                    )
+                    .await
+                {
+                    eprintln!("rift: plugin lifecycle audit failed: {error}");
+                }
+            }
+            Err(RecvError::Lagged(missed)) => {
+                eprintln!("rift: {missed} plugin lifecycle change(s) were not audited");
+            }
+            Err(RecvError::Closed) => return,
+        }
+    }
+}
+
 /// Announce committed instance changes so plugins can follow capacity, like
 /// CloudNet's service lifecycle events.
 fn instance_event(snapshot: &Snapshot, response: &serde_json::Value) {
@@ -2202,6 +2239,12 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         receiver.clone(),
         metrics.clone(),
         admin_commands.clone(),
+    ));
+    // Subscribe before any plugin starts so its first lifecycle change is
+    // audited too.
+    background.spawn(audit_plugins(
+        snapshot.extensions.plugins().monitor().subscribe(),
+        app.workflows.clone(),
     ));
     // Persistent plugins initialize once the control service answers and
     // before players connect; a plugin that cannot start fails startup.
