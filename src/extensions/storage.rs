@@ -47,6 +47,10 @@ const SCHEMA: &str = "CREATE TABLE entries (
 ) STRICT, WITHOUT ROWID;";
 /// Namespaces beginning with this prefix belong to the host, e.g. group memberships.
 const HOST_PREFIX: &str = "rift.";
+/// Persistent plugins' private namespaces, `plugin.<name>.<namespace>`. They
+/// count toward the plugin quota but, like host data, are out of reach of
+/// the configuration script's `rift.store`.
+const PLUGIN_PREFIX: &str = "plugin.";
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 pub(crate) type Key = (String, String);
 pub(super) type Entries = BTreeMap<Key, Vec<u8>>;
@@ -246,6 +250,11 @@ fn user_namespace(value: Value) -> mlua::Result<String> {
     if host_namespace(&namespace) {
         return Err(mlua::Error::runtime(format!(
             "store namespaces beginning with {HOST_PREFIX:?} are reserved for Rift"
+        )));
+    }
+    if namespace.starts_with(PLUGIN_PREFIX) {
+        return Err(mlua::Error::runtime(format!(
+            "store namespaces beginning with {PLUGIN_PREFIX:?} are reserved for persistent plugins"
         )));
     }
     Ok(namespace)
@@ -1102,6 +1111,39 @@ mod tests {
             )
             .exec()
             .unwrap();
+    }
+
+    #[test]
+    fn host_and_persistent_plugin_namespaces_are_out_of_reach_of_scripts() {
+        let store = Store::open(None).unwrap();
+        store
+            .mutate(Instant::now() + Duration::from_secs(1), |entries| {
+                entries.insert(("plugin.ban.list".into(), "k".into()), b"v".to_vec());
+                Ok(())
+            })
+            .unwrap();
+        let lua = Lua::new();
+        let api = lua.create_table().unwrap();
+        store
+            .install(&lua, &api, Instant::now() + Duration::from_secs(5))
+            .unwrap();
+        lua.globals().set("rift", api).unwrap();
+        lua.load(
+            r#"
+            for _, namespace in ipairs({ 'rift.groups', 'plugin.ban.list', 'plugin.' }) do
+                local ok, error = pcall(rift.store.get, namespace, 'k')
+                assert(not ok and tostring(error):find('reserved'), namespace)
+                assert(not pcall(rift.store.set, namespace, 'k', 'forged'))
+                assert(not pcall(rift.store.delete, namespace, 'k'))
+                assert(not pcall(rift.store.increment, namespace, 'k', 1))
+            end
+            rift.store.set('plugins', 'k', 'ok')
+        "#,
+        )
+        .exec()
+        .unwrap();
+        let entries = &store.memory().entries;
+        assert_eq!(entries[&("plugin.ban.list".into(), "k".into())], b"v");
     }
 
     #[test]

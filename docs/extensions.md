@@ -350,7 +350,8 @@ converted at startup. The original snapshot is kept as `<file>.v1-backup`; to go
 back to an earlier Rift version, restore it in place of the database.
 Namespaces organize data; they do not isolate mutually untrusted plugins.
 Namespaces beginning with `rift.` are reserved for host-owned data such as group
-memberships; `rift.store` methods reject them.
+memberships, and namespaces beginning with `plugin.` hold persistent plugins'
+private data; `rift.store` methods reject both.
 
 | Method | Result |
 | --- | --- |
