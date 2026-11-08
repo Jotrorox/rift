@@ -74,8 +74,10 @@ func init() {
 func main() {}
 ```
 
-List every hook you implement in `Registration.Hooks`; the host skips the
-others (an empty list delivers every hook). Hooks without a handler use the
+The host delivers only the hooks in `Registration.Hooks` (an empty list
+delivers every hook). Leave `Hooks` nil and the SDK fills in exactly the hooks
+you set a handler for; set it explicitly to send a fixed list, as hello-go
+does. Hooks without a handler use the
 defaults: `init` returns an empty registration, decision hooks `Continue()`,
 `route` keeps the configured policy, `suggest` returns nothing, `status` and
 `http` return no override, notification hooks do nothing.

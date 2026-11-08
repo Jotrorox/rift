@@ -29,9 +29,17 @@ var (
 	onEvent          = func(Event) {}
 )
 
+// handled records the hooks that have a handler, for registrations that
+// leave Hooks nil.
+var handled [HookEvent + 1]bool
+
 // OnInit sets the handler called once per instance with the plugin
 // configuration as a JSON object ("{}" without one). Create subscriptions and
 // timers here. A returned error fails the plugin load.
+//
+// When the returned Registration.Hooks is nil, the SDK fills in the hooks
+// that have a handler set through the On* functions, so the host skips the
+// rest. A non-nil list, even an empty one (every hook), is sent unchanged.
 func OnInit(f func(configJSON string) (Registration, error)) { onInit = f }
 
 // OnReload sets the handler called when the configuration changes and the
@@ -42,47 +50,89 @@ func OnReload(f func(configJSON string) error) { onReload = f }
 func OnShutdown(f func(reason string)) { onShutdown = f }
 
 // OnRoute sets the handler that picks a backend right after TCP accept.
-func OnRoute(f func(Connection) RouteDecision) { onRoute = f }
+func OnRoute(f func(Connection) RouteDecision) {
+	onRoute = f
+	handled[HookRoute] = true
+}
 
 // OnLogin sets the handler that may deny an authenticated login.
-func OnLogin(f func(Context) Action) { onLogin = f }
+func OnLogin(f func(Context) Action) {
+	onLogin = f
+	handled[HookLogin] = true
+}
 
 // OnInitialServer sets the handler that may pick the first server.
-func OnInitialServer(f func(Context) Action) { onInitialServer = f }
+func OnInitialServer(f func(Context) Action) {
+	onInitialServer = f
+	handled[HookInitialServer] = true
+}
 
 // OnBeforeTransfer sets the handler that may deny a server switch.
-func OnBeforeTransfer(f func(Context) Action) { onBeforeTransfer = f }
+func OnBeforeTransfer(f func(Context) Action) {
+	onBeforeTransfer = f
+	handled[HookBeforeTransfer] = true
+}
 
 // OnCommand sets the handler for registered commands.
-func OnCommand(f func(Context) Action) { onCommand = f }
+func OnCommand(f func(Context) Action) {
+	onCommand = f
+	handled[HookCommand] = true
+}
 
 // OnSuggest sets the handler for commands registered with SuggestDynamic.
-func OnSuggest(f func(Context) []Suggestion) { onSuggest = f }
+func OnSuggest(f func(Context) []Suggestion) {
+	onSuggest = f
+	handled[HookSuggest] = true
+}
 
 // OnStatus sets the handler that may override a server-list ping response.
-func OnStatus(f func(Ping) *StatusOverride) { onStatus = f }
+func OnStatus(f func(Ping) *StatusOverride) {
+	onStatus = f
+	handled[HookStatus] = true
+}
 
 // OnHTTP sets the handler for /api/script/* requests; nil means not handled.
-func OnHTTP(f func(HTTPRequest) *HTTPResponse) { onHTTP = f }
+func OnHTTP(f func(HTTPRequest) *HTTPResponse) {
+	onHTTP = f
+	handled[HookHTTP] = true
+}
 
 // OnJoin sets the handler called after a player joined.
-func OnJoin(f func(Context)) { onJoin = f }
+func OnJoin(f func(Context)) {
+	onJoin = f
+	handled[HookJoin] = true
+}
 
 // OnAfterTransfer sets the handler called after a server switch.
-func OnAfterTransfer(f func(Context)) { onAfterTransfer = f }
+func OnAfterTransfer(f func(Context)) {
+	onAfterTransfer = f
+	handled[HookAfterTransfer] = true
+}
 
 // OnDisconnect sets the handler called after a session closed.
-func OnDisconnect(f func(Context)) { onDisconnect = f }
+func OnDisconnect(f func(Context)) {
+	onDisconnect = f
+	handled[HookDisconnect] = true
+}
 
 // OnMessage sets the handler for messages on subscriptions made with
 // Subscribe.
-func OnMessage(f func(BusMessage)) { onMessage = f }
+func OnMessage(f func(BusMessage)) {
+	onMessage = f
+	handled[HookMessage] = true
+}
 
 // OnTimer sets the handler for timers started with Every or After.
-func OnTimer(f func(handle uint64)) { onTimer = f }
+func OnTimer(f func(handle uint64)) {
+	onTimer = f
+	handled[HookTimer] = true
+}
 
 // OnEvent sets the handler for rift.events.* publications.
-func OnEvent(f func(Event)) { onEvent = f }
+func OnEvent(f func(Event)) {
+	onEvent = f
+	handled[HookEvent] = true
+}
 
 func init() {
 	e := &handler.Exports
@@ -90,6 +140,13 @@ func init() {
 		reg, err := onInit(configJSON)
 		if err != nil {
 			return cm.Err[cm.Result[handler.RegistrationShape, types.Registration, string]](err.Error())
+		}
+		if reg.Hooks == nil {
+			for hook, ok := range handled {
+				if ok {
+					reg.Hooks = append(reg.Hooks, Hook(hook))
+				}
+			}
 		}
 		return cm.OK[cm.Result[handler.RegistrationShape, types.Registration, string]](reg.lower())
 	}
