@@ -16,12 +16,13 @@ use super::{
     services::{Base, Services},
 };
 use std::{
+    cell::Cell,
     collections::{BTreeMap, BTreeSet},
     io,
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel},
     },
     time::{Duration, Instant},
@@ -36,6 +37,15 @@ const MAX_BACKOFF: Duration = Duration::from_secs(60);
 /// An instance that ran this long before failing starts over at the minimum
 /// backoff; one that keeps failing sooner backs off up to the maximum.
 const STABLE: Duration = Duration::from_secs(60);
+/// How long a new instance waits for its predecessor's thread beyond the
+/// predecessor's shutdown grace period before it abandons that thread and
+/// starts anyway: a thread stuck in code the engine cannot interrupt must
+/// not keep the plugin down forever.
+const ABANDON_MARGIN: Duration = Duration::from_secs(1);
+/// Slack on top of an instance's init deadline (and its predecessor's grace)
+/// for creating the engine, such as compiling a WebAssembly component, before
+/// later plugins stop waiting for it to claim its commands.
+const SETTLE_MARGIN: Duration = Duration::from_secs(30);
 pub const EVENTS: &str = "rift.events.plugins";
 
 /// Why a call produced no reply.
@@ -166,9 +176,31 @@ pub struct Report {
 
 /// Command ownership across plugins. The host implements this so that a
 /// registration colliding with another plugin's command fails to load.
+/// Claims belong to one instance (its [`Instance::id`]), so an old
+/// generation that exits late never releases what its successor claimed.
 pub(crate) trait Registrar: Send + Sync {
-    fn register(&self, plugin: &str, registration: &Registration) -> Result<(), String>;
-    fn release(&self, plugin: &str);
+    /// Claim `registration`'s commands for instance `id` of `plugin`,
+    /// replacing what that instance and its predecessor `replaces` held.
+    fn register(
+        &self,
+        id: u64,
+        plugin: &str,
+        replaces: Option<u64>,
+        registration: &Registration,
+    ) -> Result<(), String>;
+    /// Drop every claim of instance `id`.
+    fn release(&self, id: u64);
+}
+
+/// The instance a new one takes over from: an operator restart, a
+/// replacement on reload, or a plugin removed earlier that is still
+/// stopping when it is added again.
+pub(crate) struct Predecessor {
+    pub instance: Arc<Instance>,
+    /// Keep the predecessor's registration until the new `init` returns its
+    /// own: a restarting or replaced plugin keeps its claims meanwhile. A
+    /// plugin added again after it was removed starts with none.
+    pub inherit: bool,
 }
 
 pub(crate) enum Job {
@@ -224,7 +256,11 @@ pub(crate) struct Shared {
     closing: AtomicBool,
     /// Set once the first `init` attempt finished, successfully or not.
     settled: watch::Sender<bool>,
+    /// When later plugins stop waiting for `settled`.
+    settle_by: Instant,
     exited: watch::Sender<bool>,
+    /// When the shutdown grace period ends; set by the first shutdown.
+    abandon_at: OnceLock<Instant>,
 }
 
 /// What an awaited call produced.
@@ -239,6 +275,8 @@ pub(crate) enum Outcome {
 
 /// A running (or failed, or restarting) persistent plugin instance.
 pub struct Instance {
+    /// Unique per instance in this process.
+    id: u64,
     spec: Arc<PluginSpec>,
     queue: SyncSender<Job>,
     shared: Arc<Shared>,
@@ -318,36 +356,59 @@ pub(crate) fn validate_registration(registration: &Registration) -> Result<(), S
 impl Instance {
     /// Spawn the instance's thread. With `after`, the new instance waits for
     /// that predecessor's thread to exit before creating its engine, so two
-    /// generations of one plugin never run at once. With `behind`, it waits
-    /// until that instance's first `init` settled, so plugins initialize and
-    /// claim commands in `rift.plugin()` order.
+    /// generations of one plugin do not run at once; a predecessor still
+    /// running past its shutdown grace period (plus [`ABANDON_MARGIN`]) is
+    /// abandoned. With `behind`, it claims its commands only after that
+    /// instance's first `init` settled (or could no longer be waited for),
+    /// so plugins claim commands in `rift.plugin()` order; `init` itself
+    /// does not wait.
     pub(crate) fn start(
         spec: PluginSpec,
         factory: Arc<dyn EngineFactory>,
         base: Base,
         registrar: Arc<dyn Registrar>,
-        after: Option<Arc<Instance>>,
+        after: Option<Predecessor>,
         behind: Option<Arc<Instance>>,
     ) -> io::Result<Arc<Self>> {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         let handle = tokio::runtime::Handle::try_current()
             .map_err(|_| io::Error::other("persistent plugins require a Tokio runtime"))?;
         let (queue, receiver) = sync_channel(QUEUE);
+        let now = Instant::now();
+        let waits = after.as_ref().map_or(Duration::ZERO, |previous| {
+            previous.instance.spec.manifest.shutdown_grace() + ABANDON_MARGIN
+        });
+        let mut settle_by = now + waits + spec.manifest.init_deadline();
+        if let Some(earlier) = &behind {
+            settle_by = settle_by.max(earlier.shared.settle_by);
+        }
+        let state = State {
+            registration: after
+                .as_ref()
+                .filter(|previous| previous.inherit)
+                .and_then(|previous| previous.instance.registration()),
+            ..State::default()
+        };
         let shared = Arc::new(Shared {
-            state: Mutex::default(),
+            state: Mutex::new(state),
             config_json: Mutex::new(spec.config_json.clone()),
             status: watch::channel(Status::Starting).0,
             stop: AtomicBool::new(false),
             closing: AtomicBool::new(false),
             settled: watch::channel(false).0,
+            settle_by: settle_by + SETTLE_MARGIN,
             exited: watch::channel(false).0,
+            abandon_at: OnceLock::new(),
         });
         let spec = Arc::new(spec);
         let instance = Arc::new(Self {
+            id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
             spec: spec.clone(),
             queue: queue.clone(),
             shared: shared.clone(),
         });
         let worker = Worker {
+            id: instance.id,
             spec,
             factory,
             base,
@@ -356,8 +417,9 @@ impl Instance {
             receiver,
             queue: Queue(queue),
             handle,
-            after,
-            behind,
+            replaces: after.as_ref().map(|previous| previous.instance.id),
+            after: after.map(|previous| previous.instance),
+            behind: Cell::new(behind),
         };
         std::thread::Builder::new()
             .name(format!("rift-plugin-{:.32}", instance.spec.name))
@@ -400,7 +462,11 @@ impl Instance {
         self.shared.config_json.lock().unwrap().clone()
     }
 
-    /// What the last successful `init` registered.
+    /// What the last successful `init` registered, or what the predecessor
+    /// this instance took over from registered until its own `init` returns.
+    /// `None` means the instance has made no claims yet (a plugin that is
+    /// new and still starting, or never started): the host does not consult
+    /// it for awaited hooks.
     pub fn registration(&self) -> Option<Arc<Registration>> {
         self.shared.state.lock().unwrap().registration.clone()
     }
@@ -426,18 +492,21 @@ impl Instance {
         }
     }
 
-    /// Await one handler under `deadline`. While the instance is starting the
-    /// call queues behind `init`.
+    /// Await one handler under `deadline`. Hooks the instance's registration
+    /// (its own or the inherited one) does not list are answered with their
+    /// default at once, even while it is failed: only hooks a plugin claimed
+    /// can fail. An instance that has made no claims yet is not asked. While
+    /// the instance is starting, calls queue behind `init`.
     pub(crate) async fn call(&self, event: Event, deadline: Duration) -> Outcome {
-        if let Some(reason) = self.unavailable() {
-            return Outcome::Failed(reason);
-        }
         let hook = event.hook();
-        if self
+        if !self
             .registration()
-            .is_some_and(|registration| !registration.wants(hook))
+            .is_some_and(|registration| registration.wants(hook))
         {
             return Outcome::Reply(Reply::default_for(hook));
+        }
+        if let Some(reason) = self.unavailable() {
+            return Outcome::Failed(reason);
         }
         let (reply, answer) = oneshot::channel();
         let until = Instant::now() + deadline;
@@ -508,16 +577,23 @@ impl Instance {
         }
     }
 
-    /// Wait until the first `init` attempt finished (or the thread ended).
-    pub(crate) async fn settled(&self) {
-        let mut settled = self.shared.settled.subscribe();
-        let _ = settled.wait_for(|settled| *settled).await;
-    }
-
     /// Wait until the instance's thread has finished.
     pub(crate) async fn exited(&self) {
         let mut exited = self.shared.exited.subscribe();
         let _ = exited.wait_for(|exited| *exited).await;
+    }
+
+    /// Whether the instance's thread has finished.
+    pub(crate) fn has_exited(&self) -> bool {
+        *self.shared.exited.borrow()
+    }
+
+    /// Stop an instance that was started but never made active, without
+    /// waiting: it exits once its predecessor wait ends, before creating an
+    /// engine if it had not yet.
+    pub(crate) fn abort(&self) {
+        self.shared.closing.store(true, Ordering::Release);
+        let _ = self.queue.try_send(Job::Shutdown);
     }
 
     /// Wait for the first `init` to finish (including a predecessor's
@@ -554,10 +630,11 @@ impl Instance {
     /// An instance that does not finish in time is told to stop and left to
     /// its thread; it no longer receives events either way.
     pub(crate) async fn shutdown(&self) {
+        let grace = self.spec.manifest.shutdown_grace();
+        let _ = self.shared.abandon_at.set(Instant::now() + grace);
         self.shared.closing.store(true, Ordering::Release);
         // A full queue is fine: the thread checks `closing` after every job.
         let _ = self.queue.try_send(Job::Shutdown);
-        let grace = self.spec.manifest.shutdown_grace();
         if tokio::time::timeout(grace, self.exited()).await.is_err() {
             self.shared.stop.store(true, Ordering::Release);
             eprintln!(
@@ -583,6 +660,7 @@ enum Startup {
 }
 
 struct Worker {
+    id: u64,
     spec: Arc<PluginSpec>,
     factory: Arc<dyn EngineFactory>,
     base: Base,
@@ -591,13 +669,85 @@ struct Worker {
     receiver: Receiver<Job>,
     queue: Queue,
     handle: tokio::runtime::Handle,
+    /// The predecessor's instance id, whose claims this instance takes over.
+    replaces: Option<u64>,
     after: Option<Arc<Instance>>,
-    behind: Option<Arc<Instance>>,
+    /// Taken by the first registration (or the first settled `init`).
+    behind: Cell<Option<Arc<Instance>>>,
 }
 
 impl Worker {
     fn closing(&self) -> bool {
         self.shared.closing.load(Ordering::Acquire)
+    }
+
+    /// Block until `signal` is set or `until` passes; with `interruptible`,
+    /// also stop once this instance is closing. True when `signal` is set.
+    fn wait_signal(
+        &self,
+        signal: &watch::Sender<bool>,
+        until: Instant,
+        interruptible: bool,
+    ) -> bool {
+        let mut receiver = signal.subscribe();
+        self.handle.block_on(async {
+            loop {
+                if *receiver.borrow() {
+                    return true;
+                }
+                let now = Instant::now();
+                if now >= until || (interruptible && self.closing()) {
+                    return false;
+                }
+                let step = (until - now).min(Duration::from_millis(50));
+                let _ = tokio::time::timeout(step, receiver.wait_for(|set| *set)).await;
+            }
+        })
+    }
+
+    /// Wait for the predecessor's thread to exit, at most until its shutdown
+    /// grace period ended plus [`ABANDON_MARGIN`]; then abandon it.
+    fn wait_for_predecessor(&self, previous: &Instance) {
+        let grace = previous.spec.manifest.shutdown_grace();
+        let until = previous
+            .shared
+            .abandon_at
+            .get()
+            .copied()
+            .unwrap_or_else(|| Instant::now() + grace)
+            + ABANDON_MARGIN;
+        if !self.wait_signal(&previous.shared.exited, until, false) && !self.closing() {
+            eprintln!(
+                "rift: plugin {}: the previous instance did not stop within its {} ms grace period; starting without it",
+                self.spec.name,
+                grace.as_millis()
+            );
+            self.base.monitor.log(
+                &self.spec.name,
+                super::api::Level::Warn,
+                format!(
+                    "the previous instance did not stop within {} ms; its thread is abandoned",
+                    grace.as_millis()
+                ),
+            );
+        }
+    }
+
+    /// Wait until the plugin before this one in `rift.plugin()` order made
+    /// its claims, at most until it should have.
+    fn wait_turn(&self) {
+        let Some(earlier) = self.behind.take() else {
+            return;
+        };
+        if !self.wait_signal(&earlier.shared.settled, earlier.shared.settle_by, true)
+            && !self.closing()
+        {
+            eprintln!(
+                "rift: plugin {}: plugin {} has not finished starting; claiming commands without waiting for it",
+                self.spec.name,
+                earlier.name()
+            );
+        }
     }
 
     fn publish(&self, event: &str, error: Option<&str>) {
@@ -628,14 +778,13 @@ impl Worker {
     fn run(mut self) {
         // Drop the predecessor once it exited; it must not stay alive here.
         if let Some(previous) = self.after.take() {
-            self.handle.block_on(previous.exited());
-        }
-        if let Some(earlier) = self.behind.take() {
-            self.handle.block_on(earlier.settled());
+            self.wait_for_predecessor(&previous);
         }
         let mut backoff = MIN_BACKOFF;
         let mut first = true;
+        let mut attempted = false;
         while !self.closing() {
+            attempted = true;
             self.shared.status.send_replace(Status::Starting);
             let services = Services::new(
                 self.spec.clone(),
@@ -647,14 +796,18 @@ impl Worker {
             let mut ran = false;
             let mut retry = true;
             let started = self.start_engine(&services);
+            // Later plugins claim only after this one did, or failed to.
+            self.wait_turn();
             self.shared.settled.send_replace(true);
             match started {
                 Ok(mut engine) => {
                     ran = true;
                     let started = Instant::now();
                     self.shared.state.lock().unwrap().last_error = None;
-                    self.shared.status.send_replace(Status::Running);
+                    // Announced before the status changes, so whoever waits
+                    // for the instance to run sees its lifecycle in order.
                     self.publish("started", None);
+                    self.shared.status.send_replace(Status::Running);
                     match self.serve(engine.as_mut()) {
                         Served::Shutdown => {
                             let reason = if self.closing() { "stop" } else { "shutdown" };
@@ -702,9 +855,11 @@ impl Worker {
             self.publish("restarting", None);
             backoff = (backoff * 2).min(MAX_BACKOFF);
         }
-        self.registrar.release(&self.spec.name);
-        self.shared.state.lock().unwrap().registration = None;
-        if *self.shared.status.borrow() != Status::Failed || self.closing() {
+        self.registrar.release(self.id);
+        if !attempted {
+            // Aborted before it ever started: nothing to announce.
+            self.shared.status.send_replace(Status::Stopped);
+        } else if *self.shared.status.borrow() != Status::Failed || self.closing() {
             self.shared.status.send_replace(Status::Stopped);
             self.publish("stopped", None);
         }
@@ -743,9 +898,11 @@ impl Worker {
                 limit.as_millis()
             )));
         }
-        if let Err(error) = validate_registration(&registration)
-            .and_then(|()| self.registrar.register(&self.spec.name, &registration))
-        {
+        self.wait_turn();
+        if let Err(error) = validate_registration(&registration).and_then(|()| {
+            self.registrar
+                .register(self.id, &self.spec.name, self.replaces, &registration)
+        }) {
             let _ = guarded(|| engine.shutdown("registration rejected"));
             return Err(Startup::Conflict(format!("registration: {error}")));
         }
