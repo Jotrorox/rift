@@ -30,23 +30,23 @@ import org.junit.jupiter.api.Test;
 class MessagingInteropTest {
     private static RiftProcess rift;
     private static MessagingClient backend;
-    private static MessagingClient standin;
+    private static MessagingClient peer;
 
     @BeforeAll
     static void start() throws Exception {
         assumeTrue(Files.isExecutable(RiftProcess.binary()), "build the proxy first: cargo build --bin rift");
         rift = RiftProcess.start();
-        backend = rift.connect(RiftProcess.BACKEND_TOKEN);
-        standin = rift.connect(RiftProcess.STANDIN_TOKEN);
+        backend = rift.connect(RiftProcess.SURVIVAL_TOKEN);
+        peer = rift.connect(RiftProcess.RAW_TOKEN);
         backend.connected().get(20, TimeUnit.SECONDS);
-        standin.connected().get(20, TimeUnit.SECONDS);
+        peer.connected().get(20, TimeUnit.SECONDS);
     }
 
     @AfterAll
     static void stop() throws Exception {
         if (rift != null) {
             backend.close();
-            standin.close();
+            peer.close();
             rift.close();
         }
     }
@@ -57,8 +57,8 @@ class MessagingInteropTest {
 
     @Test
     void requestReplyAcrossPrincipals() throws Exception {
-        Subscription responder = standin.subscribe("test.echo", null, message ->
-                standin.publish(message.reply(), bytes("echo:" + message.text())).join()).get(10, TimeUnit.SECONDS);
+        Subscription responder = peer.subscribe("test.echo", null, message ->
+                peer.publish(message.reply(), bytes("echo:" + message.text())).join()).get(10, TimeUnit.SECONDS);
         try {
             byte[] binary = {0, (byte) 0xff, 'h', 'i'};
             Message reply = backend.request("test.echo", binary, Duration.ofSeconds(5)).get(10, TimeUnit.SECONDS);
@@ -74,13 +74,13 @@ class MessagingInteropTest {
         BlockingQueue<Message> received = new LinkedBlockingQueue<>();
         Subscription subscription = backend.subscribe("test.events.>", null, received::add).get(10, TimeUnit.SECONDS);
         try {
-            standin.publish("test.events.player.join", bytes("alice")).get(10, TimeUnit.SECONDS);
+            peer.publish("test.events.player.join", bytes("alice")).get(10, TimeUnit.SECONDS);
             Message message = received.poll(10, TimeUnit.SECONDS);
             assertNotNull(message, "no delivery");
             assertEquals("test.events.player.join", message.subject());
             assertEquals("alice", message.text());
 
-            try (Publisher publisher = standin.publisher()) {
+            try (Publisher publisher = peer.publisher()) {
                 for (int i = 0; i < 50; i++) {
                     publisher.publish("test.events.count", null, bytes(Integer.toString(i)));
                 }
@@ -103,13 +103,20 @@ class MessagingInteropTest {
         MessagingException denied = assertInstanceOf(MessagingException.class, publish.getCause());
         assertEquals(MessagingException.PERMISSION, denied.code());
         ExecutionException events = assertThrows(ExecutionException.class,
-                () -> standin.publish("rift.events.permissions", bytes("spoof")).get(10, TimeUnit.SECONDS));
+                () -> peer.publish("rift.events.permissions", bytes("spoof")).get(10, TimeUnit.SECONDS));
         assertEquals(MessagingException.PERMISSION, ((MessagingException) events.getCause()).code());
         ExecutionException subscribe = assertThrows(ExecutionException.class,
                 () -> backend.subscribe("rift.perms.hello", null, message -> {}).get(10, TimeUnit.SECONDS));
         assertEquals(MessagingException.PERMISSION, ((MessagingException) subscribe.getCause()).code());
+        // Whatever the grants say, only the proxy publishes permission updates.
+        for (String subject : new String[] {"rift.perms.update", "rift.perms.update.resync",
+                "rift.perms.update.0123456789abcdef0123456789abcdef"}) {
+            ExecutionException forged = assertThrows(ExecutionException.class,
+                    () -> backend.publish(subject, bytes("{}")).get(10, TimeUnit.SECONDS), subject);
+            assertEquals(MessagingException.PERMISSION, ((MessagingException) forged.getCause()).code(), subject);
+        }
         // The shared publisher recovers after the server closed its stream with ERROR.
-        standin.publish("test.after.denial", bytes("ok")).get(10, TimeUnit.SECONDS);
+        peer.publish("test.after.denial", bytes("ok")).get(10, TimeUnit.SECONDS);
     }
 
     @Test
@@ -117,7 +124,7 @@ class MessagingInteropTest {
         ExecutionException none = assertThrows(ExecutionException.class,
                 () -> backend.request("test.nobody", bytes("x"), Duration.ofSeconds(2)).get(10, TimeUnit.SECONDS));
         assertEquals("no responders available", none.getCause().getMessage());
-        Subscription silent = standin.subscribe("test.silent", null, message -> {}).get(10, TimeUnit.SECONDS);
+        Subscription silent = peer.subscribe("test.silent", null, message -> {}).get(10, TimeUnit.SECONDS);
         try {
             CompletionException timeout = assertThrows(CompletionException.class,
                     () -> backend.request("test.silent", bytes("x"), Duration.ofMillis(300)).join());

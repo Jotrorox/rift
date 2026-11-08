@@ -218,6 +218,9 @@ one.
 | `groups[]` | `name`, `weight` (default 0), `display_name`?, `nodes` (default `[]`) |
 | `users[]` | `uuid`, `primary_group`?, `nodes` (default `[]`) |
 
+The Java client and RiftPerms read and write both files in these formats
+([Java offline policy](permissions-java.md#offline-policy)).
+
 ## Testing crate
 
 `TestPermissions` is an in-memory store with the same trait. It applies

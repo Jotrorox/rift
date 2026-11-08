@@ -1,4 +1,4 @@
-package io.github.jotrorox.rift.permissions.test;
+package io.github.jotrorox.rift.permissions.client;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -6,8 +6,6 @@ import io.github.jotrorox.rift.permissions.CompiledSubject;
 import io.github.jotrorox.rift.permissions.Node;
 import io.github.jotrorox.rift.permissions.SubjectRef;
 import io.github.jotrorox.rift.permissions.Uuids;
-import io.github.jotrorox.rift.permissions.client.Codec;
-import io.github.jotrorox.rift.permissions.client.Json;
 import io.github.jotrorox.rift.permissions.client.Json.Num;
 import io.github.jotrorox.rift.permissions.client.Json.Obj;
 import io.github.jotrorox.rift.permissions.client.Json.Str;

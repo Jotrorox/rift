@@ -12,7 +12,8 @@ dependencies {
 
 testing {
     suites {
-        // Runs against a real `rift` process; skipped when the binary is absent.
+        // Runs against a real `rift` process (`cargo build --bin rift`); skipped when the binary is
+        // absent. Also loads the shaded RiftPerms jar's client in an isolated class loader.
         register<JvmTestSuite>("integrationTest") {
             dependencies {
                 implementation(project())
@@ -23,6 +24,9 @@ testing {
                         .orElse(rootDir.resolve("../target/debug/rift").absolutePath)
                     inputs.property("riftBinary", binary)
                     systemProperty("rift.binary", binary.get())
+                    dependsOn(":rift-permissions-paper:shadowJar")
+                    systemProperty("riftperms.jar",
+                        rootDir.resolve("paper/build/libs/RiftPerms-${project.version}.jar").absolutePath)
                     outputs.upToDateWhen { false }
                 }
             }

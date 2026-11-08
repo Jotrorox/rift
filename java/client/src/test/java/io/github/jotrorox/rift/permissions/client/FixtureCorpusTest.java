@@ -57,6 +57,7 @@ class FixtureCorpusTest {
             Map.entry("command_request", j -> Codec.toJson(Codec.readCommandRequest(j))),
             Map.entry("command_reply", j -> Codec.toJson(Codec.readCommandReply(j))),
             Map.entry("context_report", j -> Codec.toJson(Codec.readContextReport(j))),
+            Map.entry("resync_request", j -> Codec.toJson(Codec.readResyncRequest(j))),
             Map.entry("reply", j -> Codec.toJson(Codec.readReply(j, Function.identity()), Function.identity())),
             Map.entry("tristates", j -> new Arr(((Arr) j).items().stream()
                     .map(item -> Codec.toJson(Codec.readTristate(item))).toList())),

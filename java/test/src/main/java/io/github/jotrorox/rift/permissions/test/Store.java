@@ -12,6 +12,7 @@ import io.github.jotrorox.rift.permissions.PermissionChangeEvent.GroupAttributes
 import io.github.jotrorox.rift.permissions.PermissionException;
 import io.github.jotrorox.rift.permissions.RiftPermissions;
 import io.github.jotrorox.rift.permissions.SubjectRef;
+import io.github.jotrorox.rift.permissions.client.Compiler;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;

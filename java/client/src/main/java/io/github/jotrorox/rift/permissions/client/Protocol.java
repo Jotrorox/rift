@@ -34,8 +34,18 @@ public final class Protocol {
     public static final String UPDATE = "rift.perms.update";
     /** Prefix of {@code rift.perms.update.<uuid>}: proxy → all, PUBLISH a compiled subject. */
     public static final String UPDATE_PREFIX = "rift.perms.update.";
-    /** Subscription pattern for every pushed snapshot. */
+    /** Subscription pattern for every pushed snapshot, which also matches {@link #RESYNC}. */
     public static final String UPDATE_ALL = "rift.perms.update.>";
+    /**
+     * Proxy → all, PUBLISH {@link ResyncRequest} ({@code /perms sync}): say {@code hello} again and
+     * refetch every stored subject and the group table. Never a {@code <uuid>} subject, because it
+     * is not 32 hex digits.
+     */
+    public static final String RESYNC = "rift.perms.update.resync";
+    /** Proxy → all, PUBLISH the same change events as {@link #UPDATE}, for listeners. */
+    public static final String EVENTS = "rift.events.permissions";
+    /** The proxy's retained stream of change events. */
+    public static final String CHANGES = "rift.perms.changes";
     /** Backend → proxy, PUBLISH_ACK a list of {@link RegisteredPermission}. */
     public static final String REGISTER = "rift.perms.register";
     /** Backend → proxy, REQUEST {@link CommandRequest} → {@link CommandReply}. */
@@ -239,6 +249,13 @@ public final class Protocol {
      * @param component Adventure component JSON to show the sender
      */
     public record CommandReply(long revision, String component) {}
+
+    /**
+     * {@code rift.perms.update.resync} payload.
+     *
+     * @param revision the proxy's revision when the resync was requested
+     */
+    public record ResyncRequest(long revision) {}
 
     /**
      * {@code rift.perms.context} payload: custom contexts for a player on this backend.

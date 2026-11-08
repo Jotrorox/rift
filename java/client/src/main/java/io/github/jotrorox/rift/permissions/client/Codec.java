@@ -42,6 +42,7 @@ import io.github.jotrorox.rift.permissions.client.Protocol.Ok;
 import io.github.jotrorox.rift.permissions.client.Protocol.PermissionDefault;
 import io.github.jotrorox.rift.permissions.client.Protocol.RegisteredPermission;
 import io.github.jotrorox.rift.permissions.client.Protocol.Reply;
+import io.github.jotrorox.rift.permissions.client.Protocol.ResyncRequest;
 import io.github.jotrorox.rift.permissions.client.Protocol.SubjectBatchReply;
 import io.github.jotrorox.rift.permissions.client.Protocol.SubjectBatchRequest;
 import io.github.jotrorox.rift.permissions.client.Protocol.SubjectGetRequest;
@@ -994,6 +995,22 @@ public final class Codec {
     public static CommandReply readCommandReply(Json json) {
         Fields f = new Fields(json, "command reply");
         return new CommandReply(f.u64("revision"), f.required("component").toString());
+    }
+
+    /**
+     * @param request a resync request
+     * @return its wire form
+     */
+    public static Json toJson(ResyncRequest request) {
+        return new Obj(Map.of("revision", Num.of(request.revision())));
+    }
+
+    /**
+     * @param json a resync request
+     * @return the request
+     */
+    public static ResyncRequest readResyncRequest(Json json) {
+        return new ResyncRequest(new Fields(json, "resync request").u64("revision"));
     }
 
     /**
