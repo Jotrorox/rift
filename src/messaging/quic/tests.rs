@@ -1,5 +1,7 @@
 use super::*;
 use crate::messaging::{BrokerConfig, stream::StreamConfig};
+use bytes::Bytes;
+use rustls::pki_types::PrivateKeyDer;
 
 fn identity() -> Identity {
     Identity {
@@ -73,18 +75,6 @@ fn wildcard_permissions_require_containment_not_overlap() {
     assert!(peer.can_subscribe(">").is_ok());
     assert!(peer.can_publish("rift.control.reload", None).is_ok());
     assert!(peer.can_publish("rift.events.player", None).is_err());
-}
-
-#[test]
-fn decoder_rejects_truncated_invalid_utf8_and_oversized_strings() {
-    assert!(take_string(&mut Bytes::from_static(&[0, 2, b'a'])).is_err());
-    assert!(take_string(&mut Bytes::from_static(&[0, 1, 255])).is_err());
-    assert!(take_string(&mut Bytes::from_static(&[255, 255])).is_err());
-    assert!(decode_message(Bytes::from_static(&[0, 1, b'*', 0, 0])).is_err());
-    let bad = ["", "a..b", "a.>.b", "a*b", "a b", "a\0b"];
-    for pattern in bad {
-        assert!(validate_pattern(pattern).is_err(), "{pattern:?}");
-    }
 }
 
 #[tokio::test]
@@ -204,7 +194,7 @@ async fn malformed_frames_are_rejected_without_killing_other_streams() {
         vec![0, 0, 0, 1, 255],
         vec![0, 0, 0, 3, SUBSCRIBE, 0, 30],
     ] {
-        let (mut send, mut recv) = client.inner.connection.open_bi().await.unwrap();
+        let (mut send, mut recv) = client.connection().open_bi().await.unwrap();
         send.write_all(&malformed).await.unwrap();
         let mut frame = timeout(
             Duration::from_secs(2),
@@ -281,7 +271,7 @@ async fn retained_consumer_replays_and_acknowledges_over_quic() {
 async fn dropping_server_closes_existing_connections() {
     let (server, client, _) = fixture(HashMap::new()).await;
     drop(server);
-    timeout(Duration::from_secs(2), client.inner.connection.closed())
+    timeout(Duration::from_secs(2), client.connection().closed())
         .await
         .unwrap();
 }
@@ -290,9 +280,12 @@ async fn dropping_server_closes_existing_connections() {
 async fn dropped_clients_do_not_leave_a_publisher_reference_cycle() {
     let (_server, client, _) = fixture(HashMap::new()).await;
     client.publish("game.cycle", Bytes::new()).await.unwrap();
-    let weak = Arc::downgrade(&client.inner);
+    // The connection closes only when the last reference to the client drops.
+    let connection = client.connection().clone();
     drop(client);
-    assert!(weak.upgrade().is_none());
+    timeout(Duration::from_secs(2), connection.closed())
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -310,61 +303,6 @@ async fn dropping_remote_subscription_unregisters_the_broker_subscription() {
     .await
     .unwrap();
     server.shutdown().await;
-}
-
-#[tokio::test]
-async fn fragmented_frame_read_survives_cancellation_mid_header_and_payload() {
-    let (server_tls, client_tls) = configs();
-    let server = Endpoint::server(server_tls, "127.0.0.1:0".parse().unwrap()).unwrap();
-    let address = server.local_addr().unwrap();
-    let mut client = Endpoint::client("127.0.0.1:0".parse().unwrap()).unwrap();
-    client.set_default_client_config(client_tls);
-    let (phase_tx, mut phase_rx) = tokio::sync::mpsc::channel(2);
-    let proceed = Arc::new(tokio::sync::Notify::new());
-    let producer_proceed = proceed.clone();
-    let task = tokio::spawn(async move {
-        let connection = server.accept().await.unwrap().await.unwrap();
-        let (mut send, mut recv) = connection.accept_bi().await.unwrap();
-        let mut start = [0];
-        recv.read_exact(&mut start).await.unwrap();
-        send.write_all(&[0, 0]).await.unwrap();
-        phase_tx.send(()).await.unwrap();
-        producer_proceed.notified().await;
-        send.write_all(&[0, 7, MESSAGE, b'a']).await.unwrap();
-        phase_tx.send(()).await.unwrap();
-        producer_proceed.notified().await;
-        send.write_all(b"bcdef").await.unwrap();
-        send.finish().unwrap();
-        send.stopped().await.unwrap();
-        server.close(0u32.into(), b"test completed");
-    });
-    let connection = client.connect(address, "localhost").unwrap().await.unwrap();
-    let (mut send, mut recv) = connection.open_bi().await.unwrap();
-    send.write_all(&[0]).await.unwrap();
-    let mut reader = FrameReader::default();
-    phase_rx.recv().await.unwrap();
-    assert!(
-        timeout(Duration::from_millis(10), reader.read(&mut recv))
-            .await
-            .is_err()
-    );
-    assert_eq!(reader.header_read, 2);
-    proceed.notify_one();
-    phase_rx.recv().await.unwrap();
-    assert!(
-        timeout(Duration::from_millis(10), reader.read(&mut recv))
-            .await
-            .is_err()
-    );
-    assert_eq!(reader.header_read, 4);
-    assert_eq!(reader.body_read, 2);
-    proceed.notify_one();
-    let frame = timeout(Duration::from_secs(2), reader.read(&mut recv))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(frame.as_ref(), b"\x07abcdef");
-    task.await.unwrap();
 }
 
 #[tokio::test]

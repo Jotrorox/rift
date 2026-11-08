@@ -15,6 +15,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use bytes::Bytes;
 use tokio::sync::Semaphore;
 
+pub use rift_messaging::{ConsumerConfig, Delivery, Record};
+
 use super::{Error, Message, Result, subject_matches, validate_subject};
 
 const MAGIC: &[u8; 8] = b"RIFTJS01";
@@ -43,39 +45,6 @@ impl Default for StreamConfig {
             sync_on_write: true,
         }
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ConsumerConfig {
-    pub filter_subject: String,
-    /// Positive whole milliseconds, persisted across restarts.
-    pub ack_wait: Duration,
-    pub max_ack_pending: usize,
-    pub start_sequence: u64,
-}
-
-impl Default for ConsumerConfig {
-    fn default() -> Self {
-        Self {
-            filter_subject: ">".into(),
-            ack_wait: Duration::from_secs(30),
-            max_ack_pending: 128,
-            start_sequence: 1,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Record {
-    pub sequence: u64,
-    pub timestamp_millis: u64,
-    pub message: Message,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Delivery {
-    pub record: Record,
-    pub delivery_count: u32,
 }
 
 #[derive(Clone)]

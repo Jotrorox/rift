@@ -7,3 +7,7 @@ license.workspace = true
 
 [dependencies]
 rift-permissions.workspace = true
+rift-permissions-client.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }

@@ -1215,12 +1215,24 @@ dependencies = [
  "quinn",
  "rcgen",
  "reqwest",
+ "rift-messaging",
  "rift-permissions",
  "rusqlite",
  "rustls",
  "serde",
  "serde_json",
  "sha2",
+ "tokio",
+]
+
+[[package]]
+name = "rift-messaging"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "quinn",
+ "rcgen",
+ "rustls",
  "tokio",
 ]
 
@@ -1236,14 +1248,32 @@ dependencies = [
 name = "rift-permissions-client"
 version = "0.1.0"
 dependencies = [
+ "bytes",
+ "log",
+ "quinn",
+ "rcgen",
+ "rift",
+ "rift-messaging",
  "rift-permissions",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
 name = "rift-permissions-ffi"
 version = "0.1.0"
 dependencies = [
+ "bytes",
+ "log",
+ "rcgen",
+ "rift",
  "rift-permissions",
+ "rift-permissions-client",
+ "rustls",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -1251,6 +1281,8 @@ name = "rift-permissions-testing"
 version = "0.1.0"
 dependencies = [
  "rift-permissions",
+ "rift-permissions-client",
+ "tokio",
 ]
 
 [[package]]
