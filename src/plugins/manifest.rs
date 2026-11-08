@@ -719,7 +719,9 @@ jit = false
         assert!(!manifest.lua.as_ref().unwrap().jit);
         assert_eq!(
             manifest.describe_capabilities(),
-            "filesystem=data,host,/var/lib/relaxoban(advisory) network=no(rift.http only) env=RELAXOBAN_DSN(os.getenv only) ffi=true native_modules=true memory_limit_mb=64; Lua io and os are not sandboxed"
+            format!(
+                "filesystem=data,host,{absolute}(advisory) network=no(rift.http only) env=RELAXOBAN_DSN(os.getenv only) ffi=true native_modules=true memory_limit_mb=64; Lua io and os are not sandboxed"
+            )
         );
         let script = Manifest::parse(
             "name = \"a\"\nversion = \"1\"\napi = \"0.1\"\nmode = \"script\"\n",
