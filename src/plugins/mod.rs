@@ -292,33 +292,30 @@ impl Host {
         let mut stopping = Vec::new();
         let mut reloads = Vec::new();
         let mut started = Vec::new();
-        let start = |spec: &PluginSpec,
-                     after: Option<Arc<Instance>>,
-                     behind: Option<Arc<Instance>>,
-                     retry: bool| {
-            let engine = spec.manifest.engine.ok_or_else(|| {
-                io::Error::other(format!("plugin {}: not a persistent plugin", spec.name))
-            })?;
-            let factory = persistent.engines.get(engine).ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    format!(
-                        "plugin {}: engine \"{}\" is not available in this build of Rift",
-                        spec.name,
-                        engine.name()
-                    ),
+        let start =
+            |spec: &PluginSpec, after: Option<Arc<Instance>>, behind: Option<Arc<Instance>>| {
+                let engine = spec.manifest.engine.ok_or_else(|| {
+                    io::Error::other(format!("plugin {}: not a persistent plugin", spec.name))
+                })?;
+                let factory = persistent.engines.get(engine).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        format!(
+                            "plugin {}: engine \"{}\" is not available in this build of Rift",
+                            spec.name,
+                            engine.name()
+                        ),
+                    )
+                })?;
+                Instance::start(
+                    spec.clone(),
+                    factory,
+                    persistent.base.clone(),
+                    persistent.commands.clone() as Arc<dyn Registrar>,
+                    after,
+                    behind,
                 )
-            })?;
-            Instance::start(
-                spec.clone(),
-                factory,
-                persistent.base.clone(),
-                persistent.commands.clone() as Arc<dyn Registrar>,
-                after,
-                behind,
-                retry,
-            )
-        };
+            };
         for spec in self.specs.iter() {
             let old = previous.iter().find(|old| old.name() == spec.name);
             let instance = match old {
@@ -337,12 +334,12 @@ impl Host {
                 }
                 Some(old) => {
                     stopping.push(old.clone());
-                    let instance = start(spec, Some(old.clone()), started.last().cloned(), false)?;
+                    let instance = start(spec, Some(old.clone()), started.last().cloned())?;
                     started.push(instance.clone());
                     instance
                 }
                 None => {
-                    let instance = start(spec, None, started.last().cloned(), false)?;
+                    let instance = start(spec, None, started.last().cloned())?;
                     started.push(instance.clone());
                     instance
                 }

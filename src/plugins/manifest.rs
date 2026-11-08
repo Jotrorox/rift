@@ -58,7 +58,8 @@ pub enum Restart {
     /// death), and keep retrying a restart whose `init` fails.
     OnFailure,
     /// Like `OnFailure`, and also retry a first `init` that failed after a
-    /// reload, which `OnFailure` leaves failed until the next change.
+    /// reload, which `OnFailure` leaves failed until the next change. A
+    /// failed `init` at startup fails startup either way.
     Always,
 }
 

@@ -304,8 +304,7 @@ impl Instance {
     /// that predecessor's thread to exit before creating its engine, so two
     /// generations of one plugin never run at once. With `behind`, it waits
     /// until that instance's first `init` settled, so plugins initialize and
-    /// claim commands in `rift.plugin()` order. `retry_first_init` applies
-    /// `restart = "on-failure"` to the first `init` as well.
+    /// claim commands in `rift.plugin()` order.
     pub(crate) fn start(
         spec: PluginSpec,
         factory: Arc<dyn EngineFactory>,
@@ -313,7 +312,6 @@ impl Instance {
         registrar: Arc<dyn Registrar>,
         after: Option<Arc<Instance>>,
         behind: Option<Arc<Instance>>,
-        retry_first_init: bool,
     ) -> io::Result<Arc<Self>> {
         let handle = tokio::runtime::Handle::try_current()
             .map_err(|_| io::Error::other("persistent plugins require a Tokio runtime"))?;
@@ -344,7 +342,6 @@ impl Instance {
             handle,
             after,
             behind,
-            retry_first_init,
         };
         std::thread::Builder::new()
             .name(format!("rift-plugin-{:.32}", instance.spec.name))
@@ -576,7 +573,6 @@ struct Worker {
     handle: tokio::runtime::Handle,
     after: Option<Arc<Instance>>,
     behind: Option<Arc<Instance>>,
-    retry_first_init: bool,
 }
 
 impl Worker {
@@ -669,7 +665,7 @@ impl Worker {
             let restart = retry
                 && match self.spec.manifest.restart {
                     Restart::Never => false,
-                    Restart::OnFailure => ran || !first || self.retry_first_init,
+                    Restart::OnFailure => ran || !first,
                     Restart::Always => true,
                 };
             first = false;
