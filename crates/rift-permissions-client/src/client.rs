@@ -669,7 +669,7 @@ impl Shared {
                 .map_err(Error::Transport)?,
         };
         *lock(&self.bus) = Some(bus);
-        if let Err(error) = self.handshake().await {
+        if let Err(error) = self.handshake(false).await {
             self.disconnect();
             return Err(error);
         }
@@ -677,8 +677,9 @@ impl Shared {
         Ok(session)
     }
 
-    /// `hello`, then refetch what the reply shows to be stale.
-    async fn handshake(&self) -> Result<(), Error> {
+    /// `hello`, then refetch what the reply shows to be stale, or with
+    /// `force` (a `/perms sync`) every stored subject.
+    async fn handshake(&self, force: bool) -> Result<(), Error> {
         let request = HelloRequest {
             server: self.server.clone(),
             revision: self.replica.revision(),
@@ -716,7 +717,7 @@ impl Shared {
                 self.replica.remove(*uuid);
             }
         }
-        let stale = self.replica.sync_revision(hello.revision) || backwards;
+        let stale = self.replica.sync_revision(hello.revision) || backwards || force;
         if stale {
             info!(
                 "rift-permissions: replica revision {local} differs from the proxy's {}; refetching {} snapshots",
@@ -750,7 +751,10 @@ impl Shared {
         loop {
             let result = tokio::select! {
                 message = session.updates.recv() => message.map(|m| self.on_update(&m.payload)),
-                message = session.pushes.recv() => message.map(|m| self.on_push(&m.subject, &m.payload)),
+                message = session.pushes.recv() => message.map(|m| match &*m.subject {
+                    wire::RESYNC => self.resync(),
+                    subject => self.on_push(subject, &m.payload),
+                }),
                 message = session.events.recv() => message.map(|m| {
                     if let Some(event) = parse(wire::EVENTS, &m.payload) {
                         self.changes.emit(&event);
@@ -805,6 +809,18 @@ impl Shared {
             shared.refetch(refetch).await;
             if groups {
                 shared.refresh_groups().await;
+            }
+        });
+    }
+
+    /// The proxy asked every replica to resync (`/perms sync`): `hello`
+    /// again and refetch everything, in the background.
+    fn resync(self: &Arc<Self>) {
+        info!("rift-permissions: the proxy requested a resync");
+        let shared = self.clone();
+        tokio::spawn(async move {
+            if let Err(error) = shared.handshake(true).await {
+                warn!("rift-permissions: resync failed: {error}");
             }
         });
     }

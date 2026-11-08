@@ -64,6 +64,8 @@ pub struct Snapshot {
     pub extensions: rift::extensions::Extensions,
     pub messaging: Broker,
     pub messaging_streams: Arc<HashMap<String, Stream>>,
+    /// The `rift.perms.*` bus service, shared by every generation.
+    pub perms: Arc<rift::permissions::control::Bus>,
     authenticator: Option<Arc<Authenticator>>,
     forwarding_secret: Option<Arc<[u8]>>,
 }
@@ -150,6 +152,17 @@ impl Snapshot {
             previous.map(|old| &old.extensions),
             permissions,
         )?;
+        let perms = previous.map_or_else(
+            || {
+                Arc::new(rift::permissions::control::Bus::new(
+                    messaging.clone(),
+                    extensions.permissions().clone(),
+                    config.messaging.as_ref(),
+                ))
+            },
+            |old| old.perms.clone(),
+        );
+        perms.set_commands(extensions.command_permissions());
         let players = previous.map_or_else(
             || Arc::new(PlayerRegistry::default()),
             |old| old.players.clone(),
@@ -182,6 +195,7 @@ impl Snapshot {
             policies,
             router,
             messaging,
+            perms,
             messaging_streams: previous.map_or_else(
                 || Arc::new(HashMap::new()),
                 |old| old.messaging_streams.clone(),
@@ -525,12 +539,16 @@ pub async fn handle(
         let network_configured = snapshot.config.network != Default::default()
             || snapshot.config.extensions.is_some()
             || !snapshot.config.service_groups.is_empty();
+        // Backend permission replicas need the player's snapshot before the
+        // login reaches them, so the name is read first.
         let tracked_login = network_configured
             || !snapshot.config.managed_servers.is_empty()
-            || snapshot.authenticator.is_some();
+            || snapshot.authenticator.is_some()
+            || snapshot.perms.has_principals();
         let network_enabled = session.switch_supported() && network_configured;
         if network_enabled {
             session.enable_network()?;
+            session.enable_permission_commands(snapshot.extensions.permissions().clone());
         }
         if snapshot.config.network.bungeecord {
             session.enable_bungeecord();
@@ -1009,6 +1027,7 @@ pub async fn handle(
                     event.stage = "transfer";
                     event.failure = "transfer_failed";
                     let protocol = request.snapshot.config.backends[target].version();
+                    target_network.push_permissions(&session, target);
                     let result = timeout_at(deadline, session.connect_backend_as(upstream, protocol)).await;
                     match result {
                         Ok(Ok(())) => {
@@ -1164,6 +1183,31 @@ pub async fn handle(
                     timeout(
                         HANDSHAKE_TIMEOUT,
                         session.answer_suggestions(&request, || servers),
+                    )
+                    .await??;
+                }
+                Ok(SessionEvent::ProxyCommand(command))
+                    if permission_command(&session, &command).is_some() =>
+                {
+                    let live_snapshot = snapshot.latest();
+                    let args = permission_command(&session, &command).unwrap_or_default();
+                    let output = match session.identity().and_then(|identity| identity.uuid) {
+                        Some(uuid) => {
+                            let sender = rift::permissions::command::Sender::Player(
+                                rift_permissions::Uuid::from_bytes(uuid),
+                            );
+                            rift::permissions::command::execute(
+                                &live_snapshot.perms.env(),
+                                &sender,
+                                &args,
+                            )
+                            .await
+                        }
+                        None => continue,
+                    };
+                    timeout(
+                        HANDSHAKE_TIMEOUT,
+                        session.send_system_component(&output.component()),
                     )
                     .await??;
                 }
@@ -2096,6 +2140,30 @@ fn next_instance_name(
     }
 }
 
+/// The arguments of a `/perms` or `/rp` command the proxy answers itself,
+/// unless an extension command of that name takes it.
+fn permission_command<C, B>(
+    session: &rift::session::Session<C, B>,
+    command: &str,
+) -> Option<Vec<String>>
+where
+    C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    B: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let mut words = rift::permissions::command::split(command);
+    let root = words.first()?;
+    if !rift::permissions::command::COMMAND_NAMES.contains(&root.as_str())
+        || session
+            .extension
+            .as_ref()
+            .is_some_and(|extension| extension.commands().iter().any(|name| name == root))
+    {
+        return None;
+    }
+    words.remove(0);
+    Some(words)
+}
+
 pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     use crate::{control, web};
     // Install handlers before advertising readiness and resolve the selected
@@ -2192,14 +2260,27 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
             .service_addresses
             .insert("admin".into(), listener.local_addr()?);
     }
-    initial.messaging_streams =
-        Arc::new(crate::messaging_runtime::open_streams(&initial.config).await?);
+    let mut streams = crate::messaging_runtime::open_streams(&initial.config).await?;
+    // The proxy declares the permission change log itself: file-backed
+    // beside the instance database, in memory without a configuration file.
+    let changes_directory = persistent.then(|| {
+        initial
+            .config
+            .instance_database
+            .with_extension("perms-changes")
+    });
+    let changes =
+        rift::permissions::control::open_changes_stream(changes_directory.as_deref()).await?;
+    initial.perms.set_changes_stream(changes.clone());
+    streams.insert(rift_permissions::wire::CHANGES.to_owned(), changes);
+    initial.messaging_streams = Arc::new(streams);
     let messaging_server = crate::messaging_runtime::listen(&initial).await?;
     let message_handler =
         rift::message_script::MessageHandler::new(&initial.config, initial.messaging.clone())
             .map_err(io::Error::other)?
             .map(|handler| handler.with_players(initial.extensions.player_api()));
     let messaging_controls = crate::messaging_runtime::Controls::new(initial.messaging.clone())?;
+    let permission_bus = initial.perms.listen()?;
     initial.addresses = Arc::new(
         initial
             .listener_addresses
@@ -2238,6 +2319,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         background.spawn(reconcile_nodes(receiver.clone()));
     }
     let (admin_commands, mut admin_requests) = mpsc::channel(16);
+    background.spawn(permission_bus);
     background.spawn(messaging_controls.run(
         receiver.clone(),
         metrics.clone(),

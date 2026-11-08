@@ -62,6 +62,7 @@ pub fn strict(config: &Config, path: &Path) -> Report {
             Ok(None) => {}
             Err(error) => report.errors.push(format!("extensions.storage: {error}")),
         }
+        command_permissions(config, extensions, &mut report);
     }
     if !running {
         for (field, address, transport) in addresses(config) {
@@ -73,6 +74,32 @@ pub fn strict(config: &Config, path: &Path) -> Report {
     }
     reload(config, path, running, &mut report);
     report
+}
+
+/// Extension commands nobody can run yet: their permission is neither
+/// registered by a backend nor granted anywhere. A warning, since grants are
+/// often added after the configuration.
+fn command_permissions(config: &Config, extensions: &ExtensionScript, report: &mut Report) {
+    let commands = extensions.command_permissions();
+    if commands.is_empty() {
+        return;
+    }
+    match rift::permissions::ungranted_command_permissions(
+        Some(&config.instance_database),
+        extensions.groups(),
+        &commands,
+    ) {
+        Ok(missing) => {
+            for (command, permission) in missing {
+                report.notes.push(format!(
+                    "warning: extensions.commands.{command}: permission {permission} is neither registered by a backend nor granted anywhere, so nobody can run /{command} yet"
+                ));
+            }
+        }
+        Err(error) => report.notes.push(format!(
+            "warning: command permissions were not checked: {error}"
+        )),
+    }
 }
 
 /// A secret read from `variable` must be set and contain `min..=1024` bytes

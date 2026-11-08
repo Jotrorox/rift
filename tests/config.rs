@@ -1093,6 +1093,27 @@ fn strict_check(fixture: &Fixture, envs: &[(&str, &str)]) -> (bool, String) {
 }
 
 #[test]
+fn strict_check_warns_about_command_permissions_nobody_holds() {
+    let fixture = Fixture::new();
+    fixture.write(&format!(
+        "{}\nrift.config.extensions = {{ api_version = 3, commands = {{ fly = {{ permission = 'essentials.fly', run = function() end }}, ban = {{ permission = 'network.ban', run = function() end }} }}, groups = {{ staff = {{ permissions = {{ ['network.*'] = true }} }} }} }}",
+        online_config("127.0.0.1:25566".parse().unwrap()).replacen("return {", "rift.setup {", 1)
+    ));
+    let (ok, output) = strict_check(
+        &fixture,
+        &[("RIFT_TEST_FORWARDING_SECRET", "velocity-secret-value")],
+    );
+    assert!(ok, "warnings do not fail the check: {output}");
+    assert!(
+        output.contains(
+            "warning: extensions.commands.fly: permission essentials.fly is neither registered by a backend nor granted anywhere"
+        ),
+        "{output}"
+    );
+    assert!(!output.contains("extensions.commands.ban"), "{output}");
+}
+
+#[test]
 fn strict_check_reports_unset_secrets_without_printing_values() {
     let fixture = Fixture::new();
     fixture.write(&format!(

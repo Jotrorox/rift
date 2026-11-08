@@ -126,6 +126,19 @@ struct Online {
     provided: ContextSet,
 }
 
+/// A player whose connection to `server` is being forwarded: reports from
+/// that backend are accepted before the proxy sees them arrive.
+struct Arriving {
+    server: String,
+    since: Instant,
+    external: ContextSet,
+}
+
+/// How long an expected arrival is remembered.
+const ARRIVAL_WINDOW: std::time::Duration = std::time::Duration::from_secs(120);
+/// Most expected arrivals kept at once.
+const MAX_ARRIVING: usize = 16_384;
+
 struct State {
     revision: u64,
     groups: Arc<BTreeMap<String, Group>>,
@@ -134,6 +147,7 @@ struct State {
     /// Group name to the cached users that depend on it; `None` until needed.
     index: Option<HashMap<String, HashSet<Uuid>>>,
     online: HashMap<Uuid, Online>,
+    arriving: HashMap<Uuid, Arriving>,
 }
 
 impl State {
@@ -241,6 +255,7 @@ impl Authority {
                 cache: HashMap::new(),
                 index: None,
                 online: HashMap::new(),
+                arriving: HashMap::new(),
             }),
             config: RwLock::new(config.clone()),
             notifications: broadcast::channel(NOTIFICATIONS).0,
@@ -829,6 +844,12 @@ impl Authority {
             if let Ok(set) = ContextSet::of(context::SERVER, server) {
                 online.proxy = set;
             }
+            if let Some(arriving) = state.arriving.remove(&uuid)
+                && arriving.server.eq_ignore_ascii_case(server)
+                && let Some(online) = state.online.get_mut(&uuid)
+            {
+                online.external = arriving.external;
+            }
         }
         let authority = self.clone();
         let name = name.to_owned();
@@ -850,11 +871,133 @@ impl Authority {
     /// server alone, and backend-reported and Lua-provided contexts are
     /// cleared until they are reported again.
     pub fn switch_server(&self, uuid: Uuid, server: &str) {
-        if let Some(online) = self.state_mut().online.get_mut(&uuid) {
+        let mut state = self.state_mut();
+        let arriving = state
+            .arriving
+            .remove(&uuid)
+            .filter(|arriving| arriving.server.eq_ignore_ascii_case(server));
+        if let Some(online) = state.online.get_mut(&uuid) {
             online.proxy = ContextSet::of(context::SERVER, server).unwrap_or_default();
-            online.external = ContextSet::new();
+            online.external = arriving.map(|a| a.external).unwrap_or_default();
             online.provided = ContextSet::new();
         }
+    }
+
+    /// The player's connection is about to be forwarded to `server`: until
+    /// they arrive (or two minutes pass), that backend may already report
+    /// contexts for them and act for them. Reports it makes before the
+    /// arrival take effect when [`Authority::join`] or
+    /// [`Authority::switch_server`] confirms it.
+    pub fn expect(&self, uuid: Uuid, server: &str) {
+        let mut state = self.state_mut();
+        if state.arriving.len() >= MAX_ARRIVING {
+            state
+                .arriving
+                .retain(|_, arriving| arriving.since.elapsed() < ARRIVAL_WINDOW);
+            if state.arriving.len() >= MAX_ARRIVING {
+                return;
+            }
+        }
+        state.arriving.insert(
+            uuid,
+            Arriving {
+                server: server.to_owned(),
+                since: Instant::now(),
+                external: ContextSet::new(),
+            },
+        );
+    }
+
+    /// The backend an online player is on, as far as the proxy knows.
+    pub fn server_of(&self, uuid: Uuid) -> Option<String> {
+        self.state()
+            .online
+            .get(&uuid)
+            .and_then(|online| online.proxy.get(context::SERVER))
+            .map(str::to_owned)
+    }
+
+    /// Whether the player is on `server`, or their connection is being
+    /// forwarded there right now.
+    pub fn on_server(&self, uuid: Uuid, server: &str) -> bool {
+        let state = self.state();
+        let current = state
+            .online
+            .get(&uuid)
+            .and_then(|online| online.proxy.get(context::SERVER))
+            .is_some_and(|current| current.eq_ignore_ascii_case(server));
+        current
+            || state.arriving.get(&uuid).is_some_and(|arriving| {
+                arriving.server.eq_ignore_ascii_case(server)
+                    && arriving.since.elapsed() < ARRIVAL_WINDOW
+            })
+    }
+
+    /// The name an online player joined with.
+    pub fn online_name(&self, uuid: Uuid) -> Option<String> {
+        self.state()
+            .online
+            .get(&uuid)
+            .map(|online| online.name.clone())
+    }
+
+    /// The last name the store recorded for a user, online or not.
+    pub fn last_name(&self, uuid: Uuid) -> Option<String> {
+        if let Some(name) = self.online_name(uuid) {
+            return Some(name);
+        }
+        self.database
+            .lock()
+            .query_row(
+                "SELECT last_name FROM perm_subject WHERE kind = 0 AND key = ?1",
+                [uuid.to_string()],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .ok()
+            .flatten()
+    }
+
+    /// Nodes that have expired but that the sweeper has not deleted yet.
+    pub fn expired_unswept(&self) -> Result<u64, PermError> {
+        let count: i64 = self.database.lock().query_row(
+            "SELECT count(*) FROM perm_node WHERE expires_at IS NOT NULL AND expires_at <= ?1",
+            [store::sql_time(unix_now())],
+            |r| r.get(0),
+        )?;
+        Ok(count.max(0) as u64)
+    }
+
+    /// Users holding a global or contextual positive `inherit` node for
+    /// `group`, sorted by UUID, at most `limit` (capped at 1000); `true`
+    /// when more exist.
+    pub fn group_members(
+        &self,
+        group: &str,
+        limit: usize,
+    ) -> Result<(Vec<Member>, bool), PermError> {
+        let limit = limit.min(MAX_RESULTS);
+        let connection = self.database.lock();
+        let mut statement = connection.prepare(
+            "SELECT DISTINCT s.key, s.last_name FROM perm_node n
+             JOIN perm_subject s ON s.id = n.subject_id
+             WHERE s.kind = 0 AND n.kind = 1 AND n.key = ?1 AND n.value = 'true'
+             ORDER BY s.key LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![group, limit as i64 + 1], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+        })?;
+        let mut members = Vec::new();
+        for row in rows {
+            let (key, name) = row?;
+            members.push(Member {
+                uuid: Uuid::parse(&key)?,
+                name,
+                groups: vec![group.to_owned()],
+            });
+        }
+        let more = members.len() > limit;
+        members.truncate(limit);
+        Ok((members, more))
     }
 
     /// One of the player's sessions ended.
@@ -864,6 +1007,7 @@ impl Authority {
             online.sessions -= 1;
             if online.sessions == 0 {
                 state.online.remove(&uuid);
+                state.arriving.remove(&uuid);
             }
         }
     }
@@ -908,6 +1052,13 @@ impl Authority {
             )));
         }
         let mut state = self.state_mut();
+        if let Some(arriving) = state.arriving.get_mut(&uuid)
+            && arriving.server.eq_ignore_ascii_case(server)
+            && arriving.since.elapsed() < ARRIVAL_WINDOW
+        {
+            arriving.external = contexts;
+            return Ok(true);
+        }
         match state.online.get_mut(&uuid) {
             Some(online)
                 if online

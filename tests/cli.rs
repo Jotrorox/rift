@@ -54,9 +54,18 @@ fn help_is_successful_and_describes_the_interface() {
         assert!(text.contains("rift check [--strict] [path]"));
         assert!(text.contains("No arguments: load ./rift.lua if present"));
         assert!(text.contains("rift admin"));
+        assert!(text.contains("rift admin perms <command>"));
+        assert!(text.contains("rift dev [options]"));
         assert!(text.contains("existing sessions continue"));
         assert!(output.stderr.is_empty());
     }
+    let dev = run(&["dev", "--help"]);
+    assert!(dev.status.success());
+    let text = String::from_utf8(dev.stdout).unwrap();
+    assert!(text.contains("in-memory permission store"), "{text}");
+    let bad = run(&["dev", "--bogus", "x"]);
+    assert!(!bad.status.success());
+    assert!(String::from_utf8_lossy(&bad.stderr).contains("unknown option --bogus"));
 }
 
 #[test]

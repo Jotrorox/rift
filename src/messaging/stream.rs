@@ -204,6 +204,7 @@ impl Stream {
             subject: Arc::from(subject),
             reply: reply.map(Arc::from),
             payload,
+            sender: None,
         };
         let retained_size = message_size(&message);
         if retained_size > self.inner.config.max_bytes {
@@ -906,6 +907,7 @@ fn decode(bytes: &[u8], config: &StreamConfig) -> Result<Event> {
                         Some(Arc::from(reply))
                     },
                     payload,
+                    sender: None,
                 },
             })
         }
@@ -1260,6 +1262,7 @@ mod tests {
                             subject: Arc::from("x"),
                             reply: None,
                             payload: Bytes::from_static(b"first"),
+                            sender: None,
                         },
                     }))
                 })

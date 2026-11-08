@@ -247,6 +247,19 @@ impl Broker {
         reply: Option<&str>,
         payload: Bytes,
     ) -> Result<PublishReport> {
+        self.publish_as(subject, reply, payload, None)
+    }
+
+    /// [`Broker::publish_with_reply`] on behalf of an authenticated remote
+    /// principal, recorded in [`Message::sender`]. Only the QUIC listener
+    /// names a sender; in-process publishers leave it `None`.
+    pub fn publish_as(
+        &self,
+        subject: &str,
+        reply: Option<&str>,
+        payload: Bytes,
+        sender: Option<&str>,
+    ) -> Result<PublishReport> {
         validate_subject(subject, false, self.inner.config.max_subject_bytes)?;
         if let Some(reply) = reply {
             validate_subject(reply, false, self.inner.config.max_subject_bytes)?;
@@ -278,6 +291,7 @@ impl Broker {
                 .map_or_else(|| Arc::from(subject), |entry| entry.pattern.clone()),
             reply: reply.map(Arc::from),
             payload,
+            sender: sender.map(Arc::from),
         };
         let mut report = PublishReport::default();
         let mut queues: HashMap<&str, Vec<&Entry>> = HashMap::new();
@@ -335,12 +349,24 @@ impl Broker {
         payload: Bytes,
         timeout: Duration,
     ) -> Result<Message> {
+        self.request_as(subject, payload, timeout, None).await
+    }
+
+    /// [`Broker::request`] on behalf of an authenticated remote principal;
+    /// see [`Broker::publish_as`].
+    pub async fn request_as(
+        &self,
+        subject: &str,
+        payload: Bytes,
+        timeout: Duration,
+        sender: Option<&str>,
+    ) -> Result<Message> {
         let mut random = [0u8; 16];
         aws_lc_rs::rand::fill(&mut random)
             .map_err(|_| Error::Storage("request inbox entropy unavailable".into()))?;
         let inbox = format!("_INBOX.{:032x}", u128::from_le_bytes(random));
         let mut subscription = self.subscribe(&inbox, None)?;
-        let report = self.publish_with_reply(subject, Some(&inbox), payload)?;
+        let report = self.publish_as(subject, Some(&inbox), payload, sender)?;
         if report.delivered == 0 {
             return Err(Error::NoResponders);
         }

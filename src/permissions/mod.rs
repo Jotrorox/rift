@@ -1,8 +1,10 @@
 //! The proxy's permission authority: the SQLite store in the shared database
 //! ([`store`]), compile cache, revisions and change fan-out ([`authority`]),
 //! the change log ([`audit`]), LuckPerms import and export ([`import`]), the
-//! Lua `rift.permissions` module ([`lua`]) and the replication contract a
-//! follower proxy will implement ([`follower`]).
+//! Lua `rift.permissions` module ([`lua`]), the `/perms` grammar shared by
+//! every command surface ([`command`]), the bus handlers and change fan-out
+//! ([`control`]) and the replication contract a follower proxy will
+//! implement ([`follower`]).
 //!
 //! The model, the resolver and the wire types live in the `rift-permissions`
 //! crate so backends resolve exactly as the proxy does; nothing here walks
@@ -10,6 +12,8 @@
 //! behaviour, `docs/permissions-protocol.md` the JSON shapes.
 mod audit;
 mod authority;
+pub mod command;
+pub mod control;
 pub mod follower;
 mod import;
 pub(crate) mod lua;
@@ -21,6 +25,58 @@ pub use import::{ImportReport, read_export, write_export};
 
 use rift_permissions::wire::ErrorCode;
 use std::{fmt, io};
+
+/// The publish and subscribe grants of a backend principal
+/// (`messaging.principals[].preset = "backend"`).
+pub fn backend_grants() -> (Vec<String>, Vec<String>) {
+    let strings = |list: &[&str]| list.iter().map(|s| (*s).to_owned()).collect();
+    (
+        strings(&control::BACKEND_PUBLISH),
+        strings(&control::BACKEND_SUBSCRIBE),
+    )
+}
+
+/// Extension commands whose permission is neither registered by a backend
+/// nor granted (`true`, directly or by a covering wildcard) by any node in
+/// the store at `database` or in `extensions.groups`. Reads the database
+/// read-only; a missing file or a store without permission tables counts as
+/// empty. For `rift check --strict`.
+pub fn ungranted_command_permissions(
+    database: Option<&std::path::Path>,
+    groups: &std::collections::BTreeMap<String, rift_permissions::Group>,
+    commands: &[(String, String)],
+) -> io::Result<Vec<(String, String)>> {
+    let opened = database
+        .filter(|path| path.exists())
+        .map(crate::database::Database::read_only)
+        .transpose()?;
+    let connection = opened.as_ref().map(|database| database.lock());
+    let in_store = |sql: &str, key: &str| -> bool {
+        connection
+            .as_ref()
+            .is_some_and(|connection| connection.query_row(sql, [key], |_| Ok(())).is_ok())
+    };
+    let configured = |pattern: &str| {
+        groups.values().flat_map(|group| &group.nodes).any(|node| {
+            matches!(&node.payload, rift_permissions::Payload::Permission { key, value: true } if key == pattern)
+        })
+    };
+    let mut missing = Vec::new();
+    for (command, permission) in commands {
+        let registered = in_store("SELECT 1 FROM perm_registered WHERE node = ?1", permission);
+        let granted = command::covering_patterns(permission).iter().any(|pattern| {
+            configured(pattern)
+                || in_store(
+                    "SELECT 1 FROM perm_node WHERE kind = 0 AND value = 'true' AND key = ?1 LIMIT 1",
+                    pattern,
+                )
+        });
+        if !registered && !granted {
+            missing.push((command.clone(), permission.clone()));
+        }
+    }
+    Ok(missing)
+}
 
 /// Every failure of a permission read or write.
 #[derive(Debug)]

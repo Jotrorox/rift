@@ -182,6 +182,7 @@ pub fn decode_message(mut frame: Bytes) -> Result<Message> {
         subject: Arc::from(subject),
         reply: nonempty(&reply).map(Arc::from),
         payload: frame,
+        sender: None,
     })
 }
 
