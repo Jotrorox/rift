@@ -51,6 +51,8 @@ pub(crate) struct Base {
     pub broker: Broker,
     /// Retained streams, attached by the runtime once they are open.
     pub streams: Arc<RwLock<Arc<HashMap<String, Stream>>>>,
+    /// Log tails, counters and lifecycle notifications for operators.
+    pub monitor: Arc<super::monitor::Monitor>,
 }
 
 enum Kind {
@@ -168,6 +170,7 @@ impl Services {
                 level.as_str()
             ),
         }
+        self.0.base.monitor.log(&self.0.spec.name, level, message);
     }
 }
 
@@ -183,7 +186,15 @@ impl Inner {
     }
 
     fn deliver(&self, event: Event) {
-        if !self.queue.notify(event) {
+        let hook = event.hook();
+        let queued = self.queue.notify(event);
+        let outcome = if queued {
+            super::monitor::Outcome::Queued
+        } else {
+            super::monitor::Outcome::Dropped
+        };
+        self.base.monitor.call(&self.spec.name, hook, outcome, None);
+        if !queued {
             // Report the first drop and then every power of two.
             let dropped = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
             if dropped.is_power_of_two() {

@@ -19,6 +19,7 @@ pub mod api;
 pub(crate) mod conformance;
 pub mod lua;
 pub mod manifest;
+pub mod monitor;
 pub(crate) mod remote;
 pub mod script;
 pub mod services;
@@ -33,7 +34,7 @@ use std::{
     io,
     path::PathBuf,
     sync::{Arc, Mutex, RwLock},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use worker::{Engines, Instance, Outcome, Registrar, Report};
 
@@ -141,6 +142,9 @@ struct Persistent {
     commands: Arc<CommandTable>,
     /// Fans `rift.events.*` out to plugins while any are active.
     events: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Serializes changes to `active`: activation, operator restarts and
+    /// shutdown each replace the whole set.
+    changes: Mutex<()>,
 }
 
 impl Drop for Persistent {
@@ -181,6 +185,7 @@ impl Host {
                 active: RwLock::new(Arc::from([])),
                 commands: Arc::default(),
                 events: Mutex::default(),
+                changes: Mutex::default(),
             }),
         };
         for spec in &config.plugins {
@@ -266,6 +271,157 @@ impl Host {
             .collect()
     }
 
+    /// Log tails, counters and lifecycle notifications, shared by every
+    /// generation.
+    pub fn monitor(&self) -> &Arc<monitor::Monitor> {
+        &self.persistent.base.monitor
+    }
+
+    /// Every plugin in dispatch order: the configuration script, the
+    /// persistent plugins in `rift.plugin()` order, then the bus responders.
+    pub fn statuses(&self) -> Vec<PluginStatus> {
+        let mut statuses = Vec::new();
+        if !self.script.is_empty() {
+            statuses.push(PluginStatus {
+                name: SCRIPT.into(),
+                mode: "script",
+                engine: Some("lua".into()),
+                version: None,
+                status: "active".into(),
+                restarts: 0,
+                calls: 0,
+                last_error: None,
+                hooks: self.script.hooks().map(Hook::name).collect(),
+                commands: self.script.commands().iter().cloned().collect(),
+                capabilities: Some("sandboxed".into()),
+                restartable: false,
+            });
+        }
+        let monitor = self.monitor();
+        for instance in self.active().iter() {
+            let report = instance.report();
+            let counters = monitor.counters(instance.name());
+            let registration = instance.registration();
+            statuses.push(PluginStatus {
+                name: report.name,
+                mode: "persistent",
+                engine: Some(report.engine),
+                version: Some(report.version),
+                status: serde_json::to_value(report.status)
+                    .ok()
+                    .and_then(|status| status.as_str().map(str::to_owned))
+                    .unwrap_or_default(),
+                restarts: counters.restarts,
+                calls: counters.total_calls(),
+                last_error: report.last_error,
+                hooks: registration.as_ref().map_or_else(Vec::new, |registration| {
+                    Hook::ALL
+                        .into_iter()
+                        .filter(|hook| registration.wants(*hook))
+                        .map(Hook::name)
+                        .collect()
+                }),
+                commands: registration.as_ref().map_or_else(Vec::new, |registration| {
+                    registration
+                        .commands
+                        .iter()
+                        .map(|command| command.name.clone())
+                        .collect()
+                }),
+                capabilities: Some(instance.spec().manifest.describe_capabilities()),
+                restartable: true,
+            });
+        }
+        let hooks: Vec<&'static str> = self
+            .remote
+            .hooks()
+            .filter_map(|hook| Hook::parse(hook).map(Hook::name))
+            .collect();
+        if !hooks.is_empty() {
+            statuses.push(PluginStatus {
+                name: REMOTE.into(),
+                mode: "remote",
+                engine: None,
+                version: None,
+                status: "active".into(),
+                restarts: 0,
+                calls: 0,
+                last_error: None,
+                hooks,
+                commands: Vec::new(),
+                capabilities: None,
+                restartable: false,
+            });
+        }
+        statuses
+    }
+
+    /// Stop one persistent plugin and start a fresh instance of it with the
+    /// same artifact and current configuration, in the same position. The
+    /// new instance is active when this returns and initializes once the old
+    /// one has stopped; the future finishes stopping the old instance and
+    /// must be driven. `actor` is recorded in the plugin's log and the audit
+    /// log.
+    pub fn restart(
+        &self,
+        name: &str,
+        actor: &str,
+    ) -> io::Result<impl Future<Output = ()> + Send + 'static> {
+        let persistent = &self.persistent;
+        let _changes = persistent.changes.lock().unwrap();
+        let active = persistent.active.read().unwrap().clone();
+        let Some(index) = active.iter().position(|instance| instance.name() == name) else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                if name == SCRIPT || name == REMOTE {
+                    format!("{name} cannot be restarted; reload the configuration instead")
+                } else {
+                    format!("no persistent plugin named {name:?} is running")
+                },
+            ));
+        };
+        let old = active[index].clone();
+        let mut spec = old.spec().clone();
+        spec.config_json = old.config_json();
+        let factory = spec
+            .manifest
+            .engine
+            .and_then(|engine| persistent.engines.get(engine))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!("plugin {name}: its engine is not available in this build of Rift"),
+                )
+            })?;
+        let version = spec.manifest.version.clone();
+        let instance = Instance::start(
+            spec,
+            factory,
+            persistent.base.clone(),
+            persistent.commands.clone() as Arc<dyn Registrar>,
+            Some(old.clone()),
+            None,
+        )?;
+        let mut next = active.to_vec();
+        next[index] = instance;
+        *persistent.active.write().unwrap() = Arc::from(next);
+        persistent
+            .base
+            .monitor
+            .lifecycle(name, "restart_requested", Some(actor), None);
+        let body = serde_json::json!({
+            "event": "restart_requested",
+            "plugin": name,
+            "version": version,
+            "actor": actor,
+        });
+        let _ = persistent
+            .base
+            .broker
+            .publish(worker::EVENTS, body.to_string().into());
+        Ok(async move { old.shutdown().await })
+    }
+
     /// Attach the retained streams once the runtime opened them.
     pub fn set_streams(&self, streams: Arc<HashMap<String, crate::messaging::Stream>>) {
         *self.persistent.base.streams.write().unwrap() = streams;
@@ -289,6 +445,11 @@ impl Host {
     /// (awaited or spawned). Call only after the configuration committed.
     pub fn activate(&self) -> io::Result<impl Future<Output = ()> + Send + 'static> {
         let persistent = &self.persistent;
+        let _changes = persistent.changes.lock().unwrap();
+        persistent
+            .base
+            .monitor
+            .retain(self.specs.iter().map(|spec| spec.name.as_str()));
         let previous = persistent.active.read().unwrap().clone();
         persistent.commands.0.lock().unwrap().script = self.script.commands().clone();
         let mut next = Vec::with_capacity(self.specs.len());
@@ -356,19 +517,27 @@ impl Host {
         }
         *persistent.active.write().unwrap() = Arc::from(next);
         self.watch_events();
+        let monitor = persistent.base.monitor.clone();
         Ok(async move {
             let mut work = tokio::task::JoinSet::new();
             for instance in stopping {
                 work.spawn(async move { instance.shutdown().await });
             }
             for (instance, spec) in reloads {
+                let monitor = monitor.clone();
                 work.spawn(async move {
                     match instance.reload(spec.config_json.clone()).await {
-                        Ok(()) => eprintln!("rift: plugin {} reloaded its configuration", spec.name),
-                        Err(error) => eprintln!(
-                            "rift: plugin {}: reload failed; it keeps its previous configuration: {error:.2048}",
-                            spec.name
-                        ),
+                        Ok(()) => {
+                            eprintln!("rift: plugin {} reloaded its configuration", spec.name);
+                            monitor.lifecycle(&spec.name, "reloaded", None, None);
+                        }
+                        Err(error) => {
+                            eprintln!(
+                                "rift: plugin {}: reload failed; it keeps its previous configuration: {error:.2048}",
+                                spec.name
+                            );
+                            monitor.lifecycle(&spec.name, "reload_failed", None, Some(&error));
+                        }
                     }
                 });
             }
@@ -397,8 +566,10 @@ impl Host {
 
     /// Stop every plugin within its grace period.
     pub async fn shutdown(&self) {
-        let active =
-            std::mem::replace(&mut *self.persistent.active.write().unwrap(), Arc::from([]));
+        let active = {
+            let _changes = self.persistent.changes.lock().unwrap();
+            std::mem::replace(&mut *self.persistent.active.write().unwrap(), Arc::from([]))
+        };
         if let Some(task) = self.persistent.events.lock().unwrap().take() {
             task.abort();
         }
@@ -452,43 +623,62 @@ impl Host {
                 };
                 let active = persistent.active.read().unwrap().clone();
                 for instance in active.iter() {
-                    instance.notify(Event::Event(event.clone()));
+                    notify(
+                        &persistent.base.monitor,
+                        instance,
+                        Event::Event(event.clone()),
+                    );
                 }
             }
         }));
     }
 
-    /// Await one persistent plugin and apply its manifest's policies.
-    /// `Ok(None)` skips the plugin (`continue`); `Err` denies.
-    async fn ask(&self, instance: &Instance, event: Event) -> Result<Option<Reply>, String> {
+    /// Await one persistent plugin, check its reply with `validate` and
+    /// apply its manifest's policies; an invalid reply is a failure of that
+    /// plugin. `Ok(None)` skips the plugin (`continue`); `Err` denies. Every
+    /// call to a hook the plugin wants is counted for the metrics.
+    async fn ask<T>(
+        &self,
+        instance: &Instance,
+        event: Event,
+        validate: impl FnOnce(Reply) -> Result<T, String>,
+    ) -> Result<Option<T>, String> {
+        use monitor::Outcome as Counted;
         let hook = event.hook();
         let manifest = &instance.spec().manifest;
         let deadline = manifest.deadline(hook).unwrap_or(Duration::from_millis(50));
-        match instance.call(event, deadline).await {
-            Outcome::Reply(reply) => Ok(Some(reply)),
-            Outcome::TimedOut => apply(
-                instance,
-                hook,
+        // The instance answers hooks it did not register with their default
+        // at once; those are not calls.
+        let wanted = instance
+            .registration()
+            .is_none_or(|registration| registration.wants(hook));
+        let started = Instant::now();
+        let outcome = instance.call(event, deadline).await;
+        let elapsed = Some(started.elapsed());
+        let monitor = self.monitor();
+        let (counted, policy, error) = match outcome {
+            Outcome::Reply(reply) => match validate(reply) {
+                Ok(value) => {
+                    if wanted {
+                        monitor.call(instance.name(), hook, Counted::Ok, elapsed);
+                    }
+                    return Ok(Some(value));
+                }
+                Err(error) => (
+                    Counted::Error,
+                    manifest.on_failure(),
+                    format!("invalid reply: {error}"),
+                ),
+            },
+            Outcome::TimedOut => (
+                Counted::Timeout,
                 manifest.on_timeout(hook),
                 format!("exceeded {} ms", deadline.as_millis()),
             ),
-            Outcome::Failed(error) => apply(instance, hook, manifest.on_failure(), error),
-        }
-    }
-
-    /// An invalid reply is a failure of that plugin.
-    fn invalid<T>(
-        &self,
-        instance: &Instance,
-        hook: Hook,
-        error: String,
-    ) -> Result<Option<T>, String> {
-        apply(
-            instance,
-            hook,
-            instance.spec().manifest.on_failure(),
-            format!("invalid reply: {error}"),
-        )
+            Outcome::Failed(error) => (Counted::Error, manifest.on_failure(), error),
+        };
+        monitor.call(instance.name(), hook, counted, elapsed);
+        apply(monitor, instance, hook, policy, error)
     }
 
     async fn action(
@@ -497,14 +687,11 @@ impl Host {
         hook: Hook,
         event: Event,
     ) -> Result<Option<Action>, String> {
-        match self.ask(instance, event).await? {
-            None => Ok(None),
-            Some(Reply::Action(action)) => match validate_action(hook, &action) {
-                Ok(()) => Ok(Some(action)),
-                Err(error) => self.invalid(instance, hook, error),
-            },
-            Some(other) => self.invalid(instance, hook, mismatch(hook, &other)),
-        }
+        self.ask(instance, event, |reply| match reply {
+            Reply::Action(action) => validate_action(hook, &action).map(|()| action),
+            other => Err(mismatch(hook, &other)),
+        })
+        .await
     }
 
     /// `login`, `initial_server`, `before_transfer`: the configuration script
@@ -554,7 +741,7 @@ impl Host {
         };
         for instance in self.active().iter() {
             if let Some(event) = event(input.clone()) {
-                instance.notify(event);
+                notify(self.monitor(), instance, event);
             }
         }
     }
@@ -598,23 +785,14 @@ impl Host {
         instance: &Instance,
         input: Context,
     ) -> io::Result<Vec<Suggestion>> {
-        let hook = Hook::Suggest;
-        let reply = self
-            .ask(instance, Event::Suggest(input))
+        let suggestions = self
+            .ask(instance, Event::Suggest(input), |reply| match reply {
+                Reply::Suggestions(suggestions) => validate_suggestions(suggestions),
+                other => Err(mismatch(Hook::Suggest, &other)),
+            })
             .await
             .map_err(io::Error::other)?;
-        let suggestions = match reply {
-            None => return Ok(Vec::new()),
-            Some(Reply::Suggestions(suggestions)) => validate_suggestions(suggestions),
-            Some(other) => Err(mismatch(hook, &other)),
-        };
-        match suggestions {
-            Ok(suggestions) => Ok(suggestions),
-            Err(error) => Ok(self
-                .invalid(instance, hook, error)
-                .map_err(io::Error::other)?
-                .unwrap_or_default()),
-        }
+        Ok(suggestions.unwrap_or_default())
     }
 
     /// `route` for persistent plugins, after the script kept the default.
@@ -625,31 +803,23 @@ impl Host {
         use crate::hooks::{RouteDecision, RouteError};
         let input = api::Connection::from(connection);
         for instance in self.active().iter() {
-            let reply = self
-                .ask(instance, Event::Route(input.clone()))
+            let decision = self
+                .ask(instance, Event::Route(input.clone()), |reply| match reply {
+                    Reply::Route(decision) => match &decision {
+                        RouteDecision::Backend(name) if name.trim().is_empty() => {
+                            Err("backend name must not be empty".to_owned())
+                        }
+                        RouteDecision::Reject {
+                            reason: Some(reason),
+                        } if reason.len() > 1024 => {
+                            Err("reject reason must contain at most 1024 bytes".to_owned())
+                        }
+                        _ => Ok(decision),
+                    },
+                    other => Err(mismatch(Hook::Route, &other)),
+                })
                 .await
                 .map_err(RouteError::Script)?;
-            let decision = match reply {
-                None => continue,
-                Some(Reply::Route(decision)) => match &decision {
-                    RouteDecision::Backend(name) if name.trim().is_empty() => {
-                        Err("backend name must not be empty".to_owned())
-                    }
-                    RouteDecision::Reject {
-                        reason: Some(reason),
-                    } if reason.len() > 1024 => {
-                        Err("reject reason must contain at most 1024 bytes".to_owned())
-                    }
-                    _ => Ok(decision),
-                },
-                Some(other) => Err(mismatch(Hook::Route, &other)),
-            };
-            let decision = match decision {
-                Ok(decision) => Some(decision),
-                Err(error) => self
-                    .invalid(instance, Hook::Route, error)
-                    .map_err(RouteError::Script)?,
-            };
             if let Some(decision) = decision
                 && decision != RouteDecision::Default
             {
@@ -667,27 +837,22 @@ impl Host {
         use crate::hooks::RouteError;
         let input = api::Ping::from(ping);
         for instance in self.active().iter() {
-            let reply = self
-                .ask(instance, Event::Status(input.clone()))
+            let changes = self
+                .ask(
+                    instance,
+                    Event::Status(input.clone()),
+                    |reply| match reply {
+                        Reply::Status(None) => Ok(None),
+                        Reply::Status(Some(changes)) => {
+                            crate::server_list::status_override_json(changes).map(Some)
+                        }
+                        other => Err(mismatch(Hook::Status, &other)),
+                    },
+                )
                 .await
                 .map_err(RouteError::Script)?;
-            let changes = match reply {
-                None | Some(Reply::Status(None)) => continue,
-                Some(Reply::Status(Some(changes))) => {
-                    crate::server_list::status_override_json(changes)
-                }
-                Some(other) => Err(mismatch(Hook::Status, &other)),
-            };
-            match changes {
-                Ok(changes) => return Ok(Some(changes)),
-                Err(error) => {
-                    if let Some(changes) = self
-                        .invalid(instance, Hook::Status, error)
-                        .map_err(RouteError::Script)?
-                    {
-                        return Ok(Some(changes));
-                    }
-                }
+            if let Some(Some(changes)) = changes {
+                return Ok(Some(changes));
             }
         }
         Ok(None)
@@ -701,33 +866,77 @@ impl Host {
     ) -> Result<Option<api::HttpResponse>, crate::http_script::HttpError> {
         use crate::http_script::HttpError;
         for instance in self.active().iter() {
-            let reply = self
-                .ask(instance, Event::Http(request.clone()))
+            let response = self
+                .ask(
+                    instance,
+                    Event::Http(request.clone()),
+                    |reply| match reply {
+                        Reply::Http(None) => Ok(None),
+                        Reply::Http(Some(response)) => validate_response(response).map(Some),
+                        other => Err(mismatch(Hook::Http, &other)),
+                    },
+                )
                 .await
                 .map_err(HttpError::Script)?;
-            let response = match reply {
-                None | Some(Reply::Http(None)) => continue,
-                Some(Reply::Http(Some(response))) => validate_response(response),
-                Some(other) => Err(mismatch(Hook::Http, &other)),
-            };
-            match response {
-                Ok(response) => return Ok(Some(response)),
-                Err(error) => {
-                    if let Some(response) = self
-                        .invalid(instance, Hook::Http, error)
-                        .map_err(HttpError::Script)?
-                    {
-                        return Ok(Some(response));
-                    }
-                }
+            if let Some(Some(response)) = response {
+                return Ok(Some(response));
             }
         }
         Ok(None)
     }
 }
 
+/// The pseudo-plugin names of the configuration script and the bus
+/// responders in [`Host::statuses`]; neither is a valid plugin name.
+pub const SCRIPT: &str = "(script)";
+pub const REMOTE: &str = "(remote)";
+
+/// One entry of [`Host::statuses`], for `rift admin plugins`, the status
+/// API, the dashboard and `rift.control.plugins`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PluginStatus {
+    pub name: String,
+    /// `script`, `persistent` or `remote`.
+    pub mode: &'static str,
+    pub engine: Option<String>,
+    pub version: Option<String>,
+    /// `starting`, `running`, `failed` or `stopped`; `active` for the
+    /// configuration script and the bus responders.
+    pub status: String,
+    /// Automatic and operator restarts since Rift started.
+    pub restarts: u64,
+    /// Calls since Rift started: awaited hooks, and observer events, timer
+    /// ticks and bus messages offered to the plugin's queue.
+    pub calls: u64,
+    pub last_error: Option<String>,
+    /// The hooks the plugin receives (all of them for an empty registration).
+    pub hooks: Vec<&'static str>,
+    pub commands: Vec<String>,
+    /// The effective grants, as `rift check` prints them.
+    pub capabilities: Option<String>,
+    pub restartable: bool,
+}
+
+/// Queue an observer event for one plugin and count it.
+fn notify(monitor: &monitor::Monitor, instance: &Instance, event: Event) {
+    let hook = event.hook();
+    if instance
+        .registration()
+        .is_some_and(|registration| !registration.wants(hook))
+    {
+        return;
+    }
+    let outcome = if instance.notify(event) {
+        monitor::Outcome::Queued
+    } else {
+        monitor::Outcome::Dropped
+    };
+    monitor.call(instance.name(), hook, outcome, None);
+}
+
 /// Apply `policy` to a plugin that missed its deadline or failed.
 fn apply<T>(
+    monitor: &monitor::Monitor,
     instance: &Instance,
     hook: Hook,
     policy: Policy,
@@ -737,9 +946,21 @@ fn apply<T>(
     match policy {
         Policy::Continue => {
             eprintln!("rift: {message}; skipped (continue)");
+            monitor.log(
+                instance.name(),
+                api::Level::Warn,
+                format!("{}: {error:.2048}; skipped (continue)", hook.name()),
+            );
             Ok(None)
         }
-        Policy::Deny => Err(message),
+        Policy::Deny => {
+            monitor.log(
+                instance.name(),
+                api::Level::Warn,
+                format!("{}: {error:.2048}; denied", hook.name()),
+            );
+            Err(message)
+        }
     }
 }
 

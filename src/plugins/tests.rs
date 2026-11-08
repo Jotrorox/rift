@@ -867,3 +867,112 @@ async fn unavailable_engines_are_refused_before_anything_starts() {
         "{error}"
     );
 }
+
+#[tokio::test]
+async fn operator_restarts_replace_the_instance_and_are_counted_logged_and_announced() {
+    use monitor::Outcome as Counted;
+    let root = directory();
+    let mocks = Mocks::default();
+    let mut first = Plan::new(action(Action::Continue)).commands(&["hello"]);
+    first.init = Arc::new(|_, services: &services::Services| {
+        services.log(api::Level::Info, "init says hi\nforged");
+        Ok(())
+    });
+    mocks.plan("first", first);
+    mocks.plan("second", Plan::new(action(Action::Server("game".into()))));
+    let broker = Broker::default();
+    let mut events = broker.subscribe(worker::EVENTS, None).unwrap();
+    let runtime = runtime(
+        &config(
+            "extensions = { api_version = 2, join = function() end }",
+            vec![
+                spec(&root, "first", "", "{\"a\":1}"),
+                spec(&root, "second", "", "{}"),
+            ],
+        ),
+        &mocks,
+        &broker,
+    )
+    .await;
+    let host = runtime.plugins().clone();
+    let mut lifecycle = host.monitor().subscribe();
+    // first continues; second answers login with an invalid server reply.
+    assert!(session(&runtime, 1).decision("login").await.is_err());
+    let statuses = host.statuses();
+    let names: Vec<_> = statuses.iter().map(|status| status.name.as_str()).collect();
+    assert_eq!(names, [SCRIPT, "first", "second"]);
+    assert_eq!(statuses[0].mode, "script");
+    assert!(!statuses[0].restartable);
+    assert_eq!(statuses[1].mode, "persistent");
+    assert_eq!(statuses[1].status, "running");
+    assert_eq!(statuses[1].commands, ["hello"]);
+    assert_eq!(statuses[1].restarts, 0);
+    assert!(statuses[1].hooks.contains(&"login"));
+    let first = host.monitor().counters("first");
+    assert_eq!(first.calls[&(Hook::Login, Counted::Ok)], 1);
+    assert_eq!(first.latency[&Hook::Login].count, 1);
+    let second = host.monitor().counters("second");
+    assert_eq!(second.calls[&(Hook::Login, Counted::Error)], 1);
+    let logs = host.monitor().logs("second").unwrap();
+    assert!(
+        logs.iter()
+            .any(|line| line.message.starts_with("login: invalid reply")
+                && line.message.ends_with("; denied")),
+        "{logs:?}"
+    );
+    let logs = host.monitor().logs("first").unwrap();
+    assert!(
+        logs.iter()
+            .any(|line| line.message == "init says hi forged")
+    );
+    assert!(logs.iter().any(|line| line.message == "lifecycle: started"));
+
+    let old = host.active()[0].clone();
+    host.restart("first", "alice").unwrap().await;
+    let active = host.active();
+    assert!(!Arc::ptr_eq(&old, &active[0]));
+    assert_eq!(active[0].name(), "first");
+    assert_eq!(active[1].name(), "second");
+    active[0].ready(Duration::from_secs(1)).await.unwrap();
+    assert_eq!(old.status(), Status::Stopped);
+    assert_eq!(active[0].config_json(), "{\"a\":1}");
+    // The fresh instance initialized with the same configuration.
+    assert_eq!(mocks.calls("init {\"a\":1}").len(), 2);
+    assert!(matches!(
+        host.command_owner("hello"),
+        Some(CommandOwner::Plugin(instance, _)) if instance.name() == "first"
+    ));
+    assert_eq!(host.statuses()[1].restarts, 1);
+    let mut seen = Vec::new();
+    while seen.last().map(String::as_str) != Some("started") {
+        let change = timeout(Duration::from_secs(1), lifecycle.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(change.plugin, "first");
+        if change.event == "restart_requested" {
+            assert_eq!(change.actor.as_deref(), Some("alice"));
+        }
+        seen.push(change.event);
+    }
+    assert_eq!(seen, ["restart_requested", "stopped", "started"]);
+    let mut announced = false;
+    while let Ok(Ok(message)) = timeout(Duration::from_millis(100), events.recv()).await {
+        let body: serde_json::Value = serde_json::from_slice(&message.payload).unwrap();
+        if body["event"] == "restart_requested" {
+            assert_eq!(body["plugin"], "first");
+            assert_eq!(body["actor"], "alice");
+            announced = true;
+        }
+    }
+    assert!(announced);
+    let error = host.restart("ghost", "alice").err().unwrap();
+    assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    let error = host.restart(SCRIPT, "alice").err().unwrap();
+    assert!(
+        error.to_string().contains("reload the configuration"),
+        "{error}"
+    );
+    runtime.plugins().shutdown().await;
+    assert!(host.monitor().logs("first").is_some());
+}

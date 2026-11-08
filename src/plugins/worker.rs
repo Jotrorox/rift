@@ -593,6 +593,9 @@ impl Worker {
         }
         // Ephemeral like every other Rift event: nobody listening is fine.
         let _ = self.base.broker.publish(EVENTS, body.to_string().into());
+        self.base
+            .monitor
+            .lifecycle(&self.spec.name, event, None, error);
     }
 
     fn fail(&self, error: String) {

@@ -709,6 +709,7 @@ impl Extensions {
                 permissions: permissions.clone(),
                 broker: broker.clone(),
                 streams: Arc::default(),
+                monitor: Arc::default(),
             },
             previous.map(|previous| &previous.plugins),
             engines,
