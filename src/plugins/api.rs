@@ -231,6 +231,22 @@ impl Hook {
                 | Self::Event
         )
     }
+
+    /// Hooks that carry a player's identity and therefore run only with
+    /// `authentication.online_mode`.
+    pub fn is_player(self) -> bool {
+        matches!(
+            self,
+            Self::Login
+                | Self::InitialServer
+                | Self::BeforeTransfer
+                | Self::Command
+                | Self::Suggest
+                | Self::Join
+                | Self::AfterTransfer
+                | Self::Disconnect
+        )
+    }
 }
 
 /// What `init` returns. Subscriptions and timers are created from inside

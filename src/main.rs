@@ -129,10 +129,12 @@ async fn start() -> io::Result<()> {
             for line in &plugins {
                 println!("rift: {line}");
             }
-            if !strict {
-                for warning in &warnings {
-                    eprintln!("rift: warning: {warning}");
-                }
+            // Strict check reports a missing engine as an error instead.
+            for warning in warnings
+                .iter()
+                .filter(|warning| !strict || !warning.contains("is not available"))
+            {
+                eprintln!("rift: warning: {warning}");
             }
             if strict {
                 let path = fs::canonicalize(path)?;

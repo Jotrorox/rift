@@ -77,7 +77,7 @@ pub fn plugins(config: &Config) -> (Vec<String>, Vec<String>) {
     }
     if !config.plugins.is_empty() && !config.authentication.online_mode {
         warnings.push(
-            "persistent plugins get no player hooks (login, commands, join, ...) without authentication.online_mode".into(),
+            "persistent plugins get no player hooks (login, commands, join, ...) without authentication.online_mode; a plugin that registers one fails to start".into(),
         );
     }
     (lines, warnings)

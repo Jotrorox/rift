@@ -623,7 +623,7 @@ impl Config {
             }
             let extensions = crate::extensions::ExtensionScript::parse(&root, &source)
                 .map_err(|e| e.to_string())?;
-            let plugins = lua
+            let mut plugins = lua
                 .app_data_ref::<crate::script::PersistentPlugins>()
                 .map(|records| records.0.clone())
                 .unwrap_or_default()
@@ -637,6 +637,8 @@ impl Config {
                         fingerprint: installed.fingerprint.clone()?,
                         name,
                         config_json,
+                        // Set below, once `authentication` is parsed.
+                        online_mode: false,
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -824,6 +826,9 @@ impl Config {
             }
             let network = network(&root)?;
             let authentication = authentication(&root)?;
+            for plugin in &mut plugins {
+                plugin.online_mode = authentication.online_mode;
+            }
             let forwarding = forwarding(&root)?;
             Ok(Self {
                 listeners,

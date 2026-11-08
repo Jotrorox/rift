@@ -306,13 +306,13 @@ fn check_lists_plugins_with_their_mode_and_never_starts_them() {
         );
         "plugin relaxoban: engine \"wasm\" is not available"
     };
+    let offline = "persistent plugins get no player hooks (login, commands, join, ...) without authentication.online_mode";
+    assert!(stderr.contains(offline), "{stderr}");
     let strict = fixture.run(&["check", "--strict"]);
     assert!(!strict.status.success());
-    assert!(
-        String::from_utf8_lossy(&strict.stderr).contains(refusal),
-        "{}",
-        String::from_utf8_lossy(&strict.stderr)
-    );
+    let strict_stderr = String::from_utf8_lossy(&strict.stderr);
+    assert!(strict_stderr.contains(refusal), "{strict_stderr}");
+    assert!(strict_stderr.contains(offline), "{strict_stderr}");
     let started = fixture.run(&["--config", "rift.lua"]);
     assert!(!started.status.success());
     assert!(

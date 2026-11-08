@@ -102,6 +102,7 @@ pub(crate) fn installed(folder: &Path, config_json: &str) -> PluginSpec {
         config_root: folder.parent().unwrap().parent().unwrap().to_owned(),
         config_json: config_json.into(),
         fingerprint: "one".into(),
+        online_mode: true,
     }
 }
 

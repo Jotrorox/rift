@@ -154,8 +154,13 @@ list from `rift.on`, `rift.command`, timers and subscriptions.
 
 Player hooks (`login`, `initial_server`, `before_transfer`, `command`,
 `suggest`, `join`, `after_transfer`, `disconnect`) need
-`authentication.online_mode`, because they carry a verified identity; `rift
-check` warns when persistent plugins are configured without it. Answers are
+`authentication.online_mode`, because they carry a verified identity. Without
+it, persistent plugins still run `route`, `status`, `http`, timers, bus
+messages and events, but a plugin whose registration lists a player hook,
+registers a command or has an empty hook list fails to start (it is not
+retried), so a ban list cannot silently allow everyone; `rift check` and `rift
+check --strict` warn when persistent plugins are configured without it.
+Turning `online_mode` on or off restarts every persistent plugin. Answers are
 validated exactly like Lua results and bus replies: strings are 1–1024 bytes,
 servers must exist, and an answer a hook does not accept is a failure of the
 plugin.
