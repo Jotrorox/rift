@@ -74,7 +74,7 @@ pub(super) fn watch(store: &mut Store<State>) {
         } else {
             match state.watch.deadline {
                 Some((until, limit, what)) if Instant::now() >= until => Some(format!(
-                    "interrupted: {what} exceeded its {} ms deadline",
+                    "interrupted: {what} exceeded {} ms",
                     limit.as_millis()
                 )),
                 _ => None,

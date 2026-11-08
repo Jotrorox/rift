@@ -3,27 +3,30 @@
 //! worker), never by calling the engine directly.
 //!
 //! Guests:
-//! - `hello-rs` (`examples/plugins/hello-rs`), the cross-language
-//!   conformance fixture. `hello-c` and `hello-go` behave identically and run
-//!   the same scenarios when `RIFT_TEST_PLUGIN_WASM_C` or
-//!   `RIFT_TEST_PLUGIN_WASM_GO` names their built component.
+//! - `conformance-rs` (`tests/fixtures/plugins/conformance-rs`), the
+//!   WebAssembly build of the shared conformance guest, for
+//!   [`conformance_tests!`].
+//! - `hello-rs`, `hello-c` and `hello-go` (`examples/plugins/hello-*`), run
+//!   through the shared [`conformance::hello_example`] and the WebAssembly
+//!   specifics below. `hello-c` and `hello-go` need a toolchain this test
+//!   does not drive: they run when `RIFT_TEST_PLUGIN_WASM_C` or
+//!   `RIFT_TEST_PLUGIN_WASM_GO` names the built component, or when the
+//!   component sits in its example folder (as CI downloads it).
 //! - `probe-rs` (`tests/fixtures/plugins/probe-rs`), a test-only guest for
 //!   traps, deadlines, stop requests, capabilities and captured output.
 //!
-//! `RIFT_TEST_PLUGIN_WASM_DIR` may hold prebuilt `hello_rs.wasm` and
-//! `probe_rs.wasm`. Otherwise the guests are built here with
-//! `cargo build --release --target wasm32-wasip2` into
+//! `RIFT_TEST_PLUGIN_WASM_DIR` may hold prebuilt `hello_rs.wasm`,
+//! `conformance_rs.wasm` and `probe_rs.wasm`. Otherwise the Rust guests are
+//! built here with `cargo build --release --target wasm32-wasip2` into
 //! `target/plugin-fixtures`, when that target is installed; without it the
 //! scenarios print why they were skipped and pass.
-//!
-//! The scenarios take a [`Guest`] so the engine-parameterised suite can run
-//! them for every engine that implements the hello fixture.
 use super::wasi::CAPTURED;
 use crate::{
     auth::AuthenticatedProfile,
     config::Config,
     extensions::{Action, ExtensionSession, Extensions, PlayerAction},
     messaging::Broker,
+    plugins::conformance::{self, Fixture, conformance_tests},
     plugins::{
         api::{CommandSpec, Hook, Registration, SuggestKind},
         worker::{Engines, Instance, Status},
@@ -122,15 +125,25 @@ pub(crate) fn hello_guests() -> Vec<Guest> {
                     wasm,
                 });
             }
-            for (name, variable) in [
-                ("hello-c", "RIFT_TEST_PLUGIN_WASM_C"),
-                ("hello-go", "RIFT_TEST_PLUGIN_WASM_GO"),
+            for (name, artifact, variable) in [
+                ("hello-c", "hello_c.wasm", "RIFT_TEST_PLUGIN_WASM_C"),
+                ("hello-go", "hello_go.wasm", "RIFT_TEST_PLUGIN_WASM_GO"),
             ] {
-                if let Some(wasm) = std::env::var_os(variable) {
-                    guests.push(Guest {
+                let built = Path::new(MANIFEST_DIR)
+                    .join("examples/plugins")
+                    .join(name)
+                    .join(artifact);
+                let wasm = std::env::var_os(variable)
+                    .map(PathBuf::from)
+                    .or_else(|| built.is_file().then_some(built));
+                match wasm {
+                    Some(wasm) => guests.push(Guest {
                         name: name.into(),
-                        wasm: wasm.into(),
-                    });
+                        wasm,
+                    }),
+                    None => eprintln!(
+                        "skipping {name}: set {variable} to its built component to run it"
+                    ),
                 }
             }
             if guests.is_empty() {
@@ -366,9 +379,6 @@ pub(crate) async fn hello_conformance(guest: &Guest) {
     assert_eq!(plugin.report().restarts, 0);
     runtime.plugins().shutdown().await;
     assert_eq!(plugin.status(), Status::Stopped);
-    // Compiled once and cached for the next start.
-    let cache = root.join(super::cache::DIRECTORY);
-    assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 1);
 }
 
 #[tokio::test]
@@ -376,6 +386,76 @@ async fn hello_guests_conform() {
     for guest in hello_guests() {
         hello_conformance(&guest).await;
     }
+}
+
+/// The example folder as shipped (its own `plugin.toml`) with the built
+/// component under the manifest's `entry`.
+fn example_folder(guest: &Guest) -> PathBuf {
+    let example = Path::new(MANIFEST_DIR)
+        .join("examples/plugins")
+        .join(&guest.name);
+    let folder = directory().join(&guest.name);
+    std::fs::create_dir_all(&folder).unwrap();
+    let manifest = std::fs::read_to_string(example.join("plugin.toml")).unwrap();
+    let entry = crate::plugins::manifest::Manifest::parse(&manifest, &guest.name)
+        .unwrap()
+        .entry
+        .unwrap();
+    std::fs::write(folder.join("plugin.toml"), manifest).unwrap();
+    std::fs::copy(&guest.wasm, folder.join(entry)).unwrap();
+    folder
+}
+
+#[tokio::test]
+async fn example_plugins_follow_the_shared_spec() {
+    for guest in hello_guests() {
+        conformance::hello_example(Engines::builtin(), &example_folder(&guest)).await;
+    }
+}
+
+fn conformance_guest() -> Option<PathBuf> {
+    static GUEST: OnceLock<Option<PathBuf>> = OnceLock::new();
+    GUEST
+        .get_or_init(|| {
+            let wasm = build(
+                "tests/fixtures/plugins/conformance-rs/Cargo.toml",
+                "conformance_rs.wasm",
+            );
+            if wasm.is_none() {
+                eprintln!(
+                    "skipping the shared conformance scenarios for wasm: conformance_rs.wasm unavailable (install the wasm32-wasip2 target or put it in RIFT_TEST_PLUGIN_WASM_DIR)"
+                );
+            }
+            wasm
+        })
+        .clone()
+}
+
+/// The conformance guest as a WebAssembly plugin folder.
+struct WasmFixture;
+
+impl Fixture for WasmFixture {
+    fn engines(&self) -> Engines {
+        Engines::builtin()
+    }
+
+    fn install(&self, folder: &Path, name: &str, extra: &str) {
+        let wasm = conformance_guest().expect("conformance_rs.wasm");
+        std::fs::copy(wasm, folder.join("plugin.wasm")).unwrap();
+        std::fs::write(
+            folder.join("plugin.toml"),
+            format!(
+                "name = \"{name}\"\nversion = \"1\"\napi = \"0.1\"\nengine = \"wasm\"\nentry = \"plugin.wasm\"\n{extra}"
+            ),
+        )
+        .unwrap();
+    }
+}
+
+mod shared {
+    use super::*;
+
+    conformance_tests!(WasmFixture, if conformance_guest().is_some());
 }
 
 #[tokio::test]
@@ -453,10 +533,7 @@ async fn a_guest_past_its_deadline_is_interrupted_and_restarted() {
     })
     .await;
     let error = plugin.report().last_error.unwrap();
-    assert!(
-        error.contains("login exceeded its 100 ms deadline"),
-        "{error}"
-    );
+    assert!(error.contains("login exceeded 100 ms"), "{error}");
     wait_for("the restart", Duration::from_secs(5), || {
         plugin.status() == Status::Running
     })

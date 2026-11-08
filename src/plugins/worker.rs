@@ -461,6 +461,9 @@ impl Instance {
                 self.spec.name
             )),
             Ok(Ok(Ok(reply))) => Outcome::Reply(reply),
+            // An engine that interrupts a guest at its deadline may answer
+            // just before this timer fires; the deadline still decides.
+            Ok(Ok(Err(_))) if Instant::now() >= until => Outcome::TimedOut,
             Ok(Ok(Err(error))) => Outcome::Failed(error.to_string()),
         }
     }

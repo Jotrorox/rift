@@ -762,7 +762,8 @@ fn validate_action(hook: Hook, action: &Action) -> Result<(), String> {
             )
     );
     if !allowed {
-        return Err(format!("invalid decision for {}", hook.name()));
+        let action: String = format!("{action:?}").chars().take(256).collect();
+        return Err(format!("invalid decision for {}: {action}", hook.name()));
     }
     if let Action::Deny(text) | Action::Server(text) | Action::Message(text) | Action::Queue(text) =
         action
