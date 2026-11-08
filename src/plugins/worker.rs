@@ -552,7 +552,8 @@ impl Instance {
 
 enum Served {
     Shutdown,
-    Fatal(String),
+    /// The instance is already marked failed.
+    Fatal,
 }
 
 enum Startup {
@@ -642,10 +643,9 @@ impl Worker {
                             services.close();
                             break;
                         }
-                        Served::Fatal(error) => {
+                        Served::Fatal => {
                             let _ = guarded(move || drop(engine));
                             services.close();
-                            self.fail(error);
                             if started.elapsed() >= STABLE {
                                 backoff = MIN_BACKOFF;
                             }
@@ -747,8 +747,9 @@ impl Worker {
                         let _ = reply.send(result);
                     }
                     Err(panic) => {
+                        self.fail(format!("reload {panic}"));
                         let _ = reply.send(Err(panic.clone()));
-                        return Served::Fatal(format!("reload {panic}"));
+                        return Served::Fatal;
                     }
                 },
                 Job::Call {
@@ -789,11 +790,15 @@ impl Worker {
                         }
                         _ => None,
                     };
+                    // Mark the instance failed before its caller learns why.
+                    if let Some(error) = &fatal {
+                        self.fail(error.clone());
+                    }
                     if let Some(reply) = reply {
                         let _ = reply.send(result);
                     }
-                    if let Some(error) = fatal {
-                        return Served::Fatal(error);
+                    if fatal.is_some() {
+                        return Served::Fatal;
                     }
                 }
             }
