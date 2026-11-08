@@ -9,10 +9,16 @@
     serverButtons: [], view: "overview",
     permissions: null, groups: null, logServer: "", logCursor: null, logPolling: false, definitions: {}, definitionRevision: null, definitionDirty: false, definitionVersion: 0, definitionSection: "service_groups", definitionName: "", definitionInputs: new Map(),
     // Unsaved edits on the server list, tab list and permission group forms.
-    settingsDirty: { serverList: false, tabList: false, permissionGroup: false }, permissionGroup: "", members: [], memberButtons: [],
+    settingsDirty: { serverList: false, tabList: false },
+    // The permission views: loaded groups, tracks, the selected group and player.
+    perms: permsState(),
     // Template downloads and the file browser.
     templateButtons: [], files: { root: "templates", path: "", editing: null, baseline: "", buttons: [] },
   };
+  function permsState() {
+    return { groups: [], tracks: [], group: "", groupDetail: null, user: "", userDetail: null, users: [], registered: [], events: [], expanded: new Set(),
+      buttons: [], editing: { "perm-group": null, "perm-user": null }, trackGroups: [], trackDirty: false };
+  }
   const settingsDirty = () => Object.values(state.settingsDirty).some(Boolean);
   const allowed = (permission) => state.permissions === null || state.permissions.includes(permission);
   const dirty = () => state.loaded && $("source").value !== state.baseline;
@@ -62,18 +68,21 @@
     $("console-send").disabled = state.busy || !state.logServer || !allowed("console");
     $("definition-save").disabled = state.busy || !state.definitionRevision || !allowed("config");
     $("definition-delete").disabled = state.busy || !state.definitionRevision || !$("definition-select").value || !allowed("config");
-    const groupsEnabled = Boolean(state.definitions.permission_groups);
-    for (const id of ["server-list-save", "tab-list-save", "permission-group-save"]) $(id).disabled = state.busy || !state.definitionRevision || !allowed("config");
-    $("permission-group-delete").disabled = state.busy || !state.definitionRevision || !$("permission-group-select").value || !allowed("config");
-    for (const button of state.memberButtons) button.disabled = state.busy || !allowed("config");
+    for (const id of ["server-list-save", "tab-list-save"]) $(id).disabled = state.busy || !state.definitionRevision || !allowed("config");
+    for (const button of state.perms.buttons) button.disabled = state.busy || !permsWrite() || Boolean(button.edge);
+    for (const id of ["perm-group-create", "perm-group-save", "perm-group-delete", "perm-group-node-save", "perm-user-node-save", "perm-track-save", "perm-track-add",
+      "perm-user-primary-save", "perm-user-parent-add", "perm-user-promote", "perm-user-demote"]) $(id).disabled = state.busy || !permsWrite();
+    $("perm-group-delete").disabled = state.busy || !permsWrite() || state.perms.group === "default";
+    $("perm-track-delete").disabled = state.busy || !permsWrite() || !$("perm-track-select").value;
+    $("perm-track-add").disabled = state.busy || !permsWrite() || !$("perm-track-add-group").value;
+    // Read-only operators see the data without the editing forms.
+    for (const id of ["perm-group-create-form", "perm-group-delete", "perm-group-node-form", "perm-user-node-form", "perm-track-form", "perm-user-primary-form", "perm-user-parent-form", "perm-user-track-form"]) $(id).classList.toggle("hidden", !permsWrite());
+    for (const id of ["perm-group-weight", "perm-group-display"]) $(id).disabled = !permsWrite();
+    $("perm-group-save").classList.toggle("hidden", !permsWrite());
     // Fields that only matter while their setting is on.
     for (const id of ["server-list-motd", "server-list-maintenance-motd", "server-list-version", "server-list-max-players", "server-list-sample"]) $(id).disabled = !$("server-list-enabled").checked;
     for (const id of ["tab-list-header", "tab-list-footer", "tab-list-players"]) $(id).disabled = !$("tab-list-enabled").checked;
-    for (const row of $("permission-groups").children) if (row.dataset) row.setAttribute("aria-current", String(row.dataset.group === state.permissionGroup && Boolean(state.permissionGroup)));
-    $("permission-member-add").disabled = state.busy || !groupsEnabled || !$("permission-member-group").value || !allowed("config");
     for (const [id, permission] of [["config-panel", "config"], ["definitions-panel", "config"], ["server-list-panel", "config"], ["server-list-lua-panel", "config"], ["tab-list-panel", "config"], ["deployments-panel", "deploy"], ["audit-panel", "audit"], ["extensions-panel", "extensions"]]) $(id).classList.toggle("hidden", !allowed(permission));
-    for (const id of ["permission-groups-panel", "permission-members-panel"]) $(id).classList.toggle("hidden", !allowed("config") || !groupsEnabled);
-    $("permissions-unavailable").classList.toggle("hidden", !allowed("config") || groupsEnabled || !state.definitionRevision);
     $("live-console-panel").classList.toggle("hidden", !allowed("logs") && !allowed("console"));
     for (const { button, unavailable } of state.templateButtons) button.disabled = state.busy || unavailable || !allowed("servers");
     const filesDirty = state.files.editing !== null && $("files-content").value !== state.files.baseline;
@@ -84,15 +93,17 @@
     text("files-edit-state", filesDirty ? "Unsaved changes" : "Saved");
     $("files-edit-state").className = `tag ${filesDirty ? "warning" : "good"}`;
     const visible = { script: allowed("config"), definitions: allowed("config"), extensions: allowed("extensions"),
-      "server-list": allowed("config"), "tab-list": allowed("config"), permissions: allowed("config"),
+      "server-list": allowed("config"), "tab-list": allowed("config"),
+      "perm-groups": permsRead(), "perm-users": permsRead(), "perm-nodes": permsRead(), "perm-activity": permsRead(),
       console: allowed("logs") || allowed("console"), deployments: allowed("deploy"), audit: allowed("audit"), files: allowed("files") };
     for (const [id] of views) $(`nav-${id}`).classList.toggle("hidden", visible[id] === false);
     for (const [section, ids] of sections) $(`section-${section}`).classList.toggle("hidden", ids.every((id) => visible[id] === false));
     showView();
   }
   const views = [["overview", "Overview"], ["routing", "Routing"], ["server-list", "Server list"], ["tab-list", "Tab list"], ["metrics", "Metrics"], ["servers", "Servers"], ["console", "Console"], ["groups", "Service groups"], ["files", "Files"],
-    ["script", "Lua script"], ["definitions", "Groups & templates"], ["permissions", "Permissions"], ["extensions", "Extensions"], ["reference", "Reference"], ["deployments", "Deployments"], ["audit", "Audit log"]];
-  const sections = [["configuration", ["script", "definitions", "permissions", "extensions"]], ["activity", ["deployments", "audit"]]];
+    ["script", "Lua script"], ["definitions", "Groups & templates"], ["extensions", "Extensions"], ["reference", "Reference"],
+    ["perm-groups", "Permission groups"], ["perm-users", "Players"], ["perm-nodes", "Permission nodes"], ["perm-activity", "Permission activity"], ["deployments", "Deployments"], ["audit", "Audit log"]];
+  const sections = [["configuration", ["script", "definitions", "extensions"]], ["permissions", ["perm-groups", "perm-users", "perm-nodes", "perm-activity"]], ["activity", ["deployments", "audit"]]];
   function showView() {
     const available = views.filter(([id]) => !$(`nav-${id}`).className.includes("hidden"));
     const requested = String(window.location.hash || "").slice(1);
@@ -108,7 +119,13 @@
     document.title = `${label} · Rift`;
     // The audit log is fetched on demand rather than on every poll.
     if (changed && current === "audit" && allowed("audit")) loadAudit().catch((error) => text("audit-result", error.message));
-    if (changed && current === "permissions" && allowed("config") && state.definitions.permission_groups) loadPermissions().catch((error) => text("permission-member-result", error.message));
+    if (changed && current.startsWith("perm-") && permsRead()) {
+      const failed = (id) => (error) => permsOutcome(id, error.message, "error");
+      if (current === "perm-groups") loadPermGroups().catch(failed("perm-groups-result"));
+      if (current === "perm-users") loadPermGroups().then(() => state.perms.users.length ? null : searchPermUsers()).catch(failed("perm-users-result"));
+      if (current === "perm-nodes") loadRegistered().catch(failed("perm-holders-result"));
+      if (current === "perm-activity") loadActivity().catch(failed("perm-activity-result"));
+    }
     if (changed && current === "groups" && allowed("read")) loadTemplates().catch((error) => text("template-result", error.message));
     if (changed && current === "files" && allowed("files")) loadFiles().catch((error) => text("files-result", error.message));
   }
@@ -143,8 +160,8 @@
           : response.status === 404
             ? "The admin API is unavailable. Enable web.api in the Lua configuration, or check that this is the admin service address."
             : `Request failed (HTTP ${response.status}).`;
-        const error = new Error(response.status === 404 && !path.startsWith("/api/operations/") ? fallback : data.error || fallback);
-        error.status = response.status;
+        const error = new Error(response.status === 404 && !path.startsWith("/api/operations/") && !data.code ? fallback : data.error || fallback);
+        error.status = response.status; error.code = data.code;
         throw error;
       }
       if (!response.headers.get("content-type")?.includes("application/json")) throw new Error("The server returned an unexpected response instead of JSON.");
@@ -354,7 +371,8 @@
       if (allowed("read")) { await refreshStatus(); await loadTemplates().catch((error) => text("template-result", error.message)); }
       if (allowed("config")) await loadSource();
       else { $("source").value = ""; state.baseline = ""; state.revision = null; state.loaded = false; }
-      if (allowed("config")) { await loadDefinitions(); if (state.definitions.permission_groups) await loadPermissions(); }
+      if (allowed("config")) await loadDefinitions();
+      if (permsRead()) await loadPermGroups().catch((error) => permsOutcome("perm-groups-result", error.message, "error"));
       if (allowed("deploy")) await loadDeployments();
     } catch (error) { handleError(error); }
     finally { state.busy = false; controls(); }
@@ -504,7 +522,6 @@
   function renderSettings() {
     if (!state.settingsDirty.serverList) renderServerList();
     if (!state.settingsDirty.tabList) renderTabList();
-    renderPermissionGroups();
   }
   function renderServerList() {
     const list = state.definitions.server_list || null;
@@ -558,99 +575,700 @@
     if (!Object.keys(value).length) throw new Error("Set a header, a footer or list everyone on the network, or turn the tab list off.");
     return value;
   }
-  function renderPermissionGroups() {
-    const groups = state.definitions.permission_groups || {};
-    const members = {};
-    for (const member of state.members) for (const group of member.groups || []) members[group] = (members[group] || 0) + 1;
-    const names = Object.keys(groups);
-    text("permission-group-count", `${names.length} defined`);
-    table("permission-groups", names, 5, (tr, name) => {
-      const nodes = Object.values(groups[name].permissions || {});
-      const granted = nodes.filter(Boolean).length;
-      if (tr.dataset) tr.dataset.group = name;
-      cell(tr, name, "address"); cell(tr, (groups[name].inherits || []).join(", ") || "—");
-      cell(tr, nodes.length ? `${granted} granted · ${nodes.length - granted} denied` : "None");
-      cell(tr, name === "default" ? "Everyone" : count(members[name] || 0), "metric-value");
-      const actions = cell(tr, ""), button = document.createElement("button");
-      button.type = "button"; button.className = "button subtle"; button.textContent = "Edit";
-      button.setAttribute("aria-label", `Edit ${name}`);
-      button.addEventListener("click", () => selectPermissionGroup(name));
-      actions.append(button);
-    }, "No groups defined yet. Create one below.");
-    const select = $("permission-group-select"), previous = state.permissionGroup;
+  // Permissions: groups, users, registered nodes and the change log, all
+  // through /api/perms. `perms` reads; `config` writes.
+  const permsRead = () => allowed("perms") || allowed("config");
+  const permsWrite = () => allowed("config");
+  const kindLabels = { permission: "Permission", inherit: "Parent", prefix: "Prefix", suffix: "Suffix", meta: "Meta", weight: "Weight", display_name: "Display name" };
+  const subjectLabel = (subject) => subject?.user ? `user:${subject.user}` : subject?.group ? `group:${subject.group}` : "—";
+  const contextText = (contexts) => Object.entries(contexts || {}).flatMap(([key, value]) => [value].flat().map((item) => `${key}=${item}`)).join(", ");
+  const expiryText = (at) => at ? new Date(number(at) * 1000).toLocaleString() : "Never";
+  // `key=value` pairs separated by commas, semicolons or lines; a repeated key holds several values.
+  function parseContexts(raw) {
+    const contexts = {};
+    for (const part of String(raw || "").split(/[,;\n]/).map((item) => item.trim()).filter(Boolean)) {
+      const match = /^([A-Za-z0-9_.:-]{1,64})\s*=\s*([^=;\u0000-\u001f]{1,256})$/.exec(part);
+      if (!match) throw new Error(`“${part}” isn’t a key=value context.`);
+      const key = match[1].toLowerCase(), value = match[2].trim().toLowerCase();
+      contexts[key] = Object.hasOwn(contexts, key) ? [contexts[key], value].flat() : value;
+    }
+    return contexts;
+  }
+  // Unix seconds from an expiry select ("" never, seconds from now, or "date").
+  function expiryValue(selectId, dateId) {
+    const choice = $(selectId).value;
+    if (!choice) return undefined;
+    if (choice !== "date") return Math.floor(Date.now() / 1000) + number(choice);
+    const at = Math.floor(Date.parse($(dateId).value) / 1000);
+    if (!Number.isFinite(at)) throw new Error("Choose an expiry date and time.");
+    if (at <= Date.now() / 1000) throw new Error("The expiry must be in the future.");
+    return at;
+  }
+  const localInput = (seconds) => {
+    const date = new Date(number(seconds) * 1000);
+    return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+  };
+  // The key column of a typed node.
+  function nodeKey(node) {
+    switch (node.kind) {
+      case "permission": case "meta": return node.key;
+      case "inherit": return node.group;
+      case "prefix": case "suffix": return `priority ${node.priority}`;
+      default: return kindLabels[node.kind] || node.kind;
+    }
+  }
+  function nodeValue(node) {
+    switch (node.kind) {
+      case "permission": return node.value === false ? "Deny" : "Grant";
+      case "inherit": return node.value === false ? "Block" : "Inherit";
+      case "prefix": case "suffix": return node.text;
+      case "meta": return node.value;
+      case "weight": return String(node.weight);
+      case "display_name": return node.name;
+      default: return "—";
+    }
+  }
+  // Ordered rows of the inheritance tree: each group under its heaviest
+  // existing parent, siblings by weight then name, default first.
+  function groupTree(groups) {
+    const byName = new Map(groups.map((group) => [group.name, group]));
+    const order = (list) => list.sort((a, b) => (a.name === "default" ? -1 : b.name === "default" ? 1 : 0) || number(b.weight) - number(a.weight) || a.name.localeCompare(b.name));
+    const children = new Map(), roots = [];
+    for (const group of groups) {
+      const parents = (group.parents || []).filter((node) => node.value !== false && node.group !== group.name && byName.has(node.group)).map((node) => byName.get(node.group));
+      const parent = order(parents)[0];
+      if (parent) { if (!children.has(parent.name)) children.set(parent.name, []); children.get(parent.name).push(group); } else roots.push(group);
+    }
+    const rows = [], seen = new Set();
+    const visit = (group, depth) => {
+      if (seen.has(group.name)) return;
+      seen.add(group.name); rows.push({ group, depth });
+      for (const child of order(children.get(group.name) || [])) visit(child, depth + 1);
+    };
+    for (const group of order(roots)) visit(group, 0);
+    // Groups that only inherit each other in a cycle.
+    for (const group of order(groups.filter((group) => !seen.has(group.name)))) visit(group, 0);
+    return rows;
+  }
+  // Before/after lines of one change-log effect.
+  function opDiff(op) {
+    const node = op.after || op.before || {};
+    const title = op.op === "node" ? `${subjectLabel(op.subject)} · ${kindLabels[node.kind] || node.kind} ${nodeKey(node)}`
+      : op.op === "group" ? `group:${op.name} · weight and display name`
+        : op.op === "track" ? `track:${op.name}` : `user:${op.user} · primary group`;
+    const flat = (value) => value === null || value === undefined ? {} : typeof value === "object" && !Array.isArray(value)
+      ? Object.fromEntries(Object.entries(value).map(([key, item]) => [key, typeof item === "object" ? key === "contexts" ? contextText(item) : JSON.stringify(item) : String(item)]))
+      : { value: Array.isArray(value) ? value.join(" → ") : String(value) };
+    const before = flat(op.before), after = flat(op.after), lines = [];
+    for (const key of [...new Set([...Object.keys(before), ...Object.keys(after)])]) {
+      if (before[key] === after[key]) lines.push({ sign: " ", text: `${key}: ${after[key]}` });
+      else {
+        if (Object.hasOwn(before, key)) lines.push({ sign: "-", text: `${key}: ${before[key]}` });
+        if (Object.hasOwn(after, key)) lines.push({ sign: "+", text: `${key}: ${after[key]}` });
+      }
+    }
+    return { title: `${op.before === null || op.before === undefined ? "Added" : op.after === null || op.after === undefined ? "Removed" : "Changed"} ${title}`, lines };
+  }
+  function permsButton(label, onClick, { className = "button subtle", aria = "", write = true } = {}) {
+    const button = document.createElement("button");
+    button.type = "button"; button.className = className; button.textContent = label;
+    if (aria) button.setAttribute("aria-label", aria);
+    button.addEventListener("click", () => { if (!button.disabled) onClick(); });
+    if (write) state.perms.buttons.push(button);
+    return button;
+  }
+  function permsOutcome(id, message, kind = "") { text(id, message); $(id).className = `operation-result ${kind}`; }
+  // Run one write: busy state, result line, and a reload afterwards.
+  async function permsMutation(resultId, message, work) {
+    if (state.busy || !permsWrite()) return false;
+    state.busy = true; controls(); permsOutcome(resultId, message);
+    try {
+      const done = await work();
+      permsOutcome(resultId, done, "success");
+      return true;
+    } catch (error) {
+      if ((error.status === 401 || error.status === 403) && !error.code) $("auth-panel").open = true;
+      permsOutcome(resultId, error.message, "error");
+      return false;
+    } finally { state.busy = false; controls(); }
+  }
+  const appliedText = (applied, changed, unchanged) => number(applied?.ops) > 0 ? `${changed} Revision ${applied.revision}.` : unchanged;
+  const json = (value) => JSON.stringify(value);
+  function fillSelect(id, values, { blank = null, keep = true } = {}) {
+    const select = $(id), previous = select.value;
     select.replaceChildren();
-    for (const name of ["", ...names]) {
-      const option = document.createElement("option"); option.value = name; option.textContent = name || "New group"; select.append(option);
+    for (const [value, label] of [...(blank === null ? [] : [["", blank]]), ...values.map((value) => Array.isArray(value) ? value : [value, value])]) {
+      const option = document.createElement("option"); option.value = value; option.textContent = label; select.append(option);
     }
-    select.value = Object.hasOwn(groups, previous) ? previous : "";
-    if (!state.settingsDirty.permissionGroup) renderPermissionGroup();
-    const target = $("permission-member-group"), chosen = target.value;
-    target.replaceChildren();
-    // Everyone is in default implicitly, so it can't be assigned.
-    for (const name of names.filter((name) => name !== "default")) {
-      const option = document.createElement("option"); option.value = name; option.textContent = name; target.append(option);
-    }
-    target.value = names.includes(chosen) && chosen !== "default" ? chosen : names.find((name) => name !== "default") || "";
+    const options = [...(blank === null ? [] : [""]), ...values.map((value) => Array.isArray(value) ? value[0] : value)];
+    select.value = keep && options.includes(previous) ? previous : options[0] ?? "";
+  }
+
+  // Groups and tracks.
+  async function loadPermGroups() {
+    const session = state.session;
+    const [groups, tracks] = await Promise.all([request("/api/perms/groups"), request("/api/perms/tracks")]);
+    if (session !== state.session) return;
+    state.perms.groups = Array.isArray(groups.groups) ? groups.groups : [];
+    state.perms.tracks = Array.isArray(tracks.tracks) ? tracks.tracks : [];
+    renderPermGroups();
+    if (state.perms.group && !state.perms.groups.some((group) => group.name === state.perms.group)) state.perms.group = "";
+    if (state.perms.group) await loadPermGroup(state.perms.group);
+    else renderPermGroup(null);
+  }
+  function renderPermGroups() {
+    const groups = state.perms.groups, names = groups.map((group) => group.name);
+    text("perm-group-count", `${groups.length} ${groups.length === 1 ? "group" : "groups"}`);
+    table("perm-groups", groupTree(groups), 6, (tr, { group, depth }) => {
+      tr.setAttribute("aria-current", String(group.name === state.perms.group));
+      const name = cell(tr, "", `tree-depth-${Math.min(depth, 5)}`), open = document.createElement("button");
+      open.type = "button"; open.className = "text-link"; open.textContent = group.name;
+      open.setAttribute("aria-label", `Edit group ${group.name}${depth ? `, level ${depth + 1}` : ""}`);
+      open.addEventListener("click", () => selectPermGroup(group.name));
+      name.append(open);
+      if (group.display_name) { const span = document.createElement("span"); span.className = "muted"; span.textContent = ` ${group.display_name}`; name.append(span); }
+      cell(tr, String(number(group.weight)), "metric-value");
+      cell(tr, (group.parents || []).map((node) => `${node.value === false ? "not " : ""}${node.group}${node.contexts ? ` (${contextText(node.contexts)})` : ""}`).join(", ") || (group.name === "default" ? "Everyone" : "—"));
+      cell(tr, count(group.nodes), "metric-value");
+      cell(tr, (group.tracks || []).join(", ") || "—");
+      const actions = cell(tr, ""); actions.className = "action-group";
+      actions.append(permsButton("Edit", () => selectPermGroup(group.name), { aria: `Edit ${group.name}`, write: false }));
+    }, "No groups yet. Create one below.");
+    const nonDefault = names.filter((name) => name !== "default");
+    fillSelect("perm-user-group", names, { blank: "Any group" });
+    fillSelect("perm-user-parent-group", nonDefault);
+    fillSelect("perm-user-primary", names, { blank: "Automatic (heaviest parent)" });
+    fillSelect("perm-user-track", state.perms.tracks.map((track) => track.name));
+    renderPermTracks();
     controls();
   }
-  function renderPermissionGroup() {
-    const name = $("permission-group-select").value, group = state.definitions.permission_groups?.[name] || {};
-    state.permissionGroup = name;
-    $("permission-group-name").value = name;
-    $("permission-group-inherits").value = (group.inherits || []).join("\n");
-    $("permission-group-nodes").value = Object.entries(group.permissions || {}).map(([node, granted]) => `${granted ? "" : "-"}${node}`).join("\n");
-    state.settingsDirty.permissionGroup = false;
+  async function selectPermGroup(name) {
+    state.perms.group = name; state.perms.editing["perm-group"] = null;
+    window.location.hash = "#perm-groups";
+    try { await loadPermGroup(name); } catch (error) { permsOutcome("perm-group-result", error.message, "error"); }
+    $("perm-group-weight").focus?.();
   }
-  function selectPermissionGroup(name) {
-    if (state.settingsDirty.permissionGroup && !window.confirm("Discard unsaved group changes?")) return;
-    $("permission-group-select").value = name; state.settingsDirty.permissionGroup = false; renderPermissionGroup(); controls();
-    $("permission-group-name").focus?.();
+  async function loadPermGroup(name) {
+    const session = state.session, group = await request(`/api/perms/groups/${encodeURIComponent(name)}`);
+    if (session !== state.session || state.perms.group !== name) return;
+    renderPermGroup(group);
   }
-  function permissionGroupValue() {
-    const permissions = {};
-    for (const line of lines($("permission-group-nodes").value)) {
-      const denied = line.startsWith("-"), node = denied ? line.slice(1).trim() : line;
-      if (!/^(\*|[a-z0-9_.:-]{1,256})$/.test(node.replace(/\.\*$/, "")) || node.startsWith(".")) throw new Error(`“${line}” isn’t a permission node, prefix.* wildcard or *.`);
-      permissions[node] = !denied;
+  function renderPermGroup(group) {
+    state.perms.groupDetail = group;
+    $("perm-group-panel").classList.toggle("hidden", !group);
+    $("perm-group-nodes-panel").classList.toggle("hidden", !group);
+    for (const row of $("perm-groups").children) row.setAttribute?.("aria-current", String(Boolean(group) && row.children?.[0]?.children?.[0]?.textContent === group.name));
+    if (!group) return controls();
+    text("perm-group-heading", `Group ${group.name}`);
+    $("perm-group-weight").value = String(number(group.weight));
+    $("perm-group-display").value = group.display_name || "";
+    renderNodes("perm-group", group.nodes || []);
+  }
+  function renderPermTracks() {
+    const tracks = state.perms.tracks;
+    text("perm-track-count", `${tracks.length} ${tracks.length === 1 ? "track" : "tracks"}`);
+    table("perm-tracks", tracks, 3, (tr, track) => {
+      cell(tr, track.name, "address"); cell(tr, (track.groups || []).join(" → "));
+      const actions = cell(tr, ""); actions.className = "action-group";
+      actions.append(permsButton("Edit", () => selectPermTrack(track.name), { aria: `Edit track ${track.name}`, write: false }));
+    }, "No tracks yet. Name one below and add groups in order.");
+    fillSelect("perm-track-select", tracks.map((track) => track.name), { blank: "New track" });
+    if (!state.perms.trackDirty) selectPermTrack($("perm-track-select").value, { focus: false });
+  }
+  function selectPermTrack(name, { focus = true } = {}) {
+    if (state.perms.trackDirty && focus && !window.confirm("Discard unsaved track changes?")) return;
+    const track = state.perms.tracks.find((item) => item.name === name);
+    $("perm-track-select").value = track ? name : "";
+    $("perm-track-name").value = track ? name : "";
+    state.perms.trackGroups = track ? [...track.groups] : [];
+    state.perms.trackDirty = false;
+    renderTrackGroups();
+    if (focus) $("perm-track-name").focus?.();
+  }
+  function renderTrackGroups() {
+    const list = $("perm-track-groups"), groups = state.perms.trackGroups;
+    state.perms.buttons = state.perms.buttons.filter((button) => !button.trackItem);
+    list.replaceChildren();
+    groups.forEach((name, index) => {
+      const item = document.createElement("li"), label = document.createElement("span"), actions = document.createElement("span");
+      label.textContent = name; label.className = "mono"; actions.className = "action-group";
+      const move = (offset) => { const target = index + offset; [groups[index], groups[target]] = [groups[target], groups[index]]; state.perms.trackDirty = true; renderTrackGroups(); };
+      const up = permsButton("Up", () => move(-1), { aria: `Move ${name} up` }), down = permsButton("Down", () => move(1), { aria: `Move ${name} down` });
+      const remove = permsButton("Remove", () => { groups.splice(index, 1); state.perms.trackDirty = true; renderTrackGroups(); }, { className: "button destructive", aria: `Remove ${name} from the track` });
+      for (const button of [up, down, remove]) button.trackItem = true;
+      up.edge = index === 0; down.edge = index === groups.length - 1;
+      actions.append(up, down, remove); item.append(label, actions); list.append(item);
+    });
+    if (!groups.length) { const item = document.createElement("li"); item.className = "muted"; item.textContent = "No groups on this track yet."; list.append(item); }
+    fillSelect("perm-track-add-group", state.perms.groups.map((group) => group.name).filter((name) => !groups.includes(name)));
+    controls();
+  }
+
+  // The node editor shared by groups and users; `p` is the element prefix.
+  function nodeBase(p) {
+    return p === "perm-group" ? `/api/perms/groups/${encodeURIComponent(state.perms.group)}` : `/api/perms/users/${encodeURIComponent(state.perms.user)}`;
+  }
+  function renderNodes(p, entries) {
+    state.perms.buttons = state.perms.buttons.filter((button) => button.nodeEditor !== p);
+    text(`${p}-node-count`, `${entries.length} ${entries.length === 1 ? "node" : "nodes"}`);
+    table(`${p}-nodes`, entries, 7, (tr, { id, node }) => {
+      cell(tr, kindLabels[node.kind] || node.kind); cell(tr, nodeKey(node), "address"); cell(tr, nodeValue(node));
+      cell(tr, contextText(node.contexts) || "Everywhere"); cell(tr, expiryText(node.expires_at));
+      const source = cell(tr, ""), tag = document.createElement("span");
+      tag.className = `tag ${node.source && node.source !== "store" ? "warning" : ""}`; tag.textContent = node.source || "store"; source.append(tag);
+      const actions = cell(tr, ""); actions.className = "action-group";
+      // Weight and display name are edited with the group itself.
+      if (node.kind === "weight" || node.kind === "display_name") return;
+      const edit = permsButton("Edit", () => editNode(p, id, node), { aria: `Edit ${nodeKey(node)}` });
+      const remove = permsButton("Remove", () => removeNode(p, id, node), { className: "button destructive", aria: `Remove ${nodeKey(node)}` });
+      edit.nodeEditor = p; remove.nodeEditor = p;
+      actions.append(edit, remove);
+    }, p === "perm-group" ? "This group has no nodes yet." : "This player has no nodes of their own. They still inherit default.");
+    if (!state.perms.editing[p]) resetNodeForm(p);
+  }
+  function nodeFormKind(p) {
+    const kind = $(`${p}-node-kind`).value;
+    const labels = { permission: ["Permission node", "essentials.fly"], inherit: ["Group", "vip"], prefix: ["Priority", "100"], suffix: ["Priority", "100"], meta: ["Meta key", "homes"] }[kind] || ["Key", ""];
+    text(`${p}-node-key-label`, labels[0]); $(`${p}-node-key`).placeholder = labels[1];
+    $(`${p}-node-grant-field`).classList.toggle("hidden", kind !== "permission" && kind !== "inherit");
+    $(`${p}-node-value-field`).classList.toggle("hidden", kind === "permission" || kind === "inherit");
+    text(`${p}-node-value-label`, kind === "meta" ? "Value" : "Text");
+    const grant = $(`${p}-node-grant`), chosen = grant.value;
+    grant.replaceChildren();
+    for (const [value, label] of kind === "inherit" ? [["true", "Inherit"], ["false", "Block"]] : [["true", "Grant"], ["false", "Deny"]]) {
+      const option = document.createElement("option"); option.value = value; option.textContent = label; grant.append(option);
     }
-    // Keep the fields this form does not edit (weight, prefix, suffix, meta).
-    const current = state.definitions.permission_groups?.[$("permission-group-name").value.trim()] || {};
-    return { ...current, inherits: lines($("permission-group-inherits").value.replaceAll(",", "\n")), permissions };
+    grant.value = chosen === "false" ? "false" : "true";
   }
-  async function loadPermissions() {
-    const session = state.session, data = await request("/api/permissions");
+  function nodeFromForm(p) {
+    const kind = $(`${p}-node-kind`).value, key = $(`${p}-node-key`).value.trim(), value = $(`${p}-node-value`).value, grant = $(`${p}-node-grant`).value !== "false";
+    let node;
+    if (kind === "permission") {
+      if (key.length > 256 || !/^(\*|[a-z0-9_:-]+(\.[a-z0-9_:-]+)*(\.\*)?)$/i.test(key)) throw new Error(`“${key}” isn’t a permission node, prefix.* wildcard or *.`);
+      node = { kind, key: key.toLowerCase(), value: grant };
+    } else if (kind === "inherit") {
+      if (!/^[a-z0-9_.-]{1,64}$/i.test(key)) throw new Error("Enter a group name using letters, digits, dots, underscores or hyphens.");
+      node = { kind, group: key.toLowerCase(), value: grant };
+    } else if (kind === "prefix" || kind === "suffix") {
+      if (!/^-?\d{1,10}$/.test(key) || Math.abs(Number(key)) > 2147483647) throw new Error("The priority must be a whole number.");
+      if (!value) throw new Error(`Enter the ${kind} text.`);
+      node = { kind, priority: Number(key), text: value };
+    } else if (kind === "meta") {
+      if (!/^[a-z0-9_.:-]{1,64}$/i.test(key)) throw new Error("Enter a meta key using letters, digits, dots, colons, underscores or hyphens.");
+      node = { kind, key: key.toLowerCase(), value };
+    } else throw new Error("Choose a node kind.");
+    const contexts = parseContexts($(`${p}-node-contexts`).value);
+    if (Object.keys(contexts).length) node.contexts = contexts;
+    const expires = expiryValue(`${p}-node-expiry`, `${p}-node-date`);
+    if (expires) node.expires_at = expires;
+    return node;
+  }
+  function resetNodeForm(p) {
+    state.perms.editing[p] = null;
+    for (const field of ["key", "value", "contexts", "date"]) $(`${p}-node-${field}`).value = "";
+    $(`${p}-node-expiry`).value = ""; $(`${p}-node-date`).disabled = true;
+    text(`${p}-node-save`, "Add node"); $(`${p}-node-cancel`).classList.toggle("hidden", true);
+    nodeFormKind(p);
+  }
+  function editNode(p, id, node) {
+    state.perms.editing[p] = id;
+    $(`${p}-node-kind`).value = node.kind; nodeFormKind(p);
+    $(`${p}-node-key`).value = node.kind === "inherit" ? node.group : node.kind === "prefix" || node.kind === "suffix" ? String(node.priority) : node.key;
+    $(`${p}-node-value`).value = node.kind === "prefix" || node.kind === "suffix" ? node.text : node.kind === "meta" ? node.value : "";
+    $(`${p}-node-grant`).value = node.value === false ? "false" : "true";
+    $(`${p}-node-contexts`).value = contextText(node.contexts);
+    $(`${p}-node-expiry`).value = node.expires_at ? "date" : "";
+    $(`${p}-node-date`).value = node.expires_at ? localInput(node.expires_at) : ""; $(`${p}-node-date`).disabled = !node.expires_at;
+    text(`${p}-node-save`, "Save node"); $(`${p}-node-cancel`).classList.toggle("hidden", false);
+    permsOutcome(`${p}-node-result`, `Editing ${nodeKey(node)}. Saving replaces it, including when you change its contexts.`);
+    $(`${p}-node-key`).focus?.();
+  }
+  async function saveNode(p) {
+    let node;
+    try { node = nodeFromForm(p); } catch (error) { permsOutcome(`${p}-node-result`, error.message, "error"); return; }
+    const id = state.perms.editing[p], base = nodeBase(p);
+    await permsMutation(`${p}-node-result`, "Saving node…", async () => {
+      const applied = await request(id ? `${base}/nodes/${encodeURIComponent(id)}` : `${base}/nodes`, { method: "PUT", body: json(node) });
+      state.perms.editing[p] = null;
+      await reloadSubject(p);
+      return appliedText(applied, `Saved ${nodeKey(node)}.`, `${nodeKey(node)} was already set exactly like that.`);
+    });
+  }
+  async function removeNode(p, id, node) {
+    if (!window.confirm(`Remove ${kindLabels[node.kind] || node.kind} ${nodeKey(node)}${node.contexts ? ` in ${contextText(node.contexts)}` : ""}?`)) return;
+    const base = nodeBase(p);
+    await permsMutation(`${p}-node-result`, "Removing node…", async () => {
+      const applied = await request(`${base}/nodes/${encodeURIComponent(id)}`, { method: "DELETE", body: "{}" });
+      await reloadSubject(p);
+      return appliedText(applied, `Removed ${nodeKey(node)}.`, `${nodeKey(node)} was already gone.`);
+    });
+  }
+  async function reloadSubject(p) {
+    if (p === "perm-group") { await loadPermGroups(); return; }
+    await loadPermUser(state.perms.user);
+  }
+
+  // Users.
+  async function searchPermUsers() {
+    const session = state.session, query = $("perm-user-query").value.trim(), group = $("perm-user-group").value;
+    const params = [`limit=100`, ...(query ? [`q=${encodeURIComponent(query)}`] : []), ...(group ? [`group=${encodeURIComponent(group)}`] : [])];
+    const data = await request(`/api/perms/users?${params.join("&")}`);
     if (session !== state.session) return;
-    state.members = Array.isArray(data.members) ? data.members : []; state.memberButtons = [];
-    text("permission-member-count", `${state.members.length}${data.truncated ? "+" : ""} with groups`);
-    table("permission-members", state.members, 3, (tr, member) => {
-      cell(tr, member.name || "Offline", member.name ? "" : "unlisted"); cell(tr, member.uuid, "address");
-      const groups = cell(tr, ""), list = document.createElement("div"); list.className = "chip-list";
-      for (const group of member.groups || []) {
-        const chip = document.createElement("span"), label = document.createElement("span"), remove = document.createElement("button");
-        chip.className = "chip"; label.textContent = group;
-        remove.type = "button"; remove.textContent = "×"; state.memberButtons.push(remove);
-        remove.setAttribute("aria-label", `Remove ${member.name || member.uuid} from ${group}`); remove.title = `Remove from ${group}`;
-        remove.addEventListener("click", () => changeMembership(member.uuid, group, false));
-        chip.append(label, remove); list.append(chip);
-      }
-      groups.append(list);
-    }, "No player belongs to a group yet. Everyone is in default when it exists.");
-    if (data.truncated) text("permission-member-result", "Showing the first 1,000 members.");
-    renderPermissionGroups();
+    state.perms.users = Array.isArray(data.users) ? data.users : [];
+    text("perm-user-count", `${state.perms.users.length}${data.truncated ? "+" : ""} found`);
+    table("perm-users", state.perms.users, 5, (tr, user) => {
+      tr.setAttribute("aria-current", String(user.uuid === state.perms.user));
+      cell(tr, user.name || "Unknown name", user.name ? "" : "unlisted"); cell(tr, user.uuid, "address");
+      cell(tr, user.online ? "Online" : "Offline", `state ${user.online ? "running" : "stopped"}`);
+      cell(tr, (user.groups || []).join(", ") || "default");
+      const actions = cell(tr, ""); actions.className = "action-group";
+      actions.append(permsButton("Open", () => selectPermUser(user.uuid), { aria: `Open ${user.name || user.uuid}`, write: false }));
+    }, query || group ? "No player matches. Players appear after they join or once a node is set for their UUID." : "No players known yet.");
+    permsOutcome("perm-users-result", data.truncated ? "Showing the first 100 matches; narrow the search to see more." : "");
   }
-  async function changeMembership(player, group, add) {
-    if (state.busy || !allowed("config")) return;
-    state.busy = true; controls(); text("permission-member-result", add ? `Adding ${player} to ${group}…` : `Removing ${player} from ${group}…`);
+  async function selectPermUser(user) {
+    state.perms.user = user; state.perms.editing["perm-user"] = null;
+    window.location.hash = "#perm-users";
+    try { await loadPermUser(user); await loadCompiled(); } catch (error) { permsOutcome("perm-user-result", error.message, "error"); }
+    $("perm-user-primary").focus?.();
+  }
+  async function loadPermUser(user) {
+    const session = state.session, data = await request(`/api/perms/users/${encodeURIComponent(user)}`);
+    if (session !== state.session || state.perms.user !== user) return;
+    // Names resolve to a UUID; keep the UUID from now on.
+    state.perms.user = data.uuid || user;
+    renderPermUser(data);
+  }
+  function renderPermUser(user) {
+    state.perms.userDetail = user;
+    for (const id of ["perm-user-panel", "perm-user-nodes-panel", "perm-compiled-panel"]) $(id).classList.toggle("hidden", !user);
+    if (!user) return controls();
+    text("perm-user-heading", user.name || "Unknown name"); text("perm-user-uuid", user.uuid);
+    $("perm-user-summary").replaceChildren();
+    for (const [label, value] of [["Status", user.online ? "Online" : "Offline"], ["Primary group", `${user.effective_primary_group || "default"}${user.primary_group ? " (set explicitly)" : ""}`],
+      ["Tracks", (user.tracks || []).join(", ") || "None"], ["Current contexts", contextText(user.contexts) || "None (offline or no server yet)"]]) {
+      const dt = document.createElement("dt"), dd = document.createElement("dd"); dt.textContent = label; dd.textContent = value; $("perm-user-summary").append(dt, dd);
+    }
+    $("perm-user-primary").value = user.primary_group || "";
+    state.perms.buttons = state.perms.buttons.filter((button) => !button.parentChip);
+    $("perm-user-parents").replaceChildren();
+    const parents = (user.nodes || []).filter(({ node }) => node.kind === "inherit");
+    for (const { id, node } of parents) {
+      const chip = document.createElement("span"), label = document.createElement("span");
+      chip.className = "chip";
+      label.textContent = `${node.value === false ? "not " : ""}${node.group}${node.contexts ? ` · ${contextText(node.contexts)}` : ""}${node.expires_at ? ` · until ${expiryText(node.expires_at)}` : ""}`;
+      const remove = permsButton("×", () => removeNode("perm-user", id, node), { className: "", aria: `Remove ${user.name || user.uuid} from ${node.group}${node.contexts ? ` in ${contextText(node.contexts)}` : ""}` });
+      remove.title = `Remove ${node.group}`; remove.parentChip = true;
+      chip.append(label, remove); $("perm-user-parents").append(chip);
+    }
+    if (!parents.length) { const none = document.createElement("span"); none.className = "muted small"; none.textContent = "Only default, which everyone inherits."; $("perm-user-parents").append(none); }
+    renderNodes("perm-user", user.nodes || []);
+    for (const row of $("perm-users").children) row.setAttribute?.("aria-current", String(row.children?.[1]?.textContent === user.uuid));
+    controls();
+  }
+  function compiledQuery() {
+    const pairs = [];
+    for (const key of ["server", "world", "dimension", "gamemode"]) {
+      const value = $(`perm-compiled-${key}`).value.trim();
+      if (value) pairs.push([key, value]);
+    }
+    for (const [key, value] of Object.entries(parseContexts($("perm-compiled-extra").value))) for (const item of [value].flat()) pairs.push([key, item]);
+    return pairs;
+  }
+  // Rank to the subject it stands for: 0 is the player, then one rank per group.
+  function rankNames(subject) {
+    const names = new Map([[0, "player"]]);
+    for (const entry of subject?.entries || []) if (entry.k === "group" && !names.has(entry.rank)) names.set(entry.rank, entry.key);
+    return names;
+  }
+  async function loadCompiled() {
+    const session = state.session, user = state.perms.user;
+    let pairs;
+    try { pairs = compiledQuery(); } catch (error) { permsOutcome("perm-trace-result", error.message, "error"); return; }
+    const query = pairs.map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`).join("&");
+    const data = await request(`/api/perms/users/${encodeURIComponent(user)}/compiled${query ? `?${query}` : ""}`);
+    if (session !== state.session || user !== state.perms.user) return;
+    const subject = data.subject || {}, meta = data.meta || {}, ranks = rankNames(subject);
+    text("perm-compiled-revision", subject.revision === undefined ? "—" : `Built at revision ${subject.revision}`);
+    $("perm-compiled-meta").replaceChildren();
+    for (const [label, value] of [["Contexts", `${contextText(data.contexts) || "None"}${data.contexts_from === "proxy" ? " (current on the proxy)" : ""}`], ["Groups", (data.groups || []).join(", ") || "default"],
+      ["Prefix", meta.prefix ?? "None"], ["Suffix", meta.suffix ?? "None"], ["Primary group", meta.primary_group || subject.primary_group || "default"],
+      ["Meta", Object.entries(meta.meta || {}).map(([key, value]) => `${key}=${value}`).join(", ") || "None"]]) {
+      const dt = document.createElement("dt"), dd = document.createElement("dd"); dt.textContent = label; dd.textContent = value; $("perm-compiled-meta").append(dt, dd);
+    }
+    const entries = [...(subject.entries || []), ...(subject.prefix || []).map((item) => ({ ...item, k: "prefix" })), ...(subject.suffix || []).map((item) => ({ ...item, k: "suffix" })), ...(subject.meta || []).map((item) => ({ ...item, k: "meta" }))];
+    table("perm-compiled-entries", entries, 5, (tr, entry) => {
+      const label = entry.k === "perm" ? entry.key : entry.k === "group" ? `group.${entry.key}` : entry.k === "meta" ? `meta ${entry.key}` : `${entry.k} ${entry.p}`;
+      cell(tr, label, "address");
+      cell(tr, entry.k === "perm" || entry.k === "group" ? entry.v === false ? "false" : "true" : entry.k === "meta" ? entry.v : entry.t);
+      cell(tr, contextText(entry.ctx) || "Everywhere");
+      cell(tr, `${ranks.get(entry.rank) || "group"} · rank ${entry.rank}`);
+      cell(tr, expiryText(entry.exp));
+    }, "Nothing compiled: this player gets only what backends default to.");
+  }
+  async function tracePermission() {
+    const node = $("perm-trace-node").value.trim();
+    if (!node) return;
+    let pairs;
+    try { pairs = compiledQuery(); } catch (error) { permsOutcome("perm-trace-result", error.message, "error"); return; }
+    const body = { user: state.perms.user, node };
+    if (pairs.length) body.contexts = pairs.reduce((contexts, [key, value]) => ({ ...contexts, [key]: Object.hasOwn(contexts, key) ? [contexts[key], value].flat() : value }), {});
     try {
-      const changed = await request(`/api/permissions/members/${encodeURIComponent(player)}/${encodeURIComponent(group)}`, { method: add ? "POST" : "DELETE", body: "{}" });
-      text("permission-member-result", changed.changed === false
-        ? add ? `${player} was already in ${group}.` : `${player} wasn’t in ${group}.`
-        : add ? `Added ${player} to ${group}. It applies to their next permission check.` : `Removed ${player} from ${group}.`);
-      if (add && $("permission-member-player").value.trim() === player) $("permission-member-player").value = "";
-      await loadPermissions();
-    } catch (error) { if (error.status === 401 || error.status === 403) $("auth-panel").open = true; text("permission-member-result", error.message); }
-    finally { state.busy = false; controls(); }
+      const trace = await request("/api/perms/trace", { method: "POST", body: json(body) });
+      const names = new Map((trace.ranks || []).map((rank) => [rank.rank, rank.subject]));
+      permsOutcome("perm-trace-result", trace.result === true ? `${trace.node} is granted.` : trace.result === false ? `${trace.node} is denied.` : `${trace.node} is not set; the backend’s default for it applies.`, trace.result === null || trace.result === undefined ? "warning" : trace.result ? "success" : "error");
+      const rows = [...(trace.winner ? [{ ...trace.winner, won: true }] : []), ...(trace.losers || [])];
+      $("perm-trace-table").classList.toggle("hidden", !rows.length);
+      table("perm-trace-rows", rows, 5, (tr, candidate) => {
+        const entry = candidate.entry || {};
+        cell(tr, candidate.won ? "Wins" : { lower_precedence: "Lost to a stronger entry", context_mismatch: "Contexts not active", expired: "Expired" }[candidate.outcome] || candidate.outcome);
+        cell(tr, entry.k === "group" ? `group.${entry.key}` : entry.key, "address"); cell(tr, entry.v === false ? "false" : "true");
+        cell(tr, contextText(entry.ctx) || "Everywhere"); cell(tr, `${names.get(entry.rank) || "group"} · rank ${entry.rank}`);
+      }, "No entry matches.");
+    } catch (error) { permsOutcome("perm-trace-result", error.message, "error"); }
   }
+  async function moveOnTrack(direction) {
+    const track = $("perm-user-track").value;
+    if (!track) { permsOutcome("perm-user-result", "Create a track under Groups first.", "error"); return; }
+    let contexts;
+    try { contexts = parseContexts($("perm-user-track-contexts").value); } catch (error) { permsOutcome("perm-user-result", error.message, "error"); return; }
+    const body = { user: state.perms.user };
+    if (Object.keys(contexts).length) body.contexts = contexts;
+    await permsMutation("perm-user-result", `${direction === "promote" ? "Promoting" : "Demoting"} on ${track}…`, async () => {
+      const applied = await request(`/api/perms/tracks/${encodeURIComponent(track)}/${direction}`, { method: "POST", body: json(body) });
+      await loadPermUser(state.perms.user); await loadCompiled();
+      return appliedText(applied, `${direction === "promote" ? "Promoted" : "Demoted"} on ${track}.`, "Nothing changed.");
+    });
+  }
+
+  // Registered nodes and holders.
+  async function loadRegistered() {
+    const session = state.session, data = await request("/api/perms/registered");
+    if (session !== state.session) return;
+    state.perms.registered = Array.isArray(data.registered) ? data.registered : [];
+    renderRegistered();
+  }
+  function renderRegistered() {
+    const filter = $("perm-registered-filter").value.trim().toLowerCase();
+    const owner = (item) => `${item.owner}${item.plugin ? ` · ${item.plugin}` : ""}`;
+    const items = state.perms.registered.filter((item) => !filter || [item.node, item.description, owner(item)].some((value) => String(value || "").toLowerCase().includes(filter)));
+    items.sort((a, b) => owner(a).localeCompare(owner(b)) || a.node.localeCompare(b.node));
+    text("perm-registered-count", `${state.perms.registered.length} registered`);
+    const body = $("perm-registered"); body.replaceChildren();
+    let heading = null;
+    for (const item of items) {
+      if (owner(item) !== heading) {
+        heading = owner(item);
+        const tr = document.createElement("tr"), th = document.createElement("th");
+        th.colSpan = 4; th.scope = "colgroup"; th.className = "group-row"; th.textContent = heading; tr.append(th); body.append(tr);
+      }
+      const tr = document.createElement("tr");
+      cell(tr, item.node, "address"); cell(tr, String(item.default)); cell(tr, item.description || "—");
+      const actions = cell(tr, ""); actions.className = "action-group";
+      actions.append(permsButton("Holders", () => findHolders(item.node), { aria: `Who holds ${item.node}`, write: false }));
+      body.append(tr);
+    }
+    if (!items.length) {
+      const tr = document.createElement("tr"), td = document.createElement("td");
+      td.colSpan = 4; td.className = "empty";
+      td.textContent = filter ? "No registered node matches." : "No backend has registered nodes yet. They appear once a backend plugin with the Rift permissions adapter connects.";
+      tr.append(td); body.append(tr);
+    }
+  }
+  async function findHolders(node) {
+    $("perm-holders-node").value = node;
+    const session = state.session, data = await request(`/api/perms/search?kind=permission&limit=200&node=${encodeURIComponent(node)}`).catch((error) => { permsOutcome("perm-holders-result", error.message, "error"); return null; });
+    if (!data || session !== state.session) return;
+    const holders = Array.isArray(data.holders) ? data.holders : [];
+    text("perm-holder-count", `${holders.length}${data.truncated ? "+" : ""} for ${node}`);
+    table("perm-holders", holders, 6, (tr, holder) => {
+      const user = holder.subject?.user, group = holder.subject?.group;
+      cell(tr, user ? `${holder.name || "Unknown name"} · ${user}` : `group ${group}`, user ? "address" : "");
+      cell(tr, nodeValue(holder.node || {})); cell(tr, contextText(holder.node?.contexts) || "Everywhere");
+      cell(tr, expiryText(holder.node?.expires_at)); cell(tr, holder.node?.source || "store");
+      const actions = cell(tr, ""); actions.className = "action-group";
+      actions.append(permsButton("Open", () => user ? selectPermUser(user) : selectPermGroup(group), { aria: `Open ${user || group}`, write: false }));
+    }, "Nobody sets this node directly. Wildcards such as prefix.* can still grant it; check a player under Users to see.");
+    permsOutcome("perm-holders-result", "");
+  }
+
+  // Activity: the change log with a diff per revision.
+  async function loadActivity() {
+    const session = state.session, params = ["limit=100"];
+    const actor = $("perm-activity-actor").value.trim(), subject = $("perm-activity-subject").value.trim(), since = $("perm-activity-since").value.trim();
+    if (actor) params.push(`actor=${encodeURIComponent(actor)}`);
+    if (subject) params.push(`subject=${encodeURIComponent(subject)}`);
+    if (since) params.push(`since=${encodeURIComponent(since)}`);
+    const data = await request(`/api/perms/audit?${params.join("&")}`);
+    if (session !== state.session) return;
+    state.perms.events = (Array.isArray(data.events) ? data.events : []).slice().reverse();
+    text("perm-activity-count", `Revision ${data.revision ?? "—"}`);
+    renderActivity();
+    permsOutcome("perm-activity-result", state.perms.events.length >= 100 ? "Showing 100 changes. Filter by actor, subject or revision to see others." : "");
+  }
+  function renderActivity() {
+    const body = $("perm-activity"); body.replaceChildren();
+    for (const event of state.perms.events) {
+      const tr = document.createElement("tr"), ops = event.ops || [];
+      cell(tr, String(event.revision), "metric-value"); cell(tr, new Date(number(event.at) * 1000).toLocaleString()); cell(tr, event.actor, "address");
+      const subjects = [...new Set(ops.map((op) => op.op === "node" ? subjectLabel(op.subject) : op.op === "primary_group" ? `user:${op.user}` : `${op.op}:${op.name}`))];
+      cell(tr, `${ops.length}${event.ops_truncated ? "+" : ""} ${ops.length === 1 ? "change" : "changes"} · ${subjects.slice(0, 3).join(", ")}${subjects.length > 3 ? ` and ${subjects.length - 3} more` : ""}`);
+      cell(tr, event.reason || "—");
+      const actions = cell(tr, ""); actions.className = "action-group";
+      const open = state.perms.expanded.has(event.revision);
+      const toggle = permsButton(open ? "Hide diff" : "Show diff", () => {
+        if (state.perms.expanded.has(event.revision)) state.perms.expanded.delete(event.revision); else state.perms.expanded.add(event.revision);
+        renderActivity();
+      }, { aria: `${open ? "Hide" : "Show"} the changes of revision ${event.revision}`, write: false });
+      toggle.setAttribute("aria-expanded", String(open));
+      actions.append(toggle); body.append(tr);
+      if (!open) continue;
+      const detail = document.createElement("tr"), td = document.createElement("td");
+      td.colSpan = 6; td.className = "diff-cell";
+      for (const op of ops) {
+        const { title, lines } = opDiff(op), heading = document.createElement("p"), pre = document.createElement("pre");
+        heading.className = "diff-title"; heading.textContent = title; pre.className = "diff";
+        for (const line of lines) {
+          const span = document.createElement("span");
+          span.className = line.sign === "+" ? "diff-add" : line.sign === "-" ? "diff-del" : "diff-same";
+          span.textContent = `${line.sign} ${line.text}\n`; pre.append(span);
+        }
+        td.append(heading, pre);
+      }
+      if (event.ops_truncated) { const note = document.createElement("p"); note.className = "muted small"; note.textContent = "This change had more effects than one event carries."; td.append(note); }
+      detail.append(td); body.append(detail);
+    }
+    if (!state.perms.events.length) {
+      const tr = document.createElement("tr"), td = document.createElement("td");
+      td.colSpan = 6; td.className = "empty"; td.textContent = "No permission changes match."; tr.append(td); body.append(tr);
+    }
+  }
+
+  // Permission view events.
+  $("perm-groups-refresh").addEventListener("click", () => loadPermGroups().catch((error) => permsOutcome("perm-groups-result", error.message, "error")));
+  $("perm-group-create-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const name = $("perm-group-create-name").value.trim(), weight = $("perm-group-create-weight").value.trim(), display = $("perm-group-create-display").value.trim();
+    if (!/^[A-Za-z0-9_.-]{1,64}$/.test(name)) { permsOutcome("perm-groups-result", "Enter a group name using letters, digits, dots, underscores or hyphens.", "error"); return; }
+    if (weight && !/^-?\d{1,10}$/.test(weight)) { permsOutcome("perm-groups-result", "The weight must be a whole number.", "error"); return; }
+    const body = { name, weight: number(weight) };
+    if (display) body.display_name = display;
+    permsMutation("perm-groups-result", `Creating ${name}…`, async () => {
+      const created = await request("/api/perms/groups", { method: "POST", body: json(body) });
+      for (const id of ["perm-group-create-name", "perm-group-create-display"]) $(id).value = "";
+      $("perm-group-create-weight").value = "0";
+      state.perms.group = created.name || name.toLowerCase();
+      await loadPermGroups();
+      return `Created ${created.name || name}. Add nodes to it below.`;
+    });
+  });
+  $("perm-group-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const group = state.perms.groupDetail, weight = $("perm-group-weight").value.trim(), display = $("perm-group-display").value.trim();
+    if (!group) return;
+    if (!/^-?\d{1,10}$/.test(weight)) { permsOutcome("perm-group-result", "The weight must be a whole number.", "error"); return; }
+    permsMutation("perm-group-result", `Saving ${group.name}…`, async () => {
+      const applied = await request(`/api/perms/groups/${encodeURIComponent(group.name)}`, { method: "PATCH", body: json({ weight: number(weight), display_name: display || null }) });
+      await loadPermGroups();
+      return appliedText(applied, `Saved ${group.name}.`, "Nothing changed.");
+    });
+  });
+  $("perm-group-delete").addEventListener("click", () => {
+    const group = state.perms.groupDetail;
+    if (!group || !window.confirm(`Delete the group ${group.name} and its nodes? Players and groups that inherit it keep the parent, which grants nothing until the group exists again.`)) return;
+    permsMutation("perm-groups-result", `Deleting ${group.name}…`, async () => {
+      await request(`/api/perms/groups/${encodeURIComponent(group.name)}`, { method: "DELETE", body: "{}" });
+      state.perms.group = ""; await loadPermGroups();
+      return `Deleted ${group.name}.`;
+    });
+  });
+  for (const p of ["perm-group", "perm-user"]) {
+    $(`${p}-node-kind`).addEventListener("change", () => nodeFormKind(p));
+    $(`${p}-node-expiry`).addEventListener("change", () => { $(`${p}-node-date`).disabled = $(`${p}-node-expiry`).value !== "date"; });
+    $(`${p}-node-cancel`).addEventListener("click", () => { resetNodeForm(p); permsOutcome(`${p}-node-result`, ""); });
+    $(`${p}-node-form`).addEventListener("submit", (event) => { event.preventDefault(); saveNode(p); });
+  }
+  $("perm-track-select").addEventListener("change", () => {
+    const chosen = $("perm-track-select").value;
+    $("perm-track-select").value = $("perm-track-name").value && state.perms.tracks.some((track) => track.name === $("perm-track-name").value) ? $("perm-track-name").value : "";
+    selectPermTrack(chosen);
+  });
+  $("perm-track-name").addEventListener("input", () => { state.perms.trackDirty = true; });
+  $("perm-track-add").addEventListener("click", () => {
+    const group = $("perm-track-add-group").value;
+    if (!group || state.perms.trackGroups.includes(group)) return;
+    state.perms.trackGroups.push(group); state.perms.trackDirty = true; renderTrackGroups();
+  });
+  $("perm-track-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const name = $("perm-track-name").value.trim(), groups = [...state.perms.trackGroups];
+    if (!/^[A-Za-z0-9_.-]{1,64}$/.test(name)) { permsOutcome("perm-track-result", "Enter a track name using letters, digits, dots, underscores or hyphens.", "error"); return; }
+    if (!groups.length) { permsOutcome("perm-track-result", "Add at least one group to the track.", "error"); return; }
+    permsMutation("perm-track-result", `Saving track ${name}…`, async () => {
+      const applied = await request(`/api/perms/tracks/${encodeURIComponent(name)}`, { method: "PUT", body: json({ groups }) });
+      state.perms.trackDirty = false; await loadPermGroups(); selectPermTrack(name.toLowerCase(), { focus: false });
+      return appliedText(applied, `Saved track ${name}: ${groups.join(" → ")}.`, "The track already had these groups.");
+    });
+  });
+  $("perm-track-delete").addEventListener("click", () => {
+    const name = $("perm-track-select").value;
+    if (!name || !window.confirm(`Delete the track ${name}? Players keep their groups.`)) return;
+    permsMutation("perm-track-result", `Deleting track ${name}…`, async () => {
+      await request(`/api/perms/tracks/${encodeURIComponent(name)}`, { method: "DELETE", body: "{}" });
+      state.perms.trackDirty = false; await loadPermGroups(); selectPermTrack("", { focus: false });
+      return `Deleted track ${name}.`;
+    });
+  });
+  $("perm-user-search-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const query = $("perm-user-query").value.trim(), compact = query.replaceAll("-", "").toLowerCase();
+    searchPermUsers().then(() => {
+      // A full UUID opens the player directly, even one the store has not seen.
+      if (/^[0-9a-f]{32}$/.test(compact) && !state.perms.users.some((user) => user.uuid === compact)) selectPermUser(compact);
+    }).catch((error) => permsOutcome("perm-users-result", error.message, "error"));
+  });
+  $("perm-user-primary-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const group = $("perm-user-primary").value || null;
+    permsMutation("perm-user-result", "Saving primary group…", async () => {
+      const applied = await request(`/api/perms/users/${encodeURIComponent(state.perms.user)}`, { method: "PATCH", body: json({ primary_group: group }) });
+      await loadPermUser(state.perms.user); await loadCompiled();
+      return appliedText(applied, group ? `Primary group set to ${group}.` : "The primary group is automatic again.", "Nothing changed.");
+    });
+  });
+  $("perm-user-parent-expiry").addEventListener("change", () => { $("perm-user-parent-date").disabled = $("perm-user-parent-expiry").value !== "date"; });
+  $("perm-user-parent-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const group = $("perm-user-parent-group").value;
+    if (!group) { permsOutcome("perm-user-result", "Create a group first.", "error"); return; }
+    const node = { kind: "inherit", group, value: true };
+    try {
+      const contexts = parseContexts($("perm-user-parent-contexts").value);
+      if (Object.keys(contexts).length) node.contexts = contexts;
+      const expires = expiryValue("perm-user-parent-expiry", "perm-user-parent-date");
+      if (expires) node.expires_at = expires;
+    } catch (error) { permsOutcome("perm-user-result", error.message, "error"); return; }
+    permsMutation("perm-user-result", `Adding ${group}…`, async () => {
+      const applied = await request(`/api/perms/users/${encodeURIComponent(state.perms.user)}/nodes`, { method: "PUT", body: json(node) });
+      $("perm-user-parent-contexts").value = ""; $("perm-user-parent-expiry").value = ""; $("perm-user-parent-date").disabled = true;
+      await loadPermUser(state.perms.user); await loadCompiled();
+      return appliedText(applied, `Added ${group}. It applies to the next permission check.`, `Already in ${group} exactly like that.`);
+    });
+  });
+  $("perm-user-promote").addEventListener("click", () => moveOnTrack("promote"));
+  $("perm-user-demote").addEventListener("click", () => moveOnTrack("demote"));
+  $("perm-compiled-form").addEventListener("submit", (event) => { event.preventDefault(); loadCompiled().catch((error) => permsOutcome("perm-trace-result", error.message, "error")); });
+  $("perm-trace-form").addEventListener("submit", (event) => { event.preventDefault(); tracePermission(); });
+  $("perm-nodes-refresh").addEventListener("click", () => loadRegistered().catch((error) => permsOutcome("perm-holders-result", error.message, "error")));
+  $("perm-registered-filter").addEventListener("input", () => renderRegistered());
+  $("perm-registered-form").addEventListener("submit", (event) => event.preventDefault());
+  $("perm-holders-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const node = $("perm-holders-node").value.trim();
+    if (node) findHolders(node);
+  });
+  $("perm-activity-refresh").addEventListener("click", () => loadActivity().catch((error) => permsOutcome("perm-activity-result", error.message, "error")));
+  $("perm-activity-form").addEventListener("submit", (event) => { event.preventDefault(); loadActivity().catch((error) => permsOutcome("perm-activity-result", error.message, "error")); });
   // Save one settings form through the structured definition endpoint.
   async function applySetting({ path, value, result, key, saved }) {
     if (state.busy || !state.definitionRevision || !allowed("config")) return;
@@ -673,7 +1291,6 @@
     state.settingsDirty[key] = false;
     try {
       await loadDefinitions();
-      if (state.definitions.permission_groups) await loadPermissions();
       text(result, "Refreshed.");
     } catch (error) { text(result, error.message); }
   }
@@ -832,7 +1449,7 @@
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") { event.preventDefault(); save(); }
   });
   window.addEventListener("beforeunload", (event) => {
-    if (dirty() || state.definitionDirty || settingsDirty()) { event.preventDefault(); event.returnValue = ""; }
+    if (dirty() || state.definitionDirty || settingsDirty() || state.perms.trackDirty) { event.preventDefault(); event.returnValue = ""; }
   });
   $("auth-form").addEventListener("submit", (event) => {
     event.preventDefault();
@@ -853,13 +1470,16 @@
     if ((dirty() || state.definitionDirty || settingsDirty() || filesDirty) && !window.confirm("Switch operator and discard unsaved editor changes?")) return false;
     state.loaded = false; state.baseline = ""; state.revision = null; state.remoteChanged = false; state.conflicted = false;
     state.permissions = []; state.logServer = ""; state.logCursor = null; state.definitions = {}; state.definitionRevision = null; state.definitionDirty = false; state.definitionVersion += 1;
-    state.settingsDirty = { serverList: false, tabList: false, permissionGroup: false }; state.permissionGroup = ""; state.members = []; state.memberButtons = [];
+    state.settingsDirty = { serverList: false, tabList: false }; state.perms = permsState();
     $("source").value = ""; $("console-server").replaceChildren(); $("definition-fields").replaceChildren();
     for (const id of ["console-output", "config-path", "revision", "deployment-result", "definition-result", "console-result", "extension-output"]) text(id, "");
-    for (const id of ["deployments", "audit-records", "managed-servers", "service-groups", "backends", "routes", "server-list-hosts", "permission-groups", "permission-members", "templates", "files-entries"]) $(id).replaceChildren();
+    for (const id of ["deployments", "audit-records", "managed-servers", "service-groups", "backends", "routes", "server-list-hosts", "templates", "files-entries",
+      "perm-groups", "perm-tracks", "perm-users", "perm-registered", "perm-holders", "perm-activity", "perm-group-nodes", "perm-user-nodes", "perm-compiled-entries", "perm-trace-rows"]) $(id).replaceChildren();
     state.templateButtons = []; state.files = { root: "templates", path: "", editing: null, baseline: "", buttons: [] };
     for (const id of ["template-result", "files-result"]) text(id, "");
-    for (const id of ["server-list-result", "tab-list-result", "permission-group-result", "permission-member-result"]) text(id, "");
+    for (const id of ["server-list-result", "tab-list-result", "perm-groups-result", "perm-group-result", "perm-track-result", "perm-users-result", "perm-user-result",
+      "perm-group-node-result", "perm-user-node-result", "perm-trace-result", "perm-holders-result", "perm-activity-result"]) text(id, "");
+    for (const id of ["perm-group-panel", "perm-group-nodes-panel", "perm-user-panel", "perm-user-nodes-panel", "perm-compiled-panel"]) $(id).classList.toggle("hidden", true);
     state.serverButtons = []; return true;
   }
   $("refresh-status").addEventListener("click", () => refreshStatus());
@@ -896,7 +1516,7 @@
     if (state.busy || (state.definitionDirty && !window.confirm("Discard unsaved definition fields and refresh?"))) return;
     try { await loadDefinitions(); text("definition-result", "Definitions refreshed."); } catch (error) { text("definition-result", error.message); }
   });
-  for (const [form, key] of [["server-list-form", "serverList"], ["tab-list-form", "tabList"], ["permission-group-form", "permissionGroup"]]) {
+  for (const [form, key] of [["server-list-form", "serverList"], ["tab-list-form", "tabList"]]) {
     $(form).addEventListener("input", () => markSettings(key));
     $(form).addEventListener("change", () => { markSettings(key); controls(); });
   }
@@ -911,37 +1531,8 @@
     applySetting({ path: "/api/definitions/tab_list", value: tabListValue, result: "tab-list-result", key: "tabList",
       saved: (value) => value ? "Tab list saved; players see it within half a second." : "Tab list turned off; backends control it again." });
   });
-  $("permission-group-form").addEventListener("submit", (event) => {
-    event.preventDefault();
-    const name = $("permission-group-name").value.trim();
-    if (!/^[a-z0-9_.-]{1,64}$/.test(name)) { text("permission-group-result", "Enter a group name using lowercase letters, digits, dots, underscores or hyphens."); return; }
-    if ($("permission-group-select").value === "" && Object.hasOwn(state.definitions.permission_groups || {}, name) && !window.confirm(`Replace the existing group ${name}?`)) return;
-    state.permissionGroup = name;
-    applySetting({ path: `/api/definitions/permission_groups/${encodeURIComponent(name)}`, value: permissionGroupValue, result: "permission-group-result", key: "permissionGroup",
-      saved: () => `Group ${name} saved and applied.` });
-  });
-  $("permission-group-delete").addEventListener("click", () => {
-    const name = $("permission-group-select").value;
-    if (!name || !window.confirm(`Delete the group ${name}? Players keep the membership until you remove it, but it grants nothing.`)) return;
-    state.permissionGroup = "";
-    applySetting({ path: `/api/definitions/permission_groups/${encodeURIComponent(name)}`, value: () => null, result: "permission-group-result", key: "permissionGroup",
-      saved: () => `Group ${name} deleted.` });
-  });
-  $("permission-group-select").addEventListener("change", () => {
-    const chosen = $("permission-group-select").value;
-    $("permission-group-select").value = state.permissionGroup;
-    selectPermissionGroup(chosen);
-  });
-  $("permission-member-form").addEventListener("submit", (event) => {
-    event.preventDefault();
-    const raw = $("permission-member-player").value.trim(), compact = raw.replaceAll("-", "").toLowerCase();
-    const player = /^[0-9a-f]{32}$/.test(compact) ? compact : raw;
-    if (!/^[0-9a-f]{32}$/.test(player) && !/^[A-Za-z0-9_]{1,16}$/.test(player)) { text("permission-member-result", "Enter a player UUID or the name of an online player."); return; }
-    changeMembership(player, $("permission-member-group").value, true);
-  });
   $("server-list-refresh").addEventListener("click", () => refreshSettings("serverList", "server-list-result"));
   $("tab-list-refresh").addEventListener("click", () => refreshSettings("tabList", "tab-list-result"));
-  $("permissions-refresh").addEventListener("click", () => refreshSettings("permissionGroup", "permission-group-result"));
   $("deployments-refresh").addEventListener("click", async () => { try { await loadDeployments(); } catch (error) { text("deployment-result", error.message); } });
   $("audit-refresh").addEventListener("click", async () => { try { await loadAudit(); } catch (error) { text("audit-result", error.message); } });
   $("validate").addEventListener("click", validate);

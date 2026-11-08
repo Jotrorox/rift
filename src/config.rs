@@ -204,10 +204,12 @@ pub const WEB_PERMISSIONS: &[&str] = &[
     "audit",
     "extensions",
     "files",
+    "perms",
 ];
 
-/// These grants can affect the whole proxy, so they require unrestricted scope.
-const UNSCOPED_WEB_PERMISSIONS: &[&str] = &["config", "deploy", "extensions"];
+/// These grants can affect or reveal the whole proxy, so they require
+/// unrestricted scope. Permission data is network-wide, so `perms` is here too.
+const UNSCOPED_WEB_PERMISSIONS: &[&str] = &["config", "deploy", "extensions", "perms"];
 
 /// Identities that Rift itself records in operator audit logs.
 const RESERVED_OPERATOR_NAMES: &[&str] = &[
@@ -1154,7 +1156,7 @@ impl Config {
                         .any(|p| UNSCOPED_WEB_PERMISSIONS.contains(&p.as_str()))
                     {
                         return Err(invalid(format!(
-                            "{path}: config, deploy and extensions require unrestricted group access"
+                            "{path}: config, deploy, extensions and perms require unrestricted group access"
                         )));
                     }
                 }

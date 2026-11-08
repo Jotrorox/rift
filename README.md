@@ -28,9 +28,9 @@ Run servers on more machines with `rift node` agents that the proxy controls
 over its message bus, with label- and capacity-based placement; see
 [multiple hosts](docs/nodes.md) and [examples/nodes.lua](examples/nodes.lua).
 The dashboard provides live server logs and commands, structured group/template
-editing, server list, tab list and permission group editing with group
-memberships, configuration deployment history and rollback, scoped operator
-tokens, and retained audit records. See the [HTTP operator guide](docs/http.md).
+editing, server list and tab list editing, permission groups, players, tracks,
+registered nodes and their change history, configuration deployment history
+and rollback, scoped operator tokens, and retained audit records. See the [HTTP operator guide](docs/http.md).
 Managed Minecraft processes need their own Java runtime and explicit EULA acceptance.
 
 ## Quick start
@@ -204,6 +204,7 @@ also includes for offline use.
 - [Managed servers](https://jotrorox.github.io/rift/docs/managed-servers/): local processes, automatic start/stop and persistent worlds.
 - [Multiple hosts](https://jotrorox.github.io/rift/docs/nodes/): `rift node` agents, placement across machines and failure handling.
 - [HTTP services](https://jotrorox.github.io/rift/docs/http/): web dashboard, status, API and Lua extensions.
+- [Permissions](https://jotrorox.github.io/rift/docs/permissions/): the network permission store, LuckPerms import, the dashboard and the Lua API; the [protocol](https://jotrorox.github.io/rift/docs/permissions-protocol/) backends speak the [Rust client, testing crate and C ABI](https://jotrorox.github.io/rift/docs/permissions-clients/); [RiftPerms for Paper](https://jotrorox.github.io/rift/docs/permissions-java/) and the [Pumpkin adapter](https://jotrorox.github.io/rift/docs/permissions-pumpkin/).
 - [Messaging](https://jotrorox.github.io/rift/docs/messaging/): plugin messaging, [Lua API](https://jotrorox.github.io/rift/docs/messaging-lua/) and [QUIC protocol](https://jotrorox.github.io/rift/docs/messaging-protocol/).
 - [BungeeCord compatibility](https://jotrorox.github.io/rift/docs/bungeecord/): backend plugin transfers, queries, forwarding, messages and kicks.
 - [Network protocol](https://jotrorox.github.io/rift/docs/network-protocol/): backend switching and recovery.
