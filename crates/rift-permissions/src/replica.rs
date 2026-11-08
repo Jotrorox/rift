@@ -240,6 +240,14 @@ impl Replica {
         true
     }
 
+    /// Forget the group table, so a table from a proxy whose revision went
+    /// back is stored again.
+    pub fn clear_groups(&self) {
+        let mut inner = self.write();
+        inner.groups_revision = 0;
+        inner.groups = Arc::new(Vec::new());
+    }
+
     /// The group table and the revision it was fetched at.
     pub fn groups(&self) -> (u64, Arc<Vec<GroupInfo>>) {
         let inner = self.read();
@@ -359,6 +367,9 @@ mod tests {
         assert!(replica.set_groups(5, vec![vip.clone()]));
         assert!(!replica.set_groups(4, vec![]));
         let (revision, groups) = replica.groups();
-        assert_eq!((revision, groups.as_slice()), (5, [vip].as_slice()));
+        assert_eq!((revision, groups.as_slice()), (5, [vip.clone()].as_slice()));
+        replica.clear_groups();
+        assert!(replica.groups().1.is_empty());
+        assert!(replica.set_groups(1, vec![vip.clone()]));
     }
 }

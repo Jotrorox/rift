@@ -110,8 +110,8 @@ pub struct BackendView {
     pub client_version: Option<String>,
     /// Requests it sent since the proxy started.
     pub requests: u64,
-    /// Its last reported revision is behind the proxy's and it has not said
-    /// `hello` since the proxy moved on.
+    /// Its last reported revision is ahead of the proxy's (the store went
+    /// back), or behind it and it has not said `hello` since the proxy moved on.
     pub stale: bool,
 }
 
@@ -270,10 +270,11 @@ impl Bus {
                 last_seen: backend.last_seen,
                 client_version: backend.client_version.clone(),
                 requests: backend.requests,
-                stale: backend.revision.is_some_and(|revision| revision < current)
-                    && backend
-                        .hello_at
-                        .is_some_and(|at| last_change.is_some_and(|change| at <= change)),
+                stale: backend.revision.is_some_and(|revision| revision > current)
+                    || backend.revision.is_some_and(|revision| revision < current)
+                        && backend
+                            .hello_at
+                            .is_some_and(|at| last_change.is_some_and(|change| at <= change)),
             })
             .collect()
     }
