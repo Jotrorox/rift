@@ -1476,6 +1476,11 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                                     self.extension.as_ref().map_or_else(Vec::new, |extension| {
                                         extension.visible_commands()
                                     });
+                                // Persistent plugins register commands when
+                                // they (re)start; refresh what is intercepted.
+                                if let Some(extension) = &self.extension {
+                                    self.extension_commands = extension.commands();
+                                }
                                 caps.network_commands_with(&packet, &commands)?
                             } else {
                                 packet

@@ -268,7 +268,7 @@ fn mime_token(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
 }
 
-fn valid_content_type(value: &str) -> bool {
+pub(crate) fn valid_content_type(value: &str) -> bool {
     if value.len() > 256
         || !value
             .bytes()

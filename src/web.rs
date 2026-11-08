@@ -1742,9 +1742,11 @@ async fn reload(
 }
 async fn extension(State(app): State<App>, request: Request) -> Response {
     let snapshot = app.snapshot();
-    let Some(script) = snapshot.config.on_http.clone() else {
+    let script = snapshot.config.on_http.clone();
+    let plugins = snapshot.extensions.plugins();
+    if script.is_none() && !plugins.may_handle(rift::plugins::api::Hook::Http) {
         return error(StatusCode::NOT_FOUND, "no on_http handler configured");
-    };
+    }
     let (parts, body) = request.into_parts();
     let bytes = match axum::body::to_bytes(body, control::MAX_SOURCE).await {
         Ok(bytes) => bytes,
@@ -1783,14 +1785,24 @@ async fn extension(State(app): State<App>, request: Request) -> Response {
         headers,
         context: app.status_snapshot(&snapshot, false),
     };
-    match script
-        .execute_with_host(
-            request,
-            Some(snapshot.messaging.clone()),
-            snapshot.extensions.player_api(),
-        )
-        .await
-    {
+    // The configuration script first, then persistent plugins in order.
+    let result = match script {
+        Some(script) => {
+            script
+                .execute_with_host(
+                    request.clone(),
+                    Some(snapshot.messaging.clone()),
+                    snapshot.extensions.player_api(),
+                )
+                .await
+        }
+        None => Ok(None),
+    };
+    let result = match result {
+        Ok(None) => plugins.http(&request).await,
+        result => result,
+    };
+    match result {
         Ok(Some(result)) => (
             StatusCode::from_u16(result.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
             [(header::CONTENT_TYPE, result.content_type)],

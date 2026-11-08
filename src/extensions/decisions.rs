@@ -22,13 +22,13 @@ enum Policy {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct Decision {
+pub(crate) struct Decision {
     subject: String,
     timeout: Duration,
     on_timeout: Policy,
     on_no_responders: Policy,
     deny_message: String,
-    pub(super) max_in_flight: usize,
+    pub(crate) max_in_flight: usize,
 }
 
 fn error(message: impl Into<String>) -> mlua::Error {
@@ -143,7 +143,7 @@ impl Decision {
     /// Ask the subscribers on `subject`. A full in-flight window applies the
     /// timeout policy at once instead of queueing behind a login flood. A
     /// reply that arrives after the timeout is dropped with the inbox.
-    pub(super) async fn decide(
+    pub(crate) async fn decide(
         &self,
         hook: &str,
         input: &Context,
