@@ -80,6 +80,48 @@ jobs:
           path: ${{ runner.temp }}/actionlint.tar.gz
           key: ${{ steps.actionlint-cache.outputs.cache-primary-key }}
 
+  plugin-sdk-rust:
+    name: Rust plugin SDK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned Rust toolchain and the WebAssembly target
+        run: |
+          rustup show
+          rustup target add wasm32-wasip2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          prefix-key: v1-rust
+          key: plugin-sdk-rust
+          cache-bin: false
+          # Both are standalone workspaces outside the proxy's build.
+          workspaces: |
+            sdk/rust
+            examples/plugins/hello-rs
+          save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+      - name: Check the SDK ships the repository's WIT unchanged
+        run: diff -r wit sdk/rust/wit
+      - name: Check formatting
+        run: |
+          cargo fmt --manifest-path sdk/rust/Cargo.toml --check
+          cargo fmt --manifest-path examples/plugins/hello-rs/Cargo.toml --check
+      - name: Lint for wasm32-wasip2
+        run: |
+          cargo clippy --locked --manifest-path sdk/rust/Cargo.toml --target wasm32-wasip2 -- -D warnings
+          cargo clippy --locked --manifest-path examples/plugins/hello-rs/Cargo.toml --target wasm32-wasip2 -- -D warnings
+      - name: Test SDK helpers and documentation on the host
+        run: cargo test --locked --manifest-path sdk/rust/Cargo.toml
+      - name: Build hello-rs as a component
+        working-directory: examples/plugins/hello-rs
+        run: cargo build --locked --release --target wasm32-wasip2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: hello-rs-wasm
+          path: examples/plugins/hello-rs/target/wasm32-wasip2/release/hello_rs.wasm
+          if-no-files-found: error
+          retention-days: 14
+
   audit:
     name: Dependency advisories
     runs-on: ubuntu-24.04
@@ -559,7 +601,7 @@ jobs:
   ci-ready:
     name: CI ready
     if: always()
-    needs: [quality, audit, regression, build-linux, minecraft, compatibility, benchmark]
+    needs: [quality, plugin-sdk-rust, audit, regression, build-linux, minecraft, compatibility, benchmark]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
