@@ -730,8 +730,9 @@ fn extension_commands_replace_backend_roots_and_keep_unsigned_arguments() {
         let mut data = vec![2, 0, 1, 1, 5, 0];
         write_string("queue", &mut data);
         data.push(0);
-        let commands = vec!["queue".to_owned(), "staff".to_owned()];
-        let tree: Vec<_> = commands.iter().map(|name| (name.clone(), false)).collect();
+        let names = ["queue".to_owned(), "staff".to_owned()];
+        let tree: Vec<_> = names.iter().map(|name| (name.clone(), false)).collect();
+        let commands = |name: &str| names.iter().any(|known| known == name);
         let expanded = caps
             .network_commands_with(&Packet::new(command_tree_id(number), data.clone()), &tree)
             .unwrap();
@@ -754,9 +755,11 @@ fn extension_commands_replace_backend_roots_and_keep_unsigned_arguments() {
             "queue game"
         );
         assert!(
-            caps.proxy_command_with(&Packet::new(command_id(number), unsigned.clone()), &[])
-                .unwrap()
-                .is_none()
+            caps.proxy_command_with(&Packet::new(command_id(number), unsigned.clone()), &|_| {
+                false
+            })
+            .unwrap()
+            .is_none()
         );
         unsigned.extend([0; 16]);
         unsigned.push(1);
@@ -800,7 +803,7 @@ fn proxy_suggestion_requests_are_taken_only_for_proxy_command_arguments() {
             write_string(text, &mut data);
             Packet::new(request_id, data)
         };
-        let commands = ["ban".to_owned()];
+        let commands = |name: &str| name == "ban";
         for text in ["/server lo", "/hub ", "/ban Al", "ban Al", "/ban Alice 1d"] {
             assert_eq!(
                 caps.proxy_suggestion_request(&request(text), &commands)
@@ -892,7 +895,7 @@ fn suggestion_responses_use_each_versions_id_and_tooltip_encoding() {
             write_varint(1, &mut data);
             write_string("/server lo", &mut data);
             assert_eq!(
-                caps.proxy_suggestion_request(&Packet::new(id, data), &[])
+                caps.proxy_suggestion_request(&Packet::new(id, data), &|_| false)
                     .unwrap(),
                 None
             );

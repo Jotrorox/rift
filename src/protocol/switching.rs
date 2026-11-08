@@ -264,13 +264,15 @@ impl SwitchingCapabilities {
         self,
         packet: &Packet,
     ) -> io::Result<Option<(String, Option<Packet>)>> {
-        self.proxy_command_with(packet, &[])
+        self.proxy_command_with(packet, &|_| false)
     }
 
+    /// `intercepts` says whether a root command name belongs to the proxy
+    /// (besides `server` and `hub`); it is asked only for command packets.
     pub(crate) fn proxy_command_with(
         self,
         packet: &Packet,
-        commands: &[String],
+        intercepts: &dyn Fn(&str) -> bool,
     ) -> io::Result<Option<(String, Option<Packet>)>> {
         if packet.id != self.command && packet.id != self.signed_command {
             return Ok(None);
@@ -286,7 +288,7 @@ impl SwitchingCapabilities {
             raw
         };
         let root = command.split_ascii_whitespace().next().unwrap_or("");
-        if !matches!(root, "server" | "hub") && !commands.iter().any(|name| name == root) {
+        if !matches!(root, "server" | "hub") && !intercepts(root) {
             return Ok(None);
         }
         let mut acknowledgement = None;
@@ -360,7 +362,7 @@ impl SwitchingCapabilities {
     pub(crate) fn proxy_suggestion_request(
         self,
         packet: &Packet,
-        commands: &[String],
+        intercepts: &dyn Fn(&str) -> bool,
     ) -> io::Result<Option<(i32, String)>> {
         if self.suggestion_request < 0 || packet.id != self.suggestion_request {
             return Ok(None);
@@ -376,7 +378,7 @@ impl SwitchingCapabilities {
         let Some((root, _)) = input.split_once(' ') else {
             return Ok(None);
         };
-        if !matches!(root, "server" | "hub") && !commands.iter().any(|name| name == root) {
+        if !matches!(root, "server" | "hub") && !intercepts(root) {
             return Ok(None);
         }
         Ok(Some((id, text.to_owned())))

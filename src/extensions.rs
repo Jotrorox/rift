@@ -964,6 +964,18 @@ impl ExtensionSession {
             )
             .collect()
     }
+    /// Whether the proxy answers `/name` instead of the backend: a command of
+    /// the configuration script or of a persistent plugin. Asked when a
+    /// command arrives, so commands plugins register after the session began
+    /// are intercepted too.
+    pub fn intercepts(&self, name: &str) -> bool {
+        self.runtime
+            .script
+            .as_ref()
+            .is_some_and(|script| script.commands.contains_key(name))
+            || self.runtime.plugins.command_owner(name).is_some()
+    }
+
     /// Commands for this player's command tree with whether their arguments
     /// ask for suggestions. Commands the player lacks permission for are left
     /// out; the tree is rebuilt whenever a backend sends one.

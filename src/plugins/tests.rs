@@ -1416,3 +1416,38 @@ async fn without_online_mode_plugins_that_register_player_hooks_fail_to_start() 
     assert_eq!(runtime.plugins().active()[0].status(), Status::Running);
     runtime.plugins().shutdown().await;
 }
+
+#[tokio::test]
+async fn sessions_intercept_commands_plugins_register_after_they_began() {
+    let root = directory();
+    let mocks = Mocks::default();
+    mocks.plan(
+        "late",
+        Plan::new(action(Action::Continue))
+            .commands(&["late"])
+            .slow_init(Duration::from_millis(100)),
+    );
+    let broker = Broker::default();
+    let script = "extensions = { api_version = 2, commands = { early = { permission = 'x', run = function() end } } }";
+    let runtime = runtime(&config(script, vec![]), &mocks, &broker).await;
+    let player = session(&runtime, 1);
+    assert!(player.intercepts("early"));
+    assert!(!player.intercepts("late"));
+    let next = Extensions::with_engines(
+        &config(script, vec![spec(&root, "late", "", "{}")]),
+        broker.clone(),
+        Some(&runtime),
+        mocks.engines(),
+    )
+    .unwrap();
+    next.plugins().activate().unwrap().await;
+    // Still in init: the command is not claimed yet and goes to the backend.
+    assert!(!player.intercepts("late"));
+    next.plugins().active()[0]
+        .ready(Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert!(player.intercepts("late"));
+    assert!(!player.intercepts("give"));
+    next.plugins().shutdown().await;
+}

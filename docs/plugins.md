@@ -253,7 +253,10 @@ its engine) have passed. A reload that gives the configuration script a
 command registered by a plugin that stays configured, whether unchanged,
 hot-reloaded or replaced, is refused and leaves the running set as it is.
 Sessions that started under an older configuration see the current plugin
-set.
+set: a command is looked up when the player sends it, so commands a plugin
+registers after the session began (added by a reload, or still starting when
+the player joined) reach the plugin instead of the backend. The player's
+command tree shows them with the backend's next command list.
 
 **Stopping.** `shutdown(reason)` runs within `deadlines.shutdown`; a plugin
 that does not return in time is told to stop (engines interrupt it where they
