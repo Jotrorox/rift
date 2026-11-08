@@ -295,6 +295,15 @@ fn check_lists_plugins_with_their_mode_and_never_starts_them() {
         !fixture.0.join("plugins/relaxoban/data").exists(),
         "init never runs in check"
     );
+    // Startup refuses what check reported, before binding anything.
+    let started = fixture.run(&["--config", "rift.lua"]);
+    assert!(!started.status.success());
+    assert!(
+        String::from_utf8_lossy(&started.stderr)
+            .contains("plugin relaxoban: engine \"wasm\" is not available"),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
+    );
     let strict = fixture.run(&["check", "--strict"]);
     assert!(!strict.status.success());
     assert!(

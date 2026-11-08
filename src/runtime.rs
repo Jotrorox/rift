@@ -98,12 +98,18 @@ impl Snapshot {
             ))
             .map_err(io::Error::other)?,
         };
+        let extensions = rift::extensions::Extensions::new(
+            &config,
+            messaging.clone(),
+            previous.map(|old| &old.extensions),
+        )?;
         let router = previous
             .map_or_else(
                 || Router::new(&config),
                 |old| old.router.reconfigured(&config),
             )
-            .with_messaging(messaging.clone());
+            .with_messaging(messaging.clone())
+            .with_plugins(extensions.plugins().clone());
         let control =
             previous.map_or_else(|| Arc::new(Control::default()), |old| old.control.clone());
         let health = Health::with_control(&config, control.clone());
@@ -131,11 +137,6 @@ impl Snapshot {
         } else {
             None
         };
-        let extensions = rift::extensions::Extensions::new(
-            &config,
-            messaging.clone(),
-            previous.map(|old| &old.extensions),
-        )?;
         let players = previous.map_or_else(
             || Arc::new(PlayerRegistry::default()),
             |old| old.players.clone(),
@@ -349,7 +350,7 @@ pub async fn handle(
     let unmatched = primary.is_err();
     let primary = match primary {
         Ok(primary) => primary,
-        Err(_) if !is_status && snapshot.config.extensions.is_some() => snapshot
+        Err(_) if !is_status && snapshot.config.player_hooks() => snapshot
             .config
             .backends
             .keys()
@@ -509,7 +510,7 @@ pub async fn handle(
             return Err(io::Error::new(io::ErrorKind::Unsupported, reason));
         }
         let network_configured = snapshot.config.network != Default::default()
-            || snapshot.config.extensions.is_some()
+            || snapshot.config.player_hooks()
             || !snapshot.config.service_groups.is_empty();
         let tracked_login = network_configured
             || !snapshot.config.managed_servers.is_empty()
@@ -567,7 +568,7 @@ pub async fn handle(
             event.failure = "io_error";
         }
         let mut extension_selection = None;
-        if snapshot.config.extensions.is_some() {
+        if snapshot.config.player_hooks() {
             if !session.switch_supported() {
                 let reason = "Extensions v1 requires Minecraft 1.19.3–26.3.";
                 let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect(reason)).await;
@@ -2191,17 +2192,6 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     let (commands, mut requests) = tokio::sync::mpsc::channel::<control::Command>(8);
     let app = web::App::new(receiver.clone(), metrics.clone(), commands, source)?;
     let mut tasks = JoinSet::new();
-    for (name, listener) in listeners {
-        eprintln!("rift: listening on {}", listener.local_addr()?);
-        tasks.spawn(accept(
-            listener,
-            name,
-            receiver.clone(),
-            stopping.clone(),
-            metrics.clone(),
-            admission.clone(),
-        ));
-    }
     let mut background = JoinSet::new();
     if !snapshot.nodes.is_empty() {
         background.spawn(snapshot.nodes.listen()?);
@@ -2213,6 +2203,24 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         metrics.clone(),
         admin_commands.clone(),
     ));
+    // Persistent plugins initialize once the control service answers and
+    // before players connect; a plugin that cannot start fails startup.
+    snapshot
+        .extensions
+        .plugins()
+        .set_streams(snapshot.messaging_streams.clone());
+    snapshot.extensions.plugins().start().await?;
+    for (name, listener) in listeners {
+        eprintln!("rift: listening on {}", listener.local_addr()?);
+        tasks.spawn(accept(
+            listener,
+            name,
+            receiver.clone(),
+            stopping.clone(),
+            metrics.clone(),
+            admission.clone(),
+        ));
+    }
     let message_updates = message_handler
         .as_ref()
         .map(rift::message_script::MessageHandler::script_updates);
@@ -2349,6 +2357,14 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                 extension_jobs.shutdown().await;
                 next.extensions.activate();
                 extension_jobs = next.extensions.scheduler();
+                // The plugin diff applies only now that the reload committed;
+                // stopping and hot-reloading instances finishes in the background.
+                match next.extensions.plugins().activate() {
+                    Ok(work) => {
+                        tokio::spawn(work);
+                    }
+                    Err(error) => eprintln!("rift: plugins not updated: {error}"),
+                }
                 // Keep subscriptions and queued messages across script reloads.
                 if let (Some(updates), Some(script)) = (&message_updates, &next.config.on_message) {
                     updates.send_replace(script.clone());
@@ -2457,6 +2473,8 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     tasks.shutdown().await;
     background.shutdown().await;
     services.shutdown().await;
+    // Sessions are gone; give each plugin its shutdown grace period.
+    snapshot.extensions.plugins().shutdown().await;
     // Do not abort or detach an instance transaction: filesystem work and
     // process retirement must finish. A newly registered child then belongs
     // to the managed shutdown below, just like all existing children.
