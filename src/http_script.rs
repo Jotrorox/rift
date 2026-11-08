@@ -156,7 +156,8 @@ impl HttpScript {
     }
 }
 
-fn json_value(
+/// A JSON value as Lua: objects and arrays become tables, `null` nil.
+pub(crate) fn json_value(
     lua: &Lua,
     value: &serde_json::Value,
     depth: usize,
@@ -164,7 +165,7 @@ fn json_value(
 ) -> mlua::Result<Value> {
     crate::script::check_deadline(deadline)?;
     if depth > 64 {
-        return Err(mlua::Error::runtime("HTTP context exceeds nesting limit"));
+        return Err(mlua::Error::runtime("JSON value exceeds nesting limit"));
     }
     Ok(match value {
         serde_json::Value::Null => Value::Nil,
@@ -176,7 +177,7 @@ fn json_value(
                 Value::Number(
                     value
                         .as_f64()
-                        .ok_or_else(|| mlua::Error::runtime("invalid context number"))?,
+                        .ok_or_else(|| mlua::Error::runtime("invalid JSON number"))?,
                 )
             }
         }

@@ -312,11 +312,11 @@ pub fn handle(
             let Some(player) = player(snapshot, &name) else {
                 return Ok(None);
             };
-            // Groups exist only with API v2 extensions; without them the
-            // request goes unanswered like on other proxies.
-            let Some(member) = snapshot.extensions.in_group(&uuid(&player.uuid), &group) else {
-                return Ok(None);
-            };
+            // From the compiled subject in the contexts the proxy knows.
+            let member = snapshot
+                .extensions
+                .permissions()
+                .in_group(rift_permissions::Uuid::from_bytes(player.uuid), &group);
             let mut data = strings(&["RiftInGroup", &player.name, &group])?;
             data.push(member.into());
             data
@@ -818,7 +818,7 @@ mod tests {
     }
 
     #[test]
-    fn rift_in_group_follows_memberships_inheritance_and_default() {
+    fn rift_in_group_answers_from_the_compiled_subject() {
         let snapshot = network();
         let alice = [0xa1; 16];
         let _alice = snapshot.players.register(alice, "Alice", "Lobby").unwrap();
@@ -826,12 +826,16 @@ mod tests {
             .players
             .register([0xb0; 16], "Bob", "Lobby")
             .unwrap();
-        assert!(
-            snapshot
-                .extensions
-                .change_group_membership(&uuid(&alice), "admin", true)
-                .unwrap()
-        );
+        let membership = rift_permissions::Change::SetNode {
+            subject: rift_permissions::SubjectRef::User(rift_permissions::Uuid::from_bytes(alice)),
+            node: rift_permissions::Node::inherit("admin", true).unwrap(),
+        };
+        let applied = snapshot
+            .extensions
+            .permissions()
+            .apply(rift_permissions::Actor::Cli, membership)
+            .unwrap();
+        assert_eq!(applied.ops, 1);
         let in_group = |player: &str, group: &str| {
             query(
                 &snapshot,
@@ -852,16 +856,18 @@ mod tests {
         assert_eq!(in_group("Bob", "staff"), reply("Bob", "staff", false));
         assert_eq!(in_group("Bob", "missing"), reply("Bob", "missing", false));
         assert_eq!(in_group("Carol", "default"), None);
-        // Without API v2 extensions there are no groups to ask about.
+        // The permission store exists without extensions: everyone is in default.
+        let plain = self::snapshot();
+        let _alice = plain.players.register(alice, "Alice", "Lobby").unwrap();
         assert_eq!(
             query(
-                &self::snapshot(),
+                &plain,
                 Request::RiftInGroup {
                     player: "Alice".into(),
                     group: "default".into()
                 }
             ),
-            None
+            reply("Alice", "default", true)
         );
     }
 }

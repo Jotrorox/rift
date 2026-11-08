@@ -63,7 +63,7 @@ impl Drop for StateFile {
 #[test]
 fn v2_schema_rejects_unsupported_versions_and_malformed_jobs() {
     for invalid in [
-        "api_version=3",
+        "api_version=4",
         "api_version=1, jobs={}",
         "api_version=1, storage={path='state.json'}",
         "api_version=1, integrations={}",
@@ -90,7 +90,7 @@ fn loading_configuration_cannot_execute_runtime_side_effects() {
     let state = StateFile::new();
     for operation in [
         "rift.store.set('test','key','value')",
-        "rift.permissions.set('01010101010101010101010101010101','route.game',true)",
+        "rift.permissions.user('01010101010101010101010101010101'):set('route.game',true)",
         "rift.http.request('account',{})",
         "rift.players.broadcast('hello')",
     ] {
@@ -125,7 +125,7 @@ fn reload_rejects_storage_version_and_capacity_changes_before_opening_new_storag
 async fn v1_callbacks_cannot_access_v2_host_capabilities() {
     for operation in [
         "rift.store.set('test','key','value')",
-        "rift.permissions.set('01010101010101010101010101010101','route.game',true)",
+        "rift.permissions.check('01010101010101010101010101010101','route.game')",
         "rift.http.request('account',{})",
         "rift.players.list()",
     ] {
@@ -265,22 +265,21 @@ async fn store_increment_is_atomic_across_concurrent_sessions() {
 }
 
 #[tokio::test]
-async fn live_permissions_revoke_defaults_and_reset_within_the_same_session() {
+async fn live_permission_writes_apply_within_the_same_session() {
     let runtime = runtime(
-        r#"api_version=2,
-        permissions={['*']={['route.game']=true,['permissions.manage']=true}},
+        r#"api_version=3,
+        groups={default={permissions={['route.game']=true,['permissions.manage']=true}}},
         initial_server=function(ctx)
-            assert(ctx.has_permission('route.game')==rift.permissions.has(ctx.uuid,'route.game'))
+            assert(ctx.has_permission('route.game')==(rift.permissions.check(ctx.uuid,'route.game')==true))
             return {server=ctx.has_permission('route.game') and 'game' or 'lobby'}
         end,
         commands={
             game={permission='route.game',run=function() return {server='game'} end},
             access={permission='permissions.manage',run=function(ctx)
-                if ctx.args=='revoke' then rift.permissions.set(ctx.uuid,'route.game',false)
-                elseif ctx.args=='grant' then rift.permissions.set(ctx.uuid,'route.game',true)
-                elseif ctx.args=='reset' then rift.permissions.set(ctx.uuid,'route.game',nil)
-                elseif ctx.args=='revoke-all' then rift.permissions.set('*','route.game',false)
-                elseif ctx.args=='reset-all' then rift.permissions.set('*','route.game',nil)
+                local user=rift.permissions.user(ctx.uuid)
+                if ctx.args=='revoke' then user:set('route.game',false)
+                elseif ctx.args=='grant' then user:set('route.game',true)
+                elseif ctx.args=='reset' then user:unset('route.game')
                 end
                 return {message=tostring(ctx.has_permission('route.game'))}
             end}}
@@ -294,10 +293,9 @@ async fn live_permissions_revoke_defaults_and_reset_within_the_same_session() {
     for (operation, granted) in [
         ("revoke", false),
         ("reset", true),
-        ("revoke-all", false),
+        ("revoke", false),
         ("grant", true),
-        ("reset", false),
-        ("reset-all", true),
+        ("reset", true),
     ] {
         assert_eq!(
             player
@@ -317,20 +315,26 @@ async fn live_permissions_revoke_defaults_and_reset_within_the_same_session() {
             assert!(matches!(action, Action::Message(_)));
         }
     }
+    let log = runtime.permissions().log(&Default::default()).unwrap();
+    assert!(
+        log.iter()
+            .all(|event| event.actor.to_string() == "lua:command.access"
+                || event.actor.to_string() == "system")
+    );
 }
 
 #[tokio::test]
 async fn live_revocation_blocks_all_transfer_reasons_before_capacity_reservation() {
     let runtime = runtime(
-        r#"api_version=2, queues={game=1},
-        permissions={['*']={['route.game']=true,['permissions.manage']=true}},
+        r#"api_version=3, queues={game=1},
+        groups={default={permissions={['route.game']=true,['permissions.manage']=true}}},
         before_transfer=function(ctx)
             if ctx.target=='game' and not ctx.has_permission('route.game') then
                 return {deny='Access revoked'}
             end
         end,
         commands={access={permission='permissions.manage',run=function(ctx)
-            rift.permissions.set(ctx.uuid,'route.game',ctx.args=='grant')
+            rift.permissions.user(ctx.uuid):set('route.game',ctx.args=='grant')
         end}}
     "#,
     );
@@ -356,24 +360,29 @@ async fn live_revocation_blocks_all_transfer_reasons_before_capacity_reservation
 
 #[tokio::test]
 async fn malformed_permission_updates_fail_without_revoking_existing_grants() {
-    for arguments in [
-        "ctx.uuid,'route.game',1",
-        "ctx.uuid,'route.game','false'",
-        "'not-a-uuid','route.game',false",
-        "'ABCDEF0123456789ABCDEF0123456789','route.game',false",
-        "ctx.uuid,'bad node',false",
+    for call in [
+        "rift.permissions.user(ctx.uuid):set('route.game',1)",
+        "rift.permissions.user(ctx.uuid):set('route.game','false')",
+        "rift.permissions.user('not-a-uuid'):set('route.game',false)",
+        "rift.permissions.user(ctx.uuid):set('bad node',false)",
+        "rift.permissions.user(ctx.uuid):set('route.game',false,{expires_in=-1})",
+        "rift.permissions.user(ctx.uuid):set('route.game',false,{typo=1})",
+        "rift.permissions.user(ctx.uuid):set('route.game',false,{contexts={server={'a','b'}}})",
+        "rift.permissions.group('missing'):set('route.game',false)",
+        "rift.permissions.group('default'):delete()",
+        "rift.permissions.has(ctx.uuid,'route.game')",
     ] {
         let runtime = runtime(&format!(
-            r#"api_version=2,
-            permissions={{['*']={{['route.game']=true}}}},
-            login=function(ctx) rift.permissions.set({arguments}) end,
+            r#"api_version=3,
+            groups={{default={{permissions={{['route.game']=true}}}}}},
+            login=function(ctx) {call} end,
             initial_server=function(ctx)
                 assert(ctx.has_permission('route.game'))
                 return {{server='game'}}
             end"#
         ));
         let player = runtime.session(context(1)).unwrap();
-        assert!(player.decision("login").await.is_err(), "{arguments}");
+        assert!(player.decision("login").await.is_err(), "{call}");
         assert_eq!(
             player.decision("initial_server").await.unwrap(),
             Action::Server("game".into())
@@ -382,10 +391,10 @@ async fn malformed_permission_updates_fail_without_revoking_existing_grants() {
 }
 
 #[tokio::test]
-async fn permission_reload_is_transactional_and_keeps_callback_generations_pinned() {
+async fn permission_reload_mirrors_groups_and_keeps_callback_generations_pinned() {
     let old = runtime(
         r#"api_version=2,
-        permissions={['*']={inspect=true,['route.game']=true}},
+        groups={default={permissions={inspect=true,['route.game']=true}}},
         commands={check={permission='inspect',run=function(ctx)
             return {message='old:'..tostring(ctx.has_permission('route.game'))}
         end}}"#,
@@ -393,23 +402,25 @@ async fn permission_reload_is_transactional_and_keeps_callback_generations_pinne
     let existing = old.session(context(1)).unwrap();
     let cfg = config(
         r#"api_version=2,
-        permissions={['*']={inspect=true}},
+        groups={default={permissions={inspect=true}}},
         commands={check={permission='inspect',run=function(ctx)
             return {message='new:'..tostring(ctx.has_permission('route.game'))}
         end}}"#,
     );
+    let revision = old.permissions().revision();
     let rejected = Extensions::new(&cfg, old.broker.clone(), Some(&old)).unwrap();
     assert_eq!(
         existing.command("check").await.unwrap(),
         Action::Message("old:true".into())
     );
     drop(rejected);
-    assert_eq!(
-        existing.command("check").await.unwrap(),
-        Action::Message("old:true".into())
-    );
+    assert_eq!(old.permissions().revision(), revision);
     let next = Extensions::new(&cfg, old.broker.clone(), Some(&old)).unwrap();
     next.activate();
+    assert_eq!(old.permissions().revision(), revision + 1);
+    // Activating the same groups again changes nothing.
+    next.activate();
+    assert_eq!(old.permissions().revision(), revision + 1);
     assert_eq!(
         existing.command("check").await.unwrap(),
         Action::Message("old:false".into())
@@ -425,25 +436,32 @@ async fn permission_reload_is_transactional_and_keeps_callback_generations_pinne
 }
 
 #[tokio::test]
-async fn v1_sessions_keep_static_grants_after_reload() {
+async fn v1_commands_are_authorized_by_the_permission_store() {
     let old = runtime(
-        r#"api_version=1, permissions={['*']={['route.game']=true}},
+        r#"api_version=1,
         commands={game={permission='route.game',run=function(ctx)
             assert(ctx.api_version==1 and ctx.has_permission('route.game'))
             return {server='game'}
         end}}"#,
     );
     let existing = old.session(context(1)).unwrap();
-    let next = Extensions::new(
-        &config(
-            r#"api_version=1,
-        commands={game={permission='route.game',run=function() return {server='game'} end}}"#,
-        ),
-        old.broker.clone(),
-        Some(&old),
-    )
-    .unwrap();
+    assert!(matches!(
+        existing.command("game").await.unwrap(),
+        Action::Message(_)
+    ));
+    let grant = rift_permissions::Change::SetNode {
+        subject: SubjectRef::User(Uuid::parse(&context(1).uuid).unwrap()),
+        node: Node::permission("route.game", true).unwrap(),
+    };
+    old.permissions().apply(Actor::Cli, grant).unwrap();
+    let next = Extensions::new(&config(&old_source()), old.broker.clone(), Some(&old)).unwrap();
     next.activate();
+    for session in [&existing, &next.session(context(1)).unwrap()] {
+        assert_eq!(
+            session.command("game").await.unwrap(),
+            Action::Server("game".into())
+        );
+    }
     assert!(matches!(
         next.session(context(2))
             .unwrap()
@@ -452,10 +470,12 @@ async fn v1_sessions_keep_static_grants_after_reload() {
             .unwrap(),
         Action::Message(_)
     ));
-    assert_eq!(
-        existing.command("game").await.unwrap(),
-        Action::Server("game".into())
-    );
+}
+
+fn old_source() -> String {
+    r#"api_version=1,
+        commands={game={permission='route.game',run=function() return {server='game'} end}}"#
+        .into()
 }
 
 #[tokio::test]
@@ -691,64 +711,96 @@ fn startup_and_reload_require_headers_env_variables() {
 }
 
 #[test]
-fn permission_group_and_wildcard_schema_is_validated() {
+fn permission_group_schema_is_validated_and_legacy_grants_rejected() {
     for invalid in [
         "api_version=1, groups={}",
-        "api_version=1, permissions={['*']={['network.*']=true}}",
-        "api_version=1, permissions={['*']={['network.staff']=false}}",
-        "api_version=1, permissions={['*']={['network.staff']='false'}}",
-        "api_version=2, permissions={['*']={['network.*.ban']=true}}",
-        "api_version=2, permissions={['*']={['*.ban']=true}}",
-        "api_version=2, permissions={['*']={['.*']=true}}",
-        "api_version=2, permissions={['*']={['network.staff']='yes'}}",
         "api_version=2, groups={staff=true}",
         "api_version=2, groups={Staff={}}",
         "api_version=2, groups={staff={typo=true}}",
         "api_version=2, groups={staff={inherits='default'}}",
         "api_version=2, groups={staff={inherits={x='default'}}}",
         "api_version=2, groups={default={}, staff={inherits={'default', [3]='default', y=1}}}",
-        "api_version=2, groups={staff={inherits={'missing'}}}",
-        "api_version=2, groups={staff={inherits={'staff'}}}",
-        "api_version=2, groups={a={inherits={'b'}}, b={inherits={'c'}}, c={inherits={'a'}}}",
+        "api_version=2, groups={staff={inherits={'Bad Name'}}}",
         "api_version=2, groups={staff={permissions={['bad node']=true}}}",
+        "api_version=2, groups={staff={permissions={['network.*.ban']=true}}}",
+        "api_version=2, groups={staff={permissions={['a.b']=true, ['A.b']=false}}}",
+        "api_version=2, groups={staff={permissions={['network.staff']='yes'}}}",
+        "api_version=2, groups={staff={weight='high'}}",
+        "api_version=2, groups={staff={weight=1.5}}",
+        "api_version=2, groups={staff={prefix=1}}",
+        "api_version=2, groups={staff={prefix={priority=1}}}",
+        "api_version=2, groups={staff={suffix={text='x', typo=1}}}",
+        "api_version=2, groups={staff={meta={homes={}}}}",
+        "api_version=2, groups={staff={meta={['bad key']='1'}}}",
+        "api_version=2, on_permission_change=function() end",
+        "api_version=3, on_permission_change=true",
+        "api_version=3, context_providers={server=function() end}",
+        "api_version=3, context_providers={region=true}",
+        // The removed grants table, in either version, is refused with a pointer.
+        "api_version=1, permissions={['*']={['network.staff']=true}}",
+        "api_version=2, permissions={['01010101010101010101010101010101']={['network.*']=true}}",
+        "api_version=3, permissions={}",
     ] {
         assert!(
             Config::from_lua(&source(invalid), "invalid-groups.lua").is_err(),
             "{invalid}"
         );
     }
+    let error = Config::from_lua(
+        &source("api_version=3, permissions={['*']={['chat.send']=true}}"),
+        "legacy.lua",
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("extensions.permissions was removed")
+            && error.contains("rift.permissions.user(uuid):set"),
+        "{error}"
+    );
     let many = (0..65)
         .map(|i| format!("g{i}={{}}"))
         .collect::<Vec<_>>()
         .join(",");
-    assert!(
-        Config::from_lua(
-            &source(&format!("api_version=2, groups={{{many}}}")),
-            "many.lua"
-        )
-        .is_err()
+    let limited = source(&format!("api_version=2, groups={{{many}}}")).replace(
+        "routes = {",
+        "permissions = { limits = { groups = 64 } }, routes = {",
     );
-    config(
-        r#"api_version=2,
-        permissions={['*']={['*']=false, ['network.*']=true}},
+    assert!(
+        Config::from_lua(&limited, "many.lua")
+            .unwrap_err()
+            .to_string()
+            .contains("permissions.limits.groups")
+    );
+    let config = config(
+        r#"api_version=3,
         groups={
             default={permissions={['chat.*']=true}},
-            staff={inherits={'default'}, permissions={['network.staff']=true, ['chat.color']=false}},
-            admin={inherits={'staff','default'}},
-        }"#,
+            staff={inherits={'default'}, weight=10, prefix='&c[Staff] ', meta={homes=5},
+                permissions={['Network.Staff']=true, ['chat.color']=false}},
+            admin={inherits={'staff','missing','admin'}, suffix={priority=3, text=' *'}},
+        },
+        on_permission_change=function() end,
+        context_providers={region=function() return 'spawn' end}"#,
+    );
+    let groups = config
+        .extensions
+        .as_ref()
+        .unwrap()
+        .permission_groups()
+        .unwrap();
+    assert_eq!(
+        groups["staff"],
+        serde_json::json!({
+            "inherits": ["default"], "weight": 10, "prefix": "&c[Staff] ",
+            "meta": {"homes": "5"},
+            "permissions": {"chat.color": false, "network.staff": true},
+        })
+    );
+    assert_eq!(
+        groups["admin"]["suffix"],
+        serde_json::json!({"priority": 3, "text": " *"})
     );
 }
-
-const GROUP_PROBES: &str = r#"permissions={['*']={probe=true}},
-    commands={
-        add={permission='probe',run=function(ctx) return {message=tostring(rift.permissions.add_group(ctx.uuid,ctx.args))} end},
-        remove={permission='probe',run=function(ctx) return {message=tostring(rift.permissions.remove_group(ctx.uuid,ctx.args))} end},
-        groups={permission='probe',run=function(ctx) return {message='['..table.concat(rift.permissions.groups(ctx.uuid),',')..']'} end},
-        has={permission='probe',run=function(ctx) return {message=tostring(ctx.has_permission(ctx.args))} end},
-        revoke={permission='probe',run=function(ctx) rift.permissions.set(ctx.uuid,ctx.args,false) end},
-        everyone={permission='probe',run=function(ctx) rift.permissions.add_group('*',ctx.args) end},
-        reserved={permission='probe',run=function(ctx) rift.store.get('rift.groups',ctx.uuid) end},
-    }"#;
 
 /// Run a probe command with a generous budget: disk sync latency on shared
 /// runners can exceed the session's 50 ms deadline.
@@ -769,50 +821,44 @@ fn probe(runtime: &Extensions, command: &str, args: &str) -> io::Result<String> 
     })
 }
 
+const GROUP_PROBES: &str = r#"commands={
+        add={permission='probe',run=function(ctx)
+            return {message=tostring(rift.permissions.user(ctx.uuid):add_parent(ctx.args).changed)}
+        end},
+        remove={permission='probe',run=function(ctx)
+            return {message=tostring(rift.permissions.user(ctx.uuid):remove_parent(ctx.args).changed)}
+        end},
+        groups={permission='probe',run=function(ctx)
+            local names = {}
+            for _, node in ipairs(rift.permissions.user(ctx.uuid):nodes()) do
+                if node.kind == 'inherit' then names[#names + 1] = node.group end
+            end
+            return {message='['..table.concat(names,',')..']'}
+        end},
+        has={permission='probe',run=function(ctx) return {message=tostring(ctx.has_permission(ctx.args))} end},
+    }"#;
+
 #[test]
-fn group_memberships_persist_across_restart_and_survive_group_removal() {
-    let state = StateFile::new();
-    let storage = format!(
-        "api_version=2, storage={{path={}}}, {GROUP_PROBES}",
-        state.lua_path()
+fn group_memberships_survive_config_reloads_that_drop_the_group() {
+    let settings = |groups: &str| format!("api_version=3, {GROUP_PROBES}, groups={{{groups}}}");
+    let full = settings(
+        "default={permissions={probe=true,['network.queue']=true}},
+         staff={inherits={'default'}, permissions={['network.*']=true}}",
     );
-    let settings = format!(
-        r#"{storage}, groups={{
-            default={{permissions={{['network.queue']=true}}}},
-            staff={{inherits={{'default'}}, permissions={{['network.*']=true}}}},
-        }}"#
-    );
-    {
-        let runtime = runtime(&settings);
-        assert_eq!(probe(&runtime, "has", "network.queue").unwrap(), "true");
-        assert_eq!(probe(&runtime, "has", "network.staff").unwrap(), "false");
-        assert_eq!(probe(&runtime, "add", "staff").unwrap(), "true");
-        assert_eq!(probe(&runtime, "add", "staff").unwrap(), "false");
-        assert_eq!(probe(&runtime, "has", "network.staff").unwrap(), "true");
-        assert_eq!(probe(&runtime, "groups", "").unwrap(), "[staff]");
-        for (command, args) in [
-            ("add", "missing"),
-            ("add", "default"),
-            ("add", "Staff"),
-            ("everyone", "staff"),
-            ("reserved", ""),
-        ] {
-            assert!(probe(&runtime, command, args).is_err(), "{command} {args}");
-        }
-        assert_eq!(probe(&runtime, "groups", "").unwrap(), "[staff]");
-        // Live wildcard overrides still revoke group grants.
-        probe(&runtime, "revoke", "network.*").unwrap();
-        assert_eq!(probe(&runtime, "has", "network.staff").unwrap(), "false");
-    }
-    // Memberships are durable; overrides are process-local.
-    let restarted = runtime(&settings);
-    assert_eq!(probe(&restarted, "has", "network.staff").unwrap(), "true");
-    assert_eq!(probe(&restarted, "groups", "").unwrap(), "[staff]");
-    // A reload that drops the group leaves the membership dormant but removable.
+    let runtime = runtime(&full);
+    assert_eq!(probe(&runtime, "has", "network.queue").unwrap(), "true");
+    assert_eq!(probe(&runtime, "has", "network.staff").unwrap(), "false");
+    assert_eq!(probe(&runtime, "add", "staff").unwrap(), "true");
+    assert_eq!(probe(&runtime, "add", "staff").unwrap(), "false");
+    assert_eq!(probe(&runtime, "has", "network.staff").unwrap(), "true");
+    assert_eq!(probe(&runtime, "groups", "").unwrap(), "[staff]");
+    assert!(probe(&runtime, "add", "bad name").is_err());
+    // A reload that drops the group removes its configured nodes; the
+    // membership stays, grants nothing, and can be removed.
     let reloaded = Extensions::new(
-        &config(&format!("{storage}, groups={{default={{}}}}")),
-        restarted.broker.clone(),
-        Some(&restarted),
+        &config(&settings("default={permissions={probe=true}}")),
+        runtime.broker.clone(),
+        Some(&runtime),
     )
     .unwrap();
     reloaded.activate();
@@ -821,26 +867,26 @@ fn group_memberships_persist_across_restart_and_survive_group_removal() {
     assert_eq!(probe(&reloaded, "remove", "staff").unwrap(), "true");
     assert_eq!(probe(&reloaded, "remove", "staff").unwrap(), "false");
     assert_eq!(probe(&reloaded, "groups", "").unwrap(), "[]");
-    drop((restarted, reloaded));
-    let restarted = runtime(&settings);
-    assert_eq!(probe(&restarted, "has", "network.staff").unwrap(), "false");
 }
 
 #[tokio::test]
 async fn commands_honor_group_and_wildcard_grants() {
     let runtime = runtime(
-        r#"api_version=2,
-        permissions={['01010101010101010101010101010101']={['ranks.manage']=true}},
-        groups={staff={permissions={['network.*']=true}}},
+        r#"api_version=3,
+        groups={staff={permissions={['network.*']=true}}, ranks={permissions={['ranks.manage']=true}}},
         commands={
             staff={permission='network.staff',run=function() return {server='game'} end},
             rank={permission='ranks.manage',run=function(ctx)
-                local uuid=string.rep('02',16)
-                if ctx.args=='add' then rift.permissions.add_group(uuid,'staff')
-                else rift.permissions.remove_group(uuid,'staff') end
+                local user=rift.permissions.user(string.rep('02',16))
+                if ctx.args=='add' then user:add_parent('staff') else user:remove_parent('staff') end
             end},
         }"#,
     );
+    let admin = rift_permissions::Change::SetNode {
+        subject: SubjectRef::User(Uuid::parse(&context(1).uuid).unwrap()),
+        node: Node::inherit("ranks", true).unwrap(),
+    };
+    runtime.permissions().apply(Actor::Cli, admin).unwrap();
     let admin = runtime.session(context(1)).unwrap();
     let player = runtime.session(context(2)).unwrap();
     assert!(matches!(
@@ -1041,6 +1087,7 @@ fn player_filters_and_transfers_accept_service_groups() {
             BTreeSet::from(["games-1".to_owned()]),
         )]))),
         Broker::new(Default::default()).unwrap(),
+        Arc::new(Authority::memory(&Default::default())),
     );
     let (_alice, mut alice) = players.register(1, &[1; 16], "Alice", 774, "games-1");
     let (_bob, mut bob) = players.register(2, &[2; 16], "Bob", 774, "lobby");
@@ -1224,4 +1271,68 @@ async fn players_api_shows_changes_and_removes_boss_bars() {
         ]
     );
     assert!(drain(&mut legacy).is_empty());
+}
+
+#[test]
+fn upgrade_copies_group_memberships_and_legacy_grants_without_touching_the_store() {
+    let state = StateFile::new();
+    let extension = format!(
+        "api_version=2, storage={{path={}}}, groups={{staff={{permissions={{['network.staff']=true}}}}}},
+        permissions={{['*']={{['chat.send']=true}}, ['{}']={{['network.*']=true, ['network.ban']=false}}}}",
+        state.lua_path(),
+        "01".repeat(16),
+    );
+    let path = std::env::temp_dir().join("rift-upgrade.lua");
+    // Startup parses before validating, so the removed field is still readable.
+    let config = Config::from_lua_at_unrestored(&source(&extension), &path).unwrap();
+    assert!(
+        config.validate().is_err(),
+        "validation refuses the removed field"
+    );
+    let storage = config.extensions.as_ref().unwrap().storage.as_ref();
+    {
+        let store = storage::Store::open(storage).unwrap();
+        store
+            .mutate_then(
+                Instant::now() + Duration::from_secs(30),
+                |entries| {
+                    entries.insert((MEMBERSHIPS.into(), "01".repeat(16)), b"staff,vip".to_vec());
+                    entries.insert((MEMBERSHIPS.into(), "corrupt".into()), b"staff".to_vec());
+                    Ok(())
+                },
+                |_| {},
+            )
+            .unwrap();
+    }
+    let authority = Authority::memory(&config.permissions);
+    let applied = authority
+        .migrate_once(|| upgrade_nodes(&config))
+        .unwrap()
+        .unwrap();
+    assert_eq!(applied.ops, 5);
+    assert!(authority.migrate_once(|| unreachable!()).unwrap().is_none());
+    let alice = Uuid::parse(&"01".repeat(16)).unwrap();
+    let parents: Vec<String> = authority
+        .user(alice)
+        .unwrap()
+        .nodes
+        .iter()
+        .filter(|node| node.kind() == rift_permissions::NodeKind::Inherit)
+        .map(|node| node.payload.key())
+        .collect();
+    assert_eq!(parents, ["staff", "vip"]);
+    let global = ContextSet::new();
+    assert_eq!(
+        authority.check(alice, "network.kick", &global),
+        Tristate::True
+    );
+    assert_eq!(
+        authority.check(alice, "network.ban", &global),
+        Tristate::False
+    );
+    let other = Uuid::from_u128(7);
+    assert_eq!(authority.check(other, "chat.send", &global), Tristate::True);
+    // Nothing is deleted from the extension store, so a downgrade still works.
+    let store = storage::Store::open(storage).unwrap();
+    assert_eq!(store.namespace(MEMBERSHIPS).len(), 2);
 }

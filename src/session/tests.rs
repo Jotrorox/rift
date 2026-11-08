@@ -659,7 +659,7 @@ async fn proxy_suggestions_are_answered_rate_limited_and_permission_filtered() {
     let config = crate::config::Config::from_lua(r#"return {
         listeners={public='127.0.0.1:0'}, backends={lobby='127.0.0.1:1'}, routes={public='lobby'},
         authentication={online_mode=true}, forwarding={mode='velocity', secret_env='TEST_SECRET'},
-        extensions={api_version=1, permissions={['*']={['mod.ban']=true}}, commands={
+        extensions={api_version=1, commands={
             ban={permission='mod.ban', run=function() end, suggest=function() return {'Alice', 'Bob'} end},
             staff={permission='staff.only', run=function() end, suggest='players'},
         }}
@@ -670,6 +670,14 @@ async fn proxy_suggestions_are_answered_rate_limited_and_permission_filtered() {
         None,
     )
     .unwrap();
+    let grant = rift_permissions::Change::SetNode {
+        subject: rift_permissions::SubjectRef::Group("default".into()),
+        node: rift_permissions::Node::permission("mod.ban", true).unwrap(),
+    };
+    runtime
+        .permissions()
+        .apply(rift_permissions::Actor::Cli, grant)
+        .unwrap();
     session.set_extension(
         runtime
             .session(crate::extensions::Context::authenticated(
@@ -1663,6 +1671,14 @@ async fn registered_extension_commands_reach_the_proxy_and_never_the_backend() {
         None,
     )
     .unwrap();
+    let grant = rift_permissions::Change::SetNode {
+        subject: rift_permissions::SubjectRef::Group("default".into()),
+        node: rift_permissions::Node::permission("mod.ban", true).unwrap(),
+    };
+    runtime
+        .permissions()
+        .apply(rift_permissions::Actor::Cli, grant)
+        .unwrap();
     session.set_extension(
         runtime
             .session(crate::extensions::Context::authenticated(

@@ -1,5 +1,5 @@
--- Authenticated network extensions v2: durable state, jobs, permission groups,
--- live permissions and actions for online players.
+-- Authenticated network extensions v3: durable state, jobs, permission groups,
+-- live permission changes and actions for online players.
 -- Use the Paper/Velocity setup documented in examples/online.lua.
 -- RIFT_FORWARDING_SECRET='<shared secret>' rift --config examples/extensions.lua
 -- Validate without credentials or backend servers: rift --check examples/extensions.lua
@@ -26,18 +26,19 @@ rift.config.network = { hubs = { "lobby" } }
 rift.config.fallbacks = { survival = { "lobby" }, staff = { "lobby" } }
 
 rift.config.extensions = {
-    api_version = 2,
+    api_version = 3,
     -- Relative to this Lua file; use a writable location for production.
     -- Omit storage for process-local state that survives callbacks and reloads.
     storage = { path = "extensions.state" },
-    -- staff_uuid holds every network.* node directly and can manage ranks.
-    -- Other players get permissions from groups; memberships are stored durably.
-    permissions = {
-        [staff_uuid] = { ["network.*"] = true },
-    },
+    -- Groups are mirrored into the permission store on every reload. Players
+    -- join groups at runtime (see /rank and join below); those memberships
+    -- live in the store beside the configuration and survive restarts.
     groups = {
         default = { permissions = { ["network.queue"] = true } },
-        staff = { inherits = { "default" }, permissions = { ["network.staff"] = true } },
+        staff = { inherits = { "default" }, weight = 10, prefix = "&9[Staff] ",
+            permissions = { ["network.staff"] = true } },
+        admin = { inherits = { "staff" }, weight = 100, prefix = "&c[Admin] ",
+            permissions = { ["network.*"] = true } },
     },
     -- Includes players joining or transferring; all entry paths reserve a
     -- slot. Set this to 1 to try the queue with two authenticated players.
@@ -98,15 +99,19 @@ rift.config.extensions = {
             permission = "network.ranks",
             run = function(ctx)
                 local uuid = string.sub(ctx.args, -32)
+                local user = rift.permissions.user(uuid)
                 if ctx.args == "add " .. uuid then
-                    rift.permissions.add_group(uuid, "staff")
+                    user:add_parent("staff", { reason = "/rank by " .. ctx.name })
                 elseif ctx.args == "remove " .. uuid then
-                    rift.permissions.remove_group(uuid, "staff")
+                    user:remove_parent("staff", { reason = "/rank by " .. ctx.name })
                 else
                     return { message = "Usage: /rank add|remove <uuid without hyphens>" }
                 end
-                return { message = uuid .. " groups: [" ..
-                    table.concat(rift.permissions.groups(uuid), ", ") .. "]" }
+                local groups = {}
+                for _, node in ipairs(user:nodes()) do
+                    if node.kind == "inherit" then groups[#groups + 1] = node.group end
+                end
+                return { message = uuid .. " groups: [" .. table.concat(groups, ", ") .. "]" }
             end,
         },
         -- /alert <text> messages every online player with network.staff.
@@ -116,7 +121,7 @@ rift.config.extensions = {
                 if ctx.args == "" then return { message = "Usage: /alert <text>" } end
                 local sent = 0
                 for _, player in ipairs(rift.players.list()) do
-                    if rift.permissions.has(player.uuid, "network.staff")
+                    if rift.permissions.check(player.uuid, "network.staff") == true
                         and rift.players.message(player.uuid, "[Staff] " .. ctx.name .. ": " .. ctx.args)
                     then
                         sent = sent + 1
@@ -129,6 +134,9 @@ rift.config.extensions = {
     -- Optional observations through the existing in-process message broker.
     -- Subscribe with a messaging consumer to capture these events.
     join = function(ctx)
+        -- The first administrator; later ones are added with /rank or the dashboard.
+        -- Writing a node that already exists records nothing.
+        if ctx.uuid == staff_uuid then rift.permissions.user(ctx.uuid):add_parent("admin") end
         local visits = rift.store.increment("visits", ctx.uuid, 1)
         rift.players.title(ctx.uuid, {
             title = "Welcome, " .. ctx.name,
@@ -145,6 +153,11 @@ rift.config.extensions = {
     end,
 }
 
+-- Every committed permission change, from Lua, the dashboard or an expiry.
+rift.permissions.on_change(function(event)
+    rift.publish("example.permissions", event.subject .. " " .. event.kind .. " " .. event.key)
+end)
+
 -- External work runs in a bounded background job. Permission updates apply to
 -- connected players' next command/transfer check without reconnecting.
 if refresh_staff_permissions then
@@ -154,11 +167,9 @@ if refresh_staff_permissions then
     rift.config.extensions.jobs.staff_permissions = {
         every_ms = 30000,
         run = function()
-            rift.permissions.set(staff_uuid, "network.staff", false)
             local response = rift.http.request("directory", { path = staff_uuid })
-            if response.status == 200 and response.body == "allow" then
-                rift.permissions.set(staff_uuid, "network.staff", true)
-            end
+            local allowed = response.status == 200 and response.body == "allow"
+            rift.permissions.user(staff_uuid):set("network.staff", allowed)
         end,
     }
 end

@@ -248,7 +248,7 @@ async fn imported_api_and_publish_references_work_in_http_message_and_authentica
             r#"
         rift.config.authentication = { online_mode = true }
         rift.config.forwarding = { mode = 'velocity' }
-        rift.config.extensions = { permissions = { ['*'] = { ['plugin.hello'] = true } } }
+        rift.config.extensions = { api_version = 3, groups = { default = { permissions = { ['plugin.hello'] = true } } } }
         rift.config.messaging = { subscriptions = {{ subject = 'echo' }} }
         rift.plugin('features')
     "#,

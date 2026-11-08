@@ -2,9 +2,10 @@
 //! them. Each session drains its own bounded queue from its connection loop;
 //! callers never touch a socket.
 //!
-//! Joins, server switches and quits are published on `rift.events.players`.
+//! Joins, server switches and quits are published on `rift.events.players`
+//! and tell the permission authority who is online and on which server.
 use super::fields;
-use crate::messaging::Broker;
+use crate::{messaging::Broker, permissions::Authority};
 use mlua::{Lua, Table, Value};
 use std::{
     cell::Cell,
@@ -73,6 +74,7 @@ pub struct Players {
     destinations: Destinations,
     groups: Groups,
     events: Broker,
+    permissions: Arc<Authority>,
 }
 
 pub const EVENTS: &str = "rift.events.players";
@@ -81,6 +83,7 @@ pub const EVENTS: &str = "rift.events.players";
 pub struct PlayerHandle {
     players: Players,
     id: u64,
+    uuid: rift_permissions::Uuid,
 }
 
 impl PlayerHandle {
@@ -93,6 +96,7 @@ impl PlayerHandle {
         if entry.server == server {
             return;
         }
+        self.players.permissions.switch_server(self.uuid, server);
         let previous = std::mem::replace(&mut entry.server, server.to_owned());
         let event = self
             .players
@@ -105,6 +109,7 @@ impl PlayerHandle {
 impl Drop for PlayerHandle {
     fn drop(&mut self) {
         let removed = self.players.lock().remove(&self.id);
+        self.players.permissions.leave(self.uuid);
         if let Some(entry) = removed {
             let event = self.players.event("quit", self.id, &entry, None);
             self.players.publish(event);
@@ -280,12 +285,18 @@ fn find<'a>(
 }
 
 impl Players {
-    pub(super) fn new(destinations: Destinations, groups: Groups, events: Broker) -> Self {
+    pub(super) fn new(
+        destinations: Destinations,
+        groups: Groups,
+        events: Broker,
+        permissions: Arc<Authority>,
+    ) -> Self {
         Self {
             sessions: Arc::default(),
             destinations,
             groups,
             events,
+            permissions,
         }
     }
 
@@ -336,12 +347,15 @@ impl Players {
             boss_bars: BTreeSet::new(),
         };
         let event = self.event("join", id, &entry, None);
+        let player = rift_permissions::Uuid::from_bytes(*uuid);
+        self.permissions.join(player, name, server);
         self.lock().insert(id, entry);
         self.publish(event);
         (
             PlayerHandle {
                 players: self.clone(),
                 id,
+                uuid: player,
             },
             receiver,
         )

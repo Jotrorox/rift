@@ -481,7 +481,7 @@ async fn queue_command_waits_for_capacity_and_transfer_policy_runs_before_target
         let extension_config = Config::from_lua(r#"return {
             listeners={public='127.0.0.1:0'}, backends={lobby='127.0.0.1:1',survival='127.0.0.1:2'}, routes={public='lobby'},
             authentication={online_mode=true},forwarding={mode='velocity',secret_env='TEST_SECRET'},
-            extensions={api_version=1, queues={survival=1}, permissions={['*']={['queue.use']=true}},
+            extensions={api_version=1, queues={survival=1},
                 commands={queue={permission='queue.use',run=function() return {queue='survival'} end}},
                 before_transfer=function(ctx)
                     if ctx.reason ~= 'queue' then return {deny='Use the queue'} end
@@ -490,6 +490,11 @@ async fn queue_command_waits_for_capacity_and_transfer_policy_runs_before_target
             }
         }"#, "network-extensions.lua").unwrap();
         let extensions = Extensions::new(&extension_config, snapshot.messaging.clone(), None).unwrap();
+        let grant = rift_permissions::Change::SetNode {
+            subject: rift_permissions::SubjectRef::Group("default".into()),
+            node: rift_permissions::Node::permission("queue.use", true).unwrap(),
+        };
+        extensions.permissions().apply(rift_permissions::Actor::Cli, grant).unwrap();
         let mut observations = snapshot.messaging.subscribe("observed", None).unwrap();
         let profile = AuthenticatedProfile { uuid: [7;16], name: "Player".into(), properties: vec![] };
         let mut occupant = extensions.session(Context::authenticated(2, &profile)).unwrap();
