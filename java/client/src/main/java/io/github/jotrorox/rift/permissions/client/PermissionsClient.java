@@ -223,9 +223,21 @@ public final class PermissionsClient implements RiftPermissions, AutoCloseable {
         return replica.groups().groups();
     }
 
-    /** @return the replica, for diagnostics and adapters */
-    public Replica replica() {
-        return replica;
+    /**
+     * Fetch one group with its permission nodes, which the replica's group table leaves out.
+     *
+     * @param name the group
+     * @return the group, or empty when it does not exist
+     */
+    public CompletableFuture<Optional<GroupInfo>> fetchGroup(String name) {
+        Protocol.GroupsGetRequest request = new Protocol.GroupsGetRequest(List.of(name), true);
+        return request(Protocol.GROUPS_GET, Codec.toJson(request), Codec::readGroupsReply, requestTimeout)
+                .thenApply(reply -> reply.groups().stream().filter(group -> group.name().equals(name)).findFirst());
+    }
+
+    /** @return the host adapter in use */
+    public Platform platform() {
+        return platform;
     }
 
     /** @return whether the proxy answered {@code hello} on the current connection */
@@ -376,11 +388,6 @@ public final class PermissionsClient implements RiftPermissions, AutoCloseable {
                 return () -> calculators.remove(calculator);
             }
         };
-    }
-
-    /** @return the registered context calculators, for platforms */
-    public List<ContextCalculator<?>> calculators() {
-        return List.copyOf(calculators);
     }
 
     /**

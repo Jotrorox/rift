@@ -271,11 +271,17 @@ public final class MessagingClient implements AutoCloseable {
         }
     }
 
+    /**
+     * Daemon threads whose context class loader is this library's, so that kwik's
+     * {@code ServiceLoader} lookups find its providers when the library is shaded into a plugin.
+     */
     private static ThreadFactory daemon(String name) {
         AtomicInteger count = new AtomicInteger();
+        ClassLoader loader = MessagingClient.class.getClassLoader();
         return runnable -> {
             Thread thread = new Thread(runnable, name + "-" + count.incrementAndGet());
             thread.setDaemon(true);
+            thread.setContextClassLoader(loader);
             return thread;
         };
     }

@@ -42,11 +42,6 @@ public final class Publisher implements AutoCloseable {
         return pipeline.send(new Frames.Writer(Frames.PING).frame(), true);
     }
 
-    /** @return whether no operation has failed */
-    public boolean healthy() {
-        return pipeline.healthy();
-    }
-
     @Override
     public void close() {
         pipeline.close();
