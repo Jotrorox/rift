@@ -620,6 +620,23 @@ impl Config {
             }
             let extensions = crate::extensions::ExtensionScript::parse(&root, &source)
                 .map_err(|e| e.to_string())?;
+            let plugins = lua
+                .app_data_ref::<crate::script::PersistentPlugins>()
+                .map(|records| records.0.clone())
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(name, config_json)| {
+                    let installed = &source.installed[&name];
+                    Ok::<_, String>(crate::plugins::PluginSpec {
+                        folder: source.root.join("plugins").join(&name),
+                        config_root: source.root.clone(),
+                        manifest: installed.manifest.clone()?,
+                        fingerprint: installed.fingerprint.clone()?,
+                        name,
+                        config_json,
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             let on_route = match root
                 .raw_get::<Value>("on_route")
                 .map_err(|e| e.to_string())?
@@ -822,7 +839,7 @@ impl Config {
                 forwarding,
                 on_route,
                 extensions,
-                plugins: Vec::new(),
+                plugins,
                 on_http,
                 on_message,
                 on_status,
@@ -856,6 +873,12 @@ impl Config {
                 .map_err(|error| invalid(format!("{name}: {error}")))?;
         }
         Ok((config, cost))
+    }
+
+    /// Whether authenticated sessions run player hooks: with extensions, or
+    /// with persistent plugins once players have a verified identity.
+    pub fn player_hooks(&self) -> bool {
+        self.extensions.is_some() || (!self.plugins.is_empty() && self.authentication.online_mode)
     }
 
     pub fn validate(&self) -> io::Result<()> {
