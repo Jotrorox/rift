@@ -18,7 +18,6 @@ mod store;
 pub use audit::LogQuery;
 pub use authority::{Authority, Bulk, Holder, Member, Notification, Registered};
 pub use import::{ImportReport, read_export, write_export};
-pub use rift_permissions as model;
 
 use rift_permissions::wire::ErrorCode;
 use std::{fmt, io};

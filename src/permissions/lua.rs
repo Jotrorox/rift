@@ -21,7 +21,7 @@ const MAX_WRITES: usize = 64;
 /// Longest audit reason in bytes.
 const MAX_REASON: usize = 256;
 /// Ops passed to `on_change` handlers per change; the rest are dropped.
-pub(crate) const MAX_HANDLED_OPS: usize = 64;
+const MAX_HANDLED_OPS: usize = 64;
 
 fn error(message: impl std::fmt::Display) -> mlua::Error {
     mlua::Error::runtime(format!("rift.permissions: {message}"))
@@ -62,7 +62,7 @@ fn priority(value: &Value) -> mlua::Result<i32> {
 }
 
 /// A context table: keys to a string or a list of strings.
-pub(crate) fn contexts(value: &Value) -> mlua::Result<ContextSet> {
+fn contexts(value: &Value) -> mlua::Result<ContextSet> {
     let mut set = ContextSet::new();
     match value {
         Value::Nil => {}
