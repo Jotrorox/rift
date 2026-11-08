@@ -125,6 +125,15 @@ async fn start() -> io::Result<()> {
                     "rift: warning: configuration evaluation is heavy; move expensive work into callbacks that need it, or callbacks may miss their 50 ms deadline"
                 );
             }
+            let (plugins, warnings) = check::plugins(&config);
+            for line in &plugins {
+                println!("rift: {line}");
+            }
+            if !strict {
+                for warning in &warnings {
+                    eprintln!("rift: warning: {warning}");
+                }
+            }
             if strict {
                 let path = fs::canonicalize(path)?;
                 let report = check::strict(&config, &path);
