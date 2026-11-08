@@ -852,10 +852,11 @@ async fn route_status_and_http_follow_the_script() {
 #[tokio::test]
 async fn unavailable_engines_are_refused_before_anything_starts() {
     let root = directory();
-    let error = Extensions::new(
+    let error = Extensions::with_engines(
         &config("", vec![spec(&root, "a", "", "{}")]),
         Broker::default(),
         None,
+        Engines::default(),
     )
     .err()
     .unwrap();

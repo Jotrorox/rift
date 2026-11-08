@@ -198,7 +198,7 @@ fn json_value(
     })
 }
 
-fn response(value: Value) -> mlua::Result<Option<HttpResponse>> {
+pub(crate) fn response(value: Value) -> mlua::Result<Option<HttpResponse>> {
     if value.is_nil() {
         return Ok(None);
     }

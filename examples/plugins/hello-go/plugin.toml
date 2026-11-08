@@ -1,0 +1,17 @@
+# Build with `make TINYGO=/path/to/tinygo` in this directory (see main.go for
+# the behaviour); the build writes hello_go.wasm next to this file.
+name = "hello-go"
+version = "0.1.0"
+api = "0.1"
+mode = "persistent"
+engine = "wasm"
+entry = "hello_go.wasm"
+
+[failure]
+on_timeout = "deny"
+on_failure = "deny"
+restart = "on-failure"
+
+[capabilities]
+filesystem = ["data"]
+network = false

@@ -140,7 +140,7 @@ fn ticks(options: &Table, field: &str, default: i64) -> mlua::Result<i32> {
     }
 }
 
-fn title(value: Value) -> mlua::Result<PlayerAction> {
+pub(crate) fn title(value: Value) -> mlua::Result<PlayerAction> {
     let options = match value {
         Value::String(title) => {
             return Ok(PlayerAction::Title {
@@ -177,7 +177,7 @@ fn title(value: Value) -> mlua::Result<PlayerAction> {
     })
 }
 
-fn tab_list(value: Option<Table>) -> mlua::Result<PlayerAction> {
+pub(crate) fn tab_list(value: Option<Table>) -> mlua::Result<PlayerAction> {
     let Some(options) = value else {
         return Ok(PlayerAction::TabList(None));
     };
@@ -196,7 +196,7 @@ fn tab_list(value: Option<Table>) -> mlua::Result<PlayerAction> {
     })))
 }
 
-fn boss_bar(name: String, value: Option<Table>) -> mlua::Result<PlayerAction> {
+pub(crate) fn boss_bar(name: String, value: Option<Table>) -> mlua::Result<PlayerAction> {
     if !super::token(&name) {
         return Err(error(
             "boss bar name must be 1..=64 lowercase letters, digits, '.', '_' or '-'",
