@@ -172,6 +172,43 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  java:
+    name: Java libraries and RiftPerms
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: java
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+      # Unit tests, the shared fixture corpus, Javadoc and the shaded plugin jar.
+      - run: ./gradlew build --no-daemon
+      - run: rustup show
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          prefix-key: v1-rust
+          shared-key: regression-ubuntu-24.04
+          cache-bin: false
+          save-if: false
+      - name: Build the proxy for interoperability tests
+        working-directory: .
+        run: cargo build --locked --bin rift
+      - name: Interoperate with the real proxy over QUIC
+        run: ./gradlew integrationTest --no-daemon
+      - name: Preserve test reports
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: java-test-reports
+          path: java/*/build/reports/tests/
+          if-no-files-found: warn
+          retention-days: 14
+
   build-linux:
     name: Build shared Linux test executable
     runs-on: ubuntu-24.04
@@ -559,7 +596,7 @@ jobs:
   ci-ready:
     name: CI ready
     if: always()
-    needs: [quality, audit, regression, build-linux, minecraft, compatibility, benchmark]
+    needs: [quality, audit, regression, java, build-linux, minecraft, compatibility, benchmark]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:

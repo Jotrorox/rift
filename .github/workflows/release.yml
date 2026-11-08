@@ -33,9 +33,37 @@ jobs:
     needs: version
     uses: ./.github/workflows/ci.yml
 
+  java:
+    name: Build Java artifacts
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+      - name: Write the static Maven layout and the plugin jar
+        working-directory: java
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          ./gradlew --no-daemon -Pversion="$version" build publishAllPublicationsToReleaseRepository
+          mkdir -p "$RUNNER_TEMP/java"
+          (cd build/release-repo && zip -qr "$RUNNER_TEMP/java/rift-maven-$version.zip" .)
+          cp "paper/build/libs/RiftPerms-$version.jar" "$RUNNER_TEMP/java/"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-java
+          path: ${{ runner.temp }}/java/*
+          if-no-files-found: error
+
   publish:
     name: Publish tested release executables
-    needs: verify
+    needs: [verify, java]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -46,13 +74,55 @@ jobs:
           pattern: release-*
           path: dist
           merge-multiple: true
-      - name: Publish executables
+      - name: Publish executables, the RiftPerms plugin and the Maven layout
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
         working-directory: dist
         run: |
+          version="${RELEASE_TAG#v}"
           gh release create "$RELEASE_TAG" \
             rift-linux-x86_64 rift-macos-aarch64 rift-windows-x86_64.exe \
+            "RiftPerms-$version.jar" "rift-maven-$version.zip" \
             --verify-tag --generate-notes --title "$RELEASE_TAG"
+
+  packages:
+    name: Mirror Java artifacts to GitHub Packages
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+      - name: Publish to GitHub Packages
+        working-directory: java
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          ORG_GRADLE_PROJECT_GitHubPackagesUsername: ${{ github.actor }}
+          ORG_GRADLE_PROJECT_GitHubPackagesPassword: ${{ github.token }}
+        run: ./gradlew --no-daemon -Pversion="${RELEASE_TAG#v}" publishAllPublicationsToGitHubPackagesRepository
+
+  pages:
+    name: Rebuild the site with the new Maven artifacts
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      # The Pages build assembles maven/ from every release's rift-maven-*.zip, so a
+      # documentation-only deployment never drops published versions.
+      - name: Dispatch the documentation site build on the default branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: gh workflow run pages.yml --ref "$DEFAULT_BRANCH"
