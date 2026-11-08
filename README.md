@@ -149,9 +149,12 @@ sessions for up to 30 seconds by default; a second Ctrl-C closes them immediatel
 Lua extensions provide login and transfer decisions, lifecycle events,
 commands with UUID permission checks, and FIFO server queues. API v2 adds
 durable namespaced state, recurring jobs, configured HTTP integrations,
-permission groups with inheritance and wildcards, permissions that update
-during a session, and an online-player API for messages, titles, action bars,
-tab list headers, kicks, broadcasts and transfers; v1 remains supported. The
+permission groups as configuration, and an online-player API for messages,
+titles, action bars, tab list headers, kicks, broadcasts and transfers. API v3
+adds `rift.permissions` over Rift's [permission store](docs/permissions.md):
+LuckPerms-style users, groups, weights, contexts, temporary nodes, tracks,
+prefixes and meta, with change events and LuckPerms import; v1 and v2 remain
+supported. The
 [extension example](examples/extensions.lua) demonstrates these APIs with a
 survival queue and staff-only server. See the [extension API contract](docs/extensions.md) for
 ordering, deadlines, permissions and reload behavior. Extensions require online
