@@ -716,6 +716,7 @@ impl Shared {
             for uuid in &stored {
                 self.replica.remove(*uuid);
             }
+            self.replica.clear_groups();
         }
         let differs = self.replica.sync_revision(hello.revision) || backwards;
         if differs {
