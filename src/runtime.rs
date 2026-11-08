@@ -2120,10 +2120,10 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
             // One file, one lock: the instance registry and the permission
             // store share the connection.
             let database = Arc::new(rift::database::Database::open(&config.instance_database)?);
-            let store = Arc::new(rift::instance_store::Store::new(database.clone())?);
-            store.restore(&mut config)?;
-            let ports = store.reserve_restored_ports(&config)?;
-            let permissions = rift::permissions::Authority::open(database, &config.permissions)?;
+            // The upgrade reads fields that validation rejects, so it runs
+            // before anything validates the configuration.
+            let permissions =
+                rift::permissions::Authority::open(database.clone(), &config.permissions)?;
             if let Some(applied) =
                 permissions.migrate_once(|| rift::extensions::upgrade_nodes(&config))?
                 && applied.ops > 0
@@ -2133,6 +2133,9 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                     applied.ops, applied.revision
                 );
             }
+            let store = Arc::new(rift::instance_store::Store::new(database)?);
+            store.restore(&mut config)?;
+            let ports = store.reserve_restored_ports(&config)?;
             Ok((config, Some(store), Arc::new(permissions), ports))
         } else {
             let permissions = rift::permissions::Authority::memory(&config.permissions);

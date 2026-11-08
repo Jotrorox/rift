@@ -508,6 +508,13 @@ fn version_one_databases_migrate_and_ports_become_unique_per_node() {
     let store = fixture.store();
     let version = database::version(&store.database().lock(), "instances").unwrap();
     assert_eq!(version, 2);
+    // Older releases read the version from user_version.
+    let legacy: u32 = store
+        .database()
+        .lock()
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(legacy, 2);
     // The sequence survives, so names are never reused after the upgrade.
     let (_, name, _) = fixture.ready(&store);
     assert_eq!(name, "games-5");
