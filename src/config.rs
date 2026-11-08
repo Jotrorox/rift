@@ -191,6 +191,7 @@ pub const ADMIN_PERMISSIONS: &[&str] = &[
     "reload",
     "shutdown",
     "servers",
+    "perms",
 ];
 
 /// Grants available to named `web.operators`.

@@ -14,7 +14,38 @@ pub struct Network<'a> {
     pub metrics: &'a Metrics,
 }
 
+/// The UUID a backend will know the player by: the backend-confirmed one
+/// after the first login, the Mojang one after online authentication, and
+/// otherwise the offline UUID a backend computes from the name.
+pub fn expected_uuid<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin>(
+    session: &Session<C, B>,
+) -> Option<rift_permissions::Uuid> {
+    let bytes = session
+        .identity()
+        .and_then(|identity| identity.uuid)
+        .or_else(|| session.authenticated_profile().map(|profile| profile.uuid))
+        .or_else(|| session.player_name().map(rift::players::offline_uuid))?;
+    Some(rift_permissions::Uuid::from_bytes(bytes))
+}
+
 impl Network<'_> {
+    /// Publish the player's compiled subject for backend replicas before the
+    /// connection to `backend` is forwarded.
+    pub fn push_permissions<
+        C: AsyncRead + AsyncWrite + Unpin,
+        B: AsyncRead + AsyncWrite + Unpin,
+    >(
+        &self,
+        session: &Session<C, B>,
+        backend: &str,
+    ) {
+        if self.snapshot.perms.has_principals()
+            && let Some(uuid) = expected_uuid(session)
+        {
+            self.snapshot.perms.push_before_connect(uuid, backend);
+        }
+    }
+
     /// Claim an attachment before waking the process so idle/manual shutdown
     /// cannot race a pending login. Health probes never call this path.
     pub async fn prepare_backend(
@@ -296,6 +327,7 @@ impl Network<'_> {
                 event.failure = "io_error";
                 upstream.set_nodelay(true)?;
                 event.stage = "handshake_write";
+                self.push_permissions(session, &current);
                 let protocol = self
                     .snapshot
                     .config
@@ -413,6 +445,7 @@ impl Network<'_> {
                 .await?;
                 upstream.set_nodelay(true)?;
                 event.stage = "backend_switch";
+                self.push_permissions(session, name);
                 let protocol = config.backends.get(name.as_str()).and_then(|b| b.version());
                 match timeout_at(
                     attempt_deadline,

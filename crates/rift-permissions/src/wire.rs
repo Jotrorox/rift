@@ -45,6 +45,24 @@ pub const CONTEXT: &str = "rift.perms.context";
 /// Proxy → all, PUBLISH [`ChangeEvent`], alongside the other `rift.events.*`.
 pub const EVENTS: &str = "rift.events.permissions";
 
+/// Proxy → all, PUBLISH [`ResyncRequest`]: every replica refetches
+/// everything (`/perms sync`). Matched by [`UPDATE_ALL`], and never a
+/// `<uuid>` subject because it is not 32 hex digits.
+pub const RESYNC: &str = "rift.perms.update.resync";
+
+/// Every subject a backend sends to the proxy. Only the proxy (or a control
+/// principal) may subscribe to them.
+pub const REQUESTS: [&str; 8] = [
+    HELLO,
+    SUBJECT_GET,
+    SUBJECT_BATCH,
+    GROUPS_GET,
+    APPLY,
+    COMMAND,
+    REGISTER,
+    CONTEXT,
+];
+
 /// `rift.perms.update.<uuid>` for one player.
 pub fn update_subject(uuid: Uuid) -> String {
     format!("{UPDATE_PREFIX}{uuid}")
@@ -376,6 +394,14 @@ pub struct CommandReply {
     pub component: serde_json::Value,
 }
 
+/// `rift.perms.update.resync` payload: refetch every stored subject and the
+/// group table, and send `hello` again so the proxy sees the new revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResyncRequest {
+    /// The proxy's revision when the resync was requested.
+    pub revision: u64,
+}
+
 /// `rift.perms.context` payload: custom contexts for a player on the
 /// sending backend. Replaces that player's previous report.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -420,6 +446,7 @@ mod tests {
         assert_eq!(parse_update_subject(&subject), Some(uuid));
         assert_eq!(parse_update_subject(UPDATE), None);
         assert_eq!(parse_update_subject("rift.perms.update.x"), None);
+        assert_eq!(parse_update_subject(RESYNC), None);
     }
 
     #[test]

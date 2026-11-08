@@ -147,6 +147,9 @@ impl Identity {
     fn can_publish(&self, subject: &str, reply: Option<&str>) -> Result<()> {
         validate_literal(subject)?;
         if reserved(subject, "rift.events")
+            // Only the proxy publishes permission updates and the change log.
+            || reserved(subject, "rift.perms.update")
+            || reserved(subject, rift_permissions::wire::CHANGES)
             || (!self.control && reserved(subject, "rift.control"))
             || (reserved(subject, "rift.node") && !self.node_scope(subject))
             || !self.publish.iter().any(|p| covers(p, subject))
@@ -169,6 +172,12 @@ impl Identity {
             || (!self.control
                 && !self.node_scope(pattern)
                 && (overlaps(pattern, "rift.node.>") || covers(pattern, "rift.node")))
+            // Permission requests name players and carry `/perms` commands;
+            // only the proxy (or a control principal) may receive them.
+            || (!self.control
+                && rift_permissions::wire::REQUESTS
+                    .iter()
+                    .any(|subject| overlaps(pattern, subject)))
             || !self.subscribe.iter().any(|p| covers(p, pattern))
         {
             return Err(denied("subscription not permitted"));
@@ -568,7 +577,12 @@ async fn serve_stream(
                 identity.can_publish(&message.subject, message.reply.as_deref())?;
                 context
                     .broker
-                    .publish_with_reply(&message.subject, message.reply.as_deref(), message.payload)
+                    .publish_as(
+                        &message.subject,
+                        message.reply.as_deref(),
+                        message.payload,
+                        Some(&identity.name),
+                    )
                     .map_err(other)?;
                 if opcode == PUBLISH_ACK {
                     timeout(context.auth.io_timeout, write_simple(send, OK))
@@ -617,7 +631,12 @@ async fn serve_stream(
                 check_payload(&frame)?;
                 let message = context
                     .broker
-                    .request(&subject, frame, Duration::from_millis(wait as u64))
+                    .request_as(
+                        &subject,
+                        frame,
+                        Duration::from_millis(wait as u64),
+                        Some(&identity.name),
+                    )
                     .await
                     .map_err(other)?;
                 timeout(
