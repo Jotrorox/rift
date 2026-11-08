@@ -1466,9 +1466,11 @@ fn webassembly_grants_may_not_cover_the_plugin_cache_or_the_plugins_folder() {
         .unwrap();
         spec
     };
-    let quoted = |path: &Path| format!("\"{}\"", path.display());
+    // TOML literal strings, so Windows backslashes are not escapes.
+    let quoted = |path: &Path| format!("'{}'", path.display());
     for covering in [
-        Path::new("/").to_owned(),
+        // The filesystem root: `/`, or the drive on Windows.
+        root.ancestors().last().unwrap().to_owned(),
         root.clone(),
         root.join("local"),
         root.join(CACHE_DIRECTORY),

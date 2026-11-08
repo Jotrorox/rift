@@ -672,8 +672,15 @@ mod tests {
 
     #[test]
     fn full_manifest_parses() {
+        // An absolute path on this platform, as a TOML literal string.
+        let absolute = if cfg!(windows) {
+            r"C:\relaxoban"
+        } else {
+            "/var/lib/relaxoban"
+        };
         let manifest = Manifest::parse(
-            r#"
+            &format!(
+                r#"
 name = "relaxoban"
 version = "0.3.1"
 api = "0.1"
@@ -689,7 +696,7 @@ on_timeout = "continue"
 on_failure = "continue"
 restart = "always"
 [capabilities]
-filesystem = ["data", "host", "/var/lib/relaxoban"]
+filesystem = ["data", "host", '{absolute}']
 network = false
 env = ["RELAXOBAN_DSN"]
 [lua]
@@ -697,7 +704,8 @@ ffi = true
 native_modules = true
 memory_limit_mb = 64
 jit = false
-"#,
+"#
+            ),
             "relaxoban",
         )
         .unwrap();

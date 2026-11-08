@@ -706,7 +706,10 @@ async fn precompiled_components_are_loaded_from_the_cache() {
     let config = configure(&root, &guest, "", "{}");
     let spec = &config.plugins[0];
     let note = super::precompile(spec).unwrap();
-    assert!(note.contains("local/plugincache/probe-"), "{note}");
+    assert!(
+        note.replace('\\', "/").contains("local/plugincache/probe-"),
+        "{note}"
+    );
     let (_, key) = super::read(spec).unwrap();
     let path = super::cache::path(&root, "probe", &key);
     let engine = super::engine().unwrap();
