@@ -248,6 +248,7 @@ fn wire_fixture(fixture: &Value) -> Result<(), String> {
         "command_request" => round_trip::<wire::CommandRequest>(json),
         "command_reply" => round_trip::<wire::CommandReply>(json),
         "context_report" => round_trip::<wire::ContextReport>(json),
+        "resync_request" => round_trip::<wire::ResyncRequest>(json),
         "reply" => round_trip::<Reply<Value>>(json),
         "tristates" => round_trip::<Vec<Tristate>>(json),
         "meta_view" => round_trip::<MetaView>(json),

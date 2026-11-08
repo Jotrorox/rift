@@ -89,6 +89,7 @@ output must equal `json`. With `"error": true` parsing must fail instead.
 | `register_request` | `rift.perms.register` payload |
 | `command_request`, `command_reply` | `rift.perms.command` |
 | `context_report` | `rift.perms.context` payload |
+| `resync_request` | `rift.perms.update.resync` payload |
 | `reply` | reply envelope with arbitrary `data` |
 | `tristates` | array of `true`/`false`/`null` |
 | `meta_view` | meta view |

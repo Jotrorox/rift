@@ -1295,6 +1295,59 @@ fn messaging_quic_requires_tls_and_explicit_principal_acls() {
 }
 
 #[test]
+fn messaging_backend_preset_grants_the_permission_protocol() {
+    let config = Config::from_lua(&with_security(r#"
+        messaging = {
+            listen = '127.0.0.1:4222', certificate = 'server.pem', private_key = 'server.key',
+            principals = {
+                {name = 'server.survival', token_env = 'SURVIVAL_TOKEN', preset = 'backend'},
+                {name = 'server.lobby', token_env = 'LOBBY_TOKEN', preset = 'backend', publish = {'game.>', 'rift.perms.hello'}},
+            },
+        }
+    "#), "preset.lua").unwrap();
+    let messaging = config.messaging.unwrap();
+    let survival = &messaging.principals[0];
+    assert!(survival.publish.iter().any(|p| p == "rift.perms.subject.*"));
+    assert!(survival.publish.iter().any(|p| p == "rift.perms.command"));
+    assert!(
+        survival
+            .subscribe
+            .iter()
+            .any(|p| p == "rift.perms.update.>")
+    );
+    assert!(
+        survival
+            .subscribe
+            .iter()
+            .any(|p| p == "rift.events.permissions")
+    );
+    assert!(!survival.control);
+    let lobby = &messaging.principals[1];
+    assert_eq!(lobby.publish[0], "game.>");
+    assert_eq!(
+        lobby
+            .publish
+            .iter()
+            .filter(|p| *p == "rift.perms.hello")
+            .count(),
+        1
+    );
+    let error = Config::from_lua(
+        &with_security(
+            r#"
+        messaging = {
+            listen = '127.0.0.1:4222', certificate = 'server.pem', private_key = 'server.key',
+            principals = {{name = 'server.x', token_env = 'X_TOKEN', preset = 'everything'}},
+        }
+    "#,
+        ),
+        "preset.lua",
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("unknown preset"), "{error}");
+}
+
+#[test]
 fn messaging_malformed_settings_fail_closed() {
     for (settings, expected) in [
         ("messaging = true", "messaging"),

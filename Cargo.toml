@@ -65,12 +65,15 @@ bytes.workspace = true
 quinn.workspace = true
 rustls.workspace = true
 rift-messaging.workspace = true
+# `rift dev` generates its messaging certificate.
+rcgen.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
-rcgen.workspace = true
+# The end-to-end permission tests run the real backend client.
+rift-permissions-client.workspace = true
 
 [profile.release]
 lto = "thin"

@@ -26,10 +26,13 @@ rift-permissions-testing = { git = "https://github.com/Jotrorox/rift", tag = "v0
 
 ## Proxy setup
 
-Each backend authenticates as its own principal with exactly the grants
-listed under [principal permissions](permissions-protocol.md#principal-permissions),
+Each backend authenticates as its own principal `server.<name>` with the
+`backend` preset (the grants listed under
+[principal permissions](permissions-protocol.md#principal-permissions)),
 and gets the proxy's CA (or certificate) and its token through an
-environment variable.
+environment variable. For local development, `rift dev` starts a proxy with
+such a principal and prints its token and a client configuration
+(see [`rift dev`](permissions.md#rift-dev)).
 
 ## Rust client
 
@@ -69,7 +72,9 @@ replica revision that differs from the proxy's refetches every stored
 snapshot with `subject.batch` (at most `limits.batch` per request); the group
 table is fetched on every connection. On a lost connection it reconnects with
 backoff from 0.5 s to 30 s and repeats the handshake. While disconnected it
-logs `permissions unavailable` with the stale revision once a minute.
+logs `permissions unavailable` with the stale revision once a minute. A
+`/perms sync` (`rift.perms.update.resync`) repeats the handshake and refetches
+every stored snapshot.
 
 Updates follow the protocol's ordering rules: a pushed snapshot replaces the
 stored one only when newer; a change event at the next revision refetches the

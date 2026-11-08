@@ -14,7 +14,7 @@
 //! (`permission:essentials.fly@server=survival`). They name the same node
 //! across edits and restarts, unlike database row ids, and a client can build
 //! one from the typed node JSON without asking the server.
-use super::{Authority, LogQuery, PermError, write_export};
+use super::{Authority, LogQuery, PermError, control::BackendView, write_export};
 use axum::{
     Json, Router,
     body::Bytes,
@@ -48,35 +48,17 @@ const MAX_LIMIT: usize = 1000;
 /// Longest audit reason, as in Lua.
 const MAX_REASON: usize = 256;
 
-/// One backend as the bus layer sees it, for `GET /api/perms/backends`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct BackendStatus {
-    /// The bus principal, conventionally `server.<name>`.
-    pub identity: String,
-    /// The `server` name from its last `rift.perms.hello`.
-    pub server: String,
-    /// The revision its replica reported or was last sent.
-    pub revision: u64,
-    /// When the proxy last heard from it, Unix milliseconds.
-    pub last_seen_ms: u64,
-    /// Whether its bus connection is open.
-    pub connected: bool,
-    /// `client_version` from its hello.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub client_version: Option<String>,
-}
-
 /// The source of `GET /api/perms/backends`. The bus layer implements it and
 /// installs it with [`Authority::set_backends`].
 pub trait BackendDirectory: Send + Sync {
-    fn backends(&self) -> Vec<BackendStatus>;
+    fn backends(&self) -> Vec<BackendView>;
 }
 
 /// The directory before the bus layer installs one: no backends.
 pub struct NoBackends;
 
 impl BackendDirectory for NoBackends {
-    fn backends(&self) -> Vec<BackendStatus> {
+    fn backends(&self) -> Vec<BackendView> {
         Vec::new()
     }
 }
@@ -597,19 +579,10 @@ async fn revision(Extension(caller): Extension<Caller>) -> Reply {
 }
 
 async fn backends(Extension(caller): Extension<Caller>) -> Reply {
-    let current = caller.authority.revision();
-    let backends: Vec<Value> = caller
-        .authority
-        .backends()
-        .into_iter()
-        .map(|backend| {
-            let stale = backend.revision < current;
-            let mut value = json!(backend);
-            value["stale"] = json!(stale);
-            value
-        })
-        .collect();
-    ok(json!({"revision": current, "backends": backends}))
+    ok(json!({
+        "revision": caller.authority.revision(),
+        "backends": caller.authority.backends(),
+    }))
 }
 
 async fn registered(Extension(caller): Extension<Caller>) -> Reply {
