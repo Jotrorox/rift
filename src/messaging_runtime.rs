@@ -348,6 +348,7 @@ mod tests {
             subject: subject.into(),
             reply: Some("_INBOX.test".into()),
             payload: Bytes::copy_from_slice(payload.as_bytes()),
+            sender: None,
         }
     }
 

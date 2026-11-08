@@ -196,6 +196,7 @@ impl Client {
             subject: Arc::from(subject),
             reply: reply.map(Arc::from),
             payload,
+            sender: None,
         };
         let mut header = BytesMut::new();
         header.put_u8(STREAM_PUBLISH);

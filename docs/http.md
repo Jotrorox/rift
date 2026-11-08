@@ -372,7 +372,7 @@ node's id.
 | Method and path | Purpose |
 | --- | --- |
 | `GET /api/perms/revision` | `{revision}`: the last committed revision |
-| `GET /api/perms/backends` | `{revision, backends: [{identity, server, revision, last_seen_ms, connected, client_version, stale}]}`; `stale` when a backend's revision is behind. Empty until backend tracking reports into it |
+| `GET /api/perms/backends` | `{revision, backends: [{principal, server, revision, hello_at, last_seen, client_version, requests, stale}]}`: every backend principal that has sent a `rift.perms.*` request since the proxy started. `revision` is what its last `hello` reported; `stale` when that is behind the proxy and it has not said `hello` since; times are Unix seconds |
 | `GET /api/perms/registered` | `{registered: [{owner, node, description, default, plugin}]}`: nodes backend plugins registered, sorted by node |
 | `GET /api/perms/search?node=&like=&kind=&subjects=&source=&limit=` | `{holders: [{subject, name, id, node}], truncated}`: who sets a node directly. `node` is an exact storage key, `like` a SQL `LIKE` pattern as in bulk filters; `subjects` is `any`, `users` or `groups` |
 | `GET /api/perms/users?q=&group=&limit=` | `{users: [{uuid, name, online, groups}], truncated}`: players in the store (everyone who joined or has nodes), sorted by name. `q` matches part of the name or the start of the UUID; `group` keeps those with a positive `inherit` node for it in any context. `groups` lists global parents |

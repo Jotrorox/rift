@@ -64,6 +64,21 @@ struct Command {
     suggest: Suggest,
 }
 
+impl ExtensionScript {
+    /// `(command, permission)` of every command, sorted by command.
+    pub fn command_permissions(&self) -> Vec<(String, String)> {
+        self.commands
+            .iter()
+            .map(|(name, command)| (name.clone(), command.permission.clone()))
+            .collect()
+    }
+
+    /// `extensions.groups`, as mirrored into the permission store.
+    pub fn groups(&self) -> &BTreeMap<String, Group> {
+        &self.groups
+    }
+}
+
 /// How a command's arguments are completed: not at all, from online player
 /// names, from the servers the player may join, or by a Lua function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -940,6 +955,14 @@ impl Extensions {
     /// The permission authority every surface reads and writes through.
     pub fn permissions(&self) -> &Arc<Authority> {
         &self.permissions
+    }
+
+    /// `(command, permission)` of every extension command.
+    pub fn command_permissions(&self) -> Vec<(String, String)> {
+        self.script
+            .as_ref()
+            .map(ExtensionScript::command_permissions)
+            .unwrap_or_default()
     }
 
     /// Apply the `permissions` section and mirror `extensions.groups` into

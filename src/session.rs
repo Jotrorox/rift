@@ -239,6 +239,8 @@ pub struct Session<C, B> {
     pub handshake: Handshake,
     pub extension: Option<crate::extensions::ExtensionSession>,
     extension_commands: Vec<String>,
+    /// The authority behind the proxy's own `/perms` and `/rp`, once enabled.
+    permission_commands: Option<std::sync::Arc<crate::permissions::Authority>>,
     version: Option<ProtocolVersion>,
     login_start: Option<Packet>,
     identity: Option<PlayerIdentity>,
@@ -277,6 +279,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             backend: None,
             extension: None,
             extension_commands: Vec::new(),
+            permission_commands: None,
             handshake,
             login_start: None,
             identity: None,
@@ -313,6 +316,56 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
     pub fn set_extension(&mut self, extension: crate::extensions::ExtensionSession) {
         self.extension_commands = extension.commands();
         self.extension = Some(extension);
+        self.add_permission_commands();
+    }
+
+    /// Answer `/perms` and `/rp` on the proxy (network sessions only). An
+    /// extension command of the same name takes precedence.
+    pub fn enable_permission_commands(
+        &mut self,
+        authority: std::sync::Arc<crate::permissions::Authority>,
+    ) {
+        self.permission_commands = Some(authority);
+        self.add_permission_commands();
+    }
+
+    fn add_permission_commands(&mut self) {
+        if self.permission_commands.is_none() {
+            return;
+        }
+        for name in crate::permissions::command::COMMAND_NAMES {
+            if !self
+                .extension_commands
+                .iter()
+                .any(|command| command == name)
+            {
+                self.extension_commands.push(name.to_owned());
+            }
+        }
+    }
+
+    /// The proxy's `/perms` names this player sees in the command tree.
+    fn visible_permission_commands(&self) -> Vec<(String, bool)> {
+        let (Some(authority), Some(uuid)) = (
+            &self.permission_commands,
+            self.identity.as_ref().and_then(|identity| identity.uuid),
+        ) else {
+            return Vec::new();
+        };
+        let uuid = rift_permissions::Uuid::from_bytes(uuid);
+        if !crate::permissions::command::may_use(authority, uuid) {
+            return Vec::new();
+        }
+        let extension = self
+            .extension
+            .as_ref()
+            .map(|e| e.commands())
+            .unwrap_or_default();
+        crate::permissions::command::COMMAND_NAMES
+            .iter()
+            .filter(|name| !extension.iter().any(|command| command == *name))
+            .map(|name| ((*name).to_owned(), false))
+            .collect()
     }
 
     pub fn version(&self) -> io::Result<ProtocolVersion> {
@@ -1472,10 +1525,11 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                                 raw = None;
                                 // Rebuilt per tree, so permission changes
                                 // show with the backend's next Commands packet.
-                                let commands =
+                                let mut commands =
                                     self.extension.as_ref().map_or_else(Vec::new, |extension| {
                                         extension.visible_commands()
                                     });
+                                commands.extend(self.visible_permission_commands());
                                 caps.network_commands_with(&packet, &commands)?
                             } else {
                                 packet

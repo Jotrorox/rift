@@ -45,6 +45,10 @@ pub struct Message {
     pub subject: Arc<str>,
     pub reply: Option<Arc<str>>,
     pub payload: Bytes,
+    /// The authenticated bus principal that published the message, set by
+    /// Rift's QUIC listener for remote publishers. `None` for in-process
+    /// publishers and for messages read from the wire, which never carries it.
+    pub sender: Option<Arc<str>>,
 }
 
 /// Where and how a durable consumer reads a retained stream.

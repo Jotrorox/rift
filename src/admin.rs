@@ -449,12 +449,21 @@ pub(crate) async fn execute(
             sender.try_send(Transfer {snapshot: snapshot.clone(), backend: backend.clone(), reply: TransferReply::Admin(reply)}).map_err(|_| "player disconnected or already has a queued transfer")?;
             receiver.await.map_err(|_| "player disconnected during transfer".to_owned())?
         }
+        [command, args @ ..] if command == "perms" => {
+            let sender = rift::permissions::command::Sender::Console(rift_permissions::Actor::Cli);
+            let output = rift::permissions::command::execute(&snapshot.perms.env(), &sender, args).await;
+            if output.ok {
+                Ok(json!({"revision": output.revision, "text": output.text(), "data": output.data}))
+            } else {
+                Err(output.text())
+            }
+        }
         [command] if command == "reload" => {
             let (reply, receiver) = oneshot::channel();
             commands.try_send(Command::Reload(reply)).map_err(|_| "administrator command queue is full or shutting down")?;
             receiver.await.map_err(|_| "proxy is shutting down".to_owned())?
         }
-        _ => Err("usage: status | servers | groups | nodes | templates | download <template> [refresh] | create <group> | remove <instance> | start <backend> | stop <backend> | maintenance on/off | drain <backend> on/off | transfer <connection-id> <backend> | reload | shutdown".into()),
+        _ => Err("usage: status | servers | groups | nodes | templates | download <template> [refresh] | create <group> | remove <instance> | start <backend> | stop <backend> | maintenance on/off | drain <backend> on/off | transfer <connection-id> <backend> | perms <command> | reload | shutdown".into()),
     }
 }
 
@@ -553,7 +562,7 @@ pub async fn client(args: &[String]) -> io::Result<()> {
     if args.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "usage: rift admin [--address 127.0.0.1:9091] status|servers|groups|create <group>|remove <instance>|start <backend>|stop <backend>|maintenance on/off|drain <backend> on/off|transfer <connection-id> <backend>|reload|shutdown",
+            "usage: rift admin [--address 127.0.0.1:9091] status|servers|groups|create <group>|remove <instance>|start <backend>|stop <backend>|maintenance on/off|drain <backend> on/off|transfer <connection-id> <backend>|perms <command>|reload|shutdown",
         ));
     }
     let address: SocketAddr = address.parse().map_err(|_| {
@@ -574,6 +583,17 @@ pub async fn client(args: &[String]) -> io::Result<()> {
             "set RIFT_ADMIN_TOKEN to the server's admin secret",
         )
     })?;
+    // Import and export paths are read on the proxy host; make relative
+    // paths relative to where this command runs.
+    let mut args = args.to_vec();
+    if let [command, verb, file, ..] = args.as_mut_slice()
+        && command == "perms"
+        && (verb == "import" || verb == "export")
+        && let Ok(absolute) = std::path::absolute(&*file)
+    {
+        *file = absolute.display().to_string();
+    }
+    let perms = args.first().is_some_and(|command| command == "perms");
     let deadline = if args.first().is_some_and(|command| {
         matches!(
             command.as_str(),
@@ -601,7 +621,10 @@ pub async fn client(args: &[String]) -> io::Result<()> {
                     .unwrap_or("invalid admin response"),
             ));
         }
-        println!("{}", serde_json::to_string_pretty(&response["data"])?);
+        match response["data"]["text"].as_str() {
+            Some(text) if perms => println!("{text}"),
+            _ => println!("{}", serde_json::to_string_pretty(&response["data"])?),
+        }
         Ok(())
     })
     .await?

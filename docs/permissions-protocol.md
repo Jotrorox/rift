@@ -30,7 +30,14 @@ frame, code 1 for permission), not by a JSON reply.
 
 ### Principal permissions
 
-A backend principal needs exactly:
+Give a backend principal the `backend` preset, which grants exactly what the
+protocol needs:
+
+```lua
+{ name = "server.survival-1", token_env = "RIFT_SURVIVAL_1_TOKEN", preset = "backend" }
+```
+
+Written out, that is:
 
 ```lua
 {
@@ -41,7 +48,10 @@ A backend principal needs exactly:
         "rift.perms.apply", "rift.perms.register", "rift.perms.command",
         "rift.perms.context",
     },
-    subscribe = { "rift.perms.update", "rift.perms.update.>", "rift.events.permissions" },
+    subscribe = {
+        "rift.perms.update", "rift.perms.update.>", "rift.events.permissions",
+        "rift.perms.changes",
+    },
 }
 ```
 
@@ -49,6 +59,15 @@ REQUEST creates its own private inbox, so no `_INBOX` grant is needed. Nothing
 a backend sends writes the store directly: `apply`, `command` and `register`
 go through the proxy's single write path with the backend (or the player it
 names) recorded as the actor.
+
+The proxy knows which principal sent each message (the QUIC listener records
+it); payloads never name the sender. A principal named `server.<name>` speaks
+for the Rift backend `<name>`: its `hello` must give `"server": "<name>"`, and
+it may act for, and report contexts of, players on that backend only. A
+principal with `control = true` may also write as itself and run console
+commands. Only the proxy publishes `rift.perms.update`, `rift.perms.update.>`
+and `rift.perms.changes`, and only control principals may subscribe to the
+request subjects, whatever the grants say.
 
 ## Subjects
 
@@ -64,10 +83,12 @@ names) recorded as the actor.
 | `rift.perms.context` | backend → proxy | PUBLISH | `{"uuid", "contexts"}` | none |
 | `rift.perms.update` | proxy → all | PUBLISH | [change event](#change-event) | none |
 | `rift.perms.update.<uuid>` | proxy → all | PUBLISH | [compiled subject](#compiled-subject) | none |
+| `rift.perms.update.resync` | proxy → all | PUBLISH | [resync request](#resync) | none |
 | `rift.events.permissions` | proxy → all | PUBLISH | [change event](#change-event) | none |
 | `rift.perms.changes` | proxy | retained stream | [change event](#change-event) | none |
 
-`<uuid>` in a subject is 32 lowercase hex digits.
+`<uuid>` in a subject is 32 lowercase hex digits, so `rift.perms.update.resync`
+never collides with a player; clients that do not know it ignore it.
 
 ## Replies
 
@@ -291,6 +312,11 @@ the last revision its replica saw (0 when empty). Reply data:
  "external_contexts": ["region"]}
 ```
 
+A `server.<name>` principal whose `server` differs from `<name>` is refused
+with `forbidden`. The proxy remembers each backend's last `hello` (server,
+revision, client version, time) for `/perms backends`, `/perms doctor` and the
+dashboard.
+
 `protocol` is the protocol version; a client that does not support it stops
 and applies its offline policy. `now` is the proxy's clock in Unix seconds, so
 a backend can warn about clock skew, which shifts every expiry. `limits` are
@@ -418,10 +444,33 @@ rest), `value` (bool, for `permission` and `inherit` nodes only), `contexts`
 ```
 
 With `actor_uuid` the change is made on behalf of that player: the player must
-be online on the sending backend and hold the `rift.perms.*` node for the
-operation, and the audit log records `uuid:<hex>`. Without it the change is
-made by the backend itself (`backend:<principal>`), which requires a principal
-with `control = true`. `reason` is stored in the audit log.
+be online on the sending backend (or have their connection forwarded there
+right now) and hold the `rift.perms.*` node for the operation, and the audit
+log records `uuid:<hex>`. Without it the change is made by the backend itself
+(`backend:<principal>`), which requires a principal with `control = true`.
+`reason` (at most 256 bytes) is stored in the audit log.
+
+The node mirrors the [`/perms` verb tree](permissions.md#commands):
+
+| Change | Node |
+| --- | --- |
+| `set_node` permission / inherit / meta (`*temp` with `expires_at`) | `rift.perms.<user\|group>.permission.set`, `.parent.add`, `.meta.set` (`.settemp`, `.addtemp`, `.settemp`) |
+| `set_node` prefix / suffix | `rift.perms.<user\|group>.meta.setprefix`, `.meta.setsuffix` |
+| `set_node` weight / display name | `rift.perms.group.setweight`, `rift.perms.group.setdisplayname` |
+| `unset_node` | `rift.perms.<user\|group>.permission.unset`, `.parent.remove`, `.meta.unset`, `.meta.removeprefix`, `.meta.removesuffix` |
+| `clear_subject` | `rift.perms.<user\|group>.clear` |
+| `create_group`, `delete_group`, `set_weight`, `set_display_name` | `rift.perms.group.create`, `.delete`, `.setweight`, `.setdisplayname` |
+| `set_primary_group` | `rift.perms.user.parent.switchprimarygroup` |
+| `set_track`, `delete_track` | `rift.perms.track.edit`, `rift.perms.track.delete` |
+| `promote`, `demote` | `rift.perms.user.promote`, `rift.perms.user.demote` |
+| `bulk` | `rift.perms.bulk` |
+| `batch` | every node its changes need |
+
+`rift.perms.*` covers them all. A player also cannot grant what they do not
+hold: when the change would add or alter a positive permission or group
+membership, the player must have that permission (or be in that group) in the
+node's contexts, completed with their own, unless they hold
+`rift.perms.escalate`. Refusals answer `forbidden`.
 
 ### Applied
 
@@ -484,7 +533,16 @@ it, absent for the backend console (allowed only for principals with
 `component` is Adventure component JSON to show the sender; `revision` is the
 proxy's revision after the command. A command that fails as a command
 (unknown player, bad syntax, missing permission) still replies `ok: true` with
-a component explaining it. `ok: false` is reserved for protocol failures.
+a component explaining it. `ok: false` is reserved for protocol failures: a
+console command (no `actor_uuid`) from a principal without `control = true`,
+or an `actor_uuid` who is not on the sending backend, is refused with
+`forbidden`.
+
+The proxy authorizes a player's command exactly as its own in-game `/perms`:
+each verb needs `rift.perms.<verb>` and grants need the granted node or
+`rift.perms.escalate` (see [Commands](permissions.md#commands)). Backends that
+split arguments on spaces may send quoted text in pieces
+(`"\"&6[VIP]"`, `"\""`); the proxy rejoins arguments that contain quotes.
 
 ## Registered permissions
 
@@ -498,7 +556,10 @@ dashboard. The payload is an array of at most 4096 entries:
 ```
 
 `default` is `true`, `false`, `op`, `not_op` (Bukkit) or `op:<0-4>` (Pumpkin op
-levels). Registered nodes are stored with source `plugin:<principal>` and never
+levels). The proxy stores them under the sending principal (with `plugin` when given),
+replacing that principal's earlier registration; a REQUEST instead of
+PUBLISH_ACK gets `{"registered": <count>}`. Registered nodes are stored with
+source `plugin:<principal>` and never
 change the answer for a node that has an explicit value anywhere; they only
 supply the default the backend applies to `null`.
 
@@ -511,9 +572,11 @@ sending backend, replacing that player's previous report:
 {"uuid": "0123456789abcdef0123456789abcdef", "contexts": {"region": "spawn"}}
 ```
 
-Keys must be listed in `external_contexts`; others are dropped. Reports are
-accepted only for players currently on that backend, are cleared when the
-player switches server, and are used by proxy-side checks as well.
+Keys must be listed in `external_contexts`; others are dropped (and logged).
+Reports are accepted only from a `server.<name>` principal for players on that
+backend, or whose connection the proxy is forwarding to it at that moment (so
+a report made at login is not lost); they are cleared when the player switches
+server, and are used by proxy-side checks as well.
 
 ## Revisions and ordering
 
@@ -538,8 +601,10 @@ across publishers, so replicas follow these rules:
      stored subject with `subject.batch` and the group table.
 4. **Pushes.** For every player online somewhere, the proxy publishes
    `rift.perms.update.<uuid>` after each change that affects them, and before
-   forwarding a joining player's connection to the backend, so the snapshot is
-   usually present before the player logs in.
+   forwarding a joining or switching player's connection to the backend, so
+   the snapshot is usually present before the player logs in. For the first
+   join the UUID is the Mojang one in online mode and the offline UUID
+   (`OfflinePlayer:<name>`) otherwise.
 5. **Missing snapshot at login.** Request `subject.get` with a bounded timeout
    (default 2 s); on timeout apply the offline policy to that player and retry
    every 5 s.
@@ -556,6 +621,19 @@ The retained stream `rift.perms.changes` holds the same events with stream
 sequence numbers. A client that wants the full history (or a future follower
 proxy) reads it with a durable consumer; replicas normally need only the live
 subjects.
+
+## Resync
+
+`/perms sync` publishes `rift.perms.update.resync`:
+
+```json
+{"revision": 413}
+```
+
+A replica treats it like a reconnect: it sends `hello` again (so the proxy
+sees its revision) and refetches every stored subject and the group table.
+The Rust client does this; clients that predate it ignore the subject, which
+is harmless.
 
 ## Versioning
 

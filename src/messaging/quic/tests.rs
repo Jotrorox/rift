@@ -77,6 +77,55 @@ fn wildcard_permissions_require_containment_not_overlap() {
     assert!(peer.can_publish("rift.events.player", None).is_err());
 }
 
+#[test]
+fn only_the_proxy_publishes_permission_updates_or_reads_requests() {
+    let mut peer = identity();
+    peer.publish = vec!["rift.perms.>".into()];
+    peer.subscribe = vec!["rift.perms.>".into()];
+    for subject in [
+        "rift.perms.update",
+        "rift.perms.update.0123456789abcdef0123456789abcdef",
+        "rift.perms.update.resync",
+        "rift.perms.changes",
+    ] {
+        assert!(peer.can_publish(subject, None).is_err(), "{subject}");
+    }
+    assert!(peer.can_publish("rift.perms.hello", None).is_ok());
+    assert!(peer.can_subscribe("rift.perms.update.>").is_ok());
+    assert!(peer.can_subscribe("rift.perms.update").is_ok());
+    for pattern in [
+        "rift.perms.>",
+        "rift.perms.*",
+        "rift.perms.subject.*",
+        "rift.perms.hello",
+    ] {
+        assert!(peer.can_subscribe(pattern).is_err(), "{pattern}");
+    }
+    peer.control = true;
+    assert!(peer.can_subscribe("rift.perms.>").is_ok());
+    assert!(peer.can_publish("rift.perms.update", None).is_err());
+}
+
+#[tokio::test]
+async fn remote_messages_name_their_principal() {
+    let (_server, client, broker) = fixture(HashMap::new()).await;
+    let mut local = broker.subscribe("game.sender", None).unwrap();
+    client
+        .publish("game.sender", Bytes::from_static(b"remote"))
+        .await
+        .unwrap();
+    let message = timeout(Duration::from_secs(2), local.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(message.sender.as_deref(), Some("plugin"));
+    broker
+        .publish("game.sender", Bytes::from_static(b"local"))
+        .unwrap();
+    let message = local.recv().await.unwrap();
+    assert_eq!(message.sender, None);
+}
+
 #[tokio::test]
 async fn real_quic_pubsub_pipeline_and_cancellation() {
     let (server, client, _broker) = fixture(HashMap::new()).await;
