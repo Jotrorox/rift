@@ -39,6 +39,8 @@
 //! unusable and fail the instance, which restarts per its manifest.
 mod bind;
 mod http;
+#[cfg(test)]
+mod tests;
 
 use super::{
     PluginSpec,
