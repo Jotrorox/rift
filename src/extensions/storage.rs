@@ -48,7 +48,7 @@ const SCHEMA: &str = "CREATE TABLE entries (
 /// Namespaces beginning with this prefix belong to the host, e.g. group memberships.
 const HOST_PREFIX: &str = "rift.";
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
-type Key = (String, String);
+pub(crate) type Key = (String, String);
 pub(super) type Entries = BTreeMap<Key, Vec<u8>>;
 
 /// Limits for one class of data. Host data has its own, so plugins filling the
@@ -80,7 +80,7 @@ fn entry_size((namespace, key): &Key, value: &[u8]) -> usize {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct StorageConfig {
+pub(crate) struct StorageConfig {
     pub path: PathBuf,
 }
 
@@ -168,25 +168,25 @@ fn check(usage: &Usage, quota: &Quota) -> io::Result<()> {
 }
 
 /// Pending changes over the committed entries, applied only after they commit.
-pub(super) struct Transaction<'a> {
+pub(crate) struct Transaction<'a> {
     base: &'a Entries,
     changes: BTreeMap<Key, Option<Vec<u8>>>,
 }
 
 impl Transaction<'_> {
-    pub(super) fn get(&self, key: &Key) -> Option<&Vec<u8>> {
+    pub(crate) fn get(&self, key: &Key) -> Option<&Vec<u8>> {
         match self.changes.get(key) {
             Some(change) => change.as_ref(),
             None => self.base.get(key),
         }
     }
 
-    pub(super) fn insert(&mut self, key: Key, value: Vec<u8>) {
+    pub(crate) fn insert(&mut self, key: Key, value: Vec<u8>) {
         self.changes.insert(key, Some(value));
     }
 
     /// Whether an entry was removed.
-    pub(super) fn remove(&mut self, key: &Key) -> bool {
+    pub(crate) fn remove(&mut self, key: &Key) -> bool {
         let existed = self.get(key).is_some();
         if existed {
             self.changes.insert(key.clone(), None);
@@ -202,7 +202,7 @@ struct Inner {
 }
 
 #[derive(Clone)]
-pub(super) struct Store(Arc<Inner>);
+pub(crate) struct Store(Arc<Inner>);
 
 fn invalid(message: impl ToString) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.to_string())
@@ -271,7 +271,7 @@ impl Store {
         }))
     }
 
-    pub(super) fn open(config: Option<&StorageConfig>) -> io::Result<Self> {
+    pub(crate) fn open(config: Option<&StorageConfig>) -> io::Result<Self> {
         let Some(path) = config.map(|config| config.path.as_path()) else {
             return Ok(Self::new(Memory::default(), None));
         };
@@ -331,7 +331,7 @@ impl Store {
             .unwrap_or_else(|error| error.into_inner())
     }
 
-    fn get(
+    pub(crate) fn get(
         &self,
         namespace: String,
         key: String,
@@ -341,8 +341,30 @@ impl Store {
         Ok(self.memory().entries.get(&(namespace, key)).cloned())
     }
 
+    /// Add `delta` to a decimal integer entry (missing counts as 0) within
+    /// the exact Lua number range, as `rift.store.increment` does.
+    pub(crate) fn increment(&self, key: Key, delta: i64, deadline: Instant) -> io::Result<i64> {
+        let delta = exact_integer(delta)?;
+        self.mutate(deadline, |entries| {
+            let current = match entries.get(&key) {
+                Some(value) => std::str::from_utf8(value)
+                    .ok()
+                    .and_then(|value| value.parse::<i64>().ok())
+                    .ok_or_else(|| invalid("store value is not a decimal integer"))?,
+                None => 0,
+            };
+            let current = exact_integer(current)?;
+            let next = current
+                .checked_add(delta)
+                .ok_or_else(|| invalid("store integer overflow"))?;
+            let next = exact_integer(next)?;
+            entries.insert(key, next.to_string().into_bytes());
+            Ok(next)
+        })
+    }
+
     /// Committed entries in one namespace, keyed by entry key.
-    pub(super) fn namespace(&self, namespace: &str) -> Vec<(String, Vec<u8>)> {
+    pub(crate) fn namespace(&self, namespace: &str) -> Vec<(String, Vec<u8>)> {
         self.memory()
             .entries
             .iter()
@@ -351,7 +373,7 @@ impl Store {
             .collect()
     }
 
-    fn mutate<T>(
+    pub(crate) fn mutate<T>(
         &self,
         deadline: Instant,
         change: impl FnOnce(&mut Transaction) -> io::Result<T>,
@@ -478,24 +500,8 @@ impl Store {
                         "store increment delta must be an integer",
                     ));
                 };
-                let delta = exact_integer(delta).map_err(mlua::Error::external)?;
                 store
-                    .mutate(deadline, |entries| {
-                        let current = match entries.get(&key) {
-                            Some(value) => std::str::from_utf8(value)
-                                .ok()
-                                .and_then(|value| value.parse::<i64>().ok())
-                                .ok_or_else(|| invalid("store value is not a decimal integer"))?,
-                            None => 0,
-                        };
-                        let current = exact_integer(current)?;
-                        let next = current
-                            .checked_add(delta)
-                            .ok_or_else(|| invalid("store integer overflow"))?;
-                        let next = exact_integer(next)?;
-                        entries.insert(key, next.to_string().into_bytes());
-                        Ok(next)
-                    })
+                    .increment(key, delta, deadline)
                     .map_err(mlua::Error::external)
             })?,
         )?;

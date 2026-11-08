@@ -367,8 +367,7 @@ fn install_helpers(
             exhausted,
         ))?;
     api.raw_set("try", try_)?;
-    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-    let start = *START.get_or_init(Instant::now);
+    let start = started();
     api.raw_set(
         "clock",
         lua.create_function(move |_, ()| Ok(start.elapsed().as_secs_f64()))?,
@@ -382,6 +381,13 @@ fn install_helpers(
         })?,
     )?;
     Ok(())
+}
+
+/// The origin of `rift.clock` and the plugin `meta.clock`: the first time any
+/// script or plugin asked, which is close to process start.
+pub(crate) fn started() -> Instant {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    *START.get_or_init(Instant::now)
 }
 
 fn memory_error(error: &mlua::Error) -> bool {

@@ -63,6 +63,8 @@ pub struct Config {
     pub forwarding: Option<VelocityForwarding>,
     pub on_route: Option<RouteScript>,
     pub extensions: Option<crate::extensions::ExtensionScript>,
+    /// Persistent plugins from `rift.plugin(name, config)`, in call order.
+    pub plugins: Vec<crate::plugins::PluginSpec>,
     pub on_http: Option<HttpScript>,
     pub on_message: Option<MessageScript>,
     /// Per-ping server-list overrides, run before any backend contact.
@@ -352,6 +354,7 @@ impl Config {
             forwarding: None,
             on_route: None,
             extensions: None,
+            plugins: Vec::new(),
             on_http: None,
             on_message: None,
             on_status: None,
@@ -819,6 +822,7 @@ impl Config {
                 forwarding,
                 on_route,
                 extensions,
+                plugins: Vec::new(),
                 on_http,
                 on_message,
                 on_status,

@@ -412,18 +412,97 @@ pub(crate) fn favicon_file(path: &Path) -> Result<Arc<str>, String> {
 }
 
 /// A hook-supplied favicon: an already encoded PNG data URL.
-pub(crate) fn favicon_url(value: Value, path: &str) -> Result<Arc<str>, String> {
+fn valid_favicon(url: &[u8]) -> bool {
     let limit = FAVICON_PREFIX.len() + MAX_FAVICON_BYTES.div_ceil(3) * 4;
-    let valid = match &value {
-        Value::String(url) => {
-            let url = url.as_bytes();
-            url.len() <= limit
-                && url.starts_with(FAVICON_PREFIX.as_bytes())
-                && url.len() > FAVICON_PREFIX.len()
-                && url[FAVICON_PREFIX.len()..]
-                    .iter()
-                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
+    url.len() <= limit
+        && url.starts_with(FAVICON_PREFIX.as_bytes())
+        && url.len() > FAVICON_PREFIX.len()
+        && url[FAVICON_PREFIX.len()..]
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
+}
+
+/// Validate a persistent plugin's `status` reply with the limits `on_status`
+/// results obey.
+pub(crate) fn status_override_json(
+    reply: crate::plugins::api::StatusOverride,
+) -> Result<StatusOverride, String> {
+    fn nodes(value: &Json, depth: usize, count: &mut usize) -> bool {
+        *count += 1;
+        if *count > MAX_COMPONENT_NODES || depth > MAX_COMPONENT_DEPTH {
+            return false;
         }
+        match value {
+            Json::Array(values) => values.iter().all(|value| nodes(value, depth + 1, count)),
+            Json::Object(values) => values.values().all(|value| nodes(value, depth + 1, count)),
+            _ => true,
+        }
+    }
+    let line = |value: String, path: &str| {
+        if value.len() > MAX_TEXT_BYTES {
+            return Err(format!(
+                "{path}: expected a string of at most {MAX_TEXT_BYTES} bytes"
+            ));
+        }
+        Ok(value)
+    };
+    let motd = reply
+        .motd_json
+        .map(|text| {
+            let motd: Json = serde_json::from_str(&text)
+                .map_err(|_| "motd_json: expected a JSON string or chat component".to_owned())?;
+            if !(motd.is_string() || motd.is_object() || motd.is_array())
+                || motd.as_object().is_some_and(serde_json::Map::is_empty)
+                || !nodes(&motd, 0, &mut 0)
+                || motd.to_string().len() > MAX_MOTD_BYTES
+            {
+                return Err(format!(
+                    "motd_json: expected a nonempty JSON string or chat component of at most {MAX_MOTD_BYTES} bytes, {MAX_COMPONENT_NODES} values and {MAX_COMPONENT_DEPTH} levels"
+                ));
+            }
+            Ok(motd)
+        })
+        .transpose()?;
+    let sample = reply
+        .sample
+        .map(|lines| {
+            if lines.len() > MAX_SAMPLE_LINES {
+                return Err(format!("sample: at most {MAX_SAMPLE_LINES} lines"));
+            }
+            lines
+                .into_iter()
+                .map(|value| line(value, "sample"))
+                .collect()
+        })
+        .transpose()?;
+    let favicon = reply
+        .favicon
+        .map(|url| {
+            if !valid_favicon(url.as_bytes()) {
+                return Err(format!(
+                    "favicon: expected a \"{FAVICON_PREFIX}...\" URL of a PNG up to 16 KiB"
+                ));
+            }
+            Ok(Arc::from(url))
+        })
+        .transpose()?;
+    Ok(StatusOverride {
+        motd,
+        version: reply
+            .version
+            .map(|value| line(value, "version"))
+            .transpose()?,
+        protocol: reply.protocol,
+        online: reply.online,
+        max_players: reply.max_players,
+        sample,
+        favicon,
+    })
+}
+
+pub(crate) fn favicon_url(value: Value, path: &str) -> Result<Arc<str>, String> {
+    let valid = match &value {
+        Value::String(url) => valid_favicon(&url.as_bytes()),
         _ => false,
     };
     if !valid {

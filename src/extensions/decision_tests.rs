@@ -289,8 +289,8 @@ async fn reload_keeps_open_decisions_counted() {
     let config = Config::from_lua(&source(extension), "decisions.lua").unwrap();
     let next = Extensions::new(&config, broker.clone(), Some(&old)).unwrap();
     assert!(Arc::ptr_eq(
-        &old.decision_slots["login"],
-        &next.decision_slots["login"]
+        &old.plugins.remote_slots("login"),
+        &next.plugins.remote_slots("login")
     ));
     let changed = Config::from_lua(
         &source("decisions = { login = { subject = 'bans.login', max_in_flight = 2 } }"),
@@ -298,7 +298,7 @@ async fn reload_keeps_open_decisions_counted() {
     )
     .unwrap();
     let resized = Extensions::new(&changed, broker, Some(&old)).unwrap();
-    assert_eq!(resized.decision_slots["login"].available_permits(), 2);
+    assert_eq!(resized.plugins.remote_slots("login").available_permits(), 2);
 }
 
 #[tokio::test]
