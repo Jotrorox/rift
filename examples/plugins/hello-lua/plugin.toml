@@ -1,0 +1,18 @@
+# A persistent Lua plugin: copy this folder to plugins/hello-lua next to
+# rift.lua and enable it with rift.plugin("hello-lua", { deny = "Mallory" }).
+name = "hello-lua"
+version = "0.1.0"
+api = "0.1"
+mode = "persistent"
+engine = "lua"
+entry = "init.lua"
+hot_reload = false
+
+[failure]
+on_timeout = "deny"
+on_failure = "deny"
+restart = "on-failure"
+
+[capabilities]
+filesystem = ["data"]
+network = false

@@ -32,6 +32,8 @@
 //! plus command (and suggest for dynamic suggestions), timer and message
 //! when configured; every other hook keeps the contract's default.
 //!
+//! The shared example plugins (`examples/plugins/hello-*`) run through
+//! [`hello_example`] the same way.
 use super::{
     PluginSpec,
     api::{Action, CommandSpec, Event, Hook, SuggestKind},
@@ -41,7 +43,7 @@ use super::{
 use crate::{
     auth::AuthenticatedProfile,
     config::Config,
-    extensions::{ExtensionSession, Extensions},
+    extensions::{ExtensionSession, Extensions, PlayerAction},
     messaging::{Broker, Subscription},
 };
 use serde_json::json;
@@ -755,6 +757,115 @@ pub(crate) async fn route_status_and_http_follow_the_script(fixture: &dyn Fixtur
         None
     );
     runtime.plugins().shutdown().await;
+}
+
+fn copy(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            if entry.file_name() != "target" && entry.file_name() != "data" {
+                copy(&entry.path(), &target);
+            }
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+/// The shared example spec (`examples/plugins/README.md`): `example` is a
+/// ready plugin folder, copied into a fresh configuration directory.
+pub(crate) async fn hello_example(engines: Engines, example: &Path) {
+    let root = directory();
+    let folder = root
+        .join("plugins")
+        .join(example.file_name().expect("an example folder"));
+    copy(example, &folder);
+    let spec = installed(&folder, r#"{"deny":"Mallory"}"#);
+    let namespace = format!("plugin.{}.hello", spec.name);
+    let broker = Broker::default();
+    let runtime =
+        Extensions::with_engines(&config("", vec![spec]), broker.clone(), None, engines).unwrap();
+    runtime.plugins().start().await.unwrap();
+    let registration = runtime.plugins().active()[0].registration().unwrap();
+    assert_eq!(
+        registration.commands,
+        [CommandSpec {
+            name: "hello".into(),
+            permission: "hello.use".into(),
+            suggest: SuggestKind::Players,
+        }]
+    );
+    assert_eq!(
+        registration.hooks,
+        [
+            Hook::Login,
+            Hook::Command,
+            Hook::Join,
+            Hook::Message,
+            Hook::Timer
+        ]
+    );
+
+    assert_eq!(
+        session_named(&runtime, 2, "Mallory")
+            .decision("login")
+            .await
+            .unwrap(),
+        Action::Deny("You are not welcome here.".into())
+    );
+    assert_eq!(
+        session(&runtime, 1).decision("login").await.unwrap(),
+        Action::Continue
+    );
+
+    let base = &runtime.plugins().persistent.base;
+    base.permissions
+        .set_override(&uuid(1), "hello.use", Some(true))
+        .unwrap();
+    let (_presence, mut actions) = runtime
+        .players()
+        .register(1, &[1; 16], "Player1", 774, "lobby");
+    let mut player = session(&runtime, 1);
+    assert_eq!(player.visible_commands(), [("hello".to_owned(), true)]);
+    assert_eq!(
+        player.command("hello").await.unwrap(),
+        Action::Message("Hello, Player1!".into())
+    );
+    let suggestions = player.suggest("hello", "pl", Vec::new).await.unwrap();
+    assert_eq!(suggestions.len(), 1);
+    assert_eq!(suggestions[0].text, "Player1");
+    assert_eq!(
+        session(&runtime, 3).command("hello").await.unwrap(),
+        Action::Message("You do not have permission to use this command.".into())
+    );
+
+    player.ready("lobby").await;
+    let welcome = timeout(Duration::from_secs(5), actions.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(welcome, PlayerAction::Message("Welcome, Player1!".into()));
+    timeout(Duration::from_secs(5), async {
+        while base.store.namespace(&namespace) != [("joins".to_owned(), b"1".to_vec())] {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("join increments hello/joins");
+
+    let reply = broker
+        .request(
+            "hello.ping",
+            bytes::Bytes::from_static(b"ping \x00 payload"),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reply.payload.as_ref(), b"ping \x00 payload");
+    runtime.plugins().shutdown().await;
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 /// One `#[tokio::test]` per scenario for `$fixture`, a `Fixture` value.
