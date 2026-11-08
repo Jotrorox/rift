@@ -39,7 +39,7 @@ export const FEATURES = [
 
 export const MORE_FEATURES = [
   { title: 'Web dashboard', text: 'Edit, validate and apply config from a browser. Prometheus metrics built in.' },
-  { title: 'Extensions', text: 'Login and transfer hooks, permission-checked commands, FIFO queues, durable state.' },
+  { title: 'Plugins', text: 'Login and transfer hooks, commands, queues and state, in sandboxed Lua or trusted Lua, Rust, C and Go.' },
   { title: 'Plugin messaging', text: 'A subject broker for Lua, Rust and server plugins over authenticated QUIC.' },
   { title: 'BungeeCord channel', text: 'Existing Bukkit and Paper plugins can transfer players and query the network.' },
   { title: 'Managed servers', text: 'Local processes, service groups, scaling, templates and persistent worlds.' },
@@ -56,6 +56,7 @@ export const WORLDS = [
 export const GUIDES = [
   { slug: 'overview', blurb: 'Install, first run, auth and routing' },
   { slug: 'lua', blurb: 'Settings, modules and folder plugins' },
+  { slug: 'plugins', blurb: 'Lua, Rust, C and Go plugins, and the trust model' },
   { slug: 'extensions', blurb: 'Hooks, commands, queues and state' },
   { slug: 'operations', blurb: 'systemd, containers, upgrades, rollback' },
   { slug: 'managed-servers', blurb: 'Processes, scaling, templates, worlds' },

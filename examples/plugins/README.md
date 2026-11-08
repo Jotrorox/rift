@@ -1,9 +1,30 @@
-# WebAssembly plugin examples
+# Plugin examples
 
-Each example is a standalone project that builds a WebAssembly component
-against the `plugin` world of `rift:plugin@0.1.0` (`wit/rift-plugin.wit`).
-A plugin directory holds a `plugin.toml` manifest and the built `.wasm` it
-names in `entry`.
+Four persistent plugins that behave identically, one per supported language:
+
+| Example | Engine | Build | Guide |
+| --- | --- | --- | --- |
+| [`hello-rs`](hello-rs) | WebAssembly | `cargo build --release --target wasm32-wasip2` | [Rust plugins](../../docs/plugins-rust.md) |
+| [`hello-c`](hello-c) | WebAssembly | `make WASI_SDK_PATH=/path/to/wasi-sdk` | [C plugins](../../docs/plugins-c.md) |
+| [`hello-go`](hello-go) | WebAssembly | `make TINYGO=/path/to/tinygo` (TinyGo 0.42.0) | [Go plugins](../../docs/plugins-go.md) |
+| [`hello-lua`](hello-lua) | Lua | nothing to build | [Lua plugins](../../docs/plugins-lua.md) |
+
+The WebAssembly examples are standalone projects that build a component
+against the `plugin` world of `rift:plugin@0.1.0` (`wit/rift-plugin.wit`). A
+plugin directory holds a `plugin.toml` manifest and the entry it names: the
+built `.wasm`, or `init.lua`.
+
+To try one, copy its folder (with the built `.wasm`) to `plugins/<name>/` next
+to `rift.lua` and enable it:
+
+```lua
+rift.plugin("hello-rs", { deny = "Mallory" })
+```
+
+`rift check` then lists it with its capabilities; `rift admin plugins list`
+and the dashboard's Plugins page show it running. See the
+[plugin overview](../../docs/plugins.md) for the manifest, lifecycle and trust
+model.
 
 ## hello-rs (Rust)
 
@@ -23,7 +44,7 @@ The directory then holds `plugin.toml` and `hello_rs.wasm`, ready to load.
 
 ### Behaviour
 
-`hello-rs` doubles as the host's conformance fixture, and the C and Go
+`hello-rs` doubles as the host's conformance fixture, and the C, Go and Lua
 examples behave identically. Every observable effect is deterministic:
 
 | Export | Behaviour |
@@ -60,6 +81,50 @@ restart = "on-failure"
 filesystem = ["data"]
 network = false
 ```
+
+## hello-c (C)
+
+Built with [wasi-sdk](https://github.com/WebAssembly/wasi-sdk/releases) 27 or
+newer and the C SDK in [`sdk/c`](../../sdk/c):
+
+```sh
+cd examples/plugins/hello-c
+make WASI_SDK_PATH=/path/to/wasi-sdk
+```
+
+or with CMake:
+
+```sh
+cmake -B build -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_TOOLCHAIN_FILE=$WASI_SDK_PATH/share/cmake/wasi-sdk-p2.cmake
+cmake --build build && cp build/hello_c.wasm .
+```
+
+The directory then holds `plugin.toml` and `hello_c.wasm`. The manifest is
+`hello-rs`'s with `name = "hello-c"` and `entry = "hello_c.wasm"`.
+
+## hello-go (Go)
+
+Built with [TinyGo](https://tinygo.org) **0.42.0** (newer releases leak memory
+on every call; see [Go plugins](../../docs/plugins-go.md)), `wasm-tools` and
+`wasm-opt` on `PATH`, and the Go SDK in [`sdk/go`](../../sdk/go):
+
+```sh
+cd examples/plugins/hello-go
+make TINYGO=/path/to/tinygo
+# which runs:
+tinygo build -target=wasip2 --wit-package ../../../wit --wit-world plugin -no-debug -o hello_go.wasm .
+```
+
+The directory then holds `plugin.toml` and `hello_go.wasm`. The manifest is
+`hello-rs`'s with `name = "hello-go"` and `entry = "hello_go.wasm"`.
+
+## hello-lua (Lua)
+
+A persistent Lua plugin: `plugin.toml` with `engine = "lua"` and the entry
+script `init.lua`, which Rift runs in its own LuaJIT state. There is nothing to
+build; copy the folder. Each handler body in `init.lua` would also work
+unchanged in `rift.lua`.
 
 ## Writing a Rust plugin
 

@@ -48,7 +48,7 @@ separated by dots; subscriptions support `*` for one token and a terminal `>` fo
 one or more remaining tokens. Queue subscribers divide matching deliveries;
 ordinary subscribers each receive a copy.
 
-With [authenticated extensions](extensions.md#online-players) on API v2,
+With API v2 in [`rift.config.plugins`](extensions.md#online-players),
 `on_message` and `on_http` can also use `rift.players`. For example, relay chat
 published by another server to everyone on this one:
 
