@@ -217,13 +217,15 @@ rift.config.web = {
 | `audit` | View operator records; group-scoped operators see only their own records |
 | `extensions` | Invoke configured Lua `/ext` handlers |
 | `files` | Browse, download, upload, edit and delete files in template folders (unrestricted scope only) and managed server directories within scope |
+| `plugins` | Restart persistent [plugins](plugins.md#operator-surface) (unrestricted scope only); reading plugin state needs `read`, plugin logs `logs` |
 
 Omitting `groups` permits all groups and static managed servers. A list restricts
 server actions and logs to instances of those groups; an empty list permits no
 server targets. Scoped listings omit other groups/servers, backend routing and
 configuration paths. Global counters and listener information remain visible.
-`config`, `deploy` and `extensions` require unrestricted scope because Lua and
-configuration changes can affect the whole proxy. `config` exposes any secrets
+`config`, `deploy`, `extensions` and `plugins` require unrestricted scope because Lua,
+configuration and plugin changes can affect the whole proxy, and the plugin
+endpoints refuse group-scoped operators entirely. `config` exposes any secrets
 in the Lua source and can change credentials. The legacy `web.token` and
 the generated token retain full privileges. Once `web.token` or any named
 operator is configured, no token is generated. Tokens must be
@@ -268,6 +270,10 @@ Errors use `{"error":"description"}`. `GET /api` provides endpoint discovery.
 | `POST /api/deployments/{id}/rollback` | Validate and restore a retained configuration with `{revision}` |
 | `GET /api/audit` | Latest operator records and durability flag |
 | `GET /api/groups` | `{groups: [...]}` with group names, inclusive port ranges, instance names, template and storage policy, and `nodes`/`placement` for groups on [nodes](nodes.md) |
+| `GET /api/plugins` | `{plugins: [...]}`: every [plugin](plugins.md#operator-surface) in dispatch order with `name`, `mode`, `engine`, `version`, `status`, `restarts`, `calls`, `last_error`, `hooks`, `commands`, `capabilities` and `restartable`; unrestricted operators only |
+| `GET /api/plugins/{name}` | One plugin's entry, or `404` |
+| `GET /api/plugins/{name}/logs` | `{plugin, lines}`: the last 200 log lines of a persistent plugin as `{timestamp_unix_ms, level, message}`; `logs` permission |
+| `POST /api/plugins/{name}/restart` | Stop a persistent plugin and start a fresh instance with `{}`; `plugins` permission, returns `202` when accepted. Poll `GET /api/plugins/{name}` for `status` and `restarts` |
 | `GET /api/nodes` | `{nodes: [...]}` with each [node](nodes.md)'s `state` (`online`, `unreachable`, `never_connected`), address, labels, `instances`, `max_instances`, `memory_mb`, `allocated_memory_mb`, agent `version` and `last_seen_ms` |
 | `POST /api/groups/{name}/instances` | Submit provisioning with `{}`; returns `202` with `{operation_id, status: "pending", poll}` (autostart follows group policy) |
 | `DELETE /api/instances/{name}` | Submit removal of an unused instance with `{}`; returns `202` with `{operation_id, status: "pending", poll}` |
@@ -533,8 +539,8 @@ The request table contains `method`, `path`, `query` (raw query string without
 operator detail, as a Lua table; `status.exposure` and hidden `status.backends`
 do not apply to it, and each backend has `display` and `players`). Authorization, cookie and proxy authorization headers are
 removed. JSON arrays become one-based Lua arrays. The context is an isolated
-snapshot; modifying it cannot change the live runtime. With API v2
-[authenticated extensions](extensions.md#online-players), the handler can also
+snapshot; modifying it cannot change the live runtime. With API v2 in
+[`rift.config.plugins`](extensions.md#online-players), the handler can also
 list, message, kick and transfer players through `rift.players`.
 
 Return `nil`, or `{body = "...", status = 200, content_type = "text/plain"}`.

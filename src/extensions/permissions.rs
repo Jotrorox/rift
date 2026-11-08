@@ -262,7 +262,7 @@ struct State {
 }
 
 #[derive(Clone)]
-pub(super) struct Permissions {
+pub(crate) struct Permissions {
     state: Arc<Mutex<State>>,
     store: Store,
 }
@@ -287,7 +287,7 @@ fn decode_groups(value: &[u8]) -> io::Result<BTreeSet<String>> {
 
 impl Permissions {
     /// Load durable group memberships; overrides always start empty.
-    pub(super) fn open(store: Store) -> io::Result<Self> {
+    pub(crate) fn open(store: Store) -> io::Result<Self> {
         let mut memberships = BTreeMap::new();
         for (uuid, value) in store.namespace(MEMBERSHIPS) {
             if !player_uuid(&uuid) {
@@ -314,7 +314,7 @@ impl Permissions {
 
     /// Add or remove a membership with the rules of `rift.permissions.add_group`
     /// and `remove_group`. Returns whether anything changed.
-    pub(super) fn change_group(
+    pub(crate) fn change_group(
         &self,
         uuid: &str,
         group: &str,
@@ -347,7 +347,7 @@ impl Permissions {
 
     /// Precedence: UUID override, `*` override, configured UUID grants, groups,
     /// configured `*` grants. Within each layer the most specific pattern wins.
-    pub(super) fn has(&self, uuid: &str, node: &str) -> bool {
+    pub(crate) fn has(&self, uuid: &str, node: &str) -> bool {
         if !token(node) {
             return false;
         }
@@ -372,15 +372,54 @@ impl Permissions {
         state.policy.reaches(state.memberships.get(uuid), group)
     }
 
+    /// The groups that count for `uuid`'s permission checks: direct and
+    /// inherited memberships of configured groups, and `default` when defined.
+    pub(crate) fn effective_groups(&self, uuid: &str) -> Vec<String> {
+        let state = self.state.lock().unwrap();
+        let members = state.memberships.get(uuid);
+        state
+            .policy
+            .groups
+            .keys()
+            .filter(|group| state.policy.reaches(members, group))
+            .cloned()
+            .collect()
+    }
+
+    /// The configured groups with their permissions, as `extensions.groups`.
+    pub(crate) fn groups_value(&self) -> serde_json::Value {
+        self.state.lock().unwrap().policy.groups_value()
+    }
+
+    /// Set (`Some`) or remove (`None`) a live override, as
+    /// `rift.permissions.set` does. Overrides are never persisted.
+    pub(crate) fn set_override(
+        &self,
+        uuid: &str,
+        node: &str,
+        value: Option<bool>,
+    ) -> Result<(), String> {
+        if !valid_uuid(uuid) || !pattern(node) {
+            return Err(
+                "permissions require a lowercase UUID (32 hex digits) or * and a permission node"
+                    .into(),
+            );
+        }
+        self.set(uuid.to_owned(), node.to_owned(), value, None)
+            .map_err(|error| error.to_string())
+    }
+
     fn set(
         &self,
         uuid: String,
         node: String,
         value: Option<bool>,
-        deadline: Instant,
+        deadline: Option<Instant>,
     ) -> mlua::Result<()> {
         let mut state = self.state.lock().unwrap();
-        crate::script::check_deadline(deadline)?;
+        if let Some(deadline) = deadline {
+            crate::script::check_deadline(deadline)?;
+        }
         if let Some(value) = value {
             let exists = state
                 .overrides
@@ -484,7 +523,7 @@ impl Permissions {
                         ));
                     }
                 };
-                permissions.set(uuid, node, value, deadline)
+                permissions.set(uuid, node, value, Some(deadline))
             })?,
         )?;
         for (name, add) in [("add_group", true), ("remove_group", false)] {
@@ -597,16 +636,21 @@ mod tests {
         assert!(permissions.has(PLAYER, "chat.send"));
         let deadline = Instant::now() + Duration::from_secs(30);
         permissions
-            .set("*".into(), "chat.*".into(), Some(false), deadline)
+            .set("*".into(), "chat.*".into(), Some(false), Some(deadline))
             .unwrap();
         assert!(!permissions.has(PLAYER, "chat.shout"));
         permissions
-            .set(PLAYER.into(), "chat.color".into(), Some(true), deadline)
+            .set(
+                PLAYER.into(),
+                "chat.color".into(),
+                Some(true),
+                Some(deadline),
+            )
             .unwrap();
         assert!(permissions.has(PLAYER, "chat.color"));
         assert!(!permissions.has(PLAYER, "chat.send"));
         permissions
-            .set("*".into(), "chat.*".into(), None, deadline)
+            .set("*".into(), "chat.*".into(), None, Some(deadline))
             .unwrap();
         assert!(permissions.has(PLAYER, "chat.shout"));
         assert!(permissions.has(PLAYER, "chat.send"));

@@ -2385,3 +2385,179 @@ fn nodes_are_listed_and_node_tokens_only_read_template_files() {
         .expect(403);
     assert!(!directory.join("local/templates/game/evil.jar").exists());
 }
+
+#[test]
+fn plugins_are_listed_restarted_and_audited_over_http_the_admin_socket_and_metrics() {
+    let fixture = Fixture::new();
+    let plugin = fixture.directory.join("plugins/beacon");
+    fs::create_dir_all(&plugin).unwrap();
+    fs::write(
+        plugin.join("plugin.toml"),
+        "name = \"beacon\"\nversion = \"1.2.0\"\napi = \"0.1\"\nengine = \"lua\"\n",
+    )
+    .unwrap();
+    fs::write(
+        plugin.join("init.lua"),
+        "rift.log('info', 'beacon ready')\nrift.every('tick', 60000, function() end)\n",
+    )
+    .unwrap();
+    let source = format!(
+        "rift.plugin('beacon')\n{}",
+        fixture.source(
+            &format!("token = '{TOKEN}', operators = {{ viewer = {{ token = '{OPERATOR_TOKEN}', permissions = {{'read','logs','audit'}} }}, lobby_staff = {{ token = 'test-scoped-plugin-operator', permissions = {{'read','logs'}}, groups = {{'lobby'}} }} }},"),
+            &format!(
+                "status = {{ listen = '{}' }}, admin = {{ listen = '127.0.0.1:0', permissions = {{ 'status', 'plugins', 'logs' }} }}, service_groups = {{ lobby = {{ command = {{'unused'}}, directory = 'lobby/{{name}}', port_range = {{26310,26312}} }} }},",
+                fixture.status
+            ),
+        )
+    );
+    let mut process = fixture.start(&source);
+    let address: SocketAddr = process.wait_for_log("rift: admin on ").parse().unwrap();
+    let local = |args: &[&str]| -> Value {
+        let mut stream = connect(address);
+        writeln!(stream, "{}", json!({"token":ADMIN_TOKEN,"args":args})).unwrap();
+        let mut line = String::new();
+        BufReader::new(stream).read_line(&mut line).unwrap();
+        serde_json::from_str(&line).unwrap()
+    };
+    let viewer = Client {
+        token: Some(OPERATOR_TOKEN),
+        ..fixture.client()
+    };
+    let scoped = Client {
+        token: Some("test-scoped-plugin-operator"),
+        ..fixture.client()
+    };
+    let admin = fixture.client().authenticated();
+    let wait_for = |check: &dyn Fn(&Value) -> bool| -> Value {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let status = admin.get("/api/plugins/beacon").expect(200).value();
+            if check(&status) {
+                return status;
+            }
+            assert!(Instant::now() < deadline, "plugin never settled: {status}");
+            thread::sleep(Duration::from_millis(20));
+        }
+    };
+
+    let listed = viewer.get("/api/plugins").expect(200).value();
+    let beacon = &listed["plugins"][0];
+    assert_eq!(beacon["name"], "beacon");
+    assert_eq!(beacon["mode"], "persistent");
+    assert_eq!(beacon["engine"], "lua");
+    assert_eq!(beacon["version"], "1.2.0");
+    assert_eq!(beacon["status"], "running");
+    assert_eq!(beacon["restarts"], 0);
+    let logs = viewer.get("/api/plugins/beacon/logs").expect(200).value();
+    assert!(logs["lines"].to_string().contains("beacon ready"), "{logs}");
+    viewer.get("/api/plugins/ghost").expect(404);
+    viewer
+        .json("POST", "/api/plugins/beacon/restart", json!({}))
+        .expect(403);
+    // Plugins act on the whole proxy; a group-scoped operator sees none.
+    scoped.get("/api/plugins").expect(403);
+    scoped.get("/api/plugins/beacon/logs").expect(403);
+    fixture.client().get("/api/plugins").expect(401);
+    admin
+        .send(
+            "POST",
+            "/api/plugins/beacon/restart",
+            &[
+                ("Content-Type", "application/json"),
+                ("Origin", "http://attacker.example"),
+            ],
+            "{}",
+        )
+        .expect(403);
+    admin
+        .json("POST", "/api/plugins/beacon/restart", json!({"force":true}))
+        .expect(400);
+    admin
+        .json("POST", "/api/plugins/ghost/restart", json!({}))
+        .expect(404);
+    let accepted = admin
+        .json("POST", "/api/plugins/beacon/restart", json!({}))
+        .expect(202)
+        .value();
+    assert_eq!(accepted["accepted"], true);
+    wait_for(&|status| status["restarts"] == 1 && status["status"] == "running");
+    let logs = admin.get("/api/plugins/beacon/logs").expect(200).value();
+    let text = logs["lines"].to_string();
+    assert!(
+        text.contains("lifecycle: restart_requested by admin"),
+        "{text}"
+    );
+    assert_eq!(text.matches("beacon ready").count(), 2, "{text}");
+
+    let listed = local(&["plugins", "list"]);
+    assert_eq!(listed["ok"], true, "{listed}");
+    assert_eq!(listed["data"]["plugins"][0]["restarts"], 1);
+    assert_eq!(
+        local(&["plugins", "status", "beacon"])["data"]["name"],
+        "beacon"
+    );
+    assert_eq!(local(&["plugins", "status", "ghost"])["ok"], false);
+    assert_eq!(local(&["plugins", "restart", "beacon"])["ok"], true);
+    wait_for(&|status| status["restarts"] == 2 && status["status"] == "running");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let records = loop {
+        let audit = viewer.get("/api/audit").expect(200).value();
+        let records = audit["records"].as_array().unwrap().clone();
+        let started = records
+            .iter()
+            .filter(|r| {
+                r["actor"] == "system" && r["action"] == "plugin started" && r["target"] == "beacon"
+            })
+            .count();
+        if started >= 3 {
+            break records;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "lifecycle not audited: {records:?}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    };
+    let has = |actor: &str, action: &str, outcome: &str| {
+        records.iter().any(|r| {
+            r["actor"] == actor
+                && r["action"] == action
+                && r["target"] == "beacon"
+                && r["outcome"] == outcome
+        })
+    };
+    assert!(
+        has("viewer", "POST restart_plugin", "denied"),
+        "{records:?}"
+    );
+    assert!(
+        has("admin", "POST restart_plugin", "accepted"),
+        "{records:?}"
+    );
+    assert!(
+        has("admin", "plugin restart_requested", "completed"),
+        "{records:?}"
+    );
+    assert!(
+        has("local-admin", "plugins restart", "accepted"),
+        "{records:?}"
+    );
+    assert!(
+        has("local-admin", "plugin restart_requested", "completed"),
+        "{records:?}"
+    );
+    assert!(has("system", "plugin stopped", "completed"), "{records:?}");
+
+    let scrape = Client::new(fixture.status).get("/metrics").expect(200).body;
+    assert!(
+        scrape.contains("rift_plugin_up{plugin=\"beacon\"} 1\n"),
+        "{scrape}"
+    );
+    assert!(
+        scrape.contains("rift_plugin_restarts_total{plugin=\"beacon\"} 2\n"),
+        "{scrape}"
+    );
+    assert!(scrape.contains("# TYPE rift_plugin_call_seconds histogram\n"));
+}

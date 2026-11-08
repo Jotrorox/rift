@@ -67,6 +67,8 @@ pub struct Config {
     pub forwarding: Option<VelocityForwarding>,
     pub on_route: Option<RouteScript>,
     pub extensions: Option<crate::extensions::ExtensionScript>,
+    /// Persistent plugins from `rift.plugin(name, config)`, in call order.
+    pub plugins: Vec<crate::plugins::PluginSpec>,
     pub on_http: Option<HttpScript>,
     pub on_message: Option<MessageScript>,
     /// Per-ping server-list overrides, run before any backend contact.
@@ -191,6 +193,8 @@ pub const ADMIN_PERMISSIONS: &[&str] = &[
     "reload",
     "shutdown",
     "servers",
+    "plugins",
+    "logs",
 ];
 
 /// Grants available to named `web.operators`.
@@ -204,10 +208,11 @@ pub const WEB_PERMISSIONS: &[&str] = &[
     "audit",
     "extensions",
     "files",
+    "plugins",
 ];
 
 /// These grants can affect the whole proxy, so they require unrestricted scope.
-const UNSCOPED_WEB_PERMISSIONS: &[&str] = &["config", "deploy", "extensions"];
+const UNSCOPED_WEB_PERMISSIONS: &[&str] = &["config", "deploy", "extensions", "plugins"];
 
 /// Identities that Rift itself records in operator audit logs.
 const RESERVED_OPERATOR_NAMES: &[&str] = &[
@@ -338,6 +343,7 @@ impl Config {
             forwarding: None,
             on_route: None,
             extensions: None,
+            plugins: Vec::new(),
             on_http: None,
             on_message: None,
             on_status: None,
@@ -603,6 +609,28 @@ impl Config {
             }
             let extensions = crate::extensions::ExtensionScript::parse(&root, &source)
                 .map_err(|e| e.to_string())?;
+            let mut plugins = lua
+                .app_data_ref::<crate::script::PersistentPlugins>()
+                .map(|records| records.0.clone())
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(name, config_json)| {
+                    let installed = &source.installed[&name];
+                    let spec = crate::plugins::PluginSpec {
+                        folder: source.root.join("plugins").join(&name),
+                        config_root: source.root.clone(),
+                        manifest: installed.manifest.clone()?,
+                        fingerprint: installed.fingerprint.clone()?,
+                        name,
+                        config_json,
+                        // Set below, once `authentication` is parsed.
+                        online_mode: false,
+                    };
+                    spec.check_grants()
+                        .map_err(|error| format!("plugin {}: {error}", spec.name))?;
+                    Ok::<_, String>(spec)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             let on_route = match root
                 .raw_get::<Value>("on_route")
                 .map_err(|e| e.to_string())?
@@ -787,6 +815,9 @@ impl Config {
             }
             let network = network(&root)?;
             let authentication = authentication(&root)?;
+            for plugin in &mut plugins {
+                plugin.online_mode = authentication.online_mode;
+            }
             let forwarding = forwarding(&root)?;
             Ok(Self {
                 listeners,
@@ -805,6 +836,7 @@ impl Config {
                 forwarding,
                 on_route,
                 extensions,
+                plugins,
                 on_http,
                 on_message,
                 on_status,
@@ -838,6 +870,12 @@ impl Config {
                 .map_err(|error| invalid(format!("{name}: {error}")))?;
         }
         Ok((config, cost))
+    }
+
+    /// Whether authenticated sessions run player hooks: with extensions, or
+    /// with persistent plugins once players have a verified identity.
+    pub fn player_hooks(&self) -> bool {
+        self.extensions.is_some() || (!self.plugins.is_empty() && self.authentication.online_mode)
     }
 
     pub fn validate(&self) -> io::Result<()> {
@@ -1129,7 +1167,7 @@ impl Config {
                         .any(|p| UNSCOPED_WEB_PERMISSIONS.contains(&p.as_str()))
                     {
                         return Err(invalid(format!(
-                            "{path}: config, deploy and extensions require unrestricted group access"
+                            "{path}: config, deploy, extensions and plugins require unrestricted group access"
                         )));
                     }
                 }

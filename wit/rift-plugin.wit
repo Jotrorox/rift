@@ -1,0 +1,395 @@
+/// The Rift plugin contract.
+///
+/// One event schema and one host API, shared by every execution mode: the
+/// sandboxed configuration script, persistent Lua and WebAssembly plugins and
+/// remote bus responders. Rust host types mirror these definitions with serde
+/// derives; the bus uses their JSON form.
+///
+/// Rules that keep C and Go guests pleasant (see docs/plugins.md):
+/// - WASI 0.2, no `async`, no `stream` or `future`.
+/// - No `resource` types: host-managed things are plain `u64` handles.
+/// - Plain data only: no `flags`, no nested options, tuples only as pairs.
+/// - Plugin configuration and free-form payloads are JSON strings.
+/// - Every hook is an export and every export has a default in each SDK.
+/// - The guest is single-threaded; the host never calls one instance
+///   concurrently.
+/// - Additive changes bump the minor version; breaking changes move to 1.0.
+package rift:plugin@0.1.0;
+
+interface types {
+    /// Log severity.
+    enum level {
+        trace,
+        debug,
+        info,
+        warn,
+        error,
+    }
+
+    /// A joined player in the process-wide directory.
+    record player-info {
+        connection-id: u64,
+        /// 32 lowercase hexadecimal digits, without dashes.
+        uuid: string,
+        name: string,
+        /// The backend the player is connected to.
+        server: string,
+        protocol: s32,
+    }
+
+    /// The session an authenticated player hook is about. Fields that do not
+    /// apply to a hook are `none` or empty.
+    record context {
+        connection-id: u64,
+        uuid: string,
+        name: string,
+        listener: string,
+        hostname: string,
+        peer-ip: string,
+        protocol: s32,
+        server: option<string>,
+        default-server: option<string>,
+        /// `before-transfer`/`after-transfer`: the destination.
+        target: option<string>,
+        /// `before-transfer`: why the transfer happens; `disconnect`: why the
+        /// session closed.
+        reason: option<string>,
+        /// `after-transfer`: whether the transfer completed.
+        success: option<bool>,
+        /// `command`/`suggest`: the command name and the text after it.
+        command: option<string>,
+        args: string,
+        /// `suggest`: the argument being completed and its 1-based position.
+        word: string,
+        position: u32,
+    }
+
+    /// Metadata available right after TCP accept, before any bytes are read.
+    record connection {
+        listener: string,
+        peer-addr: string,
+        peer-ip: string,
+        peer-port: u16,
+        local-addr: string,
+        local-ip: string,
+        local-port: u16,
+        default-backend: option<string>,
+    }
+
+    /// `route`: keep the configured policy, pick a configured backend or
+    /// group, or close the connection.
+    variant route-decision {
+        default,
+        backend(string),
+        reject(option<string>),
+    }
+
+    /// The answer to a decision hook. Each hook accepts a subset:
+    /// - login, before-transfer: continue, deny
+    /// - initial-server: continue, deny, server
+    /// - command: continue, message, server, queue, leave-queue
+    variant action {
+        continue,
+        deny(string),
+        server(string),
+        message(string),
+        queue(string),
+        leave-queue,
+    }
+
+    record suggestion {
+        text: string,
+        tooltip: option<string>,
+    }
+
+    /// A server-list ping, before any backend contact.
+    record ping {
+        listener: string,
+        hostname: string,
+        protocol: s32,
+        peer-ip: string,
+        /// The routed backend or group; `none` for an unmatched hostname.
+        backend: option<string>,
+        maintenance: bool,
+        online: u64,
+        max-players: u64,
+    }
+
+    /// Fields a `status` hook replaces for one ping. `motd-json` is a JSON
+    /// text component or a JSON string.
+    record status-override {
+        motd-json: option<string>,
+        version: option<string>,
+        protocol: option<s32>,
+        online: option<u32>,
+        max-players: option<u32>,
+        sample: option<list<string>>,
+        /// A `data:image/png;base64,...` URI.
+        favicon: option<string>,
+    }
+
+    /// An authenticated request to `/api/script/*` on the web server.
+    record http-request {
+        method: string,
+        path: string,
+        query: string,
+        body: string,
+        headers: list<tuple<string, string>>,
+        /// The authenticated principal and scopes, as a JSON object.
+        context-json: string,
+    }
+
+    record http-response {
+        status: u16,
+        content-type: string,
+        body: string,
+    }
+
+    /// A bus message delivered to a subscription made with `bus.subscribe`.
+    record bus-message {
+        /// The handle `bus.subscribe` returned.
+        handle: u64,
+        subject: string,
+        payload: list<u8>,
+        reply: option<string>,
+    }
+
+    /// A Rift event, mirroring a `rift.events.*` publication.
+    record rift-event {
+        /// For example `rift.events.players` or `rift.events.instances`.
+        subject: string,
+        /// The event body as published on the bus (a JSON object).
+        payload-json: string,
+    }
+
+    /// How a command's arguments are completed.
+    variant suggest-kind {
+        none,
+        /// A fixed list, filtered by prefix.
+        fixed(list<string>),
+        /// Online player names.
+        players,
+        /// Servers the player may join.
+        servers,
+        /// Ask the plugin's `suggest` export.
+        dynamic,
+    }
+
+    record command-spec {
+        /// 1..=64 bytes of `a-z0-9_-`; `server` and `hub` are reserved.
+        name: string,
+        /// The permission node a player needs to see and run the command.
+        permission: string,
+        suggest: suggest-kind,
+    }
+
+    /// Events a plugin can receive. The host skips exports a plugin does not
+    /// list, so unused hooks cost nothing per event.
+    enum hook {
+        route,
+        login,
+        initial-server,
+        before-transfer,
+        command,
+        suggest,
+        status,
+        http,
+        join,
+        after-transfer,
+        disconnect,
+        message,
+        timer,
+        event,
+    }
+
+    /// What `init` returns. Subscriptions and timers are created from inside
+    /// `init` through the host API.
+    record registration {
+        commands: list<command-spec>,
+        /// Events to deliver. An empty list delivers every hook.
+        hooks: list<hook>,
+    }
+
+    /// A boss bar shown to one player.
+    record boss-bar-spec {
+        /// A plain string or a JSON text component.
+        text-json: string,
+        /// 0.0 to 1.0.
+        progress: f32,
+        /// pink, blue, red, green, yellow, purple or white.
+        color: string,
+        /// progress, notched_6, notched_10, notched_12 or notched_20.
+        style: string,
+        darken-sky: bool,
+        play-music: bool,
+        create-fog: bool,
+    }
+
+    /// A title; times are ticks.
+    record title-spec {
+        title: string,
+        subtitle: option<string>,
+        fade-in: s32,
+        stay: s32,
+        fade-out: s32,
+    }
+}
+
+/// The joined players. `target` is a name, a UUID or a connection id.
+interface players {
+    use types.{player-info, title-spec, boss-bar-spec};
+
+    /// Players, optionally only those on one server or service group.
+    %list: func(server: option<string>) -> result<list<player-info>, string>;
+    get: func(target: string) -> result<option<player-info>, string>;
+    /// Names starting with `prefix`, sorted.
+    names: func(prefix: option<string>) -> list<string>;
+    /// Each returns whether the player was online.
+    message: func(target: string, text: string) -> result<bool, string>;
+    action-bar: func(target: string, text: string) -> result<bool, string>;
+    title: func(target: string, title: title-spec) -> result<bool, string>;
+    /// JSON text components; both `none` restores the configured tab list.
+    tab-list: func(target: string, header-json: option<string>, footer-json: option<string>) -> result<bool, string>;
+    /// `none` removes the bar called `name`.
+    boss-bar: func(target: string, name: string, bar: option<boss-bar-spec>) -> result<bool, string>;
+    kick: func(target: string, reason: string) -> result<bool, string>;
+    transfer: func(target: string, server: string) -> result<bool, string>;
+    /// Returns how many players received the message.
+    broadcast: func(text: string) -> result<u32, string>;
+}
+
+/// The durable key-value store. Namespaces are prefixed with
+/// `plugin.<name>.` for persistent plugins.
+interface store {
+    get: func(namespace: string, key: string) -> result<option<list<u8>>, string>;
+    set: func(namespace: string, key: string, value: list<u8>) -> result<_, string>;
+    /// Returns whether an entry existed.
+    delete: func(namespace: string, key: string) -> result<bool, string>;
+    /// Adds `delta` to an integer entry (missing counts as 0) and returns it.
+    increment: func(namespace: string, key: string, delta: s64) -> result<s64, string>;
+    /// Entries whose key starts with `prefix`, sorted by key.
+    %list: func(namespace: string, prefix: string) -> result<list<tuple<string, list<u8>>>, string>;
+}
+
+/// Live permissions and durable groups.
+interface permissions {
+    has: func(uuid: string, node: string) -> bool;
+    /// `none` removes a direct grant or denial.
+    set: func(uuid: string, node: string, value: option<bool>) -> result<_, string>;
+    /// Returns whether membership changed.
+    add-group: func(uuid: string, group: string) -> result<bool, string>;
+    remove-group: func(uuid: string, group: string) -> result<bool, string>;
+    /// The player's groups, including inherited and `default`.
+    groups: func(uuid: string) -> list<string>;
+    /// The configured groups with their permissions, as a JSON object.
+    list-groups: func() -> string;
+}
+
+/// The message bus.
+interface bus {
+    /// Returns how many subscribers received the message.
+    publish: func(subject: string, payload: list<u8>, reply: option<string>) -> result<u32, string>;
+    /// Send a request and wait for the first reply.
+    request: func(subject: string, payload: list<u8>, timeout-ms: u32) -> result<list<u8>, string>;
+    /// Messages arrive through the `message` export with this handle.
+    /// `queue-group` load-balances between subscribers of the same group.
+    subscribe: func(subject: string, queue-group: option<string>) -> result<u64, string>;
+    unsubscribe: func(handle: u64) -> bool;
+    /// Append to a durable stream; returns the sequence number.
+    stream-publish: func(subject: string, payload: list<u8>) -> result<u64, string>;
+}
+
+/// Managed servers, through the same `rift.control.*` operations as the bus.
+/// Results are the control service's JSON replies.
+interface servers {
+    create: func(group: string) -> result<string, string>;
+    remove: func(name: string) -> result<string, string>;
+    start: func(name: string) -> result<string, string>;
+    stop: func(name: string) -> result<string, string>;
+    download: func(template: string) -> result<string, string>;
+    /// Any other `rift.control.<operation>` (status, servers, groups, nodes,
+    /// templates, transfer, drain, maintenance, reload) with a JSON payload.
+    control: func(operation: string, payload-json: string) -> result<string, string>;
+}
+
+/// Timers fire through the `timer` export with the returned handle.
+interface timers {
+    /// Repeats every `ms` milliseconds (at least 10).
+    every: func(ms: u32) -> u64;
+    /// Fires once after `ms` milliseconds.
+    after: func(ms: u32) -> u64;
+    /// Returns whether the timer existed.
+    cancel: func(handle: u64) -> bool;
+}
+
+/// Rift's log stream, prefixed with the plugin name.
+interface log {
+    use types.{level};
+    log: func(level: level, message: string);
+}
+
+interface meta {
+    name: func() -> string;
+    version: func() -> string;
+    /// Guest path of the plugin's private data directory (`/data`).
+    data-dir: func() -> string;
+    /// Guest path of the configuration directory (`/host`), if granted.
+    config-dir: func() -> option<string>;
+    /// Monotonic seconds since Rift started.
+    clock: func() -> f64;
+    /// Unix time in seconds.
+    time: func() -> s64;
+}
+
+/// Hooks the host calls. Every export has a default in each SDK, and the
+/// host skips hooks the plugin does not list in its registration.
+interface handler {
+    use types.{
+        context, connection, route-decision, action, suggestion, ping,
+        status-override, http-request, http-response, bus-message, rift-event,
+        registration,
+    };
+
+    /// Called once per instance with the `rift.plugin(name, config)` table
+    /// encoded as JSON (`{}` without one).
+    init: func(config-json: string) -> result<registration, string>;
+    /// The configuration changed and the manifest sets `hot_reload = true`.
+    reload: func(config-json: string) -> result<_, string>;
+    shutdown: func(reason: string);
+
+    route: func(connection: connection) -> route-decision;
+    login: func(ctx: context) -> action;
+    initial-server: func(ctx: context) -> action;
+    before-transfer: func(ctx: context) -> action;
+    command: func(ctx: context) -> action;
+    suggest: func(ctx: context) -> list<suggestion>;
+    status: func(ping: ping) -> option<status-override>;
+    http: func(request: http-request) -> option<http-response>;
+
+    join: func(ctx: context);
+    after-transfer: func(ctx: context);
+    disconnect: func(ctx: context);
+    message: func(message: bus-message);
+    timer: func(handle: u64);
+    event: func(event: rift-event);
+}
+
+/// Imports and exports without WASI; the host links WASI separately.
+world core {
+    import players;
+    import store;
+    import permissions;
+    import bus;
+    import servers;
+    import timers;
+    import log;
+    import meta;
+    export handler;
+}
+
+/// The world guests build against. TinyGo's `wasip2` target expects the
+/// WASI CLI import set even when a plugin does not use it.
+world plugin {
+    include wasi:cli/imports@0.2.0;
+    include core;
+}

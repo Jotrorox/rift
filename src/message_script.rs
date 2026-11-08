@@ -30,9 +30,12 @@ impl MessageScript {
         }
     }
 
+    /// `subscription` is the configured subject that delivered `message`;
+    /// `rift.subscribe` dispatches on it.
     async fn execute(
         &self,
         message: Message,
+        subscription: String,
         broker: Broker,
         players: Option<Players>,
     ) -> Result<(), String> {
@@ -43,7 +46,7 @@ impl MessageScript {
         let deadline = Instant::now() + crate::script::EXECUTION_TIMEOUT;
         let task = spawn_blocking(move || {
             let _permit = permit;
-            script.evaluate(message, broker, players, deadline)
+            script.evaluate(message, &subscription, broker, players, deadline)
         });
         timeout(crate::script::EXECUTION_TIMEOUT, task)
             .await
@@ -54,6 +57,7 @@ impl MessageScript {
     fn evaluate(
         &self,
         message: Message,
+        subscription: &str,
         broker: Broker,
         players: Option<Players>,
         deadline: Instant,
@@ -72,6 +76,7 @@ impl MessageScript {
             input.raw_set("subject", message.subject.as_ref())?;
             input.raw_set("payload", lua.create_string(&message.payload)?)?;
             input.raw_set("reply", message.reply.as_deref())?;
+            input.raw_set("subscription", subscription)?;
             hook.call::<()>(input)?;
             crate::script::check_deadline(deadline)
         };
@@ -158,7 +163,7 @@ impl MessageHandler {
                         }
                     };
                     let script = scripts.borrow().clone();
-                    if let Err(error) = script.execute(message, broker.clone(), players.clone()).await {
+                    if let Err(error) = script.execute(message, settings.subject.clone(), broker.clone(), players.clone()).await {
                         eprintln!("{error}");
                     }
                 }

@@ -483,6 +483,55 @@ async function testWebAssets(appSource, statusSource) {
     assert(!h.calls.slice(before).some(({ path }) => path === "/api/config" || path === "/api/definitions"), "Scoped operator fetched privileged data");
     assert(h.element("managed-servers").children[0].children[9].children[0].disabled, "Ungrantable server mutation was enabled");
   });
+  await test("plugins render safely, restart with an encoded name and tail their log", async () => {
+    const h = fixture(appSource); await flush();
+    const plugins = [
+      { name: "(script)", mode: "script", engine: "lua", status: "active", restarts: 0, calls: 0, restartable: false },
+      { name: "hello lua", mode: "persistent", engine: "lua", version: "0.1.0", status: "failed", restarts: 3, calls: 1200, last_error: "<b>init: boom</b>", restartable: true },
+      { name: "(remote)", mode: "remote", engine: null, status: "active", restarts: 0, calls: 0, restartable: false },
+    ];
+    h.model.intercept = (path, options) => {
+      if (path === "/api/plugins") return h.response({ plugins });
+      if (path === "/api/plugins/hello%20lua/logs") return h.response({ plugin: "hello lua", lines: [{ timestamp_unix_ms: 1, level: "error", message: "lifecycle: failed: <script>" }] });
+      if (path === "/api/plugins/hello%20lua/restart" && options.method === "POST") return h.response({ accepted: true }, 202);
+      return undefined;
+    };
+    h.window.location.hash = "#plugins";
+    await h.element("refresh-status").emit("click"); await flush();
+    assert(!h.element("view-plugins").hidden, "Plugins view not shown");
+    const rows = h.element("plugins").children;
+    assert(rows.length === 3, "Every mode should be listed");
+    assert(rows[0].children[1].textContent === "Configuration script" && rows[2].children[1].textContent === "Bus responders", "Modes not labelled");
+    assert(rows[1].children[0].textContent === "hello lua 0.1.0", "Name and version missing");
+    assert(rows[1].children[3].className.includes("failed"), "Failed state not styled");
+    assert(rows[1].children[6].textContent === "<b>init: boom</b>", "Last error not preserved as text");
+    assert(rows[0].children[7].children.length === 0, "The configuration script cannot be restarted");
+    const restart = rows[1].children[7].children[0];
+    assert(!restart.disabled, "Restart unavailable to an unrestricted operator");
+    const select = h.element("plugin-log-select");
+    assert(select.children.length === 2 && select.children[1].value === "hello lua", "Only persistent plugins have a log");
+    select.value = "hello lua"; await select.emit("change"); await flush();
+    assert(h.element("plugin-log-output").textContent.includes("lifecycle: failed: <script>"), "Log tail missing");
+    await restart.emit("click"); await flush();
+    const call = h.calls.find(({ path }) => path === "/api/plugins/hello%20lua/restart");
+    assert(call && call.options.method === "POST" && call.options.body === "{}", "Restart request missing or incorrectly encoded");
+    assert(h.element("plugin-result").textContent.includes("accepted"), "Accepted restart not reported");
+  });
+  await test("restarts need the plugins grant and scoped operators see no plugins", async () => {
+    const h = fixture(appSource); await flush();
+    h.model.intercept = (path) => path === "/api/plugins" ? h.response({ plugins: [{ name: "a", mode: "persistent", engine: "wasm", status: "running", restartable: true }] }) : undefined;
+    h.model.access = { name: "viewer", permissions: ["read"], groups: null };
+    h.element("token").value = "viewer-token"; await h.element("auth-form").emit("submit"); await flush();
+    h.window.location.hash = "#plugins";
+    await h.element("refresh-status").emit("click"); await flush();
+    assert(h.element("plugins").children[0].children[7].children[0].disabled, "Restart enabled without the plugins grant");
+    assert(h.element("plugin-log-panel").className.includes("hidden"), "Log tail shown without the logs grant");
+    const scoped = fixture(appSource); await flush();
+    scoped.model.access = { name: "lobby_staff", permissions: ["read", "logs"], groups: ["lobby"] };
+    scoped.element("token").value = "staff-token"; await scoped.element("auth-form").emit("submit"); await flush();
+    assert(scoped.element("nav-plugins").className.includes("hidden"), "Plugins shown to a group-scoped operator");
+    assert(!scoped.calls.some(({ path }) => path.startsWith("/api/plugins")), "Scoped operator fetched plugins");
+  });
   await test("server logs resume their cursor and discard responses for a previous selection", async () => {
     const h = fixture(appSource); await flush();
     h.model.intercept = (path) => path.includes("/logs") ? h.response({ text: "first\n", cursor: 6 }) : null;

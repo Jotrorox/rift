@@ -4,6 +4,75 @@ use mlua::{Function, Lua, Table, Value, chunk::ChunkMode};
 
 use super::{ScriptSource, check_deadline};
 
+/// `rift.plugin(name, config)` calls that named a persistent plugin, in call
+/// order: `(name, configuration JSON)`. Read by configuration evaluation;
+/// callbacks re-evaluate the configuration and ignore it.
+#[derive(Debug, Default)]
+pub(crate) struct PersistentPlugins(pub Vec<(String, String)>);
+
+/// The configuration table handed to a persistent plugin's `init`.
+const MAX_CONFIG_BYTES: usize = 64 * 1024;
+const MAX_CONFIG_DEPTH: usize = 32;
+
+/// Encode a configuration table as JSON: string keys make objects, dense
+/// integer keys from 1 make arrays, an empty table is an object.
+fn json(value: Value, depth: usize) -> mlua::Result<serde_json::Value> {
+    let fail = |message: &str| mlua::Error::runtime(format!("rift.plugin: config {message}"));
+    if depth > MAX_CONFIG_DEPTH {
+        return Err(fail(&format!(
+            "nests deeper than {MAX_CONFIG_DEPTH} levels"
+        )));
+    }
+    Ok(match value {
+        Value::Nil => serde_json::Value::Null,
+        Value::Boolean(value) => value.into(),
+        Value::Integer(value) => value.into(),
+        Value::Number(value) => serde_json::Number::from_f64(value)
+            .map(serde_json::Value::Number)
+            .ok_or_else(|| fail("numbers must be finite"))?,
+        Value::String(value) => value
+            .to_str()
+            .map_err(|_| fail("strings must be UTF-8"))?
+            .to_owned()
+            .into(),
+        Value::Table(table) => {
+            let mut object = serde_json::Map::new();
+            let mut array = std::collections::BTreeMap::new();
+            for pair in table.pairs::<Value, Value>() {
+                let (key, value) = pair?;
+                let value = json(value, depth + 1)?;
+                match key {
+                    Value::String(key) => {
+                        let key = key.to_str().map_err(|_| fail("keys must be UTF-8"))?;
+                        object.insert(key.to_owned(), value);
+                    }
+                    Value::Integer(index) if index >= 1 => {
+                        array.insert(index, value);
+                    }
+                    _ => return Err(fail("keys must be strings or array indices")),
+                }
+            }
+            match (object.is_empty(), array.is_empty()) {
+                (_, true) => serde_json::Value::Object(object),
+                (true, false) if array.keys().copied().eq(1..=array.len() as i64) => {
+                    serde_json::Value::Array(array.into_values().collect())
+                }
+                _ => {
+                    return Err(fail(
+                        "tables must be either a dense list or have only string keys",
+                    ));
+                }
+            }
+        }
+        other => {
+            return Err(fail(&format!(
+                "cannot contain a {} value",
+                other.type_name()
+            )));
+        }
+    })
+}
+
 /// A bounded, text-only require implementation over an immutable source bundle.
 /// Neither package.path nor a native/dynamic loader is exposed to Lua.
 pub(super) fn install(
@@ -97,14 +166,50 @@ pub(super) fn install(
     )?;
 
     let files = source.files.clone();
+    let installed = source.installed.clone();
+    lua.set_app_data(PersistentPlugins::default());
     api.raw_set(
         "plugin",
-        lua.create_function(move |lua, name: String| {
+        lua.create_function(move |lua, (name, config): (String, Value)| {
             check_deadline(deadline)?;
             if !valid_name(&name, false) {
                 return Err(mlua::Error::runtime(
                     "rift.plugin expects a folder name using letters, digits, '_' or '-'",
                 ));
+            }
+            if !matches!(config, Value::Nil | Value::Table(_)) {
+                return Err(mlua::Error::runtime(
+                    "rift.plugin expects an optional configuration table",
+                ));
+            }
+            // A persistent plugin is recorded, never evaluated here: trusted
+            // code does not run in the configuration sandbox.
+            if let Some(plugin) = installed.get(&name).filter(|plugin| plugin.persistent()) {
+                if let Err(error) = &plugin.manifest {
+                    return Err(mlua::Error::runtime(format!("plugin '{name}': {error}")));
+                }
+                if let Err(error) = &plugin.fingerprint {
+                    return Err(mlua::Error::runtime(format!("plugin '{name}': {error}")));
+                }
+                let config = match config {
+                    Value::Nil => "{}".to_owned(),
+                    table => json(table, 0)?.to_string(),
+                };
+                if config.len() > MAX_CONFIG_BYTES {
+                    return Err(mlua::Error::runtime(format!(
+                        "rift.plugin: config for '{name}' exceeds 64 KiB as JSON"
+                    )));
+                }
+                let mut records = lua
+                    .app_data_mut::<PersistentPlugins>()
+                    .ok_or_else(|| mlua::Error::runtime("rift.plugin registry unavailable"))?;
+                if records.0.iter().any(|(existing, _)| *existing == name) {
+                    return Err(mlua::Error::runtime(format!(
+                        "plugin '{name}' is already registered"
+                    )));
+                }
+                records.0.push((name, config));
+                return Ok(Value::Boolean(true));
             }
             let cached: Value = plugins.raw_get(name.as_str())?;
             if !cached.is_nil() {
@@ -114,7 +219,7 @@ pub(super) fn install(
                 .get(&format!("plugins/{name}/init.lua"))
                 .ok_or_else(|| {
                     mlua::Error::runtime(format!(
-                        "plugin '{name}' not found: expected plugins/{name}/init.lua"
+                        "plugin '{name}' not found: expected plugins/{name}/init.lua or plugins/{name}/plugin.toml"
                     ))
                 })?;
             let key = format!("plugin:{name}");
@@ -128,7 +233,7 @@ pub(super) fn install(
                 .load(file.source.as_ref())
                 .set_name(file.name.as_ref())
                 .set_mode(ChunkMode::Text)
-                .call::<Value>(name.as_str());
+                .call::<Value>((name.as_str(), config));
             loading.borrow_mut().remove(&key);
             let value = result?;
             check_deadline(deadline)?;

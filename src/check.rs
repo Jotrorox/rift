@@ -24,11 +24,87 @@ impl Report {
     }
 }
 
-/// Run every strict check and collect the results; nothing is created or
-/// changed, except a probe file that is removed at once.
+/// Every plugin with its execution mode, so the trust difference is visible:
+/// the configuration script runs sandboxed, persistent plugins run trusted
+/// with the listed capabilities. Plugins are never initialized here. Returns
+/// lines to print and warnings (engines this build lacks).
+pub fn plugins(config: &Config) -> (Vec<String>, Vec<String>) {
+    let mut lines = Vec::new();
+    let mut warnings = Vec::new();
+    let script = rift::plugins::script::ScriptPlugin::new(config);
+    if !script.is_empty() {
+        let hooks: Vec<_> = script.hooks().map(|hook| hook.name()).collect();
+        let mut line = format!(
+            "plugin (configuration script): mode script, sandboxed; hooks {}",
+            hooks.join(", ")
+        );
+        if !script.commands().is_empty() {
+            let commands: Vec<_> = script.commands().iter().map(String::as_str).collect();
+            line.push_str(&format!("; commands {}", commands.join(", ")));
+        }
+        lines.push(line);
+    }
+    if let Some(extensions) = &config.extensions {
+        let hooks: Vec<_> = extensions.decision_hooks().collect();
+        if !hooks.is_empty() {
+            lines.push(format!(
+                "plugin (bus responders): mode remote; hooks {}",
+                hooks.join(", ")
+            ));
+        }
+    }
+    let engines = rift::plugins::worker::Engines::builtin();
+    for spec in &config.plugins {
+        let manifest = &spec.manifest;
+        let engine = manifest.engine.map_or("none", |engine| engine.name());
+        lines.push(format!(
+            "plugin {} {}: mode persistent, engine {engine}, trusted; restart {}{}; capabilities {}",
+            spec.name,
+            manifest.version,
+            manifest.restart.name(),
+            if manifest.hot_reload { ", hot reload" } else { "" },
+            manifest.describe_capabilities()
+        ));
+        if let Some(kind) = manifest.engine
+            && !engines.available(kind)
+        {
+            warnings.push(format!(
+                "plugin {}: {}; startup and reload will refuse it",
+                spec.name,
+                rift::plugins::worker::Engines::unavailable(kind)
+            ));
+        }
+    }
+    if !config.plugins.is_empty() && !config.authentication.online_mode {
+        warnings.push(
+            "persistent plugins get no player hooks (login, commands, join, ...) without authentication.online_mode; a plugin that registers one fails to start".into(),
+        );
+    }
+    (lines, warnings)
+}
+
+/// Run every strict check and collect the results. Nothing is created or
+/// changed except a probe file that is removed at once and the compiled
+/// WebAssembly plugins in `local/plugincache` (and that cache's key), which
+/// startup then loads.
 pub fn strict(config: &Config, path: &Path) -> Report {
     let mut report = Report::default();
     environment(config, &mut report);
+    report.errors.extend(
+        plugins(config)
+            .1
+            .into_iter()
+            .filter(|warning| warning.contains("is not available")),
+    );
+    #[cfg(feature = "wasm")]
+    for spec in &config.plugins {
+        if spec.manifest.engine == Some(rift::plugins::manifest::EngineKind::Wasm) {
+            match rift::plugins::wasm::precompile(spec) {
+                Ok(note) => report.notes.push(note),
+                Err(error) => report.errors.push(format!("plugin {}: {error}", spec.name)),
+            }
+        }
+    }
     let running = match Store::check(&config.instance_database, config) {
         Ok(DatabaseCheck::Missing) => {
             report.notes.push(format!(

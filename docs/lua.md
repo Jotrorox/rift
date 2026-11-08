@@ -87,9 +87,11 @@ fail with an explicit diagnostic. `rift`, `rift.config`, `rift.store`, `rift.htt
 ## Folder-based plugins
 
 `rift.plugin("greeting")` adds `plugins/greeting/lua/` to module lookup, then
-executes `plugins/greeting/init.lua`. Plugin names use letters, digits, `_` or `-`,
-up to 128 bytes. The entry script receives the plugin name as `...` and can use
-the same API as `rift.lua`. It needs no return value:
+executes `plugins/greeting/init.lua` inside this sandbox. (A folder with a
+persistent `plugin.toml` is different; see [below](#persistent-lua-plugins).)
+Plugin names use letters, digits, `_` or `-`, up to 128 bytes. The entry script
+receives the plugin name as `...` and can use the same API as `rift.lua`. It
+needs no return value:
 
 ```lua
 -- plugins/greeting/init.lua
@@ -118,13 +120,21 @@ Already imported modules remain cached. Give plugin modules their own namespace
 (for example `greeting.format`) to avoid collisions. Copy a plugin folder into
 `plugins/` to install it; Rift does not download or auto-enable plugins.
 
+## Persistent Lua plugins
+
+A plugin folder whose `plugin.toml` names `engine = "lua"` is a persistent
+plugin: `rift.plugin(name, config)` records it instead of running it here, and
+Rift runs it trusted in its own long-lived LuaJIT state, with the same `rift`
+API and the whole standard library. See [persistent Lua plugins](plugins-lua.md)
+and the [plugin overview](plugins.md).
+
 ## Registering callbacks and commands
 
 `rift.on(event, callback)` appends a handler. Supported events are `route`, `http`,
 `message`, `status`, `login`, `initial_server`, `join`, `disconnect`, `before_transfer` and
 `after_transfer`. Arguments and results match the existing `on_route`, `on_http`,
 `on_message`, [`on_status`](operations.md#server-list-motd-favicon-and-player-count) and
-[authenticated extension](extensions.md) callbacks.
+[plugin event](extensions.md) callbacks.
 
 Handlers run in registration order. A directly configured callback runs first.
 For all events except `message`, the first non-nil result ends the chain and is
@@ -174,7 +184,7 @@ globals exist; everything else in the standard library is removed:
 | `table` | `concat`, `insert`, `remove`, `maxn` |
 | `math` | `abs`, `acos`, `asin`, `atan`, `atan2`, `ceil`, `cos`, `cosh`, `deg`, `exp`, `floor`, `fmod`, `frexp`, `huge`, `ldexp`, `log`, `log10`, `max`, `min`, `modf`, `pi`, `pow`, `rad`, `random`, `randomseed`, `sin`, `sinh`, `sqrt`, `tan`, `tanh` |
 | `require` | Rift's module loader, described above |
-| `rift` | The API described on this page and in the [extension API](extensions.md) |
+| `rift` | The API described on this page and in the [plugin event API](extensions.md) |
 
 Missing on purpose: `pcall`, `xpcall`, `coroutine`, `load`, `loadstring`,
 `dofile`, `loadfile`, `setmetatable`, `getmetatable`, `rawget`/`rawset`/`rawequal`,
@@ -226,7 +236,7 @@ reload captures edited modules and plugins even when `rift.lua` did not change.
 Existing player sessions retain their original code. API v1 also pins permissions;
 API v2 supports live grants, durable state, jobs, HTTP integrations and online
 player actions as described
-in the [extension API](extensions.md). A failed reload preserves the active
+in the [plugin event API](extensions.md). A failed reload preserves the active
 configuration.
 
 All imports and handlers share the existing 8 MiB VM memory limit and 100,000
