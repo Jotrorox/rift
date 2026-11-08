@@ -50,6 +50,8 @@ jobs:
           python-version: '3.12'
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Lint without WebAssembly support
+        run: cargo clippy --locked --all-targets --no-default-features -- -D warnings
       - run: python -m unittest discover -s tests -p 'test_*.py' -v
       - name: Test bundled frontend without npm dependencies
         run: node src/web_assets/tests.js
@@ -172,7 +174,11 @@ jobs:
             executable: rift-windows-x86_64.exe
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: rustup show
+      - name: Install pinned Rust toolchain and the WebAssembly target
+        # The WebAssembly conformance tests build their guest components.
+        run: |
+          rustup show
+          rustup target add wasm32-wasip2
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           prefix-key: v1-rust
