@@ -298,6 +298,41 @@ jobs:
           path: ${{ runner.temp }}/downloads
           key: ${{ steps.tools-cache.outputs.cache-primary-key }}
 
+  plugin-examples-wasm:
+    name: C and Go examples on the WebAssembly engine
+    needs: [plugin-sdk-c, plugin-sdk-go]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned Rust toolchain and the WebAssembly target
+        run: |
+          rustup show
+          rustup target add wasm32-wasip2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          prefix-key: v1-rust
+          shared-key: regression-ubuntu-24.04
+          cache-bin: false
+          # Only regression saves the shared cache.
+          save-if: false
+      - name: Download this run's hello-c component
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: hello-c-wasm
+          path: examples/plugins/hello-c
+      - name: Download this run's hello-go component
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: hello-go-wasm
+          path: examples/plugins/hello-go
+      - name: Run the WebAssembly conformance tests with every hello example
+        # The tests pick up hello_c.wasm and hello_go.wasm in their example folders.
+        run: |
+          test -f examples/plugins/hello-c/hello_c.wasm
+          test -f examples/plugins/hello-go/hello_go.wasm
+          cargo test --locked --lib plugins::wasm -- --test-threads=1
+
   regression:
     name: Regression (${{ matrix.platform }})
     runs-on: ${{ matrix.os }}
@@ -750,7 +785,7 @@ jobs:
   ci-ready:
     name: CI ready
     if: always()
-    needs: [quality, plugin-sdk-rust, plugin-sdk-c, plugin-sdk-go, audit, regression, build-linux, minecraft, compatibility, benchmark]
+    needs: [quality, plugin-sdk-rust, plugin-sdk-c, plugin-sdk-go, plugin-examples-wasm, audit, regression, build-linux, minecraft, compatibility, benchmark]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
