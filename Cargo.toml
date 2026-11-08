@@ -8,7 +8,8 @@ license = "BSD-2-Clause"
 mlua = { version = "0.12", features = ["luajit", "vendored"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal", "process", "fs"] }
 serde_json = "1"
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
+toml = { version = "1", default-features = false, features = ["parse", "serde", "std"] }
 rusqlite = { version = "0.41", features = ["bundled"] }
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
 aes = { version = "0.9", features = ["zeroize"] }
@@ -20,6 +21,16 @@ sha2 = "0.11"
 bytes = "1"
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "aws_lc_rs"] }
+http = { version = "1", optional = true }
+http-body-util = { version = "0.1", optional = true }
+wasmtime = { version = "50.0.1", optional = true, default-features = false, features = ["cranelift", "component-model", "parallel-compilation", "runtime", "std"] }
+wasmtime-wasi = { version = "50.0.1", optional = true, default-features = false, features = ["p2"] }
+wasmtime-wasi-http = { version = "50.0.1", optional = true, default-features = false, features = ["default-send-request", "p2"] }
+
+[features]
+default = ["wasm"]
+# WebAssembly plugins (engine = "wasm") through wasmtime.
+wasm = ["dep:http", "dep:http-body-util", "dep:wasmtime", "dep:wasmtime-wasi", "dep:wasmtime-wasi-http"]
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

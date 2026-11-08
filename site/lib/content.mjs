@@ -13,8 +13,18 @@ export const DOCS = [
     blurb: 'Install, first run, authentication and hostname routing.' },
   { slug: 'lua', file: 'docs/lua.md', title: 'Lua configuration', group: 'Configure',
     blurb: 'Script-style settings, local modules and folder plugins.' },
-  { slug: 'extensions', file: 'docs/extensions.md', title: 'Authenticated extensions', group: 'Configure',
+  { slug: 'plugins', file: 'docs/plugins.md', title: 'Plugins', group: 'Plugins',
+    blurb: 'One contract, three execution modes, plugin.toml, lifecycle and the trust model.' },
+  { slug: 'extensions', file: 'docs/extensions.md', title: 'Events, commands and policy', group: 'Plugins',
     blurb: 'Login and transfer hooks, commands, permissions, queues and durable state.' },
+  { slug: 'plugins-lua', file: 'docs/plugins-lua.md', title: 'Lua plugins', group: 'Plugins',
+    blurb: 'Persistent plugins in their own LuaJIT state, and the JIT switch.' },
+  { slug: 'plugins-rust', file: 'docs/plugins-rust.md', title: 'Rust plugins', group: 'Plugins',
+    blurb: 'WebAssembly components with the rift-plugin crate.' },
+  { slug: 'plugins-c', file: 'docs/plugins-c.md', title: 'C plugins', group: 'Plugins',
+    blurb: 'WebAssembly components with wasi-sdk and the C SDK.' },
+  { slug: 'plugins-go', file: 'docs/plugins-go.md', title: 'Go plugins', group: 'Plugins',
+    blurb: 'WebAssembly components with TinyGo and the Go SDK.' },
   { slug: 'operations', file: 'docs/operations.md', title: 'Operations', group: 'Run',
     blurb: 'systemd, containers, reloads, maintenance, upgrades and rollback.' },
   { slug: 'managed-servers', file: 'docs/managed-servers.md', title: 'Managed servers', group: 'Run',
@@ -74,7 +84,7 @@ function rewriteHref(href, from, docHref) {
   return BLOB + target + (hash ? `#${hash}` : '');
 }
 
-const LANGS = ['sh', 'lua', 'yaml', 'properties', 'rust', 'python', 'http', 'java', 'json', 'text'];
+const LANGS = ['sh', 'lua', 'yaml', 'properties', 'rust', 'python', 'http', 'java', 'json', 'toml', 'c', 'go', 'text'];
 let highlighter;
 
 function getHighlighter() {

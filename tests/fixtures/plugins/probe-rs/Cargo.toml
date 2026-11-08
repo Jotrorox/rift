@@ -1,0 +1,23 @@
+[package]
+name = "probe-rs"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-2-Clause"
+publish = false
+
+# Standalone on purpose: a test fixture, never part of the proxy's build.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+rift-plugin = { path = "../../../../sdk/rust" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

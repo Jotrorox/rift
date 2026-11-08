@@ -1,0 +1,22 @@
+[package]
+name = "rift-plugin"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "BSD-2-Clause"
+description = "Guest SDK for Rift WebAssembly plugins (rift:plugin@0.1.0)"
+keywords = ["rift", "minecraft", "plugin", "wasm", "component"]
+categories = ["wasm", "api-bindings"]
+include = ["src/**", "wit/**", "Cargo.toml"]
+
+# Standalone on purpose: the SDK is never part of the proxy's build.
+[workspace]
+
+[dependencies]
+wit-bindgen = { version = "0.63.0", default-features = false, features = ["macros", "realloc", "std"] }
+log = { version = "0.4", features = ["std"] }
+serde = "1"
+serde_json = "1"
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }

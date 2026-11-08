@@ -218,7 +218,7 @@ fn legacy_commands_keep_signed_arguments_and_preserve_last_seen_acknowledgements
         let mut chat = Vec::new();
         write_string("/server lobby", &mut chat);
         assert_eq!(
-            caps.proxy_command_with(&Packet::new(id, chat), &[])
+            caps.proxy_command_with(&Packet::new(id, chat), &|_| false)
                 .unwrap()
                 .unwrap()
                 .0,
@@ -227,7 +227,7 @@ fn legacy_commands_keep_signed_arguments_and_preserve_last_seen_acknowledgements
         let mut chat = Vec::new();
         write_string("server lobby", &mut chat);
         assert!(
-            caps.proxy_command_with(&Packet::new(id, chat), &[])
+            caps.proxy_command_with(&Packet::new(id, chat), &|_| false)
                 .unwrap()
                 .is_none()
         );
@@ -251,7 +251,7 @@ fn legacy_commands_keep_signed_arguments_and_preserve_last_seen_acknowledgements
                 data.extend(&update);
             }
             let packet = Packet::new(id, data);
-            let result = caps.proxy_command_with(&packet, &[]).unwrap();
+            let result = caps.proxy_command_with(&packet, &|_| false).unwrap();
             if signed {
                 assert!(result.is_none());
             } else {
@@ -268,8 +268,10 @@ fn legacy_commands_keep_signed_arguments_and_preserve_last_seen_acknowledgements
             }
             for cut in 14..packet.data.len() {
                 assert!(
-                    caps.proxy_command_with(&Packet::new(id, packet.data[..cut].to_vec()), &[])
-                        .is_err()
+                    caps.proxy_command_with(&Packet::new(id, packet.data[..cut].to_vec()), &|_| {
+                        false
+                    })
+                    .is_err()
                 );
             }
         }
