@@ -16,7 +16,7 @@
 //! | `tag` (string) | `init` reports `init <tag>`; a hot reload adopts the new configuration and reports `reload <tag>` (`-` without a tag). `shutdown(reason)` reports `shutdown <reason>`. |
 //! | `decide` | Object from `login`, `initial_server`, `before_transfer` to the action that hook returns, in the serde form of [`Action`]: `"continue"`, `{"deny": "..."}`, `{"server": "..."}`. Missing hooks continue. |
 //! | `slow` | Hooks that busy-wait 300 ms (calling the host clock) before answering. |
-//! | `fail` | Object from hook name to `"handler"` (the handler fails with an error containing `database down`) or `"fatal"` (a trap: the instance fails; the Lua guest exhausts its memory limit). |
+//! | `fail` | Object from hook name to `"handler"` (the handler fails with an error containing `database down`) or `"fatal"` (a trap: the instance fails; the Lua guest exhausts its memory limit, the WebAssembly guest panics). WebAssembly hooks have no error result, so its "handler" failure answers a decision the hook rejects, carrying `database down`. |
 //! | `commands` | List of `{name, permission, suggest}`; `suggest` is `"none"`, `"players"`, `"servers"`, `"dynamic"` or a list of strings. Every command answers `{"message": "hi <args>"}`; a dynamic `suggest` returns `alpha`, `beta`, `gamma`. |
 //! | `grant` | List of `[uuid, node]` pairs granted with `permissions.set(uuid, node, true)` during init. |
 //! | `increment` | Integer added to store entry `counters`/`hits` during init. |
@@ -869,60 +869,101 @@ pub(crate) async fn hello_example(engines: Engines, example: &Path) {
 }
 
 /// One `#[tokio::test]` per scenario for `$fixture`, a `Fixture` value.
+/// With `if $ready`, a scenario returns at once while `$ready` is false (an
+/// engine whose guest cannot be built on this machine).
 macro_rules! conformance_tests {
+    ($fixture:expr, if $ready:expr) => {
+        $crate::plugins::conformance::conformance_tests!(@scenarios $fixture, $ready);
+    };
     ($fixture:expr) => {
+        $crate::plugins::conformance::conformance_tests!(@scenarios $fixture, true);
+    };
+    (@scenarios $fixture:expr, $ready:expr) => {
         #[tokio::test]
         async fn decisions_follow_the_chain() {
+            if !$ready {
+                return;
+            }
             $crate::plugins::conformance::decisions_follow_the_chain(&$fixture).await;
         }
 
         #[tokio::test]
         async fn remote_responders_follow_plugins() {
+            if !$ready {
+                return;
+            }
             $crate::plugins::conformance::remote_responders_follow_plugins(&$fixture).await;
         }
 
         #[tokio::test]
         async fn first_answer_other_than_continue_wins() {
+            if !$ready {
+                return;
+            }
             $crate::plugins::conformance::first_answer_other_than_continue_wins(&$fixture).await;
         }
 
         #[tokio::test]
         async fn deadlines_apply_on_timeout() {
+            if !$ready {
+                return;
+            }
             $crate::plugins::conformance::deadlines_apply_on_timeout(&$fixture).await;
         }
 
         #[tokio::test]
         async fn failures_apply_on_failure_and_restart() {
+            if !$ready {
+                return;
+            }
             $crate::plugins::conformance::failures_apply_on_failure_and_restart(&$fixture).await;
         }
 
         #[tokio::test]
         async fn reload_diff_keeps_reloads_or_replaces() {
+            if !$ready {
+                return;
+            }
             $crate::plugins::conformance::reload_diff_keeps_reloads_or_replaces(&$fixture).await;
         }
 
         #[tokio::test]
         async fn command_names_have_one_owner() {
+            if !$ready {
+                return;
+            }
             $crate::plugins::conformance::command_names_have_one_owner(&$fixture).await;
         }
 
         #[tokio::test]
         async fn commands_check_permissions() {
+            if !$ready {
+                return;
+            }
             $crate::plugins::conformance::commands_check_permissions(&$fixture).await;
         }
 
         #[tokio::test]
         async fn suggest_kinds_complete() {
+            if !$ready {
+                return;
+            }
             $crate::plugins::conformance::suggest_kinds_complete(&$fixture).await;
         }
 
         #[tokio::test]
         async fn observers_reach_every_plugin() {
+            if !$ready {
+                return;
+            }
             $crate::plugins::conformance::observers_reach_every_plugin(&$fixture).await;
         }
 
         #[tokio::test]
         async fn services_scope_the_store_and_deliver_timers_and_messages() {
+            if !$ready {
+                return;
+            }
             $crate::plugins::conformance::services_scope_the_store_and_deliver_timers_and_messages(
                 &$fixture,
             )
@@ -931,6 +972,9 @@ macro_rules! conformance_tests {
 
         #[tokio::test]
         async fn route_status_and_http_follow_the_script() {
+            if !$ready {
+                return;
+            }
             $crate::plugins::conformance::route_status_and_http_follow_the_script(&$fixture).await;
         }
     };
