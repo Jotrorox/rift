@@ -16,6 +16,9 @@ default-members = [
     "crates/rift-permissions-ffi",
     "crates/rift-messaging",
 ]
+# The Pumpkin plugin pulls in Pumpkin from git; it builds on its own (see
+# adapters/pumpkin and docs/permissions-pumpkin.md).
+exclude = ["adapters/pumpkin"]
 resolver = "3"
 
 [workspace.package]
