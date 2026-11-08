@@ -1,0 +1,13 @@
+name: RiftPerms
+main: io.github.jotrorox.rift.permissions.paper.RiftPermsPlugin
+version: '${version}'
+api-version: '1.21'
+description: Rift permissions for Paper, Folia and Purpur, answered from the proxy's replica
+website: https://github.com/Jotrorox/rift
+folia-supported: true
+softdepend: [Vault, PlaceholderAPI]
+commands:
+  perms:
+    description: Manage Rift permissions; the proxy parses, authorises and applies the command
+    usage: /perms <user|group|track|check|trace|...>
+    aliases: [rp]
