@@ -115,7 +115,7 @@ impl ServerList {
 }
 
 /// Fields an `on_status` hook may replace for one ping.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StatusOverride {
     pub motd: Option<Json>,
     pub version: Option<String>,
@@ -127,7 +127,7 @@ pub struct StatusOverride {
 }
 
 /// Owned inputs for `on_status`, available before any backend contact.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Ping {
     pub listener: String,
     pub hostname: String,

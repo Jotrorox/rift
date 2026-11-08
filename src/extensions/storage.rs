@@ -32,7 +32,7 @@ const MAX_VALUE: usize = 64 * 1024;
 /// Upper bound of a version 1 snapshot.
 const MAX_BYTES: usize = 1024 * 1024;
 // LuaJIT numbers cannot distinguish every integer outside this range.
-const MAX_INTEGER: mlua::Integer = (1 << 53) - 1;
+const MAX_INTEGER: i64 = (1 << 53) - 1;
 const MAGIC: &[u8; 8] = b"RIFTKV\0\x01";
 const CHECKSUM_BYTES: usize = 32;
 const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
@@ -218,7 +218,7 @@ fn check_deadline(deadline: Instant) -> io::Result<()> {
     Ok(())
 }
 
-fn exact_integer(value: mlua::Integer) -> io::Result<mlua::Integer> {
+fn exact_integer(value: i64) -> io::Result<i64> {
     if !(-MAX_INTEGER..=MAX_INTEGER).contains(&value) {
         return Err(invalid(
             "store integer exceeds the exact Lua number range (-9007199254740991..=9007199254740991)",
@@ -484,7 +484,7 @@ impl Store {
                         let current = match entries.get(&key) {
                             Some(value) => std::str::from_utf8(value)
                                 .ok()
-                                .and_then(|value| value.parse::<mlua::Integer>().ok())
+                                .and_then(|value| value.parse::<i64>().ok())
                                 .ok_or_else(|| invalid("store value is not a decimal integer"))?,
                             None => 0,
                         };

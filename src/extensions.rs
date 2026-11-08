@@ -397,7 +397,10 @@ impl ExtensionScript {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A decision hook's answer. Serialized like a Lua result table:
+/// `"continue"`, `{"deny":"reason"}`, `"leave_queue"`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Action {
     Continue,
     Deny(String),
@@ -541,8 +544,12 @@ fn filter_suggestions(suggestions: Vec<Suggestion>, word: &str) -> Vec<Suggestio
         .collect()
 }
 
-#[derive(Debug, Clone, Default)]
+/// The session a player hook is about; the serde form uses the WIT field
+/// names (`connection_id`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Context {
+    #[serde(rename = "connection_id")]
     pub id: u64,
     pub uuid: String,
     pub name: String,

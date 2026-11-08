@@ -116,6 +116,11 @@ fn error(message: &str) -> mlua::Error {
     mlua::Error::runtime(message)
 }
 
+/// Lua sees the same message as before `Players::send` became engine-neutral.
+fn lua_error(error: std::io::Error) -> mlua::Error {
+    mlua::Error::runtime(error.to_string())
+}
+
 fn text(value: String, label: &str) -> mlua::Result<String> {
     if value.is_empty() || value.len() > MAX_TEXT {
         return Err(mlua::Error::runtime(format!(
@@ -256,19 +261,19 @@ fn boss_bar(name: String, value: Option<Table>) -> mlua::Result<PlayerAction> {
     })
 }
 
+const INVALID_TARGET: &str = "player must be a lowercase UUID (32 hex digits) or a player name";
+
 /// Find a player by lowercase UUID or case-insensitive name.
 fn find<'a>(
     sessions: &'a BTreeMap<u64, Entry>,
     target: &str,
-) -> mlua::Result<Option<(&'a u64, &'a Entry)>> {
+) -> Result<Option<(&'a u64, &'a Entry)>, &'static str> {
     let uuid = target.len() == 32
         && target
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
     if !uuid && !crate::players::valid_username(target) {
-        return Err(error(
-            "player must be a lowercase UUID (32 hex digits) or a player name",
-        ));
+        return Err(INVALID_TARGET);
     }
     Ok(sessions.iter().find(|(_, entry)| {
         if uuid {
@@ -357,9 +362,10 @@ impl Players {
 
     /// Queue an action for a lowercase UUID or case-insensitive player name.
     /// False means that the player is offline or has a full queue.
-    pub fn send(&self, target: &str, action: PlayerAction) -> mlua::Result<bool> {
+    pub fn send(&self, target: &str, action: PlayerAction) -> std::io::Result<bool> {
         let sessions = self.lock();
-        Ok(find(&sessions, target)?
+        Ok(find(&sessions, target)
+            .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?
             .is_some_and(|(_, entry)| entry.actions.try_send(action).is_ok()))
     }
 
@@ -501,7 +507,8 @@ impl Players {
             lua.create_function(move |lua, target: String| {
                 crate::script::check_deadline(deadline)?;
                 let sessions = players.lock();
-                find(&sessions, &target)?
+                find(&sessions, &target)
+                    .map_err(error)?
                     .map(|(id, entry)| Self::info(lua, entry, *id))
                     .transpose()
             })?,
@@ -544,7 +551,9 @@ impl Players {
                 name,
                 lua.create_function(move |_, (target, value): (String, String)| {
                     charge()?;
-                    players.send(&target, action(text(value, label)?))
+                    players
+                        .send(&target, action(text(value, label)?))
+                        .map_err(lua_error)
                 })?,
             )?;
         }
@@ -553,7 +562,7 @@ impl Players {
             "title",
             lua.create_function(move |_, (target, options): (String, Value)| {
                 charge()?;
-                players.send(&target, title(options)?)
+                players.send(&target, title(options)?).map_err(lua_error)
             })?,
         )?;
         let (players, charge) = (self.clone(), budget.clone());
@@ -561,7 +570,7 @@ impl Players {
             "tab_list",
             lua.create_function(move |_, (target, options): (String, Option<Table>)| {
                 charge()?;
-                players.send(&target, tab_list(options)?)
+                players.send(&target, tab_list(options)?).map_err(lua_error)
             })?,
         )?;
         let (players, charge) = (self.clone(), budget.clone());
@@ -572,7 +581,8 @@ impl Players {
                     charge()?;
                     let action = boss_bar(name.clone(), options)?;
                     let mut sessions = players.lock();
-                    let Some(id) = find(&sessions, &target)?.map(|(id, _)| *id) else {
+                    let Some(id) = find(&sessions, &target).map_err(error)?.map(|(id, _)| *id)
+                    else {
                         return Ok(false);
                     };
                     let entry = sessions.get_mut(&id).unwrap();
@@ -604,7 +614,9 @@ impl Players {
             lua.create_function(move |_, (target, server): (String, String)| {
                 charge()?;
                 players.known(&server)?;
-                players.send(&target, PlayerAction::Transfer(server))
+                players
+                    .send(&target, PlayerAction::Transfer(server))
+                    .map_err(lua_error)
             })?,
         )?;
         let players = self.clone();
