@@ -17,10 +17,11 @@ complete plugin.
 
 Upstream Go cannot emit WebAssembly components yet
 ([golang/go#65333](https://github.com/golang/go/issues/65333)), so
-[TinyGo](https://tinygo.org) is the supported compiler. TinyGo needs
-[`wasm-tools`](https://github.com/bytecodealliance/wasm-tools) and `wasm-opt`
-([Binaryen](https://github.com/WebAssembly/binaryen)) on `PATH`; it runs
-`wasm-tools component embed`/`new` itself.
+[TinyGo](https://tinygo.org) is the supported compiler. TinyGo runs
+`wasm-tools component embed`/`new` itself, so it needs
+[`wasm-tools`](https://github.com/bytecodealliance/wasm-tools) on `PATH`, plus
+`wasm-opt` from [Binaryen](https://github.com/WebAssembly/binaryen) (bundled
+in TinyGo's Linux release; `brew install binaryen` on macOS).
 
 **Use TinyGo 0.42.0** (CI does). Any release from 0.34 accepts the build line
 below, but TinyGo 0.43.0 and 0.44.0 allocate the memory the host writes
