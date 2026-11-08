@@ -101,12 +101,25 @@ impl Default for Capabilities {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LuaOptions {
     pub ffi: bool,
     pub native_modules: bool,
     /// 0 means unlimited.
     pub memory_limit_mb: u32,
+    /// `false` turns LuaJIT's compiler off so the deadline hook always fires.
+    pub jit: bool,
+}
+
+impl Default for LuaOptions {
+    fn default() -> Self {
+        Self {
+            ffi: false,
+            native_modules: false,
+            memory_limit_mb: 0,
+            jit: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,6 +179,7 @@ struct RawLua {
     ffi: Option<bool>,
     native_modules: Option<bool>,
     memory_limit_mb: Option<i64>,
+    jit: Option<bool>,
 }
 
 /// Plugin and folder names: what `rift.plugin` accepts.
@@ -335,6 +349,7 @@ impl Manifest {
                     ffi: None,
                     native_modules: None,
                     memory_limit_mb: None,
+                    jit: None,
                 });
                 let memory_limit_mb = raw.memory_limit_mb.unwrap_or(0);
                 if !(0..=65_536).contains(&memory_limit_mb) {
@@ -344,6 +359,7 @@ impl Manifest {
                     ffi: raw.ffi.unwrap_or(false),
                     native_modules: raw.native_modules.unwrap_or(false),
                     memory_limit_mb: memory_limit_mb as u32,
+                    jit: raw.jit.unwrap_or(true),
                 })
             }
             (None, EngineKind::Wasm) => None,
@@ -588,6 +604,7 @@ env = ["RELAXOBAN_DSN"]
 ffi = true
 native_modules = true
 memory_limit_mb = 64
+jit = false
 "#,
             "relaxoban",
         )
@@ -599,6 +616,7 @@ memory_limit_mb = 64
         assert_eq!(manifest.on_timeout(Hook::Login), Policy::Continue);
         assert_eq!(manifest.on_failure(), Policy::Continue);
         assert_eq!(manifest.restart, Restart::Always);
+        assert!(!manifest.lua.as_ref().unwrap().jit);
         assert_eq!(
             manifest.describe_capabilities(),
             "filesystem=data,host,/var/lib/relaxoban network=no env=RELAXOBAN_DSN ffi=true native_modules=true memory_limit_mb=64"
@@ -653,7 +671,7 @@ memory_limit_mb = 64
                 "a",
             ),
             ("engine = \"lua\"\n[lua]\nmemory_limit_mb = -1\n", "a"),
-            ("engine = \"lua\"\n[lua]\njit = true\n", "a"),
+            ("engine = \"lua\"\n[lua]\njit = \"off\"\n", "a"),
         ] {
             let text = format!("{base}{extra}");
             assert!(Manifest::parse(&text, folder).is_err(), "{text}");

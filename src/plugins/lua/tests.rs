@@ -215,6 +215,52 @@ end)
 }
 
 #[tokio::test]
+async fn without_the_jit_a_pure_lua_loop_is_interrupted() {
+    let root = folder(
+        "[deadlines]\nlogin = 50\n[lua]\njit = false\n",
+        &[(
+            "init.lua",
+            r#"
+assert(not jit.status(), "the compiler must be off")
+assert(not pcall(jit.on), "jit.on must refuse")
+rift.on("login", function()
+    -- Calls no Rift function: only the instruction hook can stop it.
+    while true do end
+end)
+rift.on("initial_server", function()
+    local n = 0
+    for i = 1, 100000 do n = n + i end
+    return { deny = "alive " .. n .. " " .. tostring(jit.status()) }
+end)
+"#,
+        )],
+    );
+    let broker = Broker::default();
+    let runtime = started(&root, "{}", &broker).await;
+    let instance = runtime.plugins().active()[0].clone();
+    let started = Instant::now();
+    let outcome = instance
+        .call(Event::Login(Context::default()), Duration::from_secs(5))
+        .await;
+    let Outcome::Failed(error) = outcome else {
+        panic!("expected a handler error, got {outcome:?}");
+    };
+    assert!(error.contains("deadline exceeded"), "{error}");
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(instance.status(), Status::Running);
+    assert_eq!(
+        instance
+            .call(
+                Event::InitialServer(Context::default()),
+                Duration::from_secs(5)
+            )
+            .await,
+        Outcome::Reply(Reply::Action(Action::Deny("alive 5000050000 false".into())))
+    );
+    runtime.plugins().shutdown().await;
+}
+
+#[tokio::test]
 async fn late_registration_is_refused_but_timers_work_with_their_hook() {
     let root = folder(
         "",

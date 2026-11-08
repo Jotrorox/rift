@@ -13,8 +13,8 @@
 //!   `lua.native_modules = true` (from the folder, its `lua/` subfolder and
 //!   LuaJIT's default `cpath`).
 //! - Globals, modules and upvalues persist between calls. The JIT compiler is
-//!   on; there is no instruction budget and memory is limited only when
-//!   `lua.memory_limit_mb` is set.
+//!   on unless `lua.jit = false`; there is no instruction budget and memory
+//!   is limited only when `lua.memory_limit_mb` is set.
 //! - Each call runs under its manifest deadline (`init`, `reload` and
 //!   `shutdown` under theirs; observers, timers and messages under
 //!   [`OBSERVER_DEADLINE`]). An instruction hook and every Rift function
@@ -24,7 +24,8 @@
 //!   loops as compiled traces that skip the instruction hook, so a compiled
 //!   loop that never calls a Rift function cannot be interrupted: its calls
 //!   time out under the manifest's policy and Rift abandons the thread on
-//!   shutdown.
+//!   shutdown. With `lua.jit = false` everything is interpreted, the hook
+//!   always fires and such a loop is interrupted too.
 //!
 //! The entry chunk (`entry`, default `init.lua`) receives the plugin name and
 //! the decoded configuration table as `...`, like a script-mode plugin
@@ -536,7 +537,9 @@ fn vm(options: &LuaOptions) -> Result<Lua, String> {
     Ok(lua)
 }
 
-/// `package.path`/`cpath`, `os.exit`, `os.getenv` and the JIT.
+/// `package.path`/`cpath`, `os.exit`, `os.getenv` and the JIT. With
+/// `lua.jit = false` the compiler is off before the entry script loads and
+/// `jit.on` refuses, so the deadline hook fires in every loop.
 fn environment(lua: &Lua, spec: &PluginSpec, options: &LuaOptions) -> mlua::Result<()> {
     let globals = lua.globals();
     let folder = spec.folder.display().to_string();
@@ -581,8 +584,19 @@ fn environment(lua: &Lua, spec: &PluginSpec, options: &LuaOptions) -> mlua::Resu
             })?,
         )?;
     }
-    globals
-        .raw_get::<Table>("jit")?
-        .raw_get::<Function>("on")?
-        .call::<()>(())
+    let jit: Table = globals.raw_get("jit")?;
+    if options.jit {
+        return jit.raw_get::<Function>("on")?.call::<()>(());
+    }
+    jit.raw_get::<Function>("off")?.call::<()>(())?;
+    // Flush traces compiled during setup, then keep the compiler off.
+    jit.raw_get::<Function>("flush")?.call::<()>(())?;
+    jit.raw_set(
+        "on",
+        lua.create_function(|_, _: mlua::MultiValue| -> mlua::Result<()> {
+            Err(mlua::Error::runtime(
+                "jit.on: the manifest sets lua.jit = false so that deadlines can interrupt every loop",
+            ))
+        })?,
+    )
 }
