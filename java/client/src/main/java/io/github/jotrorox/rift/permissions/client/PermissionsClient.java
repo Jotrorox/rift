@@ -118,6 +118,36 @@ public final class PermissionsClient implements RiftPermissions, AutoCloseable {
             logger.fine(() -> "Cannot reach the Rift proxy: " + cause.getMessage());
         }
     };
+    private final EventBus eventBus = new EventBus() {
+        @Override
+        @SuppressWarnings("unchecked")
+        public <E> Subscription subscribe(Class<E> type, Consumer<? super E> listener) {
+            List<Consumer<Object>> list = listeners.get(type);
+            if (list == null) {
+                throw new IllegalArgumentException("unknown permission event " + type.getName());
+            }
+            Consumer<Object> wrapped = event -> listener.accept((E) event);
+            list.add(wrapped);
+            return () -> list.remove(wrapped);
+        }
+    };
+    private final Contexts contexts = new Contexts() {
+        @Override
+        public ContextSet of(Object player) {
+            return platform.contexts(player);
+        }
+
+        @Override
+        public UUID uuid(Object player) {
+            return platform.uuid(player);
+        }
+
+        @Override
+        public Subscription register(ContextCalculator<?> calculator) {
+            calculators.add(Objects.requireNonNull(calculator, "calculator"));
+            return () -> calculators.remove(calculator);
+        }
+    };
     private volatile List<RegisteredPermission> registrations = List.of();
     private volatile Protocol.Limits limits = Protocol.Limits.DEFAULT;
     private volatile Set<String> externalContexts = Set.of();
@@ -309,28 +339,19 @@ public final class PermissionsClient implements RiftPermissions, AutoCloseable {
 
     /**
      * Wait for a joining player's snapshot: immediate when held, otherwise {@code subject.get} with
-     * the join timeout. After a failure the player is retried every 5 seconds while online and the
-     * offline policy answers meanwhile.
+     * the join timeout. Without it, the offline policy answers for the player, and
+     * {@link #playerJoined} retries every 5 seconds.
      *
      * @param uuid the joining player
      * @return the snapshot, or a failure after the join timeout
      */
     public CompletableFuture<CompiledSubject> awaitSubject(UUID uuid) {
-        online.add(uuid);
-        replica.markJoined(uuid);
         Optional<CompiledSubject> held = replica.get(uuid);
-        if (held.isPresent()) {
-            return CompletableFuture.completedFuture(held.get());
-        }
-        return fetch(uuid, joinTimeout).whenComplete((subject, error) -> {
-            if (error != null) {
-                missing.add(uuid);
-            }
-        });
+        return held.isPresent() ? CompletableFuture.completedFuture(held.get()) : fetch(uuid, joinTimeout);
     }
 
     /**
-     * @param uuid a player now on this server
+     * @param uuid a player now on this server; refetched every 5 seconds while their snapshot is missing
      */
     public void playerJoined(UUID uuid) {
         online.add(uuid);
@@ -354,40 +375,12 @@ public final class PermissionsClient implements RiftPermissions, AutoCloseable {
 
     @Override
     public EventBus events() {
-        return new EventBus() {
-            @Override
-            @SuppressWarnings("unchecked")
-            public <E> Subscription subscribe(Class<E> type, Consumer<? super E> listener) {
-                List<Consumer<Object>> list = listeners.get(type);
-                if (list == null) {
-                    throw new IllegalArgumentException("unknown permission event " + type.getName());
-                }
-                Consumer<Object> wrapped = event -> listener.accept((E) event);
-                list.add(wrapped);
-                return () -> list.remove(wrapped);
-            }
-        };
+        return eventBus;
     }
 
     @Override
     public Contexts contexts() {
-        return new Contexts() {
-            @Override
-            public ContextSet of(Object player) {
-                return platform.contexts(player);
-            }
-
-            @Override
-            public UUID uuid(Object player) {
-                return platform.uuid(player);
-            }
-
-            @Override
-            public Subscription register(ContextCalculator<?> calculator) {
-                calculators.add(Objects.requireNonNull(calculator, "calculator"));
-                return () -> calculators.remove(calculator);
-            }
-        };
+        return contexts;
     }
 
     /**
