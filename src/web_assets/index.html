@@ -207,8 +207,8 @@
         </section>
 
         <section class="view" id="view-permissions" aria-labelledby="view-title" hidden>
-          <div class="page-head"><p class="page-intro">Groups grant permission nodes for extension commands and <code>rift.permissions.has</code>. A group overrides the groups it inherits from, and everyone belongs to <code>default</code> when it exists. Membership changes apply immediately and survive restarts.</p><button type="button" class="button secondary" id="permissions-refresh">Refresh</button></div>
-          <div class="notice warning hidden" id="permissions-unavailable" role="status">Permission groups need extensions with <code>api_version = 2</code>, which require online authentication. Configure them in the Lua script first.</div>
+          <div class="page-head"><p class="page-intro">Groups from <code>extensions.groups</code> grant permission nodes for extension commands, <code>rift.permissions.check</code> and backends. Heavier groups win, then closer ones, and everyone belongs to <code>default</code>. Membership changes are stored in the permission store, apply immediately and survive restarts.</p><button type="button" class="button secondary" id="permissions-refresh">Refresh</button></div>
+          <div class="notice warning hidden" id="permissions-unavailable" role="status">Configured permission groups need extensions with <code>api_version = 2</code> or <code>3</code>, which require online authentication. Configure them in the Lua script first.</div>
           <section class="panel" id="permission-groups-panel" aria-label="Permission groups">
             <div class="panel-heading"><h2>Groups</h2><span class="muted small" id="permission-group-count">—</span></div>
             <div class="table-wrap"><table><thead><tr><th scope="col">Group</th><th scope="col">Inherits from</th><th scope="col">Nodes</th><th scope="col" class="numeric">Members</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead><tbody id="permission-groups"><tr><td colspan="5" class="empty">Waiting for data</td></tr></tbody></table></div>

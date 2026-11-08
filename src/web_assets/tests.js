@@ -589,7 +589,7 @@ async function testWebAssets(appSource, statusSource) {
   });
   await test("permission groups render, save typed nodes and manage encoded memberships", async () => {
     const h = fixture(appSource);
-    h.model.definitions.permission_groups = { default: { inherits: [], permissions: { "chat.send": true } }, staff: { inherits: ["default"], permissions: { "network.*": true, "network.ban": false } } };
+    h.model.definitions.permission_groups = { default: { inherits: [], permissions: { "chat.send": true } }, staff: { inherits: ["default"], weight: 10, prefix: "&c", permissions: { "network.*": true, "network.ban": false } } };
     h.model.intercept = (path) => path === "/api/permissions" ? h.response({ enabled: true, truncated: false, members: [{ uuid: "0123456789abcdef0123456789abcdef", name: "<Alice>", groups: ["staff"] }] }) : null;
     await flush();
     assert(h.element("permission-groups-panel").className.includes("hidden") === false, "Groups panel hidden with v2 extensions");
@@ -609,6 +609,7 @@ async function testWebAssets(appSource, statusSource) {
     await h.element("permission-group-form").emit("submit"); await flush();
     assert(calls[0].path === "/api/definitions/permission_groups/staff" && calls[0].body.definition.permissions["network.ban"] === false
       && calls[0].body.definition.permissions["*"] === true && calls[0].body.definition.inherits[0] === "default", "Group definition incorrect");
+    assert(calls[0].body.definition.weight === 10 && calls[0].body.definition.prefix === "&c", "Fields the form does not edit were dropped");
     h.element("permission-member-player").value = "01234567-89AB-CDEF-0123-456789ABCDEF";
     await h.element("permission-member-form").emit("submit"); await flush();
     assert(calls[1].path === "/api/permissions/members/0123456789abcdef0123456789abcdef/staff" && calls[1].method === "POST", "Membership UUID was not normalized");

@@ -70,6 +70,19 @@ pub struct Snapshot {
 
 impl Snapshot {
     pub fn new(config: Config, previous: Option<&Self>) -> io::Result<Self> {
+        Self::build(config, previous, None)
+    }
+
+    /// The first snapshot, using the process-wide permission authority.
+    fn first(config: Config, permissions: Arc<rift::permissions::Authority>) -> io::Result<Self> {
+        Self::build(config, None, Some(permissions))
+    }
+
+    fn build(
+        config: Config,
+        previous: Option<&Self>,
+        permissions: Option<Arc<rift::permissions::Authority>>,
+    ) -> io::Result<Self> {
         config.validate()?;
         let mut policies = BTreeMap::new();
         for (listener, route) in &config.routes {
@@ -131,10 +144,11 @@ impl Snapshot {
         } else {
             None
         };
-        let extensions = rift::extensions::Extensions::new(
+        let extensions = rift::extensions::Extensions::with_permissions(
             &config,
             messaging.clone(),
             previous.map(|old| &old.extensions),
+            permissions,
         )?;
         let players = previous.map_or_else(
             || Arc::new(PlayerRegistry::default()),
@@ -2100,21 +2114,34 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         (config, None)
     };
     let persistent = source.is_some() || !config.service_groups.is_empty();
-    let (config, instance_store, restored_ports) = blocking(move || {
+    let (config, instance_store, permissions, restored_ports) = blocking(move || {
         let mut config = config;
         if persistent {
-            let store = Arc::new(rift::instance_store::Store::open(
-                &config.instance_database,
-            )?);
+            // One file, one lock: the instance registry and the permission
+            // store share the connection.
+            let database = Arc::new(rift::database::Database::open(&config.instance_database)?);
+            let store = Arc::new(rift::instance_store::Store::new(database.clone())?);
             store.restore(&mut config)?;
             let ports = store.reserve_restored_ports(&config)?;
-            Ok((config, Some(store), ports))
+            let permissions = rift::permissions::Authority::open(database, &config.permissions)?;
+            if let Some(applied) =
+                permissions.migrate_once(|| rift::extensions::upgrade_nodes(&config))?
+                && applied.ops > 0
+            {
+                eprintln!(
+                    "rift: copied {} permission changes from the extension store into revision {}",
+                    applied.ops, applied.revision
+                );
+            }
+            Ok((config, Some(store), Arc::new(permissions), ports))
         } else {
-            Ok((config, None, Vec::new()))
+            let permissions = rift::permissions::Authority::memory(&config.permissions);
+            Ok((config, None, Arc::new(permissions), Vec::new()))
         }
     })
     .await?;
-    let mut initial = Snapshot::new(config, None)?;
+    let permission_sweeper = permissions.spawn_sweeper();
+    let mut initial = Snapshot::first(config, permissions)?;
     if let Some(store) = instance_store {
         initial.managed.with_persistence(store.clone())?;
         initial.instance_store = Some(store);
@@ -2429,6 +2456,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     );
     eprintln!("rift: draining {} connections", metrics.active.get());
     extension_jobs.shutdown().await;
+    permission_sweeper.abort();
     if let Some(task) = message_task {
         task.abort();
         let _ = task.await;

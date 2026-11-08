@@ -1,18 +1,22 @@
 //! Durable instance registrations and filesystem intents, using bundled SQLite.
 use crate::{
     config::{Config, InstanceStorage, ServiceInstance},
+    database::{self, Database},
     provisioning::{self, Plan},
 };
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use rusqlite::{OptionalExtension, params};
 use std::{
     collections::BTreeSet,
-    fs::{self, File, OpenOptions as FileOptions},
+    fs::{self, OpenOptions as FileOptions},
     io,
     net::{SocketAddr, TcpListener},
-    path::{Path, PathBuf},
-    sync::Mutex,
-    time::Duration,
+    path::Path,
+    sync::Arc,
 };
+
+/// The `rift_schema` component and version of the instance tables.
+const COMPONENT: &str = "instances";
+const SCHEMA_VERSION: u32 = 2;
 
 const INSTANCES_V2: &str = "CREATE TABLE instances (
     name TEXT PRIMARY KEY NOT NULL,
@@ -46,31 +50,13 @@ impl Record {
     }
 }
 
-#[derive(Debug)]
-pub struct Store {
-    path: PathBuf,
-    connection: Mutex<Connection>,
-    // The OS releases this lock even after a crash. Keep the lock file in place.
-    _lock: File,
-}
-
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.into())
 }
 
-fn private_file(path: &Path) -> io::Result<File> {
-    provisioning::checked_path(path)?;
-    if fs::symlink_metadata(path).is_ok_and(|m| !m.is_file()) {
-        return Err(invalid("instance database and lock must be regular files"));
-    }
-    let mut options = FileOptions::new();
-    options.read(true).write(true).create(true).truncate(false);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    options.open(path)
+#[derive(Debug)]
+pub struct Store {
+    database: Arc<Database>,
 }
 
 /// What [`Store::check`] found.
@@ -91,9 +77,7 @@ impl Store {
     /// anything (for `rift check --strict`).
     pub fn check(path: &Path, config: &Config) -> io::Result<DatabaseCheck> {
         let path = provisioning::checked_path(path)?;
-        let mut lock_path = path.as_os_str().to_owned();
-        lock_path.push(".lock");
-        let lock_path = PathBuf::from(lock_path);
+        let lock_path = database::lock_path(&path);
         if fs::symlink_metadata(&lock_path).is_ok() {
             let lock = FileOptions::new().read(true).write(true).open(&lock_path)?;
             match lock.try_lock() {
@@ -113,25 +97,12 @@ impl Store {
             }
             Err(error) => return Err(error),
         }
-        let connection = Connection::open_with_flags(
-            &path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .map_err(|e| invalid(format!("instance database {}: {e}", path.display())))?;
         let store = Self {
-            path: path.clone(),
-            connection: Mutex::new(connection),
-            // Read-only placeholder; this handle never takes the lock.
-            _lock: File::open(&path)?,
+            database: Arc::new(Database::read_only(&path)?),
         };
         let (version, check) = {
-            let connection = store.connection.lock().unwrap();
-            connection
-                .busy_timeout(Duration::from_secs(2))
-                .map_err(|e| store.error(e))?;
-            let version: u32 = connection
-                .query_row("PRAGMA user_version", [], |r| r.get(0))
-                .map_err(|e| store.error(e))?;
+            let connection = store.database.lock();
+            let version = database::version(&connection, COMPONENT).map_err(|e| store.error(e))?;
             let check: String = connection
                 .query_row("PRAGMA quick_check", [], |r| r.get(0))
                 .map_err(|e| store.error(e))?;
@@ -143,7 +114,7 @@ impl Store {
         match version {
             // Empty, or upgraded in place at startup.
             0 | 1 => return Ok(DatabaseCheck::Ready { instances: 0 }),
-            2 => {}
+            SCHEMA_VERSION => {}
             _ => return Err(store.error(format!("unsupported schema version {version}"))),
         }
         let records = store.records()?;
@@ -164,83 +135,42 @@ impl Store {
 }
 
 impl Store {
+    /// Open the database file and the instance tables in it.
     pub fn open(path: &Path) -> io::Result<Self> {
-        let path = provisioning::checked_path(path)?;
-        fs::create_dir_all(path.parent().unwrap())?;
-        let mut lock_path = path.as_os_str().to_owned();
-        lock_path.push(".lock");
-        let lock = private_file(Path::new(&lock_path))?;
-        lock.try_lock().map_err(|error| {
-            io::Error::new(
-                io::ErrorKind::ResourceBusy,
-                format!(
-                    "instance database {} is already in use or cannot be locked: {error}",
-                    path.display()
-                ),
-            )
+        Self::new(Arc::new(Database::open(path)?))
+    }
+
+    /// The instance tables in a shared database, created or upgraded as needed.
+    pub fn new(database: Arc<Database>) -> io::Result<Self> {
+        // Version 2 stores each instance's node ('' for this host); ports
+        // are unique per node, since every node has its own port range.
+        database.migrate(COMPONENT, SCHEMA_VERSION, |from| match from {
+            0 => format!(
+                "{INSTANCES_V2}
+                CREATE TABLE sequences (group_name TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL) STRICT;"
+            ),
+            _ => format!(
+                "ALTER TABLE instances RENAME TO instances_v1;
+                {INSTANCES_V2}
+                INSERT INTO instances (name,node,port,phase,explicitly_stopped,definition)
+                    SELECT name,'',port,phase,explicitly_stopped,definition FROM instances_v1;
+                DROP TABLE instances_v1;"
+            ),
         })?;
-        private_file(&path)?;
-        let connection = Connection::open_with_flags(
-            &path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE
-                | OpenFlags::SQLITE_OPEN_CREATE
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .map_err(|e| invalid(format!("instance database {}: {e}", path.display())))?;
-        let store = Self {
-            path,
-            connection: Mutex::new(connection),
-            _lock: lock,
-        };
-        {
-            let connection = store.connection.lock().unwrap();
-            connection
-                .busy_timeout(Duration::from_secs(2))
-                .map_err(|e| store.error(e))?;
-            connection
-                .execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;")
-                .map_err(|e| store.error(e))?;
-            let version: u32 = connection
-                .query_row("PRAGMA user_version", [], |r| r.get(0))
-                .map_err(|e| store.error(e))?;
-            // Version 2 stores each instance's node ('' for this host); ports
-            // are unique per node, since every node has its own port range.
-            match version {
-                0 => connection.execute_batch(&format!("BEGIN IMMEDIATE;
-                    {INSTANCES_V2}
-                    CREATE TABLE sequences (group_name TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL) STRICT;
-                    PRAGMA user_version=2; COMMIT;"))
-                    .map_err(|e| store.error(e))?,
-                1 => connection.execute_batch(&format!("BEGIN IMMEDIATE;
-                    ALTER TABLE instances RENAME TO instances_v1;
-                    {INSTANCES_V2}
-                    INSERT INTO instances (name,node,port,phase,explicitly_stopped,definition)
-                        SELECT name,'',port,phase,explicitly_stopped,definition FROM instances_v1;
-                    DROP TABLE instances_v1;
-                    PRAGMA user_version=2; COMMIT;"))
-                    .map_err(|e| store.error(e))?,
-                2 => {},
-                _ => return Err(store.error(format!("unsupported schema version {version}"))),
-            }
-            let check: String = connection
-                .query_row("PRAGMA quick_check", [], |r| r.get(0))
-                .map_err(|e| store.error(e))?;
-            if check != "ok" {
-                return Err(store.error(format!("integrity check failed: {check}")));
-            }
-        }
-        Ok(store)
+        Ok(Self { database })
+    }
+
+    /// The database this store shares with the permission store.
+    pub fn database(&self) -> &Arc<Database> {
+        &self.database
     }
 
     fn error(&self, error: impl std::fmt::Display) -> io::Error {
-        io::Error::other(format!(
-            "instance database {}: {error}",
-            self.path.display()
-        ))
+        self.database.error(error)
     }
 
     fn records(&self) -> io::Result<Vec<Record>> {
-        let connection = self.connection.lock().unwrap();
+        let connection = self.database.lock();
         let mut statement = connection
             .prepare(
                 "SELECT name,port,phase,explicitly_stopped,definition,node FROM instances ORDER BY name",
@@ -339,7 +269,9 @@ impl Store {
             }
             for directory in &storage_paths {
                 // Stored paths must not overlap the database, templates, or another worker.
-                if self.path.starts_with(directory) || directory.starts_with(&self.path) {
+                if self.database.path().starts_with(directory)
+                    || directory.starts_with(self.database.path())
+                {
                     return Err(self.error(format!(
                         "instances.{}: storage overlaps database",
                         record.name
@@ -450,7 +382,7 @@ impl Store {
     }
 
     pub fn allocate_name(&self, config: &Config, group: &str) -> io::Result<String> {
-        let mut connection = self.connection.lock().unwrap();
+        let mut connection = self.database.lock();
         let transaction = connection.transaction().map_err(|e| self.error(e))?;
         let current: Option<String> = transaction
             .query_row(
@@ -513,9 +445,8 @@ impl Store {
             plan: plan.clone(),
         })
         .map_err(|e| self.error(e))?;
-        self.connection
+        self.database
             .lock()
-            .unwrap()
             .execute(
                 "INSERT INTO instances (name,node,port,phase,definition) VALUES (?1,?2,?3,'creating',?4)",
                 params![
@@ -541,9 +472,8 @@ impl Store {
     }
     fn transition(&self, name: &str, from: &str, to: &str) -> io::Result<()> {
         let changed = self
-            .connection
+            .database
             .lock()
-            .unwrap()
             .execute(
                 "UPDATE instances SET phase=?1 WHERE name=?2 AND phase=?3",
                 params![to, name, from],
@@ -556,9 +486,8 @@ impl Store {
     }
 
     fn forget(&self, name: &str) -> io::Result<()> {
-        self.connection
+        self.database
             .lock()
-            .unwrap()
             .execute("DELETE FROM instances WHERE name=?1", [name])
             .map_err(|e| self.error(e))?;
         Ok(())
@@ -596,9 +525,8 @@ impl Store {
 
     pub fn set_explicit_stop(&self, name: &str, stopped: bool) -> io::Result<()> {
         // Static managed servers are outside the instance registry.
-        self.connection
+        self.database
             .lock()
-            .unwrap()
             .execute(
                 "UPDATE instances SET explicitly_stopped=?1 WHERE name=?2 AND phase='ready'",
                 params![stopped, name],

@@ -1,13 +1,22 @@
-//! Named fixed-delay jobs. A name cannot overlap, even across reload generations.
-use super::{Context, Extensions, fields, invalid, token};
+//! Named fixed-delay jobs, and the `rift.permissions.on_change` handlers of
+//! API v3. A job name cannot overlap, even across reload generations.
+use super::{Context, Extensions, PERMISSION_EVENTS, fields, invalid, token};
+use crate::permissions::Notification;
 use mlua::{Function, Table, Value};
+use rift_permissions::{Actor, ChangeEvent};
 use std::{
     collections::BTreeMap,
     io,
     sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::{sync::Semaphore, task::JoinHandle};
+use tokio::{
+    sync::{
+        Semaphore,
+        broadcast::{self, error::RecvError},
+    },
+    task::JoinHandle,
+};
 
 const JOB_TIMEOUT: Duration = Duration::from_secs(5);
 /// Jobs run on their own workers: a job waiting seconds on an HTTP call must
@@ -101,8 +110,57 @@ impl Extensions {
                     }
                 }));
             }
+            if script.permission_events {
+                // Subscribe now so no change committed after this call is missed.
+                let notifications = self.permissions.subscribe();
+                tasks.push(tokio::spawn(self.clone().permission_events(notifications)));
+            }
         }
         Scheduler { tasks }
+    }
+
+    /// Feed committed permission changes to `on_permission_change`, one at a
+    /// time on the job workers. Changes made by the handlers themselves are
+    /// not fed back.
+    async fn permission_events(self, mut notifications: broadcast::Receiver<Notification>) {
+        let own = Actor::Lua(PERMISSION_EVENTS.into());
+        loop {
+            match notifications.recv().await {
+                Ok(Notification::Committed { event, .. }) if event.actor != own => {
+                    if let Err(error) = self.run_permission_change(event).await {
+                        eprintln!("rift: {error}");
+                    }
+                }
+                Ok(_) => {}
+                Err(RecvError::Lagged(missed)) => eprintln!(
+                    "rift: extensions.on_permission_change fell behind and missed {missed} changes"
+                ),
+                Err(RecvError::Closed) => return,
+            }
+        }
+    }
+
+    async fn run_permission_change(&self, event: Arc<ChangeEvent>) -> io::Result<()> {
+        let permit = self
+            .job_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(invalid)?;
+        let runtime = self.clone();
+        let deadline = Instant::now() + JOB_TIMEOUT;
+        let task = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            runtime
+                .script
+                .as_ref()
+                .unwrap()
+                .permission_changed(&event, deadline, &runtime)
+        });
+        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), task)
+            .await
+            .map_err(invalid)?
+            .map_err(invalid)?
     }
 
     async fn run_job(&self, name: &str, gate: &Arc<Semaphore>) -> io::Result<()> {
