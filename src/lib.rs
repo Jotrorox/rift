@@ -12,6 +12,7 @@ pub mod message_script;
 pub mod messaging;
 pub mod node;
 pub mod players;
+pub mod plugins;
 pub mod preflight;
 pub mod protocol;
 pub mod provisioning;
