@@ -15,6 +15,7 @@
 //! every plugin. Each command has exactly one owner; a name registered twice
 //! is a load error.
 pub mod api;
+pub mod lua;
 pub mod manifest;
 pub(crate) mod remote;
 pub mod script;

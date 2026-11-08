@@ -97,11 +97,10 @@ where
 pub struct Engines(BTreeMap<EngineKind, Arc<dyn EngineFactory>>);
 
 impl Engines {
-    /// The engines this build provides. None are implemented yet: a manifest
-    /// naming `lua` or `wasm` is reported by `rift check` and refused at
-    /// startup and reload until an engine registers here.
+    /// The engines this build provides. A manifest naming another engine is
+    /// reported by `rift check` and refused at startup and reload.
     pub fn builtin() -> Self {
-        Self::default()
+        Self::default().with(EngineKind::Lua, super::lua::factory)
     }
 
     pub fn with(mut self, kind: EngineKind, factory: impl EngineFactory) -> Self {
