@@ -65,6 +65,19 @@ pub(super) fn sql_time(seconds: u64) -> i64 {
     i64::try_from(seconds).unwrap_or(i64::MAX)
 }
 
+/// Escape `%`, `_` and `\` so `text` matches itself in a `LIKE ... ESCAPE '\'`
+/// pattern.
+pub(super) fn like_literal(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for c in text.chars() {
+        if matches!(c, '\\' | '%' | '_') {
+            escaped.push('\\');
+        }
+        escaped.push(c);
+    }
+    escaped
+}
+
 fn corrupt(what: &str, detail: impl std::fmt::Display) -> PermError {
     PermError::Storage(format!("invalid {what} row: {detail}"))
 }

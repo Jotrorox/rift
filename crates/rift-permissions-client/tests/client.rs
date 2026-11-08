@@ -442,13 +442,14 @@ async fn reconnecting_compares_revisions_and_resyncs() {
     // The proxy moves on unannounced, then the bus drops.
     proxy.set(8, subject(ALICE, 8, "fly", false));
     proxy.restart().await;
+    // The refetched snapshot lands before the handshake finishes (the group
+    // table is refreshed next), and only then is the client online.
     eventually(
         "the resync after reconnecting",
         Duration::from_secs(10),
-        || check(&client, ALICE, "fly") == Tristate::False,
+        || client.is_online() && check(&client, ALICE, "fly") == Tristate::False,
     )
     .await;
-    assert!(client.is_online());
     assert_eq!(client.revision(), 8);
     let state = proxy.state();
     assert_eq!(state.hellos.len(), 2);

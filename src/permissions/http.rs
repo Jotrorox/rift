@@ -14,7 +14,9 @@
 //! (`permission:essentials.fly@server=survival`). They name the same node
 //! across edits and restarts, unlike database row ids, and a client can build
 //! one from the typed node JSON without asking the server.
-use super::{Authority, LogQuery, PermError, control::BackendView, write_export};
+use super::{
+    Authority, LogQuery, PermError, control::BackendView, store::like_literal, write_export,
+};
 use axum::{
     Json, Router,
     body::Bytes,
@@ -325,9 +327,7 @@ fn user(authority: &Authority, text: &str) -> Result<Uuid, Failure> {
     if let Ok(uuid) = Uuid::parse(text) {
         return Ok(uuid);
     }
-    if !(1..=16).contains(&text.len())
-        || !text.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
-    {
+    if !crate::players::valid_username(text) {
         return Err(Failure::invalid(format!(
             "{text:?} is neither a UUID nor a player name"
         )));
@@ -588,17 +588,6 @@ async fn backends(Extension(caller): Extension<Caller>) -> Reply {
 async fn registered(Extension(caller): Extension<Caller>) -> Reply {
     let registered = blocking(move || Ok(caller.authority.registered()?)).await?;
     ok(json!({"registered": registered}))
-}
-
-/// Escape `%`, `_` and `\` for a `LIKE` pattern.
-fn like_literal(text: &str) -> String {
-    text.chars().fold(String::new(), |mut out, c| {
-        if matches!(c, '%' | '_' | '\\') {
-            out.push('\\');
-        }
-        out.push(c);
-        out
-    })
 }
 
 async fn search(Extension(caller): Extension<Caller>, RawQuery(query): RawQuery) -> Reply {

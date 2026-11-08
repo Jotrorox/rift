@@ -25,6 +25,7 @@ use std::{
 const SURVIVAL_TOKEN: &str = "rift-permissions-e2e-survival-token-32-bytes";
 const LOBBY_TOKEN: &str = "rift-permissions-e2e-lobby-token-32-bytes!!";
 const ADMIN_TOKEN: &str = "rift-permissions-e2e-admin-token-32-bytes!!";
+const WEB_TOKEN: &str = "rift-permissions-e2e-web-token-32-bytes!!!!";
 
 struct Fixture {
     dir: PathBuf,
@@ -54,6 +55,7 @@ return {{
     routes = {{ main = 'survival-1' }},
     permissions = {{ contexts = {{ external = {{ 'region' }} }} }},
     admin = {{ listen = '127.0.0.1:0', permissions = {{ 'status', 'perms' }} }},
+    web = {{ listen = '127.0.0.1:0', ui = false, token = '{WEB_TOKEN}' }},
     messaging = {{
         listen = '127.0.0.1:0', certificate = 'cert.pem', private_key = 'key.pem',
         principals = {{
@@ -90,9 +92,9 @@ return {{
                 }
             }
         });
-        let (mut front, mut admin, mut bus) = (None, None, None);
+        let (mut front, mut admin, mut bus, mut web) = (None, None, None, None);
         let mut logs = Vec::new();
-        while front.is_none() || admin.is_none() || bus.is_none() {
+        while front.is_none() || admin.is_none() || bus.is_none() || web.is_none() {
             let line = lines
                 .recv_timeout(Duration::from_secs(15))
                 .unwrap_or_else(|error| panic!("startup ({error}): {logs:?}"));
@@ -105,6 +107,9 @@ return {{
             if let Some(address) = line.strip_prefix("rift: messaging QUIC on ") {
                 bus = address.parse().ok();
             }
+            if let Some(address) = line.strip_prefix("rift: web on ") {
+                web = address.parse().ok();
+            }
             logs.push(line);
         }
         Proxy {
@@ -113,6 +118,7 @@ return {{
             front: front.unwrap(),
             admin: admin.unwrap(),
             bus: bus.unwrap(),
+            web: web.unwrap(),
             ca: self.dir.join("cert.pem"),
         }
     }
@@ -131,6 +137,7 @@ struct Proxy {
     front: SocketAddr,
     admin: SocketAddr,
     bus: SocketAddr,
+    web: SocketAddr,
     ca: PathBuf,
 }
 
@@ -160,6 +167,28 @@ impl Proxy {
             String::from_utf8_lossy(&output.stderr)
         );
         String::from_utf8(output.stdout).unwrap()
+    }
+
+    /// `GET <path>` from the HTTP API, which must answer 200; its JSON body.
+    fn api(&self, path: &str) -> serde_json::Value {
+        let mut stream = TcpStream::connect(self.web).unwrap();
+        write!(
+            stream,
+            "GET {path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {WEB_TOKEN}\r\nConnection: close\r\n\r\n",
+            self.web
+        )
+        .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        let (head, body) = response.split_once("\r\n\r\n").unwrap();
+        assert!(head.starts_with("HTTP/1.1 200"), "GET {path}: {response}");
+        assert!(
+            !head
+                .to_ascii_lowercase()
+                .contains("transfer-encoding: chunked"),
+            "GET {path}: {head}"
+        );
+        serde_json::from_str(body).unwrap_or_else(|error| panic!("GET {path} ({error}): {body}"))
     }
 
     fn config(&self, server: &str) -> Config {
@@ -293,6 +322,22 @@ async fn backends_replicate_act_and_resync_through_the_real_proxy() {
         "{backends}"
     );
     assert!(backends.contains("server.lobby (lobby)"), "{backends}");
+    // The HTTP API reads the same bus tracking (Bus::install_directory).
+    let api = proxy.api("/api/perms/backends");
+    let listed = api["backends"].as_array().unwrap();
+    let survival_view = listed
+        .iter()
+        .find(|backend| backend["principal"] == "server.survival-1")
+        .unwrap_or_else(|| panic!("{api}"));
+    assert_eq!(survival_view["server"], "survival-1", "{api}");
+    assert_eq!(survival_view["revision"], 0, "{api}");
+    assert_eq!(survival_view["stale"], false, "{api}");
+    assert!(
+        listed
+            .iter()
+            .any(|backend| backend["principal"] == "server.lobby" && backend["server"] == "lobby"),
+        "{api}"
+    );
     // A principal may only speak for its own server.
     let impostor = Client::start_with_token(proxy.config("survival-1"), LOBBY_TOKEN).unwrap();
     assert!(!impostor.wait_online(Duration::from_secs(2)).await);
