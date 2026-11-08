@@ -20,9 +20,10 @@
 //	func main() {}
 //
 // Register handlers from an init function: the host calls exports right after
-// instantiation and never runs main. List every implemented hook in the
-// registration that OnInit returns; the host skips the others (an empty list
-// delivers every hook).
+// instantiation and never runs main. The host delivers only the hooks listed
+// in the registration that OnInit returns (an empty list delivers every
+// hook); leave Registration.Hooks nil and the SDK lists exactly the hooks
+// that have a handler.
 //
 // Defaults: init returns an empty registration, decision hooks continue,
 // route keeps the configured policy, suggest returns nothing, status and http
