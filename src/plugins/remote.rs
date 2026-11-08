@@ -56,6 +56,11 @@ impl Remote {
             .await
     }
 
+    /// The hooks a responder is configured for.
+    pub(crate) fn hooks(&self) -> impl Iterator<Item = &str> {
+        self.decisions.keys().map(String::as_str)
+    }
+
     #[cfg(test)]
     pub(crate) fn slots(&self, hook: &str) -> Arc<Semaphore> {
         self.slots[hook].clone()
