@@ -117,7 +117,7 @@ jit = true                  # false: interpret everything so deadlines interrupt
 | `name`, `version`, `api` | required | `api` must be `"0.1"`. |
 | `mode` | `"persistent"` | `"script"` manifests may contain only `name`, `version` and `api`; the folder's `init.lua` runs in the sandbox. |
 | `engine` | required | `"lua"` or `"wasm"`. An engine missing from this build is a warning in `rift check`, an error in `rift check --strict`, and refused at startup and reload. |
-| `entry` | `init.lua` (Lua) | A relative path of at most 256 bytes inside the folder, without `..`. Required for WebAssembly. |
+| `entry` | `init.lua` (Lua) | A relative path of at most 256 bytes inside the folder, without `..`, not inside `data/` and without hidden (dot) components. Required for WebAssembly. |
 | `hot_reload` | `false` | See [lifecycle](#lifecycle-failures-restarts-and-reloads). |
 | `[deadlines]` | per hook | Keys are `init`, `reload`, `shutdown` and the awaited hooks; observers have no deadline and are rejected here. Awaited hooks allow 1–10 000 ms, `http` up to 60 000. |
 | `[failure]` | | `on_timeout` overrides the per-hook default for every hook. |
@@ -234,7 +234,7 @@ is unaffected.
 | Nothing (same files, manifest and configuration table) | Untouched; state and commands survive. |
 | Only the configuration table, `hot_reload = true`, running | `reload(config)` is called within `deadlines.reload`; on error the plugin keeps its previous configuration. |
 | Only the configuration table, otherwise | The instance is replaced. |
-| The manifest or any file in the folder except `data/` | The instance is replaced. |
+| The manifest or any file in the folder except `data/` and hidden (dot) files | The instance is replaced. The folder may not contain symbolic links, hidden ones included. |
 | Removed from the configuration | Stopped. |
 | New | Started. |
 

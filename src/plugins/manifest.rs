@@ -528,6 +528,15 @@ fn relative_entry(entry: &str) -> Result<PathBuf, String> {
             "entry must be a relative path of at most 256 bytes inside the plugin folder".into(),
         );
     }
+    // The reload diff hashes neither hidden paths nor `data/`, and `data/`
+    // is writable by the plugin itself: an entry there could change unseen.
+    if path.starts_with("data")
+        || path
+            .components()
+            .any(|component| component.as_os_str().to_string_lossy().starts_with('.'))
+    {
+        return Err("entry must not be inside data/ or a hidden (dot) path".into());
+    }
     Ok(path.to_owned())
 }
 
@@ -719,6 +728,9 @@ jit = false
             ("engine = \"lua\"\nentry = \"/x.lua\"\n", "a"),
             ("engine = \"lua\"\nentry = \"./x.lua\"\n", "a"),
             ("engine = \"lua\"\nentry = \"\"\n", "a"),
+            ("engine = \"lua\"\nentry = \".hidden/x.lua\"\n", "a"),
+            ("engine = \"lua\"\nentry = \"src/.x.lua\"\n", "a"),
+            ("engine = \"lua\"\nentry = \"data/x.lua\"\n", "a"),
             ("engine = \"lua\"\nmode = \"daemon\"\n", "a"),
             ("mode = \"script\"\nengine = \"lua\"\n", "a"),
             ("mode = \"script\"\n[deadlines]\nlogin = 5\n", "a"),
