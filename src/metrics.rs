@@ -308,12 +308,63 @@ impl Metrics {
             }
             text.push_str(&format!("rift_login_duration_seconds_bucket{{le=\"+Inf\"}} {}\nrift_login_duration_seconds_sum {}\nrift_login_duration_seconds_count {}\n", latency.count, latency.seconds, latency.count));
         }
+        render_plugins(&mut text, snapshot.extensions.plugins());
         let resident = resident_memory_bytes();
         text.push_str(&format!("# TYPE rift_process_resident_memory_available gauge\nrift_process_resident_memory_available {}\n", u8::from(resident.is_some())));
         if let Some(bytes) = resident {
             text.push_str(&format!("# TYPE rift_process_resident_memory_bytes gauge\nrift_process_resident_memory_bytes {bytes}\n"));
         }
         text
+    }
+}
+
+/// Persistent plugins, labelled by configured plugin name, hook (a fixed
+/// set) and outcome (a fixed set), so cardinality follows the configuration.
+fn render_plugins(text: &mut String, plugins: &rift::plugins::Host) {
+    use rift::plugins::monitor::CALL_BUCKETS;
+    let counters = plugins.monitor().all_counters();
+    text.push_str("# TYPE rift_plugin_calls_total counter\n");
+    for (plugin, counters) in &counters {
+        let plugin = escape_label(plugin);
+        for ((hook, outcome), count) in &counters.calls {
+            text.push_str(&format!(
+                "rift_plugin_calls_total{{plugin=\"{plugin}\",hook=\"{}\",outcome=\"{}\"}} {count}\n",
+                hook.name(),
+                outcome.as_str()
+            ));
+        }
+    }
+    text.push_str("# TYPE rift_plugin_call_seconds histogram\n");
+    for (plugin, counters) in &counters {
+        let plugin = escape_label(plugin);
+        for (hook, latency) in &counters.latency {
+            let labels = format!("plugin=\"{plugin}\",hook=\"{}\"", hook.name());
+            for (upper, count) in CALL_BUCKETS.iter().zip(latency.buckets) {
+                text.push_str(&format!(
+                    "rift_plugin_call_seconds_bucket{{{labels},le=\"{upper}\"}} {count}\n"
+                ));
+            }
+            text.push_str(&format!(
+                "rift_plugin_call_seconds_bucket{{{labels},le=\"+Inf\"}} {}\nrift_plugin_call_seconds_sum{{{labels}}} {}\nrift_plugin_call_seconds_count{{{labels}}} {}\n",
+                latency.count, latency.seconds, latency.count
+            ));
+        }
+    }
+    text.push_str("# TYPE rift_plugin_restarts_total counter\n");
+    for (plugin, counters) in &counters {
+        text.push_str(&format!(
+            "rift_plugin_restarts_total{{plugin=\"{}\"}} {}\n",
+            escape_label(plugin),
+            counters.restarts
+        ));
+    }
+    text.push_str("# TYPE rift_plugin_up gauge\n");
+    for report in plugins.reports() {
+        text.push_str(&format!(
+            "rift_plugin_up{{plugin=\"{}\"}} {}\n",
+            escape_label(&report.name),
+            u8::from(report.status == rift::plugins::worker::Status::Running)
+        ));
     }
 }
 
@@ -511,6 +562,53 @@ mod tests {
         assert_eq!(metrics.active.get(), 0);
         assert_eq!(metrics.completed.get(), 1);
         assert!(Active::new(metrics.clone(), 1).is_some());
+    }
+
+    #[test]
+    fn plugin_series_are_labelled_by_plugin_hook_and_outcome() {
+        use rift::plugins::{api::Hook, monitor::Outcome};
+        let metrics = Metrics::default();
+        let snapshot = Snapshot::new(Config::default(), None).unwrap();
+        let text = metrics.render(&snapshot);
+        for family in [
+            "# TYPE rift_plugin_calls_total counter\n",
+            "# TYPE rift_plugin_call_seconds histogram\n",
+            "# TYPE rift_plugin_restarts_total counter\n",
+            "# TYPE rift_plugin_up gauge\n",
+        ] {
+            assert!(text.contains(family), "{family}");
+        }
+        let monitor = snapshot.extensions.plugins().monitor();
+        monitor.retain(["quo\"te"]);
+        monitor.call(
+            "quo\"te",
+            Hook::Login,
+            Outcome::Ok,
+            Some(Duration::from_millis(3)),
+        );
+        monitor.call(
+            "quo\"te",
+            Hook::Login,
+            Outcome::Timeout,
+            Some(Duration::from_secs(1)),
+        );
+        monitor.call("quo\"te", Hook::Join, Outcome::Dropped, None);
+        monitor.lifecycle("quo\"te", "restarting", None, None);
+        let text = metrics.render(&snapshot);
+        for line in [
+            "rift_plugin_calls_total{plugin=\"quo\\\"te\",hook=\"login\",outcome=\"ok\"} 1\n",
+            "rift_plugin_calls_total{plugin=\"quo\\\"te\",hook=\"login\",outcome=\"timeout\"} 1\n",
+            "rift_plugin_calls_total{plugin=\"quo\\\"te\",hook=\"join\",outcome=\"dropped\"} 1\n",
+            "rift_plugin_call_seconds_bucket{plugin=\"quo\\\"te\",hook=\"login\",le=\"0.005\"} 1\n",
+            "rift_plugin_call_seconds_bucket{plugin=\"quo\\\"te\",hook=\"login\",le=\"1\"} 2\n",
+            "rift_plugin_call_seconds_bucket{plugin=\"quo\\\"te\",hook=\"login\",le=\"+Inf\"} 2\n",
+            "rift_plugin_call_seconds_count{plugin=\"quo\\\"te\",hook=\"login\"} 2\n",
+            "rift_plugin_restarts_total{plugin=\"quo\\\"te\"} 1\n",
+        ] {
+            assert!(text.contains(line), "{line} missing from {text}");
+        }
+        // Observers have no latency series.
+        assert!(!text.contains("hook=\"join\",le="));
     }
 
     #[test]
