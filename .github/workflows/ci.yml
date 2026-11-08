@@ -336,7 +336,9 @@ jobs:
   regression:
     name: Regression (${{ matrix.platform }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # Debug and release builds of the wasmtime plugin engine. Pull requests
+    # never save the dependency cache, so they compile it cold every time.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
