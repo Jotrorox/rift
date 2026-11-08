@@ -3,13 +3,14 @@
 Rift keeps one permission store for the whole network: users, groups,
 inheritance with weights, negated nodes, wildcards, temporary nodes, contexts,
 prefixes, suffixes, meta and tracks, the model LuckPerms users know. The proxy
-owns the data and resolves it; backends will hold replicas and answer
+owns the data and resolves it; backends hold replicas and answer
 `hasPermission` from memory (see the [protocol](permissions-protocol.md)).
 
-On the proxy today the store answers extension commands, `ctx.has_permission`,
+On the proxy the store answers extension commands, `ctx.has_permission`,
 the Lua `rift.permissions` module (extensions API v3), the `RiftInGroup`
-[BungeeCord request](bungeecord.md#rift-requests) and the dashboard's group
-memberships.
+[BungeeCord request](bungeecord.md#rift-requests), the dashboard's group
+memberships and the [`/perms` commands](#commands); backends replicate it over
+the [bus](#backends).
 
 ## Model
 
@@ -81,11 +82,13 @@ returns `nil` for it, so a script can tell "denied" from "never set".
 Proxy-side checks use the contexts Rift knows for an online player:
 
 - `server`, the backend they are on. The proxy does not track `world`,
-  `dimension` or `gamemode` yet; nodes that require them do not apply on the
-  proxy until it does.
+  `dimension` or `gamemode` (it would have to follow every Respawn and Game
+  Event packet across protocol versions); nodes that require them apply on the
+  backends, whose adapters fill them, but not in proxy-side checks.
 - Custom contexts reported by the player's backend, for keys listed in
   `permissions.contexts.external`. A report replaces the backend's earlier one
-  and is accepted only while the player is on that backend.
+  and is accepted only while the player is on that backend, or while the proxy
+  forwards their connection to it.
 - Custom contexts from Lua [context providers](#context-providers).
 
 Reported and provided contexts are cleared on every server switch. Offline
@@ -107,7 +110,7 @@ effects as before/after pairs, so the log is both the audit trail and, later,
 the replication stream for a follower proxy.
 
 After each commit the proxy recompiles the online players the change affects
-and tells subscribers, which is how backends will learn about it. Compiled
+and tells subscribers, which is how backends learn about it. Compiled
 subjects are cached per user and dropped when one of their nodes or any group
 they could inherit changes.
 
@@ -288,8 +291,155 @@ other sources are never touched. Export writes the same format, so `/lp import`
 can read it back; a context key with several values keeps its first value
 there, since LuckPerms would read the list as "any".
 
-The administration surfaces for this (`/perms import`, `rift admin perms
-import`, the dashboard) are not built yet.
+Run it with `/perms import <file> [--replace]` and `/perms export <file>`
+([Commands](#commands)).
+
+## Commands
+
+Every surface speaks the same LuckPerms-style grammar and produces the same
+audit rows:
+
+- in game, the proxy answers `/perms` and its alias `/rp` itself, for
+  [network](operations.md) sessions (an extension command of the same name
+  takes precedence). The command tree shows them to players who hold any
+  `rift.perms.` node;
+- a backend adapter forwards its own `/perms` on
+  [`rift.perms.command`](permissions-protocol.md#commands) and shows the reply;
+- `rift admin perms <command>` runs it from the proxy host with console
+  rights (admin permission `perms`, see [Command line](#command-line)).
+
+| Command | Effect |
+| --- | --- |
+| `user <player> info` | Online server, primary group, groups and contexts in effect, prefix, suffix and every own node |
+| `user <player> permission set <node> [true\|false] [context...] [--duration <time>]` | Set a node (default `true`); `--expiry <unix>` sets an absolute end |
+| `user <player> permission settemp <node> <true\|false> <time> [context...]` | Set a temporary node |
+| `user <player> permission unset\|unsettemp <node> [context...]` | Remove the node in exactly these contexts (`unsettemp` only a temporary one) |
+| `user <player> permission info` / `check <node> [context...]` | List permission nodes / show the node and what it resolves to |
+| `user <player> parent add\|remove\|set <group> [context...]` | Inherit, stop inheriting, or make the group the only parent in these contexts |
+| `user <player> parent addtemp <group> <time> [context...]`, `removetemp` | Temporary membership |
+| `user <player> parent switchprimarygroup <group>`, `parent info` | Explicit primary group; list parents |
+| `user <player> meta set\|unset <key> [<value>] [context...]`, `settemp` | Meta values |
+| `user <player> meta setprefix\|setsuffix <priority> <text> [context...]` | Also `addprefix`, `settempprefix <priority> <text> <time>`, … |
+| `user <player> meta removeprefix\|removesuffix <priority> [context...]`, `meta info`, `meta clear [context...]` | |
+| `user <player> promote\|demote <track> [context...]` | Move along a track |
+| `user <player> clear [context...]` | Remove every node, or those in exactly these contexts |
+| `group <group> create [weight] [display name]`, `delete`, `info`, `listmembers` | Also `creategroup` and `deletegroup` |
+| `group <group> setweight <weight>`, `setdisplayname [name]` | No name clears the display name |
+| `group <group> permission\|parent\|meta …`, `group <group> clear` | As for users; `group default clear` empties `default` |
+| `track <track> create [group...]`, `delete`, `info`, `clear` | Also `createtrack` and `deletetrack` |
+| `track <track> append <group>`, `insert <group> <position>`, `remove <group>` | Positions start at 1 |
+| `check <player> <node> [context...]` | The proxy's answer, in the player's current contexts unless given |
+| `trace <player> <node> [context...]` | The answer, the winning entry (pattern, subject, rank, contexts, expiry) and why every other match lost |
+| `listgroups`, `listtracks` | Groups by weight; tracks |
+| `search <node>` | Who sets the node, and who holds a wildcard covering it; `%` makes it a `LIKE` pattern |
+| `import <file> [--replace]`, `export <file>` | [LuckPerms JSON](#luckperms-import-and-export) (`.gz` is compressed); export never overwrites |
+| `bulk [users\|groups\|all] [filters] <actions> [--dry-run]` | Patch matching nodes in one revision, see below |
+| `log [--since <revision>] [--actor <actor>] [--subject <player\|group:name>] [--limit <n>]` | The change log |
+| `compiled <player>` | The compiled-subject JSON a backend holds |
+| `registered` | Permissions backends registered, with owner, default and description |
+| `sync` | Ask every backend to resync, then list them with their revisions |
+| `backends` | Backends the bus has heard from: server, revision at `hello`, last seen, client version |
+| `doctor` | Problems, see [Doctor](#doctor) |
+
+Players are names (anyone who has joined once) or UUIDs. Contexts are
+`key=value` arguments (`server=survival world=world_nether`); `global` and
+`server=global` mean no context. Times are durations (`90s`, `30m`, `12h`,
+`7d`, `2w`, `1mo`, `1y`, combined like `1d12h`) or Unix seconds. Text with
+spaces goes in double quotes: `meta setprefix 100 "&6[VIP] "`.
+
+`bulk` filters are `key <like>` (SQL `LIKE`, `%` and `_`), `kind <kind>`,
+`value <value>`, `context <k=v>` (repeat for several pairs; `context global`
+selects global nodes), `source <source>` and `subject user:<player>|group:<name>`.
+Actions are `delete`, `set-value <true|false>`, `set-context <k=v|global>`
+(repeatable), `set-expiry <time>`, `permanent` and `set-source <source>`.
+For example `bulk users key essentials.% kind permission set-value false --dry-run`.
+
+**Authorization.** Players need `rift.perms.<verb>`, mirroring the grammar:
+`rift.perms.user.permission.set`, `rift.perms.user.parent.addtemp`,
+`rift.perms.group.meta.setprefix`, `rift.perms.track.append`,
+`rift.perms.trace`, `rift.perms.bulk` and so on (`settemp`, `unsettemp`,
+`addtemp`, `removetemp`, `settempprefix` are verbs of their own);
+`rift.perms.*` grants everything. A player cannot grant a permission or group
+they do not hold themselves, in the node's contexts, unless they hold
+`rift.perms.escalate`; denying and removing are always allowed. In game,
+`import` and `export` take a bare file name in the proxy's working directory.
+Backend consoles may run commands only when their principal has
+`control = true`; `rift admin perms` and the dashboard act as the console.
+
+### Command line
+
+```sh
+rift admin perms user Alice parent add vip
+rift admin perms trace Alice essentials.fly server=survival
+rift admin perms log --since 400 --actor cli
+rift admin perms export ./luckperms.json.gz
+rift admin perms compiled Alice
+rift admin perms doctor
+```
+
+The text is printed as it would appear in game; a failed command exits
+non-zero. `import` and `export` paths are resolved where the CLI runs and read
+or written by the proxy process.
+
+### Doctor
+
+`/perms doctor` lists:
+
+- dangling parents: `inherit` nodes, or track entries, naming groups that do
+  not exist (they grant nothing until the group is created again);
+- unreachable groups: groups nobody inherits and no track lists;
+- expired nodes the sweeper has not deleted yet (they already grant nothing);
+- backends whose last `hello` reported an older revision than the proxy's,
+  with no `hello` since (run `/perms sync`), and principals that never said
+  `hello`;
+- extension commands whose `permission` is neither registered by a backend nor
+  granted anywhere.
+
+`rift check --strict` warns about the last kind as well, reading the store
+read-only and `extensions.groups`.
+
+## Backends
+
+Backends keep replicas through the [permission protocol](permissions-protocol.md)
+on the [messaging bus](messaging.md). Give each one a principal with the
+`backend` preset; its name must be `server.<backend>`:
+
+```lua
+rift.config.messaging = {
+    listen = "0.0.0.0:7443",
+    certificate = "messaging-cert.pem",
+    private_key = "messaging-key.pem",
+    principals = {
+        { name = "server.survival-1", token_env = "RIFT_SURVIVAL_1_TOKEN", preset = "backend" },
+        { name = "server.lobby", token_env = "RIFT_LOBBY_TOKEN", preset = "backend" },
+    },
+}
+```
+
+The proxy publishes each player's compiled subject before it forwards their
+connection to a backend, so the replica usually holds it before the player
+logs in, and again after every change that affects them. With a principal
+that may receive these snapshots, the proxy reads the login name before
+connecting even without network features. Every committed change is also
+appended to the retained stream `rift.perms.changes`, file-backed beside the
+instance database (`rift.perms-changes/`).
+
+### `rift dev`
+
+`rift dev` starts a proxy for plugin development in one command: the
+permission store in memory, the bus on `127.0.0.1:7443` with a self-signed
+certificate written to `./rift-dev/ca.pem`, one backend `dev` at
+`127.0.0.1:25566` whose principal `server.dev` has the `backend` preset and
+`control = true`, and the admin service on `127.0.0.1:9091`. It prints the
+token (`RIFT_DEV_TOKEN`, generated unless set), a ready plugin configuration
+and the `rift admin perms` command line:
+
+```sh
+rift dev --server paper --backend 127.0.0.1:25566
+```
+
+Options: `--listen`, `--backend`, `--server`, `--bus`, `--admin`, `--dir`.
+Nothing is saved; run the backend in offline mode.
 
 ## Upgrading from extensions API v2
 
