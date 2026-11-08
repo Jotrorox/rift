@@ -69,8 +69,9 @@ pub fn plugins(config: &Config) -> (Vec<String>, Vec<String>) {
             && !engines.available(kind)
         {
             warnings.push(format!(
-                "plugin {}: engine \"{engine}\" is not available in this build of Rift; startup and reload will refuse it",
-                spec.name
+                "plugin {}: {}; startup and reload will refuse it",
+                spec.name,
+                rift::plugins::worker::Engines::unavailable(kind)
             ));
         }
     }
@@ -82,8 +83,9 @@ pub fn plugins(config: &Config) -> (Vec<String>, Vec<String>) {
     (lines, warnings)
 }
 
-/// Run every strict check and collect the results; nothing is created or
-/// changed, except a probe file that is removed at once.
+/// Run every strict check and collect the results. Nothing is created or
+/// changed except a probe file that is removed at once and the compiled
+/// WebAssembly plugins in `local/plugincache`, which startup then loads.
 pub fn strict(config: &Config, path: &Path) -> Report {
     let mut report = Report::default();
     environment(config, &mut report);
@@ -93,6 +95,15 @@ pub fn strict(config: &Config, path: &Path) -> Report {
             .into_iter()
             .filter(|warning| warning.contains("is not available")),
     );
+    #[cfg(feature = "wasm")]
+    for spec in &config.plugins {
+        if spec.manifest.engine == Some(rift::plugins::manifest::EngineKind::Wasm) {
+            match rift::plugins::wasm::precompile(spec) {
+                Ok(note) => report.notes.push(note),
+                Err(error) => report.errors.push(format!("plugin {}: {error}", spec.name)),
+            }
+        }
+    }
     let running = match Store::check(&config.instance_database, config) {
         Ok(DatabaseCheck::Missing) => {
             report.notes.push(format!(

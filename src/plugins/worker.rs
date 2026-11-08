@@ -97,11 +97,27 @@ where
 pub struct Engines(BTreeMap<EngineKind, Arc<dyn EngineFactory>>);
 
 impl Engines {
-    /// The engines this build provides. None are implemented yet: a manifest
-    /// naming `lua` or `wasm` is reported by `rift check` and refused at
-    /// startup and reload until an engine registers here.
+    /// The engines this build provides. A manifest naming another engine is
+    /// reported by `rift check` and refused at startup and reload.
     pub fn builtin() -> Self {
-        Self::default()
+        let engines = Self::default();
+        #[cfg(feature = "wasm")]
+        let engines = engines.with(EngineKind::Wasm, super::wasm::create);
+        engines
+    }
+
+    /// Why `kind` cannot run in this build, for `rift check` and startup.
+    pub fn unavailable(kind: EngineKind) -> String {
+        match kind {
+            EngineKind::Wasm if !cfg!(feature = "wasm") => {
+                "engine \"wasm\" is not available: this Rift was built without WebAssembly support"
+                    .into()
+            }
+            kind => format!(
+                "engine \"{}\" is not available in this build of Rift",
+                kind.name()
+            ),
+        }
     }
 
     pub fn with(mut self, kind: EngineKind, factory: impl EngineFactory) -> Self {
