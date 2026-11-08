@@ -122,8 +122,9 @@ before retrying), `Rejected` (the proxy's error reply), `Config` and
 
 ### A Pumpkin plugin
 
-The Pumpkin adapter wires the client into Pumpkin's permission events, so
-`player.has_permission` already answers from the replica. A plugin that wants
+The [Pumpkin adapter](permissions-pumpkin.md) wires the client into
+Pumpkin's permission events, so `player.has_permission` already answers from
+the replica, and offers the trait to other plugins as a service. A plugin that wants
 meta values, groups or writes holds the trait:
 
 ```rust,ignore
