@@ -41,6 +41,15 @@ impl Fixture for LuaFixture {
 
 conformance_tests!(LuaFixture);
 
+#[tokio::test]
+async fn example_plugin_follows_the_shared_spec() {
+    conformance::hello_example(
+        Engines::builtin(),
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/plugins/hello-lua"),
+    )
+    .await;
+}
+
 const BASE: &str = "listeners = { public = '127.0.0.1:0' }, backends = { lobby = '127.0.0.1:25001' }, routes = { public = 'lobby' }, authentication = { online_mode = true }, forwarding = { mode = 'velocity', secret_env = 'TEST_SECRET' }";
 
 fn directory() -> PathBuf {
