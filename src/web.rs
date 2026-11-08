@@ -1178,7 +1178,7 @@ async fn apply_definition(
     {
         return error(
             StatusCode::CONFLICT,
-            "permission groups require extensions with api_version = 2; configure them in Lua first",
+            "permission groups require extensions with api_version = 2 or 3; configure them in Lua first",
         );
     }
     if section == "server_list"
@@ -1207,78 +1207,111 @@ async fn apply_definition(
 }
 /// Members are capped so a large store cannot produce an unbounded response.
 const MAX_LISTED_MEMBERS: usize = 1000;
-async fn permission_groups(State(app): State<App>) -> Json<Value> {
-    let snapshot = app.snapshot();
-    let Some(memberships) = snapshot.extensions.group_memberships() else {
-        return Json(json!({"enabled":false,"members":[],"truncated":false}));
-    };
-    let names = snapshot.extensions.players().names();
-    let members: Vec<Value> = memberships
-        .iter()
-        .take(MAX_LISTED_MEMBERS)
-        .map(|(uuid, groups)| json!({"uuid":uuid,"name":names.get(uuid),"groups":groups}))
-        .collect();
-    Json(json!({
-        "enabled": true,
-        "members": members,
-        "truncated": memberships.len() > MAX_LISTED_MEMBERS,
-    }))
+/// Users with global group memberships in the permission store.
+async fn permission_groups(State(app): State<App>) -> Response {
+    let extensions = app.snapshot().extensions.clone();
+    let names = extensions.players().names();
+    let listed =
+        tokio::task::spawn_blocking(move || extensions.permissions().members(MAX_LISTED_MEMBERS))
+            .await;
+    match listed {
+        Ok(Ok((members, truncated))) => {
+            let members: Vec<Value> = members
+                .into_iter()
+                .map(|member| {
+                    let uuid = member.uuid.to_string();
+                    let name = names.get(&uuid).cloned().or(member.name);
+                    json!({"uuid": uuid, "name": name, "groups": member.groups})
+                })
+                .collect();
+            Json(json!({"enabled": true, "members": members, "truncated": truncated}))
+                .into_response()
+        }
+        Ok(Err(failure)) => error(StatusCode::SERVICE_UNAVAILABLE, failure),
+        Err(failure) => error(StatusCode::INTERNAL_SERVER_ERROR, failure),
+    }
 }
 async fn add_member(
     State(app): State<App>,
+    Extension(access): Extension<Access>,
     Path((uuid, group)): Path<(String, String)>,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
-    membership(app, uuid, group, body, true).await
+    membership(app, access, uuid, group, body, true).await
 }
 async fn remove_member(
     State(app): State<App>,
+    Extension(access): Extension<Access>,
     Path((uuid, group)): Path<(String, String)>,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
-    membership(app, uuid, group, body, false).await
+    membership(app, access, uuid, group, body, false).await
 }
+/// Add or remove a global `inherit` node through the permission authority.
 async fn membership(
     app: App,
+    access: Access,
     uuid: String,
     group: String,
     body: Result<Json<Value>, JsonRejection>,
     add: bool,
 ) -> Response {
+    use rift::permissions::PermError;
+    use rift_permissions::{Actor, Change, Node, NodeKind, SubjectRef, node::NodeKey};
     if let Err(error) = payload(body, &[]) {
         return error.into_response();
     }
     let extensions = app.snapshot().extensions.clone();
-    // An online player may be named instead of identified by UUID.
-    let hexadecimal = uuid.len() == 32 && uuid.bytes().all(|b| b.is_ascii_hexdigit());
-    let uuid = if hexadecimal {
-        uuid
-    } else {
-        match extensions
-            .players()
-            .names()
-            .into_iter()
-            .find(|(_, name)| name.eq_ignore_ascii_case(&uuid))
-        {
-            Some((uuid, _)) => uuid,
-            None => {
-                return error(
-                    StatusCode::NOT_FOUND,
-                    "no online player has that name; use their UUID",
-                );
+    let actor = format!("operator:{}", access.name)
+        .parse()
+        .unwrap_or_else(|_| Actor::Operator("dashboard".into()));
+    let result = tokio::task::spawn_blocking(move || {
+        let permissions = extensions.permissions();
+        // A player may be named instead of identified by UUID.
+        let user = match rift_permissions::Uuid::parse(&uuid) {
+            Ok(user) => user,
+            Err(_) => permissions
+                .user_by_name(&uuid)?
+                .ok_or(PermError::NotFound {
+                    what: "player",
+                    name: uuid,
+                })?,
+        };
+        let subject = SubjectRef::User(user);
+        let change = if add {
+            if group.eq_ignore_ascii_case(rift_permissions::DEFAULT_GROUP) {
+                return Err(PermError::Conflict(
+                    "every player belongs to the default group implicitly".into(),
+                ));
             }
-        }
-    };
-    let result =
-        tokio::task::spawn_blocking(move || extensions.change_group_membership(&uuid, &group, add))
-            .await;
+            if permissions.group(&group.to_ascii_lowercase()).is_none() {
+                return Err(PermError::NotFound {
+                    what: "permission group",
+                    name: group,
+                });
+            }
+            Change::SetNode {
+                subject,
+                node: Node::inherit(&group, true)?,
+            }
+        } else {
+            Change::UnsetNode {
+                subject,
+                key: NodeKey::new(NodeKind::Inherit, &group, Default::default())?,
+            }
+        };
+        permissions.apply(actor, change)
+    })
+    .await;
     match result {
-        Ok(Ok(changed)) => Json(json!({"changed":changed})).into_response(),
+        Ok(Ok(applied)) => {
+            Json(json!({"changed": applied.ops > 0, "revision": applied.revision})).into_response()
+        }
         Ok(Err(failure)) => error(
-            match failure.kind() {
-                io::ErrorKind::InvalidInput => StatusCode::BAD_REQUEST,
-                io::ErrorKind::Unsupported => StatusCode::CONFLICT,
-                _ => StatusCode::SERVICE_UNAVAILABLE,
+            match &failure {
+                PermError::NotFound { what: "player", .. } => StatusCode::NOT_FOUND,
+                PermError::Storage(_) | PermError::Deadline => StatusCode::SERVICE_UNAVAILABLE,
+                _ => StatusCode::BAD_REQUEST,
             },
             failure,
         ),

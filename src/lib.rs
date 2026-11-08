@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod bungeecord;
 pub mod config;
+pub mod database;
 pub mod extensions;
 pub mod files;
 mod forwarding;
@@ -11,6 +12,7 @@ pub mod managed;
 pub mod message_script;
 pub mod messaging;
 pub mod node;
+pub mod permissions;
 pub mod players;
 pub mod preflight;
 pub mod protocol;

@@ -610,10 +610,12 @@
     const permissions = {};
     for (const line of lines($("permission-group-nodes").value)) {
       const denied = line.startsWith("-"), node = denied ? line.slice(1).trim() : line;
-      if (!/^(\*|[a-z0-9_.-]{1,64})$/.test(node.replace(/\.\*$/, "")) || node.startsWith(".")) throw new Error(`“${line}” isn’t a permission node, prefix.* wildcard or *.`);
+      if (!/^(\*|[a-z0-9_.:-]{1,256})$/.test(node.replace(/\.\*$/, "")) || node.startsWith(".")) throw new Error(`“${line}” isn’t a permission node, prefix.* wildcard or *.`);
       permissions[node] = !denied;
     }
-    return { inherits: lines($("permission-group-inherits").value.replaceAll(",", "\n")), permissions };
+    // Keep the fields this form does not edit (weight, prefix, suffix, meta).
+    const current = state.definitions.permission_groups?.[$("permission-group-name").value.trim()] || {};
+    return { ...current, inherits: lines($("permission-group-inherits").value.replaceAll(",", "\n")), permissions };
   }
   async function loadPermissions() {
     const session = state.session, data = await request("/api/permissions");

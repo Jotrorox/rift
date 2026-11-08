@@ -1873,7 +1873,7 @@ fn console_settings_edit_permission_groups_memberships_tab_list_and_server_list(
     .expect(200);
     put(
         "/api/definitions/permission_groups/broken",
-        json!({"inherits": ["missing"]}),
+        json!({"permissions": {"bad node": true}}),
     )
     .expect(400);
     put("/api/definitions/permission_groups/Staff", json!({})).expect(400);
@@ -1907,7 +1907,7 @@ fn console_settings_edit_permission_groups_memberships_tab_list_and_server_list(
     assert!(fixture.read().contains(&source));
     assert_eq!(client.get("/ext/test").expect(200).body, "hook preserved");
 
-    // Memberships are runtime state in the extension store, not configuration.
+    // Memberships are runtime state in the permission store, not configuration.
     let uuid = "0123456789abcdef0123456789abcdef";
     let member = |method: &str, group: &str| {
         client.json(
@@ -1927,13 +1927,17 @@ fn console_settings_edit_permission_groups_memberships_tab_list_and_server_list(
     client
         .json("POST", "/api/permissions/members/Offline/staff", json!({}))
         .expect(404);
-    client
-        .json(
-            "POST",
-            &format!("/api/permissions/members/{}/staff", uuid.to_uppercase()),
-            json!({}),
-        )
-        .expect(400);
+    assert_eq!(
+        client
+            .json(
+                "POST",
+                &format!("/api/permissions/members/{}/staff", uuid.to_uppercase()),
+                json!({}),
+            )
+            .expect(200)
+            .value()["changed"],
+        false
+    );
     assert_eq!(revision(client), before);
     assert_eq!(
         client.get("/api/permissions").expect(200).value(),
@@ -1959,13 +1963,13 @@ fn console_settings_edit_permission_groups_memberships_tab_list_and_server_list(
 }
 
 #[test]
-fn permission_groups_require_api_v2_extensions() {
+fn permission_group_definitions_require_extensions() {
     let fixture = Fixture::new();
     let _process = fixture.start(&fixture.source("", ""));
     let client = fixture.client();
     assert_eq!(
-        client.get("/api/permissions").expect(200).value()["enabled"],
-        false
+        client.get("/api/permissions").expect(200).value(),
+        json!({"enabled": true, "members": [], "truncated": false})
     );
     assert!(client.get("/api/definitions").expect(200).value()["permission_groups"].is_null());
     client
@@ -1981,7 +1985,7 @@ fn permission_groups_require_api_v2_extensions() {
             "/api/permissions/members/0123456789abcdef0123456789abcdef/staff",
             json!({}),
         )
-        .expect(409);
+        .expect(400);
 }
 
 #[test]
