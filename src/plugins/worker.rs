@@ -311,6 +311,29 @@ fn valid_permission(node: &str) -> bool {
         })
 }
 
+/// Without `authentication.online_mode` player hooks never run: a plugin
+/// that relies on one (a ban list on `login`, say) must not start and
+/// silently allow everyone.
+pub(crate) fn require_online_mode(registration: &Registration) -> Result<(), String> {
+    let needs = if !registration.commands.is_empty() {
+        Some("commands need".to_owned())
+    } else if registration.hooks.is_empty() {
+        Some("an empty hook list (every hook, including login) needs".to_owned())
+    } else {
+        registration
+            .hooks
+            .iter()
+            .find(|hook| hook.is_player())
+            .map(|hook| format!("hook {} needs", hook.name()))
+    };
+    match needs {
+        Some(what) => Err(format!(
+            "{what} authentication.online_mode; without it player hooks never run"
+        )),
+        None => Ok(()),
+    }
+}
+
 /// The same limits the configuration script's commands obey.
 pub(crate) fn validate_registration(registration: &Registration) -> Result<(), String> {
     if registration.commands.len() > 64 {
@@ -899,10 +922,19 @@ impl Worker {
             )));
         }
         self.wait_turn();
-        if let Err(error) = validate_registration(&registration).and_then(|()| {
-            self.registrar
-                .register(self.id, &self.spec.name, self.replaces, &registration)
-        }) {
+        if let Err(error) = validate_registration(&registration)
+            .and_then(|()| {
+                if self.spec.online_mode {
+                    Ok(())
+                } else {
+                    require_online_mode(&registration)
+                }
+            })
+            .and_then(|()| {
+                self.registrar
+                    .register(self.id, &self.spec.name, self.replaces, &registration)
+            })
+        {
             let _ = guarded(|| engine.shutdown("registration rejected"));
             return Err(Startup::Conflict(format!("registration: {error}")));
         }

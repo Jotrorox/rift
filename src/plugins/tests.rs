@@ -189,6 +189,7 @@ fn spec(root: &Path, name: &str, extra: &str, config_json: &str) -> PluginSpec {
         manifest: Manifest::parse(&text, name).unwrap(),
         config_json: config_json.into(),
         fingerprint: "one".into(),
+        online_mode: true,
     }
 }
 
@@ -1359,6 +1360,59 @@ async fn script_commands_may_not_take_a_replaced_plugins_command() {
             .contains("registered by plugin greeter and by the configuration script"),
         "{error}"
     );
+    assert_eq!(runtime.plugins().active()[0].status(), Status::Running);
+    runtime.plugins().shutdown().await;
+}
+
+#[tokio::test]
+async fn without_online_mode_plugins_that_register_player_hooks_fail_to_start() {
+    let root = directory();
+    let mocks = Mocks::default();
+    mocks.plan(
+        "ban",
+        Plan::new(action(Action::Deny("banned".into()))).hooks(&[Hook::Login]),
+    );
+    mocks.plan(
+        "greeter",
+        Plan::new(action(Action::Continue))
+            .hooks(&[Hook::Timer])
+            .commands(&["hello"]),
+    );
+    mocks.plan("everything", Plan::new(action(Action::Continue)));
+    mocks.plan(
+        "web",
+        Plan::new(action(Action::Continue)).hooks(&[Hook::Http, Hook::Timer]),
+    );
+    let offline = |plugins: Vec<PluginSpec>| {
+        let mut config = Config::from_lua(
+            "return { listeners = { public = '127.0.0.1:0' }, backends = { lobby = '127.0.0.1:25001' }, routes = { public = 'lobby' } }",
+            "offline.lua",
+        )
+        .unwrap();
+        config.plugins = plugins
+            .into_iter()
+            .map(|mut spec| {
+                spec.online_mode = false;
+                spec
+            })
+            .collect();
+        config
+    };
+    let broker = Broker::default();
+    for (name, expected) in [
+        ("ban", "hook login needs authentication.online_mode"),
+        ("greeter", "commands need"),
+        ("everything", "an empty hook list"),
+    ] {
+        let config = offline(vec![spec(&root, name, "", "{}")]);
+        let runtime =
+            Extensions::with_engines(&config, broker.clone(), None, mocks.engines()).unwrap();
+        let error = runtime.plugins().start().await.unwrap_err().to_string();
+        assert!(error.contains(expected), "{name}: {error}");
+    }
+    // Plugins without player hooks run offline.
+    let config = offline(vec![spec(&root, "web", "", "{}")]);
+    let runtime = runtime(&config, &mocks, &broker).await;
     assert_eq!(runtime.plugins().active()[0].status(), Status::Running);
     runtime.plugins().shutdown().await;
 }

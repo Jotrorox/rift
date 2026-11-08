@@ -55,6 +55,9 @@ pub struct PluginSpec {
     /// SHA-256 of the manifest and every artifact in the folder except
     /// `data/`, for the reload diff.
     pub fingerprint: String,
+    /// `authentication.online_mode`: without it player hooks never run, so
+    /// a plugin that registers one is refused at `init`.
+    pub online_mode: bool,
 }
 
 impl PluginSpec {
@@ -71,11 +74,14 @@ impl PluginSpec {
     }
 
     /// Same code, manifest and folder; only the configuration table may differ.
+    /// A change of `online_mode` restarts the plugin, so its registration is
+    /// checked again.
     fn same_artifact(&self, other: &Self) -> bool {
         self.fingerprint == other.fingerprint
             && self.manifest == other.manifest
             && self.folder == other.folder
             && self.config_root == other.config_root
+            && self.online_mode == other.online_mode
     }
 }
 
