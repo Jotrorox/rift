@@ -100,7 +100,24 @@ impl Engines {
     /// The engines this build provides. A manifest naming another engine is
     /// reported by `rift check` and refused at startup and reload.
     pub fn builtin() -> Self {
-        Self::default().with(EngineKind::Lua, super::lua::factory)
+        let engines = Self::default().with(EngineKind::Lua, super::lua::factory);
+        #[cfg(feature = "wasm")]
+        let engines = engines.with(EngineKind::Wasm, super::wasm::create);
+        engines
+    }
+
+    /// Why `kind` cannot run in this build, for `rift check` and startup.
+    pub fn unavailable(kind: EngineKind) -> String {
+        match kind {
+            EngineKind::Wasm if !cfg!(feature = "wasm") => {
+                "engine \"wasm\" is not available: this Rift was built without WebAssembly support"
+                    .into()
+            }
+            kind => format!(
+                "engine \"{}\" is not available in this build of Rift",
+                kind.name()
+            ),
+        }
     }
 
     pub fn with(mut self, kind: EngineKind, factory: impl EngineFactory) -> Self {
@@ -444,6 +461,9 @@ impl Instance {
                 self.spec.name
             )),
             Ok(Ok(Ok(reply))) => Outcome::Reply(reply),
+            // An engine that interrupts a guest at its deadline may answer
+            // just before this timer fires; the deadline still decides.
+            Ok(Ok(Err(_))) if Instant::now() >= until => Outcome::TimedOut,
             Ok(Ok(Err(error))) => Outcome::Failed(error.to_string()),
         }
     }

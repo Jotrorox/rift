@@ -23,6 +23,8 @@ pub mod monitor;
 pub(crate) mod remote;
 pub mod script;
 pub mod services;
+#[cfg(feature = "wasm")]
+pub mod wasm;
 pub mod worker;
 
 use api::{Action, Context, Event, Hook, Reply, Suggestion};
@@ -194,11 +196,7 @@ impl Host {
             {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,
-                    format!(
-                        "plugin {}: engine \"{}\" is not available in this build of Rift",
-                        spec.name,
-                        engine.name()
-                    ),
+                    format!("plugin {}: {}", spec.name, Engines::unavailable(engine)),
                 ));
             }
         }
@@ -464,11 +462,7 @@ impl Host {
                 let factory = persistent.engines.get(engine).ok_or_else(|| {
                     io::Error::new(
                         io::ErrorKind::Unsupported,
-                        format!(
-                            "plugin {}: engine \"{}\" is not available in this build of Rift",
-                            spec.name,
-                            engine.name()
-                        ),
+                        format!("plugin {}: {}", spec.name, Engines::unavailable(engine)),
                     )
                 })?;
                 Instance::start(
@@ -989,7 +983,8 @@ fn validate_action(hook: Hook, action: &Action) -> Result<(), String> {
             )
     );
     if !allowed {
-        return Err(format!("invalid decision for {}", hook.name()));
+        let action: String = format!("{action:?}").chars().take(256).collect();
+        return Err(format!("invalid decision for {}: {action}", hook.name()));
     }
     if let Action::Deny(text) | Action::Server(text) | Action::Message(text) | Action::Queue(text) =
         action
