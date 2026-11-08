@@ -8,8 +8,8 @@ owns the data and resolves it; backends will hold replicas and answer
 
 On the proxy today the store answers extension commands, `ctx.has_permission`,
 the Lua `rift.permissions` module (extensions API v3), the `RiftInGroup`
-[BungeeCord request](bungeecord.md#rift-requests) and the dashboard's group
-memberships.
+[BungeeCord request](bungeecord.md#rift-requests), the [dashboard](#dashboard)
+and the [HTTP API](http.md#permissions-api).
 
 ## Model
 
@@ -288,8 +288,46 @@ other sources are never touched. Export writes the same format, so `/lp import`
 can read it back; a context key with several values keeps its first value
 there, since LuckPerms would read the list as "any".
 
-The administration surfaces for this (`/perms import`, `rift admin perms
-import`, the dashboard) are not built yet.
+Over HTTP, `POST /api/perms/import` takes the file (gzipped or not, with
+`?replace=true` for replace) and `GET /api/perms/export` returns it; see the
+[HTTP API](http.md#permissions-api).
+
+## Dashboard
+
+The [web dashboard](http.md) has four permission views under **Permissions**.
+They call the [HTTP API](http.md#permissions-api) for everything, so an edit
+there is validated, audited and pushed to backends exactly like `/perms` or a
+Lua write, and the change log records it as `operator:<name>`.
+
+- **Groups**: every group as a tree by inheritance (each group under its
+  heaviest parent) with its weight, parents, node count and tracks. Create and
+  delete groups, change weight and display name, and edit a group's nodes.
+  Tracks are edited below the tree: add groups and put them in order with the
+  Up and Down buttons, lowest first.
+- **Players**: search by name, UUID prefix or group. A player's page shows
+  their status, effective primary group and current contexts, lets you set the
+  primary group, add and remove parent groups (with contexts and an expiry),
+  promote and demote on a track, and edit their own nodes. *What backends
+  see* shows the compiled subject with each entry's source group and rank, the
+  resolved prefix, suffix and meta for any contexts you enter, and checks one
+  node with the winning entry and why the others lost.
+- **Nodes**: the registered node catalogue grouped by the backend and plugin
+  that registered it, with defaults and descriptions. Choose a node to list who
+  sets it directly; wildcards are not expanded there, so use a player's check
+  for the full answer.
+- **Activity**: the change log, newest first, filterable by actor, subject and
+  revision. Open a revision to compare every node before and after.
+
+The node editor takes a kind (permission, parent group, prefix, suffix or
+meta), its key and value, contexts as `key=value` pairs separated by commas,
+and an expiry (a duration from now or a date). Editing a node replaces it, so
+changing its contexts moves it. Nodes from `extensions.groups` show the source
+`config` and come back on the next reload if you change them here; edit those
+in Lua instead.
+
+Operators with the `perms` permission see the views without the editing
+controls; `config` adds them. Weight and display-name nodes are edited through
+the group's fields.
 
 ## Upgrading from extensions API v2
 
