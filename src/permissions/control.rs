@@ -879,3 +879,248 @@ pub fn required_nodes(change: &Change) -> Vec<String> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{MessagingConfig, MessagingPrincipal, PermissionsConfig};
+    use rift_permissions::{Node, SubjectRef};
+    use serde_json::json;
+    use std::time::Duration;
+
+    const ALICE: Uuid = Uuid::from_u128(0xa11ce);
+
+    fn principal(name: &str, control: bool) -> MessagingPrincipal {
+        let (publish, subscribe) = crate::permissions::backend_grants();
+        MessagingPrincipal {
+            name: name.into(),
+            token_env: "UNUSED".into(),
+            publish,
+            subscribe,
+            control,
+        }
+    }
+
+    async fn bus() -> (Arc<Bus>, Broker) {
+        let broker = Broker::default();
+        let authority = Arc::new(Authority::memory(&PermissionsConfig {
+            external_contexts: ["region".to_owned()].into(),
+            ..PermissionsConfig::default()
+        }));
+        let messaging = MessagingConfig {
+            principals: vec![
+                principal("server.survival", false),
+                principal("operator", true),
+            ],
+            ..MessagingConfig::default()
+        };
+        let bus = Arc::new(Bus::new(broker.clone(), authority, Some(&messaging)));
+        tokio::spawn(bus.listen().unwrap());
+        (bus, broker)
+    }
+
+    async fn ask(broker: &Broker, sender: &str, subject: &str, body: Value) -> Value {
+        let reply = broker
+            .request_as(
+                subject,
+                Bytes::from(body.to_string()),
+                Duration::from_secs(5),
+                Some(sender),
+            )
+            .await
+            .unwrap();
+        serde_json::from_slice(&reply.payload).unwrap()
+    }
+
+    #[tokio::test]
+    async fn requests_are_authorized_by_the_sending_principal() {
+        let (bus, broker) = bus().await;
+        assert!(bus.has_principals());
+        let hello = ask(
+            &broker,
+            "server.survival",
+            wire::HELLO,
+            json!({"server": "survival", "revision": 0, "client_version": "test"}),
+        )
+        .await;
+        assert_eq!(hello["ok"], true, "{hello}");
+        assert_eq!(hello["data"]["external_contexts"], json!(["region"]));
+        let backends = bus.backends();
+        assert_eq!(backends[0].principal, "server.survival");
+        assert_eq!(backends[0].revision, Some(0));
+        let impostor = ask(
+            &broker,
+            "server.survival",
+            wire::HELLO,
+            json!({"server": "lobby", "revision": 0, "client_version": "test"}),
+        )
+        .await;
+        assert_eq!(impostor["code"], "forbidden", "{impostor}");
+
+        let change = json!({"op": "create_group", "name": "vip"});
+        let refused = ask(
+            &broker,
+            "server.survival",
+            wire::APPLY,
+            json!({"change": change}),
+        )
+        .await;
+        assert_eq!(refused["code"], "forbidden", "{refused}");
+        let applied = ask(&broker, "operator", wire::APPLY, json!({"change": change})).await;
+        assert_eq!(applied["data"]["revision"], 1, "{applied}");
+        let log = bus.authority().log(&LogQuery::default()).unwrap();
+        assert_eq!(log[0].actor, Actor::Backend("operator".into()));
+
+        let absent = ask(
+            &broker,
+            "server.survival",
+            wire::APPLY,
+            json!({"change": change, "actor_uuid": ALICE}),
+        )
+        .await;
+        assert!(
+            absent["error"].as_str().unwrap().contains("not online"),
+            "{absent}"
+        );
+        let console = ask(
+            &broker,
+            "server.survival",
+            wire::COMMAND,
+            json!({"args": ["listgroups"]}),
+        )
+        .await;
+        assert_eq!(console["code"], "forbidden", "{console}");
+        let operator = ask(
+            &broker,
+            "operator",
+            wire::COMMAND,
+            json!({"args": ["listgroups"]}),
+        )
+        .await;
+        assert!(
+            operator["data"]["component"]
+                .to_string()
+                .contains("2 groups"),
+            "{operator}"
+        );
+
+        let groups = ask(
+            &broker,
+            "server.survival",
+            wire::GROUPS_GET,
+            json!({"permissions": true}),
+        )
+        .await;
+        assert_eq!(groups["code"], "invalid_request", "{groups}");
+        let uuids: Vec<String> = (0..257).map(|i| Uuid::from_u128(i).to_string()).collect();
+        let batch = ask(
+            &broker,
+            "server.survival",
+            wire::SUBJECT_BATCH,
+            json!({"uuids": uuids}),
+        )
+        .await;
+        assert_eq!(batch["code"], "limit", "{batch}");
+        let malformed = ask(
+            &broker,
+            "server.survival",
+            wire::SUBJECT_GET,
+            json!({"uuid": 5}),
+        )
+        .await;
+        assert_eq!(malformed["code"], "invalid_request", "{malformed}");
+    }
+
+    #[tokio::test]
+    async fn arriving_players_can_be_acted_for_and_report_contexts() {
+        let (bus, broker) = bus().await;
+        let authority = bus.authority().clone();
+        authority
+            .apply(
+                Actor::Cli,
+                Change::SetNode {
+                    subject: SubjectRef::User(ALICE),
+                    node: Node::permission("warp.spawn", true)
+                        .unwrap()
+                        .with_context("region", "spawn")
+                        .unwrap(),
+                },
+            )
+            .unwrap();
+        let mut pushes = broker
+            .subscribe(&wire::update_subject(ALICE), None)
+            .unwrap();
+        bus.push_before_connect(ALICE, "survival");
+        let pushed = pushes.recv().await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&pushed.payload).unwrap()["revision"],
+            1
+        );
+        let report = ask(
+            &broker,
+            "server.survival",
+            wire::CONTEXT,
+            json!({"uuid": ALICE, "contexts": {"region": "spawn", "evil": "x"}}),
+        )
+        .await;
+        assert_eq!(report["ok"], true, "{report}");
+        let lobby = ask(
+            &broker,
+            "server.lobby",
+            wire::CONTEXT,
+            json!({"uuid": ALICE, "contexts": {"region": "market"}}),
+        )
+        .await;
+        assert_eq!(lobby["code"], "forbidden", "{lobby}");
+        authority.join(ALICE, "Alice", "survival");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            authority.contexts(ALICE).get("region"),
+            Some("spawn"),
+            "the report made during the login took effect"
+        );
+        assert_eq!(authority.contexts(ALICE).get("evil"), None);
+        assert_eq!(
+            authority.check_active(ALICE, "warp.spawn"),
+            rift_permissions::Tristate::True
+        );
+    }
+
+    #[test]
+    fn apply_nodes_mirror_the_command_tree() {
+        let set = |node: Node| Change::SetNode {
+            subject: SubjectRef::User(ALICE),
+            node,
+        };
+        assert_eq!(
+            required_nodes(&set(Node::permission("a", true).unwrap())),
+            ["rift.perms.user.permission.set"]
+        );
+        assert_eq!(
+            required_nodes(&set(Node::inherit("vip", true).unwrap().expiring_at(5))),
+            ["rift.perms.user.parent.addtemp"]
+        );
+        assert_eq!(
+            required_nodes(&Change::Batch {
+                changes: vec![
+                    set(Node::prefix(1, "x").unwrap()),
+                    Change::CreateGroup {
+                        name: "vip".into(),
+                        weight: 0,
+                        display_name: None,
+                    },
+                ],
+            }),
+            ["rift.perms.group.create", "rift.perms.user.meta.setprefix"]
+        );
+        assert!(pattern_matches(
+            "rift.perms.update.>",
+            "rift.perms.update.abc"
+        ));
+        assert!(pattern_matches(">", "rift.perms.update.abc"));
+        assert!(!pattern_matches(
+            "rift.perms.update",
+            "rift.perms.update.abc"
+        ));
+    }
+}

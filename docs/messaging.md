@@ -89,6 +89,33 @@ paths are relative to Rift's working directory. Messaging configuration changes,
 including credentials and stream limits, require a restart. Lua callback source
 can reload while connections, subscriptions and queued messages remain intact.
 
+### Backend permission principals
+
+A backend that replicates [permissions](permissions.md) needs the
+`rift.perms.*` subjects of the [permission protocol](permissions-protocol.md).
+Instead of listing them, give its principal the `backend` preset:
+
+```lua
+principals = {
+    { name = "server.survival-1", token_env = "RIFT_SURVIVAL_1_TOKEN", preset = "backend" },
+},
+```
+
+The preset adds publish `rift.perms.hello`, `rift.perms.subject.*`,
+`rift.perms.groups.*`, `rift.perms.apply`, `rift.perms.register`,
+`rift.perms.command` and `rift.perms.context`, and subscribe
+`rift.perms.update`, `rift.perms.update.>`, `rift.events.permissions` and
+`rift.perms.changes` (the retained change log), to whatever `publish` and
+`subscribe` the entry also lists. Name the principal `server.<backend>`: Rift
+trusts it to speak for that backend's players and nobody else's.
+
+Rift records which principal sent each remote message, so permission handlers
+know the caller without trusting the payload. Whatever the grants say, only
+Rift itself publishes `rift.perms.update`, `rift.perms.update.>` and
+`rift.perms.changes`, and only principals with `control = true` may subscribe
+to the request subjects (`rift.perms.hello`, `rift.perms.subject.*`, …), so a
+backend can neither forge updates nor read another backend's requests.
+
 ```rust
 use bytes::Bytes;
 use rift::messaging::quic::{Client, tls_client_config};
@@ -165,6 +192,8 @@ details. `rift.events.reload` reports the active revision after successful reloa
 `{"event":"join","connection_id":"7","uuid":"…","name":"Alice","server":"lobby"}`.
 A `switch` also carries the `previous` server, and a `quit` names the last one.
 `uuid` is lowercase 32-digit hex without hyphens. Events for one player arrive in order.
+`rift.events.permissions` carries every committed [permission](permissions.md)
+change, the same JSON as `rift.perms.update`.
 `rift.events.lifecycle` reports `ready` and `draining`. These are ephemeral events;
 query status to get current state. A timed-out command may already have executed;
 check status before retrying a mutation. No automatic mutation retry is performed.
@@ -198,6 +227,15 @@ after the deadline, and after reopening a file store. Remote durable names are
 scoped to authenticated principal names. Reopen the same name with the same
 configuration to resume. Use a distinct consumer per independent subscription or
 share a name among workers in the same principal.
+
+Rift declares one stream itself: `rift.perms.changes`, every committed
+permission change in revision order (see the
+[protocol](permissions-protocol.md#revisions-and-ordering)). It is file-backed
+in the directory beside the instance database (`rift.perms-changes/` next to
+`rift.sqlite3`), or in memory without a configuration file, and holds the
+latest 100,000 changes. Read it with a durable consumer on stream
+`rift.perms.changes` and filter `rift.perms.changes`; the `backend` preset
+grants that.
 
 Retention bounds apply regardless of unacknowledged messages: records evicted by
 count/byte limits cannot be redelivered. File storage persists records and consumer
