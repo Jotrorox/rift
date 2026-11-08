@@ -103,3 +103,53 @@ The built component also imports a few WASI 0.2 interfaces that Rust's
 standard library uses (stdio, environment, exit, clocks). Rust 1.98's
 standard library records them as `@0.2.9`; hosts link them through semver
 matching against any WASI 0.2 implementation.
+
+## How Rift runs a WebAssembly plugin
+
+Rift runs components on Wasmtime with Cranelift, one instance per plugin on
+the plugin's own thread, one call at a time. The host links Rift's
+interfaces, the whole WASI 0.2 command import set and `wasi:http`, so Rust,
+C and TinyGo components load alike.
+
+**Capabilities.** `[capabilities]` decides what the instance sees; `rift
+check` prints the effective set. The default is `filesystem = ["data"]`,
+`network = true` and the whole environment.
+
+| Grant | Inside the plugin |
+| --- | --- |
+| `filesystem = ["data"]` | The plugin's `data/` folder as `/data` (created if missing; `meta.data-dir`). |
+| `filesystem = ["host"]` | The configuration directory as `/host` (`meta.config-dir`). |
+| `filesystem = ["/srv/x"]` | That absolute path at the same path. |
+| `network = true` | TCP, UDP and DNS through `wasi:sockets`; outbound HTTP through `wasi:http`. Without it every socket is refused and `wasi:http` requests fail with `HTTP-request-denied`. |
+| `env = ["NAME"]` | Only the listed variables that are set; omit `env` to inherit Rift's environment. |
+
+All directories are read-write and nothing else of the host is visible.
+Stdin is empty; stdout and stderr go to Rift's log line by line as
+`rift: plugin <name>: stdout: ...` (stderr at `warn`).
+
+**Limits.** An optional `[wasm]` section caps each instance's memory:
+
+```toml
+[wasm]
+memory_limit_mb = 64   # 1..=4096; 0 or absent keeps WebAssembly's 4 GiB bound
+```
+
+`[deadlines]` bound the awaited hooks, `init`, `reload` and `shutdown`. A
+guest still running at its deadline is interrupted (within about 10 ms) and
+the instance counts as failed: Rift discards it and restarts it according to
+`[failure] restart`, because the interrupted code may have left its state
+half-changed. A trap, such as a Rust panic, does the same. `init` or `reload`
+returning an error is an ordinary failure that interrupts nothing. Observers
+have no deadline, but stopping or reloading Rift interrupts a guest that does
+not return within the shutdown grace period.
+
+**Compilation.** The first start compiles the component and stores the result
+in `local/plugincache/<name>-<key>.cwasm` under the configuration directory;
+later starts with the same component, Rift version and engine settings load
+it instead. `rift check --strict` compiles every WebAssembly plugin ahead of
+time, checks that its imports and exports fit this Rift, and fills the same
+cache. Rift only loads cache files it wrote and compiles again on any
+mismatch.
+
+Rift built without its default `wasm` Cargo feature has no WebAssembly
+support: `rift check` warns about such plugins and startup refuses them.
