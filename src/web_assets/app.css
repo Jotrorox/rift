@@ -233,6 +233,10 @@ td.unlisted{color:var(--secondary)}
 #main.status-main{display:grid;gap:20px;max-width:1088px;margin:0 auto;padding:32px 24px 0}
 .status-main>.notice{margin:0}
 .status-main .footer{margin-top:12px}
+/* Cards and panels reflow when the configuration or a public view hides some. */
+#summary.stats{grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
+.status-main .grid.single{grid-template-columns:1fr}
+.status-main #links{flex:1;justify-content:center}
 .verdict{display:flex;align-items:center;gap:18px;padding:22px 24px;background:var(--surface);border:1px solid var(--separator);border-radius:var(--radius);box-shadow:var(--shadow)}
 .verdict h1{margin:0;font-size:1.75rem;line-height:1.2;font-weight:700;letter-spacing:-.02em}
 .verdict p{margin:4px 0 0;color:var(--secondary)}

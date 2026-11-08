@@ -18,6 +18,9 @@ pub use managed::ManagedServer;
 pub use messaging::{MessagingConfig, MessagingPrincipal, MessagingStream, MessagingSubscription};
 pub use nodes::{LOCAL_NODE, NodeConfig, NodeSelector, Placement, valid_node_directory};
 pub use services::{InstanceStorage, ServiceGroup, ServiceInstance, ServiceScaling};
+pub use status::{
+    StatusBackend, StatusConfig, StatusExposure, StatusLink, StatusPage, StatusPanels,
+};
 pub use templates::ServerTemplate;
 
 mod managed;
@@ -25,6 +28,7 @@ mod messaging;
 mod nodes;
 mod server_list;
 mod services;
+mod status;
 mod tab_list;
 mod templates;
 
@@ -244,24 +248,6 @@ impl Default for WebConfig {
             ui: true,
             operators: BTreeMap::new(),
             records_directory: None,
-        }
-    }
-}
-
-/// Optional read-only status service, independent of the administration service.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StatusConfig {
-    pub listen: SocketAddr,
-    pub ui: bool,
-    pub metrics: bool,
-}
-
-impl Default for StatusConfig {
-    fn default() -> Self {
-        Self {
-            listen: "127.0.0.1:9090".parse().unwrap(),
-            ui: true,
-            metrics: true,
         }
     }
 }
@@ -765,7 +751,7 @@ impl Config {
                 value => string_set(value, "draining")?,
             };
             let web = web_options(&root, directory)?;
-            let status = status_options(&root)?;
+            let status = status::parse(&root)?;
             let shutdown_timeout = Duration::from_millis(integer(
                 &root,
                 "config",
@@ -881,6 +867,7 @@ impl Config {
         services::validate(self).map_err(invalid)?;
         managed::validate(&self.managed_servers, &self.backends, &self.nodes).map_err(invalid)?;
         templates::validate(self).map_err(invalid)?;
+        self.validate_status().map_err(invalid)?;
         if let Some(extensions) = &self.extensions {
             if !self.authentication.online_mode {
                 return Err(invalid("extensions requires authentication.online_mode"));
@@ -1028,7 +1015,10 @@ impl Config {
             for (name, listen) in [
                 ("metrics", self.metrics),
                 ("web.listen", self.web.as_ref().map(|web| web.listen)),
-                ("status.listen", self.status.map(|status| status.listen)),
+                (
+                    "status.listen",
+                    self.status.as_ref().map(|status| status.listen),
+                ),
             ] {
                 if listen.is_some_and(|listen| addresses_overlap(admin.listen, listen)) {
                     return Err(invalid(format!(
@@ -1201,7 +1191,10 @@ impl Config {
         let services = [
             ("metrics", self.metrics),
             ("web.listen", self.web.as_ref().map(|web| web.listen)),
-            ("status.listen", self.status.map(|status| status.listen)),
+            (
+                "status.listen",
+                self.status.as_ref().map(|status| status.listen),
+            ),
         ];
         for (index, (name, listen)) in services.iter().enumerate() {
             let Some(listen) = listen else { continue };
@@ -1518,20 +1511,6 @@ fn web_options(root: &Table, base: &Path) -> Result<Option<WebConfig>, String> {
                 Some(base.join(value))
             }
         },
-    };
-    Ok(enabled.then_some(config))
-}
-
-fn status_options(root: &Table) -> Result<Option<StatusConfig>, String> {
-    let Some(table) = service_options(root, "status", &["enabled", "listen", "ui", "metrics"])?
-    else {
-        return Ok(None);
-    };
-    let enabled = boolean(&table, "status", "enabled", true)?;
-    let config = StatusConfig {
-        listen: service_listen(&table, "status", StatusConfig::default().listen)?,
-        ui: boolean(&table, "status", "ui", true)?,
-        metrics: boolean(&table, "status", "metrics", true)?,
     };
     Ok(enabled.then_some(config))
 }

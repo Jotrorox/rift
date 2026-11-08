@@ -50,7 +50,8 @@ An enabled empty table uses the defaults above. `web.ui` controls the admin
 HTML/assets; `web.api` controls the built-in `/api` endpoints. Lua `/ext` routes
 remain available with `api = false`. The bundled admin dashboard needs the API
 to display or edit data; disabling the API is useful for custom Lua sites.
-`status.ui` controls the status HTML/assets, and `status.metrics` controls its
+`status.ui` controls the status HTML/assets (or styles them; see
+[Public status page](#public-status-page)), and `status.metrics` controls its
 Prometheus endpoint. The status JSON endpoint stays available whenever its
 server is enabled. `metrics = false` disables the standalone metrics listener;
 internal traffic counters and authenticated `/api/metrics` remain available.
@@ -71,6 +72,84 @@ unavailable. Re-enable it by editing the Lua file and sending SIGHUP (Unix) or
 Ctrl-Break (Windows), or restart Rift. The save response is allowed to finish
 when disabling its own server. Accepted proxy sessions retain their existing
 routes and are never interrupted by an HTTP configuration change.
+
+## Public status page
+
+The status server can be the page you link players to. Set
+`exposure = "public"` and it reveals only names, health and player counts:
+
+```lua
+status = {
+    listen = "0.0.0.0:9090",
+    exposure = "public", -- Default "operator" keeps addresses and counters.
+    backends = {
+        survival1 = "Survival", -- Display name on the page and in JSON.
+        arena = "Arena",        -- A service group: instances become "Arena 1", "Arena 2", …
+        limbo = false,          -- Hidden from the status server.
+    },
+    cors = { "https://example.com" }, -- Or "*"; lets that site fetch /status.
+    ui = {
+        title = "Example Network",
+        notice = "Maintenance Sunday 02:00 UTC",
+        accent = "#ff6a00",
+        refresh_ms = 10000,
+        panels = { summary = true, backends = true, listeners = false, metrics = false },
+        links = {
+            { label = "Discord", href = "https://discord.gg/example" },
+            { label = "Rules", href = "/ext/rules" },
+        },
+    },
+},
+```
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `exposure` | `"operator"` | `"public"` omits addresses, listeners, counters, the Rift version, the configuration revision and service settings from `/status`, and turns off `/metrics` unless `metrics = true` is set explicitly |
+| `backends` | `{}` | Per backend or service group: a display name (1–64 characters) or `false` to hide it. Runtime instances are configured through their group. Hidden backends still appear on the authenticated `/api/status` and in the Lua `on_http` context |
+| `cors` | none | Origins (`scheme://host[:port]`, no path) allowed to read `/status` from a browser, or `"*"` alone. Credentials are never allowed |
+| `ui` | `true` | `false` disables the page; a table enables it and styles it |
+| `ui.title` | `"Rift"` | Brand name in the header, the document title and the badge label (1–80 characters) |
+| `ui.notice` | none | A banner under the verdict, such as planned maintenance (1–500 characters) |
+| `ui.accent` | theme purple | `#rgb` or `#rrggbb`, applied to the theme's accent colour |
+| `ui.refresh_ms` | `5000` | Refresh interval, `1000`–`300000` |
+| `ui.panels` | all `true` | Show or hide `summary`, `backends`, `listeners` and `metrics`. Public exposure always hides listeners and metrics |
+| `ui.links` | none | Up to 8 footer links; `href` is an `http(s)` URL or a path starting with `/` |
+| `ui.enabled` | `true` | Keep the table but disable the page |
+
+All of these hot-reload, so `ui.notice` doubles as an incident banner: edit it and
+reload. The title and notice are rendered into the HTML for link previews and
+readers without JavaScript; the page then applies everything else from the
+`page` object in `/status`. Theming goes through the stylesheet's CSS
+variables, so the strict Content Security Policy is unchanged.
+
+Public `/status` has this shape (operator exposure adds the fields it always had,
+plus `address` per backend):
+
+```json
+{
+  "exposure": "public",
+  "uptime_seconds": 86400,
+  "players": 42,
+  "health_checks_enabled": true,
+  "backends": [
+    { "name": "survival1", "display": "Survival", "version": null, "healthy": true, "players": 30 }
+  ],
+  "page": { "title": "Example Network", "notice": null, "accent": "#ff6a00", "refresh_ms": 10000,
+            "panels": { "summary": true, "backends": true, "listeners": false, "metrics": false },
+            "links": [ { "label": "Discord", "href": "https://discord.gg/example" } ] },
+  "services": { "status": { "metrics": false } }
+}
+```
+
+`players` counts everyone online, including players on hidden backends; each
+backend's `players` counts players currently attached to it. To render the data
+on your own website, list its origin in `cors` and fetch `/status` from there.
+
+`GET /badge.svg` returns a small SVG for READMEs and forum signatures: the
+`ui.title` (or "players") and `N online`, green when every backend is healthy,
+amber when some are unhealthy, blue when health checks are off, and `offline` in
+red when every visible backend is unhealthy. It is served whenever the status
+server runs, including with `ui = false`.
 
 ## Authentication and access
 
@@ -152,10 +231,13 @@ unique, names must be distinct from reserved system/admin audit identities,
 and permission/credential changes apply on the next request after reload.
 `GET /api/access` reports the current identity and grants without credentials.
 
-The separate status and metrics servers are read-only and unauthenticated. Their
-JSON includes backend/listener addresses, health eligibility, counters and
-service settings, but no Lua source, token or configuration filesystem path.
-Bind these servers to the monitoring interface appropriate for that information.
+The separate status and metrics servers are read-only and unauthenticated. With
+the default `status.exposure = "operator"`, status JSON includes backend/listener
+addresses, health eligibility, counters and service settings, but no Lua source,
+token or configuration filesystem path. Bind these servers to the monitoring
+interface appropriate for that information, or use `exposure = "public"` (see
+[Public status page](#public-status-page)) before exposing the status server to
+players.
 A healthy backend may still be administratively draining and reject new
 attachments. With health checks disabled, an up value does not imply a successful
 probe. `health_checks_enabled` reports the policy; the operational CLI and
@@ -202,7 +284,8 @@ Errors use `{"error":"description"}`. `GET /api` provides endpoint discovery.
 | `POST /api/config/validate` | Validate `{source}` including live listener restrictions; does not save or bind sockets |
 | `PUT /api/config` | Validate, atomically save and apply `{source, revision}` |
 | `POST /api/reload` | Reload the selected file, with an empty JSON object `{}` |
-| `GET /status` | Public JSON on the separate status server |
+| `GET /status` | Status JSON on the separate status server, as `status.exposure` allows; `status.cors` origins may read it cross-origin |
+| `GET /badge.svg` | Player count and health badge on the status server |
 | `GET /metrics` | Prometheus text on the status server when enabled, or the standalone metrics server |
 
 Managed lifecycle requests return promptly; acceptance does not mean startup or
@@ -446,8 +529,9 @@ end,
 ```
 
 The request table contains `method`, `path`, `query` (raw query string without
-`?`), UTF-8 `body`, lowercase `headers`, and `context` (the public status object
-as a Lua table). Authorization, cookie and proxy authorization headers are
+`?`), UTF-8 `body`, lowercase `headers`, and `context` (the status object with
+operator detail, as a Lua table; `status.exposure` and hidden `status.backends`
+do not apply to it, and each backend has `display` and `players`). Authorization, cookie and proxy authorization headers are
 removed. JSON arrays become one-based Lua arrays. The context is an isolated
 snapshot; modifying it cannot change the live runtime. With API v2
 [authenticated extensions](extensions.md#online-players), the handler can also
