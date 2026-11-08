@@ -1,4 +1,4 @@
-package io.github.jotrorox.rift.permissions.test;
+package io.github.jotrorox.rift.permissions.client;
 
 import io.github.jotrorox.rift.permissions.CompiledSubject;
 import io.github.jotrorox.rift.permissions.CompiledSubject.Decoration;
@@ -18,12 +18,15 @@ import java.util.TreeMap;
 import java.util.UUID;
 
 /**
- * Stage 1 of resolution, a port of the Rust crate's {@code compiled} module so that the in-memory
- * implementation answers exactly like the proxy. The fixture corpus checks it entry for entry.
+ * Stage 1 of resolution, a port of the Rust crate's {@code compiled} module: flattens a user's
+ * inheritance into the {@link CompiledSubject} the proxy would send. Backends never compile what
+ * the proxy serves; the client uses it for {@link OfflinePolicy#fallbackFile fallback files} and
+ * {@code rift-permissions-test} for its in-memory store. The fixture corpus checks it entry for
+ * entry.
  */
-final class Compiler {
+public final class Compiler {
     /** Default cap on all entries of a compiled subject. */
-    static final int MAX_ENTRIES = 4096;
+    public static final int MAX_ENTRIES = 4096;
 
     /**
      * A user as the resolver sees it.
@@ -32,8 +35,8 @@ final class Compiler {
      * @param primaryGroup the explicit primary group, or null
      * @param nodes own nodes in insertion order
      */
-    record User(UUID uuid, String primaryGroup, List<Node> nodes) {
-        User {
+    public record User(UUID uuid, String primaryGroup, List<Node> nodes) {
+        public User {
             nodes = List.copyOf(nodes);
         }
     }
@@ -46,8 +49,8 @@ final class Compiler {
      * @param displayName the display name, or null
      * @param nodes own nodes in insertion order
      */
-    record Group(String name, int weight, String displayName, List<Node> nodes) {
-        Group {
+    public record Group(String name, int weight, String displayName, List<Node> nodes) {
+        public Group {
             nodes = List.copyOf(nodes);
         }
     }
@@ -235,9 +238,14 @@ final class Compiler {
     /**
      * Compile {@code user} against {@code groups} at {@code now}, tagged with {@code revision}.
      *
+     * @param user the user
+     * @param groups every group by normalised name
+     * @param now Unix seconds; nodes expired by then are left out
+     * @param revision the revision to tag the subject with
+     * @return the compiled subject
      * @throws IllegalStateException beyond {@link #MAX_ENTRIES}
      */
-    static CompiledSubject compile(User user, Map<String, Group> groups, long now, long revision) {
+    public static CompiledSubject compile(User user, Map<String, Group> groups, long now, long revision) {
         List<Block> blocks = new ArrayList<>();
         walk(user, groups, now, List.of(), blocks, MAX_ENTRIES);
         TreeMap<String, List<Path>> paths = walk(user, groups, now, blocks, new ArrayList<>(), MAX_ENTRIES);

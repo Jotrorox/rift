@@ -211,6 +211,13 @@ public final class Replica {
         }
     }
 
+    /** Forget the group table, so that the next one is stored whatever its revision. */
+    public void clearGroups() {
+        synchronized (revisionLock) {
+            groups = new Groups(0, List.of());
+        }
+    }
+
     /** @return the group table and the revision it was fetched at */
     public Groups groups() {
         return groups;

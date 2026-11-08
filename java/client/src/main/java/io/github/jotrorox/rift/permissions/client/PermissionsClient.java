@@ -31,7 +31,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
-import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -58,9 +58,11 @@ import java.util.logging.Logger;
  * {@link Resolver} for reads, and requests to the proxy for writes ({@code docs/permissions-protocol.md}).
  *
  * <p>On every (re)connection it sends {@code hello}, adopts the proxy's revision and refetches
- * stale snapshots with {@code subject.batch}; it follows {@code rift.perms.update} and the pushed
- * {@code rift.perms.update.<uuid>} snapshots. Players without a snapshot are answered by the
- * {@link OfflinePolicy}. The client does not own the {@link MessagingClient}; close both.
+ * stale snapshots with {@code subject.batch}; it follows {@code rift.perms.update}, the pushed
+ * {@code rift.perms.update.<uuid>} snapshots and {@code rift.perms.update.resync}, which repeats
+ * the handshake and refetches everything. Players whose snapshot could not be fetched are answered
+ * by the {@link OfflinePolicy}. Reads add this server's {@code server} context when the given set
+ * names none. The client does not own the {@link MessagingClient}; close both.
  */
 public final class PermissionsClient implements RiftPermissions, AutoCloseable {
     /** The name and version announced in {@code hello}. */
@@ -95,6 +97,10 @@ public final class PermissionsClient implements RiftPermissions, AutoCloseable {
     private final List<ContextCalculator<?>> calculators = new CopyOnWriteArrayList<>();
     private final Set<UUID> online = ConcurrentHashMap.newKeySet();
     private final Set<UUID> missing = ConcurrentHashMap.newKeySet();
+    /** Players whose replica snapshot came from the fallback file rather than the proxy. */
+    private final Set<UUID> fallback = ConcurrentHashMap.newKeySet();
+    /** Makes replacing a fallback snapshot with the proxy's one atomic. */
+    private final Object storeLock = new Object();
     private final Map<UUID, CompletableFuture<CompiledSubject>> inflight = new ConcurrentHashMap<>();
     private final Map<UUID, ContextSet> reported = new ConcurrentHashMap<>();
     private final List<io.github.jotrorox.rift.messaging.Subscription> subscriptions = new CopyOnWriteArrayList<>();
@@ -102,7 +108,7 @@ public final class PermissionsClient implements RiftPermissions, AutoCloseable {
     private final ConnectionListener connectionListener = new ConnectionListener() {
         @Override
         public void connected() {
-            hello(epoch.incrementAndGet(), 0);
+            hello(epoch.incrementAndGet(), 0, false);
         }
 
         @Override
@@ -152,16 +158,24 @@ public final class PermissionsClient implements RiftPermissions, AutoCloseable {
     private volatile Protocol.Limits limits = Protocol.Limits.DEFAULT;
     private volatile Set<String> externalContexts = Set.of();
     private volatile boolean available;
+    /** Players loaded from the last snapshot, kept until the first connection so an outage does not evict them. */
+    private volatile List<UUID> loaded = List.of();
 
     private PermissionsClient(Builder builder) throws IOException {
         this.messaging = builder.messaging;
-        this.server = builder.server;
+        this.server = ContextSet.of(ContextSet.SERVER, builder.server).get(ContextSet.SERVER).orElseThrow();
         this.requestTimeout = builder.requestTimeout;
         this.joinTimeout = builder.joinTimeout;
-        this.offline = OfflineStore.load(builder.offlinePolicy);
         this.logger = builder.logger;
+        this.offline = OfflineStore.load(builder.offlinePolicy, logger);
         this.clock = builder.clock;
         this.platform = builder.platform == null ? new Standalone() : builder.platform.apply(this);
+        Protocol.SubjectBatchReply snapshot = offline.snapshot();
+        if (snapshot != null) {
+            replica.syncRevision(snapshot.revision());
+            snapshot.subjects().forEach(replica::insert);
+            loaded = snapshot.subjects().stream().map(CompiledSubject::uuid).toList();
+        }
     }
 
     /** @return a builder */
@@ -173,15 +187,15 @@ public final class PermissionsClient implements RiftPermissions, AutoCloseable {
         messaging.addListener(connectionListener);
         CompletableFuture<?> updates = messaging.subscribe(Protocol.UPDATE, null, this::onUpdate)
                 .thenAccept(subscriptions::add);
-        CompletableFuture<?> snapshots = messaging.subscribe(Protocol.UPDATE_ALL, null, this::onSnapshot)
+        CompletableFuture<?> snapshots = messaging.subscribe(Protocol.UPDATE_ALL, null, this::onPush)
                 .thenAccept(subscriptions::add);
         CompletableFuture.allOf(updates, snapshots).whenComplete((ignored, error) -> {
             if (error != null) {
                 logger.severe("Cannot subscribe to permission updates: " + unwrap(error).getMessage()
-                        + "; grant subscribe on rift.perms.update and rift.perms.update.>");
+                        + "; give this principal the backend preset");
             } else if (messaging.isConnected() && epoch.compareAndSet(0, 1)) {
                 // Connected before this client listened; otherwise connected() sends hello.
-                hello(1, 0);
+                hello(1, 0, false);
             }
         });
         scheduler.scheduleWithFixedDelay(this::retryMissing, RETRY.toMillis(), RETRY.toMillis(), TimeUnit.MILLISECONDS);
@@ -196,7 +210,12 @@ public final class PermissionsClient implements RiftPermissions, AutoCloseable {
     }
 
     private CompiledSubject subject(UUID uuid) {
-        return replica.get(uuid).orElseGet(() -> offline.subject(uuid));
+        return replica.get(uuid).orElse(null);
+    }
+
+    /** {@code contexts} with this server's {@code server} context when it names none. */
+    private ContextSet active(ContextSet contexts) {
+        return contexts.get(ContextSet.SERVER).isPresent() ? contexts : contexts.with(ContextSet.SERVER, server);
     }
 
     @Override
@@ -207,7 +226,7 @@ public final class PermissionsClient implements RiftPermissions, AutoCloseable {
     @Override
     public Tristate check(UUID uuid, String node, ContextSet contexts) {
         CompiledSubject subject = subject(uuid);
-        return subject == null ? Tristate.UNDEFINED : Resolver.check(subject, node, contexts, now());
+        return subject == null ? Tristate.UNDEFINED : Resolver.check(subject, node, active(contexts), now());
     }
 
     @Override
@@ -215,7 +234,7 @@ public final class PermissionsClient implements RiftPermissions, AutoCloseable {
         CompiledSubject subject = subject(uuid);
         return subject == null
                 ? new Trace(node, Tristate.UNDEFINED, null, List.of())
-                : Resolver.trace(subject, node, contexts, now());
+                : Resolver.trace(subject, node, active(contexts), now());
     }
 
     @Override
@@ -223,19 +242,19 @@ public final class PermissionsClient implements RiftPermissions, AutoCloseable {
         CompiledSubject subject = subject(uuid);
         return subject == null
                 ? new MetaView(null, null, Map.of(), DEFAULT_GROUP)
-                : Resolver.meta(subject, contexts, now());
+                : Resolver.meta(subject, active(contexts), now());
     }
 
     @Override
     public List<String> groupsOf(UUID uuid, ContextSet contexts) {
         CompiledSubject subject = subject(uuid);
-        return subject == null ? List.of() : Resolver.groups(subject, contexts, now());
+        return subject == null ? List.of() : Resolver.groups(subject, active(contexts), now());
     }
 
     @Override
     public boolean inGroup(UUID uuid, String group, ContextSet contexts) {
         CompiledSubject subject = subject(uuid);
-        return subject != null && Resolver.inGroup(subject, group, contexts, now());
+        return subject != null && Resolver.inGroup(subject, group, active(contexts), now());
     }
 
     @Override
@@ -273,6 +292,15 @@ public final class PermissionsClient implements RiftPermissions, AutoCloseable {
     /** @return whether the proxy answered {@code hello} on the current connection */
     public boolean isAvailable() {
         return available;
+    }
+
+    /**
+     * @param uuid a player
+     * @return whether the player's snapshot in the replica came from the fallback file rather than
+     *     the proxy
+     */
+    public boolean isFallback(UUID uuid) {
+        return fallback.contains(uuid);
     }
 
     // ---- writes ----
@@ -338,26 +366,38 @@ public final class PermissionsClient implements RiftPermissions, AutoCloseable {
     // ---- players ----
 
     /**
-     * Wait for a joining player's snapshot: immediate when held, otherwise {@code subject.get} with
-     * the join timeout. Without it, the offline policy answers for the player, and
-     * {@link #playerJoined} retries every 5 seconds.
+     * Wait for a joining player's snapshot: immediate when the proxy's is held, otherwise
+     * {@code subject.get} with the join timeout. On failure the offline policy answers for the
+     * player (a fallback file's subject is stored), and {@link #playerJoined} retries every 5
+     * seconds.
      *
      * @param uuid the joining player
      * @return the snapshot, or a failure after the join timeout
      */
     public CompletableFuture<CompiledSubject> awaitSubject(UUID uuid) {
         Optional<CompiledSubject> held = replica.get(uuid);
-        return held.isPresent() ? CompletableFuture.completedFuture(held.get()) : fetch(uuid, joinTimeout);
+        if (held.isPresent() && !fallback.contains(uuid)) {
+            return CompletableFuture.completedFuture(held.get());
+        }
+        return fetch(uuid, joinTimeout).whenComplete((subject, error) -> {
+            if (error != null) {
+                applyOffline(uuid);
+            }
+        });
     }
 
     /**
-     * @param uuid a player now on this server; refetched every 5 seconds while their snapshot is missing
+     * @param uuid a player now on this server; refetched every 5 seconds while the proxy's snapshot
+     *     is missing, and given the offline policy meanwhile when the proxy is unreachable
      */
     public void playerJoined(UUID uuid) {
         online.add(uuid);
         replica.markJoined(uuid);
-        if (!replica.contains(uuid)) {
+        if (!replica.contains(uuid) || fallback.contains(uuid)) {
             missing.add(uuid);
+            if (!available) {
+                applyOffline(uuid);
+            }
         }
     }
 
@@ -421,7 +461,11 @@ public final class PermissionsClient implements RiftPermissions, AutoCloseable {
 
     // ---- bus ----
 
-    private void hello(long connection, int attempt) {
+    /**
+     * {@code hello}, then refetch what the reply shows to be stale, or with {@code force} (a
+     * {@code /perms sync}) every stored subject.
+     */
+    private void hello(long connection, int attempt, boolean force) {
         Protocol.HelloRequest request = new Protocol.HelloRequest(server, replica.revision(), CLIENT_VERSION);
         request(Protocol.HELLO, Codec.toJson(request), Codec::readHelloReply, requestTimeout)
                 .whenComplete((reply, error) -> {
@@ -429,12 +473,18 @@ public final class PermissionsClient implements RiftPermissions, AutoCloseable {
                         return;
                     }
                     if (error != null) {
-                        String problem = "Rift permissions unavailable (" + unwrap(error).getMessage()
-                                + "); retrying every " + RETRY.toSeconds() + " s";
+                        Throwable cause = unwrap(error);
+                        String problem = cause instanceof PermissionException refused
+                                && refused.code() == ErrorCode.FORBIDDEN
+                                ? "The proxy refused hello (" + cause.getMessage() + "): the principal server.<name>"
+                                        + " speaks for backend <name> only, and this client says server \"" + server
+                                        + "\"; retrying every " + RETRY.toSeconds() + " s"
+                                : "Rift permissions unavailable (" + cause.getMessage() + "); retrying every "
+                                        + RETRY.toSeconds() + " s";
                         logger.log(attempt == 0 ? Level.WARNING : Level.FINE, problem);
                         scheduler.schedule(() -> {
                             if (connection == epoch.get()) {
-                                hello(connection, attempt + 1);
+                                hello(connection, attempt + 1, force);
                             }
                         }, RETRY.toMillis(), TimeUnit.MILLISECONDS);
                         return;
@@ -444,30 +494,64 @@ public final class PermissionsClient implements RiftPermissions, AutoCloseable {
                                 + Protocol.VERSION + "; applying the offline policy");
                         return;
                     }
-                    welcome(reply);
+                    welcome(reply, force);
                 });
     }
 
-    private void welcome(Protocol.HelloReply reply) {
+    private void welcome(Protocol.HelloReply reply, boolean force) {
         limits = reply.limits();
         externalContexts = Set.copyOf(reply.externalContexts());
         long skew = Math.abs(reply.now() - now());
         if (skew > SKEW_WARNING_SECONDS) {
             logger.warning("This server's clock is " + skew + " s away from the proxy's, which shifts every expiry");
         }
-        boolean resync = replica.syncRevision(reply.revision());
+        List<UUID> stored = replica.uuids();
+        long local = replica.revision();
+        boolean backwards = reply.revision() < local;
+        if (backwards) {
+            // A replaced store: snapshots only replace older ones, so drop them all to refetch.
+            logger.warning("The proxy's permission revision went back from " + local + " to " + reply.revision()
+                    + "; refetching every snapshot");
+            synchronized (storeLock) {
+                stored.forEach(replica::remove);
+                fallback.removeAll(stored);
+            }
+            replica.clearGroups();
+        }
+        boolean stale = replica.syncRevision(reply.revision()) || backwards || force;
+        boolean first = !available && !force;
         available = true;
-        logger.info("Connected to Rift permissions at revision " + reply.revision());
-        List<UUID> stale = new ArrayList<>(resync ? replica.uuids() : List.of());
+        logger.info((force ? "Resynchronising with" : "Connected to") + " Rift permissions at revision "
+                + reply.revision() + (stale && !stored.isEmpty() ? "; refetching " + stored.size() + " snapshots" : ""));
+        List<UUID> previous = loaded;
+        if (!previous.isEmpty()) {
+            loaded = List.of();
+            long now = now();
+            previous.stream().filter(uuid -> !online.contains(uuid)).forEach(uuid -> replica.markLeft(uuid, now));
+        }
+        Set<UUID> refetch = new LinkedHashSet<>(stale ? stored : List.of());
         for (UUID uuid : online) {
-            if (!replica.contains(uuid) && !stale.contains(uuid)) {
-                stale.add(uuid);
+            if (!replica.contains(uuid) || fallback.contains(uuid) || missing.contains(uuid)) {
+                refetch.add(uuid);
             }
         }
-        refetch(stale);
+        refetch(List.copyOf(refetch));
         refreshGroups();
-        publishRegistrations();
-        reported.forEach(this::publishContexts);
+        if (first) {
+            publishRegistrations();
+            reported.forEach(this::publishContexts);
+        }
+    }
+
+    /** {@code /perms sync}: repeat the handshake and refetch everything. */
+    private void onResync(Message message) {
+        try {
+            Protocol.ResyncRequest request = Codec.readResyncRequest(Json.parse(message.text()));
+            logger.info("The proxy requested a resync to revision " + request.revision());
+        } catch (IllegalArgumentException e) {
+            logger.info("The proxy requested a resync");
+        }
+        hello(epoch.get(), 0, true);
     }
 
     private void onUpdate(Message message) {
@@ -500,7 +584,11 @@ public final class PermissionsClient implements RiftPermissions, AutoCloseable {
         dispatch(PermissionChangeEvent.class, event);
     }
 
-    private void onSnapshot(Message message) {
+    private void onPush(Message message) {
+        if (message.subject().equals(Protocol.RESYNC)) {
+            onResync(message);
+            return;
+        }
         Optional<UUID> uuid = Protocol.parseUpdateSubject(message.subject());
         if (uuid.isEmpty()) {
             return;
@@ -511,24 +599,53 @@ public final class PermissionsClient implements RiftPermissions, AutoCloseable {
                 logger.warning("Ignoring a snapshot for " + subject.uuid() + " pushed on " + message.subject());
                 return;
             }
-            store(subject);
+            store(subject, true);
         } catch (IllegalArgumentException e) {
             logger.warning("Ignoring a malformed snapshot on " + message.subject() + ": " + e.getMessage());
         }
     }
 
-    private void store(CompiledSubject subject) {
+    /**
+     * Store a snapshot from the proxy ({@code real}) or the fallback file. A real snapshot always
+     * replaces a fallback one; otherwise the newer wins.
+     */
+    private void store(CompiledSubject subject, boolean real) {
         UUID uuid = subject.uuid();
-        if (!replica.insert(subject)) {
-            return;
-        }
-        if (online.contains(uuid)) {
-            missing.remove(uuid);
-        } else {
-            // Pushed before the player arrives, or for a player elsewhere: evicted unless they join.
-            replica.markLeft(uuid, now());
+        synchronized (storeLock) {
+            if (real) {
+                missing.remove(uuid);
+                if (fallback.remove(uuid)) {
+                    replica.remove(uuid);
+                }
+            }
+            boolean known = replica.contains(uuid);
+            if (!replica.insert(subject)) {
+                return;
+            }
+            if (!real) {
+                fallback.add(uuid);
+            }
+            if (!known && !online.contains(uuid)) {
+                // Pushed before the player arrives, or for a player elsewhere: evicted unless they join.
+                replica.markLeft(uuid, now());
+            }
         }
         dispatch(SubjectUpdatedEvent.class, new SubjectUpdatedEvent(uuid, subject.revision()));
+    }
+
+    /** No snapshot from the proxy: queue a retry and, with a fallback file, compile the player locally. */
+    private void applyOffline(UUID uuid) {
+        if (online.contains(uuid)) {
+            missing.add(uuid);
+        }
+        if (!offline.hasFallback() || replica.contains(uuid)) {
+            return;
+        }
+        try {
+            store(offline.fallback(uuid, now()), false);
+        } catch (RuntimeException e) {
+            logger.log(Level.WARNING, "Cannot compile the fallback subject of " + uuid, e);
+        }
     }
 
     private void refetchIfOlder(UUID uuid, long revision) {
@@ -547,7 +664,7 @@ public final class PermissionsClient implements RiftPermissions, AutoCloseable {
                                     throw new PermissionException(ErrorCode.INTERNAL,
                                             "asked for " + uuid + ", the proxy answered " + subject.uuid());
                                 }
-                                store(subject);
+                                store(subject, true);
                                 return subject;
                             });
             result.whenComplete((subject, error) -> inflight.remove(uuid));
@@ -566,7 +683,7 @@ public final class PermissionsClient implements RiftPermissions, AutoCloseable {
                             logger.warning("Cannot refetch " + chunk.size() + " snapshots: " + unwrap(error).getMessage());
                             missing.addAll(chunk.stream().filter(online::contains).toList());
                         } else {
-                            reply.subjects().forEach(this::store);
+                            reply.subjects().forEach(subject -> store(subject, true));
                         }
                     });
         }
@@ -610,7 +727,7 @@ public final class PermissionsClient implements RiftPermissions, AutoCloseable {
             return;
         }
         for (UUID uuid : missing) {
-            if (!online.contains(uuid) || replica.contains(uuid)) {
+            if (!online.contains(uuid) || (replica.contains(uuid) && !fallback.contains(uuid))) {
                 missing.remove(uuid);
             } else {
                 fetch(uuid, requestTimeout);
@@ -623,7 +740,10 @@ public final class PermissionsClient implements RiftPermissions, AutoCloseable {
             logger.warning("Rift permissions replica is stale at revision " + replica.revision()
                     + ": the proxy is unreachable");
         }
-        replica.evict(now(), Replica.EVICT_AFTER);
+        for (UUID uuid : replica.evict(now(), Replica.EVICT_AFTER)) {
+            missing.remove(uuid);
+            fallback.remove(uuid);
+        }
     }
 
     /**
@@ -686,8 +806,8 @@ public final class PermissionsClient implements RiftPermissions, AutoCloseable {
     }
 
     /**
-     * Stop following the bus and, with {@link OfflinePolicy#lastSnapshot}, persist the replica. The
-     * {@link MessagingClient} stays open.
+     * Stop following the bus and, with {@link OfflinePolicy#lastSnapshot}, persist the proxy's
+     * snapshots in the replica. The {@link MessagingClient} stays open.
      */
     @Override
     public void close() {
@@ -696,7 +816,8 @@ public final class PermissionsClient implements RiftPermissions, AutoCloseable {
         scheduler.shutdownNow();
         events.shutdown();
         try {
-            offline.save(replica.revision(), replica.subjects());
+            offline.save(replica.revision(),
+                    replica.subjects().stream().filter(subject -> !fallback.contains(subject.uuid())).toList());
         } catch (IOException e) {
             logger.log(Level.WARNING, "Cannot persist the permission snapshot", e);
         }

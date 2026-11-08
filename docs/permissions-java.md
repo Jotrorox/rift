@@ -78,7 +78,8 @@ depend: [RiftPerms]   # or softdepend, if your plugin also runs without it
 
 Reads never touch the network. They answer from the replica, in the contexts
 you pass or in the player's current ones (`server`, `world`, `dimension`,
-`gamemode` and whatever context calculators add).
+`gamemode` and whatever context calculators add). A set that names no
+`server` gets this server's, as in the Rust client.
 
 ```java
 RiftPermissions perms = RiftPermissions.get();
@@ -205,8 +206,9 @@ assertTrue(player.hasPermission("kits.starter"));
 
 ## Installing RiftPerms
 
-1. Give the backend a principal on the proxy's messaging bus, named after the
-   server, with exactly the permission grants from the protocol:
+1. Give the backend a principal on the proxy's messaging bus named
+   `server.<backend>`, with the `backend` preset (the grants listed under
+   [principal permissions](permissions-protocol.md#principal-permissions)):
 
    ```lua
    messaging = {
@@ -214,19 +216,17 @@ assertTrue(player.hasPermission("kits.starter"));
        certificate = "messaging-cert.pem",
        private_key = "messaging-key.pem",
        principals = {
-           {
-               name = "server.survival-1",
-               token_env = "RIFT_SURVIVAL_1_TOKEN",
-               publish = {
-                   "rift.perms.hello", "rift.perms.subject.*", "rift.perms.groups.*",
-                   "rift.perms.apply", "rift.perms.register", "rift.perms.command",
-                   "rift.perms.context",
-               },
-               subscribe = { "rift.perms.update", "rift.perms.update.>", "rift.events.permissions" },
-           },
+           { name = "server.survival-1", token_env = "RIFT_SURVIVAL_1_TOKEN", preset = "backend" },
        },
    }
    ```
+
+   The principal speaks for that backend only: `server` in `config.yml` must
+   be the same name, or the proxy refuses the handshake (RiftPerms logs
+   `The proxy refused hello`). Add `control = true` only if this server's
+   console should run `/perms` and write as itself. For plugin development,
+   `rift dev --server <name>` starts a proxy with such a principal and prints
+   its token (see [`rift dev`](permissions.md#rift-dev)).
 
 2. Drop `RiftPerms-<version>.jar` into `plugins/`, remove LuckPerms, copy the
    bus certificate (or its CA) to `plugins/RiftPerms/messaging-cert.pem`, and
@@ -258,20 +258,49 @@ player's permissions on their own entity scheduler when their snapshot
 changes, so it is safe on Folia. Permission attachments still work and are
 consulted first, as in vanilla Bukkit.
 
+The client follows the [protocol](permissions-protocol.md) like the Rust
+client: `hello` on every connection (a different revision refetches every
+stored snapshot), change events and pushed snapshots, and
+`rift.perms.update.resync`, which `/perms sync` publishes and which repeats
+the handshake and refetches everything. While the proxy is unreachable the
+replica keeps answering at its last revision.
+
 ### Offline policy
 
-Players whose snapshot the server does not hold (the proxy is unreachable or
-did not answer within `join_timeout_ms`) are answered by the policy, and
-retried every 5 seconds:
+The policy decides what a player gets when no snapshot came from the proxy,
+because it is unreachable or did not answer within `join_timeout_ms`; the
+fetch is retried every 5 seconds. Players whose snapshot is already in the
+replica keep being served from it. Both files have the Rust client's formats
+([offline policies](permissions-clients.md#offline-policies)), so one file
+serves Paper and Pumpkin backends alike:
 
 - `deny`: nothing is set, so plugin defaults and operator status apply.
-- `last_snapshot`: the snapshot saved at the last clean shutdown, in
-  `snapshot_file` as `{"revision": n, "subjects": [compiled subject, ...]}`.
-- `fallback_file`: the same static node list for every such player, in
-  `fallback_file` as `{"primary_group": "default", "nodes": [typed node, ...]}`.
-  Permission, prefix, suffix and meta nodes apply as the player's own; positive
-  `inherit` nodes count as group memberships (`group.<name>`, Vault, the
-  `in_group` placeholder) without granting the group's nodes.
+- `last_snapshot`: RiftPerms writes the replica to `snapshot_file` when it is
+  disabled and loads it on enable, so players known before a restart keep
+  their permissions while the proxy is away. The file is the `subject.batch`
+  reply shape, `{"revision": 412, "subjects": [compiled subject, ...]}`,
+  written atomically; a missing or unreadable file starts empty. Loaded
+  snapshots are not evicted before the first successful connection.
+- `fallback_file`: groups and users the operator writes for emergencies, in
+  the [typed node](permissions-protocol.md#typed-node) format, compiled
+  locally exactly as the proxy compiles (inheritance, weights, contexts,
+  prefixes and meta all work). A player the file does not list gets
+  `default`. The file is validated on enable, and a snapshot from the proxy
+  always replaces a fallback one.
+
+  ```json
+  {"groups": [
+     {"name": "default", "nodes": [{"kind": "permission", "key": "essentials.spawn", "value": true}]},
+     {"name": "staff", "weight": 100, "nodes": [
+        {"kind": "permission", "key": "essentials.*", "value": true},
+        {"kind": "prefix", "priority": 100, "text": "&c[Staff] "}]}],
+   "users": [
+     {"uuid": "0123456789abcdef0123456789abcdef",
+      "nodes": [{"kind": "inherit", "group": "staff", "value": true}]}]}
+  ```
+
+  `groups[]` take `name`, `weight` (default 0), `display_name` and `nodes`
+  (default `[]`); `users[]` take `uuid`, `primary_group` and `nodes`.
 
 ### Vault
 
@@ -300,7 +329,9 @@ highest one the subject has, so it wins.
 (`/perms user Alice permission set essentials.fly true server=survival`,
 `/perms group vip setweight 50`, `/perms trace Alice essentials.fly`). The
 backend only forwards the arguments; the proxy parses, authorises
-(`rift.perms.<verb>` nodes), applies, audits and answers with a message.
+(`rift.perms.<verb>` nodes), applies, audits and answers with a message. A
+player cannot grant what they do not hold without `rift.perms.escalate`; the
+server console may use `/perms` only when its principal has `control = true`.
 Tab completion offers online players, the group table and registered
 permissions. On enable, RiftPerms sends every plugin's `plugin.yml`
 permissions to the proxy for the dashboard and tab completion.
@@ -320,10 +351,14 @@ PermissionsClient perms = PermissionsClient.builder()
         .server("lobby-bot")
         .build();
 perms.load(uuid).join();
-Tristate t = perms.check(uuid, "chat.color", ContextSet.of("server", "lobby-bot"));
+Tristate t = perms.check(uuid, "chat.color", ContextSet.empty());   // server=lobby-bot is added
 ```
 
-Without a platform adapter, players are `UUID`s. `rift-messaging` alone is a
+Without a platform adapter, players are `UUID`s. The principal must be
+`server.lobby-bot` with the `backend` preset. `playerJoined`, `awaitSubject`
+and `playerLeft` mirror the Rust client's `join` and `leave`; `register`,
+`reportContexts`, `command` and `fetchGroup` cover the rest of the protocol,
+and `isAvailable` tells whether the proxy answered `hello`. `rift-messaging` alone is a
 general client for the bus: `publish`, `request`, `subscribe` (re-established
 after every reconnect) and a pipelined `Publisher`.
 
@@ -346,6 +381,12 @@ cd java
 ./gradlew build                       # libraries, tests against tests/fixtures/permissions, the plugin jar
 cargo build --bin rift && ./gradlew integrationTest   # the Java clients against a real rift over QUIC
 ```
+
+The integration tests start the real proxy with its permission handlers, two
+backend principals (one with `control = true`) and the admin service, log a
+player in through it, write with `rift admin perms`, restart it, and load the
+shaded plugin jar's client in an isolated class loader. They are skipped when
+`target/debug/rift` (or `$RIFT_BINARY`) is missing.
 
 The plugin jar is `java/paper/build/libs/RiftPerms-<version>.jar`. Java 21 is
 the target (Paper's minimum); Gradle downloads a JDK 21 toolchain when none is

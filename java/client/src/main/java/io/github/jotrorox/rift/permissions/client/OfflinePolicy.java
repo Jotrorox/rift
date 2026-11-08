@@ -4,8 +4,9 @@ import java.nio.file.Path;
 import java.util.Objects;
 
 /**
- * What a backend answers for a player whose snapshot it does not hold, because the proxy cannot be
- * reached or did not answer in time. Only such players are affected; held snapshots always win.
+ * What a player gets when no snapshot came from the proxy, because it is unreachable or did not
+ * answer within the join timeout. Players whose snapshot is already in the replica keep being
+ * served from it either way. The files are the Rust client's ({@code docs/permissions-clients.md}).
  */
 public sealed interface OfflinePolicy {
     /** @return answer undefined, so plugin defaults and operator status still apply */
@@ -14,18 +15,21 @@ public sealed interface OfflinePolicy {
     }
 
     /**
-     * @param file where the replica is written on a clean shutdown, as
-     *     {@code {"revision": n, "subjects": [compiled subject, ...]}}
-     * @return serve the player's snapshot from the last clean shutdown, if it is there
+     * @param file where the replica is written on {@link PermissionsClient#close()}, atomically, as
+     *     {@code {"revision": n, "subjects": [compiled subject, ...]}} (the {@code subject.batch}
+     *     reply shape); loaded on start, and a missing or unreadable file starts empty
+     * @return keep serving the players known before a restart while the proxy is away
      */
     static OfflinePolicy lastSnapshot(Path file) {
         return new LastSnapshot(file);
     }
 
     /**
-     * @param file a static node list for emergencies, as
-     *     {@code {"primary_group": "default", "nodes": [typed node, ...]}}
-     * @return serve the same nodes to every such player
+     * @param file groups and users for emergencies, as {@code {"groups": [{"name", "weight"?,
+     *     "display_name"?, "nodes": [typed node, ...]}, ...], "users": [{"uuid", "primary_group"?,
+     *     "nodes": [...]}, ...]}}; read and validated when the client is built
+     * @return compile such players locally exactly as the proxy would, at revision 0 so that any
+     *     snapshot from the proxy replaces it; a player the file does not list gets {@code default}
      */
     static OfflinePolicy fallbackFile(Path file) {
         return new FallbackFile(file);
@@ -48,7 +52,7 @@ public sealed interface OfflinePolicy {
     /**
      * See {@link #fallbackFile(Path)}.
      *
-     * @param file the fallback node list
+     * @param file the fallback file
      */
     record FallbackFile(Path file) implements OfflinePolicy {
         public FallbackFile {

@@ -21,10 +21,12 @@ join_timeout_ms: 2000
 # How long writes, /perms and Vault writes wait for the proxy.
 request_timeout_ms: 5000
 
-# What players without a snapshot get while the proxy is unreachable:
+# What a player gets when no snapshot came from the proxy (unreachable, or no
+# answer within join_timeout_ms):
 #   deny          - nothing is set: plugin defaults and operator status apply
-#   last_snapshot - the snapshot saved at the last clean shutdown (snapshot_file)
-#   fallback_file - the static node list in fallback_file, for every such player
+#   last_snapshot - the replica saved when RiftPerms was last disabled (snapshot_file)
+#   fallback_file - groups and users in fallback_file, compiled like the proxy does;
+#                   unlisted players get "default" (format: docs/permissions-java.md)
 offline_policy: deny
 snapshot_file: replica.json
 fallback_file: fallback.json

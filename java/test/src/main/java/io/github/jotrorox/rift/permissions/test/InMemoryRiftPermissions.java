@@ -19,6 +19,7 @@ import io.github.jotrorox.rift.permissions.SubjectUpdatedEvent;
 import io.github.jotrorox.rift.permissions.Subscription;
 import io.github.jotrorox.rift.permissions.Trace;
 import io.github.jotrorox.rift.permissions.Tristate;
+import io.github.jotrorox.rift.permissions.client.Compiler;
 import io.github.jotrorox.rift.permissions.client.Resolver;
 import java.time.Clock;
 import java.util.ArrayList;
