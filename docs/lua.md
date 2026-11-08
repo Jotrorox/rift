@@ -118,6 +118,91 @@ Already imported modules remain cached. Give plugin modules their own namespace
 (for example `greeting.format`) to avoid collisions. Copy a plugin folder into
 `plugins/` to install it; Rift does not download or auto-enable plugins.
 
+## Persistent Lua plugins
+
+A plugin folder with a `plugin.toml` naming `engine = "lua"` is a persistent
+plugin: `rift.plugin("hello-lua", { deny = "Mallory" })` records it instead of
+running it in the configuration sandbox, and Rift runs its entry script
+(`entry`, default `init.lua`) in its own long-lived LuaJIT state on the
+plugin's thread. See [`examples/plugins/hello-lua`](../examples/plugins/hello-lua).
+
+```toml
+name = "hello-lua"
+version = "0.1.0"
+api = "0.1"
+engine = "lua"
+```
+
+The `rift` API and the `ctx` tables are the ones described on this page and in
+the [extension API](extensions.md), and results are validated by the same
+rules, so a handler body moves between `rift.lua` and a plugin folder
+unchanged. The entry script receives the plugin name and its configuration
+table as `...` and registers with `rift.on`, `rift.command`, `rift.every` and
+`rift.subscribe`. What differs is the environment:
+
+- The whole safe standard library is available, including `io`, `os`,
+  `package`, `coroutine`, `pcall`, `xpcall`, `load` and the Lua pattern
+  functions. `ffi` requires `lua.ffi = true`. `os.exit` raises an error, and
+  with `capabilities.env` set `os.getenv` sees only the listed variables.
+  Filesystem grants are not enforced for Lua `io`: persistent plugins are
+  trusted.
+- `require` finds `name.lua` and `name/init.lua` in the plugin folder and in
+  its `lua/` subfolder; `require("rift")` and `require("rift.store")` (and the
+  other `rift.*` tables) return the API. Native modules load only with
+  `lua.native_modules = true`.
+- Globals, modules and upvalues persist between calls. The JIT compiler is on.
+  There is no instruction budget and no per-call limit on host calls; memory is
+  limited only by `lua.memory_limit_mb`.
+- Each call runs under its `[deadlines]` entry (observers, timers and bus
+  messages under 60 seconds). When a call overruns, the host applies
+  `on_timeout`, and the plugin is interrupted 100 ms later: the next Rift
+  function it calls, or the instruction hook in code the JIT did not compile,
+  raises an error that `pcall`, `xpcall` and `rift.try` do not catch. A
+  compiled loop that never calls a Rift function cannot be interrupted; its
+  calls time out and Rift abandons the thread when it stops the plugin.
+- A Lua error is a handler error (`on_failure` applies and the plugin keeps
+  running). Running out of memory, or being interrupted because Rift is
+  stopping the plugin, fails the plugin, which restarts per `failure.restart`.
+
+Registration in plugins:
+
+- `rift.on(event, fn)` accepts the events above plus `event` (Rift events
+  from `rift.events.*`, as `{ subject, payload, payload_json }`), `timer`
+  (timers started without a function), `message` (subscriptions without a
+  function), `reload` (called with the new configuration table when
+  `hot_reload = true`; without it a hot reload changes nothing until the next
+  restart) and `shutdown` (called with the reason). Handlers run in
+  registration order: for decision events the first non-nil result wins;
+  observers all run and must return nil.
+- `rift.command(name, { permission, run, suggest })` also accepts a list of
+  strings as `suggest`.
+- `rift.on` and `rift.command` work only while the entry script runs.
+  `rift.every(name, every_ms, fn)`, `rift.subscribe(subject, [queue,] [fn])`
+  (returns a handle for `rift.unsubscribe`) and `rift.timers.every(ms, [fn])`,
+  `rift.timers.after(ms, [fn])` and `rift.timers.cancel(handle)` also work in
+  handlers, as long as the entry script created at least one timer (or
+  subscription) or registered `rift.on("timer")` (or `"message"`): hooks are
+  fixed once the entry script finishes. Timer functions receive the handle;
+  `rift.every` functions receive `{ api_version = 2, job = name }`; messages
+  are `{ subject, payload, reply, subscription, handle }`.
+
+Host API differences from script mode:
+
+| Function | In a persistent plugin |
+| --- | --- |
+| `rift.store.*` | Namespaces are private (`plugin.<name>.<namespace>`). `delete` returns whether the entry existed, `increment`'s delta defaults to 1, and `rift.store.list(namespace, prefix)` returns `{ key, value }` entries sorted by key. |
+| `rift.permissions.groups` | Returns effective groups, including inherited ones and `default`. `rift.permissions.list_groups()` returns the configured groups. |
+| `rift.http.request(url, options)` | Takes any `http`/`https` URL instead of an integration name; options are `method`, `body`, `headers` and `timeout_ms` (default 10 s, at most 60 s). Requires `capabilities.network` (default true). |
+| `rift.servers.*` | Waits for the control service and returns its decoded reply; `rift.servers.control(operation, payload)` reaches any `rift.control.*` operation. |
+| `rift.publish` | Returns `{ delivered = n }`. `rift.request(subject, payload, timeout_ms)` waits for a reply. |
+| `rift.log(level, message)` | Writes to Rift's log with the plugin name (`trace`, `debug`, `info`, `warn`, `error`); `print` logs at `info`. |
+| `rift.plugin_name`, `rift.meta` | The plugin's name, and `{ name, version, data_dir, config_dir }`. |
+| `rift.setup`, `rift.plugin`, `rift.config` | Configure Rift and exist only in `rift.lua`. |
+
+The `status` input lacks `peer_addr`, which the plugin contract does not carry.
+Errors raised by Rift functions reach `pcall` and `rift.try` as message
+strings.
+
 ## Registering callbacks and commands
 
 `rift.on(event, callback)` appends a handler. Supported events are `route`, `http`,

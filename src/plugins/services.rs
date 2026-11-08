@@ -353,8 +353,14 @@ impl PlayersApi<'_> {
 
     /// Returns how many players received the message.
     pub fn broadcast(&self, message: &str) -> Result<u32, String> {
+        self.broadcast_to(message, None)
+    }
+
+    /// Like [`PlayersApi::broadcast`], only to the players on one server or
+    /// service group when `server` is set.
+    pub fn broadcast_to(&self, message: &str, server: Option<&str>) -> Result<u32, String> {
         self.players()
-            .broadcast(message, None)
+            .broadcast(message, server)
             .map(|count| u32::try_from(count).unwrap_or(u32::MAX))
     }
 }

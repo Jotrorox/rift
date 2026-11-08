@@ -414,7 +414,7 @@ fn retain(table: &Table, allowed: &[&str]) -> mlua::Result<()> {
     Ok(())
 }
 
-fn decision(value: Value) -> mlua::Result<RouteDecision> {
+pub(crate) fn decision(value: Value) -> mlua::Result<RouteDecision> {
     if value.is_nil() {
         return Ok(RouteDecision::Default);
     }
