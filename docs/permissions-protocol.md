@@ -7,7 +7,8 @@ anything else) implements: the bus subjects, every JSON shape, the check
 algorithm a replica runs, and the revision rules that keep replicas current.
 
 The Rust types in `crates/rift-permissions` (`wire`, `change`, `compiled`,
-`check`) are the reference implementation. Every shape below has a test case
+`check`) are the reference implementation. [Permissions clients](permissions-clients.md)
+covers the ready-made Rust client, the in-memory testing crate and the C ABI. Every shape below has a test case
 in [`tests/fixtures/permissions`](../tests/fixtures/permissions/README.md),
 which every implementation runs.
 

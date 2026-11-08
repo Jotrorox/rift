@@ -5,6 +5,7 @@
 
 pub mod quic;
 pub mod stream;
+pub use rift_messaging::Message;
 pub use stream::{ConsumerConfig, Delivery, DurableConsumer, Record, Stream, StreamConfig};
 
 use std::collections::HashMap;
@@ -93,13 +94,6 @@ impl Default for BrokerConfig {
             max_subscriptions: 65_536,
         }
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Message {
-    pub subject: Arc<str>,
-    pub reply: Option<Arc<str>>,
-    pub payload: Bytes,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
