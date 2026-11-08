@@ -630,7 +630,7 @@ impl Config {
                 .into_iter()
                 .map(|(name, config_json)| {
                     let installed = &source.installed[&name];
-                    Ok::<_, String>(crate::plugins::PluginSpec {
+                    let spec = crate::plugins::PluginSpec {
                         folder: source.root.join("plugins").join(&name),
                         config_root: source.root.clone(),
                         manifest: installed.manifest.clone()?,
@@ -639,7 +639,10 @@ impl Config {
                         config_json,
                         // Set below, once `authentication` is parsed.
                         online_mode: false,
-                    })
+                    };
+                    spec.check_grants()
+                        .map_err(|error| format!("plugin {}: {error}", spec.name))?;
+                    Ok::<_, String>(spec)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let on_route = match root

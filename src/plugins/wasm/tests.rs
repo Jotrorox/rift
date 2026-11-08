@@ -573,6 +573,7 @@ async fn shutdown_interrupts_a_stuck_guest() {
 struct Report {
     data: bool,
     host: bool,
+    host_writable: bool,
     meta_data: String,
     meta_config: Option<String>,
     env: Vec<String>,
@@ -641,6 +642,9 @@ async fn capabilities_limit_what_the_guest_sees() {
     let report = probe_report(&runtime, "granted").await;
     assert!(report.data);
     assert!(report.host);
+    // The configuration directory is visible but cannot be changed.
+    assert!(!report.host_writable);
+    assert!(!root.join("probe-write.txt").exists());
     assert_eq!(report.meta_config.as_deref(), Some("/host"));
     assert!(report.env.is_empty(), "only listed variables are passed");
     assert_ne!(report.network, denied, "network grants sockets");
@@ -709,11 +713,51 @@ async fn precompiled_components_are_loaded_from_the_cache() {
     assert!(super::cache::load(engine, &path, &key).is_some());
     // Another key or a damaged file is never deserialized.
     assert!(super::cache::load(engine, &path, &"0".repeat(32)).is_none());
-    let mut damaged = std::fs::read(&path).unwrap();
+    let original = std::fs::read(&path).unwrap();
+    let mut damaged = original.clone();
     let middle = damaged.len() / 2;
     damaged[middle] ^= 1;
     std::fs::write(&path, &damaged).unwrap();
     assert!(super::cache::load(engine, &path, &key).is_none());
+    // Knowing the key is not enough: a checksum anyone can compute, or a
+    // MAC under another secret, does not make a file loadable.
+    let contents = &original[..original.len() - 32];
+    let mut forged = contents.to_vec();
+    {
+        use sha2::{Digest, Sha256};
+        let mut hash = Sha256::new();
+        hash.update(key.as_bytes());
+        hash.update([0]);
+        hash.update(contents);
+        forged.extend_from_slice(&hash.finalize());
+    }
+    std::fs::write(&path, &forged).unwrap();
+    assert!(super::cache::load(engine, &path, &key).is_none());
+    let secret = root.join("local/plugincache/key");
+    let elsewhere = directory();
+    super::cache::store(
+        &super::cache::path(&elsewhere, "probe", &key),
+        "probe",
+        &key,
+        contents,
+    )
+    .unwrap();
+    std::fs::copy(super::cache::path(&elsewhere, "probe", &key), &path).unwrap();
+    assert!(super::cache::load(engine, &path, &key).is_none());
+    std::fs::write(&path, &original).unwrap();
+    assert!(super::cache::load(engine, &path, &key).is_some());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&secret).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        // A secret others can read no longer authenticates anything.
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(super::cache::load(engine, &path, &key).is_none());
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
     // Startup still works.
     let runtime = start(&config, &Broker::default()).await;
     assert_eq!(instance(&runtime).status(), Status::Running);

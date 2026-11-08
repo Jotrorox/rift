@@ -40,6 +40,9 @@ use std::{
 };
 use worker::{Engines, Instance, Outcome, Predecessor, Registrar, Report};
 
+/// Compiled WebAssembly components, under the configuration directory.
+pub(crate) const CACHE_DIRECTORY: &str = "local/plugincache";
+
 /// One `rift.plugin(name, config)` entry for a folder with a persistent
 /// `plugin.toml`. Two specs describe the same instance when they are equal.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,6 +76,42 @@ impl PluginSpec {
             .map(|entry| self.folder.join(entry))
     }
 
+    /// A WebAssembly plugin must not be able to write code Rift runs: an
+    /// absolute filesystem grant (always read-write) may not contain or lie
+    /// inside the compiled component cache or the plugins folder. The `host`
+    /// grant is read-only and its own data folder comes with `data`. Lua
+    /// plugins run with Rift's privileges, so their grants are not checked.
+    pub fn check_grants(&self) -> Result<(), String> {
+        if self.manifest.engine != Some(manifest::EngineKind::Wasm) {
+            return Ok(());
+        }
+        let protected = [
+            (
+                resolve(&self.config_root.join(CACHE_DIRECTORY)),
+                "the compiled plugin cache",
+            ),
+            (
+                resolve(self.folder.parent().unwrap_or(&self.folder)),
+                "the plugins folder",
+            ),
+        ];
+        for grant in &self.manifest.capabilities.filesystem {
+            let manifest::Filesystem::Path(path) = grant else {
+                continue;
+            };
+            let resolved = resolve(path);
+            if let Some((_, what)) = protected.iter().find(|(directory, _)| {
+                resolved.starts_with(directory) || directory.starts_with(&resolved)
+            }) {
+                return Err(format!(
+                    "capabilities.filesystem: {} overlaps {what}; a WebAssembly plugin may not write code Rift runs (use \"data\" for the plugin's own folder)",
+                    path.display()
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Same code, manifest and folder; only the configuration table may differ.
     /// A change of `online_mode` restarts the plugin, so its registration is
     /// checked again.
@@ -82,6 +121,28 @@ impl PluginSpec {
             && self.folder == other.folder
             && self.config_root == other.config_root
             && self.online_mode == other.online_mode
+    }
+}
+
+/// `path` with symbolic links resolved as far as it exists, so that two
+/// spellings of one directory compare equal.
+fn resolve(path: &std::path::Path) -> PathBuf {
+    let mut existing = path;
+    let mut rest = Vec::new();
+    loop {
+        if let Ok(canonical) = std::fs::canonicalize(existing) {
+            return rest
+                .iter()
+                .rev()
+                .fold(canonical, |path: PathBuf, part| path.join(part));
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_owned());
+                existing = parent;
+            }
+            _ => return path.to_owned(),
+        }
     }
 }
 

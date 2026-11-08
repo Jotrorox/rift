@@ -1451,3 +1451,55 @@ async fn sessions_intercept_commands_plugins_register_after_they_began() {
     assert!(!player.intercepts("give"));
     next.plugins().shutdown().await;
 }
+
+#[test]
+fn webassembly_grants_may_not_cover_the_plugin_cache_or_the_plugins_folder() {
+    let root = directory();
+    let wasm = |filesystem: &str| {
+        let mut spec = spec(&root, "probe", "", "{}");
+        spec.manifest = Manifest::parse(
+            &format!(
+                "name = \"probe\"\nversion = \"1\"\napi = \"0.1\"\nengine = \"wasm\"\nentry = \"probe.wasm\"\n[capabilities]\nfilesystem = [{filesystem}]\n"
+            ),
+            "probe",
+        )
+        .unwrap();
+        spec
+    };
+    let quoted = |path: &Path| format!("\"{}\"", path.display());
+    for covering in [
+        Path::new("/").to_owned(),
+        root.clone(),
+        root.join("local"),
+        root.join(CACHE_DIRECTORY),
+        root.join(CACHE_DIRECTORY).join("nested"),
+        root.join("plugins"),
+        root.join("plugins/other"),
+    ] {
+        let error = wasm(&quoted(&covering)).check_grants().unwrap_err();
+        assert!(
+            error.contains("overlaps"),
+            "{}: {error}",
+            covering.display()
+        );
+    }
+    // A symbolic link to a protected directory is the same directory.
+    #[cfg(unix)]
+    {
+        std::fs::create_dir_all(root.join(CACHE_DIRECTORY)).unwrap();
+        let link = directory().join("cache-link");
+        std::os::unix::fs::symlink(root.join(CACHE_DIRECTORY), &link).unwrap();
+        assert!(wasm(&quoted(&link)).check_grants().is_err());
+    }
+    for allowed in [
+        "\"data\", \"host\"".to_owned(),
+        quoted(&root.join("lobby")),
+        quoted(&directory()),
+    ] {
+        wasm(&allowed).check_grants().unwrap();
+    }
+    // Lua plugins run with Rift's privileges anyway.
+    let mut lua = spec(&root, "lua", "", "{}");
+    lua.manifest.capabilities.filesystem = vec![manifest::Filesystem::Path("/".into())];
+    lua.check_grants().unwrap();
+}

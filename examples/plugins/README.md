@@ -183,8 +183,8 @@ check` prints the effective set. The default is `filesystem = ["data"]`,
 | Grant | Inside the plugin |
 | --- | --- |
 | `filesystem = ["data"]` | The plugin's `data/` folder as `/data` (created if missing; `meta.data-dir`). |
-| `filesystem = ["host"]` | The configuration directory as `/host` (`meta.config-dir`). |
-| `filesystem = ["/srv/x"]` | That absolute path at the same path. |
+| `filesystem = ["host"]` | The configuration directory as `/host` (`meta.config-dir`), read-only. |
+| `filesystem = ["/srv/x"]` | That absolute path at the same path, read-write. It may not contain or lie inside `local/plugincache` or `plugins/`, so no plugin can change code Rift runs. |
 | `network = true` | TCP, UDP and DNS through `wasi:sockets`; outbound HTTP through `wasi:http`. Without it every socket is refused and `wasi:http` requests fail with `HTTP-request-denied`. |
 | `env = ["NAME"]` | Only the listed variables that are set; omit `env` to inherit Rift's environment. |
 
@@ -215,8 +215,12 @@ in `local/plugincache/<name>-<key>.cwasm` under the configuration directory;
 later starts with the same component, Rift version and engine settings load
 it instead. `rift check --strict` compiles every WebAssembly plugin ahead of
 time, checks that its imports and exports fit this Rift, and fills the same
-cache. Rift only loads cache files it wrote and compiles again on any
-mismatch.
+cache. Each file carries an HMAC-SHA256 under a per-install secret,
+`local/plugincache/key` (32 random bytes, mode 0600, created on first use);
+Rift loads only files with a valid MAC and compiles again on any mismatch.
+A key file that is not a private regular file of Rift's user disables the
+cache (remove it to start over), so run `rift check --strict` as the same
+user as Rift.
 
 Rift built without its default `wasm` Cargo feature has no WebAssembly
 support: `rift check` warns about such plugins and startup refuses them.
