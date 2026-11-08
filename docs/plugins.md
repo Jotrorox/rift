@@ -146,10 +146,10 @@ list from `rift.on`, `rift.command`, timers and subscriptions.
 | `suggest` | awaited, owner only | completions | 50 ms | continue (no completions) |
 | `status` | awaited | fields to replace in one server-list ping | 50 ms | continue |
 | `http` | awaited | a response for `/ext/*`, or none | 5000 ms | continue |
-| `join`, `after_transfer`, `disconnect` | observer | none | none (queued) | – |
-| `message` | observer | a message on a subscription the plugin made | none (queued) | – |
-| `timer` | observer | a tick of a timer the plugin started | none (queued) | – |
-| `event` | observer | a `rift.events.*` publication | none (queued) | – |
+| `join`, `after_transfer`, `disconnect` | observer | none | none (queued; interrupted after 60 s) | – |
+| `message` | observer | a message on a subscription the plugin made | none (queued; interrupted after 60 s) | – |
+| `timer` | observer | a tick of a timer the plugin started | none (queued; interrupted after 60 s) | – |
+| `event` | observer | a `rift.events.*` publication | none (queued; interrupted after 60 s) | – |
 | `init`, `reload`, `shutdown` | lifecycle | registration / ok / none | 30 s / 5 s / 10 s | init fails the plugin; reload keeps the old configuration |
 
 Player hooks (`login`, `initial_server`, `before_transfer`, `command`,

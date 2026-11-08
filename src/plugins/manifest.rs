@@ -9,6 +9,11 @@ use std::{
     time::Duration,
 };
 
+/// Calls without a manifest deadline (observers, timers, bus messages) may
+/// run this long in every engine, which also covers the longest blocking
+/// host call (bus requests, server operations and `rift.http.request` wait
+/// at most 60 s). A call past it is interrupted and fails the instance.
+pub const OBSERVER_DEADLINE: Duration = Duration::from_secs(60);
 pub const FILE: &str = "plugin.toml";
 /// Manifests are small; a larger file is almost certainly a mistake.
 pub const MAX_BYTES: usize = 64 * 1024;
@@ -416,6 +421,13 @@ impl Manifest {
         })
     }
 
+    /// How long engines let guest code run for one call: the hook's
+    /// deadline, or [`OBSERVER_DEADLINE`] for observers. Every engine
+    /// interrupts a call past this limit where it can.
+    pub fn run_limit(&self, hook: Hook) -> Duration {
+        self.deadline(hook).unwrap_or(OBSERVER_DEADLINE)
+    }
+
     /// The deadline for one awaited hook; `None` for observers.
     pub fn deadline(&self, hook: Hook) -> Option<Duration> {
         if hook.is_observer() {
@@ -596,6 +608,15 @@ mod tests {
             assert_eq!(manifest.deadline(hook), Some(Duration::from_millis(ms)));
         }
         assert_eq!(manifest.deadline(Hook::Join), None);
+        // Engines bound observers too, the same way in Lua and WebAssembly.
+        for hook in Hook::ALL {
+            let limit = manifest.run_limit(hook);
+            if hook.is_observer() {
+                assert_eq!(limit, OBSERVER_DEADLINE, "{hook:?}");
+            } else {
+                assert_eq!(Some(limit), manifest.deadline(hook), "{hook:?}");
+            }
+        }
         assert_eq!(manifest.on_timeout(Hook::Login), Policy::Deny);
         assert_eq!(manifest.on_timeout(Hook::Status), Policy::Continue);
         assert_eq!(manifest.on_timeout(Hook::Http), Policy::Continue);

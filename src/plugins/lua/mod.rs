@@ -54,10 +54,7 @@ use bind::{State, TimerAction};
 use mlua::{Function, HookTriggers, Lua, LuaOptions as VmOptions, StdLib, Table, Value, VmState};
 use std::{path::PathBuf, rc::Rc, time::Duration, time::Instant};
 
-/// Calls without a manifest deadline (observers, timers, bus messages) may
-/// run this long, which also covers the longest blocking host call
-/// (`rift.request` and `rift.http.request` wait at most 60 s).
-pub const OBSERVER_DEADLINE: Duration = Duration::from_secs(60);
+pub use super::manifest::OBSERVER_DEADLINE;
 /// Guest code is interrupted this long after its deadline, so the host's own
 /// timeout answers first and `on_timeout` (not `on_failure`) applies.
 const GRACE: Duration = Duration::from_millis(100);
@@ -475,10 +472,7 @@ impl Engine for LuaEngine {
         if let Some(error) = &self.poisoned {
             return Err(CallError::Fatal(error.clone()));
         }
-        let limit = self
-            .manifest
-            .deadline(event.hook())
-            .unwrap_or(OBSERVER_DEADLINE);
+        let limit = self.manifest.run_limit(event.hook());
         self.guard(limit, || self.dispatch(event))
     }
 
