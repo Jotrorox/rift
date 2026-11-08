@@ -112,7 +112,7 @@ pub struct LuaOptions {
 /// `[wasm]`: limits for one WebAssembly instance.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WasmOptions {
-    /// Linear memory and tables per instance; 0 means only WebAssembly's
+    /// Linear memory per instance in MiB; 0 means only WebAssembly's
     /// own 4 GiB bound.
     pub memory_limit_mb: u32,
 }

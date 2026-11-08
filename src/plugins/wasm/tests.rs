@@ -155,7 +155,7 @@ fn probe() -> Option<Guest> {
         .clone();
     if wasm.is_none() {
         eprintln!(
-            "skipping WebAssembly probe scenarios: probe_rs.wasm unavailable (install the wasm32-wasip2 target)"
+            "skipping WebAssembly probe scenarios: probe_rs.wasm unavailable (install the wasm32-wasip2 target or put it in RIFT_TEST_PLUGIN_WASM_DIR)"
         );
     }
     wasm.map(|wasm| Guest {
