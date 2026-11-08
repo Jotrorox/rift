@@ -556,7 +556,7 @@ async fn shutdown_interrupts_a_stuck_guest() {
     let broker = Broker::default();
     let runtime = start(&config, &broker).await;
     let plugin = instance(&runtime);
-    // Observers have no deadline: this join never returns by itself.
+    // Observers run up to 60 s: this join outlasts the shutdown grace.
     let mut player = session(&runtime, 1, "Spin");
     player.ready("lobby").await;
     tokio::time::sleep(Duration::from_millis(50)).await;

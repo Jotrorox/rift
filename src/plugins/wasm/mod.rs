@@ -324,7 +324,13 @@ impl PluginEngine for WasmEngine {
         {
             return Ok(Reply::default_for(hook));
         }
-        limits::arm(&mut self.store, hook.name(), self.manifest.deadline(hook));
+        // Observers are not awaited, but a looping one would wedge the
+        // queue behind it: they run under the same limit as in Lua.
+        limits::arm(
+            &mut self.store,
+            hook.name(),
+            Some(self.manifest.run_limit(hook)),
+        );
         let guest = self.core.rift_plugin_handler();
         let store = &mut self.store;
         let result = match event {

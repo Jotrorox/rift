@@ -205,7 +205,9 @@ the instance counts as failed: Rift discards it and restarts it according to
 `[failure] restart`, because the interrupted code may have left its state
 half-changed. A trap, such as a Rust panic, does the same. `init` or `reload`
 returning an error is an ordinary failure that interrupts nothing. Observers
-have no deadline, but stopping or reloading Rift interrupts a guest that does
+(`join`, `after_transfer`, `disconnect`, `message`, `timer`, `event`) are not
+awaited, but a guest still running one after 60 s is interrupted the same
+way, as in Lua; stopping or reloading Rift also interrupts a guest that does
 not return within the shutdown grace period.
 
 **Compilation.** The first start compiles the component and stores the result
