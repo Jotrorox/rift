@@ -144,17 +144,21 @@ impl Store {
     pub fn new(database: Arc<Database>) -> io::Result<Self> {
         // Version 2 stores each instance's node ('' for this host); ports
         // are unique per node, since every node has its own port range.
+        // `user_version` keeps the version too, for Rift releases that
+        // predate `rift_schema`, so a downgrade still opens the file.
         database.migrate(COMPONENT, SCHEMA_VERSION, |from| match from {
             0 => format!(
                 "{INSTANCES_V2}
-                CREATE TABLE sequences (group_name TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL) STRICT;"
+                CREATE TABLE sequences (group_name TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL) STRICT;
+                PRAGMA user_version={SCHEMA_VERSION};"
             ),
             _ => format!(
                 "ALTER TABLE instances RENAME TO instances_v1;
                 {INSTANCES_V2}
                 INSERT INTO instances (name,node,port,phase,explicitly_stopped,definition)
                     SELECT name,'',port,phase,explicitly_stopped,definition FROM instances_v1;
-                DROP TABLE instances_v1;"
+                DROP TABLE instances_v1;
+                PRAGMA user_version={SCHEMA_VERSION};"
             ),
         })?;
         Ok(Self { database })
