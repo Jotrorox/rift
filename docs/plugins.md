@@ -210,7 +210,17 @@ marks the instance **failed**. `failure.restart` then decides:
 Restarts back off from 1 s, doubling to 60 s; an instance that ran for 60 s
 before failing starts over at 1 s. An invalid registration or a command that
 collides with another owner is never retried. While a plugin is failed or
-restarting, its awaited calls apply `on_failure`.
+restarting, its awaited calls apply `on_failure`, but only for hooks its last
+registration listed: a failed plugin that registered `http` and `timer` does
+not deny logins.
+
+**Claims.** A plugin's registration is its claim on hooks and commands. A
+plugin that is new (at startup or added by a reload) and still in `init` has
+claimed nothing, so the host does not ask it yet; startup waits for every
+`init` anyway. A restarted or replaced plugin keeps its predecessor's
+registration until its own `init` returns: calls to the hooks it claimed queue
+behind that `init` and apply `on_timeout` if it is slow, and every other hook
+is unaffected.
 
 **Reloads.** A configuration reload diffs the plugin set by name:
 
@@ -224,9 +234,18 @@ restarting, its awaited calls apply `on_failure`.
 | New | Started. |
 
 A replacement starts only after its predecessor's thread exited, so two
-generations of one plugin never run at once, and plugins initialize and claim
-commands in order. Sessions that started under an older configuration see the
-current plugin set.
+generations of one plugin do not run at once; this also holds for a plugin
+added again while its removed generation is still stopping. A predecessor
+that is still running 1 s after its shutdown grace period ended (stuck in code
+its engine cannot interrupt) is abandoned with a log line, and the new
+instance starts anyway. Plugins initialize concurrently but claim commands in
+`rift.plugin()` order; a plugin waits for the one before it to claim, at most
+until that one's predecessor wait and `init` deadline (plus 30 s for creating
+its engine) have passed. A reload that gives the configuration script a
+command registered by a plugin that stays configured, whether unchanged,
+hot-reloaded or replaced, is refused and leaves the running set as it is.
+Sessions that started under an older configuration see the current plugin
+set.
 
 **Stopping.** `shutdown(reason)` runs within `deadlines.shutdown`; a plugin
 that does not return in time is told to stop (engines interrupt it where they
@@ -234,9 +253,11 @@ can) and its thread is abandoned. It receives no further events either way.
 
 **Operator restarts.** `rift admin plugins restart <name>`, the dashboard's
 Restart button, `POST /api/plugins/<name>/restart` and `rift.control.plugins`
-stop a plugin and start a fresh instance with the same files and its current
-configuration, in the same position. Calls in the meantime queue behind the
-new `init` or time out under the manifest.
+stop a plugin and start a fresh instance with the same files and its
+configuration table as currently configured (also while a hot reload to it is
+still running), in the same position. Calls in the meantime to hooks the plugin
+registered queue behind the new `init` or time out under the manifest; other
+hooks are unaffected.
 
 ## Host API
 

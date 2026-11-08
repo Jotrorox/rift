@@ -38,7 +38,7 @@ use std::{
     sync::{Arc, Mutex, RwLock},
     time::{Duration, Instant},
 };
-use worker::{Engines, Instance, Outcome, Registrar, Report};
+use worker::{Engines, Instance, Outcome, Predecessor, Registrar, Report};
 
 /// One `rift.plugin(name, config)` entry for a folder with a persistent
 /// `plugin.toml`. Two specs describe the same instance when they are equal.
@@ -91,15 +91,23 @@ pub(crate) enum CommandOwner {
 #[derive(Default)]
 struct Claims {
     script: BTreeSet<String>,
-    plugins: BTreeMap<String, String>,
+    /// Command name to the instance id and plugin name that claimed it.
+    plugins: BTreeMap<String, (u64, String)>,
 }
 
 #[derive(Default)]
 struct CommandTable(Mutex<Claims>);
 
 impl Registrar for CommandTable {
-    fn register(&self, plugin: &str, registration: &api::Registration) -> Result<(), String> {
+    fn register(
+        &self,
+        id: u64,
+        plugin: &str,
+        replaces: Option<u64>,
+        registration: &api::Registration,
+    ) -> Result<(), String> {
         let mut claims = self.0.lock().unwrap();
+        let mine = |owner: u64| owner == id || Some(owner) == replaces;
         for command in &registration.commands {
             if claims.script.contains(&command.name) {
                 return Err(format!(
@@ -107,10 +115,10 @@ impl Registrar for CommandTable {
                     command.name
                 ));
             }
-            if let Some(owner) = claims
+            if let Some((_, owner)) = claims
                 .plugins
                 .get(&command.name)
-                .filter(|owner| owner.as_str() != plugin)
+                .filter(|(owner, _)| !mine(*owner))
             {
                 return Err(format!(
                     "command /{} is already registered by plugin {owner}",
@@ -118,21 +126,21 @@ impl Registrar for CommandTable {
                 ));
             }
         }
-        claims.plugins.retain(|_, owner| owner != plugin);
+        claims.plugins.retain(|_, (owner, _)| !mine(*owner));
         for command in &registration.commands {
             claims
                 .plugins
-                .insert(command.name.clone(), plugin.to_owned());
+                .insert(command.name.clone(), (id, plugin.to_owned()));
         }
         Ok(())
     }
 
-    fn release(&self, plugin: &str) {
+    fn release(&self, id: u64) {
         self.0
             .lock()
             .unwrap()
             .plugins
-            .retain(|_, owner| owner != plugin);
+            .retain(|_, (owner, _)| *owner != id);
     }
 }
 
@@ -141,6 +149,12 @@ struct Persistent {
     engines: Engines,
     base: Base,
     active: RwLock<Arc<[Arc<Instance>]>>,
+    /// The plugin set of the last activation, so an operator restart uses
+    /// the configuration as configured even while a hot reload is running.
+    specs: RwLock<Arc<[PluginSpec]>>,
+    /// Instances that were removed or replaced and may still be stopping,
+    /// by name: a plugin added again waits for the old generation.
+    stopping: Mutex<BTreeMap<String, Arc<Instance>>>,
     commands: Arc<CommandTable>,
     /// Fans `rift.events.*` out to plugins while any are active.
     events: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -185,6 +199,8 @@ impl Host {
                 engines,
                 base: base.clone(),
                 active: RwLock::new(Arc::from([])),
+                specs: RwLock::new(Arc::from([])),
+                stopping: Mutex::default(),
                 commands: Arc::default(),
                 events: Mutex::default(),
                 changes: Mutex::default(),
@@ -201,15 +217,16 @@ impl Host {
             }
         }
         let script = script::ScriptPlugin::new(config);
-        // Plugins that stay untouched keep their commands; a new script
-        // command may not take one of them.
+        // Plugins that stay configured keep their commands: unchanged and
+        // hot-reloaded ones as they are, replaced ones until their new
+        // `init` registers. A new script command may not take one of them.
         let active = persistent.active.read().unwrap().clone();
         for instance in active.iter() {
-            let unchanged = config
+            let configured = config
                 .plugins
                 .iter()
-                .any(|spec| spec.name == instance.name() && spec.same_artifact(instance.spec()));
-            if let Some(registration) = instance.registration().filter(|_| unchanged)
+                .any(|spec| spec.name == instance.name());
+            if let Some(registration) = instance.registration().filter(|_| configured)
                 && let Some(command) = registration
                     .commands
                     .iter()
@@ -379,8 +396,20 @@ impl Host {
             ));
         };
         let old = active[index].clone();
-        let mut spec = old.spec().clone();
-        spec.config_json = old.config_json();
+        // The configured table, not the one the old instance runs with: a
+        // hot reload may still be on its way to it.
+        let spec = persistent
+            .specs
+            .read()
+            .unwrap()
+            .iter()
+            .find(|spec| spec.name == name)
+            .cloned()
+            .unwrap_or_else(|| {
+                let mut spec = old.spec().clone();
+                spec.config_json = old.config_json();
+                spec
+            });
         let factory = spec
             .manifest
             .engine
@@ -397,12 +426,20 @@ impl Host {
             factory,
             persistent.base.clone(),
             persistent.commands.clone() as Arc<dyn Registrar>,
-            Some(old.clone()),
+            Some(Predecessor {
+                instance: old.clone(),
+                inherit: true,
+            }),
             None,
         )?;
         let mut next = active.to_vec();
         next[index] = instance;
         *persistent.active.write().unwrap() = Arc::from(next);
+        persistent
+            .stopping
+            .lock()
+            .unwrap()
+            .insert(name.to_owned(), old.clone());
         persistent
             .base
             .monitor
@@ -425,13 +462,14 @@ impl Host {
         *self.persistent.base.streams.write().unwrap() = streams;
     }
 
-    /// Whether any active plugin may want `hook`: registered it, or is still
-    /// starting so its registration is unknown.
+    /// Whether any active plugin claims `hook`. A plugin that is new and
+    /// still starting has claimed nothing yet; a restarting or replaced one
+    /// keeps its predecessor's claims until its own `init` returns.
     pub fn may_handle(&self, hook: Hook) -> bool {
         self.active().iter().any(|instance| {
             instance
                 .registration()
-                .is_none_or(|registration| registration.wants(hook))
+                .is_some_and(|registration| registration.wants(hook))
         })
     }
 
@@ -444,43 +482,42 @@ impl Host {
     pub fn activate(&self) -> io::Result<impl Future<Output = ()> + Send + 'static> {
         let persistent = &self.persistent;
         let _changes = persistent.changes.lock().unwrap();
-        persistent
-            .base
-            .monitor
-            .retain(self.specs.iter().map(|spec| spec.name.as_str()));
         let previous = persistent.active.read().unwrap().clone();
-        persistent.commands.0.lock().unwrap().script = self.script.commands().clone();
-        let mut next = Vec::with_capacity(self.specs.len());
-        let mut stopping = Vec::new();
-        let mut reloads = Vec::new();
-        let mut started = Vec::new();
-        let start =
-            |spec: &PluginSpec, after: Option<Arc<Instance>>, behind: Option<Arc<Instance>>| {
+        // Everything that can fail is checked before anything starts.
+        let factories = self
+            .specs
+            .iter()
+            .map(|spec| {
                 let engine = spec.manifest.engine.ok_or_else(|| {
                     io::Error::other(format!("plugin {}: not a persistent plugin", spec.name))
                 })?;
-                let factory = persistent.engines.get(engine).ok_or_else(|| {
+                persistent.engines.get(engine).ok_or_else(|| {
                     io::Error::new(
                         io::ErrorKind::Unsupported,
                         format!("plugin {}: {}", spec.name, Engines::unavailable(engine)),
                     )
-                })?;
-                Instance::start(
-                    spec.clone(),
-                    factory,
-                    persistent.base.clone(),
-                    persistent.commands.clone() as Arc<dyn Registrar>,
-                    after,
-                    behind,
-                )
-            };
-        for spec in self.specs.iter() {
+                })
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        let script_commands = std::mem::replace(
+            &mut persistent.commands.0.lock().unwrap().script,
+            self.script.commands().clone(),
+        );
+        let mut stopping_by_name = persistent.stopping.lock().unwrap();
+        stopping_by_name.retain(|_, instance| !instance.has_exited());
+        let mut next = Vec::with_capacity(self.specs.len());
+        let mut stopping = Vec::new();
+        let mut reloads = Vec::new();
+        let mut started: Vec<Arc<Instance>> = Vec::new();
+        let mut failure = None;
+        for (spec, factory) in self.specs.iter().zip(factories) {
             let old = previous.iter().find(|old| old.name() == spec.name);
-            let instance = match old {
+            let after = match old {
                 Some(old)
                     if old.spec().same_artifact(spec) && old.config_json() == spec.config_json =>
                 {
-                    old.clone()
+                    next.push(old.clone());
+                    continue;
                 }
                 Some(old)
                     if old.spec().same_artifact(spec)
@@ -488,28 +525,66 @@ impl Host {
                         && old.status() == worker::Status::Running =>
                 {
                     reloads.push((old.clone(), spec.clone()));
-                    old.clone()
+                    next.push(old.clone());
+                    continue;
                 }
-                Some(old) => {
-                    stopping.push(old.clone());
-                    let instance = start(spec, Some(old.clone()), started.last().cloned())?;
-                    started.push(instance.clone());
-                    instance
-                }
-                None => {
-                    let instance = start(spec, None, started.last().cloned())?;
-                    started.push(instance.clone());
-                    instance
-                }
+                // A replacement keeps the old instance's claims until its
+                // own `init` returns.
+                Some(old) => Some(Predecessor {
+                    instance: old.clone(),
+                    inherit: true,
+                }),
+                // Added (again): wait for a generation that is still
+                // stopping, but claim nothing it held.
+                None => stopping_by_name.get(&spec.name).map(|old| Predecessor {
+                    instance: old.clone(),
+                    inherit: false,
+                }),
             };
-            next.push(instance);
+            match Instance::start(
+                spec.clone(),
+                factory,
+                persistent.base.clone(),
+                persistent.commands.clone() as Arc<dyn Registrar>,
+                after,
+                started.last().cloned(),
+            ) {
+                Ok(instance) => {
+                    if let Some(old) = old {
+                        stopping.push(old.clone());
+                    }
+                    started.push(instance.clone());
+                    next.push(instance);
+                }
+                Err(error) => {
+                    failure = Some(error);
+                    break;
+                }
+            }
+        }
+        if let Some(error) = failure {
+            // Nothing of this activation takes effect.
+            for instance in &started {
+                instance.abort();
+            }
+            persistent.commands.0.lock().unwrap().script = script_commands;
+            return Err(error);
         }
         for old in previous.iter() {
             if !self.specs.iter().any(|spec| spec.name == old.name()) {
                 stopping.push(old.clone());
             }
         }
+        for old in &stopping {
+            stopping_by_name.insert(old.name().to_owned(), old.clone());
+        }
+        drop(stopping_by_name);
+        persistent
+            .base
+            .monitor
+            .retain(self.specs.iter().map(|spec| spec.name.as_str()));
         *persistent.active.write().unwrap() = Arc::from(next);
+        *persistent.specs.write().unwrap() = self.specs.clone();
         self.watch_events();
         let monitor = persistent.base.monitor.clone();
         Ok(async move {
@@ -641,11 +716,11 @@ impl Host {
         let hook = event.hook();
         let manifest = &instance.spec().manifest;
         let deadline = manifest.deadline(hook).unwrap_or(Duration::from_millis(50));
-        // The instance answers hooks it did not register with their default
-        // at once; those are not calls.
+        // The instance answers hooks it did not claim with their default at
+        // once; those are not calls.
         let wanted = instance
             .registration()
-            .is_none_or(|registration| registration.wants(hook));
+            .is_some_and(|registration| registration.wants(hook));
         let started = Instant::now();
         let outcome = instance.call(event, deadline).await;
         let elapsed = Some(started.elapsed());

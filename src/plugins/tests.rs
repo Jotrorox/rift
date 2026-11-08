@@ -27,6 +27,9 @@ struct Plan {
     registration: Registration,
     init: Init,
     handler: Handler,
+    /// How long `reload` and `shutdown` take.
+    reload_delay: Duration,
+    shutdown_delay: Duration,
 }
 
 impl Plan {
@@ -40,7 +43,23 @@ impl Plan {
             registration: Registration::default(),
             init: Arc::new(|_, _| Ok(())),
             handler: Arc::new(handler),
+            reload_delay: Duration::ZERO,
+            shutdown_delay: Duration::ZERO,
         }
+    }
+
+    fn hooks(mut self, hooks: &[Hook]) -> Self {
+        self.registration.hooks = hooks.to_vec();
+        self
+    }
+
+    /// `init` sleeps this long before registering.
+    fn slow_init(mut self, delay: Duration) -> Self {
+        self.init = Arc::new(move |_, _| {
+            std::thread::sleep(delay);
+            Ok(())
+        });
+        self
     }
 
     fn commands(mut self, names: &[&str]) -> Self {
@@ -135,12 +154,17 @@ impl Engine for Mock {
     }
 
     fn reload(&mut self, config_json: &str) -> Result<(), String> {
+        std::thread::sleep(self.plan.reload_delay);
         self.record(format!("reload {config_json}"));
         Ok(())
     }
 
     fn shutdown(&mut self, reason: &str) {
         self.record(format!("shutdown {reason}"));
+        if !self.plan.shutdown_delay.is_zero() {
+            std::thread::sleep(self.plan.shutdown_delay);
+            self.record("shutdown done".into());
+        }
     }
 }
 
@@ -975,4 +999,366 @@ async fn operator_restarts_replace_the_instance_and_are_counted_logged_and_annou
     );
     runtime.plugins().shutdown().await;
     assert!(host.monitor().logs("first").is_some());
+}
+
+/// Poll `done` every 10 ms for at most `limit`.
+async fn eventually(what: &str, limit: Duration, mut done: impl FnMut() -> bool) {
+    let deadline = Instant::now() + limit;
+    while !done() {
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+fn http(event: &Event, _: &services::Services) -> Result<Reply, CallError> {
+    match event {
+        Event::Http(_) => Err(CallError::Fatal("trap".into())),
+        event => Ok(Reply::default_for(event.hook())),
+    }
+}
+
+#[tokio::test]
+async fn a_failed_plugin_fails_only_the_hooks_it_registered() {
+    let root = directory();
+    let mocks = Mocks::default();
+    mocks.plan("web", Plan::new(http).hooks(&[Hook::Http, Hook::Timer]));
+    let broker = Broker::default();
+    let config = config(
+        "",
+        vec![spec(&root, "web", "[failure]\nrestart = \"never\"\n", "{}")],
+    );
+    let runtime = runtime(&config, &mocks, &broker).await;
+    let request = crate::http_script::HttpRequest {
+        method: "GET".into(),
+        path: "/ext/web".into(),
+        query: String::new(),
+        body: String::new(),
+        headers: BTreeMap::new(),
+        context: serde_json::json!({}),
+    };
+    // The trap fails the plugin; on_failure (deny) applies to http.
+    assert!(runtime.plugins().http(&request).await.is_err());
+    let plugin = runtime.plugins().active()[0].clone();
+    assert_eq!(plugin.status(), Status::Failed);
+    assert!(runtime.plugins().http(&request).await.is_err());
+    // It never registered login, routes or pings: those continue.
+    assert_eq!(
+        session(&runtime, 1).decision("login").await.unwrap(),
+        Action::Continue
+    );
+    assert_eq!(
+        session(&runtime, 2)
+            .decision("initial_server")
+            .await
+            .unwrap(),
+        Action::Continue
+    );
+    assert!(!runtime.plugins().may_handle(Hook::Route));
+    let router = crate::hooks::Router::new(&config).with_plugins(runtime.plugins().clone());
+    assert_eq!(
+        router
+            .route(crate::hooks::ConnectionInfo {
+                listener: "public".into(),
+                peer_addr: "198.51.100.1:5000".parse().unwrap(),
+                local_addr: "127.0.0.1:25565".parse().unwrap(),
+                default_backend: Some("lobby".into()),
+            })
+            .await
+            .unwrap(),
+        api::RouteDecision::Default
+    );
+    runtime.plugins().shutdown().await;
+}
+
+#[tokio::test]
+async fn starting_plugins_are_asked_only_for_what_they_claimed() {
+    let root = directory();
+    let mocks = Mocks::default();
+    mocks.plan(
+        "web",
+        Plan::new(action(Action::Continue))
+            .hooks(&[Hook::Http])
+            .slow_init(Duration::from_millis(400)),
+    );
+    mocks.plan(
+        "ban",
+        Plan::new(action(Action::Deny("banned".into())))
+            .hooks(&[Hook::Login])
+            .slow_init(Duration::from_millis(300)),
+    );
+    let broker = Broker::default();
+    let first = config("", vec![spec(&root, "web", "", "{}")]);
+    let runtime = runtime(&first, &mocks, &broker).await;
+    let host = runtime.plugins().clone();
+    let router = crate::hooks::Router::new(&first).with_plugins(host.clone());
+    let connection = || crate::hooks::ConnectionInfo {
+        listener: "public".into(),
+        peer_addr: "198.51.100.1:5000".parse().unwrap(),
+        local_addr: "127.0.0.1:25565".parse().unwrap(),
+        default_backend: Some("lobby".into()),
+    };
+    // Restarting an http-only plugin keeps its claims: routes and logins
+    // are not held up behind its init.
+    host.restart("web", "alice").unwrap().await;
+    assert_eq!(host.active()[0].status(), Status::Starting);
+    assert!(!host.may_handle(Hook::Route));
+    assert!(host.may_handle(Hook::Http));
+    let started = Instant::now();
+    assert_eq!(
+        router.route(connection()).await.unwrap(),
+        api::RouteDecision::Default
+    );
+    assert_eq!(
+        session(&runtime, 1).decision("login").await.unwrap(),
+        Action::Continue
+    );
+    assert!(started.elapsed() < Duration::from_millis(200));
+    host.active()[0]
+        .ready(Duration::from_secs(1))
+        .await
+        .unwrap();
+
+    // A plugin added on reload has claimed nothing until its init returns.
+    let second = config(
+        "",
+        vec![spec(&root, "web", "", "{}"), spec(&root, "ban", "", "{}")],
+    );
+    let next =
+        Extensions::with_engines(&second, broker.clone(), Some(&runtime), Engines::default())
+            .unwrap();
+    next.plugins().activate().unwrap().await;
+    assert_eq!(next.plugins().active()[1].status(), Status::Starting);
+    assert_eq!(
+        session(&next, 2).decision("login").await.unwrap(),
+        Action::Continue
+    );
+    next.plugins().active()[1]
+        .ready(Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert_eq!(
+        session(&next, 3).decision("login").await.unwrap(),
+        Action::Deny("banned".into())
+    );
+    // A replaced plugin keeps its claims: logins queue behind the new init.
+    let mut changed = spec(&root, "ban", "", "{}");
+    changed.fingerprint = "two".into();
+    let third = config("", vec![spec(&root, "web", "", "{}"), changed]);
+    let last =
+        Extensions::with_engines(&third, broker.clone(), Some(&next), Engines::default()).unwrap();
+    last.plugins().activate().unwrap().await;
+    assert_eq!(last.plugins().active()[1].status(), Status::Starting);
+    assert_eq!(
+        session(&last, 4).decision("login").await.unwrap(),
+        Action::Deny("banned".into())
+    );
+    last.plugins().shutdown().await;
+}
+
+#[tokio::test]
+async fn a_stuck_predecessor_is_abandoned_and_later_plugins_start() {
+    let root = directory();
+    let mocks = Mocks::default();
+    let mut stuck = Plan::new(action(Action::Continue)).commands(&["stuck"]);
+    stuck.shutdown_delay = Duration::from_secs(3);
+    mocks.plan("stuck", stuck);
+    mocks.plan("other", Plan::new(action(Action::Continue)));
+    let broker = Broker::default();
+    let grace = "[deadlines]\nshutdown = 100\n";
+    let first = config("", vec![spec(&root, "stuck", grace, "{}")]);
+    let runtime = runtime(&first, &mocks, &broker).await;
+    let old = runtime.plugins().active()[0].clone();
+    let mut changed = spec(&root, "stuck", grace, "{}");
+    changed.fingerprint = "two".into();
+    let second = config("", vec![changed, spec(&root, "other", "", "{}")]);
+    let next =
+        Extensions::with_engines(&second, broker.clone(), Some(&runtime), Engines::default())
+            .unwrap();
+    let started = Instant::now();
+    tokio::spawn(next.plugins().activate().unwrap());
+    let active = next.plugins().active();
+    // `other` initializes without waiting for `stuck`'s old thread...
+    eventually("other's init", Duration::from_millis(600), || {
+        mocks.log().contains(&"other:init {}".to_owned())
+    })
+    .await;
+    // ...and both run once the old thread's grace and the margin passed,
+    // although that thread is still busy. `other` claims its commands
+    // after `stuck` did.
+    active[0].ready(Duration::from_secs(3)).await.unwrap();
+    active[1].ready(Duration::from_secs(1)).await.unwrap();
+    assert!(started.elapsed() < Duration::from_millis(2500));
+    assert!(!old.has_exited());
+    assert!(matches!(
+        next.plugins().command_owner("stuck"),
+        Some(CommandOwner::Plugin(instance, _)) if Arc::ptr_eq(&instance, &active[0])
+    ));
+    next.plugins().shutdown().await;
+}
+
+#[tokio::test]
+async fn a_plugin_added_again_waits_for_its_stopping_generation() {
+    let root = directory();
+    let mocks = Mocks::default();
+    let mut slow = Plan::new(action(Action::Continue)).commands(&["slow"]);
+    slow.shutdown_delay = Duration::from_millis(500);
+    mocks.plan("slow", slow);
+    let broker = Broker::default();
+    let with = config("", vec![spec(&root, "slow", "", "{}")]);
+    let runtime = runtime(&with, &mocks, &broker).await;
+    let old = runtime.plugins().active()[0].clone();
+    // Removed: its shutdown takes a while.
+    let without = Extensions::with_engines(
+        &config("", vec![]),
+        broker.clone(),
+        Some(&runtime),
+        Engines::default(),
+    )
+    .unwrap();
+    tokio::spawn(without.plugins().activate().unwrap());
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Added again before the old generation exited.
+    let again = Extensions::with_engines(&with, broker.clone(), Some(&without), Engines::default())
+        .unwrap();
+    again.plugins().activate().unwrap().await;
+    let new = again.plugins().active()[0].clone();
+    new.ready(Duration::from_secs(2)).await.unwrap();
+    assert!(old.has_exited());
+    let log = mocks.log();
+    let done = log.iter().position(|entry| entry == "slow:shutdown done");
+    let init = log.iter().rposition(|entry| entry == "slow:init {}");
+    assert!(done.is_some() && done < init, "{log:?}");
+    // The old generation's exit did not release the new one's command.
+    let owner = again
+        .plugins()
+        .persistent
+        .commands
+        .0
+        .lock()
+        .unwrap()
+        .plugins
+        .get("slow")
+        .map(|(_, name)| name.clone());
+    assert_eq!(owner.as_deref(), Some("slow"));
+    again.plugins().shutdown().await;
+}
+
+#[tokio::test]
+async fn a_failed_activation_starts_nothing_and_keeps_the_active_set() {
+    let root = directory();
+    let mocks = Mocks::default();
+    mocks.plan("kept", Plan::new(action(Action::Continue)));
+    mocks.plan("fresh", Plan::new(action(Action::Continue)));
+    let broker = Broker::default();
+    let runtime = runtime(
+        &config(
+            "extensions = { api_version = 2 }",
+            vec![spec(&root, "kept", "", "{}")],
+        ),
+        &mocks,
+        &broker,
+    )
+    .await;
+    let before = runtime.plugins().active();
+    let script = "extensions = { api_version = 2, commands = { hello = { permission = 'x', run = function() end } } }";
+    // A spec without an engine cannot start; nothing of this activation may.
+    let mut broken = spec(&root, "broken", "", "{}");
+    broken.manifest.engine = None;
+    let next = Extensions::with_engines(
+        &config(script, vec![spec(&root, "fresh", "", "{}"), broken]),
+        broker.clone(),
+        Some(&runtime),
+        Engines::default(),
+    )
+    .unwrap();
+    assert!(next.plugins().activate().is_err());
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!mocks.log().iter().any(|entry| entry.starts_with("fresh:")));
+    let after = runtime.plugins().active();
+    assert_eq!(after.len(), 1);
+    assert!(Arc::ptr_eq(&after[0], &before[0]));
+    assert!(
+        runtime
+            .plugins()
+            .persistent
+            .commands
+            .0
+            .lock()
+            .unwrap()
+            .script
+            .is_empty()
+    );
+    runtime.plugins().shutdown().await;
+}
+
+#[tokio::test]
+async fn an_operator_restart_uses_the_configured_table_during_a_hot_reload() {
+    let root = directory();
+    let mocks = Mocks::default();
+    let mut plan = Plan::new(action(Action::Continue));
+    plan.reload_delay = Duration::from_millis(300);
+    mocks.plan("hot", plan);
+    let broker = Broker::default();
+    let manifest = "hot_reload = true\n";
+    let runtime = runtime(
+        &config("", vec![spec(&root, "hot", manifest, "{\"a\":1}")]),
+        &mocks,
+        &broker,
+    )
+    .await;
+    let next = Extensions::with_engines(
+        &config("", vec![spec(&root, "hot", manifest, "{\"a\":2}")]),
+        broker.clone(),
+        Some(&runtime),
+        Engines::default(),
+    )
+    .unwrap();
+    tokio::spawn(next.plugins().activate().unwrap());
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    next.plugins().restart("hot", "alice").unwrap().await;
+    next.plugins().active()[0]
+        .ready(Duration::from_secs(1))
+        .await
+        .unwrap();
+    assert_eq!(mocks.calls("init {\"a\":2}"), ["hot:init {\"a\":2}"]);
+    next.plugins().shutdown().await;
+}
+
+#[tokio::test]
+async fn script_commands_may_not_take_a_replaced_plugins_command() {
+    let root = directory();
+    let mocks = Mocks::default();
+    mocks.plan(
+        "greeter",
+        Plan::new(action(Action::Continue)).commands(&["hello"]),
+    );
+    let broker = Broker::default();
+    let runtime = runtime(
+        &config(
+            "extensions = { api_version = 2 }",
+            vec![spec(&root, "greeter", "", "{}")],
+        ),
+        &mocks,
+        &broker,
+    )
+    .await;
+    let mut changed = spec(&root, "greeter", "", "{}");
+    changed.fingerprint = "two".into();
+    let script = "extensions = { api_version = 2, commands = { hello = { permission = 'x', run = function() end } } }";
+    let error = Extensions::with_engines(
+        &config(script, vec![changed]),
+        broker.clone(),
+        Some(&runtime),
+        Engines::default(),
+    )
+    .err()
+    .unwrap();
+    assert!(
+        error
+            .to_string()
+            .contains("registered by plugin greeter and by the configuration script"),
+        "{error}"
+    );
+    assert_eq!(runtime.plugins().active()[0].status(), Status::Running);
+    runtime.plugins().shutdown().await;
 }
