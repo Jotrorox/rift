@@ -22,7 +22,7 @@ use crate::{
 };
 
 /// Metadata available immediately after TCP accept, before reading any bytes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ConnectionInfo {
     pub listener: String,
     pub peer_addr: SocketAddr,
@@ -30,7 +30,8 @@ pub struct ConnectionInfo {
     pub default_backend: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RouteDecision {
     /// Continue the configured direct or hostname routing policy.
     Default,

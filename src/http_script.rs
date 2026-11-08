@@ -13,7 +13,7 @@ static SLOTS: Semaphore = Semaphore::const_new(crate::script::MAX_CONCURRENT);
 
 /// Request metadata plus a read-only snapshot of runtime status in `context`.
 /// Authentication headers should be removed by the HTTP adapter.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HttpRequest {
     pub method: String,
     pub path: String,
@@ -23,7 +23,7 @@ pub struct HttpRequest {
     pub context: serde_json::Value,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HttpResponse {
     pub status: u16,
     pub content_type: String,

@@ -9,7 +9,7 @@ use super::packets::{Text, boolean, disconnect_text, take};
 use std::io;
 
 /// One Command Suggestions Response entry. Tooltips are plain text.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Suggestion {
     pub text: String,
     pub tooltip: Option<String>,
