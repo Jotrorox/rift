@@ -90,6 +90,77 @@ pub struct Start {
     /// Relative to the agent's `--root`.
     pub directory: PathBuf,
     pub port: u16,
+    /// `env` and `inherit_env` of the server. Agents from before this field
+    /// ignore it and start the server with their whole environment minus
+    /// nothing, so upgrade agents together with the controller.
+    #[serde(default, skip_serializing_if = "Environment::is_default")]
+    pub environment: Environment,
+}
+
+/// [`crate::config::ProcessEnvironment`] on the wire. The agent removes its
+/// own secrets (`--token-env`, `--forwarding-secret-env`) whatever this says.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Environment {
+    /// `None` inherits the agent's environment; `Some` only these names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherit: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub set: Vec<(String, String)>,
+}
+
+impl Environment {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+impl From<&crate::config::ProcessEnvironment> for Environment {
+    fn from(environment: &crate::config::ProcessEnvironment) -> Self {
+        Self {
+            inherit: environment
+                .inherit
+                .as_ref()
+                .map(|names| names.iter().cloned().collect()),
+            set: environment
+                .set
+                .iter()
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect(),
+        }
+    }
+}
+
+impl TryFrom<&Environment> for crate::config::ProcessEnvironment {
+    type Error = io::Error;
+    /// The agent checks names itself: they become `execve` arguments.
+    fn try_from(environment: &Environment) -> io::Result<Self> {
+        let invalid =
+            || io::Error::new(io::ErrorKind::InvalidInput, "invalid environment variable");
+        let names = environment
+            .inherit
+            .iter()
+            .flatten()
+            .chain(environment.set.iter().map(|(name, _)| name));
+        for name in names {
+            if !crate::environment::valid_name(name) {
+                return Err(invalid());
+            }
+        }
+        if environment
+            .set
+            .iter()
+            .any(|(_, value)| value.contains('\0'))
+        {
+            return Err(invalid());
+        }
+        Ok(Self {
+            inherit: environment
+                .inherit
+                .as_ref()
+                .map(|names| names.iter().cloned().collect()),
+            set: environment.set.iter().cloned().collect(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -330,6 +401,36 @@ mod tests {
         assert_eq!(encode_base64(b"fo"), "Zm8=");
         for invalid in ["Zm8", "Z===", "Zm=v", "Zm8=Zm8=", "Zm.v"] {
             assert!(decode_base64(invalid).is_none(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn start_environment_is_optional_on_the_wire() {
+        // A controller from before `environment` sends none; the default
+        // inherits the agent's environment minus its secrets.
+        let old = r#"{"op":"start","server":"game-1","command":["java"],"directory":"game-1","port":30000}"#;
+        let Command::Start(start) = serde_json::from_str::<Command>(old).unwrap() else {
+            panic!("not a start");
+        };
+        assert_eq!(start.environment, Environment::default());
+        assert_eq!(serde_json::to_string(&Command::Start(start)).unwrap(), old);
+        let environment = Environment {
+            inherit: Some(vec!["PATH".into()]),
+            set: vec![("DB".into(), "x".into())],
+        };
+        let config = crate::config::ProcessEnvironment::try_from(&environment).unwrap();
+        assert_eq!(Environment::from(&config), environment);
+        for bad in [
+            Environment {
+                inherit: Some(vec!["A=B".into()]),
+                set: vec![],
+            },
+            Environment {
+                inherit: None,
+                set: vec![("X".into(), "a\0b".into())],
+            },
+        ] {
+            assert!(crate::config::ProcessEnvironment::try_from(&bad).is_err());
         }
     }
 }

@@ -379,6 +379,7 @@ async fn agents_refuse_unlisted_programs_and_paths_outside_their_root() {
             command,
             directory: directory.into(),
             port: fixture.port,
+            environment: Default::default(),
         })
     };
     let wait = Duration::from_secs(5);

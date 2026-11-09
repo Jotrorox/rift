@@ -87,6 +87,8 @@ impl Snapshot {
         permissions: Option<Arc<rift::permissions::Authority>>,
     ) -> io::Result<Self> {
         config.validate()?;
+        // Before any worker of this generation can spawn a server.
+        rift::managed::protect_secrets(&config);
         let mut policies = BTreeMap::new();
         for (listener, route) in &config.routes {
             let policy = match route {
