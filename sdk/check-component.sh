@@ -27,7 +27,7 @@ if [[ "$missing" != 0 ]]; then
 fi
 
 # Everything else must be WASI 0.2 or Rift itself.
-if unexpected="$(sed -n '/^world root {/,/^}/p' <<<"$wit" | grep -E '^\s+(import|export) ' | grep -vE '(rift:plugin/[a-z-]+@0\.1\.0|wasi:[a-z-]+/[a-z-]+@0\.2\.[0-9]+);$')"; then
+if unexpected="$(sed -n '/^world root {/,/^}/p' <<<"$wit" | grep -E '^\s+(import|export) ' | grep -vE '(rift:plugin/[a-z-]+@0\.2\.0|wasi:[a-z-]+/[a-z-]+@0\.2\.[0-9]+);$')"; then
     echo "error: unexpected imports or exports in $wasm:" >&2
     echo "$unexpected" >&2
     exit 1
