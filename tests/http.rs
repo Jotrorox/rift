@@ -397,6 +397,22 @@ fn revision(client: Client) -> Value {
     client.get("/api/config").expect(200).value()["revision"].clone()
 }
 
+/// Asserts that the `/ext/test` Lua hook still answers after definition edits.
+/// Each call runs the configuration in a fresh VM under a 50 ms wall deadline,
+/// which a debug build on a busy CI runner can miss right after a reload; a
+/// 504 is retried because these tests check that the hook survived, not speed.
+fn assert_hook_preserved(client: Client) {
+    let mut response = client.get("/ext/test");
+    for _ in 0..4 {
+        if response.status != 504 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        response = client.get("/ext/test");
+    }
+    assert_eq!(response.expect(200).body, "hook preserved");
+}
+
 fn base64(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     bytes
@@ -1931,7 +1947,7 @@ fn structured_definitions_preserve_lua_and_apply_safe_group_and_template_edits()
         )
         .expect(200);
     assert!(fixture.read().contains(&source));
-    assert_eq!(client.get("/ext/test").expect(200).body, "hook preserved");
+    assert_hook_preserved(client);
     client
         .instance("POST", "/api/groups/lobby/instances", json!({}))
         .expect(201);
@@ -2012,7 +2028,7 @@ fn structured_definitions_preserve_lua_and_apply_safe_group_and_template_edits()
             .count(),
         1
     );
-    assert_eq!(client.get("/ext/test").expect(200).body, "hook preserved");
+    assert_hook_preserved(client);
 }
 
 #[test]
@@ -2121,7 +2137,7 @@ fn console_settings_edit_permission_groups_memberships_tab_list_and_server_list(
     assert_eq!(values["server_list"]["max_players"], 50);
     assert_eq!(values["server_list"]["hosts"], json!({}));
     assert!(fixture.read().contains(&source));
-    assert_eq!(client.get("/ext/test").expect(200).body, "hook preserved");
+    assert_hook_preserved(client);
 
     // Memberships are runtime state in the permission store, not configuration.
     let uuid = "0123456789abcdef0123456789abcdef";
