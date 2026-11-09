@@ -205,7 +205,7 @@ like control requests, and publish no `rift.events.control` event. Every
 request that acts on a player (all but `list`, `get` and `names`) is written
 to the [operator audit log](http.md#authentication-and-access) as
 `players.<operation>` with the player as the target, never the text, by
-`bus:<login>`. Persistent plugins calling these subjects through their own
+`bus:<login>`, before the reply is sent. Persistent plugins calling these subjects through their own
 `bus` interface appear as `plugin:<name>`, the configuration script as
 `rift.players`. Plugins normally use the `players` interface directly, which
 is not audited, like their other host calls.

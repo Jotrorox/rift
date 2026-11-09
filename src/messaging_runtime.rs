@@ -211,7 +211,8 @@ impl Controls {
                     Err(error) => Err(error),
                 };
                 let outcome = if result.is_ok() { "ok" } else { "rejected" };
-                respond(&broker, &reply, &command, result);
+                // Record first: a caller that saw the reply may rely on the
+                // audit record existing.
                 if let Some(args) = audited {
                     let (outcome, status) = (outcome, if outcome == "ok" { 200 } else { 400 });
                     let target = args[1..].join(" ");
@@ -228,6 +229,7 @@ impl Controls {
                         eprintln!("rift: audit of rift.control.{command} failed: {error}");
                     }
                 }
+                respond(&broker, &reply, &command, result);
             };
             if LONG_RUNNING.contains(&message.subject.trim_start_matches("rift.control.")) {
                 match self.long_running.clone().try_acquire_owned() {
@@ -362,7 +364,7 @@ impl PlayerRequests {
                         json!({"ok": false, "error": error})
                     }
                 };
-                let _ = broker.publish(&reply, Bytes::from(response.to_string()));
+                // Record first, as for control requests.
                 if let Some((operation, target)) = audited {
                     let actor =
                         rift::players_service::actor(message.sender.as_deref(), PLAYERS_ACTOR);
@@ -383,6 +385,7 @@ impl PlayerRequests {
                         eprintln!("rift: audit of rift.players.{operation} failed: {error}");
                     }
                 }
+                let _ = broker.publish(&reply, Bytes::from(response.to_string()));
                 drop(permit);
             });
         }
