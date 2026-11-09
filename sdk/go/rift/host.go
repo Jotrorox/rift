@@ -115,6 +115,18 @@ func SetBossBar(target, name string, bar *BossBar) (bool, error) {
 	return unwrap(players.BossBar(target, name, spec))
 }
 
+// ShowDialog shows a player a dialog given as JSON in the vanilla dialog
+// format (Minecraft 1.21.6+), replacing any open one. Buttons whose custom
+// or dynamic/custom action has an id without a namespace come back to the
+// OnDialog handler. It reports false for an offline or pre-1.21.6 player; an
+// invalid dialog is an error.
+func ShowDialog(target, dialogJSON string) (bool, error) {
+	return unwrap(players.Dialog(target, dialogJSON))
+}
+
+// ClearDialog closes the dialog Rift showed the player, if it is still open.
+func ClearDialog(target string) (bool, error) { return unwrap(players.ClearDialog(target)) }
+
 // Kick disconnects a player with a reason.
 func Kick(target, reason string) (bool, error) { return unwrap(players.Kick(target, reason)) }
 

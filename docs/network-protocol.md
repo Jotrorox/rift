@@ -259,3 +259,32 @@ Implementation references checked for this change:
   No decompiled Mojang source is included in this repository.
 
 - [Velocity legacy client transitions](https://github.com/PaperMC/Velocity/blob/dev/3.0.0/proxy/src/main/java/com/velocitypowered/proxy/connection/client/ClientPlaySessionHandler.java): Join Game/Respawn reset and persistent tab/boss/title cleanup.
+
+## Dialogs
+
+On 1.21.6+ (protocols 771 to 777) Rift shows [dialogs](dialogs.md) for
+plugins. IDs come from the official server artifacts' packet reports for every
+protocol; the layouts are the same in all of them (Mojang's 1.21.6 mappings and
+the unobfuscated 26.3 server, inspected with `javap -c -private`):
+
+| Protocols | Show Dialog (play) | Clear Dialog (play) | Custom Click Action (play) | Configuration: show / clear / click |
+| --- | --- | --- | --- | --- |
+| 771–772 (1.21.6–1.21.8) | `0x85` | `0x84` | `0x41` | `0x12` / `0x11` / `0x08` |
+| 773–774 (1.21.9–1.21.11) | `0x8a` | `0x89` | `0x41` | `0x12` / `0x11` / `0x08` |
+| 775–776 (26.1–26.2) | `0x8c` | `0x8b` | `0x44` | `0x12` / `0x11` / `0x08` |
+| 777 (26.3) | `0x8f` | `0x8e` | `0x44` | `0x13` / `0x12` / `0x08` |
+
+Show Dialog in play carries a `Holder<Dialog>`; Rift always sends it inline
+(VarInt `0`, then the dialog as anonymous network NBT, converted from JSON the
+way vanilla's `JsonOps` to `NbtOps` conversion does). Clear Dialog has no
+fields. Custom Click Action carries an identifier, a VarInt length of at most
+65536 and an optional anonymous NBT tag. Rift decodes that tag with a 32-level
+nesting limit (vanilla accepts 16); a malformed click packet closes the
+session, as vanilla does.
+
+Clicks with a `rift:` identifier never reach a backend: one on the dialog Rift
+showed last becomes a dialog event for its owner, any other is dropped. Every
+other click passes through unchanged. A backend's own Show or Clear Dialog
+ends Rift's dialog, and so does configuration, which closes every screen.
+Dialogs reach the client only in play; clicks drained during a server switch
+are dropped like commands.

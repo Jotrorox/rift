@@ -47,6 +47,7 @@ server names are errors; Rift never treats an error as permission to proceed.
 | `before_transfer(ctx)` | Before each eligible target connection attempt | `server`, `target`, `reason` | `{ deny = "reason" }` |
 | `after_transfer(ctx)` | When an admitted transfer attempt completes or fails | `server` (source), `target`, `reason`, `success` | `nil` |
 | `disconnect(ctx)` | Session teardown, including an authenticated login that never joined | Last committed `server`, or nil; `reason = "session_closed"` | `nil` |
+| `dialog(ctx)` | A click on a plugin action of a [dialog](dialogs.md) the script showed (API v2+) | `server`, `action`, `values`, `payload` | `nil` |
 
 Common player context fields are `api_version` (1, 2 or 3), `authenticated = true`, `uuid`
 (lowercase 32-digit hex, no hyphens), canonical Mojang `name`, `connection_id`
@@ -529,6 +530,8 @@ names a configured backend or service group; a group matches all its instances.
 | `rift.players.title(player, title)` | Boolean: a title was queued; `title` is text or an options table |
 | `rift.players.tab_list(player, options)` | Boolean: a tab list header and footer were queued; omit `options` to restore the configured ones |
 | `rift.players.boss_bar(player, name, options)` | Boolean: a boss bar was queued; omit `options` to remove the bar called `name` |
+| `rift.players.dialog(player, dialog)` | Boolean: a [dialog](dialogs.md) was queued; false for players older than 1.21.6 |
+| `rift.players.clear_dialog(player)` | Boolean: closing Rift's dialog was queued |
 | `rift.players.kick(player, reason)` | Boolean: a disconnect with this reason (a string or a chat component table) was queued |
 | `rift.players.transfer(player, server)` | Boolean: a transfer request was queued |
 | `rift.players.broadcast(text, server)` | Number of players a chat message (a string or a chat component table) was queued for; `server` is optional |
@@ -601,8 +604,8 @@ queued, or false when the player is offline or already has 32 undelivered
 actions; it never waits for the client. The player's own session writes queued
 actions in order while it is in a usable world, so they wait while a transfer is
 in progress. An action other than a kick, tab list or boss bar that meets a
-backend-initiated reconfiguration is dropped; tab lists and boss bars apply
-after the next join. Undelivered actions are lost on disconnect. Each
+backend-initiated reconfiguration is dropped (a dialog too: configuration
+closes every screen); tab lists and boss bars apply after the next join. Undelivered actions are lost on disconnect. Each
 callback can make at most 256 action calls; a broadcast counts once.
 
 A transfer takes the same path as `/server`: static access, health and draining
@@ -612,6 +615,43 @@ player where they are without a message, and the current server is never a
 target. A service group selects one of its instances. A kick closes the
 connection with the given reason and runs `disconnect` as usual. Invalid
 arguments, unknown servers and exceeded budgets fail the callback.
+
+[Dialogs](dialogs.md) are screens with text, inputs and buttons (Minecraft
+1.21.6 and newer), described as tables in the vanilla dialog format. A button
+whose `custom` or `dynamic/custom` action has an `id` without a namespace
+calls the `dialog` callback with `ctx.action` (that `id`), `ctx.values` (the
+player's inputs) and `ctx.payload` (the action's `payload` or `additions`,
+which Rift keeps instead of sending them to the client):
+
+```lua
+rift.config.extensions = {
+    api_version = 2,
+    commands = {
+        report = {
+            permission = "network.player",
+            run = function(ctx)
+                rift.players.dialog(ctx.uuid, {
+                    type = "multi_action",
+                    title = "Report a player",
+                    inputs = {
+                        { type = "text", key = "player", label = "Player" },
+                        { type = "text", key = "reason", label = "Reason", max_length = 256 },
+                    },
+                    actions = {
+                        { label = "Send", action = { type = "dynamic/custom", id = "report" } },
+                    },
+                })
+            end,
+        },
+    },
+    dialog = function(ctx)
+        if ctx.action == "report" then
+            rift.publish("staff.reports", ctx.name .. " reported " .. ctx.values.player
+                .. ": " .. ctx.values.reason)
+        end
+    end,
+}
+```
 
 ### Rich text
 
@@ -626,10 +666,11 @@ written. For colours, line breaks, hover text and click events, give a
   `rift.players.message(player, { text = "Hi", bold = true })`;
 - in [bus replies](#decisions-answered-over-the-message-bus), an object or a
   list as the `reason`;
-- in WebAssembly plugins, the `-json` functions and decisions of the plugin
-  contract (`players.message-json`, `action-bar-json`, `kick-json`,
-  `broadcast-json`, `action::deny-json`, `action::message-json`), which take
-  the component as JSON text.
+- in WebAssembly plugins, the `-json` functions of the plugin contract
+  (`players.message-json`, `action-bar-json`, `kick-json`, `broadcast-json`)
+  and the `deny-json` and `message-json` answers of its optional `decisions`
+  export (since 0.1.2), which take the component as JSON text. The SDKs
+  export `decisions` for you.
 
 Rift never reads JSON out of a plain string, so a plugin that relays what a
 player typed cannot be made to send click events. A component may be at most

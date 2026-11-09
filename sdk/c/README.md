@@ -1,6 +1,6 @@
 # Rift C plugin SDK
 
-Write Rift WebAssembly plugins in C (or C++) against the `rift:plugin@0.2.0`
+Write Rift WebAssembly plugins in C (or C++) against the `rift:plugin@0.1.2`
 contract in [`wit/rift-plugin.wit`](../../wit/rift-plugin.wit).
 
 | File | What it is |
@@ -40,7 +40,7 @@ debug info (`-Wl,--strip-debug`) unless you need it: wasi-libc ships with
 DWARF, which more than triples the size of a small plugin.
 
 Check the result with `wasm-tools component wit plugin.wasm`: it must export
-`rift:plugin/handler@0.2.0` and import the `rift:plugin/*` interfaces you use.
+`rift:plugin/handler@0.1.x` and import the `rift:plugin/*` interfaces you use.
 
 Toolchains that only produce core WebAssembly modules (wasi-sdk before 22, or
 `--target=wasm32-wasip1`) need the manual path: build a `wasm32-wasip1`

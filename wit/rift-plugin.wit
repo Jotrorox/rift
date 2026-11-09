@@ -13,8 +13,14 @@
 /// - Every hook is an export and every export has a default in each SDK.
 /// - The guest is single-threaded; the host never calls one instance
 ///   concurrently.
-/// - Additive changes bump the minor version; breaking changes move to 1.0.
-package rift:plugin@0.2.0;
+/// - Additive changes keep compiled components loading: new host functions,
+///   new types and new interfaces, never a changed type or a new case in an
+///   existing enum or variant. Wasmtime matches `@0.1.x` names with each
+///   other, so 0.1.1 adds the optional `dialogs` export and the dialog host
+///   functions, and 0.1.2 the optional `decisions` export and the rich text
+///   host functions, without breaking components built against 0.1.0.
+/// - Breaking changes move to 1.0.
+package rift:plugin@0.1.2;
 
 interface types {
     /// Log severity.
@@ -85,15 +91,27 @@ interface types {
     }
 
     /// The answer to a decision hook. Each hook accepts a subset:
-    /// - login, before-transfer: continue, deny, deny-json
-    /// - initial-server: continue, deny, deny-json, server
-    /// - command: continue, message, message-json, server, queue, leave-queue
+    /// - login, before-transfer: continue, deny
+    /// - initial-server: continue, deny, server
+    /// - command: continue, message, server, queue, leave-queue
+    variant action {
+        continue,
+        deny(string),
+        server(string),
+        message(string),
+        queue(string),
+        leave-queue,
+    }
+
+    /// `action` with rich text (since 0.1.2), the answer of the `decisions`
+    /// export. The hooks accept the same subsets, with `deny-json` wherever
+    /// `deny` is accepted and `message-json` wherever `message` is.
     ///
     /// `deny` and `message` are plain text of 1..=1024 bytes. `deny-json`
     /// and `message-json` are JSON text components of at most 32 KiB, for
     /// colours, line breaks, hover text and click events; text that does not
     /// start with `{`, `[` or `"` is shown as written.
-    variant action {
+    variant decision {
         continue,
         deny(string),
         server(string),
@@ -240,6 +258,25 @@ interface types {
         stay: s32,
         fade-out: s32,
     }
+
+    /// A click on a plugin action of a dialog this plugin showed with
+    /// `players.dialog` (since 0.1.1).
+    record dialog-response {
+        /// The player who clicked. `server` is their current backend; the
+        /// command, target and suggestion fields are empty.
+        ctx: context,
+        /// The action's `id` as the plugin wrote it, such as `submit`.
+        action: string,
+        /// The player's input values by key, as a JSON object: strings for
+        /// text and single-option inputs, booleans, numbers. `{}` for a
+        /// `custom` action. They come from the client: check them like any
+        /// player input.
+        values-json: string,
+        /// The action's `payload` (`custom`) or `additions`
+        /// (`dynamic/custom`) as JSON, exactly as the plugin wrote it. Rift
+        /// keeps it, so the client can neither see nor change it.
+        payload-json: option<string>,
+    }
 }
 
 /// The joined players. `target` is a name, a UUID or a connection id.
@@ -252,24 +289,36 @@ interface players {
     /// Names starting with `prefix`, sorted.
     names: func(prefix: option<string>) -> list<string>;
     /// Each returns whether the player was online. Plain text is 1..=1024
-    /// bytes. The `-json` functions take a JSON text component of at most
-    /// 32 KiB instead; text that does not start with `{`, `[` or `"` is
-    /// shown as written. Rift spells hover and click events the way each
-    /// player's client reads them.
+    /// bytes.
     message: func(target: string, text: string) -> result<bool, string>;
-    message-json: func(target: string, text-json: string) -> result<bool, string>;
     action-bar: func(target: string, text: string) -> result<bool, string>;
-    action-bar-json: func(target: string, text-json: string) -> result<bool, string>;
     title: func(target: string, title: title-spec) -> result<bool, string>;
     /// JSON text components; both `none` restores the configured tab list.
     tab-list: func(target: string, header-json: option<string>, footer-json: option<string>) -> result<bool, string>;
     /// `none` removes the bar called `name`.
     boss-bar: func(target: string, name: string, bar: option<boss-bar-spec>) -> result<bool, string>;
     kick: func(target: string, reason: string) -> result<bool, string>;
-    kick-json: func(target: string, reason-json: string) -> result<bool, string>;
+    /// Show a dialog to a player on Minecraft 1.21.6 or newer, replacing any
+    /// open one (since 0.1.1). `dialog-json` is a dialog in the vanilla JSON
+    /// format; see docs/dialogs.md for the accepted subset. Buttons whose
+    /// `custom` or `dynamic/custom` action has an `id` without a namespace
+    /// come back through the `dialogs` export. Returns false when the player
+    /// is offline, older than 1.21.6 or has too many undelivered actions; an
+    /// invalid dialog is an error.
+    dialog: func(target: string, dialog-json: string) -> result<bool, string>;
+    /// Close the dialog this Rift showed, if it is still open (since 0.1.1).
+    clear-dialog: func(target: string) -> result<bool, string>;
     transfer: func(target: string, server: string) -> result<bool, string>;
     /// Returns how many players received the message.
     broadcast: func(text: string) -> result<u32, string>;
+    /// `message`, `action-bar`, `kick` and `broadcast` with a JSON text
+    /// component of at most 32 KiB instead of plain text, for colours, line
+    /// breaks, hover text and click events (since 0.1.2). Text that does not
+    /// start with `{`, `[` or `"` is shown as written. Rift spells hover and
+    /// click events the way each player's client reads them.
+    message-json: func(target: string, text-json: string) -> result<bool, string>;
+    action-bar-json: func(target: string, text-json: string) -> result<bool, string>;
+    kick-json: func(target: string, reason-json: string) -> result<bool, string>;
     broadcast-json: func(text-json: string) -> result<u32, string>;
 }
 
@@ -390,8 +439,33 @@ interface handler {
     event: func(event: rift-event);
 }
 
-/// Imports and exports without WASI; the host links WASI separately.
-world core {
+/// Dialog clicks (since 0.1.1). Optional: the host calls it only for
+/// components that export it, so components built against 0.1.0 still load.
+/// It runs as an observer, under the same limit as `join`.
+interface dialogs {
+    use types.{dialog-response};
+
+    /// A player clicked a plugin action of a dialog this plugin showed.
+    dialog: func(response: dialog-response);
+}
+
+/// The decision hooks answering with rich text (since 0.1.2). Optional: for a
+/// component that exports it, the host calls these instead of the `handler`
+/// functions of the same names, so components built against 0.1.0 and 0.1.1
+/// still load. Deadlines and failure policies are those of the hooks.
+interface decisions {
+    use types.{context, decision};
+
+    login: func(ctx: context) -> decision;
+    initial-server: func(ctx: context) -> decision;
+    before-transfer: func(ctx: context) -> decision;
+    command: func(ctx: context) -> decision;
+}
+
+/// Every import and the exports every component has, without WASI: what the
+/// host requires. Exports added in later 0.1 releases are looked up
+/// separately.
+world base {
     import players;
     import store;
     import permissions;
@@ -401,6 +475,23 @@ world core {
     import log;
     import meta;
     export handler;
+}
+
+/// The optional exports, which the host looks up one by one: one world
+/// each, so a component may have any of them.
+world optional {
+    export dialogs;
+}
+
+world optional-decisions {
+    export decisions;
+}
+
+/// Imports and exports without WASI; the host links WASI separately.
+world core {
+    include base;
+    export dialogs;
+    export decisions;
 }
 
 /// The world guests build against. TinyGo's `wasip2` target expects the

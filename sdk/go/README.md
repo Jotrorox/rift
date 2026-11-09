@@ -1,6 +1,6 @@
 # Rift Go plugin SDK
 
-Write Rift WebAssembly plugins in Go against the `rift:plugin@0.2.0` contract
+Write Rift WebAssembly plugins in Go against the `rift:plugin@0.1.2` contract
 in [`wit/rift-plugin.wit`](../../wit/rift-plugin.wit).
 
 Module: `github.com/Jotrorox/rift/sdk/go`
@@ -38,7 +38,7 @@ tinygo build -target=wasip2 --wit-package path/to/rift/wit --wit-world plugin -n
 `--wit-package` also accepts a packaged WIT (`wasm-tools component wit
 --wasm -o rift-plugin.wasm wit`). Check the result with
 `wasm-tools component wit plugin.wasm`: it must export
-`rift:plugin/handler@0.2.0` and import the `rift:plugin/*` interfaces you use.
+`rift:plugin/handler@0.1.x` and import the `rift:plugin/*` interfaces you use.
 
 Add this module to your plugin's `go.mod` (inside this repository use a
 `replace` directive, as hello-go does):

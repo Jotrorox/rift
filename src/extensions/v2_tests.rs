@@ -1383,3 +1383,111 @@ fn upgrade_copies_group_memberships_and_legacy_grants_without_touching_the_store
     let store = storage::Store::open(storage).unwrap();
     assert_eq!(store.namespace(MEMBERSHIPS).len(), 2);
 }
+
+#[tokio::test]
+async fn players_api_shows_dialogs_and_the_script_receives_clicks() {
+    let runtime = runtime(
+        r#"api_version=2, login=function(ctx)
+        local players = require('rift.players')
+        assert(players.dialog('Alice', {
+            type = 'multi_action',
+            title = { text = 'Report', color = 'red' },
+            inputs = {
+                { type = 'text', key = 'reason', label = 'Reason' },
+                { type = 'boolean', key = 'agree', label = 'Agree' },
+            },
+            actions = {
+                { label = 'Send', action = { type = 'dynamic/custom', id = 'send', additions = { target = 'Bob' } } },
+            },
+        }))
+        -- JSON text works too; 1.21.5 has no dialogs.
+        assert(not players.dialog('Old', '{"type":"notice","title":"x"}'))
+        assert(not players.dialog('Nobody', { type = 'notice', title = 'x' }))
+        assert(players.clear_dialog('Alice'))
+        assert(not players.clear_dialog('Old'))
+    end, dialog=function(ctx)
+        rift.players.message(ctx.uuid, ctx.action .. ':' .. ctx.values.reason .. ':'
+            .. tostring(ctx.values.agree) .. ':' .. ctx.payload.target)
+    end"#,
+    );
+    let (_alice, mut alice) = joined(&runtime, 9, "Alice", "lobby");
+    let (_old, mut old) = runtime
+        .players()
+        .register(10, &[10; 16], "Old", 770, "lobby");
+    let session = runtime.session(context(9)).unwrap();
+    assert_eq!(session.decision("login").await.unwrap(), Action::Continue);
+    assert!(drain(&mut old).is_empty());
+    let actions = drain(&mut alice);
+    assert_eq!(actions.len(), 2);
+    let PlayerAction::Dialog { dialog, owner } = &actions[0] else {
+        panic!("expected a dialog, got {:?}", actions[0]);
+    };
+    assert_eq!(*owner, crate::dialog::Owner::Script);
+    assert_eq!(actions[1], PlayerAction::ClearDialog);
+    // The kept additions never reach the client.
+    let id = dialog.wire()["actions"][0]["action"]["id"]
+        .as_str()
+        .unwrap();
+    assert!(id.starts_with("rift:dialog/"));
+    assert!(!dialog.wire().to_string().contains("Bob"));
+
+    let (response, _) = dialog
+        .resolve(
+            id,
+            Some(serde_json::json!({"reason": "griefing", "agree": 1})),
+        )
+        .unwrap();
+    session
+        .dialog(crate::dialog::Owner::Script, response)
+        .await
+        .unwrap();
+    assert_eq!(
+        drain(&mut alice),
+        [PlayerAction::Message("send:griefing:true:Bob".into())]
+    );
+}
+
+#[tokio::test]
+async fn invalid_dialogs_fail_the_callback_and_dialog_handlers_need_api_v2() {
+    let runtime = runtime(
+        r#"api_version=2, login=function(ctx)
+        require('rift.players').dialog('Alice', { type = 'notice', title = 'x', after_action = 'none' })
+    end"#,
+    );
+    let (_alice, mut alice) = joined(&runtime, 9, "Alice", "lobby");
+    let error = runtime
+        .session(context(1))
+        .unwrap()
+        .decision("login")
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("pauses the game"), "{error}");
+    assert!(drain(&mut alice).is_empty());
+
+    let error = Config::from_lua(
+        &source("api_version=1, dialog=function(ctx) end"),
+        "dialog-v1.lua",
+    )
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("extensions.dialog requires api_version = 2"),
+        "{error}"
+    );
+    // rift.on("dialog") implies API v2, like rift.every.
+    let config = Config::from_lua(
+        "rift.setup({ listeners = { public = '127.0.0.1:0' }, backends = { lobby = '127.0.0.1:25001' }, routes = { public = 'lobby' }, authentication = { online_mode = true }, forwarding = { mode = 'velocity', secret_env = 'TEST_SECRET' } })
+        for _, event in ipairs({ 'join', 'login', 'disconnect', 'after_transfer' }) do rift.on(event, function(ctx) end) end
+        rift.on('dialog', function(ctx) end)",
+        "dialog-on.lua",
+    )
+    .unwrap();
+    assert!(
+        config
+            .extensions
+            .unwrap()
+            .hook_names()
+            .any(|hook| hook == "dialog")
+    );
+}

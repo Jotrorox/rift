@@ -1,4 +1,4 @@
-//! Engine-neutral mirrors of the `rift:plugin@0.2.0` WIT types
+//! Engine-neutral mirrors of the `rift:plugin@0.1.0` WIT types
 //! (`wit/rift-plugin.wit`). Engines translate their own values (Lua tables,
 //! wasmtime bindgen records) into these; the host never sees engine values.
 //! Core types are reused where their shape already matches the contract.
@@ -12,11 +12,7 @@ pub use crate::{
 };
 
 /// The `rift:plugin` package version this host implements.
-pub const API_VERSION: &str = "0.2";
-/// Older contract versions whose Lua and script plugins still run unchanged:
-/// 0.2 only added functions and decisions. A WebAssembly component is bound
-/// to the exact interfaces it was built against and needs a rebuild.
-pub const LUA_COMPATIBLE: &[&str] = &["0.1"];
+pub const API_VERSION: &str = "0.1";
 
 /// Log severity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -178,10 +174,15 @@ pub enum Hook {
     Message,
     Timer,
     Event,
+    /// A click on a plugin action of a dialog the plugin showed. Like timer
+    /// ticks it is addressed to one plugin, and needs no registration: the
+    /// WIT `hook` enum has no case for it, so WebAssembly plugins built
+    /// against 0.1.0 keep loading.
+    Dialog,
 }
 
 impl Hook {
-    pub const ALL: [Hook; 14] = [
+    pub const ALL: [Hook; 15] = [
         Hook::Route,
         Hook::Login,
         Hook::InitialServer,
@@ -196,6 +197,7 @@ impl Hook {
         Hook::Message,
         Hook::Timer,
         Hook::Event,
+        Hook::Dialog,
     ];
 
     /// The snake_case name used by manifests, Lua and the bus.
@@ -215,6 +217,7 @@ impl Hook {
             Self::Message => "message",
             Self::Timer => "timer",
             Self::Event => "event",
+            Self::Dialog => "dialog",
         }
     }
 
@@ -233,6 +236,7 @@ impl Hook {
                 | Self::Message
                 | Self::Timer
                 | Self::Event
+                | Self::Dialog
         )
     }
 
@@ -264,8 +268,10 @@ pub struct Registration {
 }
 
 impl Registration {
+    /// Dialog clicks reach the plugin that showed the dialog whatever it
+    /// listed (see [`Hook::Dialog`]).
     pub fn wants(&self, hook: Hook) -> bool {
-        self.hooks.is_empty() || self.hooks.contains(&hook)
+        hook == Hook::Dialog || self.hooks.is_empty() || self.hooks.contains(&hook)
     }
 }
 
@@ -312,6 +318,8 @@ pub enum Event {
     Message(BusMessage),
     Timer(u64),
     Event(RiftEvent),
+    /// A dialog click; `Context::dialog` holds the action and values.
+    Dialog(Context),
 }
 
 impl Event {
@@ -331,6 +339,7 @@ impl Event {
             Self::Message(_) => Hook::Message,
             Self::Timer(_) => Hook::Timer,
             Self::Event(_) => Hook::Event,
+            Self::Dialog(_) => Hook::Dialog,
         }
     }
 }
@@ -366,7 +375,8 @@ impl Reply {
             | Hook::Disconnect
             | Hook::Message
             | Hook::Timer
-            | Hook::Event => Self::None,
+            | Hook::Event
+            | Hook::Dialog => Self::None,
         }
     }
 }

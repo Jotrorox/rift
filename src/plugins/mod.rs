@@ -882,6 +882,18 @@ impl Host {
         }
     }
 
+    /// Queue a dialog click for the persistent plugin `name`, which showed
+    /// the dialog. Dropped when no plugin of that name is active.
+    pub(crate) fn dialog(&self, name: &str, input: Context) {
+        if let Some(instance) = self
+            .active()
+            .iter()
+            .find(|instance| instance.name() == name)
+        {
+            notify(self.monitor(), instance, Event::Dialog(input));
+        }
+    }
+
     /// The single owner of a command name, if any.
     pub(crate) fn command_owner(&self, name: &str) -> Option<CommandOwner> {
         if self.script.commands().contains(name) {

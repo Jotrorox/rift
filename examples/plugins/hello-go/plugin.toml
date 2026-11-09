@@ -2,7 +2,7 @@
 # the behaviour); the build writes hello_go.wasm next to this file.
 name = "hello-go"
 version = "0.1.0"
-api = "0.2"
+api = "0.1"
 mode = "persistent"
 engine = "wasm"
 entry = "hello_go.wasm"
