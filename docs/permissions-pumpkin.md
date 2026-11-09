@@ -61,6 +61,54 @@ The backend authenticates on the bus as its own principal, conventionally
 the server process the principal's token in an environment variable and the
 proxy's CA (or certificate) as a PEM file.
 
+### Velocity modern forwarding
+
+The proxy pushes each player's snapshot keyed by the UUID it knows them by,
+before it connects them to the backend. Pumpkin knows the player by the same
+UUID only when it reads it from Velocity modern forwarding, so enable it on
+both sides with the same secret. Rift sends forwarding only in online mode,
+and requires the two together:
+
+```lua
+rift.config.authentication = { online_mode = true, timeout_ms = 10000 }
+rift.config.forwarding = { mode = "velocity", secret_env = "RIFT_FORWARDING_SECRET" }
+```
+
+In Pumpkin's `pumpkin.toml`, with `RIFT_FORWARDING_SECRET`'s value as the
+secret:
+
+```toml
+[networking.proxy]
+enabled = true
+
+[networking.proxy.velocity]
+enabled = true
+secret = "the same secret as RIFT_FORWARDING_SECRET"
+
+[networking.proxy.bungeecord]
+enabled = false
+
+[networking.proxy.vine]
+enabled = false
+```
+
+Pumpkin then takes the player's UUID, name, skin properties and address from
+the proxy, and ignores `[networking.java] online_mode` and `encryption` for
+logins (Rift has already verified the account). Direct connections that
+bypass the proxy are kicked, as they cannot sign the forwarded data. Vine
+takes precedence over Velocity in Pumpkin's login and Rift does not speak it;
+BungeeCord forwarding is not sent by Rift, so Pumpkin would fall back to its
+own UUIDs.
+
+Without Velocity forwarding Pumpkin derives an offline UUID from the name
+(the first 16 bytes of its SHA-256, not vanilla's `OfflinePlayer:` MD5 that an
+offline-mode Rift uses), so the pushed snapshot goes unused and each login
+waits to fetch one (up to `join_timeout_ms`). Permissions still work, keyed by
+Pumpkin's UUID. The plugin warns about this at load: expected behind an
+offline-mode proxy such as `rift dev`, which cannot forward, and a setup error
+otherwise. An enabled Velocity section with an empty secret gets its own
+warning, as Pumpkin then rejects every forwarded login.
+
 ## Configuration
 
 On first start the plugin writes a template to
@@ -102,10 +150,11 @@ their permissions while the proxy is away.
 ## What the plugin does
 
 **Startup.** It starts the client on a small tokio runtime of its own, logs
-`started as server <name>; proxy <address>, offline policy <policy>`, and,
-when the proxy has not answered within the join timeout, `permissions
-unavailable: ... applying the offline policy ...`. The client keeps
-reconnecting with backoff and serves the replica meanwhile.
+`started as server <name>; proxy <address>, offline policy <policy>`, warns
+when Pumpkin's [Velocity forwarding](#velocity-modern-forwarding) is off or
+has no secret, and, when the proxy has not answered within the join
+timeout, `permissions unavailable: ... applying the offline policy ...`. The
+client keeps reconnecting with backoff and serves the replica meanwhile.
 
 **Checks.** A blocking `PlayerPermissionCheckEvent` handler computes the
 player's contexts, asks the replica, and overwrites `event.result` only for
@@ -121,9 +170,10 @@ below). Custom keys are reported to the proxy on `rift.perms.context`
 whenever they change, and again after a reconnect.
 
 **Logins.** A blocking `AsyncPlayerPreLoginEvent` handler waits up to the join
-timeout for the player's snapshot (usually already pushed by the proxy before
-the transfer); without one the offline policy applies to that player and the
-client retries every 5 s. `PlayerLeaveEvent` marks the player as gone, and the
+timeout for the player's snapshot (already pushed by the proxy before the
+transfer when [Velocity forwarding](#velocity-modern-forwarding) is on);
+without one the offline policy applies to that player and the client retries
+every 5 s. `PlayerLeaveEvent` marks the player as gone, and the
 snapshot is evicted 10 minutes later. A login that never reaches the join is
 released after 60 s.
 

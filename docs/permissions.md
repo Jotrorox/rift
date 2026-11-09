@@ -464,11 +464,14 @@ rift.config.messaging = {
 
 The proxy publishes each player's compiled subject before it forwards their
 connection to a backend, so the replica usually holds it before the player
-logs in, and again after every change that affects them. With a principal
-that may receive these snapshots, the proxy reads the login name before
-connecting even without network features. Every committed change is also
-appended to the retained stream `rift.perms.changes`, file-backed beside the
-instance database (`rift.perms-changes/`).
+logs in, and again after every change that affects them. This needs the
+backend to know the player by the proxy's UUID; Pumpkin does only with
+[Velocity modern forwarding](permissions-pumpkin.md#velocity-modern-forwarding),
+and otherwise fetches the snapshot at login. With a principal that may
+receive these snapshots, the proxy reads the login name before connecting
+even without network features. Every committed change is also appended to the
+retained stream `rift.perms.changes`, file-backed beside the instance database
+(`rift.perms-changes/`).
 
 ### `rift dev`
 
