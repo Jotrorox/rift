@@ -3,6 +3,7 @@ pub mod bungeecord;
 pub mod config;
 pub mod database;
 pub mod dialog;
+pub mod environment;
 pub mod extensions;
 pub mod files;
 mod forwarding;
