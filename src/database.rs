@@ -46,6 +46,27 @@ fn private_file(path: &Path) -> io::Result<File> {
     options.open(path)
 }
 
+/// How long [`lock_exclusive`] waits for a lock held elsewhere.
+const LOCK_WAIT: Duration = Duration::from_secs(2);
+
+/// Take an exclusive lock on `file`, waiting up to two seconds if it is held.
+///
+/// A lock released in this process can stay held for a moment: a child forked
+/// by another thread keeps a copy of the descriptor until it calls `exec`,
+/// which then closes it. A lock still held after the wait belongs to another
+/// process, normally a running Rift.
+pub(crate) fn lock_exclusive(file: &File) -> Result<(), fs::TryLockError> {
+    let deadline = Instant::now() + LOCK_WAIT;
+    loop {
+        match file.try_lock() {
+            Err(fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            result => return result,
+        }
+    }
+}
+
 /// The lock file guarding `path`.
 pub(crate) fn lock_path(path: &Path) -> PathBuf {
     let mut lock = path.as_os_str().to_owned();
@@ -67,7 +88,7 @@ impl Database {
         let path = provisioning::checked_path(path)?;
         fs::create_dir_all(path.parent().unwrap())?;
         let lock = private_file(&lock_path(&path))?;
-        lock.try_lock().map_err(|error| {
+        lock_exclusive(&lock).map_err(|error| {
             io::Error::new(
                 io::ErrorKind::ResourceBusy,
                 format!(
@@ -265,6 +286,28 @@ pub fn version(connection: &Connection, component: &str) -> rusqlite::Result<u32
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_lock_released_shortly_after_open_starts_is_taken() {
+        let directory = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("rift-database-lock-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("rift.sqlite3");
+        // Another descriptor holds the lock, as a forked child briefly does.
+        let held = private_file(&lock_path(&path)).unwrap();
+        held.try_lock().unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            drop(held);
+        });
+        let database = Database::open(&path).unwrap();
+        release.join().unwrap();
+        drop(database);
+        fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn components_migrate_independently_and_legacy_versions_seed_once() {
