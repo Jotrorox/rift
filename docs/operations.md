@@ -149,6 +149,9 @@ The `servers` permission grants `rift admin servers`, `rift admin start <backend
 and `rift admin stop <backend>` for configured [managed servers](managed-servers.md).
 It also grants `rift admin groups`, `rift admin create <group>` and
 `rift admin remove <instance>` for [service groups](managed-servers.md#service-groups-and-dynamic-instances),
+`rift admin group start <group>`, `rift admin group stop <group>` and
+`rift admin group mode <group> active|dev` for
+[whole groups](managed-servers.md#start-stop-and-dev-mode-for-a-whole-group),
 and `rift admin nodes` for [node agents](nodes.md).
 Creation allocates a port and registers a stopped backend; removal waits for
 child cleanup and refuses players or pending attachments.

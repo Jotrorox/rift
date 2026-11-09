@@ -6,7 +6,7 @@ use std::{
 };
 
 use rift::{
-    config::{Config, InstanceStorage, Placement, ServiceScaling},
+    config::{Config, GroupMode, InstanceStorage, Placement, ServiceScaling},
     managed::{ManagedServerSnapshot, Phase},
     node::{DEFAULT_INSTANCE_MEMORY_MB, Nodes},
 };
@@ -16,10 +16,15 @@ use crate::{control::Operation, runtime::Snapshot};
 pub enum Change {
     Instance(Operation),
     Start(String),
+    /// Stop a member of a stopped group that has become empty.
+    Stop(String),
 }
 
 /// The longest a group with failed instances waits between changes.
 const MAX_BACKOFF: Duration = Duration::from_secs(300);
+
+/// How long a rejected stop of a stopped group's member waits before retrying.
+const STOP_RETRY: Duration = Duration::from_secs(5);
 
 #[derive(Default)]
 pub struct Scaler {
@@ -29,6 +34,8 @@ pub struct Scaler {
     /// doubles the group's cooldown, so a template that crashes on start is
     /// replaced ever more slowly instead of in a tight create/remove loop.
     failures: BTreeMap<String, u32>,
+    /// When each member of a stopped group was last asked to stop.
+    stops: BTreeMap<String, Instant>,
 }
 
 /// The cooldown after `failures` consecutive changes made around failed
@@ -52,10 +59,9 @@ impl Scaler {
             .and_then(|last| groups.iter().position(|(name, _)| *name > last))
             .unwrap_or(0);
         groups.rotate_left(start);
+        self.stops
+            .retain(|_, at| now.saturating_duration_since(*at) < STOP_RETRY);
         for (name, group) in groups {
-            let Some(policy) = &group.scaling else {
-                continue;
-            };
             let members: Vec<_> = servers
                 .iter()
                 .filter(|server| {
@@ -66,6 +72,23 @@ impl Scaler {
                         .is_some_and(|instance| instance.group == *name)
                 })
                 .collect();
+            // Operator state outranks the scaling policy: a stopped group
+            // only winds down, and a group in dev mode is left as it is.
+            let state = snapshot.control.group(name);
+            if state.suspended {
+                if let Some(server) = stop_candidate(&members, &self.stops) {
+                    self.stops.insert(server.clone(), now);
+                    self.last_group = Some(name.clone());
+                    return Some(Change::Stop(server));
+                }
+                continue;
+            }
+            if state.mode == GroupMode::Dev {
+                continue;
+            }
+            let Some(policy) = &group.scaling else {
+                continue;
+            };
             let failing = members.iter().any(|server| server.state == Phase::Failed);
             if !failing {
                 self.failures.remove(name);
@@ -99,6 +122,25 @@ impl Scaler {
         }
         None
     }
+}
+
+/// The next member of a stopped group to stop: one that is empty, would
+/// still wake on its own and was not just asked. Occupied members keep
+/// running, draining, until their players leave.
+fn stop_candidate(
+    members: &[&ManagedServerSnapshot],
+    recent: &BTreeMap<String, Instant>,
+) -> Option<String> {
+    members
+        .iter()
+        .find(|server| {
+            server.automatic_enabled
+                && server.players == 0
+                && server.reservations == 0
+                && !matches!(server.state, Phase::Stopping | Phase::Unknown)
+                && !recent.contains_key(&server.name)
+        })
+        .map(|server| server.name.clone())
 }
 
 fn desired(policy: &ServiceScaling, load: usize, queued: usize) -> usize {
@@ -532,6 +574,56 @@ rift.config.service_groups.lobby={template='t',port_range={31000,31099},nodes={'
         let next = Snapshot::new(config, Some(&snapshot)).unwrap();
         assert!(scaler.next(&next, now + Duration::from_secs(4)).is_none());
         assert!(scaler.next(&next, now + Duration::from_secs(5)).is_some());
+    }
+
+    #[test]
+    fn stopped_groups_only_stop_empty_members_and_dev_groups_are_frozen() {
+        let mut paused = server("game-4", 0, 0, Phase::Stopped);
+        paused.automatic_enabled = false;
+        let members = [
+            server("game-1", 3, 0, Phase::Running),
+            server("game-2", 0, 1, Phase::Running),
+            server("game-3", 0, 0, Phase::Stopping),
+            paused,
+            server("game-5", 0, 0, Phase::Unknown),
+            server("game-6", 0, 0, Phase::Running),
+            server("game-7", 0, 0, Phase::Stopped),
+        ];
+        let members: Vec<_> = members.iter().collect();
+        let mut recent = BTreeMap::new();
+        // Occupied, reserved, stopping, already paused and unreachable
+        // members are left alone; idle-stopped ones are paused too.
+        assert_eq!(stop_candidate(&members, &recent).as_deref(), Some("game-6"));
+        recent.insert("game-6".to_owned(), Instant::now());
+        assert_eq!(stop_candidate(&members, &recent).as_deref(), Some("game-7"));
+        recent.insert("game-7".to_owned(), Instant::now());
+        assert_eq!(stop_candidate(&members, &recent), None);
+
+        // A group below its minimum creates nothing while stopped or in dev
+        // mode, and scales again once active.
+        let source = "return {listeners={public='127.0.0.1:0'},backends={},routes={public='game'},service_groups={game={command={'unused'},directory='instances/{name}',port_range={26000,26003},scaling={capacity_per_instance=10}}}}";
+        let config = rift::config::Config::from_lua(source, "stopped-scaling.lua").unwrap();
+        let snapshot = Snapshot::new(config, None).unwrap();
+        let mut scaler = Scaler::default();
+        let now = Instant::now();
+        snapshot
+            .update_group("game", |state| state.suspended = true)
+            .unwrap();
+        assert!(scaler.next(&snapshot, now).is_none());
+        snapshot
+            .update_group("game", |state| {
+                state.suspended = false;
+                state.mode = GroupMode::Dev;
+            })
+            .unwrap();
+        assert!(scaler.next(&snapshot, now).is_none());
+        snapshot
+            .update_group("game", |state| state.mode = GroupMode::Active)
+            .unwrap();
+        assert!(matches!(
+            scaler.next(&snapshot, now),
+            Some(Change::Instance(Operation::CreateInstance { .. }))
+        ));
     }
 
     #[test]
