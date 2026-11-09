@@ -127,9 +127,12 @@ h3{margin:20px 0 8px;font-size:.9375rem;font-weight:600;color:var(--label)}
 h3:first-child{margin-top:0}
 .panel-note{margin:0 0 14px;padding:0 var(--pad);max-width:76ch;color:var(--secondary);font-size:.8125rem}
 .panel-note.flush{margin:0;padding:0}
+.panel>.panel-note:first-child{padding-top:16px}
 .tag{display:inline-flex;align-items:center;gap:6px;padding:2px 9px;border-radius:999px;background:var(--fill);color:var(--secondary);font-size:.75rem;font-weight:500;white-space:nowrap}
 .tag.good{background:var(--green-soft);color:var(--green)}
 .tag.warning{background:var(--orange-soft);color:var(--orange)}
+.tag.accent{background:var(--accent-soft);color:var(--link)}
+td .tag+.tag{margin-left:6px}
 .table-wrap{overflow-x:auto;border-top:1px solid var(--separator)}
 .table-wrap.flush{border-top:0}
 table{width:100%;border-collapse:collapse;text-align:left}

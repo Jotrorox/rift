@@ -212,7 +212,7 @@ rift.config.web = {
 | `read` | Status, metrics and scoped group/server listings; include it for dashboard use |
 | `logs` | Read managed server logs within the operator's scope |
 | `console` | Send commands with the managed server's console privileges |
-| `servers` | Start/stop servers and create/remove instances within scope |
+| `servers` | Start/stop servers and whole groups, switch group modes and create/remove instances within scope |
 | `config` | Read, validate, edit and reload complete Lua source and structured definitions |
 | `deploy` | View configuration deployment metadata and restore retained deployments |
 | `audit` | View operator records; group-scoped operators see only their own records |
@@ -273,7 +273,7 @@ Errors use `{"error":"description"}`. `GET /api` provides endpoint discovery.
 | `GET /api/deployments` | Retained deployment metadata, active revision, retention limit and durability flag; never includes source |
 | `POST /api/deployments/{id}/rollback` | Validate and restore a retained configuration with `{revision}` |
 | `GET /api/audit` | Latest operator records and durability flag |
-| `GET /api/groups` | `{groups: [...]}` with group names, inclusive port ranges, instance names, template and storage policy, and `nodes`/`placement` for groups on [nodes](nodes.md) |
+| `GET /api/groups` | `{groups: [...]}` with group names, inclusive port ranges, instance names, template and storage policy, `nodes`/`placement` for groups on [nodes](nodes.md), the operator state `suspended` and `mode` (`active` or `dev`) with its `dev_permission`, and a `summary` of instance states (`running`, `starting`, `stopping`, `stopped`, `failed`, `unknown`), `players`, and `draining` (occupied instances of a stopped group still waiting to stop) |
 | `GET /api/plugins` | `{plugins: [...]}`: every [plugin](plugins.md#operator-surface) in dispatch order with `name`, `mode`, `engine`, `version`, `status`, `restarts`, `calls`, `last_error`, `hooks`, `commands`, `capabilities` and `restartable`; unrestricted operators only |
 | `GET /api/plugins/{name}` | One plugin's entry, or `404` |
 | `GET /api/plugins/{name}/logs` | `{plugin, lines}`: the last 200 log lines of a persistent plugin as `{timestamp_unix_ms, level, message}`; `logs` permission |
@@ -281,6 +281,9 @@ Errors use `{"error":"description"}`. `GET /api` provides endpoint discovery.
 | `GET /api/nodes` | `{nodes: [...]}` with each [node](nodes.md)'s `state` (`online`, `unreachable`, `never_connected`), address, labels, `instances`, `max_instances`, `memory_mb`, `allocated_memory_mb`, agent `version` and `last_seen_ms` |
 | `POST /api/groups/{name}/instances` | Submit provisioning with `{}`; returns `202` with `{operation_id, status: "pending", poll}` (autostart follows group policy) |
 | `DELETE /api/instances/{name}` | Submit removal of an unused instance with `{}`; returns `202` with `{operation_id, status: "pending", poll}` |
+| `POST /api/groups/{name}/start` | Start a whole [service group](managed-servers.md#start-stop-and-dev-mode-for-a-whole-group) with `{}`: resume it and start every instance that is not running; returns `202` with `{group, suspended, mode, instances}` |
+| `POST /api/groups/{name}/stop` | Stop a whole group with `{}`: keep new players out, pause scaling and stop every empty instance now and the others once their players leave; returns `202` with the same shape |
+| `PUT /api/groups/{name}/mode` | Set `{"mode": "dev"}` or `{"mode": "active"}`; returns `200` with `{group, suspended, mode, dev_permission}` |
 | `GET /api/operations/{id}` | Retrieve instance or download operation state and its completed result; requires current `servers` permission and the operation's group scope |
 | `GET /api/templates` | `{templates: [...]}` with names, the groups using them, counts of config layers and plugins, and `software` with its download cache state (`cached`, `resolved_version`, `build`, `size`, `sha256`); never includes asset paths |
 | `POST /api/templates/{name}/download` | Download (`{}`) or refresh (`{"refresh":true}`) a template's server software ahead of instance creation; `servers` permission, returns `202` with an operation to poll |
@@ -343,6 +346,16 @@ are retained for 10 minutes, then polls return `404`. Records are in memory
 and do not survive proxy restarts. Pending operations retain their slots
 until completion, regardless of HTTP disconnections. Each poll checks current
 permissions and the group saved at submission, including after removal.
+
+Whole-group operations need `servers` and the group's scope, and are audited
+as `start_group`, `stop_group` and `group_mode`. They record the group's state
+and return immediately; each entry of `instances` is `{name, result}` with an
+optional `message`, where `result` is `starting`, `running` (already up),
+`stopping`, `stopped` (already stopped), `draining` (has players; stops once
+they leave) or `failed`. Process changes complete asynchronously; poll
+`/api/servers`, whose entries carry `group_suspended`, `group_mode` and
+`draining`. Unknown groups are `404`, an unknown mode `400`, and creating an
+instance in a stopped group fails with `409`.
 The dashboard polls through long operations, displays operation failures and
 cleanup warnings, and identifies unresolved operations if polling fails.
 

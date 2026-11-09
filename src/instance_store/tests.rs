@@ -589,3 +589,41 @@ fn remote_registrations_never_touch_local_storage() {
     assert!(store.records().unwrap().is_empty());
     assert!(!fixture.root.join("temp").exists());
 }
+
+#[test]
+fn group_states_persist_apart_from_the_instance_schema() {
+    let fixture = Fixture::new("persistent");
+    let store = fixture.store();
+    assert!(store.group_states().unwrap().is_empty());
+    let dev = GroupState {
+        suspended: true,
+        mode: GroupMode::Dev,
+    };
+    store.set_group_state("games", dev).unwrap();
+    store
+        .set_group_state(
+            "lobby",
+            GroupState {
+                suspended: true,
+                mode: GroupMode::Active,
+            },
+        )
+        .unwrap();
+    drop(store);
+    let store = fixture.store();
+    let states = store.group_states().unwrap();
+    assert_eq!(states.len(), 2);
+    assert_eq!(states["games"], dev);
+    // The default state is not stored.
+    store
+        .set_group_state("lobby", GroupState::default())
+        .unwrap();
+    assert_eq!(
+        store.group_states().unwrap().keys().collect::<Vec<_>>(),
+        ["games"]
+    );
+    // The instance schema keeps its version, so older releases still open it.
+    let connection = store.database().lock();
+    assert_eq!(database::version(&connection, "instances").unwrap(), 2);
+    assert_eq!(database::version(&connection, "groups").unwrap(), 1);
+}
