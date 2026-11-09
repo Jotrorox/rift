@@ -1111,6 +1111,27 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             .await
     }
 
+    /// A chat message from plain text or a validated JSON text component.
+    pub async fn send_text(&mut self, message: &crate::text::Text) -> io::Result<()> {
+        match message {
+            crate::text::Text::Plain(text) => self.send_system_message(text).await,
+            crate::text::Text::Component(component) => self.send_system_component(component).await,
+        }
+    }
+
+    /// An action bar from plain text or a validated JSON text component.
+    pub async fn send_action_bar_text(&mut self, message: &crate::text::Text) -> io::Result<()> {
+        let crate::text::Text::Component(component) = message else {
+            return self.send_action_bar(&message.to_string()).await;
+        };
+        self.client.flush_pending().await?;
+        if !self.client.state.settled(State::Play) {
+            return Err(protocol::invalid("action bar messages require play state"));
+        }
+        self.send_client(&protocol::action_bar_component(self.version()?, component)?)
+            .await
+    }
+
     pub async fn send_action_bar(&mut self, message: &str) -> io::Result<()> {
         self.client.flush_pending().await?;
         if !self.client.state.settled(State::Play) {
@@ -1704,6 +1725,14 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             protocol::disconnect_component(version, state, reason)
         })
         .await
+    }
+
+    /// Disconnect with plain text or a validated JSON text component.
+    pub async fn disconnect_text(&mut self, reason: &crate::text::Text) -> io::Result<()> {
+        match reason {
+            crate::text::Text::Plain(text) => self.disconnect(text).await,
+            crate::text::Text::Component(component) => self.disconnect_component(component).await,
+        }
     }
 
     async fn disconnect_with(

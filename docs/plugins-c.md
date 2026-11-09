@@ -72,8 +72,8 @@ Rust, Go and Lua examples.
 | --- | --- |
 | `handler` exports | `exports_rift_plugin_handler_<hook>` with the exact signatures in `rift_plugin.h`. `rift_plugin_defaults.c` provides weak no-op versions; define only the hooks you need. |
 | `registration` | `rift_registration_init`, `rift_registration_add_hook`, `rift_registration_add_command`, `rift_registration_add_command_fixed`. |
-| `action` | `rift_action_continue`, `rift_action_deny`, `rift_action_server`, `rift_action_message`, `rift_action_queue`, `rift_action_leave_queue`. |
-| host functions | `rift_plugin_<interface>_<function>`, for example `rift_plugin_players_message`, `rift_plugin_store_increment`, `rift_plugin_bus_publish`, `rift_plugin_timers_every`. |
+| `action` | `rift_action_continue`, `rift_action_deny`, `rift_action_deny_json`, `rift_action_server`, `rift_action_message`, `rift_action_message_json`, `rift_action_queue`, `rift_action_leave_queue`. The `_json` forms take a JSON text component ([rich text](extensions.md#rich-text)). |
+| host functions | `rift_plugin_<interface>_<function>`, for example `rift_plugin_players_message`, `rift_plugin_players_message_json`, `rift_plugin_store_increment`, `rift_plugin_bus_publish`, `rift_plugin_timers_every`. `rift_message` and `rift_message_json` wrap the chat message calls. |
 | `result<T, string>` | The function returns `bool` and fills a `ret` and an `err` out-parameter. |
 | `option<T>` parameters | Pointers; `NULL` is `none`. |
 | `log` | `rift_log(RIFT_INFO, "format %d", value)`. |

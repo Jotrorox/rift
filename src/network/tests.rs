@@ -484,7 +484,7 @@ async fn queue_command_waits_for_capacity_and_transfer_policy_runs_before_target
             extensions={api_version=1, queues={survival=1},
                 commands={queue={permission='queue.use',run=function() return {queue='survival'} end}},
                 before_transfer=function(ctx)
-                    if ctx.reason ~= 'queue' then return {deny='Use the queue'} end
+                    if ctx.reason ~= 'queue' then return {deny={text='Use the queue',color='gold'}} end
                 end,
                 after_transfer=function(ctx) rift.publish('observed', tostring(ctx.success)) end
             }
@@ -531,9 +531,14 @@ async fn queue_command_waits_for_capacity_and_transfer_policy_runs_before_target
         session.extension.as_mut().unwrap().ready("lobby").await;
         assert!(session.can_switch());
 
-        // A manually typed built-in route cannot bypass the extension policy.
+        // A manually typed built-in route cannot bypass the extension policy,
+        // and the player sees the hook's reason with its formatting.
         assert!(network.command(&mut session,"lobby","server survival",&mut event).await.unwrap().is_none());
-        assert_eq!(read(&mut client).await.id, 0x77);
+        let denied = read(&mut client).await;
+        assert_eq!(denied.id, 0x77);
+        let contains = |needle: &[u8]| denied.data.windows(needle.len()).any(|window| window == needle);
+        assert!(contains(b"Unable to switch servers: ") && contains(b"Use the queue"));
+        assert!(contains(b"color") && contains(b"gold"));
         assert!(timeout(Duration::from_millis(10), game.accept()).await.is_err());
         let mut command=Vec::new(); write_string("queue", &mut command);
         Codec::default().write(&mut client, &Packet::new(6,command)).await.unwrap();

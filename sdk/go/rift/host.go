@@ -74,9 +74,20 @@ func PlayerNames(prefix string) []string {
 // id) and reports whether the player was online.
 func SendMessage(target, text string) (bool, error) { return unwrap(players.Message(target, text)) }
 
+// SendMessageJSON sends a chat message given as a JSON text component of at
+// most 32 KiB, for colours, hover text and click events.
+func SendMessageJSON(target, textJSON string) (bool, error) {
+	return unwrap(players.MessageJSON(target, textJSON))
+}
+
 // SendActionBar shows text above a player's hotbar.
 func SendActionBar(target, text string) (bool, error) {
 	return unwrap(players.ActionBar(target, text))
+}
+
+// SendActionBarJSON shows a JSON text component above a player's hotbar.
+func SendActionBarJSON(target, textJSON string) (bool, error) {
+	return unwrap(players.ActionBarJSON(target, textJSON))
 }
 
 // SendTitle shows a title to a player.
@@ -119,11 +130,20 @@ func ClearDialog(target string) (bool, error) { return unwrap(players.ClearDialo
 // Kick disconnects a player with a reason.
 func Kick(target, reason string) (bool, error) { return unwrap(players.Kick(target, reason)) }
 
+// KickJSON disconnects a player with a reason given as a JSON text component.
+func KickJSON(target, reasonJSON string) (bool, error) {
+	return unwrap(players.KickJSON(target, reasonJSON))
+}
+
 // Transfer moves a player to a server.
 func Transfer(target, server string) (bool, error) { return unwrap(players.Transfer(target, server)) }
 
 // Broadcast messages every joined player and returns how many received it.
 func Broadcast(text string) (uint32, error) { return unwrap(players.Broadcast(text)) }
+
+// BroadcastJSON sends a JSON text component to every joined player and
+// returns how many received it.
+func BroadcastJSON(textJSON string) (uint32, error) { return unwrap(players.BroadcastJSON(textJSON)) }
 
 // Store. Namespaces are prefixed with plugin.<name>. by the host.
 

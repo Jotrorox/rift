@@ -284,6 +284,7 @@ end)
     let Action::Deny(errors) = session(&runtime, 1, "A").decision("login").await.unwrap() else {
         panic!("login should deny with the errors");
     };
+    let errors = errors.to_string();
     assert!(
         errors.contains("rift.on is only available while the plugin initializes"),
         "{errors}"

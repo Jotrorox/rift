@@ -1,12 +1,13 @@
-//! Host bindings for `rift:plugin@0.1.1`: generated types and traits, the
+//! Host bindings for `rift:plugin@0.1.2`: generated types and traits, the
 //! trait implementations that forward every import to
 //! [`Services`](crate::plugins::services::Services), and conversions between
 //! the generated types and the engine-neutral [`api`] types. WASI is linked
 //! separately (see [`super::wasi`]).
 //!
 //! The host binds world `base` (every import and the `handler` export that
-//! every component has) and, separately, world `optional`, whose exports a
-//! component built against an older 0.1 lacks; see [`Optional::load`].
+//! every component has) and, separately, worlds `optional` (`dialogs`) and
+//! `optional-decisions` (`decisions`), whose exports a component built
+//! against an older 0.1 lacks; see [`Optional::load`].
 use super::State;
 use crate::plugins::api;
 
@@ -20,6 +21,17 @@ pub(super) mod optional {
     wasmtime::component::bindgen!({
         path: "wit",
         world: "rift:plugin/optional",
+        with: {
+            "rift:plugin/types": super::rift::plugin::types,
+        },
+    });
+}
+
+/// The optional `decisions` export (since 0.1.2), sharing `base`'s types.
+pub(super) mod optional_decisions {
+    wasmtime::component::bindgen!({
+        path: "wit",
+        world: "rift:plugin/optional-decisions",
         with: {
             "rift:plugin/types": super::rift::plugin::types,
         },
@@ -121,12 +133,29 @@ pub(super) fn route_decision(decision: types::RouteDecision) -> api::RouteDecisi
 pub(super) fn action(action: types::Action) -> api::Action {
     match action {
         types::Action::Continue => api::Action::Continue,
-        types::Action::Deny(reason) => api::Action::Deny(reason),
+        types::Action::Deny(reason) => api::Action::Deny(reason.into()),
         types::Action::Server(server) => api::Action::Server(server),
-        types::Action::Message(text) => api::Action::Message(text),
+        types::Action::Message(text) => api::Action::Message(text.into()),
         types::Action::Queue(server) => api::Action::Queue(server),
         types::Action::LeaveQueue => api::Action::LeaveQueue,
     }
+}
+
+/// The `decisions` export's answer. Fails for a `-json` case whose text is
+/// not a valid text component; the host then treats the decision like any
+/// other invalid one.
+pub(super) fn decision(decision: types::Decision) -> Result<api::Action, String> {
+    use crate::text::Text;
+    Ok(match decision {
+        types::Decision::Continue => api::Action::Continue,
+        types::Decision::Deny(reason) => api::Action::Deny(reason.into()),
+        types::Decision::Server(server) => api::Action::Server(server),
+        types::Decision::Message(text) => api::Action::Message(text.into()),
+        types::Decision::Queue(server) => api::Action::Queue(server),
+        types::Decision::LeaveQueue => api::Action::LeaveQueue,
+        types::Decision::DenyJson(reason) => api::Action::Deny(Text::json(&reason, "deny reason")?),
+        types::Decision::MessageJson(text) => api::Action::Message(Text::json(&text, "message")?),
+    })
 }
 
 pub(super) fn suggestions(suggestions: Vec<types::Suggestion>) -> Vec<api::Suggestion> {
@@ -285,8 +314,16 @@ impl players::Host for State {
         self.services.players().message(&target, &text)
     }
 
+    fn message_json(&mut self, target: String, text_json: String) -> Result<bool, String> {
+        self.services.players().message_json(&target, &text_json)
+    }
+
     fn action_bar(&mut self, target: String, text: String) -> Result<bool, String> {
         self.services.players().action_bar(&target, &text)
+    }
+
+    fn action_bar_json(&mut self, target: String, text_json: String) -> Result<bool, String> {
+        self.services.players().action_bar_json(&target, &text_json)
     }
 
     fn title(&mut self, target: String, spec: types::TitleSpec) -> Result<bool, String> {
@@ -328,12 +365,20 @@ impl players::Host for State {
         self.services.players().kick(&target, &reason)
     }
 
+    fn kick_json(&mut self, target: String, reason_json: String) -> Result<bool, String> {
+        self.services.players().kick_json(&target, &reason_json)
+    }
+
     fn transfer(&mut self, target: String, server: String) -> Result<bool, String> {
         self.services.players().transfer(&target, &server)
     }
 
     fn broadcast(&mut self, text: String) -> Result<u32, String> {
         self.services.players().broadcast(&text)
+    }
+
+    fn broadcast_json(&mut self, text_json: String) -> Result<u32, String> {
+        self.services.players().broadcast_json(&text_json)
     }
 }
 

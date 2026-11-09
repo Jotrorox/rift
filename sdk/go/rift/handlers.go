@@ -3,6 +3,7 @@ package rift
 import (
 	"go.bytecodealliance.org/cm"
 
+	"github.com/Jotrorox/rift/sdk/go/gen/rift/plugin/decisions"
 	"github.com/Jotrorox/rift/sdk/go/gen/rift/plugin/dialogs"
 	"github.com/Jotrorox/rift/sdk/go/gen/rift/plugin/handler"
 	"github.com/Jotrorox/rift/sdk/go/gen/rift/plugin/types"
@@ -142,6 +143,12 @@ func OnDialog(f func(DialogResponse)) { onDialog = f }
 
 func init() {
 	dialogs.Exports.Dialog = func(r types.DialogResponse) { onDialog(liftDialogResponse(r)) }
+	// Hosts from rift:plugin 0.1.2 ask decisions; older ones the handler.
+	d := &decisions.Exports
+	d.Login = func(c types.Context) types.Decision { return onLogin(liftContext(c)).lowerDecision() }
+	d.InitialServer = func(c types.Context) types.Decision { return onInitialServer(liftContext(c)).lowerDecision() }
+	d.BeforeTransfer = func(c types.Context) types.Decision { return onBeforeTransfer(liftContext(c)).lowerDecision() }
+	d.Command = func(c types.Context) types.Decision { return onCommand(liftContext(c)).lowerDecision() }
 	e := &handler.Exports
 	e.Init = func(configJSON string) cm.Result[handler.RegistrationShape, types.Registration, string] {
 		reg, err := onInit(configJSON)

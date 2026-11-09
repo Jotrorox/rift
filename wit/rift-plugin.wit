@@ -17,9 +17,10 @@
 ///   new types and new interfaces, never a changed type or a new case in an
 ///   existing enum or variant. Wasmtime matches `@0.1.x` names with each
 ///   other, so 0.1.1 adds the optional `dialogs` export and the dialog host
-///   functions without breaking components built against 0.1.0.
+///   functions, and 0.1.2 the optional `decisions` export and the rich text
+///   host functions, without breaking components built against 0.1.0.
 /// - Breaking changes move to 1.0.
-package rift:plugin@0.1.1;
+package rift:plugin@0.1.2;
 
 interface types {
     /// Log severity.
@@ -100,6 +101,25 @@ interface types {
         message(string),
         queue(string),
         leave-queue,
+    }
+
+    /// `action` with rich text (since 0.1.2), the answer of the `decisions`
+    /// export. The hooks accept the same subsets, with `deny-json` wherever
+    /// `deny` is accepted and `message-json` wherever `message` is.
+    ///
+    /// `deny` and `message` are plain text of 1..=1024 bytes. `deny-json`
+    /// and `message-json` are JSON text components of at most 32 KiB, for
+    /// colours, line breaks, hover text and click events; text that does not
+    /// start with `{`, `[` or `"` is shown as written.
+    variant decision {
+        continue,
+        deny(string),
+        server(string),
+        message(string),
+        queue(string),
+        leave-queue,
+        deny-json(string),
+        message-json(string),
     }
 
     record suggestion {
@@ -268,7 +288,8 @@ interface players {
     get: func(target: string) -> result<option<player-info>, string>;
     /// Names starting with `prefix`, sorted.
     names: func(prefix: option<string>) -> list<string>;
-    /// Each returns whether the player was online.
+    /// Each returns whether the player was online. Plain text is 1..=1024
+    /// bytes.
     message: func(target: string, text: string) -> result<bool, string>;
     action-bar: func(target: string, text: string) -> result<bool, string>;
     title: func(target: string, title: title-spec) -> result<bool, string>;
@@ -290,6 +311,15 @@ interface players {
     transfer: func(target: string, server: string) -> result<bool, string>;
     /// Returns how many players received the message.
     broadcast: func(text: string) -> result<u32, string>;
+    /// `message`, `action-bar`, `kick` and `broadcast` with a JSON text
+    /// component of at most 32 KiB instead of plain text, for colours, line
+    /// breaks, hover text and click events (since 0.1.2). Text that does not
+    /// start with `{`, `[` or `"` is shown as written. Rift spells hover and
+    /// click events the way each player's client reads them.
+    message-json: func(target: string, text-json: string) -> result<bool, string>;
+    action-bar-json: func(target: string, text-json: string) -> result<bool, string>;
+    kick-json: func(target: string, reason-json: string) -> result<bool, string>;
+    broadcast-json: func(text-json: string) -> result<u32, string>;
 }
 
 /// The durable key-value store. Namespaces are prefixed with
@@ -419,6 +449,19 @@ interface dialogs {
     dialog: func(response: dialog-response);
 }
 
+/// The decision hooks answering with rich text (since 0.1.2). Optional: for a
+/// component that exports it, the host calls these instead of the `handler`
+/// functions of the same names, so components built against 0.1.0 and 0.1.1
+/// still load. Deadlines and failure policies are those of the hooks.
+interface decisions {
+    use types.{context, decision};
+
+    login: func(ctx: context) -> decision;
+    initial-server: func(ctx: context) -> decision;
+    before-transfer: func(ctx: context) -> decision;
+    command: func(ctx: context) -> decision;
+}
+
 /// Every import and the exports every component has, without WASI: what the
 /// host requires. Exports added in later 0.1 releases are looked up
 /// separately.
@@ -434,15 +477,21 @@ world base {
     export handler;
 }
 
-/// The optional exports, which the host looks up one by one.
+/// The optional exports, which the host looks up one by one: one world
+/// each, so a component may have any of them.
 world optional {
     export dialogs;
+}
+
+world optional-decisions {
+    export decisions;
 }
 
 /// Imports and exports without WASI; the host links WASI separately.
 world core {
     include base;
     export dialogs;
+    export decisions;
 }
 
 /// The world guests build against. TinyGo's `wasip2` target expects the

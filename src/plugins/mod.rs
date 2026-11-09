@@ -1140,11 +1140,13 @@ fn validate_action(hook: Hook, action: &Action) -> Result<(), String> {
         let action: String = format!("{action:?}").chars().take(256).collect();
         return Err(format!("invalid decision for {}: {action}", hook.name()));
     }
-    if let Action::Deny(text) | Action::Server(text) | Action::Message(text) | Action::Queue(text) =
-        action
-        && (text.is_empty() || text.len() > 1024)
-    {
-        return Err("decision string must contain 1..=1024 bytes".into());
+    match action {
+        Action::Deny(text) => text.validate("deny reason")?,
+        Action::Message(text) => text.validate("message")?,
+        Action::Server(text) | Action::Queue(text) if text.is_empty() || text.len() > 1024 => {
+            return Err("decision string must contain 1..=1024 bytes".into());
+        }
+        _ => {}
     }
     Ok(())
 }

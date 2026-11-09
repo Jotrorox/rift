@@ -616,14 +616,16 @@ pub(crate) fn dialog_fields(
 const PERMISSION_EVENTS: &str = "permission_change";
 
 /// A decision hook's answer. Serialized like a Lua result table:
-/// `"continue"`, `{"deny":"reason"}`, `"leave_queue"`.
+/// `"continue"`, `{"deny":"reason"}`, `"leave_queue"`. A deny reason or a
+/// message is a string of plain text or a JSON text component (an object
+/// or a list).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Action {
     Continue,
-    Deny(String),
+    Deny(crate::text::Text),
     Server(String),
-    Message(String),
+    Message(crate::text::Text),
     Queue(String),
     LeaveQueue,
 }
@@ -657,6 +659,19 @@ pub(crate) fn parse_action(hook: &str, value: Value) -> mlua::Result<Action> {
     if key == "leave_queue" && *value == Value::Boolean(true) {
         return Ok(Action::LeaveQueue);
     }
+    if key == "deny" || key == "message" {
+        let label = if key == "deny" {
+            "deny reason"
+        } else {
+            "message"
+        };
+        let text = crate::text::Text::lua(value.clone(), label).map_err(mlua::Error::runtime)?;
+        return Ok(if key == "deny" {
+            Action::Deny(text)
+        } else {
+            Action::Message(text)
+        });
+    }
     let Value::String(value) = value else {
         return Err(mlua::Error::runtime("decision requires a string"));
     };
@@ -667,9 +682,7 @@ pub(crate) fn parse_action(hook: &str, value: Value) -> mlua::Result<Action> {
         ));
     }
     Ok(match key.as_str() {
-        "deny" => Action::Deny(value),
         "server" => Action::Server(value),
-        "message" => Action::Message(value),
         "queue" => Action::Queue(value),
         _ => return Err(mlua::Error::runtime("invalid decision")),
     })
@@ -1445,9 +1458,7 @@ impl ExtensionSession {
             .call("before_transfer", &input, &self.jobs)
             .await?
         {
-            Action::Deny(reason) => {
-                return Err(io::Error::new(io::ErrorKind::PermissionDenied, reason));
-            }
+            Action::Deny(reason) => return Err(crate::text::denied(reason)),
             Action::Continue => {}
             _ => unreachable!(),
         }

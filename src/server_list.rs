@@ -257,8 +257,7 @@ pub(crate) fn motd(value: Value, path: &str) -> Result<Json, String> {
     let motd = match value {
         Value::String(text) => Json::String(utf8(&text, path)?),
         Value::Table(_) => {
-            let mut nodes = 0;
-            let component = component(value, 0, &mut nodes, path)?;
+            let component = chat_component(value, path)?;
             if component.as_object().is_some_and(serde_json::Map::is_empty) {
                 return Err(format!("{path}: chat component must not be empty"));
             }
@@ -275,6 +274,11 @@ pub(crate) fn motd(value: Value, path: &str) -> Result<Json, String> {
         return Err(format!("{path}: exceeds {MAX_MOTD_BYTES} bytes"));
     }
     Ok(motd)
+}
+
+/// A Lua chat component table as JSON: at most 1024 values in 16 levels.
+pub(crate) fn chat_component(value: Value, path: &str) -> Result<Json, String> {
+    component(value, 0, &mut 0, path)
 }
 
 fn component(value: Value, depth: usize, nodes: &mut usize, path: &str) -> Result<Json, String> {

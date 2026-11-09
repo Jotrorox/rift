@@ -1,6 +1,8 @@
 package rift
 
 import (
+	"strings"
+
 	"go.bytecodealliance.org/cm"
 
 	"github.com/Jotrorox/rift/sdk/go/gen/rift/plugin/types"
@@ -100,9 +102,9 @@ func (d RouteDecision) lower() types.RouteDecision {
 }
 
 // Action answers a decision hook. Each hook accepts a subset:
-//   - login, before-transfer: Continue, Deny
-//   - initial-server: Continue, Deny, Server
-//   - command: Continue, Message, Server, Queue, LeaveQueue
+//   - login, before-transfer: Continue, Deny, DenyJSON
+//   - initial-server: Continue, Deny, DenyJSON, Server
+//   - command: Continue, Message, MessageJSON, Server, Queue, LeaveQueue
 type Action struct {
 	kind  uint8
 	value string
@@ -115,6 +117,8 @@ const (
 	actionMessage
 	actionQueue
 	actionLeaveQueue
+	actionDenyJSON
+	actionMessageJSON
 )
 
 // Continue lets the event proceed unchanged.
@@ -123,11 +127,19 @@ func Continue() Action { return Action{kind: actionContinue} }
 // Deny refuses the login or transfer with a reason shown to the player.
 func Deny(reason string) Action { return Action{kind: actionDeny, value: reason} }
 
+// DenyJSON refuses the login or transfer with a JSON text component of at
+// most 32 KiB, for colours, line breaks and hover text.
+func DenyJSON(reason string) Action { return Action{kind: actionDenyJSON, value: reason} }
+
 // Server sends the player to a server.
 func Server(name string) Action { return Action{kind: actionServer, value: name} }
 
 // Message replies to a command with a chat message.
 func Message(text string) Action { return Action{kind: actionMessage, value: text} }
+
+// MessageJSON replies to a command with a JSON text component of at most
+// 32 KiB, for colours, hover text and click events.
+func MessageJSON(text string) Action { return Action{kind: actionMessageJSON, value: text} }
 
 // Queue puts the player into a server's queue.
 func Queue(server string) Action { return Action{kind: actionQueue, value: server} }
@@ -147,9 +159,54 @@ func (a Action) lower() types.Action {
 		return types.ActionQueue(a.value)
 	case actionLeaveQueue:
 		return types.ActionLeaveQueue()
+	// Hosts before rift:plugin 0.1.2 call the handler hooks and have no
+	// rich text: they get the component's words.
+	case actionDenyJSON:
+		return types.ActionDeny(componentWords(a.value))
+	case actionMessageJSON:
+		return types.ActionMessage(componentWords(a.value))
 	default:
 		return types.ActionContinue()
 	}
+}
+
+// lowerDecision is the answer of the decisions export (rift:plugin 0.1.2).
+func (a Action) lowerDecision() types.Decision {
+	switch a.kind {
+	case actionDeny:
+		return types.DecisionDeny(a.value)
+	case actionServer:
+		return types.DecisionServer(a.value)
+	case actionMessage:
+		return types.DecisionMessage(a.value)
+	case actionQueue:
+		return types.DecisionQueue(a.value)
+	case actionLeaveQueue:
+		return types.DecisionLeaveQueue()
+	case actionDenyJSON:
+		return types.DecisionDenyJSON(a.value)
+	case actionMessageJSON:
+		return types.DecisionMessageJSON(a.value)
+	default:
+		return types.DecisionContinue()
+	}
+}
+
+// componentWords is the visible text of a JSON text component, without
+// formatting; text that is not a valid component is returned as it is. It
+// uses the configuration scanner rather than encoding/json, which would add
+// hundreds of kilobytes to every plugin.
+func componentWords(text string) string {
+	p := &jsonScanner{s: text}
+	var out strings.Builder
+	if !p.words(&out, 0) {
+		return text
+	}
+	p.ws()
+	if p.i != len(p.s) {
+		return text
+	}
+	return out.String()
 }
 
 // Suggestion is one completion offered by the suggest hook.

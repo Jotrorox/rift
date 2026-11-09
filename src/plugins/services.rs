@@ -16,6 +16,7 @@ use crate::{
     extensions::{PlayerAction, Players, storage::Store},
     messaging::{Broker, Error as BusError, Stream},
     permissions::Authority,
+    text::Text,
 };
 use bytes::Bytes;
 use rift_permissions::{
@@ -265,14 +266,31 @@ impl PlayersApi<'_> {
     }
 
     pub fn message(&self, target: &str, message: &str) -> Result<bool, String> {
-        self.send(target, PlayerAction::Message(text(message, "message")?))
+        self.message_text(target, Text::plain(message, "message")?)
+    }
+
+    /// `players.message-json`: a JSON text component.
+    pub fn message_json(&self, target: &str, message: &str) -> Result<bool, String> {
+        self.message_text(target, Text::json(message, "message")?)
+    }
+
+    /// A message already checked by [`Text`].
+    pub fn message_text(&self, target: &str, message: Text) -> Result<bool, String> {
+        self.send(target, PlayerAction::Message(message))
     }
 
     pub fn action_bar(&self, target: &str, message: &str) -> Result<bool, String> {
-        self.send(
-            target,
-            PlayerAction::ActionBar(text(message, "action bar text")?),
-        )
+        self.action_bar_text(target, Text::plain(message, "action bar text")?)
+    }
+
+    /// `players.action-bar-json`: a JSON text component.
+    pub fn action_bar_json(&self, target: &str, message: &str) -> Result<bool, String> {
+        self.action_bar_text(target, Text::json(message, "action bar text")?)
+    }
+
+    /// An action bar already checked by [`Text`].
+    pub fn action_bar_text(&self, target: &str, message: Text) -> Result<bool, String> {
+        self.send(target, PlayerAction::ActionBar(message))
     }
 
     pub fn title(&self, target: &str, title: &TitleSpec) -> Result<bool, String> {
@@ -383,7 +401,17 @@ impl PlayersApi<'_> {
     }
 
     pub fn kick(&self, target: &str, reason: &str) -> Result<bool, String> {
-        self.send(target, PlayerAction::Kick(text(reason, "kick reason")?))
+        self.kick_text(target, Text::plain(reason, "kick reason")?)
+    }
+
+    /// `players.kick-json`: a JSON text component.
+    pub fn kick_json(&self, target: &str, reason: &str) -> Result<bool, String> {
+        self.kick_text(target, Text::json(reason, "kick reason")?)
+    }
+
+    /// A kick reason already checked by [`Text`].
+    pub fn kick_text(&self, target: &str, reason: Text) -> Result<bool, String> {
+        self.send(target, PlayerAction::Kick(reason))
     }
 
     pub fn transfer(&self, target: &str, server: &str) -> Result<bool, String> {
@@ -395,11 +423,22 @@ impl PlayersApi<'_> {
         self.broadcast_to(message, None)
     }
 
+    /// `players.broadcast-json`: a JSON text component.
+    pub fn broadcast_json(&self, message: &str) -> Result<u32, String> {
+        self.broadcast_text(Text::json(message, "message")?, None)
+    }
+
     /// Like [`PlayersApi::broadcast`], only to the players on one server or
     /// service group when `server` is set.
     pub fn broadcast_to(&self, message: &str, server: Option<&str>) -> Result<u32, String> {
+        self.broadcast_text(Text::plain(message, "message")?, server)
+    }
+
+    /// A message already checked by [`Text`], to everyone or to the players
+    /// on one server or service group.
+    pub fn broadcast_text(&self, message: Text, server: Option<&str>) -> Result<u32, String> {
         self.players()
-            .broadcast(message, server)
+            .broadcast(&message, server)
             .map(|count| u32::try_from(count).unwrap_or(u32::MAX))
     }
 }

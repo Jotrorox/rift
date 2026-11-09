@@ -136,7 +136,7 @@ impl Decision {
     fn apply(&self, policy: Policy) -> Action {
         match policy {
             Policy::Allow => Action::Continue,
-            Policy::Deny => Action::Deny(self.deny_message.clone()),
+            Policy::Deny => Action::Deny(self.deny_message.as_str().into()),
         }
     }
 
@@ -184,8 +184,9 @@ fn request(hook: &str, input: &Context) -> bytes::Bytes {
 }
 
 /// `{"action":"continue"}`, `{"action":"deny","reason":…}` or, for
-/// `initial_server` only, `{"action":"server","server":…}`. Anything else is
-/// an error, exactly like an invalid Lua result.
+/// `initial_server` only, `{"action":"server","server":…}`. A reason is a
+/// string of plain text or a JSON text component (an object or a list).
+/// Anything else is an error, exactly like an invalid Lua result.
 fn parse_reply(hook: &str, payload: &[u8]) -> io::Result<Action> {
     let fail = |message: &str| invalid(format!("extensions.decisions.{hook}: {message}"));
     let value: serde_json::Value =
@@ -212,15 +213,21 @@ fn parse_reply(hook: &str, payload: &[u8]) -> io::Result<Action> {
     let Some(field) = field else {
         return Ok(Action::Continue);
     };
+    if field == "reason" {
+        let reason = match &object[field] {
+            serde_json::Value::String(text) => crate::text::Text::plain(text.as_str(), "reason"),
+            component @ (serde_json::Value::Object(_) | serde_json::Value::Array(_)) => {
+                crate::text::Text::component(component.clone(), "reason")
+            }
+            _ => Err("reason must be a string or a JSON text component".into()),
+        };
+        return reason.map(Action::Deny).map_err(|error| fail(&error));
+    }
     let text = object[field]
         .as_str()
         .filter(|text| !text.is_empty() && text.len() <= 1024)
         .ok_or_else(|| fail("decision string must contain 1..=1024 bytes"))?;
-    Ok(if field == "reason" {
-        Action::Deny(text.into())
-    } else {
-        Action::Server(text.into())
-    })
+    Ok(Action::Server(text.into()))
 }
 
 #[cfg(test)]
@@ -246,6 +253,20 @@ mod tests {
                 r#"{"action":"deny","reason":"no"}"#,
                 Action::Deny("no".into()),
             ),
+            (
+                "login",
+                r#"{"action":"deny","reason":{"text":"Banned","color":"red"}}"#,
+                Action::Deny(crate::text::Text::Component(
+                    serde_json::json!({"text": "Banned", "color": "red"}),
+                )),
+            ),
+            (
+                "login",
+                r#"{"action":"deny","reason":["Banned",{"text":"!"}]}"#,
+                Action::Deny(crate::text::Text::Component(
+                    serde_json::json!(["Banned", {"text": "!"}]),
+                )),
+            ),
         ] {
             assert_eq!(parse_reply(hook, reply.as_bytes()).unwrap(), expected);
         }
@@ -256,6 +277,12 @@ mod tests {
             ("login", r#"{"action":"deny"}"#),
             ("login", r#"{"action":"deny","reason":""}"#),
             ("login", r#"{"action":"deny","reason":7}"#),
+            ("login", r#"{"action":"deny","reason":{}}"#),
+            ("login", r#"{"action":"deny","reason":{"text":null}}"#),
+            (
+                "initial_server",
+                r#"{"action":"server","server":{"text":"lobby"}}"#,
+            ),
             ("login", long.as_str()),
             ("login", r#"{"action":"continue","reason":"x"}"#),
             ("login", r#"{"action":"allow"}"#),
