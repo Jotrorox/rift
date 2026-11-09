@@ -3232,7 +3232,7 @@ fn plugins_are_listed_restarted_and_audited_over_http_the_admin_socket_and_metri
     fs::create_dir_all(&plugin).unwrap();
     fs::write(
         plugin.join("plugin.toml"),
-        "name = \"beacon\"\nversion = \"1.2.0\"\napi = \"0.1\"\nengine = \"lua\"\n",
+        "name = \"beacon\"\nversion = \"1.2.0\"\napi = \"0.2\"\nengine = \"lua\"\n",
     )
     .unwrap();
     fs::write(

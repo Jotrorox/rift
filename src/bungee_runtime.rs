@@ -12,6 +12,7 @@ use rift::{
     managed::Phase,
     players::Player,
     protocol::{PlayerIdentity, validate_component},
+    text::Text,
 };
 use std::{collections::BTreeMap, io, net::SocketAddr, sync::Arc};
 
@@ -160,12 +161,16 @@ pub fn handle(
             return Ok(None);
         }
         Request::Message { player, message } => {
-            deliver(snapshot, &player, PlayerAction::Message(message));
+            deliver(snapshot, &player, PlayerAction::Message(message.into()));
             return Ok(None);
         }
         Request::MessageRaw { player, message } => {
             if let Some(message) = component(&message) {
-                deliver(snapshot, &player, PlayerAction::RawMessage(message));
+                deliver(
+                    snapshot,
+                    &player,
+                    PlayerAction::Message(Text::Component(message)),
+                );
             }
             return Ok(None);
         }
@@ -173,7 +178,7 @@ pub fn handle(
             snapshot
                 .extensions
                 .players()
-                .send_named(&player, PlayerAction::Kick(reason));
+                .send_named(&player, PlayerAction::Kick(reason.into()));
             return Ok(None);
         }
         Request::KickPlayerRaw { player, reason } => {
@@ -181,7 +186,7 @@ pub fn handle(
                 snapshot
                     .extensions
                     .players()
-                    .send_named(&player, PlayerAction::RawKick(reason));
+                    .send_named(&player, PlayerAction::Kick(Text::Component(reason)));
             }
             return Ok(None);
         }
@@ -671,7 +676,9 @@ mod tests {
             assert_eq!(query(&snapshot, request), None);
         }
         let everyone = PlayerAction::Message("§aeveryone".into());
-        let raw = PlayerAction::RawMessage(serde_json::json!({"text": "raw", "color": "red"}));
+        let raw = PlayerAction::Message(Text::Component(
+            serde_json::json!({"text": "raw", "color": "red"}),
+        ));
         assert_eq!(
             drain(&mut alice),
             [
@@ -686,7 +693,7 @@ mod tests {
                 everyone,
                 PlayerAction::Message("only Bob".into()),
                 raw,
-                PlayerAction::RawKick(serde_json::json!("Raw bye")),
+                PlayerAction::Kick(Text::Component(serde_json::json!("Raw bye"))),
             ]
         );
     }

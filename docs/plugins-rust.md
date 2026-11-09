@@ -42,7 +42,7 @@ strip = true
 
 The release profile above keeps the component small. Check the result with
 `wasm-tools component wit my_plugin.wasm`: it exports
-`rift:plugin/handler@0.1.0` and imports the `rift:plugin/*` interfaces it uses.
+`rift:plugin/handler@0.2.0` and imports the `rift:plugin/*` interfaces it uses.
 
 ## A minimal plugin
 
@@ -89,7 +89,7 @@ rift_plugin::export!(Hello);
 # plugins/my-plugin/plugin.toml
 name = "my-plugin"
 version = "0.1.0"
-api = "0.1"
+api = "0.2"
 engine = "wasm"
 entry = "my_plugin.wasm"
 
@@ -110,7 +110,7 @@ example and the host's conformance fixture.
 | `handler` exports | Methods of the `Plugin` trait; each has a default. `rift_plugin::export!(T)` exports a `T: Plugin + Default`. |
 | plugin state | Fields of your type. The SDK creates one value with `Default` right before `init` and passes it to every hook as `&mut self`; `shutdown` runs last. |
 | `registration` | `Registration::new().command(...).hooks([...])`; `CommandSpec::new(name).permission(node).suggest(kind)`. |
-| `action` | `Action::Continue`, `Action::deny(..)`, `Action::message(..)`, `Action::server(..)`, `Action::Queue(..)`, `Action::LeaveQueue`. |
+| `action` | `Action::Continue`, `Action::deny(..)`, `Action::deny_json(..)`, `Action::message(..)`, `Action::message_json(..)`, `Action::server(..)`, `Action::Queue(..)`, `Action::LeaveQueue`. The `_json` forms take a `serde_json::Value` or JSON text ([rich text](extensions.md#rich-text)). |
 | configuration JSON | `rift_plugin::config::<T>(json)` decodes with serde. |
 | `players`, `store`, `permissions`, `bus`, `servers`, `timers`, `meta` | Modules of the same names with the generated functions. `store::get_json`/`set_json` and `bus::reply(&message, payload)` are helpers. |
 | `log` | `log::info!` and friends: the SDK installs a logger before `init`. Also re-exported as `rift_plugin::log::info!`. |

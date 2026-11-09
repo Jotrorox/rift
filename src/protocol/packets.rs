@@ -464,12 +464,18 @@ pub fn disconnect(
 }
 
 /// Disconnect with a JSON text component, as validated by [`validate_component`].
+/// Hover and click events are spelled the way the client reads them.
 pub fn disconnect_component(
     version: Option<ProtocolVersion>,
     state: State,
     reason: &serde_json::Value,
 ) -> io::Result<Packet> {
-    disconnect_text(version, state, Text::Component(reason))
+    let converted = crate::text::for_client(reason, version);
+    disconnect_text(
+        version,
+        state,
+        Text::Component(converted.as_ref().unwrap_or(reason)),
+    )
 }
 
 pub(crate) fn disconnect_text(
@@ -660,16 +666,34 @@ pub fn system_message(version: ProtocolVersion, message: &str) -> io::Result<Pac
     switching(version)?.system_message(version, Text::Literal(message))
 }
 
-/// A system chat message from a JSON text component, as validated by [`validate_component`].
+/// A system chat message from a JSON text component, as validated by
+/// [`validate_component`]. Hover and click events are spelled the way the
+/// client reads them.
 pub fn system_component(
     version: ProtocolVersion,
     message: &serde_json::Value,
 ) -> io::Result<Packet> {
-    switching(version)?.system_message(version, Text::Component(message))
+    let converted = crate::text::for_client(message, Some(version));
+    switching(version)?.system_message(
+        version,
+        Text::Component(converted.as_ref().unwrap_or(message)),
+    )
 }
 
 pub fn action_bar(version: ProtocolVersion, message: &str) -> io::Result<Packet> {
     switching(version)?.action_bar(version, Text::Literal(message))
+}
+
+/// An action bar from a JSON text component, as validated by [`validate_component`].
+pub fn action_bar_component(
+    version: ProtocolVersion,
+    message: &serde_json::Value,
+) -> io::Result<Packet> {
+    let converted = crate::text::for_client(message, Some(version));
+    switching(version)?.action_bar(
+        version,
+        Text::Component(converted.as_ref().unwrap_or(message)),
+    )
 }
 
 /// Title packets in send order; `times` are fade-in, stay and fade-out ticks.

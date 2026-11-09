@@ -62,7 +62,7 @@ impl Guest {
         std::fs::write(
             folder.join("plugin.toml"),
             format!(
-                "name = \"{}\"\nversion = \"0.1.0\"\napi = \"0.1\"\nengine = \"wasm\"\nentry = \"plugin.wasm\"\n{manifest_extra}",
+                "name = \"{}\"\nversion = \"0.1.0\"\napi = \"0.2\"\nengine = \"wasm\"\nentry = \"plugin.wasm\"\n{manifest_extra}",
                 self.name
             ),
         )
@@ -444,7 +444,7 @@ impl Fixture for WasmFixture {
         std::fs::write(
             folder.join("plugin.toml"),
             format!(
-                "name = \"{name}\"\nversion = \"1\"\napi = \"0.1\"\nengine = \"wasm\"\nentry = \"plugin.wasm\"\n{extra}"
+                "name = \"{name}\"\nversion = \"1\"\napi = \"0.2\"\nengine = \"wasm\"\nentry = \"plugin.wasm\"\n{extra}"
             ),
         )
         .unwrap();
@@ -588,7 +588,7 @@ async fn probe_report(runtime: &Extensions, args: &str) -> Report {
     else {
         panic!("probe did not reply with a message");
     };
-    serde_json::from_str(&text).unwrap()
+    serde_json::from_str(&text.to_string()).unwrap()
 }
 
 #[tokio::test]

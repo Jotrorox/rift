@@ -225,6 +225,14 @@ static inline void rift_action_message(rift_action_t *ret, const char *text) {
 static inline void rift_action_queue(rift_action_t *ret, const char *queue) {
   rift_action_with(ret, RIFT_PLUGIN_TYPES_ACTION_QUEUE, queue);
 }
+// `deny-json` and `message-json`: a JSON text component of at most 32 KiB,
+// for colours, line breaks, hover text and click events.
+static inline void rift_action_deny_json(rift_action_t *ret, const char *reason_json) {
+  rift_action_with(ret, RIFT_PLUGIN_TYPES_ACTION_DENY_JSON, reason_json);
+}
+static inline void rift_action_message_json(rift_action_t *ret, const char *text_json) {
+  rift_action_with(ret, RIFT_PLUGIN_TYPES_ACTION_MESSAGE_JSON, text_json);
+}
 
 // ---------------------------------------------------------------------------
 // Registration (what `init` returns)
@@ -289,6 +297,19 @@ static inline bool rift_message(const rift_string_t *target, const char *text) {
   bool online = false;
   if (!rift_plugin_players_message(&t, &msg, &online, &err)) {
     rift_log(RIFT_WARN, "players.message failed: " RIFT_STR_FMT, RIFT_STR_ARG(err));
+    rift_string_free(&err);
+    return false;
+  }
+  return online;
+}
+
+// Like `rift_message`, with `text_json` a JSON text component of at most
+// 32 KiB, for colours, hover text and click events.
+static inline bool rift_message_json(const rift_string_t *target, const char *text_json) {
+  rift_string_t t = *target, msg = rift_str(text_json), err = {NULL, 0};
+  bool online = false;
+  if (!rift_plugin_players_message_json(&t, &msg, &online, &err)) {
+    rift_log(RIFT_WARN, "players.message-json failed: " RIFT_STR_FMT, RIFT_STR_ARG(err));
     rift_string_free(&err);
     return false;
   }

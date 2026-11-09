@@ -1,7 +1,7 @@
 //! `engine = "wasm"`: WebAssembly components on Wasmtime.
 //!
 //! A plugin is a component built against the `plugin` world of
-//! `rift:plugin@0.1.0` (`wit/rift-plugin.wit`). Each instance owns one
+//! `rift:plugin@0.2.0` (`wit/rift-plugin.wit`). Each instance owns one
 //! [`Store`] and one component instance, created on the plugin's own thread
 //! and called synchronously, one call at a time, by the worker.
 //!
@@ -333,22 +333,30 @@ impl PluginEngine for WasmEngine {
         );
         let guest = self.core.rift_plugin_handler();
         let store = &mut self.store;
+        let mut invalid = None;
+        let mut decide = |action| match bindings::action(action) {
+            Ok(action) => Reply::Action(action),
+            Err(error) => {
+                invalid = Some(error);
+                Reply::Action(crate::extensions::Action::Continue)
+            }
+        };
         let result = match event {
             Event::Route(connection) => guest
                 .call_route(store, &bindings::connection(connection))
                 .map(|decision| Reply::Route(bindings::route_decision(decision))),
             Event::Login(context) => guest
                 .call_login(store, &bindings::context(context))
-                .map(|action| Reply::Action(bindings::action(action))),
+                .map(&mut decide),
             Event::InitialServer(context) => guest
                 .call_initial_server(store, &bindings::context(context))
-                .map(|action| Reply::Action(bindings::action(action))),
+                .map(&mut decide),
             Event::BeforeTransfer(context) => guest
                 .call_before_transfer(store, &bindings::context(context))
-                .map(|action| Reply::Action(bindings::action(action))),
+                .map(&mut decide),
             Event::Command(context) => guest
                 .call_command(store, &bindings::context(context))
-                .map(|action| Reply::Action(bindings::action(action))),
+                .map(&mut decide),
             Event::Suggest(context) => guest
                 .call_suggest(store, &bindings::context(context))
                 .map(|list| Reply::Suggestions(bindings::suggestions(list))),
@@ -375,7 +383,11 @@ impl PluginEngine for WasmEngine {
                 .call_event(store, &bindings::rift_event(event))
                 .map(|()| Reply::None),
         };
-        result.map_err(|error| CallError::Fatal(self.fail(error)))
+        let reply = result.map_err(|error| CallError::Fatal(self.fail(error)))?;
+        match invalid {
+            Some(error) => Err(CallError::Handler(format!("invalid decision: {error}"))),
+            None => Ok(reply),
+        }
     }
 
     fn reload(&mut self, config_json: &str) -> Result<(), String> {

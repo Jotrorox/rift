@@ -1,7 +1,7 @@
 //! `plugin.toml`: what an installed plugin is, how it runs and what it may
 //! touch. Parsing is strict: unknown keys, keys that do not apply to the
 //! selected mode or engine, and out-of-range values are errors.
-use super::api::{API_VERSION, Hook};
+use super::api::{API_VERSION, Hook, LUA_COMPATIBLE};
 use serde::Deserialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -272,7 +272,7 @@ impl Manifest {
                     .into(),
             );
         }
-        if raw.api != API_VERSION {
+        if raw.api != API_VERSION && !LUA_COMPATIBLE.contains(&raw.api.as_str()) {
             return Err(format!(
                 "api {:?} is not supported; this Rift implements rift:plugin {API_VERSION}",
                 raw.api
@@ -323,6 +323,12 @@ impl Manifest {
             Some(_) => return Err("engine must be \"lua\" or \"wasm\"".into()),
             None => return Err("engine is required: \"lua\" or \"wasm\"".into()),
         };
+        if engine == EngineKind::Wasm && raw.api != API_VERSION {
+            return Err(format!(
+                "api {:?} WebAssembly components do not run on this Rift: rebuild the plugin against rift:plugin {API_VERSION} (wit/rift-plugin.wit) and set api = \"{API_VERSION}\"",
+                raw.api
+            ));
+        }
         let entry = match (raw.entry, engine) {
             (Some(entry), _) => entry,
             (None, EngineKind::Lua) => "init.lua".into(),
@@ -601,7 +607,7 @@ fn capabilities(raw: RawCapabilities) -> Result<Capabilities, String> {
 mod tests {
     use super::*;
 
-    const MINIMAL: &str = "name = \"relaxoban\"\nversion = \"0.3.1\"\napi = \"0.1\"\nengine = \"wasm\"\nentry = \"relaxoban.wasm\"\n";
+    const MINIMAL: &str = "name = \"relaxoban\"\nversion = \"0.3.1\"\napi = \"0.2\"\nengine = \"wasm\"\nentry = \"relaxoban.wasm\"\n";
 
     #[test]
     fn defaults_follow_the_contract() {
@@ -646,7 +652,7 @@ mod tests {
             "filesystem=data network=yes env=all"
         );
         let lua = Manifest::parse(
-            "name = \"a\"\nversion = \"1\"\napi = \"0.1\"\nengine = \"lua\"\n",
+            "name = \"a\"\nversion = \"1\"\napi = \"0.2\"\nengine = \"lua\"\n",
             "a",
         )
         .unwrap();
@@ -683,7 +689,7 @@ mod tests {
                 r#"
 name = "relaxoban"
 version = "0.3.1"
-api = "0.1"
+api = "0.2"
 mode = "persistent"
 engine = "lua"
 entry = "src/main.lua"
@@ -724,7 +730,7 @@ jit = false
             )
         );
         let script = Manifest::parse(
-            "name = \"a\"\nversion = \"1\"\napi = \"0.1\"\nmode = \"script\"\n",
+            "name = \"a\"\nversion = \"1\"\napi = \"0.2\"\nmode = \"script\"\n",
             "a",
         )
         .unwrap();
@@ -734,7 +740,7 @@ jit = false
 
     #[test]
     fn invalid_manifests_are_rejected() {
-        let base = "name = \"a\"\nversion = \"1\"\napi = \"0.1\"\n";
+        let base = "name = \"a\"\nversion = \"1\"\napi = \"0.2\"\n";
         for (extra, folder) in [
             ("engine = \"lua\"\ntypo = 1\n", "a"),
             ("engine = \"lua\"\n", "b"),
@@ -792,10 +798,10 @@ jit = false
             assert!(Manifest::parse(&text, folder).is_err(), "{text}");
         }
         for text in [
-            "version = \"1\"\napi = \"0.1\"\nengine = \"lua\"\n",
-            "name = \"a\"\nversion = \"1 2\"\napi = \"0.1\"\nengine = \"lua\"\n",
-            "name = \"a\"\nversion = \"1\"\napi = \"0.2\"\nengine = \"lua\"\n",
-            "name = \"a/b\"\nversion = \"1\"\napi = \"0.1\"\nengine = \"lua\"\n",
+            "version = \"1\"\napi = \"0.2\"\nengine = \"lua\"\n",
+            "name = \"a\"\nversion = \"1 2\"\napi = \"0.2\"\nengine = \"lua\"\n",
+            "name = \"a\"\nversion = \"1\"\napi = \"0.3\"\nengine = \"lua\"\n",
+            "name = \"a/b\"\nversion = \"1\"\napi = \"0.2\"\nengine = \"lua\"\n",
             "name = [\n",
         ] {
             assert!(Manifest::parse(text, "a").is_err(), "{text}");
@@ -803,5 +809,23 @@ jit = false
         let error =
             Manifest::parse(&format!("{base}engine = \"lua\"\ntypo = 1\n"), "a").unwrap_err();
         assert!(error.contains("typo"), "{error}");
+    }
+
+    #[test]
+    fn lua_plugins_written_for_0_1_still_load_but_components_need_a_rebuild() {
+        let old = "name = \"a\"\nversion = \"1\"\napi = \"0.1\"\n";
+        for extra in ["engine = \"lua\"\n", "mode = \"script\"\n"] {
+            let manifest = Manifest::parse(&format!("{old}{extra}"), "a").unwrap();
+            assert_eq!(manifest.api, "0.1");
+        }
+        let error = Manifest::parse(
+            &format!("{old}engine = \"wasm\"\nentry = \"a.wasm\"\n"),
+            "a",
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "api \"0.1\" WebAssembly components do not run on this Rift: rebuild the plugin against rift:plugin 0.2 (wit/rift-plugin.wit) and set api = \"0.2\""
+        );
     }
 }

@@ -160,7 +160,9 @@ three ways to run code:
 Plugins get login and transfer decisions, lifecycle events, commands with UUID
 permission checks, FIFO server queues, durable namespaced state, timers,
 permissions, the message bus and an online-player API for messages, titles,
-action bars, tab lists, kicks, broadcasts and transfers.
+action bars, tab lists, kicks, broadcasts and transfers. Messages, kicks and
+deny reasons can be rich text: colours, line breaks, hover text and click
+events, spelled for each player's client version.
 
 Permissions live in Rift's [permission store](docs/permissions.md):
 LuckPerms-style users, groups, weights, contexts, temporary nodes, tracks,

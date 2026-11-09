@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Check that a plugin artifact is a component built against rift:plugin@0.1.0:
+# Check that a plugin artifact is a component built against rift:plugin@0.2.0:
 # it must export the handler interface and import the Rift interfaces the
 # hello examples use. Needs wasm-tools on PATH.
 #
@@ -11,12 +11,12 @@ wit="$(wasm-tools component wit "$wasm")"
 
 missing=0
 for line in \
-    'export rift:plugin/handler@0.1.0;' \
-    'import rift:plugin/players@0.1.0;' \
-    'import rift:plugin/store@0.1.0;' \
-    'import rift:plugin/bus@0.1.0;' \
-    'import rift:plugin/timers@0.1.0;' \
-    'import rift:plugin/log@0.1.0;'; do
+    'export rift:plugin/handler@0.2.0;' \
+    'import rift:plugin/players@0.2.0;' \
+    'import rift:plugin/store@0.2.0;' \
+    'import rift:plugin/bus@0.2.0;' \
+    'import rift:plugin/timers@0.2.0;' \
+    'import rift:plugin/log@0.2.0;'; do
     if ! grep -qF "$line" <<<"$wit"; then
         echo "error: $wasm lacks \`$line\`" >&2
         missing=1
@@ -34,4 +34,4 @@ if unexpected="$(sed -n '/^world root {/,/^}/p' <<<"$wit" | grep -E '^\s+(import
 fi
 
 wasm-tools validate "$wasm"
-echo "$wasm: $(wc -c <"$wasm" | tr -d " ") bytes, exports rift:plugin/handler@0.1.0"
+echo "$wasm: $(wc -c <"$wasm" | tr -d " ") bytes, exports rift:plugin/handler@0.2.0"

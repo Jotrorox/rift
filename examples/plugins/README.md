@@ -10,7 +10,7 @@ Four persistent plugins that behave identically, one per supported language:
 | [`hello-lua`](hello-lua) | Lua | nothing to build | [Lua plugins](../../docs/plugins-lua.md) |
 
 The WebAssembly examples are standalone projects that build a component
-against the `plugin` world of `rift:plugin@0.1.0` (`wit/rift-plugin.wit`). A
+against the `plugin` world of `rift:plugin@0.2.0` (`wit/rift-plugin.wit`). A
 plugin directory holds a `plugin.toml` manifest and the entry it names: the
 built `.wasm`, or `init.lua`.
 
@@ -66,7 +66,7 @@ Example configuration: `{"deny":"Mallory"}`.
 ```toml
 name = "hello-rs"
 version = "0.1.0"
-api = "0.1"
+api = "0.2"
 mode = "persistent"
 engine = "wasm"
 entry = "hello_rs.wasm"
@@ -133,7 +133,7 @@ unchanged in `rift.lua`.
 crate-type = ["cdylib"]
 
 [dependencies]
-rift-plugin = "0.1"
+rift-plugin = "0.2"
 ```
 
 ```rust

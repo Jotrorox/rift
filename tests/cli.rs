@@ -275,7 +275,7 @@ fn check_lists_plugins_with_their_mode_and_never_starts_them() {
     fs::create_dir_all(fixture.0.join("plugins/relaxoban")).unwrap();
     fs::write(
         fixture.0.join("plugins/relaxoban/plugin.toml"),
-        "name = \"relaxoban\"\nversion = \"0.3.1\"\napi = \"0.1\"\nengine = \"wasm\"\nentry = \"relaxoban.wasm\"\n[capabilities]\nenv = [\"RELAXOBAN_DSN\"]\n",
+        "name = \"relaxoban\"\nversion = \"0.3.1\"\napi = \"0.2\"\nengine = \"wasm\"\nentry = \"relaxoban.wasm\"\n[capabilities]\nenv = [\"RELAXOBAN_DSN\"]\n",
     )
     .unwrap();
     fs::write(fixture.0.join("plugins/relaxoban/relaxoban.wasm"), "\0asm").unwrap();

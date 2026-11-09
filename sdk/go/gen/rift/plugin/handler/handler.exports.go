@@ -6,7 +6,7 @@ import (
 	"go.bytecodealliance.org/cm"
 )
 
-// Exports represents the caller-defined exports from "rift:plugin/handler@0.1.0".
+// Exports represents the caller-defined exports from "rift:plugin/handler@0.2.0".
 var Exports struct {
 	// Init represents the caller-defined, exported function "init".
 	//

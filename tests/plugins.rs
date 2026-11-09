@@ -16,7 +16,7 @@ const BASE: &str = r#"
     config.routes.public = 'lobby'
 "#;
 
-const MANIFEST: &str = "name = \"relaxoban\"\nversion = \"0.3.1\"\napi = \"0.1\"\nengine = \"wasm\"\nentry = \"relaxoban.wasm\"\n";
+const MANIFEST: &str = "name = \"relaxoban\"\nversion = \"0.3.1\"\napi = \"0.2\"\nengine = \"wasm\"\nentry = \"relaxoban.wasm\"\n";
 
 struct Fixture(PathBuf);
 
@@ -159,7 +159,7 @@ fn script_mode_manifests_load_in_the_sandbox_as_before() {
     let fixture = Fixture::new();
     fixture.write(
         "plugins/greeter/plugin.toml",
-        "name = \"greeter\"\nversion = \"1\"\napi = \"0.1\"\nmode = \"script\"\n",
+        "name = \"greeter\"\nversion = \"1\"\napi = \"0.2\"\nmode = \"script\"\n",
     );
     fixture.write(
         "plugins/greeter/init.lua",
