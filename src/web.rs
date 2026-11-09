@@ -168,7 +168,18 @@ impl App {
     fn status_snapshot(&self, snapshot: &Snapshot, view: View) -> Value {
         let config = &snapshot.config;
         let settings = config.status.as_ref();
-        let players = self.metrics.backend_players();
+        // The status server is unauthenticated, so it shows the public
+        // count, without hidden players; `/api/status` shows everyone.
+        let players: BTreeMap<String, u64> = if view.status_server() {
+            snapshot
+                .players
+                .server_counts_for(rift::players::Viewer::Public)
+                .into_iter()
+                .map(|(server, count)| (server, count as u64))
+                .collect()
+        } else {
+            self.metrics.backend_players()
+        };
         let health_checks = config.health_check.is_some();
         let mut backends = Vec::with_capacity(config.backends.len());
         // Instances shown under a group's display name are numbered within it.
@@ -202,7 +213,11 @@ impl App {
         }
         let mut value = json!({
             "uptime_seconds":self.started.elapsed().as_secs(),
-            "players":self.metrics.players.get(),
+            "players":if view.status_server() {
+                snapshot.players.count_for(rift::players::Viewer::Public, None) as u64
+            } else {
+                self.metrics.players.get()
+            },
             "backends":backends,
             "health_checks_enabled":health_checks,
         });

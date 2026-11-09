@@ -1247,6 +1247,20 @@ pub struct ExtensionSession {
     jobs: Arc<Semaphore>,
 }
 impl ExtensionSession {
+    /// Player names for completion: the ones this player may see.
+    fn visible_names(&self) -> Vec<String> {
+        let uuid = Uuid::parse(&self.context.uuid)
+            .map(|uuid| *uuid.as_bytes())
+            .unwrap_or_default();
+        let holds = |node: &str| self.runtime.permits(&self.context.uuid, node);
+        self.runtime
+            .players
+            .names_for(crate::players::Viewer::Player {
+                uuid,
+                holds: &holds,
+            })
+    }
+
     fn script_commands(&self) -> impl Iterator<Item = (&String, &Command)> {
         self.runtime
             .script
@@ -1340,12 +1354,7 @@ impl ExtensionSession {
                 let suggestions = match command.suggest {
                     SuggestKind::None => Vec::new(),
                     SuggestKind::Fixed(names) => return Ok(complete_names(names, word)),
-                    SuggestKind::Players => {
-                        return Ok(complete_names(
-                            self.runtime.players.names().into_values().collect(),
-                            word,
-                        ));
-                    }
+                    SuggestKind::Players => return Ok(complete_names(self.visible_names(), word)),
                     SuggestKind::Servers => return Ok(complete_names(servers(), word)),
                     SuggestKind::Dynamic => {
                         let mut input = self.context.clone();
@@ -1368,12 +1377,7 @@ impl ExtensionSession {
         let word = args.rsplit(' ').next().unwrap_or_default();
         let suggestions = match command.suggest {
             Suggest::None => Vec::new(),
-            Suggest::Players => {
-                return Ok(complete_names(
-                    self.runtime.players.names().into_values().collect(),
-                    word,
-                ));
-            }
+            Suggest::Players => return Ok(complete_names(self.visible_names(), word)),
             Suggest::Servers => return Ok(complete_names(servers(), word)),
             Suggest::Lua => {
                 let mut input = self.context.clone();
