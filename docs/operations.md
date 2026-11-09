@@ -93,7 +93,7 @@ returned Lua configuration table before starting:
 admin = {
     listen = "127.0.0.1:9091",
     token_env = "RIFT_ADMIN_TOKEN",
-    permissions = { "status", "servers", "maintenance", "drain", "transfer", "reload", "shutdown", "perms" },
+    permissions = { "status", "servers", "maintenance", "drain", "transfer", "reload", "shutdown", "plugins", "logs", "perms" },
 },
 maintenance = false,
 draining = {}, -- For example, { "survival" } blocks new attachments to survival.
@@ -156,6 +156,14 @@ Start and stop return an accepted response immediately; poll `servers` to verify
 completion. A failed start appears in the server's `last_error` field. These
 commands never accept arbitrary process commands or modify ordinary unmanaged
 backends. `status` also includes the managed server state for read-only inspection.
+
+`rift admin plugins list` and `rift admin plugins status <name>` show
+[plugins](plugins.md#operator-surface) with their state, restarts, calls and
+last error; they need `status`. `rift admin plugins logs <name>` shows a
+plugin's last 200 log lines and needs `logs`, like the HTTP log endpoints. `rift admin plugins restart <name>` stops a persistent plugin and
+starts a fresh instance with its current configuration; it needs the `plugins`
+permission, returns once the restart is accepted, and is recorded in the
+operator audit log with the plugin name.
 
 Connection `rate_limit` runs before handshake parsing. `login_rate_limit` runs
 at login admission and has the same token-bucket fields and defaults; it allows
@@ -269,7 +277,7 @@ but Rift lists them to players on other servers.
 Configuration reloads apply to connected players. Removing `tab_list` removes
 Rift's entries and blanks the header and footer, after which backends' own
 updates show again. Extensions can set a player's header and footer with
-`rift.players.tab_list` (see [extensions](extensions.md#online-players)).
+`rift.players.tab_list` (see [online players](extensions.md#online-players)).
 The tab list works on every Minecraft version Rift can switch players on
 (1.8.9–26.3).
 

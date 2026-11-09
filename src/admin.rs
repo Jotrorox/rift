@@ -227,11 +227,18 @@ fn request(value: &Value, settings: &Admin, secret: &str) -> Result<Vec<String>,
         })
         .collect::<Result<Vec<_>, _>>()?;
     let command = args.first().ok_or("missing command")?;
-    let permission = match command.as_str() {
-        "start" | "stop" | "groups" | "create" | "remove" | "templates" | "download" | "nodes" => {
-            "servers"
-        }
-        command => command,
+    let permission = match (command.as_str(), args.get(1).map(String::as_str)) {
+        (
+            "start" | "stop" | "groups" | "create" | "remove" | "templates" | "download" | "nodes",
+            _,
+        ) => "servers",
+        // Restarting a plugin changes the running proxy; its log tail may
+        // carry whatever the plugin logs, as server logs do over HTTP;
+        // reading its state is status.
+        ("plugins", Some("restart")) => "plugins",
+        ("plugins", Some("logs")) => "logs",
+        ("plugins", _) => "status",
+        (command, _) => command,
     };
     if !settings.permissions.contains(permission) {
         return Err(format!(
@@ -382,11 +389,59 @@ pub(crate) fn managed_backend(snapshot: &Snapshot, backend: &str) -> io::Result<
     Ok(())
 }
 
+const PLUGINS_USAGE: &str =
+    "usage: plugins list | plugins status <name> | plugins logs <name> | plugins restart <name>";
+
+/// `plugins list|status|logs|restart`, shared by the local administration
+/// service and `rift.control.plugins`. `actor` is recorded with a restart.
+pub(crate) fn plugins(snapshot: &Snapshot, args: &[String], actor: &str) -> Result<Value, String> {
+    let host = snapshot.extensions.plugins();
+    let unknown = |name: &str| format!("no plugin named {name:?}; use plugins list");
+    match args {
+        [action] if action == "list" => Ok(json!({"plugins": host.statuses()})),
+        [action, name] if action == "status" => host
+            .statuses()
+            .into_iter()
+            .find(|status| status.name == *name)
+            .map(|status| json!(status))
+            .ok_or_else(|| unknown(name)),
+        [action, name] if action == "logs" => host
+            .monitor()
+            .logs(name)
+            .map(|lines| json!({"plugin": name, "lines": lines}))
+            .ok_or_else(|| unknown(name)),
+        [action, name] if action == "restart" => {
+            let stopping = host
+                .restart(name, actor)
+                .map_err(|error| error.to_string())?;
+            tokio::spawn(stopping);
+            Ok(
+                json!({"plugin":name,"operation":"restart","accepted":true,"message":"Restart accepted; use plugins status to check completion"}),
+            )
+        }
+        _ => Err(PLUGINS_USAGE.into()),
+    }
+}
+
+/// The audit action and target of a command: `plugins <action>` and the
+/// plugin name, or the command alone.
+pub(crate) fn audited(args: &[String]) -> (String, String) {
+    match args {
+        [command, action, rest @ ..] if command == "plugins" => (
+            format!("{command} {action}").chars().take(64).collect(),
+            rest.first().cloned().unwrap_or_default(),
+        ),
+        [command, ..] => (command.clone(), String::new()),
+        [] => (String::new(), String::new()),
+    }
+}
+
 pub(crate) async fn execute(
     args: &[String],
     snapshot: Arc<Snapshot>,
     metrics: &Metrics,
     commands: &mpsc::Sender<Command>,
+    actor: &str,
 ) -> Result<Value, String> {
     let control = &snapshot.control;
     let enabled = |value: &str| match value {
@@ -400,6 +455,7 @@ pub(crate) async fn execute(
         [command] if command == "groups" => Ok(service_groups(&snapshot)),
         [command] if command == "nodes" => Ok(nodes(&snapshot)),
         [command] if command == "templates" => Ok(templates(&snapshot)),
+        [command, rest @ ..] if command == "plugins" => plugins(&snapshot, rest, actor),
         [command, template] if command == "download" => download_template(&snapshot, template, false).await,
         [command, template, refresh] if command == "download" && refresh == "refresh" => download_template(&snapshot, template, true).await,
         [command, group] if command == "create" => {
@@ -463,7 +519,7 @@ pub(crate) async fn execute(
             commands.try_send(Command::Reload(reply)).map_err(|_| "administrator command queue is full or shutting down")?;
             receiver.await.map_err(|_| "proxy is shutting down".to_owned())?
         }
-        _ => Err("usage: status | servers | groups | nodes | templates | download <template> [refresh] | create <group> | remove <instance> | start <backend> | stop <backend> | maintenance on/off | drain <backend> on/off | transfer <connection-id> <backend> | perms <command> | reload | shutdown".into()),
+        _ => Err("usage: status | servers | groups | nodes | templates | download <template> [refresh] | create <group> | remove <instance> | start <backend> | stop <backend> | maintenance on/off | drain <backend> on/off | transfer <connection-id> <backend> | plugins list | plugins status <name> | plugins logs <name> | plugins restart <name> | perms <command> | reload | shutdown".into()),
     }
 }
 
@@ -497,11 +553,12 @@ pub async fn serve(
                         let bytes = timeout(Duration::from_secs(2), read_line(&mut stream, 8192)).await??;
                         let parsed = serde_json::from_slice::<Value>(&bytes).map_err(|_| "invalid JSON request".to_owned()).and_then(|value| request(&value, &settings, &secret));
                         let mut permission = String::new();
+                        let mut target = String::new();
                         let mut shutdown_ack = None;
                         let result = match parsed {
                             Ok(args) => {
-                                permission = args[0].clone();
-                                let audit = workflows.audit_async("local-admin", &permission, "", "requested", 0).await;
+                                (permission, target) = audited(&args);
+                                let audit = workflows.audit_async("local-admin", &permission, &target, "requested", 0).await;
                                 if audit.is_err() {
                                     Err("operator audit unavailable; command was not submitted".into())
                                 } else if args == ["shutdown"] {
@@ -528,7 +585,7 @@ pub async fn serve(
                                     {
                                         deadline += server.stop_timeout;
                                     }
-                                    timeout(deadline, execute(&args, snapshot, &metrics, &commands)).await
+                                    timeout(deadline, execute(&args, snapshot, &metrics, &commands, "local-admin")).await
                                         .unwrap_or_else(|_| Err("administrator operation deadline exceeded; refresh status before retrying".into()))
                                 }
                             }
@@ -536,7 +593,7 @@ pub async fn serve(
                         };
                         let actor = if permission.is_empty() { "anonymous" } else { "local-admin" };
                         let (outcome, status) = if result.is_ok() { ("accepted", 200) } else { ("rejected", 400) };
-                        if let Err(error) = workflows.audit_async(actor, &permission, "", outcome, status).await {
+                        if let Err(error) = workflows.audit_async(actor, &permission, &target, outcome, status).await {
                             eprintln!("rift: local administrator audit failed: {error}");
                         }
                         let response = match result {
@@ -562,7 +619,7 @@ pub async fn client(args: &[String]) -> io::Result<()> {
     if args.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "usage: rift admin [--address 127.0.0.1:9091] status|servers|groups|create <group>|remove <instance>|start <backend>|stop <backend>|maintenance on/off|drain <backend> on/off|transfer <connection-id> <backend>|perms <command>|reload|shutdown",
+            "usage: rift admin [--address 127.0.0.1:9091] status|servers|groups|create <group>|remove <instance>|start <backend>|stop <backend>|maintenance on/off|drain <backend> on/off|transfer <connection-id> <backend>|plugins list|plugins status <name>|plugins logs <name>|plugins restart <name>|perms <command>|reload|shutdown",
         ));
     }
     let address: SocketAddr = address.parse().map_err(|_| {

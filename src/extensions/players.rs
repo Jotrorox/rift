@@ -64,8 +64,8 @@ struct Entry {
     boss_bars: BTreeSet<String>,
 }
 
-type Destinations = Arc<Mutex<BTreeSet<String>>>;
-type Groups = Arc<Mutex<BTreeMap<String, BTreeSet<String>>>>;
+pub(crate) type Destinations = Arc<Mutex<BTreeSet<String>>>;
+pub(crate) type Groups = Arc<Mutex<BTreeMap<String, BTreeSet<String>>>>;
 
 /// Joined players, shared by every reload generation and listener.
 #[derive(Clone)]
@@ -121,6 +121,11 @@ fn error(message: &str) -> mlua::Error {
     mlua::Error::runtime(message)
 }
 
+/// Lua sees the same message as before `Players::send` became engine-neutral.
+fn lua_error(error: std::io::Error) -> mlua::Error {
+    mlua::Error::runtime(error.to_string())
+}
+
 fn text(value: String, label: &str) -> mlua::Result<String> {
     if value.is_empty() || value.len() > MAX_TEXT {
         return Err(mlua::Error::runtime(format!(
@@ -140,7 +145,7 @@ fn ticks(options: &Table, field: &str, default: i64) -> mlua::Result<i32> {
     }
 }
 
-fn title(value: Value) -> mlua::Result<PlayerAction> {
+pub(crate) fn title(value: Value) -> mlua::Result<PlayerAction> {
     let options = match value {
         Value::String(title) => {
             return Ok(PlayerAction::Title {
@@ -177,7 +182,7 @@ fn title(value: Value) -> mlua::Result<PlayerAction> {
     })
 }
 
-fn tab_list(value: Option<Table>) -> mlua::Result<PlayerAction> {
+pub(crate) fn tab_list(value: Option<Table>) -> mlua::Result<PlayerAction> {
     let Some(options) = value else {
         return Ok(PlayerAction::TabList(None));
     };
@@ -196,7 +201,7 @@ fn tab_list(value: Option<Table>) -> mlua::Result<PlayerAction> {
     })))
 }
 
-fn boss_bar(name: String, value: Option<Table>) -> mlua::Result<PlayerAction> {
+pub(crate) fn boss_bar(name: String, value: Option<Table>) -> mlua::Result<PlayerAction> {
     if !super::token(&name) {
         return Err(error(
             "boss bar name must be 1..=64 lowercase letters, digits, '.', '_' or '-'",
@@ -261,19 +266,19 @@ fn boss_bar(name: String, value: Option<Table>) -> mlua::Result<PlayerAction> {
     })
 }
 
+const INVALID_TARGET: &str = "player must be a lowercase UUID (32 hex digits) or a player name";
+
 /// Find a player by lowercase UUID or case-insensitive name.
 fn find<'a>(
     sessions: &'a BTreeMap<u64, Entry>,
     target: &str,
-) -> mlua::Result<Option<(&'a u64, &'a Entry)>> {
+) -> Result<Option<(&'a u64, &'a Entry)>, &'static str> {
     let uuid = target.len() == 32
         && target
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
     if !uuid && !crate::players::valid_username(target) {
-        return Err(error(
-            "player must be a lowercase UUID (32 hex digits) or a player name",
-        ));
+        return Err(INVALID_TARGET);
     }
     Ok(sessions.iter().find(|(_, entry)| {
         if uuid {
@@ -285,7 +290,7 @@ fn find<'a>(
 }
 
 impl Players {
-    pub(super) fn new(
+    pub(crate) fn new(
         destinations: Destinations,
         groups: Groups,
         events: Broker,
@@ -371,9 +376,10 @@ impl Players {
 
     /// Queue an action for a lowercase UUID or case-insensitive player name.
     /// False means that the player is offline or has a full queue.
-    pub fn send(&self, target: &str, action: PlayerAction) -> mlua::Result<bool> {
+    pub fn send(&self, target: &str, action: PlayerAction) -> std::io::Result<bool> {
         let sessions = self.lock();
-        Ok(find(&sessions, target)?
+        Ok(find(&sessions, target)
+            .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?
             .is_some_and(|(_, entry)| entry.actions.try_send(action).is_ok()))
     }
 
@@ -433,20 +439,20 @@ impl Players {
         reached.len()
     }
 
-    fn known(&self, server: &str) -> mlua::Result<()> {
+    fn known(&self, server: &str) -> Result<(), &'static str> {
         if !self
             .destinations
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .contains(server)
         {
-            return Err(error("unknown server or service group"));
+            return Err("unknown server or service group");
         }
         Ok(())
     }
 
     /// Match players on a server or in a service group; nil matches everyone.
-    fn matcher(&self, server: Option<String>) -> mlua::Result<impl Fn(&Entry) -> bool> {
+    fn matcher(&self, server: Option<String>) -> Result<impl Fn(&Entry) -> bool, &'static str> {
         let mut members = None;
         if let Some(server) = &server {
             self.known(server)?;
@@ -465,6 +471,122 @@ impl Players {
                         .is_some_and(|members| members.contains(&entry.server))
             })
         })
+    }
+
+    fn player_info(entry: &Entry, id: u64) -> crate::plugins::api::PlayerInfo {
+        crate::plugins::api::PlayerInfo {
+            connection_id: id,
+            uuid: entry.uuid.clone(),
+            name: entry.name.clone(),
+            server: entry.server.clone(),
+            protocol: entry.protocol,
+        }
+    }
+
+    /// Joined players, optionally only those on one server or service group.
+    pub fn list(
+        &self,
+        server: Option<&str>,
+    ) -> Result<Vec<crate::plugins::api::PlayerInfo>, String> {
+        let matches = self.matcher(server.map(str::to_owned))?;
+        Ok(self
+            .lock()
+            .iter()
+            .filter(|(_, entry)| matches(entry))
+            .map(|(id, entry)| Self::player_info(entry, *id))
+            .collect())
+    }
+
+    /// One player by lowercase UUID or case-insensitive name.
+    pub fn get(&self, target: &str) -> Result<Option<crate::plugins::api::PlayerInfo>, String> {
+        let sessions = self.lock();
+        Ok(find(&sessions, target)?.map(|(id, entry)| Self::player_info(entry, *id)))
+    }
+
+    /// Names starting with `prefix` (ignoring ASCII case), sorted.
+    pub fn names_with_prefix(&self, prefix: &str) -> Vec<String> {
+        let mut names: Vec<_> = self
+            .lock()
+            .values()
+            .filter(|entry| {
+                entry
+                    .name
+                    .get(..prefix.len())
+                    .is_some_and(|start| start.eq_ignore_ascii_case(prefix))
+            })
+            .map(|entry| entry.name.clone())
+            .collect();
+        names.sort_by_key(|name| name.to_ascii_lowercase());
+        names
+    }
+
+    /// Move a player to a configured server or service group.
+    pub fn transfer(&self, target: &str, server: &str) -> Result<bool, String> {
+        self.known(server)?;
+        self.send(target, PlayerAction::Transfer(server.to_owned()))
+            .map_err(|error| error.to_string())
+    }
+
+    /// Queue a chat message for every player on `server` (everyone for
+    /// `None`) and count those that accepted it.
+    pub fn broadcast(&self, message: &str, server: Option<&str>) -> Result<usize, String> {
+        if message.is_empty() || message.len() > MAX_TEXT {
+            return Err("message must contain 1..=1024 bytes".into());
+        }
+        let matches = self.matcher(server.map(str::to_owned))?;
+        Ok(self
+            .lock()
+            .values()
+            .filter(|entry| matches(entry))
+            .filter(|entry| {
+                entry
+                    .actions
+                    .try_send(PlayerAction::Message(message.to_owned()))
+                    .is_ok()
+            })
+            .count())
+    }
+
+    /// Show, change or remove one boss bar, tracking the per-player limit.
+    /// False means that the player is offline, too old for boss bars, or has
+    /// a full queue.
+    pub fn boss_bar(
+        &self,
+        target: &str,
+        name: &str,
+        bar: Option<crate::protocol::BossBar>,
+    ) -> Result<bool, &'static str> {
+        if !super::token(name) {
+            return Err("boss bar name must be 1..=64 lowercase letters, digits, '.', '_' or '-'");
+        }
+        let mut sessions = self.lock();
+        let Some(id) = find(&sessions, target)?.map(|(id, _)| *id) else {
+            return Ok(false);
+        };
+        let entry = sessions.get_mut(&id).unwrap();
+        if !crate::protocol::boss_bars_supported(entry.protocol) {
+            return Ok(false);
+        }
+        let shown = bar.is_some();
+        if shown
+            && !entry.boss_bars.contains(name)
+            && entry.boss_bars.len() >= crate::protocol::MAX_BOSS_BARS
+        {
+            return Err("a player can have at most 8 boss bars");
+        }
+        let action = PlayerAction::BossBar {
+            name: name.to_owned(),
+            bar,
+        };
+        if entry.actions.try_send(action).is_err() {
+            return Ok(false);
+        }
+        if shown {
+            entry.boss_bars.insert(name.to_owned());
+        } else {
+            entry.boss_bars.remove(name);
+        }
+        Ok(true)
     }
 
     fn info(lua: &Lua, entry: &Entry, id: u64) -> mlua::Result<Table> {
@@ -499,7 +621,7 @@ impl Players {
             "list",
             lua.create_function(move |lua, server: Option<String>| {
                 crate::script::check_deadline(deadline)?;
-                let matches = players.matcher(server)?;
+                let matches = players.matcher(server).map_err(error)?;
                 let list = lua.create_table()?;
                 for (id, entry) in players.lock().iter() {
                     if matches(entry) {
@@ -515,7 +637,8 @@ impl Players {
             lua.create_function(move |lua, target: String| {
                 crate::script::check_deadline(deadline)?;
                 let sessions = players.lock();
-                find(&sessions, &target)?
+                find(&sessions, &target)
+                    .map_err(error)?
                     .map(|(id, entry)| Self::info(lua, entry, *id))
                     .transpose()
             })?,
@@ -558,7 +681,9 @@ impl Players {
                 name,
                 lua.create_function(move |_, (target, value): (String, String)| {
                     charge()?;
-                    players.send(&target, action(text(value, label)?))
+                    players
+                        .send(&target, action(text(value, label)?))
+                        .map_err(lua_error)
                 })?,
             )?;
         }
@@ -567,7 +692,7 @@ impl Players {
             "title",
             lua.create_function(move |_, (target, options): (String, Value)| {
                 charge()?;
-                players.send(&target, title(options)?)
+                players.send(&target, title(options)?).map_err(lua_error)
             })?,
         )?;
         let (players, charge) = (self.clone(), budget.clone());
@@ -575,7 +700,7 @@ impl Players {
             "tab_list",
             lua.create_function(move |_, (target, options): (String, Option<Table>)| {
                 charge()?;
-                players.send(&target, tab_list(options)?)
+                players.send(&target, tab_list(options)?).map_err(lua_error)
             })?,
         )?;
         let (players, charge) = (self.clone(), budget.clone());
@@ -584,31 +709,10 @@ impl Players {
             lua.create_function(
                 move |_, (target, name, options): (String, String, Option<Table>)| {
                     charge()?;
-                    let action = boss_bar(name.clone(), options)?;
-                    let mut sessions = players.lock();
-                    let Some(id) = find(&sessions, &target)?.map(|(id, _)| *id) else {
-                        return Ok(false);
+                    let PlayerAction::BossBar { name, bar } = boss_bar(name, options)? else {
+                        unreachable!("boss_bar builds a boss bar action");
                     };
-                    let entry = sessions.get_mut(&id).unwrap();
-                    if !crate::protocol::boss_bars_supported(entry.protocol) {
-                        return Ok(false);
-                    }
-                    let shown = matches!(action, PlayerAction::BossBar { bar: Some(_), .. });
-                    if shown
-                        && !entry.boss_bars.contains(&name)
-                        && entry.boss_bars.len() >= crate::protocol::MAX_BOSS_BARS
-                    {
-                        return Err(error("a player can have at most 8 boss bars"));
-                    }
-                    if entry.actions.try_send(action).is_err() {
-                        return Ok(false);
-                    }
-                    if shown {
-                        entry.boss_bars.insert(name);
-                    } else {
-                        entry.boss_bars.remove(&name);
-                    }
-                    Ok(true)
+                    players.boss_bar(&target, &name, bar).map_err(error)
                 },
             )?,
         )?;
@@ -617,8 +721,10 @@ impl Players {
             "transfer",
             lua.create_function(move |_, (target, server): (String, String)| {
                 charge()?;
-                players.known(&server)?;
-                players.send(&target, PlayerAction::Transfer(server))
+                players.known(&server).map_err(error)?;
+                players
+                    .send(&target, PlayerAction::Transfer(server))
+                    .map_err(lua_error)
             })?,
         )?;
         let players = self.clone();
@@ -627,7 +733,7 @@ impl Players {
             lua.create_function(move |_, (message, server): (String, Option<String>)| {
                 budget()?;
                 let message = text(message, "message")?;
-                let matches = players.matcher(server)?;
+                let matches = players.matcher(server).map_err(error)?;
                 Ok(players
                     .lock()
                     .values()

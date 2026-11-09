@@ -162,6 +162,17 @@ async fn start(args: Vec<String>) -> io::Result<()> {
                     "rift: warning: configuration evaluation is heavy; move expensive work into callbacks that need it, or callbacks may miss their 50 ms deadline"
                 );
             }
+            let (plugins, warnings) = check::plugins(&config);
+            for line in &plugins {
+                println!("rift: {line}");
+            }
+            // Strict check reports a missing engine as an error instead.
+            for warning in warnings
+                .iter()
+                .filter(|warning| !strict || !warning.contains("is not available"))
+            {
+                eprintln!("rift: warning: {warning}");
+            }
             if strict {
                 let path = fs::canonicalize(path)?;
                 let report = check::strict(&config, &path);

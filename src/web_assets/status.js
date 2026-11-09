@@ -2,9 +2,12 @@
   "use strict";
   const $ = (id) => document.getElementById(id);
   const text = (id, value) => { $(id).textContent = value; };
+  const hide = (id, hidden) => { $(id).classList.toggle("hidden", hidden); };
   const number = (value) => Number.isFinite(Number(value)) ? Number(value) : 0;
   const count = (value) => number(value).toLocaleString();
-  let pending = false;
+  const plural = (amount, one, many = `${one}s`) => `${count(amount)} ${number(amount) === 1 ? one : many}`;
+  const DEFAULT_REFRESH = 5000, MIN_REFRESH = 1000, MAX_REFRESH = 300000;
+  let pending = false, timer = null, interval = DEFAULT_REFRESH, appliedLinks = "";
   function bytes(value) {
     let amount = number(value), unit = 0;
     const units = ["B", "KiB", "MiB", "GiB", "TiB"];
@@ -33,36 +36,103 @@
       td.colSpan = width; $(id).append(tr);
     }
   }
+  // The server validates these too; the page re-checks before handing them to the DOM.
+  const safeHref = (href) => typeof href === "string" && /^(https?:\/\/[^\s/]|\/(?![/\\]))/.test(href);
+  const safeColor = (color) => typeof color === "string" && /^#[0-9a-f]{6}$/i.test(color);
+  function applyPage(page, publicView) {
+    page = page && typeof page === "object" ? page : {};
+    const title = typeof page.title === "string" && page.title ? page.title : "Rift";
+    text("brand-name", title);
+    document.title = `Network status · ${title}`;
+    const style = document.documentElement?.style;
+    if (style) {
+      for (const [name, suffix] of [["--accent", ""], ["--accent-hover", ""], ["--accent-soft", "1f"]]) {
+        if (safeColor(page.accent)) style.setProperty(name, `${page.accent}${suffix}`); else style.removeProperty(name);
+      }
+    }
+    text("announcement", typeof page.notice === "string" ? page.notice : "");
+    hide("announcement", !page.notice);
+    const panels = page.panels || {};
+    hide("summary", panels.summary === false);
+    hide("backends-panel", panels.backends === false);
+    hide("listeners-panel", publicView || panels.listeners === false);
+    hide("metrics-panel", publicView || panels.metrics === false);
+    $("panels").classList.toggle("single", $("backends-panel").className.includes("hidden") || $("listeners-panel").className.includes("hidden"));
+    const links = Array.isArray(page.links) ? page.links.filter((link) => link && typeof link.label === "string" && safeHref(link.href)) : [];
+    const signature = JSON.stringify(links.map((link) => [link.label, link.href]));
+    if (signature !== appliedLinks) {
+      appliedLinks = signature;
+      $("links").replaceChildren(...links.map((link) => {
+        const a = document.createElement("a");
+        a.className = "text-link"; a.textContent = link.label; a.href = link.href;
+        if (/^https?:/.test(link.href)) a.rel = "noopener noreferrer";
+        return a;
+      }));
+    }
+    hide("links", !links.length);
+    const requested = Math.round(number(page.refresh_ms));
+    interval = requested ? Math.min(MAX_REFRESH, Math.max(MIN_REFRESH, requested)) : DEFAULT_REFRESH;
+    const seconds = interval / 1000;
+    text("refresh-interval", `Refreshes every ${seconds === 1 ? "second" : `${Number.isInteger(seconds) ? seconds : seconds.toFixed(1)} seconds`}`);
+  }
+  function healthLabel(backend, checks, publicView) {
+    if (!checks) return publicView ? ["unknown", "Unknown"] : ["unknown", "Checks disabled"];
+    if (backend.healthy === false) return ["bad", publicView ? "Offline" : "Unhealthy"];
+    if (backend.healthy === true) return ["", publicView ? "Online" : "Healthy"];
+    return ["unknown", "Unknown"];
+  }
   function render(status) {
-    const metrics = status.metrics || {}, backends = status.backends || [];
+    const publicView = status.exposure === "public";
+    const metrics = status.metrics || {}, backends = Array.isArray(status.backends) ? status.backends : [];
     const checks = status.health_checks_enabled !== false;
     const healthy = checks ? backends.filter((backend) => backend.healthy === true).length : 0;
     const unhealthy = checks ? backends.filter((backend) => backend.healthy === false).length : 0;
     const unknown = backends.length - healthy - unhealthy;
-    text("version", status.version ? `v${status.version}` : "");
-    text("metric-active", count(metrics.active));
-    text("metric-accepted", `${count(metrics.accepted)} accepted since startup`);
+    const players = status.players ?? metrics.players;
+    const noun = publicView ? "server" : "backend";
+    applyPage(status.page, publicView);
+    text("version", status.version ? ` · v${status.version}` : "");
+    text("metric-players", count(players));
+    text("metric-connections", publicView
+      ? `Across ${plural(backends.length, "server")}`
+      : `${plural(metrics.active, "active connection")} · ${count(metrics.accepted)} accepted`);
+    text("metric-backends-label", publicView ? "Servers online" : "Backend health");
     text("metric-backends", unknown === backends.length && backends.length ? "Unmonitored" : `${healthy} / ${backends.length}`);
-    text("metric-health", unknown ? `${unknown} without a health result` : "Healthy backends / total");
+    text("metric-health", unknown ? `${unknown} without a health result` : publicView ? "Online servers / total" : "Healthy backends / total");
+    hide("traffic-stat", publicView);
     text("metric-traffic", bytes(number(metrics.sent) + number(metrics.received)));
     text("metric-directions", `${bytes(metrics.sent)} sent · ${bytes(metrics.received)} received`);
     text("metric-uptime", uptime(status.uptime_seconds));
-    text("metric-errors", `${count(metrics.errors)} errors · ${count(metrics.reloads)} reloads`);
+    text("metric-errors", publicView ? "Since the proxy last started" : `${count(metrics.errors)} errors · ${count(metrics.reloads)} reloads`);
+    const allDown = unhealthy && unhealthy === backends.length;
     verdict(unhealthy ? "bad" : !checks || unknown ? "warning" : "good",
-      unhealthy ? `${unhealthy} of ${backends.length} backends unhealthy`
-        : !backends.length ? "Proxy is running"
-          : !checks || unknown === backends.length ? "Proxy is running, health unmonitored"
-            : unknown ? "Proxy is running, some health unknown"
-              : `All ${backends.length === 1 ? "backends" : `${backends.length} backends`} healthy`);
-    text("status-summary", unhealthy ? `${unhealthy} backend${unhealthy === 1 ? " is" : "s are"} reporting unhealthy. The proxy status service is reachable.` : !checks ? "Proxy is reachable. Backend health checks are disabled." : unknown ? "Proxy is reachable. Some backends do not have a health result." : "Proxy is reachable. All monitored backends are healthy.");
+      publicView
+        ? allDown ? "Network offline"
+          : unhealthy ? `${unhealthy} of ${plural(backends.length, noun)} offline`
+            : !backends.length || !checks || unknown === backends.length ? "Network is running"
+              : unknown ? "Network is running, some servers unknown"
+                : "All servers online"
+        : unhealthy ? `${unhealthy} of ${plural(backends.length, noun)} unhealthy`
+          : !backends.length ? "Proxy is running"
+            : !checks || unknown === backends.length ? "Proxy is running, health unmonitored"
+              : unknown ? "Proxy is running, some health unknown"
+                : `All ${backends.length === 1 ? "backends" : `${backends.length} backends`} healthy`);
+    text("status-summary", publicView
+      ? allDown ? "No servers are accepting players right now." : unhealthy ? `${plural(unhealthy, "server")} ${unhealthy === 1 ? "is" : "are"} offline. Players can still join the others.` : !checks ? "The network is reachable. Server health is not monitored." : unknown ? "The network is reachable. Some servers have not reported yet." : "Players can join every server."
+      : unhealthy ? `${unhealthy} backend${unhealthy === 1 ? " is" : "s are"} reporting unhealthy. The proxy status service is reachable.` : !checks ? "Proxy is reachable. Backend health checks are disabled." : unknown ? "Proxy is reachable. Some backends do not have a health result." : "Proxy is reachable. All monitored backends are healthy.");
     text("last-update", `Updated ${new Date().toLocaleTimeString()}`);
-    $("metrics-link").classList.toggle("hidden", !status.services?.status?.metrics);
+    hide("metrics-link", !status.services?.status?.metrics);
+    text("backends-heading", publicView ? "Servers" : "Backends");
+    hide("backend-address-heading", publicView);
     table("listeners", status.listeners || [], 2, (tr, listener) => { cell(tr, listener.name); cell(tr, listener.address, "address"); });
-    table("backends", backends, 3, (tr, backend) => {
-      cell(tr, backend.name); cell(tr, backend.address, "address");
+    table("backends", backends, publicView ? 3 : 4, (tr, backend) => {
+      const name = cell(tr, backend.display || backend.name);
+      if (!publicView && backend.display && backend.display !== backend.name) name.title = backend.name;
+      if (!publicView) cell(tr, backend.address, "address");
+      cell(tr, count(backend.players), "metric-value");
+      const [className, label] = healthLabel(backend, checks, publicView);
       const span = document.createElement("span");
-      span.className = `health ${!checks ? "unknown" : backend.healthy === false ? "bad" : backend.healthy === true ? "" : "unknown"}`;
-      span.textContent = !checks ? "Checks disabled" : backend.healthy === false ? "Unhealthy" : backend.healthy === true ? "Healthy" : "Unknown";
+      span.className = `health ${className}`; span.textContent = label;
       cell(tr, "").append(span);
     });
     table("metrics", Object.entries(metrics).filter(([, value]) => typeof value === "number"), 2, (tr, [key, value]) => {
@@ -72,6 +142,10 @@
   function verdict(kind, title) {
     $("verdict").className = `verdict ${kind}`;
     text("status-verdict", title);
+  }
+  function schedule() {
+    clearTimeout(timer);
+    timer = setTimeout(() => { if (document.hidden) schedule(); else refresh(); }, interval);
   }
   async function refresh() {
     if (pending) return;
@@ -89,10 +163,9 @@
       text("status-summary", "The status service is unavailable. Displayed values are the last received snapshot.");
       text("notice", error.name === "AbortError" ? "Status request timed out. Retrying automatically." : `${error.message} Retrying automatically.`);
       $("notice").className = "notice error";
-    } finally { clearTimeout(timeout); pending = false; $("refresh-status").disabled = false; }
+    } finally { clearTimeout(timeout); pending = false; $("refresh-status").disabled = false; schedule(); }
   }
   $("refresh-status").addEventListener("click", refresh);
-  setInterval(() => { if (!document.hidden) refresh(); }, 5000);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
   refresh();
 })();

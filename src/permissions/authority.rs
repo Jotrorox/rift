@@ -654,6 +654,16 @@ impl Authority {
             .map(|((), applied)| applied)
     }
 
+    /// Grant `node` to a player UUID as a global user node (tests).
+    #[cfg(test)]
+    pub(crate) fn grant(&self, uuid: &str, node: &str) {
+        let change = Change::SetNode {
+            subject: rift_permissions::SubjectRef::User(Uuid::parse(uuid).unwrap()),
+            node: rift_permissions::Node::permission(node, true).unwrap(),
+        };
+        self.apply(Actor::Cli, change).unwrap();
+    }
+
     /// What `change` would do, without writing anything.
     pub fn preview(&self, change: Change) -> Result<Vec<Op>, PermError> {
         let change = change.normalized()?;

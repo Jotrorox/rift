@@ -39,6 +39,10 @@ rift.config.status = {
     listen = "127.0.0.1:9090",
     ui = true,
     metrics = true,
+    -- To link players to this page, hide operator detail and brand it:
+    -- exposure = "public",
+    -- backends = { survival = "Survival", lobby = "Lobby" },
+    -- ui = { title = "Example Network", accent = "#ff6a00", notice = "Maintenance Sunday 02:00 UTC" },
 }
 -- Optional separate Prometheus-only server; usually status.metrics is enough.
 rift.config.metrics = false

@@ -13,7 +13,7 @@ static SLOTS: Semaphore = Semaphore::const_new(crate::script::MAX_CONCURRENT);
 
 /// Request metadata plus a read-only snapshot of runtime status in `context`.
 /// Authentication headers should be removed by the HTTP adapter.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HttpRequest {
     pub method: String,
     pub path: String,
@@ -23,7 +23,7 @@ pub struct HttpRequest {
     pub context: serde_json::Value,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HttpResponse {
     pub status: u16,
     pub content_type: String,
@@ -199,7 +199,7 @@ pub(crate) fn json_value(
     })
 }
 
-fn response(value: Value) -> mlua::Result<Option<HttpResponse>> {
+pub(crate) fn response(value: Value) -> mlua::Result<Option<HttpResponse>> {
     if value.is_nil() {
         return Ok(None);
     }
@@ -269,7 +269,7 @@ fn mime_token(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
 }
 
-fn valid_content_type(value: &str) -> bool {
+pub(crate) fn valid_content_type(value: &str) -> bool {
     if value.len() > 256
         || !value
             .bytes()

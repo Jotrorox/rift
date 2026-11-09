@@ -238,7 +238,6 @@ pub struct Session<C, B> {
     backend: Option<Connection<B>>,
     pub handshake: Handshake,
     pub extension: Option<crate::extensions::ExtensionSession>,
-    extension_commands: Vec<String>,
     /// The authority behind the proxy's own `/perms` and `/rp`, once enabled.
     permission_commands: Option<std::sync::Arc<crate::permissions::Authority>>,
     version: Option<ProtocolVersion>,
@@ -278,7 +277,6 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             version: ProtocolVersion::new(handshake.protocol).ok(),
             backend: None,
             extension: None,
-            extension_commands: Vec::new(),
             permission_commands: None,
             handshake,
             login_start: None,
@@ -314,34 +312,16 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
     }
 
     pub fn set_extension(&mut self, extension: crate::extensions::ExtensionSession) {
-        self.extension_commands = extension.commands();
         self.extension = Some(extension);
-        self.add_permission_commands();
     }
 
     /// Answer `/perms` and `/rp` on the proxy (network sessions only). An
-    /// extension command of the same name takes precedence.
+    /// extension or plugin command of the same name takes precedence.
     pub fn enable_permission_commands(
         &mut self,
         authority: std::sync::Arc<crate::permissions::Authority>,
     ) {
         self.permission_commands = Some(authority);
-        self.add_permission_commands();
-    }
-
-    fn add_permission_commands(&mut self) {
-        if self.permission_commands.is_none() {
-            return;
-        }
-        for name in crate::permissions::command::COMMAND_NAMES {
-            if !self
-                .extension_commands
-                .iter()
-                .any(|command| command == name)
-            {
-                self.extension_commands.push(name.to_owned());
-            }
-        }
     }
 
     /// The proxy's `/perms` names this player sees in the command tree.
@@ -1341,7 +1321,14 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                         && self.joined
                         && let Some(caps) = version.switching()
                         && let Some((id, text)) =
-                            caps.proxy_suggestion_request(&packet, &self.extension_commands)?
+                            caps.proxy_suggestion_request(&packet, &|name| {
+                                self.extension
+                                    .as_ref()
+                                    .is_some_and(|extension| extension.intercepts(name))
+                                    || (self.permission_commands.is_some()
+                                        && crate::permissions::command::COMMAND_NAMES
+                                            .contains(&name))
+                            })?
                     {
                         if self.suggestions.allow() {
                             return Ok(SessionEvent::Suggestions(SuggestionRequest { id, text }));
@@ -1355,8 +1342,17 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                         && phase == State::Play
                         && self.joined
                         && let Some(caps) = version.switching()
+                        // Looked up now, not when the session began: plugins
+                        // register commands when they (re)start.
                         && let Some((command, acknowledgement)) =
-                            caps.proxy_command_with(&packet, &self.extension_commands)?
+                            caps.proxy_command_with(&packet, &|name| {
+                                self.extension
+                                    .as_ref()
+                                    .is_some_and(|extension| extension.intercepts(name))
+                                    || (self.permission_commands.is_some()
+                                        && crate::permissions::command::COMMAND_NAMES
+                                            .contains(&name))
+                            })?
                     {
                         if let Some(acknowledgement) = acknowledgement {
                             let acknowledgement =

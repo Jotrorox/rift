@@ -41,6 +41,7 @@
         <ul class="nav" aria-labelledby="nav-heading-configuration">
           <li id="nav-script"><a href="#script"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7 5 3 10l4 5M13 5l4 5-4 5"/></svg>Lua script</a></li>
           <li id="nav-definitions"><a href="#definitions"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 6H11M15 6h1.5M3.5 14H5M9 14h7.5"/><circle cx="13" cy="6" r="2"/><circle cx="7" cy="14" r="2"/></svg>Groups &amp; templates</a></li>
+          <li id="nav-plugins"><a href="#plugins"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7.5 3v3.5M12.5 3v3.5M5 6.5h10v3a5 5 0 0 1-10 0zM10 14.5V17"/></svg>Plugins</a></li>
           <li id="nav-extensions"><a href="#extensions"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7 3.5c-2 0-2 1-2 2.5v1.5c0 1.5-1 2.5-2 2.5 1 0 2 1 2 2.5V14c0 1.5 0 2.5 2 2.5M13 3.5c2 0 2 1 2 2.5v1.5c0 1.5 1 2.5 2 2.5-1 0-2 1-2 2.5V14c0 1.5 0 2.5-2 2.5"/></svg>Extensions</a></li>
           <li id="nav-reference"><a href="#reference"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 15.5v-11A1.5 1.5 0 0 1 5.5 3H16v11H5.5A1.5 1.5 0 0 0 4 15.5 1.5 1.5 0 0 0 5.5 17H16"/></svg>Reference</a></li>
         </ul>
@@ -333,6 +334,18 @@
             <form class="form-row" id="perm-activity-form" role="search"><div class="field grow"><label for="perm-activity-actor">Actor</label><input id="perm-activity-actor" class="mono" autocomplete="off" spellcheck="false" placeholder="operator:admin"></div><div class="field grow"><label for="perm-activity-subject">Subject</label><input id="perm-activity-subject" class="mono" autocomplete="off" spellcheck="false" placeholder="group:vip or a player UUID"></div><div class="field"><label for="perm-activity-since">After revision</label><input id="perm-activity-since" type="number" min="0" step="1"></div><button type="submit" class="button" id="perm-activity-apply">Filter</button></form>
             <div class="table-wrap"><table><thead><tr><th scope="col" class="numeric">Revision</th><th scope="col">Time</th><th scope="col">Actor</th><th scope="col">Changes</th><th scope="col">Reason</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead><tbody id="perm-activity"><tr><td colspan="6" class="empty">Waiting for data</td></tr></tbody></table></div>
             <p class="operation-result" id="perm-activity-result" role="status" aria-live="polite"></p>
+          </section>
+        </section>
+
+        <section class="view" id="view-plugins" aria-labelledby="view-title" hidden>
+          <div class="page-head"><p class="page-intro">Plugins answer Rift’s events in order: the configuration script, then persistent plugins in <code>rift.plugin</code> order, then bus responders. Persistent plugins run with Rift’s own privileges. Restarting one stops it and starts a fresh instance with its current configuration; calls meanwhile wait for it or time out under its manifest.</p><button type="button" class="button secondary" id="plugins-refresh">Refresh</button></div>
+          <section class="panel" id="plugins-panel" aria-label="Plugins">
+            <div class="table-wrap flush"><table><thead><tr><th scope="col">Name</th><th scope="col">Mode</th><th scope="col">Engine</th><th scope="col">State</th><th scope="col" class="numeric">Restarts</th><th scope="col" class="numeric">Calls</th><th scope="col">Last error</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead><tbody id="plugins"><tr><td colspan="8" class="empty">Waiting for data</td></tr></tbody></table></div>
+            <p class="operation-result" id="plugin-result" role="status" aria-live="polite"></p>
+          </section>
+          <section class="panel" id="plugin-log-panel" aria-label="Plugin log">
+            <div class="form-row top"><div class="field grow"><label for="plugin-log-select">Plugin</label><select id="plugin-log-select"><option value="">Choose a plugin</option></select></div><label class="checkbox"><input type="checkbox" id="plugin-log-follow" checked> Follow log</label><button type="button" class="button secondary" id="plugin-log-refresh">Refresh log</button></div>
+            <pre class="log-output tall" id="plugin-log-output" tabindex="0" aria-label="Plugin log output">Choose a plugin to view its last 200 log lines.</pre>
           </section>
         </section>
 
