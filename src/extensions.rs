@@ -366,7 +366,7 @@ impl ExtensionScript {
                         || context_providers.len() >= MAX_CONTEXT_PROVIDERS
                     {
                         return Err(mlua::Error::runtime(format!(
-                            "context provider {key:?}: use a custom key of 1 to 64 bytes of [a-z0-9_.:-] (not server, world, dimension or gamemode), at most {MAX_CONTEXT_PROVIDERS} providers"
+                            "context provider {key:?}: use a custom key of 1 to 64 bytes of [a-z0-9_.:-] (not server, group, world, dimension or gamemode), at most {MAX_CONTEXT_PROVIDERS} providers"
                         )));
                     }
                     context_providers.insert(key);
@@ -1037,6 +1037,8 @@ impl Extensions {
     pub fn update_destinations(&self, config: &Config) {
         // Publish capacity membership before callbacks can select new names.
         *self.groups.lock().unwrap() = group_members(config);
+        self.permissions
+            .set_service_groups(config.service_groups.keys());
         *self.backends.lock().unwrap_or_else(|e| e.into_inner()) = config
             .backends
             .keys()

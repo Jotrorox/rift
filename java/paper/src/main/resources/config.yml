@@ -5,6 +5,11 @@
 # every check here, so it must match the backend names used in grants.
 server: survival-1
 
+# This backend's service group, when it is an instance of one (lobby for
+# lobby-2). It is the "group" context, so a grant limited to group=lobby
+# applies on every lobby instance. Leave it unset outside a group.
+# group: lobby
+
 bus:
   # The proxy's messaging listener (messaging.listen in rift.lua).
   address: 127.0.0.1:4222

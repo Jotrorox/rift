@@ -77,9 +77,9 @@ depend: [RiftPerms]   # or softdepend, if your plugin also runs without it
 ## Reading
 
 Reads never touch the network. They answer from the replica, in the contexts
-you pass or in the player's current ones (`server`, `world`, `dimension`,
-`gamemode` and whatever context calculators add). A set that names no
-`server` gets this server's, as in the Rust client.
+you pass or in the player's current ones (`server`, `group`, `world`,
+`dimension`, `gamemode` and whatever context calculators add). A set that names
+no `server` gets this server's, and its `group` too, as in the Rust client.
 
 ```java
 RiftPermissions perms = RiftPermissions.get();
@@ -237,6 +237,7 @@ assertTrue(player.hasPermission("kits.starter"));
 
    ```yaml
    server: survival-1            # this backend's name: the "server" context
+   # group: survival             # its service group, for an instance: the "group" context
    bus:
      address: 127.0.0.1:4222     # messaging.listen on the proxy
      server_name: localhost      # the DNS name in the bus certificate
