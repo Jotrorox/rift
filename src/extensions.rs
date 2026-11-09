@@ -18,12 +18,12 @@ use std::{
 };
 use tokio::sync::Semaphore;
 
-mod decisions;
+pub(crate) mod decisions;
 mod groups;
 mod integrations;
-mod players;
+pub(crate) mod players;
 mod scheduler;
-mod storage;
+pub(crate) mod storage;
 pub use players::{PlayerAction, PlayerHandle, Players};
 pub use scheduler::Scheduler;
 
@@ -97,7 +97,7 @@ const MAX_SUGGESTION_RESULTS: usize = 1024;
 fn invalid(message: impl ToString) -> io::Error {
     io::Error::other(message.to_string())
 }
-fn fields(table: &Table, allowed: &[&str]) -> mlua::Result<()> {
+pub(crate) fn fields(table: &Table, allowed: &[&str]) -> mlua::Result<()> {
     for pair in table.clone().pairs::<String, Value>() {
         let (key, _) = pair?;
         if !allowed.contains(&key.as_str()) {
@@ -111,7 +111,7 @@ fn fields(table: &Table, allowed: &[&str]) -> mlua::Result<()> {
 /// Lua `rift.permissions.contexts.provide` callbacks per configuration.
 const MAX_CONTEXT_PROVIDERS: usize = 16;
 
-fn token(value: &str) -> bool {
+pub(crate) fn token(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
         && value.bytes().all(|b| {
@@ -119,6 +119,28 @@ fn token(value: &str) -> bool {
         })
 }
 impl ExtensionScript {
+    /// Player hooks the script defines (`login`, `join`, ...).
+    pub fn hook_names(&self) -> impl Iterator<Item = &str> {
+        self.hooks.iter().map(String::as_str)
+    }
+
+    pub fn command_names(&self) -> impl Iterator<Item = &str> {
+        self.commands.keys().map(String::as_str)
+    }
+
+    pub fn has_jobs(&self) -> bool {
+        !self.jobs.is_empty()
+    }
+
+    /// Hooks answered by bus responders (`extensions.decisions`).
+    pub fn decision_hooks(&self) -> impl Iterator<Item = &str> {
+        self.decisions.keys().map(String::as_str)
+    }
+
+    pub(crate) fn decisions(&self) -> &BTreeMap<String, decisions::Decision> {
+        &self.decisions
+    }
+
     /// `extensions.groups` with the field names of the configuration. API v1
     /// has no groups.
     pub fn permission_groups(&self) -> Option<serde_json::Value> {
@@ -558,7 +580,10 @@ impl ExtensionScript {
 /// own changes are not fed back to them.
 const PERMISSION_EVENTS: &str = "permission_change";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A decision hook's answer. Serialized like a Lua result table:
+/// `"continue"`, `{"deny":"reason"}`, `"leave_queue"`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Action {
     Continue,
     Deny(String),
@@ -567,7 +592,7 @@ pub enum Action {
     Queue(String),
     LeaveQueue,
 }
-fn parse_action(hook: &str, value: Value) -> mlua::Result<Action> {
+pub(crate) fn parse_action(hook: &str, value: Value) -> mlua::Result<Action> {
     if value.is_nil() {
         return Ok(Action::Continue);
     }
@@ -616,7 +641,7 @@ fn parse_action(hook: &str, value: Value) -> mlua::Result<Action> {
 }
 
 /// A `suggest` result: an array of strings or `{ text = ..., tooltip = ... }`.
-fn parse_suggestions(_hook: &str, value: Value) -> mlua::Result<Vec<Suggestion>> {
+pub(crate) fn parse_suggestions(_hook: &str, value: Value) -> mlua::Result<Vec<Suggestion>> {
     let wrong = || {
         mlua::Error::runtime(
             "suggest must return an array of strings or { text = ..., tooltip = ... } tables",
@@ -702,8 +727,12 @@ fn filter_suggestions(suggestions: Vec<Suggestion>, word: &str) -> Vec<Suggestio
         .collect()
 }
 
-#[derive(Debug, Clone, Default)]
+/// The session a player hook is about; the serde form uses the WIT field
+/// names (`connection_id`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Context {
+    #[serde(rename = "connection_id")]
     pub id: u64,
     pub uuid: String,
     pub name: String,
@@ -789,8 +818,8 @@ pub struct Extensions {
     permissions_config: PermissionsConfig,
     players: Players,
     job_gates: Arc<Mutex<BTreeMap<String, Weak<Semaphore>>>>,
-    /// Open bus decisions per hook, kept across reloads while the limit is unchanged.
-    decision_slots: Arc<BTreeMap<String, Arc<Semaphore>>>,
+    /// The dispatch chain: this script, persistent plugins, bus responders.
+    plugins: crate::plugins::Host,
 }
 impl Extensions {
     /// Live FIFO pressure, excluding expired tickets even while their session
@@ -813,7 +842,13 @@ impl Extensions {
     /// A generation for `config`. The first one gets a private in-memory
     /// permission store; see [`Extensions::with_permissions`].
     pub fn new(config: &Config, broker: Broker, previous: Option<&Self>) -> io::Result<Self> {
-        Self::with_permissions(config, broker, previous, None)
+        Self::build(
+            config,
+            broker,
+            previous,
+            crate::plugins::worker::Engines::builtin(),
+            None,
+        )
     }
 
     /// [`Extensions::new`] with the permission authority the first generation
@@ -822,6 +857,33 @@ impl Extensions {
         config: &Config,
         broker: Broker,
         previous: Option<&Self>,
+        permissions: Option<Arc<Authority>>,
+    ) -> io::Result<Self> {
+        Self::build(
+            config,
+            broker,
+            previous,
+            crate::plugins::worker::Engines::builtin(),
+            permissions,
+        )
+    }
+
+    /// Like [`Extensions::new`] with an explicit engine set. `engines` only
+    /// matters for the first generation; reloads keep the running set.
+    pub fn with_engines(
+        config: &Config,
+        broker: Broker,
+        previous: Option<&Self>,
+        engines: crate::plugins::worker::Engines,
+    ) -> io::Result<Self> {
+        Self::build(config, broker, previous, engines, None)
+    }
+
+    fn build(
+        config: &Config,
+        broker: Broker,
+        previous: Option<&Self>,
+        engines: crate::plugins::worker::Engines,
         permissions: Option<Arc<Authority>>,
     ) -> io::Result<Self> {
         if let Some(previous) = previous {
@@ -863,35 +925,34 @@ impl Extensions {
             || Arc::new(Mutex::new(group_members(config))),
             |previous| previous.groups.clone(),
         );
-        let decision_slots = config
-            .extensions
-            .iter()
-            .flat_map(|script| &script.decisions)
-            .map(|(hook, decision)| {
-                let reused = previous
-                    .and_then(|previous| previous.script.as_ref())
-                    .and_then(|old| old.decisions.get(hook))
-                    .filter(|old| old.max_in_flight == decision.max_in_flight)
-                    .and_then(|_| previous?.decision_slots.get(hook).cloned());
-                let slots =
-                    reused.unwrap_or_else(|| Arc::new(Semaphore::new(decision.max_in_flight)));
-                (hook.clone(), slots)
-            })
-            .collect();
+        let players = previous.map_or_else(
+            || {
+                Players::new(
+                    backends.clone(),
+                    groups.clone(),
+                    broker.clone(),
+                    permissions.clone(),
+                )
+            },
+            |previous| previous.players.clone(),
+        );
+        let plugins = crate::plugins::Host::new(
+            config,
+            crate::plugins::services::Base {
+                players: players.clone(),
+                store: store.clone(),
+                permissions: permissions.clone(),
+                broker: broker.clone(),
+                streams: Arc::default(),
+                monitor: Arc::default(),
+            },
+            previous.map(|previous| &previous.plugins),
+            engines,
+        )?;
         let runtime = Self {
             script: config.extensions.clone(),
-            decision_slots: Arc::new(decision_slots),
-            players: previous.map_or_else(
-                || {
-                    Players::new(
-                        backends.clone(),
-                        groups.clone(),
-                        broker.clone(),
-                        permissions.clone(),
-                    )
-                },
-                |previous| previous.players.clone(),
-            ),
+            plugins,
+            players,
             backends,
             groups,
             broker,
@@ -931,6 +992,11 @@ impl Extensions {
             .chain(config.service_groups.keys())
             .cloned()
             .collect();
+    }
+
+    /// The plugin dispatch chain for this generation.
+    pub fn plugins(&self) -> &crate::plugins::Host {
+        &self.plugins
     }
 
     /// The process-wide directory that sessions join, with or without extensions.
@@ -988,8 +1054,17 @@ impl Extensions {
         Uuid::parse(uuid)
             .is_ok_and(|uuid| self.permissions.check_active(uuid, node) == Tristate::True)
     }
+
+    /// Whether authenticated sessions get player hooks: with extensions or
+    /// with persistent plugins.
+    pub fn enabled(&self) -> bool {
+        self.script.is_some() || self.plugins.has_plugins()
+    }
+
     pub fn session(&self, context: Context) -> Option<ExtensionSession> {
-        self.script.as_ref()?;
+        if !self.enabled() {
+            return None;
+        }
         Some(ExtensionSession {
             runtime: self.clone(),
             context,
@@ -998,22 +1073,36 @@ impl Extensions {
             jobs: Arc::new(Semaphore::new(1)),
         })
     }
-    /// The Lua hook runs first because it is cheap and local. Only when it
-    /// continues does a configured bus decision get asked.
+    /// The plugin chain: the Lua hook first because it is cheap and local,
+    /// then persistent plugins, then a configured bus decision. Script
+    /// commands go to the script only; observers also reach every
+    /// persistent plugin.
     async fn call(&self, hook: &str, input: &Context, jobs: &Arc<Semaphore>) -> io::Result<Action> {
-        let script = self.script.as_ref().unwrap();
-        let mut action = if hook == "command" || script.hooks.contains(hook) {
-            self.evaluate(hook, input, jobs).await?
-        } else {
-            Action::Continue
+        let script = self
+            .script
+            .as_ref()
+            .filter(|script| hook == "command" || script.hooks.contains(hook))
+            .map(|_| self.evaluate(hook, input, jobs));
+        let action = match hook {
+            "command" => match script {
+                Some(script) => script.await?,
+                None => return Err(invalid("unknown extension command")),
+            },
+            "join" | "after_transfer" | "disconnect" => {
+                let result = match script {
+                    Some(script) => script.await,
+                    None => Ok(Action::Continue),
+                };
+                self.plugins.observe(hook, input);
+                result?
+            }
+            _ => self.plugins.decide(hook, input, script).await?,
         };
-        if action == Action::Continue
-            && let Some(decision) = script.decisions.get(hook)
-        {
-            action = decision
-                .decide(hook, input, &self.broker, &self.decision_slots[hook])
-                .await?;
-        }
+        self.known_destination(action)
+    }
+
+    /// Plugins may only select configured backends and service groups.
+    fn known_destination(&self, action: Action) -> io::Result<Action> {
         if let Action::Server(server) | Action::Queue(server) = &action
             && !self
                 .backends
@@ -1079,31 +1168,66 @@ pub struct ExtensionSession {
     jobs: Arc<Semaphore>,
 }
 impl ExtensionSession {
-    pub fn commands(&self) -> Vec<String> {
+    fn script_commands(&self) -> impl Iterator<Item = (&String, &Command)> {
+        self.runtime
+            .script
+            .iter()
+            .flat_map(|script| script.commands.iter())
+    }
+
+    /// Queue capacities by destination; none without extensions.
+    fn queues(&self) -> &BTreeMap<String, usize> {
+        static NONE: BTreeMap<String, usize> = BTreeMap::new();
         self.runtime
             .script
             .as_ref()
-            .unwrap()
-            .commands
-            .keys()
-            .cloned()
+            .map_or(&NONE, |script| &script.queues)
+    }
+
+    /// Every command Rift answers: the script's, then persistent plugins'.
+    pub fn commands(&self) -> Vec<String> {
+        self.script_commands()
+            .map(|(name, _)| name.clone())
+            .chain(
+                self.runtime
+                    .plugins
+                    .plugin_commands()
+                    .into_iter()
+                    .map(|command| command.name),
+            )
             .collect()
     }
+    /// Whether the proxy answers `/name` instead of the backend: a command of
+    /// the configuration script or of a persistent plugin. Asked when a
+    /// command arrives, so commands plugins register after the session began
+    /// are intercepted too.
+    pub fn intercepts(&self, name: &str) -> bool {
+        self.runtime
+            .script
+            .as_ref()
+            .is_some_and(|script| script.commands.contains_key(name))
+            || self.runtime.plugins.command_owner(name).is_some()
+    }
+
     /// Commands for this player's command tree with whether their arguments
     /// ask for suggestions. Commands the player lacks permission for are left
     /// out; the tree is rebuilt whenever a backend sends one.
     pub fn visible_commands(&self) -> Vec<(String, bool)> {
-        self.runtime
-            .script
-            .as_ref()
-            .unwrap()
-            .commands
-            .iter()
-            .filter(|(_, command)| {
-                self.runtime
-                    .permits(&self.context.uuid, &command.permission)
-            })
+        let uuid = &self.context.uuid;
+        self.script_commands()
+            .filter(|(_, command)| self.runtime.permits(uuid, &command.permission))
             .map(|(name, command)| (name.clone(), command.suggest != Suggest::None))
+            .chain(
+                self.runtime
+                    .plugins
+                    .plugin_commands()
+                    .into_iter()
+                    .filter(|command| self.runtime.permits(uuid, &command.permission))
+                    .map(|command| {
+                        let suggests = command.suggest != crate::plugins::api::SuggestKind::None;
+                        (command.name, suggests)
+                    }),
+            )
             .collect()
     }
 
@@ -1117,9 +1241,44 @@ impl ExtensionSession {
         args: &str,
         servers: impl FnOnce() -> Vec<String>,
     ) -> io::Result<Vec<Suggestion>> {
-        let script = self.runtime.script.as_ref().unwrap();
-        let Some(command) = script.commands.get(name) else {
+        use crate::plugins::{CommandOwner, api::SuggestKind};
+        let Some(owner) = self.runtime.plugins.command_owner(name) else {
             return Ok(Vec::new());
+        };
+        let command = match owner {
+            CommandOwner::Script => match self.script_commands().find(|(key, _)| *key == name) {
+                Some((_, command)) => command,
+                None => return Ok(Vec::new()),
+            },
+            CommandOwner::Plugin(instance, command) => {
+                if !self
+                    .runtime
+                    .permits(&self.context.uuid, &command.permission)
+                {
+                    return Ok(Vec::new());
+                }
+                let word = args.rsplit(' ').next().unwrap_or_default();
+                let suggestions = match command.suggest {
+                    SuggestKind::None => Vec::new(),
+                    SuggestKind::Fixed(names) => return Ok(complete_names(names, word)),
+                    SuggestKind::Players => {
+                        return Ok(complete_names(
+                            self.runtime.players.names().into_values().collect(),
+                            word,
+                        ));
+                    }
+                    SuggestKind::Servers => return Ok(complete_names(servers(), word)),
+                    SuggestKind::Dynamic => {
+                        let mut input = self.context.clone();
+                        input.command = Some(name.into());
+                        input.args = args.into();
+                        input.word = word.into();
+                        input.position = args.split(' ').count();
+                        self.runtime.plugins.suggest(&instance, input).await?
+                    }
+                };
+                return Ok(filter_suggestions(suggestions, word));
+            }
         };
         if !self
             .runtime
@@ -1167,13 +1326,21 @@ impl ExtensionSession {
         let (name, args) = command
             .split_once(char::is_whitespace)
             .unwrap_or((command, ""));
-        let script = self.runtime.script.as_ref().unwrap();
-        let permission = &script
-            .commands
-            .get(name)
-            .ok_or_else(|| invalid("unknown extension command"))?
-            .permission;
-        if !self.runtime.permits(&self.context.uuid, permission) {
+        use crate::plugins::CommandOwner;
+        let owner = self
+            .runtime
+            .plugins
+            .command_owner(name)
+            .ok_or_else(|| invalid("unknown extension command"))?;
+        let permission = match &owner {
+            CommandOwner::Script => self
+                .script_commands()
+                .find(|(key, _)| *key == name)
+                .map(|(_, command)| command.permission.clone())
+                .ok_or_else(|| invalid("unknown extension command"))?,
+            CommandOwner::Plugin(_, command) => command.permission.clone(),
+        };
+        if !self.runtime.permits(&self.context.uuid, &permission) {
             return Ok(Action::Message(
                 "You do not have permission to use this command.".into(),
             ));
@@ -1181,7 +1348,13 @@ impl ExtensionSession {
         let mut input = self.context.clone();
         input.command = Some(name.into());
         input.args = args.trim().into();
-        self.runtime.call("command", &input, &self.jobs).await
+        match owner {
+            CommandOwner::Script => self.runtime.call("command", &input, &self.jobs).await,
+            CommandOwner::Plugin(instance, _) => {
+                let action = self.runtime.plugins.command(&instance, input).await?;
+                self.runtime.known_destination(action)
+            }
+        }
     }
     async fn notify(&self, hook: &str, input: &Context) {
         if let Err(error) = self.runtime.call(hook, input, &self.jobs).await {
@@ -1211,7 +1384,7 @@ impl ExtensionSession {
     pub fn reserve(&self, target: &str) -> io::Result<()> {
         let mut host = self.runtime.host.lock().unwrap();
         let groups = self.runtime.groups.lock().unwrap();
-        for (destination, capacity) in &self.runtime.script.as_ref().unwrap().queues {
+        for (destination, capacity) in self.queues() {
             let members = groups.get(destination);
             if destination != target && !members.is_some_and(|members| members.contains(target)) {
                 continue;
@@ -1284,7 +1457,9 @@ impl ExtensionSession {
     /// Run the Lua context providers for the player's current server and
     /// hand the result to the permission authority.
     async fn provide_contexts(&self) {
-        let script = self.runtime.script.as_ref().unwrap();
+        let Some(script) = self.runtime.script.as_ref() else {
+            return;
+        };
         let Ok(uuid) = Uuid::parse(&self.context.uuid) else {
             return;
         };
@@ -1308,14 +1483,7 @@ impl ExtensionSession {
     }
 
     pub fn enqueue(&self, target: &str) -> io::Result<usize> {
-        if !self
-            .runtime
-            .script
-            .as_ref()
-            .unwrap()
-            .queues
-            .contains_key(target)
-        {
+        if !self.queues().contains_key(target) {
             return Err(invalid("No queue is configured for that server."));
         }
         if self.context.server.as_deref().is_some_and(|current| {
@@ -1373,7 +1541,7 @@ impl ExtensionSession {
                 .values()
                 .filter(|servers| contains_destination(servers, server, members))
                 .count();
-            used < self.runtime.script.as_ref().unwrap().queues[server]
+            used < self.queues().get(server).copied().unwrap_or(0)
                 * members.map_or(1, BTreeSet::len)
         }))
     }
@@ -1407,6 +1575,14 @@ impl Drop for ExtensionSession {
                 queue.retain(|(id, _)| *id != self.context.id);
             }
         }
+        // Persistent plugins are told without waiting; their queues are bounded.
+        let mut closing = self.context.clone();
+        closing.reason = Some("session_closed".into());
+        if let Some(mut transfer) = self.pending.clone() {
+            transfer.success = Some(false);
+            self.runtime.plugins.observe("after_transfer", &transfer);
+        }
+        self.runtime.plugins.observe("disconnect", &closing);
         // Cleanup is synchronous and unconditional. Notifications are bounded,
         // best effort on cancellation and shutdown; never queue unbounded work.
         let Some(script) = self.runtime.script.clone() else {

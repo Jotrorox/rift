@@ -8,13 +8,13 @@ use axum::{
     extract::{
         DefaultBodyLimit, Extension, Path, RawQuery, Request, State, rejection::JsonRejection,
     },
-    http::{HeaderValue, StatusCode, Uri, header},
+    http::{HeaderMap, HeaderValue, StatusCode, Uri, header},
     middleware::{self, Next},
     response::{Html, IntoResponse, Response},
     routing::{any, delete, get, post, put},
 };
 use rift::{
-    config::Config,
+    config::{Config, StatusBackend, StatusExposure},
     http_script::{HttpError, HttpRequest},
 };
 use serde_json::{Value, json};
@@ -156,25 +156,76 @@ impl App {
             snapshot.service_addresses.get(kind.name()) == Some(&address)
         })
     }
-    fn status(&self, private: bool) -> Value {
-        self.status_snapshot(&self.snapshot(), private)
+    /// The status server's view, as its `exposure` setting allows.
+    fn status(&self) -> Value {
+        let snapshot = self.snapshot();
+        let view = match snapshot.config.status.as_ref().map(|s| s.exposure) {
+            Some(StatusExposure::Public) => View::Public,
+            _ => View::Operator,
+        };
+        self.status_snapshot(&snapshot, view)
     }
-    fn status_snapshot(&self, snapshot: &Snapshot, private: bool) -> Value {
+    fn status_snapshot(&self, snapshot: &Snapshot, view: View) -> Value {
         let config = &snapshot.config;
-        let listeners: Vec<_> = config.listeners.iter().map(|(name, address)| json!({"name":name,"address":snapshot.listener_addresses.get(name).unwrap_or(address).to_string()})).collect();
-        let backends: Vec<_> = config.backends.iter().map(|(name, address)| json!({"name":name,"address":address.address(),"version":address.version().map(|version| version.release()),"healthy":snapshot.health.available(name)})).collect();
-        let mut value = json!({
-            "version":env!("CARGO_PKG_VERSION"), "uptime_seconds":self.started.elapsed().as_secs(),
-            "revision":snapshot.revision, "listeners":listeners, "backends":backends,
-            "metrics":self.metrics.values(), "health_checks_enabled":config.health_check.is_some(),
-            "http_hook":config.on_http.is_some(),
-            "services":{
-                "web":config.web.as_ref().map(|c| json!({"listen":snapshot.service_addresses.get("web").unwrap_or(&c.listen).to_string(),"api":c.api,"ui":c.ui})),
-                "status":config.status.as_ref().map(|c| json!({"listen":snapshot.service_addresses.get("status").unwrap_or(&c.listen).to_string(),"ui":c.ui,"metrics":c.metrics})),
-                "metrics":config.metrics.map(|a| snapshot.service_addresses.get("metrics").unwrap_or(&a).to_string())
+        let settings = config.status.as_ref();
+        let players = self.metrics.backend_players();
+        let health_checks = config.health_check.is_some();
+        let mut backends = Vec::with_capacity(config.backends.len());
+        // Instances shown under a group's display name are numbered within it.
+        let mut numbered: BTreeMap<&str, usize> = BTreeMap::new();
+        for (name, backend) in &config.backends {
+            let group = config.instances.get(name).map(|i| i.group.as_str());
+            let entry = settings.and_then(|s| s.backend(name, group));
+            let display = match entry {
+                Some(StatusBackend::Hidden) if view.status_server() => continue,
+                Some(StatusBackend::Display(display))
+                    if group.is_some()
+                        && !settings.is_some_and(|s| s.backends.contains_key(name)) =>
+                {
+                    let number = numbered.entry(group.unwrap()).or_default();
+                    *number += 1;
+                    format!("{display} {number}")
+                }
+                Some(StatusBackend::Display(display)) => display.clone(),
+                _ => name.clone(),
+            };
+            let mut value = json!({
+                "name":name, "display":display,
+                "version":backend.version().map(|version| version.release()),
+                "healthy":snapshot.health.available(name),
+                "players":players.get(name).copied().unwrap_or(0),
+            });
+            if view != View::Public {
+                value["address"] = json!(backend.address());
             }
+            backends.push(value);
+        }
+        let mut value = json!({
+            "uptime_seconds":self.started.elapsed().as_secs(),
+            "players":self.metrics.players.get(),
+            "backends":backends,
+            "health_checks_enabled":health_checks,
         });
-        if private {
+        if let Some(settings) = settings.filter(|_| view.status_server()) {
+            value["exposure"] = json!(settings.exposure.name());
+            value["page"] = page(settings, view);
+        }
+        if view == View::Public {
+            value["services"] = json!({"status":{"metrics":settings.is_some_and(|s| s.metrics)}});
+            return value;
+        }
+        let listeners: Vec<_> = config.listeners.iter().map(|(name, address)| json!({"name":name,"address":snapshot.listener_addresses.get(name).unwrap_or(address).to_string()})).collect();
+        value["version"] = json!(env!("CARGO_PKG_VERSION"));
+        value["revision"] = json!(snapshot.revision);
+        value["listeners"] = json!(listeners);
+        value["metrics"] = self.metrics.values();
+        value["http_hook"] = json!(config.on_http.is_some());
+        value["services"] = json!({
+            "web":config.web.as_ref().map(|c| json!({"listen":snapshot.service_addresses.get("web").unwrap_or(&c.listen).to_string(),"api":c.api,"ui":c.ui})),
+            "status":settings.map(|c| json!({"listen":snapshot.service_addresses.get("status").unwrap_or(&c.listen).to_string(),"ui":c.ui,"metrics":c.metrics,"exposure":c.exposure.name()})),
+            "metrics":config.metrics.map(|a| snapshot.service_addresses.get("metrics").unwrap_or(&a).to_string())
+        });
+        if view == View::Admin {
             value["managed_servers"] = admin::managed_servers(snapshot);
             value["service_groups"] = admin::service_groups(snapshot)["groups"].clone();
             value["config_path"] = json!(self.path.as_ref().map(|p| p.display().to_string()));
@@ -199,6 +250,39 @@ impl App {
         }
         value
     }
+}
+
+/// Who a status object is for; each view reveals less than the one after it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum View {
+    /// `status.exposure = "public"`: names, health and players only.
+    Public,
+    /// The status server with operator exposure: addresses, listeners and counters.
+    Operator,
+    /// The Lua `on_http` context: operator detail, ignoring status page presentation.
+    Context,
+    /// Authenticated `/api/status`: everything, including managed servers and routes.
+    Admin,
+}
+impl View {
+    fn status_server(self) -> bool {
+        matches!(self, Self::Public | Self::Operator)
+    }
+}
+
+/// Presentation settings for the bundled page (and anyone styling their own).
+fn page(settings: &rift::config::StatusConfig, view: View) -> Value {
+    let page = &settings.page;
+    let operator = view != View::Public;
+    json!({
+        "title":page.title, "notice":page.notice, "accent":page.accent,
+        "refresh_ms":page.refresh.as_millis() as u64,
+        "panels":{
+            "summary":page.panels.summary, "backends":page.panels.backends,
+            "listeners":page.panels.listeners && operator, "metrics":page.panels.metrics && operator,
+        },
+        "links":page.links.iter().map(|link| json!({"label":link.label,"href":link.href})).collect::<Vec<_>>(),
+    })
 }
 
 fn error(status: StatusCode, message: impl ToString) -> Response {
@@ -364,6 +448,10 @@ fn router(kind: Kind, address: SocketAddr, mut app: App) -> Router {
             .route("/api/servers/{name}/console", post(server_console))
             .route("/api/groups", get(service_groups))
             .route("/api/nodes", get(nodes))
+            .route("/api/plugins", get(plugin_list))
+            .route("/api/plugins/{name}", get(plugin_status))
+            .route("/api/plugins/{name}/logs", get(plugin_logs))
+            .route("/api/plugins/{name}/restart", post(restart_plugin))
             .route("/api/definitions", get(definitions))
             .route("/api/definitions/{section}", put(edit_setting))
             .route("/api/permissions", get(permission_groups))
@@ -418,7 +506,8 @@ fn router(kind: Kind, address: SocketAddr, mut app: App) -> Router {
             .route("/", get(status_html))
             .route("/assets/app.css", get(css))
             .route("/assets/status.js", get(status_js))
-            .route("/status", get(public_status))
+            .route("/status", get(public_status).options(status_preflight))
+            .route("/badge.svg", get(status_badge))
             .route("/metrics", get(status_metrics))
             .layer(middleware::from_fn_with_state(app.clone(), status_guard)),
         Kind::Metrics => Router::new().route("/metrics", get(standalone_metrics)),
@@ -648,7 +737,8 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
                 ["api", "access"] | ["api"] => "",
                 ["api", "files", ..] => "files",
                 ["api", "templates", _, "download"] | ["api", "software", ..] => "servers",
-                ["api", "servers", _, "logs"] => "logs",
+                ["api", "servers", _, "logs"] | ["api", "plugins", _, "logs"] => "logs",
+                ["api", "plugins", _, "restart"] => "plugins",
                 ["api", "servers", _, "console"] => "console",
                 ["api", "servers", _, _]
                 | ["api", "groups", _, "instances"]
@@ -743,6 +833,18 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
                     },
                 )
             }
+            // Plugins act on the whole proxy: group-scoped operators see none.
+            ["api", "plugins", rest @ ..] => {
+                let name = rest
+                    .first()
+                    .and_then(|name| decode_name(name))
+                    .unwrap_or_default();
+                let known = snapshot.config.plugins.iter().any(|spec| spec.name == name);
+                (
+                    access.groups.is_none(),
+                    if known { name } else { String::new() },
+                )
+            }
             ["api", "groups", name, ..] => {
                 let name = decode_name(name).unwrap_or_default();
                 (
@@ -793,6 +895,7 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
             ["api", "config"] => "configuration",
             ["api", "config", "validate"] => "validate",
             ["api", "reload"] => "reload",
+            ["api", "plugins", _, "restart"] => "restart_plugin",
             _ => permission,
         };
         let action = format!("{} {}", request.method(), operation);
@@ -880,8 +983,43 @@ async fn status_guard(State(app): State<App>, request: Request, next: Next) -> R
 async fn admin_html() -> Html<&'static str> {
     Html(include_str!("web_assets/index.html"))
 }
-async fn status_html() -> Html<&'static str> {
-    Html(include_str!("web_assets/status.html"))
+/// The title and notice are rendered into the page too, for link previews and
+/// readers without JavaScript; the script keeps them current after reloads.
+async fn status_html(State(app): State<App>) -> Html<String> {
+    let snapshot = app.snapshot();
+    let page = snapshot.config.status.as_ref().map(|s| &s.page);
+    let title = page.and_then(|p| p.title.as_deref()).unwrap_or("Rift");
+    let notice = page.and_then(|p| p.notice.as_deref());
+    let (title, notice) = (escape_xml(title), escape_xml(notice.unwrap_or("")));
+    let notice_class = if notice.is_empty() { " hidden" } else { "" };
+    Html(fill(
+        include_str!("web_assets/status.html"),
+        &[
+            ("title", &title),
+            ("notice", &notice),
+            ("notice_class", notice_class),
+        ],
+    ))
+}
+/// Replace `{{name}}` placeholders in one pass, so values are never re-scanned.
+fn fill(template: &str, values: &[(&str, &str)]) -> String {
+    let mut output = String::with_capacity(template.len() + 256);
+    let mut rest = template;
+    while let Some(start) = rest.find("{{") {
+        output.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let Some(end) = after.find("}}") else {
+            output.push_str(&rest[start..]);
+            return output;
+        };
+        match values.iter().find(|(name, _)| *name == &after[..end]) {
+            Some((_, value)) => output.push_str(value),
+            None => output.push_str(&rest[start..start + 2 + end + 2]),
+        }
+        rest = &after[end + 2..];
+    }
+    output.push_str(rest);
+    output
 }
 async fn css() -> impl IntoResponse {
     (
@@ -919,7 +1057,7 @@ fn visible_groups(snapshot: &Snapshot, access: &Access) -> Value {
 }
 async fn admin_status(State(app): State<App>, Extension(access): Extension<Access>) -> Json<Value> {
     let snapshot = app.snapshot();
-    let mut value = app.status_snapshot(&snapshot, true);
+    let mut value = app.status_snapshot(&snapshot, View::Admin);
     value["managed_servers"] = visible_servers(&snapshot, &access);
     value["service_groups"] = visible_groups(&snapshot, &access)["groups"].clone();
     if !snapshot.nodes.is_empty() {
@@ -1651,8 +1789,201 @@ fn server_operation(
         ),
     }
 }
-async fn public_status(State(app): State<App>) -> Json<Value> {
-    Json(app.status(false))
+/// Every plugin in dispatch order with its state, restarts and calls.
+async fn plugin_list(State(app): State<App>) -> Json<Value> {
+    Json(json!({"plugins": app.snapshot().extensions.plugins().statuses()}))
+}
+async fn plugin_status(State(app): State<App>, Path(name): Path<String>) -> Response {
+    match app
+        .snapshot()
+        .extensions
+        .plugins()
+        .statuses()
+        .into_iter()
+        .find(|status| status.name == name)
+    {
+        Some(status) => Json(json!(status)).into_response(),
+        None => error(StatusCode::NOT_FOUND, format!("no plugin named {name:?}")),
+    }
+}
+/// The plugin's last log lines: its own log calls, captured output and
+/// lifecycle changes, oldest first.
+async fn plugin_logs(State(app): State<App>, Path(name): Path<String>) -> Response {
+    match app.snapshot().extensions.plugins().monitor().logs(&name) {
+        Some(lines) => Json(json!({"plugin": name, "lines": lines})).into_response(),
+        None => error(
+            StatusCode::NOT_FOUND,
+            format!("no persistent plugin named {name:?}"),
+        ),
+    }
+}
+async fn restart_plugin(
+    State(app): State<App>,
+    Extension(access): Extension<Access>,
+    Path(name): Path<String>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    if let Err(error) = payload(body, &[]) {
+        return error.into_response();
+    }
+    match app
+        .snapshot()
+        .extensions
+        .plugins()
+        .restart(&name, &access.name)
+    {
+        Ok(stopping) => {
+            tokio::spawn(stopping);
+            (
+                StatusCode::ACCEPTED,
+                Json(json!({
+                    "plugin":name,"operation":"restart","accepted":true,
+                    "message":"Restart accepted; poll /api/plugins for completion",
+                })),
+            )
+                .into_response()
+        }
+        Err(failure) => error(
+            match failure.kind() {
+                io::ErrorKind::NotFound => StatusCode::NOT_FOUND,
+                io::ErrorKind::Unsupported => StatusCode::CONFLICT,
+                _ => StatusCode::SERVICE_UNAVAILABLE,
+            },
+            failure,
+        ),
+    }
+}
+async fn public_status(State(app): State<App>, headers: HeaderMap) -> Response {
+    let mut response = Json(app.status()).into_response();
+    cors(&app, &headers, &mut response);
+    response
+}
+/// `GET /status` is a simple request, but answer preflights for clients that send one.
+async fn status_preflight(State(app): State<App>, headers: HeaderMap) -> Response {
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    if cors(&app, &headers, &mut response) {
+        let headers = response.headers_mut();
+        headers.insert(
+            header::ACCESS_CONTROL_ALLOW_METHODS,
+            HeaderValue::from_static("GET"),
+        );
+        headers.insert(
+            header::ACCESS_CONTROL_ALLOW_HEADERS,
+            HeaderValue::from_static("accept"),
+        );
+        headers.insert(
+            header::ACCESS_CONTROL_MAX_AGE,
+            HeaderValue::from_static("600"),
+        );
+    }
+    response
+}
+/// Grant a cross-origin read when `status.cors` lists the request's origin.
+/// Credentials are never allowed: the status server has none to protect.
+fn cors(app: &App, request: &HeaderMap, response: &mut Response) -> bool {
+    let snapshot = app.snapshot();
+    let Some(settings) = snapshot
+        .config
+        .status
+        .as_ref()
+        .filter(|s| !s.cors.is_empty())
+    else {
+        return false;
+    };
+    let wildcard = settings.cors.iter().any(|origin| origin == "*");
+    let headers = response.headers_mut();
+    if !wildcard {
+        headers.append(header::VARY, HeaderValue::from_static("origin"));
+    }
+    let Some(origin) = request
+        .get(header::ORIGIN)
+        .and_then(|origin| origin.to_str().ok())
+    else {
+        return false;
+    };
+    let allowed = if wildcard {
+        HeaderValue::from_static("*")
+    } else if settings.allows_origin(origin) {
+        match HeaderValue::from_str(origin) {
+            Ok(value) => value,
+            Err(_) => return false,
+        }
+    } else {
+        return false;
+    };
+    headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, allowed);
+    true
+}
+/// A shields-style SVG with the player count, coloured by backend health.
+async fn status_badge(State(app): State<App>) -> impl IntoResponse {
+    let status = app.status();
+    let backends = status["backends"].as_array().cloned().unwrap_or_default();
+    let unhealthy = backends.iter().filter(|b| b["healthy"] == false).count();
+    let players = status["players"].as_u64().unwrap_or(0);
+    let (message, color) = if !backends.is_empty() && unhealthy == backends.len() {
+        ("offline".to_owned(), "#cb2431")
+    } else {
+        let message = format!("{players} online");
+        let color = if unhealthy > 0 {
+            "#bf8700"
+        } else if status["health_checks_enabled"] == true {
+            "#2da44e"
+        } else {
+            "#0969da"
+        };
+        (message, color)
+    };
+    let label = status["page"]["title"].as_str().unwrap_or("players");
+    (
+        [(header::CONTENT_TYPE, "image/svg+xml; charset=utf-8")],
+        badge(label, &message, color),
+    )
+}
+fn badge(label: &str, message: &str, color: &str) -> String {
+    // Approximate Verdana 11px advance widths; textLength pins the rendering.
+    let width = |text: &str| {
+        text.chars()
+            .map(|c| match c {
+                'i' | 'l' | 'j' | '.' | ',' | ':' | ';' | '\'' | '|' | '!' => 3.5,
+                ' ' | 'f' | 't' | 'r' | 'I' => 4.5,
+                'm' | 'w' | 'M' | 'W' => 10.0,
+                c if c.is_ascii_uppercase() => 7.5,
+                _ => 7.0,
+            })
+            .sum::<f64>()
+            .ceil() as u32
+    };
+    let (label_text, message_text) = (width(label), width(message));
+    let (left, right) = (label_text + 12, message_text + 12);
+    let total = left + right;
+    let (label, message) = (escape_xml(label), escape_xml(message));
+    format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{total}\" height=\"20\" role=\"img\" aria-label=\"{label}: {message}\">\
+<title>{label}: {message}</title>\
+<linearGradient id=\"s\" x2=\"0\" y2=\"100%\"><stop offset=\"0\" stop-color=\"#bbb\" stop-opacity=\".1\"/><stop offset=\"1\" stop-opacity=\".1\"/></linearGradient>\
+<clipPath id=\"r\"><rect width=\"{total}\" height=\"20\" rx=\"3\" fill=\"#fff\"/></clipPath>\
+<g clip-path=\"url(#r)\"><rect width=\"{left}\" height=\"20\" fill=\"#555\"/><rect x=\"{left}\" width=\"{right}\" height=\"20\" fill=\"{color}\"/><rect width=\"{total}\" height=\"20\" fill=\"url(#s)\"/></g>\
+<g fill=\"#fff\" text-anchor=\"middle\" font-family=\"Verdana,Geneva,DejaVu Sans,sans-serif\" font-size=\"11\">\
+<text x=\"{lx}\" y=\"15\" fill=\"#010101\" fill-opacity=\".3\" textLength=\"{label_text}\">{label}</text><text x=\"{lx}\" y=\"14\" textLength=\"{label_text}\">{label}</text>\
+<text x=\"{mx}\" y=\"15\" fill=\"#010101\" fill-opacity=\".3\" textLength=\"{message_text}\">{message}</text><text x=\"{mx}\" y=\"14\" textLength=\"{message_text}\">{message}</text>\
+</g></svg>",
+        lx = f64::from(left) / 2.0,
+        mx = f64::from(left) + f64::from(right) / 2.0,
+    )
+}
+fn escape_xml(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            c => escaped.push(c),
+        }
+    }
+    escaped
 }
 async fn json_metrics(State(app): State<App>) -> Json<Value> {
     Json(app.metrics.values())
@@ -1678,7 +2009,7 @@ async fn standalone_metrics(state: State<App>) -> Response {
 }
 async fn discovery() -> Json<Value> {
     Json(
-        json!({"version":1,"endpoints":["GET /api/access","GET /api/status","GET /api/servers","POST /api/servers/{name}/start","POST /api/servers/{name}/stop","GET /api/servers/{name}/logs","POST /api/servers/{name}/console","GET /api/groups","GET /api/nodes","POST /api/groups/{name}/instances","GET /api/templates","POST /api/templates/{name}/download","GET /api/software/{type}/versions","GET|PUT|DELETE /api/files/templates/{path}","GET|PUT|DELETE /api/files/servers/{name}/{path}","DELETE /api/instances/{name}","GET /api/definitions","PUT /api/definitions/{section}/{name}","PUT /api/definitions/{section}","GET /api/permissions","POST /api/permissions/members/{uuid}/{group}","DELETE /api/permissions/members/{uuid}/{group}","GET /api/perms/revision","GET /api/perms/backends","GET /api/perms/registered","GET /api/perms/search","GET /api/perms/users","GET|PATCH /api/perms/users/{user}","GET|PUT|DELETE /api/perms/users/{user}/nodes","PUT|DELETE /api/perms/users/{user}/nodes/{id}","GET /api/perms/users/{user}/compiled","GET|POST /api/perms/groups","GET|PATCH|DELETE /api/perms/groups/{name}","GET|PUT|DELETE /api/perms/groups/{name}/nodes","PUT|DELETE /api/perms/groups/{name}/nodes/{id}","GET /api/perms/tracks","GET|PUT|DELETE /api/perms/tracks/{name}","POST /api/perms/tracks/{name}/promote","POST /api/perms/tracks/{name}/demote","GET /api/perms/audit","POST /api/perms/trace","POST /api/perms/apply","POST /api/perms/bulk","POST /api/perms/import","GET /api/perms/export","GET /api/deployments","POST /api/deployments/{id}/rollback","GET /api/audit","GET /api/operations/{id}","GET /api/metrics","GET /api/config","POST /api/config/validate","PUT /api/config","POST /api/reload"],"extensions":"/ext/* -> on_http(request)","source_limit_bytes":control::MAX_SOURCE}),
+        json!({"version":1,"endpoints":["GET /api/access","GET /api/status","GET /api/servers","POST /api/servers/{name}/start","POST /api/servers/{name}/stop","GET /api/servers/{name}/logs","POST /api/servers/{name}/console","GET /api/groups","GET /api/nodes","GET /api/plugins","GET /api/plugins/{name}","GET /api/plugins/{name}/logs","POST /api/plugins/{name}/restart","POST /api/groups/{name}/instances","GET /api/templates","POST /api/templates/{name}/download","GET /api/software/{type}/versions","GET|PUT|DELETE /api/files/templates/{path}","GET|PUT|DELETE /api/files/servers/{name}/{path}","DELETE /api/instances/{name}","GET /api/definitions","PUT /api/definitions/{section}/{name}","PUT /api/definitions/{section}","GET /api/permissions","POST /api/permissions/members/{uuid}/{group}","DELETE /api/permissions/members/{uuid}/{group}","GET /api/perms/revision","GET /api/perms/backends","GET /api/perms/registered","GET /api/perms/search","GET /api/perms/users","GET|PATCH /api/perms/users/{user}","GET|PUT|DELETE /api/perms/users/{user}/nodes","PUT|DELETE /api/perms/users/{user}/nodes/{id}","GET /api/perms/users/{user}/compiled","GET|POST /api/perms/groups","GET|PATCH|DELETE /api/perms/groups/{name}","GET|PUT|DELETE /api/perms/groups/{name}/nodes","PUT|DELETE /api/perms/groups/{name}/nodes/{id}","GET /api/perms/tracks","GET|PUT|DELETE /api/perms/tracks/{name}","POST /api/perms/tracks/{name}/promote","POST /api/perms/tracks/{name}/demote","GET /api/perms/audit","POST /api/perms/trace","POST /api/perms/apply","POST /api/perms/bulk","POST /api/perms/import","GET /api/perms/export","GET /api/deployments","POST /api/deployments/{id}/rollback","GET /api/audit","GET /api/operations/{id}","GET /api/metrics","GET /api/config","POST /api/config/validate","PUT /api/config","POST /api/reload"],"extensions":"/ext/* -> on_http(request)","source_limit_bytes":control::MAX_SOURCE}),
     )
 }
 async fn config_source(State(app): State<App>) -> Json<Value> {
@@ -1831,9 +2162,11 @@ async fn reload(
 }
 async fn extension(State(app): State<App>, request: Request) -> Response {
     let snapshot = app.snapshot();
-    let Some(script) = snapshot.config.on_http.clone() else {
+    let script = snapshot.config.on_http.clone();
+    let plugins = snapshot.extensions.plugins();
+    if script.is_none() && !plugins.may_handle(rift::plugins::api::Hook::Http) {
         return error(StatusCode::NOT_FOUND, "no on_http handler configured");
-    };
+    }
     let (parts, body) = request.into_parts();
     let bytes = match axum::body::to_bytes(body, control::MAX_SOURCE).await {
         Ok(bytes) => bytes,
@@ -1870,16 +2203,26 @@ async fn extension(State(app): State<App>, request: Request) -> Response {
         query: parts.uri.query().unwrap_or("").into(),
         body,
         headers,
-        context: app.status_snapshot(&snapshot, false),
+        context: app.status_snapshot(&snapshot, View::Context),
     };
-    match script
-        .execute_with_host(
-            request,
-            Some(snapshot.messaging.clone()),
-            snapshot.extensions.player_api(),
-        )
-        .await
-    {
+    // The configuration script first, then persistent plugins in order.
+    let result = match script {
+        Some(script) => {
+            script
+                .execute_with_host(
+                    request.clone(),
+                    Some(snapshot.messaging.clone()),
+                    snapshot.extensions.player_api(),
+                )
+                .await
+        }
+        None => Ok(None),
+    };
+    let result = match result {
+        Ok(None) => plugins.http(&request).await,
+        result => result,
+    };
+    match result {
         Ok(Some(result)) => (
             StatusCode::from_u16(result.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
             [(header::CONTENT_TYPE, result.content_type)],

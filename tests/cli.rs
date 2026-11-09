@@ -264,3 +264,69 @@ fn setup_commands_report_paths_and_reject_extra_arguments() {
     }
     assert!(fs::read_dir(&fixture.0).unwrap().next().is_none());
 }
+
+#[test]
+fn check_lists_plugins_with_their_mode_and_never_starts_them() {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.0.join("plugins/relaxoban")).unwrap();
+    fs::write(
+        fixture.0.join("plugins/relaxoban/plugin.toml"),
+        "name = \"relaxoban\"\nversion = \"0.3.1\"\napi = \"0.1\"\nengine = \"wasm\"\nentry = \"relaxoban.wasm\"\n[capabilities]\nenv = [\"RELAXOBAN_DSN\"]\n",
+    )
+    .unwrap();
+    fs::write(fixture.0.join("plugins/relaxoban/relaxoban.wasm"), "\0asm").unwrap();
+    fs::write(
+        fixture.0.join("rift.lua"),
+        "rift.plugin('relaxoban', { database_env = 'RELAXOBAN_DSN' })
+        rift.on('route', function() end)
+        return { listeners = { public = '127.0.0.1:0' }, backends = { lobby = '127.0.0.1:0' }, routes = { public = 'lobby' } }",
+    )
+    .unwrap();
+    let output = fixture.run(&["check"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(
+        stdout.contains("plugin (configuration script): mode script, sandboxed; hooks route"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "plugin relaxoban 0.3.1: mode persistent, engine wasm, trusted; restart on-failure; capabilities filesystem=data network=yes env=RELAXOBAN_DSN"
+        ),
+        "{stdout}"
+    );
+    assert!(
+        !fixture.0.join("plugins/relaxoban/data").exists(),
+        "init never runs in check"
+    );
+    // Without WebAssembly support, check warns and startup and strict check
+    // refuse the plugin before anything starts. With it, both fail on the
+    // invalid component.
+    let refusal = if cfg!(feature = "wasm") {
+        assert!(!stderr.contains("is not available"), "{stderr}");
+        "relaxoban.wasm is not a WebAssembly component"
+    } else {
+        assert!(
+            stderr.contains(
+                "engine \"wasm\" is not available: this Rift was built without WebAssembly support"
+            ),
+            "{stderr}"
+        );
+        "plugin relaxoban: engine \"wasm\" is not available"
+    };
+    let offline = "persistent plugins get no player hooks (login, commands, join, ...) without authentication.online_mode";
+    assert!(stderr.contains(offline), "{stderr}");
+    let strict = fixture.run(&["check", "--strict"]);
+    assert!(!strict.status.success());
+    let strict_stderr = String::from_utf8_lossy(&strict.stderr);
+    assert!(strict_stderr.contains(refusal), "{strict_stderr}");
+    assert!(strict_stderr.contains(offline), "{strict_stderr}");
+    let started = fixture.run(&["--config", "rift.lua"]);
+    assert!(!started.status.success());
+    assert!(
+        String::from_utf8_lossy(&started.stderr).contains(refusal),
+        "{}",
+        String::from_utf8_lossy(&started.stderr)
+    );
+}

@@ -113,12 +113,19 @@ impl Snapshot {
             ))
             .map_err(io::Error::other)?,
         };
+        let extensions = rift::extensions::Extensions::with_permissions(
+            &config,
+            messaging.clone(),
+            previous.map(|old| &old.extensions),
+            permissions,
+        )?;
         let router = previous
             .map_or_else(
                 || Router::new(&config),
                 |old| old.router.reconfigured(&config),
             )
-            .with_messaging(messaging.clone());
+            .with_messaging(messaging.clone())
+            .with_plugins(extensions.plugins().clone());
         let control =
             previous.map_or_else(|| Arc::new(Control::default()), |old| old.control.clone());
         let health = Health::with_control(&config, control.clone());
@@ -146,12 +153,6 @@ impl Snapshot {
         } else {
             None
         };
-        let extensions = rift::extensions::Extensions::with_permissions(
-            &config,
-            messaging.clone(),
-            previous.map(|old| &old.extensions),
-            permissions,
-        )?;
         let perms = previous.map_or_else(
             || {
                 let bus = Arc::new(rift::permissions::control::Bus::new(
@@ -379,7 +380,7 @@ pub async fn handle(
     let unmatched = primary.is_err();
     let primary = match primary {
         Ok(primary) => primary,
-        Err(_) if !is_status && snapshot.config.extensions.is_some() => snapshot
+        Err(_) if !is_status && snapshot.config.player_hooks() => snapshot
             .config
             .backends
             .keys()
@@ -539,7 +540,7 @@ pub async fn handle(
             return Err(io::Error::new(io::ErrorKind::Unsupported, reason));
         }
         let network_configured = snapshot.config.network != Default::default()
-            || snapshot.config.extensions.is_some()
+            || snapshot.config.player_hooks()
             || !snapshot.config.service_groups.is_empty();
         // Backend permission replicas need the player's snapshot before the
         // login reaches them, so the name is read first.
@@ -601,7 +602,7 @@ pub async fn handle(
             event.failure = "io_error";
         }
         let mut extension_selection = None;
-        if snapshot.config.extensions.is_some() {
+        if snapshot.config.player_hooks() {
             if !session.switch_supported() {
                 let reason = "Extensions v1 requires Minecraft 1.19.3–26.3.";
                 let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect(reason)).await;
@@ -2045,6 +2046,43 @@ async fn reconcile_nodes(current: watch::Receiver<Arc<Snapshot>>) {
     }
 }
 
+/// Plugin starts, stops, restarts, reloads and failures in the operator
+/// audit log: Rift itself (`system`) or the operator who asked for a restart.
+/// Only the event and the plugin name are recorded, never error text.
+async fn audit_plugins(
+    mut lifecycle: tokio::sync::broadcast::Receiver<rift::plugins::monitor::Lifecycle>,
+    workflows: Arc<crate::operator::Store>,
+) {
+    use tokio::sync::broadcast::error::RecvError;
+    loop {
+        match lifecycle.recv().await {
+            Ok(change) => {
+                let outcome = if matches!(change.event.as_str(), "failed" | "reload_failed") {
+                    "failed"
+                } else {
+                    "completed"
+                };
+                if let Err(error) = workflows
+                    .audit_async(
+                        change.actor.as_deref().unwrap_or("system"),
+                        &format!("plugin {}", change.event),
+                        &change.plugin,
+                        outcome,
+                        0,
+                    )
+                    .await
+                {
+                    eprintln!("rift: plugin lifecycle audit failed: {error}");
+                }
+            }
+            Err(RecvError::Lagged(missed)) => {
+                eprintln!("rift: {missed} plugin lifecycle change(s) were not audited");
+            }
+            Err(RecvError::Closed) => return,
+        }
+    }
+}
+
 /// Announce committed instance changes so plugins can follow capacity, like
 /// CloudNet's service lifecycle events.
 fn instance_event(snapshot: &Snapshot, response: &serde_json::Value) {
@@ -2143,7 +2181,7 @@ fn next_instance_name(
 }
 
 /// The arguments of a `/perms` or `/rp` command the proxy answers itself,
-/// unless an extension command of that name takes it.
+/// unless an extension or plugin command of that name takes it.
 fn permission_command<C, B>(
     session: &rift::session::Session<C, B>,
     command: &str,
@@ -2158,7 +2196,7 @@ where
         || session
             .extension
             .as_ref()
-            .is_some_and(|extension| extension.commands().iter().any(|name| name == root))
+            .is_some_and(|extension| extension.intercepts(root))
     {
         return None;
     }
@@ -2304,17 +2342,6 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     let (commands, mut requests) = tokio::sync::mpsc::channel::<control::Command>(8);
     let app = web::App::new(receiver.clone(), metrics.clone(), commands, source)?;
     let mut tasks = JoinSet::new();
-    for (name, listener) in listeners {
-        eprintln!("rift: listening on {}", listener.local_addr()?);
-        tasks.spawn(accept(
-            listener,
-            name,
-            receiver.clone(),
-            stopping.clone(),
-            metrics.clone(),
-            admission.clone(),
-        ));
-    }
     let mut background = JoinSet::new();
     if !snapshot.nodes.is_empty() {
         background.spawn(snapshot.nodes.listen()?);
@@ -2327,6 +2354,30 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         metrics.clone(),
         admin_commands.clone(),
     ));
+    // Subscribe before any plugin starts so its first lifecycle change is
+    // audited too.
+    background.spawn(audit_plugins(
+        snapshot.extensions.plugins().monitor().subscribe(),
+        app.workflows.clone(),
+    ));
+    // Persistent plugins initialize once the control service answers and
+    // before players connect; a plugin that cannot start fails startup.
+    snapshot
+        .extensions
+        .plugins()
+        .set_streams(snapshot.messaging_streams.clone());
+    snapshot.extensions.plugins().start().await?;
+    for (name, listener) in listeners {
+        eprintln!("rift: listening on {}", listener.local_addr()?);
+        tasks.spawn(accept(
+            listener,
+            name,
+            receiver.clone(),
+            stopping.clone(),
+            metrics.clone(),
+            admission.clone(),
+        ));
+    }
     let message_updates = message_handler
         .as_ref()
         .map(rift::message_script::MessageHandler::script_updates);
@@ -2463,6 +2514,14 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                 extension_jobs.shutdown().await;
                 next.extensions.activate();
                 extension_jobs = next.extensions.scheduler();
+                // The plugin diff applies only now that the reload committed;
+                // stopping and hot-reloading instances finishes in the background.
+                match next.extensions.plugins().activate() {
+                    Ok(work) => {
+                        tokio::spawn(work);
+                    }
+                    Err(error) => eprintln!("rift: plugins not updated: {error}"),
+                }
                 // Keep subscriptions and queued messages across script reloads.
                 if let (Some(updates), Some(script)) = (&message_updates, &next.config.on_message) {
                     updates.send_replace(script.clone());
@@ -2572,6 +2631,8 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     tasks.shutdown().await;
     background.shutdown().await;
     services.shutdown().await;
+    // Sessions are gone; give each plugin its shutdown grace period.
+    snapshot.extensions.plugins().shutdown().await;
     // Do not abort or detach an instance transaction: filesystem work and
     // process retirement must finish. A newly registered child then belongs
     // to the managed shutdown below, just like all existing children.

@@ -176,6 +176,7 @@ request helpers create one automatically. Control requests are serialized.
 | `rift.control.start` | `{"name":"lobby-1"}` | Request a managed server start (accepted asynchronously) |
 | `rift.control.stop` | `{"name":"lobby-1"}` | Request an unused managed server stop and pause automatic wake |
 | `rift.control.download` | `{"template":"paper","refresh":false}` | Download (or with `refresh`, update) a template's server software |
+| `rift.control.plugins` | `{"action":"list"}`, or `{"action":"status"\|"logs"\|"restart","name":"hello-lua"}` | [Plugins](plugins.md#operator-surface) with state, restarts and calls; one plugin; its last 200 log lines; or restart a persistent plugin (accepted asynchronously) |
 
 `create`, `remove` and `download` reply when the operation finishes, which can
 include a first-time download of up to 15 minutes; they run alongside other
@@ -194,6 +195,8 @@ A `switch` also carries the `previous` server, and a `quit` names the last one.
 `uuid` is lowercase 32-digit hex without hyphens. Events for one player arrive in order.
 `rift.events.permissions` carries every committed [permission](permissions.md)
 change, the same JSON as `rift.perms.update`.
+`rift.events.plugins` reports persistent plugins starting, failing, restarting
+and stopping, and operator restarts, as described in [plugins](plugins.md#operator-surface).
 `rift.events.lifecycle` reports `ready` and `draining`. These are ephemeral events;
 query status to get current state. A timed-out command may already have executed;
 check status before retrying a mutation. No automatic mutation retry is performed.

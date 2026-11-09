@@ -14,6 +14,8 @@
     perms: permsState(),
     // Template downloads and the file browser.
     templateButtons: [], files: { root: "templates", path: "", editing: null, baseline: "", buttons: [] },
+    // Plugin restarts and the plugin log tail.
+    pluginButtons: [], pluginLog: "", pluginLogPolling: false,
   };
   function permsState() {
     return { groups: [], tracks: [], group: "", groupDetail: null, user: "", userDetail: null, users: [], registered: [], events: [], expanded: new Set(),
@@ -21,6 +23,8 @@
   }
   const settingsDirty = () => Object.values(state.settingsDirty).some(Boolean);
   const allowed = (permission) => state.permissions === null || state.permissions.includes(permission);
+  // Plugins act on the whole proxy, so group-scoped operators see none.
+  const pluginsVisible = () => allowed("read") && !state.groups;
   const dirty = () => state.loaded && $("source").value !== state.baseline;
   const number = (value) => Number.isFinite(Number(value)) ? Number(value) : 0;
   const count = (value) => number(value).toLocaleString();
@@ -89,21 +93,23 @@
     for (const id of ["files-open", "files-up", "files-new-file", "files-new-folder", "files-upload", "files-refresh"]) $(id).disabled = state.busy || !allowed("files");
     $("files-save").disabled = state.busy || !allowed("files") || state.files.editing === null || !filesDirty;
     for (const button of state.files.buttons) button.disabled = state.busy || !allowed("files");
+    for (const button of state.pluginButtons) button.disabled = state.busy || !allowed("plugins");
+    $("plugin-log-panel").classList.toggle("hidden", !allowed("logs"));
     $("files-editor").classList.toggle("hidden", state.files.editing === null);
     text("files-edit-state", filesDirty ? "Unsaved changes" : "Saved");
     $("files-edit-state").className = `tag ${filesDirty ? "warning" : "good"}`;
     const visible = { script: allowed("config"), definitions: allowed("config"), extensions: allowed("extensions"),
       "server-list": allowed("config"), "tab-list": allowed("config"),
       "perm-groups": permsRead(), "perm-users": permsRead(), "perm-nodes": permsRead(), "perm-activity": permsRead(),
-      console: allowed("logs") || allowed("console"), deployments: allowed("deploy"), audit: allowed("audit"), files: allowed("files") };
+      console: allowed("logs") || allowed("console"), deployments: allowed("deploy"), audit: allowed("audit"), files: allowed("files"), plugins: pluginsVisible() };
     for (const [id] of views) $(`nav-${id}`).classList.toggle("hidden", visible[id] === false);
     for (const [section, ids] of sections) $(`section-${section}`).classList.toggle("hidden", ids.every((id) => visible[id] === false));
     showView();
   }
   const views = [["overview", "Overview"], ["routing", "Routing"], ["server-list", "Server list"], ["tab-list", "Tab list"], ["metrics", "Metrics"], ["servers", "Servers"], ["console", "Console"], ["groups", "Service groups"], ["files", "Files"],
-    ["script", "Lua script"], ["definitions", "Groups & templates"], ["extensions", "Extensions"], ["reference", "Reference"],
+    ["script", "Lua script"], ["definitions", "Groups & templates"], ["plugins", "Plugins"], ["extensions", "Extensions"], ["reference", "Reference"],
     ["perm-groups", "Permission groups"], ["perm-users", "Players"], ["perm-nodes", "Permission nodes"], ["perm-activity", "Permission activity"], ["deployments", "Deployments"], ["audit", "Audit log"]];
-  const sections = [["configuration", ["script", "definitions", "extensions"]], ["permissions", ["perm-groups", "perm-users", "perm-nodes", "perm-activity"]], ["activity", ["deployments", "audit"]]];
+  const sections = [["configuration", ["script", "definitions", "plugins", "extensions"]], ["permissions", ["perm-groups", "perm-users", "perm-nodes", "perm-activity"]], ["activity", ["deployments", "audit"]]];
   function showView() {
     const available = views.filter(([id]) => !$(`nav-${id}`).className.includes("hidden"));
     const requested = String(window.location.hash || "").slice(1);
@@ -128,6 +134,7 @@
     }
     if (changed && current === "groups" && allowed("read")) loadTemplates().catch((error) => text("template-result", error.message));
     if (changed && current === "files" && allowed("files")) loadFiles().catch((error) => text("files-result", error.message));
+    if (changed && current === "plugins" && pluginsVisible()) loadPlugins().catch((error) => text("plugin-result", error.message));
   }
   function sidebar(open) {
     $("app").classList.toggle("nav-open", open);
@@ -1323,6 +1330,71 @@
     table("audit-records", data.records || [], 5, (tr, record) => { cell(tr, time(record.timestamp_unix_ms)); cell(tr, record.actor); cell(tr, record.action); cell(tr, record.target || "—"); cell(tr, `${record.outcome}${record.status ? ` (${record.status})` : ""}`); }, "No audit records yet.");
     text("audit-result", data.durable ? "Records are retained on disk." : "Records are held in memory for this process.");
   }
+  const pluginModes = { script: "Configuration script", persistent: "Persistent", remote: "Bus responders" };
+  async function loadPlugins() {
+    const session = state.session, data = await request("/api/plugins");
+    if (session !== state.session) return;
+    const plugins = Array.isArray(data.plugins) ? data.plugins : [];
+    state.pluginButtons = [];
+    table("plugins", plugins, 8, (tr, plugin) => {
+      cell(tr, plugin.version ? `${plugin.name} ${plugin.version}` : plugin.name);
+      cell(tr, pluginModes[plugin.mode] || plugin.mode);
+      cell(tr, plugin.engine || "—");
+      cell(tr, plugin.status, `state ${plugin.status === "active" ? "running" : plugin.status}`);
+      cell(tr, plugin.restartable ? count(plugin.restarts) : "—", "metric-value");
+      cell(tr, plugin.restartable ? count(plugin.calls) : "—", "metric-value");
+      cell(tr, plugin.last_error || "—");
+      const actions = cell(tr, "");
+      if (!plugin.restartable) return;
+      const button = document.createElement("button");
+      button.type = "button"; button.className = "button subtle"; button.textContent = "Restart";
+      button.setAttribute("aria-label", `Restart ${plugin.name}`);
+      state.pluginButtons.push(button);
+      button.addEventListener("click", () => { if (!button.disabled) restartPlugin(plugin.name); });
+      actions.append(button);
+    }, "No plugins configured. Install one under plugins/ and enable it with rift.plugin.");
+    // Only persistent plugins keep a log tail.
+    const persistent = plugins.filter((plugin) => plugin.mode === "persistent").map((plugin) => plugin.name);
+    const select = $("plugin-log-select"), selected = state.pluginLog;
+    select.replaceChildren();
+    for (const name of ["", ...persistent]) {
+      const option = document.createElement("option"); option.value = name; option.textContent = name || "Choose a plugin"; select.append(option);
+    }
+    select.value = persistent.includes(selected) ? selected : "";
+    if (select.value !== state.pluginLog) { state.pluginLog = ""; text("plugin-log-output", "Choose a plugin to view its last 200 log lines."); }
+    controls();
+  }
+  async function pollPluginLog() {
+    if (state.pluginLogPolling || !state.pluginLog || !allowed("logs")) return;
+    const session = state.session, plugin = state.pluginLog;
+    state.pluginLogPolling = true;
+    try {
+      const data = await request(`/api/plugins/${encodeURIComponent(plugin)}/logs`);
+      if (session !== state.session || plugin !== state.pluginLog) return;
+      const lines = (Array.isArray(data.lines) ? data.lines : []).map((line) => `${new Date(number(line.timestamp_unix_ms)).toLocaleTimeString()}  ${String(line.level || "info").padEnd(5)}  ${line.message}`);
+      text("plugin-log-output", lines.length ? lines.join("\n") : "No log lines yet.");
+      if ($("plugin-log-follow").checked) $("plugin-log-output").scrollTop = $("plugin-log-output").scrollHeight;
+    } catch (error) { if (session === state.session && plugin === state.pluginLog) text("plugin-result", error.message); }
+    finally { state.pluginLogPolling = false; }
+  }
+  async function restartPlugin(name) {
+    if (state.busy || !allowed("plugins")) return;
+    if (!window.confirm(`Restart ${name}? Rift stops it and starts a fresh instance; calls meanwhile wait for it or time out under its manifest.`)) return;
+    state.busy = true; controls();
+    text("plugin-result", `Restarting ${name}…`);
+    $("plugin-result").className = "operation-result";
+    try {
+      await request(`/api/plugins/${encodeURIComponent(name)}/restart`, { method: "POST", body: "{}" });
+      text("plugin-result", `Restart accepted for ${name}. Its state updates below.`);
+      $("plugin-result").className = "operation-result success";
+      await loadPlugins();
+      if (state.pluginLog === name) await pollPluginLog();
+    } catch (error) {
+      if (error.status === 401 || error.status === 403) $("auth-panel").open = true;
+      text("plugin-result", error.message || "The restart request failed.");
+      $("plugin-result").className = "operation-result error";
+    } finally { state.busy = false; controls(); }
+  }
   function wakeLabel(server) {
     if (server.restart_exhausted) return "Paused · restart retries exhausted; Start to retry";
     if (server.automatic_enabled === false) return "Paused by Stop; Start to resume";
@@ -1476,7 +1548,9 @@
     for (const id of ["deployments", "audit-records", "managed-servers", "service-groups", "backends", "routes", "server-list-hosts", "templates", "files-entries",
       "perm-groups", "perm-tracks", "perm-users", "perm-registered", "perm-holders", "perm-activity", "perm-group-nodes", "perm-user-nodes", "perm-compiled-entries", "perm-trace-rows"]) $(id).replaceChildren();
     state.templateButtons = []; state.files = { root: "templates", path: "", editing: null, baseline: "", buttons: [] };
-    for (const id of ["template-result", "files-result"]) text(id, "");
+    for (const id of ["template-result", "files-result", "plugin-result"]) text(id, "");
+    state.pluginButtons = []; state.pluginLog = ""; $("plugins").replaceChildren(); $("plugin-log-select").replaceChildren();
+    text("plugin-log-output", "Choose a plugin to view its last 200 log lines.");
     for (const id of ["server-list-result", "tab-list-result", "perm-groups-result", "perm-group-result", "perm-track-result", "perm-users-result", "perm-user-result",
       "perm-group-node-result", "perm-user-node-result", "perm-trace-result", "perm-holders-result", "perm-activity-result"]) text(id, "");
     for (const id of ["perm-group-panel", "perm-group-nodes-panel", "perm-user-panel", "perm-user-nodes-panel", "perm-compiled-panel"]) $(id).classList.toggle("hidden", true);
@@ -1488,6 +1562,13 @@
     text("console-output", ""); text("console-result", ""); controls(); pollLogs({ reset: true });
   });
   $("console-refresh").addEventListener("click", () => pollLogs());
+  $("plugins-refresh").addEventListener("click", () => loadPlugins().catch((error) => text("plugin-result", error.message)));
+  $("plugin-log-select").addEventListener("change", () => {
+    state.pluginLog = $("plugin-log-select").value;
+    text("plugin-log-output", state.pluginLog ? "" : "Choose a plugin to view its last 200 log lines."); text("plugin-result", "");
+    pollPluginLog();
+  });
+  $("plugin-log-refresh").addEventListener("click", () => pollPluginLog());
   $("console-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     if (state.busy || !state.logServer || !allowed("console")) return;
@@ -1751,8 +1832,16 @@
     });
   });
 
-  setInterval(() => { if (!document.hidden && !state.busy && allowed("read")) refreshStatus(); }, 5000);
-  setInterval(() => { if (!document.hidden && !state.busy && $("console-follow").checked) pollLogs(); }, 1000);
+  setInterval(() => {
+    if (document.hidden || state.busy || !allowed("read")) return;
+    refreshStatus();
+    if ($("view-plugins").hidden === false && pluginsVisible()) loadPlugins().catch((error) => text("plugin-result", error.message));
+  }, 5000);
+  setInterval(() => {
+    if (document.hidden || state.busy) return;
+    if ($("console-follow").checked) pollLogs();
+    if ($("view-plugins").hidden === false && $("plugin-log-follow").checked) pollPluginLog();
+  }, 1000);
   document.addEventListener("visibilitychange", () => { if (!document.hidden && !state.busy) refreshStatus(); });
   controls(); connect();
 })();

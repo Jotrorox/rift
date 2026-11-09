@@ -22,7 +22,7 @@ use crate::{
 };
 
 /// Metadata available immediately after TCP accept, before reading any bytes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ConnectionInfo {
     pub listener: String,
     pub peer_addr: SocketAddr,
@@ -30,7 +30,8 @@ pub struct ConnectionInfo {
     pub default_backend: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RouteDecision {
     /// Continue the configured direct or hostname routing policy.
     Default,
@@ -80,6 +81,8 @@ pub struct Router {
     slots: Arc<Semaphore>,
     status_slots: Arc<Semaphore>,
     messaging: Option<crate::messaging::Broker>,
+    /// Persistent plugins asked after the script keeps the default.
+    plugins: Option<crate::plugins::Host>,
 }
 
 impl Router {
@@ -89,6 +92,7 @@ impl Router {
         router.slots = self.slots.clone();
         router.status_slots = self.status_slots.clone();
         router.messaging = self.messaging.clone();
+        router.plugins = self.plugins.clone();
         router
     }
 
@@ -102,7 +106,14 @@ impl Router {
             slots: Arc::new(Semaphore::new(crate::script::MAX_CONCURRENT)),
             status_slots: Arc::new(Semaphore::new(crate::script::MAX_CONCURRENT_STATUS)),
             messaging: None,
+            plugins: None,
         }
+    }
+
+    /// Ask persistent plugins after `on_route`/`on_status` keep the default.
+    pub fn with_plugins(mut self, plugins: crate::plugins::Host) -> Self {
+        self.plugins = Some(plugins);
+        self
     }
 
     /// Give connection hooks access to the shared, nonblocking message broker.
@@ -111,10 +122,16 @@ impl Router {
         self
     }
 
-    /// Run once per accepted connection. A short burst waits briefly for a
-    /// worker; sustained overload is rejected.
+    /// Run once per accepted connection: `on_route` first, then persistent
+    /// plugins in order. A short burst waits briefly for a script worker;
+    /// sustained overload is rejected.
     pub async fn route(&self, connection: ConnectionInfo) -> Result<RouteDecision, RouteError> {
-        let decision = if let Some(script) = self.script.clone() {
+        let plugins = self
+            .plugins
+            .as_ref()
+            .filter(|plugins| plugins.may_handle(crate::plugins::api::Hook::Route));
+        let mut decision = if let Some(script) = self.script.clone() {
+            let connection = connection.clone();
             self.run(&self.slots, move |deadline, messaging| {
                 script.evaluate(&connection, deadline, messaging)
             })
@@ -122,6 +139,11 @@ impl Router {
         } else {
             RouteDecision::Default
         };
+        if decision == RouteDecision::Default
+            && let Some(plugins) = plugins
+        {
+            decision = plugins.route(&connection).await?;
+        }
         if let RouteDecision::Backend(name) = &decision
             && !self.backends.contains_key(name)
             && !self.groups.contains(name)
@@ -134,17 +156,32 @@ impl Router {
     /// Run `on_status` for a server-list ping on its own workers, separate
     /// from `on_route`; `None` keeps the default response.
     pub async fn status(&self, ping: Ping) -> Result<Option<StatusOverride>, RouteError> {
-        let Some(script) = self.status.clone() else {
-            return Ok(None);
-        };
-        self.run(&self.status_slots, move |deadline, messaging| {
-            script.evaluate(&ping, deadline, messaging)
-        })
-        .await
+        if let Some(script) = self.status.clone() {
+            let input = ping.clone();
+            let changes = self
+                .run(&self.status_slots, move |deadline, messaging| {
+                    script.evaluate(&input, deadline, messaging)
+                })
+                .await?;
+            if changes.is_some() {
+                return Ok(changes);
+            }
+        }
+        match &self.plugins {
+            Some(plugins) if plugins.may_handle(crate::plugins::api::Hook::Status) => {
+                plugins.status(&ping).await
+            }
+            _ => Ok(None),
+        }
     }
 
+    /// `on_status` or a persistent plugin that may answer pings.
     pub fn has_status_hook(&self) -> bool {
         self.status.is_some()
+            || self
+                .plugins
+                .as_ref()
+                .is_some_and(|plugins| plugins.may_handle(crate::plugins::api::Hook::Status))
     }
 
     /// Waits at most [`crate::script::SLOT_WAIT`] for a worker. The execution

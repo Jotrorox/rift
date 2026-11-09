@@ -55,7 +55,8 @@ async function testWebAssets(appSource, statusSource) {
       const node = new Element();
       if (tag === "textarea") Object.defineProperty(node, "type", { get: () => "textarea" });
       return node;
-    }, hidden: false, addEventListener() {} };
+    }, hidden: false, addEventListener() {}, title: "",
+      documentElement: { style: { properties: {}, setProperty(name, value) { this.properties[name] = value; }, removeProperty(name) { delete this.properties[name]; } } } };
     const window = { location: { origin: "http://localhost:8080" }, addEventListener() {}, confirm: () => true };
     const model = {
       config: { source: "return { -- original comments\n}\n", revision: "rev-1", writable: true },
@@ -95,7 +96,7 @@ async function testWebAssets(appSource, statusSource) {
     evaluate(document, window, fetch, TestHeaders, class { abort() {} },
       class { encode(value) { return { length: unescape(encodeURIComponent(value)).length }; } },
       typeof URL === "undefined" ? TestURL : URL, schedule, (id) => timers.delete(id), (callback) => intervals.push(callback));
-    return { element, model, calls, window, intervals, response, advance, TestHeaders };
+    return { element, model, calls, window, document, intervals, response, advance, TestHeaders };
   }
   async function test(name, callback) { await callback(); passed.push(name); }
 
@@ -422,8 +423,54 @@ async function testWebAssets(appSource, statusSource) {
   await test("public status retains last snapshot when requests fail", async () => {
     const h = fixture(statusSource); await flush(); h.model.fail = 503;
     await h.element("refresh-status").emit("click"); await flush();
-    assert(h.element("metric-active").textContent === "2", "Error removed last snapshot");
+    assert(h.element("metric-connections").textContent.startsWith("2 active connections"), "Error removed last snapshot");
     assert(h.element("connection-state").textContent === "Unavailable", "Failed status presented as live");
+  });
+  await test("public exposure shows display names and players without operator detail", async () => {
+    const h = fixture(statusSource); await flush();
+    h.model.status = { exposure: "public", uptime_seconds: 90, players: 12, health_checks_enabled: true,
+      backends: [{ name: "survival1", display: "<b>Survival</b>", healthy: true, players: 9 }, { name: "lobby", display: "Lobby", healthy: false, players: 3 }],
+      services: { status: { metrics: false } }, page: { panels: { summary: true, backends: true, listeners: false, metrics: false } } };
+    await h.element("refresh-status").emit("click"); await flush();
+    assert(h.element("metric-players").textContent === "12", "Network players missing");
+    const row = h.element("backends").children[0];
+    assert(row.children.length === 3, "Public rows must not include an address column");
+    assert(row.children[0].textContent === "<b>Survival</b>", "Display name was not rendered as text");
+    assert(row.children[1].textContent === "9", "Backend players missing");
+    assert(row.children[2].children[0].textContent === "Online", "Public health wording missing");
+    assert(h.element("backend-address-heading").className.includes("hidden"), "Address heading shown publicly");
+    assert(h.element("listeners-panel").className.includes("hidden"), "Listeners shown publicly");
+    assert(h.element("metrics-panel").className.includes("hidden"), "Counters shown publicly");
+    assert(h.element("traffic-stat").className.includes("hidden"), "Traffic shown publicly");
+    assert(h.element("status-verdict").textContent === "1 of 2 servers offline", "Public verdict wording missing");
+    assert(h.element("version").textContent === "", "Version shown without one");
+  });
+  await test("status page settings brand, theme, link and pace the page", async () => {
+    const h = fixture(statusSource); await flush();
+    h.model.status.page = { title: "Example Network", notice: "Maintenance at 02:00", accent: "#ff6a00", refresh_ms: 12000,
+      panels: { summary: false, backends: true, listeners: true, metrics: true },
+      links: [{ label: "Discord", href: "https://discord.example/invite" }, { label: "Bad", href: "javascript:alert(1)" }, { label: "Rules", href: "/rules" }, { label: "Escape", href: "//evil.example" }] };
+    await h.element("refresh-status").emit("click"); await flush();
+    assert(h.element("brand-name").textContent === "Example Network", "Title not applied");
+    assert(h.document.title === "Network status · Example Network", "Document title not applied");
+    assert(h.document.documentElement.style.properties["--accent"] === "#ff6a00", "Accent not applied");
+    assert(h.document.documentElement.style.properties["--accent-soft"] === "#ff6a001f", "Soft accent not derived");
+    assert(h.element("announcement").textContent === "Maintenance at 02:00" && !h.element("announcement").className.includes("hidden"), "Notice not shown");
+    assert(h.element("summary").className.includes("hidden"), "Hidden summary still shown");
+    const links = h.element("links").children;
+    assert(links.length === 2 && links[0].href === "https://discord.example/invite" && links[1].href === "/rules", "Unsafe links were not filtered");
+    assert(links[0].rel === "noopener noreferrer", "External link opener not isolated");
+    assert(h.element("refresh-interval").textContent === "Refreshes every 12 seconds", "Refresh interval not shown");
+    const before = h.calls.filter(({ path }) => path === "/status").length;
+    await h.advance(11000);
+    assert(h.calls.filter(({ path }) => path === "/status").length === before, "Refreshed before the configured interval");
+    await h.advance(1000);
+    assert(h.calls.filter(({ path }) => path === "/status").length === before + 1, "Did not refresh at the configured interval");
+    h.model.status.page = { refresh_ms: 10 };
+    await h.element("refresh-status").emit("click"); await flush();
+    assert(h.element("refresh-interval").textContent === "Refreshes every second", "Refresh interval was not clamped");
+    assert(h.document.documentElement.style.properties["--accent"] === undefined, "Removed accent was retained");
+    assert(h.element("brand-name").textContent === "Rift" && h.element("announcement").className.includes("hidden"), "Removed settings were retained");
   });
   await test("scoped operators hide configuration and disable ungranted mutations", async () => {
     const h = fixture(appSource); await flush();
@@ -435,6 +482,55 @@ async function testWebAssets(appSource, statusSource) {
     assert(h.element("source").value === "", "Previous operator source was retained");
     assert(!h.calls.slice(before).some(({ path }) => path === "/api/config" || path === "/api/definitions"), "Scoped operator fetched privileged data");
     assert(h.element("managed-servers").children[0].children[9].children[0].disabled, "Ungrantable server mutation was enabled");
+  });
+  await test("plugins render safely, restart with an encoded name and tail their log", async () => {
+    const h = fixture(appSource); await flush();
+    const plugins = [
+      { name: "(script)", mode: "script", engine: "lua", status: "active", restarts: 0, calls: 0, restartable: false },
+      { name: "hello lua", mode: "persistent", engine: "lua", version: "0.1.0", status: "failed", restarts: 3, calls: 1200, last_error: "<b>init: boom</b>", restartable: true },
+      { name: "(remote)", mode: "remote", engine: null, status: "active", restarts: 0, calls: 0, restartable: false },
+    ];
+    h.model.intercept = (path, options) => {
+      if (path === "/api/plugins") return h.response({ plugins });
+      if (path === "/api/plugins/hello%20lua/logs") return h.response({ plugin: "hello lua", lines: [{ timestamp_unix_ms: 1, level: "error", message: "lifecycle: failed: <script>" }] });
+      if (path === "/api/plugins/hello%20lua/restart" && options.method === "POST") return h.response({ accepted: true }, 202);
+      return undefined;
+    };
+    h.window.location.hash = "#plugins";
+    await h.element("refresh-status").emit("click"); await flush();
+    assert(!h.element("view-plugins").hidden, "Plugins view not shown");
+    const rows = h.element("plugins").children;
+    assert(rows.length === 3, "Every mode should be listed");
+    assert(rows[0].children[1].textContent === "Configuration script" && rows[2].children[1].textContent === "Bus responders", "Modes not labelled");
+    assert(rows[1].children[0].textContent === "hello lua 0.1.0", "Name and version missing");
+    assert(rows[1].children[3].className.includes("failed"), "Failed state not styled");
+    assert(rows[1].children[6].textContent === "<b>init: boom</b>", "Last error not preserved as text");
+    assert(rows[0].children[7].children.length === 0, "The configuration script cannot be restarted");
+    const restart = rows[1].children[7].children[0];
+    assert(!restart.disabled, "Restart unavailable to an unrestricted operator");
+    const select = h.element("plugin-log-select");
+    assert(select.children.length === 2 && select.children[1].value === "hello lua", "Only persistent plugins have a log");
+    select.value = "hello lua"; await select.emit("change"); await flush();
+    assert(h.element("plugin-log-output").textContent.includes("lifecycle: failed: <script>"), "Log tail missing");
+    await restart.emit("click"); await flush();
+    const call = h.calls.find(({ path }) => path === "/api/plugins/hello%20lua/restart");
+    assert(call && call.options.method === "POST" && call.options.body === "{}", "Restart request missing or incorrectly encoded");
+    assert(h.element("plugin-result").textContent.includes("accepted"), "Accepted restart not reported");
+  });
+  await test("restarts need the plugins grant and scoped operators see no plugins", async () => {
+    const h = fixture(appSource); await flush();
+    h.model.intercept = (path) => path === "/api/plugins" ? h.response({ plugins: [{ name: "a", mode: "persistent", engine: "wasm", status: "running", restartable: true }] }) : undefined;
+    h.model.access = { name: "viewer", permissions: ["read"], groups: null };
+    h.element("token").value = "viewer-token"; await h.element("auth-form").emit("submit"); await flush();
+    h.window.location.hash = "#plugins";
+    await h.element("refresh-status").emit("click"); await flush();
+    assert(h.element("plugins").children[0].children[7].children[0].disabled, "Restart enabled without the plugins grant");
+    assert(h.element("plugin-log-panel").className.includes("hidden"), "Log tail shown without the logs grant");
+    const scoped = fixture(appSource); await flush();
+    scoped.model.access = { name: "lobby_staff", permissions: ["read", "logs"], groups: ["lobby"] };
+    scoped.element("token").value = "staff-token"; await scoped.element("auth-form").emit("submit"); await flush();
+    assert(scoped.element("nav-plugins").className.includes("hidden"), "Plugins shown to a group-scoped operator");
+    assert(!scoped.calls.some(({ path }) => path.startsWith("/api/plugins")), "Scoped operator fetched plugins");
   });
   await test("server logs resume their cursor and discard responses for a previous selection", async () => {
     const h = fixture(appSource); await flush();

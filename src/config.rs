@@ -19,6 +19,9 @@ pub use messaging::{MessagingConfig, MessagingPrincipal, MessagingStream, Messag
 pub use nodes::{LOCAL_NODE, NodeConfig, NodeSelector, Placement, valid_node_directory};
 pub use permissions::PermissionsConfig;
 pub use services::{InstanceStorage, ServiceGroup, ServiceInstance, ServiceScaling};
+pub use status::{
+    StatusBackend, StatusConfig, StatusExposure, StatusLink, StatusPage, StatusPanels,
+};
 pub use templates::ServerTemplate;
 
 mod managed;
@@ -27,6 +30,7 @@ mod nodes;
 mod permissions;
 mod server_list;
 mod services;
+mod status;
 mod tab_list;
 mod templates;
 
@@ -65,6 +69,8 @@ pub struct Config {
     pub forwarding: Option<VelocityForwarding>,
     pub on_route: Option<RouteScript>,
     pub extensions: Option<crate::extensions::ExtensionScript>,
+    /// Persistent plugins from `rift.plugin(name, config)`, in call order.
+    pub plugins: Vec<crate::plugins::PluginSpec>,
     pub on_http: Option<HttpScript>,
     pub on_message: Option<MessageScript>,
     /// Per-ping server-list overrides, run before any backend contact.
@@ -191,6 +197,8 @@ pub const ADMIN_PERMISSIONS: &[&str] = &[
     "reload",
     "shutdown",
     "servers",
+    "plugins",
+    "logs",
     "perms",
 ];
 
@@ -205,12 +213,13 @@ pub const WEB_PERMISSIONS: &[&str] = &[
     "audit",
     "extensions",
     "files",
+    "plugins",
     "perms",
 ];
 
 /// These grants can affect or reveal the whole proxy, so they require
 /// unrestricted scope. Permission data is network-wide, so `perms` is here too.
-const UNSCOPED_WEB_PERMISSIONS: &[&str] = &["config", "deploy", "extensions", "perms"];
+const UNSCOPED_WEB_PERMISSIONS: &[&str] = &["config", "deploy", "extensions", "plugins", "perms"];
 
 /// Identities that Rift itself records in operator audit logs.
 const RESERVED_OPERATOR_NAMES: &[&str] = &[
@@ -251,24 +260,6 @@ impl Default for WebConfig {
             ui: true,
             operators: BTreeMap::new(),
             records_directory: None,
-        }
-    }
-}
-
-/// Optional read-only status service, independent of the administration service.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StatusConfig {
-    pub listen: SocketAddr,
-    pub ui: bool,
-    pub metrics: bool,
-}
-
-impl Default for StatusConfig {
-    fn default() -> Self {
-        Self {
-            listen: "127.0.0.1:9090".parse().unwrap(),
-            ui: true,
-            metrics: true,
         }
     }
 }
@@ -359,6 +350,7 @@ impl Config {
             forwarding: None,
             on_route: None,
             extensions: None,
+            plugins: Vec::new(),
             on_http: None,
             on_message: None,
             on_status: None,
@@ -626,6 +618,28 @@ impl Config {
             }
             let extensions = crate::extensions::ExtensionScript::parse(&root, &source)
                 .map_err(|e| e.to_string())?;
+            let mut plugins = lua
+                .app_data_ref::<crate::script::PersistentPlugins>()
+                .map(|records| records.0.clone())
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(name, config_json)| {
+                    let installed = &source.installed[&name];
+                    let spec = crate::plugins::PluginSpec {
+                        folder: source.root.join("plugins").join(&name),
+                        config_root: source.root.clone(),
+                        manifest: installed.manifest.clone()?,
+                        fingerprint: installed.fingerprint.clone()?,
+                        name,
+                        config_json,
+                        // Set below, once `authentication` is parsed.
+                        online_mode: false,
+                    };
+                    spec.check_grants()
+                        .map_err(|error| format!("plugin {}: {error}", spec.name))?;
+                    Ok::<_, String>(spec)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
             let on_route = match root
                 .raw_get::<Value>("on_route")
                 .map_err(|e| e.to_string())?
@@ -775,7 +789,7 @@ impl Config {
                 value => string_set(value, "draining")?,
             };
             let web = web_options(&root, directory)?;
-            let status = status_options(&root)?;
+            let status = status::parse(&root)?;
             let shutdown_timeout = Duration::from_millis(integer(
                 &root,
                 "config",
@@ -811,6 +825,9 @@ impl Config {
             }
             let network = network(&root)?;
             let authentication = authentication(&root)?;
+            for plugin in &mut plugins {
+                plugin.online_mode = authentication.online_mode;
+            }
             let forwarding = forwarding(&root)?;
             Ok(Self {
                 listeners,
@@ -829,6 +846,7 @@ impl Config {
                 forwarding,
                 on_route,
                 extensions,
+                plugins,
                 on_http,
                 on_message,
                 on_status,
@@ -865,6 +883,12 @@ impl Config {
         Ok((config, cost))
     }
 
+    /// Whether authenticated sessions run player hooks: with extensions, or
+    /// with persistent plugins once players have a verified identity.
+    pub fn player_hooks(&self) -> bool {
+        self.extensions.is_some() || (!self.plugins.is_empty() && self.authentication.online_mode)
+    }
+
     pub fn validate(&self) -> io::Result<()> {
         let path = self.instance_database.as_os_str().as_encoded_bytes();
         if path.is_empty()
@@ -892,6 +916,7 @@ impl Config {
         services::validate(self).map_err(invalid)?;
         managed::validate(&self.managed_servers, &self.backends, &self.nodes).map_err(invalid)?;
         templates::validate(self).map_err(invalid)?;
+        self.validate_status().map_err(invalid)?;
         if let Some(extensions) = &self.extensions {
             if !self.authentication.online_mode {
                 return Err(invalid("extensions requires authentication.online_mode"));
@@ -1046,7 +1071,10 @@ impl Config {
             for (name, listen) in [
                 ("metrics", self.metrics),
                 ("web.listen", self.web.as_ref().map(|web| web.listen)),
-                ("status.listen", self.status.map(|status| status.listen)),
+                (
+                    "status.listen",
+                    self.status.as_ref().map(|status| status.listen),
+                ),
             ] {
                 if listen.is_some_and(|listen| addresses_overlap(admin.listen, listen)) {
                     return Err(invalid(format!(
@@ -1157,7 +1185,7 @@ impl Config {
                         .any(|p| UNSCOPED_WEB_PERMISSIONS.contains(&p.as_str()))
                     {
                         return Err(invalid(format!(
-                            "{path}: config, deploy, extensions and perms require unrestricted group access"
+                            "{path}: config, deploy, extensions, plugins and perms require unrestricted group access"
                         )));
                     }
                 }
@@ -1219,7 +1247,10 @@ impl Config {
         let services = [
             ("metrics", self.metrics),
             ("web.listen", self.web.as_ref().map(|web| web.listen)),
-            ("status.listen", self.status.map(|status| status.listen)),
+            (
+                "status.listen",
+                self.status.as_ref().map(|status| status.listen),
+            ),
         ];
         for (index, (name, listen)) in services.iter().enumerate() {
             let Some(listen) = listen else { continue };
@@ -1536,20 +1567,6 @@ fn web_options(root: &Table, base: &Path) -> Result<Option<WebConfig>, String> {
                 Some(base.join(value))
             }
         },
-    };
-    Ok(enabled.then_some(config))
-}
-
-fn status_options(root: &Table) -> Result<Option<StatusConfig>, String> {
-    let Some(table) = service_options(root, "status", &["enabled", "listen", "ui", "metrics"])?
-    else {
-        return Ok(None);
-    };
-    let enabled = boolean(&table, "status", "enabled", true)?;
-    let config = StatusConfig {
-        listen: service_listen(&table, "status", StatusConfig::default().listen)?,
-        ui: boolean(&table, "status", "ui", true)?,
-        metrics: boolean(&table, "status", "metrics", true)?,
     };
     Ok(enabled.then_some(config))
 }

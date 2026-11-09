@@ -144,21 +144,44 @@ Invalid reloads retain the working configuration; existing sessions keep their
 routes. Gameplay listener changes require a restart. Ctrl-C drains active
 sessions for up to 30 seconds by default; a second Ctrl-C closes them immediately.
 
-## Authenticated extensions
+## Plugins
 
-Lua extensions provide login and transfer decisions, lifecycle events,
-commands with UUID permission checks, and FIFO server queues. API v2 adds
-durable namespaced state, recurring jobs, configured HTTP integrations,
-permission groups as configuration, and an online-player API for messages,
-titles, action bars, tab list headers, kicks, broadcasts and transfers. API v3
-adds `rift.permissions` over Rift's [permission store](docs/permissions.md):
+One plugin system, one contract ([`wit/rift-plugin.wit`](wit/rift-plugin.wit)),
+three ways to run code:
+
+- **script**: `rift.lua` and its folder plugins, sandboxed, editable from the
+  dashboard;
+- **persistent**: plugin folders installed on disk with a `plugin.toml`,
+  running trusted in their own LuaJIT state or as WebAssembly components
+  written in Rust, C or Go;
+- **remote**: services on the message bus that answer login and transfer
+  decisions.
+
+Plugins get login and transfer decisions, lifecycle events, commands with UUID
+permission checks, FIFO server queues, durable namespaced state, timers,
+permissions, the message bus and an online-player API for messages, titles,
+action bars, tab lists, kicks, broadcasts and transfers.
+
+Permissions live in Rift's [permission store](docs/permissions.md):
 LuckPerms-style users, groups, weights, contexts, temporary nodes, tracks,
-prefixes and meta, with change events and LuckPerms import; v1 and v2 remain
-supported. The
-[extension example](examples/extensions.lua) demonstrates these APIs with a
-survival queue and staff-only server. See the [extension API contract](docs/extensions.md) for
-ordering, deadlines, permissions and reload behavior. Extensions require online
-authentication and Java 1.19.3–26.3 (the online authentication range).
+prefixes and meta, with change events and LuckPerms import, managed with
+`/perms`, `rift admin perms`, `/api/perms` and the dashboard. `rift.lua`
+reaches it through `rift.permissions` with `extensions.api_version = 3`, and
+Paper and Pumpkin backends check it through their adapters.
+
+```lua
+rift.plugin("hello-lua", { deny = "Mallory" }) -- plugins/hello-lua/plugin.toml
+```
+
+Start with the [plugin overview](docs/plugins.md), including its trust model,
+then [events, commands and policy](docs/extensions.md) and the guides for
+[Lua](docs/plugins-lua.md), [Rust](docs/plugins-rust.md), [C](docs/plugins-c.md)
+and [Go](docs/plugins-go.md). [`examples/plugins`](examples/plugins) has the same
+plugin in all four languages, and [`examples/extensions.lua`](examples/extensions.lua)
+a survival queue and staff-only server in `rift.lua`. `rift admin plugins`, the
+dashboard and Prometheus metrics show each plugin's state, restarts and log.
+Player hooks require online authentication and Java 1.19.3–26.3 (the online
+authentication range).
 
 ## Compatibility
 
@@ -181,7 +204,7 @@ backends of different versions. Declare a backend's version with
 `config.backends.survival = { address = "127.0.0.1:25567", version = "1.21.6" }`.
 Other pairs still need matching versions. See [protocol translation](docs/translation.md).
 Online authentication, Velocity modern forwarding and
-authenticated extensions require **1.19.3 or newer**; earlier versions use offline
+plugin player hooks require **1.19.3 or newer**; earlier versions use offline
 backends with forwarding disabled. Bedrock/UDP, unlisted snapshots and legacy
 pre-1.7 pings are unsupported.
 
@@ -199,7 +222,7 @@ The pages are built from the Markdown in [docs/](docs), which every release arch
 also includes for offline use.
 
 - [Lua configuration and plugins](https://jotrorox.github.io/rift/docs/lua/): script-style settings, modules and folder plugins.
-- [Authenticated extensions](https://jotrorox.github.io/rift/docs/extensions/): lifecycle hooks, commands, permissions and queues.
+- [Plugins](https://jotrorox.github.io/rift/docs/plugins/): execution modes, `plugin.toml`, lifecycle, trust model and operations; [events, commands and policy](https://jotrorox.github.io/rift/docs/extensions/); guides for [Lua](https://jotrorox.github.io/rift/docs/plugins-lua/), [Rust](https://jotrorox.github.io/rift/docs/plugins-rust/), [C](https://jotrorox.github.io/rift/docs/plugins-c/) and [Go](https://jotrorox.github.io/rift/docs/plugins-go/).
 - [Operations](https://jotrorox.github.io/rift/docs/operations/): installation, systemd/containers, administration and upgrades.
 - [Managed servers](https://jotrorox.github.io/rift/docs/managed-servers/): local processes, automatic start/stop and persistent worlds.
 - [Multiple hosts](https://jotrorox.github.io/rift/docs/nodes/): `rift node` agents, placement across machines and failure handling.

@@ -1,4 +1,13 @@
-# Authenticated Lua extensions, API versions 1 to 3
+# Plugins: events, commands and policy
+
+This page describes the events, commands, permissions, queues and host
+services that plugins use, as the configuration script sees them: player
+callbacks with a verified identity, permission-checked commands, FIFO queues,
+durable state, scheduled jobs and bus decisions, in API versions 1 to 3.
+Persistent [Lua](plugins-lua.md) and WebAssembly plugins receive the same
+events through the [plugin contract](plugins.md), with the same validation;
+[the plugin overview](plugins.md) explains the execution modes, the dispatch
+order and the trust model.
 
 [`examples/extensions.lua`](../examples/extensions.lua) is a runnable authenticated
 network with a FIFO survival queue, a staff-only server, durable visit counters,
@@ -8,11 +17,15 @@ It uses the existing Paper/Velocity forwarding setup in
 examples/extensions.lua`, then start with `RIFT_FORWARDING_SECRET` set. Clients
 must use Java 1.19.3–26.3, which supports both switching and online authentication.
 
-Set `rift.config.extensions = { api_version = 3, ... }` for the current API
+Set `rift.config.plugins = { api_version = 3, ... }` for the current API
 (`api_version = 2` is the same without `rift.permissions`, and `api_version = 1`
 is the original contract), or use
 `rift.on(event, callback)` and `rift.command(name, definition)` from a script or
-[folder-based plugin](lua.md). Existing returned configuration tables still work.
+[folder-based plugin](lua.md). `rift.config.plugins` is the preferred name;
+`rift.config.extensions` (and an `extensions` field in a returned table) is
+accepted as an alias throughout 0.x, and setting both is an error. Diagnostics
+and the field names on this page call the table `extensions`. Existing returned
+configuration tables still work.
 Unknown versions, fields, invalid registrations and missing online authentication
 reject the configuration. The existing `on_route`, `on_http` and `on_message`
 interfaces remain available. `on_route` still runs before the handshake and has
@@ -59,7 +72,7 @@ For a new player the order is:
 1. Legacy `on_route`, handshake, maintenance/rate admission and login parsing.
 2. Mojang identity verification and encryption. A claimed Login Start UUID is
    never passed to an extension as an authenticated identity.
-3. `login`, then `initial_server` (each Lua first, then its [bus decision](#decisions-answered-over-the-message-bus)),
+3. `login`, then `initial_server` (each Lua first, then [persistent plugins](plugins.md#dispatch-order), then its [bus decision](#decisions-answered-over-the-message-bus)),
    access checks and duplicate-name reservation.
 4. Initial backend capacity reservation, connect, login, configuration and Join Game.
 5. Presence/administration registration, then `join`. Registration at backend
@@ -140,7 +153,7 @@ takes effect independently; later callback failure does not roll it back.
 ## Permissions and commands
 
 ```lua
-rift.config.extensions = {
+rift.config.plugins = {
     api_version = 3,
     groups = {
         default = { permissions = { ["network.queue"] = true } },
@@ -226,7 +239,7 @@ responder holds no Lua worker and no extension slot. Decisions require
 `api_version = 2` or later.
 
 ```lua
-rift.config.extensions = {
+rift.config.plugins = {
     api_version = 2,
     decisions = {
         login = {
@@ -256,8 +269,9 @@ floods. Decisions can change on reload; open requests keep counting against the
 limit while it stays the same.
 
 **Order.** The Lua hook (a direct callback or `rift.on` handlers) runs first,
-because it is cheap and local. The bus is asked only when Lua continues. Any deny
-wins. A hook without Lua code goes straight to the bus.
+because it is cheap and local, then [persistent plugins](plugins.md#dispatch-order)
+in `rift.plugin()` order. The bus is asked only when all of them continue. Any
+deny wins. A hook without Lua code or plugins goes straight to the bus.
 
 **Request.** A JSON object with `hook`, `uuid` (lowercase 32-digit hex),
 `name`, `connection_id` (decimal string), `peer_ip`, `hostname`, `protocol`,
@@ -316,7 +330,7 @@ the same way. All methods use a dot, not a colon. API v3 adds
 ### Persistent state
 
 ```lua
-rift.config.extensions = {
+rift.config.plugins = {
     api_version = 2,
     storage = { path = "extensions.state" },
     join = function(ctx)
@@ -343,8 +357,9 @@ converted at startup. The original snapshot is kept as `<file>.v1-backup`; to go
 back to an earlier Rift version, restore it in place of the database.
 Namespaces organize data; they do not isolate mutually untrusted plugins.
 Namespaces beginning with `rift.` are reserved for host-owned data, such as the
-group memberships of API v2 that an upgrade copies into the permission store;
-`rift.store` methods reject them.
+group memberships of API v2 that an upgrade copies into the permission store,
+and namespaces beginning with `plugin.` hold persistent plugins' private data;
+`rift.store` methods reject both.
 
 | Method | Result |
 | --- | --- |
@@ -374,7 +389,7 @@ callback.
 ### Scheduled work
 
 ```lua
-rift.config.extensions.jobs = {
+rift.config.plugins.jobs = {
     heartbeat = {
         every_ms = 60000,
         run = function(ctx)
@@ -408,7 +423,7 @@ exactly-once execution; use idempotent external operations.
 ### HTTP integrations
 
 ```lua
-rift.config.extensions.integrations = {
+rift.config.plugins.integrations = {
     directory = {
         url = "https://directory.example.com/permissions/",
         timeout_ms = 1000,
@@ -462,19 +477,22 @@ Permission groups, memberships, live grants and their Lua API (`rift.permissions
 with `api_version = 3`) are described in [permissions](permissions.md). The
 `extensions.groups` table is mirrored into the permission store on every
 committed reload; [groups as configuration](permissions.md#groups-as-configuration)
-lists its fields. Backend plugins can ask whether a player is in a group with
-the `RiftInGroup` request on the [BungeeCord channel](bungeecord.md#rift-requests).
+lists its fields. Persistent plugins reach the same store through the
+contract's `permissions` interface, described in
+[permissions](permissions.md#persistent-plugins). Backend plugins can ask
+whether a player is in a group with the `RiftInGroup` request on the
+[BungeeCord channel](bungeecord.md#rift-requests).
 
 ### Online players
 
 ```lua
-rift.config.extensions.jobs.announcements = {
+rift.config.plugins.jobs.announcements = {
     every_ms = 300000,
     run = function()
         rift.players.broadcast("Vote for the network at example.com/vote")
     end,
 }
-rift.config.extensions.commands.alert = {
+rift.config.plugins.commands.alert = {
     permission = "network.staff",
     run = function(ctx)
         local sent = 0
@@ -529,7 +547,7 @@ footer across server switches until the next call or disconnect, and
 `rift.players.tab_list(player)` returns them to the configured ones:
 
 ```lua
-rift.config.extensions = {
+rift.config.plugins = {
     api_version = 3,
     join = function(ctx)
         if rift.permissions.check(ctx.uuid, "network.vip") == true then
@@ -553,7 +571,7 @@ false for 1.8.9 players. They have their own UUIDs and never touch the
 backend's boss bars.
 
 ```lua
-rift.config.extensions = {
+rift.config.plugins = {
     api_version = 2,
     join = function(ctx)
         rift.players.boss_bar(ctx.uuid, "event", {
@@ -606,7 +624,7 @@ direct connections cannot bypass the group queue. Adding or removing instances
 updates capacity without changing tickets; transfers within a group retain the
 player's existing group slot. A group with no instances can collect tickets,
 which its [scaling policy](managed-servers.md#automatic-scaling) uses to start
-capacity. Queue policies still require authenticated extensions.
+capacity. Queue policies still require `rift.config.plugins` with online authentication.
 
 A queue command keeps the client playing on its current server. Each session can
 hold one ticket. Repeating the same request returns its current position;

@@ -513,12 +513,8 @@ impl Network<'_> {
             .ok_or_else(|| io::Error::other("missing player identity"))?;
         let words: Vec<_> = command.split_whitespace().collect();
         let extension_action = if let Some(extension) = &session.extension
-            && words.first().is_some_and(|name| {
-                extension
-                    .commands()
-                    .iter()
-                    .any(|registered| registered == name)
-            }) {
+            && words.first().is_some_and(|name| extension.intercepts(name))
+        {
             match extension.command(command).await {
                 Ok(action) => Some(action),
                 Err(error) => {

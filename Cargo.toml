@@ -51,7 +51,8 @@ mlua = { version = "0.12", features = ["luajit", "vendored"] }
 rift-permissions.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal", "process", "fs"] }
 serde_json.workspace = true
-serde.workspace = true
+serde = { workspace = true, features = ["rc"] }
+toml = { version = "1", default-features = false, features = ["parse", "serde", "std"] }
 rusqlite = { version = "0.41", features = ["bundled"] }
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
 aes = { version = "0.9", features = ["zeroize"] }
@@ -67,6 +68,16 @@ rustls.workspace = true
 rift-messaging.workspace = true
 # `rift dev` generates its messaging certificate.
 rcgen.workspace = true
+http = { version = "1", optional = true }
+http-body-util = { version = "0.1", optional = true }
+wasmtime = { version = "50.0.1", optional = true, default-features = false, features = ["cranelift", "component-model", "parallel-compilation", "runtime", "std"] }
+wasmtime-wasi = { version = "50.0.1", optional = true, default-features = false, features = ["p2"] }
+wasmtime-wasi-http = { version = "50.0.1", optional = true, default-features = false, features = ["default-send-request", "p2"] }
+
+[features]
+default = ["wasm"]
+# WebAssembly plugins (engine = "wasm") through wasmtime.
+wasm = ["dep:http", "dep:http-body-util", "dep:wasmtime", "dep:wasmtime-wasi", "dep:wasmtime-wasi-http"]
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

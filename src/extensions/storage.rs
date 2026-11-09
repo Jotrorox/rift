@@ -32,7 +32,7 @@ const MAX_VALUE: usize = 64 * 1024;
 /// Upper bound of a version 1 snapshot.
 const MAX_BYTES: usize = 1024 * 1024;
 // LuaJIT numbers cannot distinguish every integer outside this range.
-const MAX_INTEGER: mlua::Integer = (1 << 53) - 1;
+const MAX_INTEGER: i64 = (1 << 53) - 1;
 const MAGIC: &[u8; 8] = b"RIFTKV\0\x01";
 const CHECKSUM_BYTES: usize = 32;
 const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
@@ -47,8 +47,12 @@ const SCHEMA: &str = "CREATE TABLE entries (
 ) STRICT, WITHOUT ROWID;";
 /// Namespaces beginning with this prefix belong to the host, e.g. group memberships.
 const HOST_PREFIX: &str = "rift.";
+/// Persistent plugins' private namespaces, `plugin.<name>.<namespace>`. They
+/// count toward the plugin quota but, like host data, are out of reach of
+/// the configuration script's `rift.store`.
+const PLUGIN_PREFIX: &str = "plugin.";
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
-type Key = (String, String);
+pub(crate) type Key = (String, String);
 pub(super) type Entries = BTreeMap<Key, Vec<u8>>;
 
 /// Limits for one class of data. Host data has its own, so plugins filling the
@@ -80,7 +84,7 @@ fn entry_size((namespace, key): &Key, value: &[u8]) -> usize {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct StorageConfig {
+pub(crate) struct StorageConfig {
     pub path: PathBuf,
 }
 
@@ -168,25 +172,25 @@ fn check(usage: &Usage, quota: &Quota) -> io::Result<()> {
 }
 
 /// Pending changes over the committed entries, applied only after they commit.
-pub(super) struct Transaction<'a> {
+pub(crate) struct Transaction<'a> {
     base: &'a Entries,
     changes: BTreeMap<Key, Option<Vec<u8>>>,
 }
 
 impl Transaction<'_> {
-    pub(super) fn get(&self, key: &Key) -> Option<&Vec<u8>> {
+    pub(crate) fn get(&self, key: &Key) -> Option<&Vec<u8>> {
         match self.changes.get(key) {
             Some(change) => change.as_ref(),
             None => self.base.get(key),
         }
     }
 
-    pub(super) fn insert(&mut self, key: Key, value: Vec<u8>) {
+    pub(crate) fn insert(&mut self, key: Key, value: Vec<u8>) {
         self.changes.insert(key, Some(value));
     }
 
     /// Whether an entry was removed.
-    pub(super) fn remove(&mut self, key: &Key) -> bool {
+    pub(crate) fn remove(&mut self, key: &Key) -> bool {
         let existed = self.get(key).is_some();
         if existed {
             self.changes.insert(key.clone(), None);
@@ -202,7 +206,7 @@ struct Inner {
 }
 
 #[derive(Clone)]
-pub(super) struct Store(Arc<Inner>);
+pub(crate) struct Store(Arc<Inner>);
 
 fn invalid(message: impl ToString) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message.to_string())
@@ -218,7 +222,7 @@ fn check_deadline(deadline: Instant) -> io::Result<()> {
     Ok(())
 }
 
-fn exact_integer(value: mlua::Integer) -> io::Result<mlua::Integer> {
+fn exact_integer(value: i64) -> io::Result<i64> {
     if !(-MAX_INTEGER..=MAX_INTEGER).contains(&value) {
         return Err(invalid(
             "store integer exceeds the exact Lua number range (-9007199254740991..=9007199254740991)",
@@ -248,6 +252,11 @@ fn user_namespace(value: Value) -> mlua::Result<String> {
             "store namespaces beginning with {HOST_PREFIX:?} are reserved for Rift"
         )));
     }
+    if namespace.starts_with(PLUGIN_PREFIX) {
+        return Err(mlua::Error::runtime(format!(
+            "store namespaces beginning with {PLUGIN_PREFIX:?} are reserved for persistent plugins"
+        )));
+    }
     Ok(namespace)
 }
 
@@ -271,7 +280,7 @@ impl Store {
         }))
     }
 
-    pub(super) fn open(config: Option<&StorageConfig>) -> io::Result<Self> {
+    pub(crate) fn open(config: Option<&StorageConfig>) -> io::Result<Self> {
         let Some(path) = config.map(|config| config.path.as_path()) else {
             return Ok(Self::new(Memory::default(), None));
         };
@@ -331,7 +340,7 @@ impl Store {
             .unwrap_or_else(|error| error.into_inner())
     }
 
-    fn get(
+    pub(crate) fn get(
         &self,
         namespace: String,
         key: String,
@@ -341,8 +350,30 @@ impl Store {
         Ok(self.memory().entries.get(&(namespace, key)).cloned())
     }
 
+    /// Add `delta` to a decimal integer entry (missing counts as 0) within
+    /// the exact Lua number range, as `rift.store.increment` does.
+    pub(crate) fn increment(&self, key: Key, delta: i64, deadline: Instant) -> io::Result<i64> {
+        let delta = exact_integer(delta)?;
+        self.mutate(deadline, |entries| {
+            let current = match entries.get(&key) {
+                Some(value) => std::str::from_utf8(value)
+                    .ok()
+                    .and_then(|value| value.parse::<i64>().ok())
+                    .ok_or_else(|| invalid("store value is not a decimal integer"))?,
+                None => 0,
+            };
+            let current = exact_integer(current)?;
+            let next = current
+                .checked_add(delta)
+                .ok_or_else(|| invalid("store integer overflow"))?;
+            let next = exact_integer(next)?;
+            entries.insert(key, next.to_string().into_bytes());
+            Ok(next)
+        })
+    }
+
     /// Committed entries in one namespace, keyed by entry key.
-    pub(super) fn namespace(&self, namespace: &str) -> Vec<(String, Vec<u8>)> {
+    pub(crate) fn namespace(&self, namespace: &str) -> Vec<(String, Vec<u8>)> {
         self.memory()
             .entries
             .iter()
@@ -351,7 +382,7 @@ impl Store {
             .collect()
     }
 
-    fn mutate<T>(
+    pub(crate) fn mutate<T>(
         &self,
         deadline: Instant,
         change: impl FnOnce(&mut Transaction) -> io::Result<T>,
@@ -478,24 +509,8 @@ impl Store {
                         "store increment delta must be an integer",
                     ));
                 };
-                let delta = exact_integer(delta).map_err(mlua::Error::external)?;
                 store
-                    .mutate(deadline, |entries| {
-                        let current = match entries.get(&key) {
-                            Some(value) => std::str::from_utf8(value)
-                                .ok()
-                                .and_then(|value| value.parse::<mlua::Integer>().ok())
-                                .ok_or_else(|| invalid("store value is not a decimal integer"))?,
-                            None => 0,
-                        };
-                        let current = exact_integer(current)?;
-                        let next = current
-                            .checked_add(delta)
-                            .ok_or_else(|| invalid("store integer overflow"))?;
-                        let next = exact_integer(next)?;
-                        entries.insert(key, next.to_string().into_bytes());
-                        Ok(next)
-                    })
+                    .increment(key, delta, deadline)
                     .map_err(mlua::Error::external)
             })?,
         )?;
@@ -1096,6 +1111,39 @@ mod tests {
             )
             .exec()
             .unwrap();
+    }
+
+    #[test]
+    fn host_and_persistent_plugin_namespaces_are_out_of_reach_of_scripts() {
+        let store = Store::open(None).unwrap();
+        store
+            .mutate(Instant::now() + Duration::from_secs(1), |entries| {
+                entries.insert(("plugin.ban.list".into(), "k".into()), b"v".to_vec());
+                Ok(())
+            })
+            .unwrap();
+        let lua = Lua::new();
+        let api = lua.create_table().unwrap();
+        store
+            .install(&lua, &api, Instant::now() + Duration::from_secs(5))
+            .unwrap();
+        lua.globals().set("rift", api).unwrap();
+        lua.load(
+            r#"
+            for _, namespace in ipairs({ 'rift.groups', 'plugin.ban.list', 'plugin.' }) do
+                local ok, error = pcall(rift.store.get, namespace, 'k')
+                assert(not ok and tostring(error):find('reserved'), namespace)
+                assert(not pcall(rift.store.set, namespace, 'k', 'forged'))
+                assert(not pcall(rift.store.delete, namespace, 'k'))
+                assert(not pcall(rift.store.increment, namespace, 'k', 1))
+            end
+            rift.store.set('plugins', 'k', 'ok')
+        "#,
+        )
+        .exec()
+        .unwrap();
+        let entries = &store.memory().entries;
+        assert_eq!(entries[&("plugin.ban.list".into(), "k".into())], b"v");
     }
 
     #[test]

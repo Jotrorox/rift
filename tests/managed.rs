@@ -74,7 +74,9 @@ fn managed_process_helper() {
     let ready_at = Instant::now();
     while !stopping.load(Ordering::Acquire) {
         if fs::remove_file("crash").is_ok()
-            || (mode == "flap" && ready_at.elapsed() >= Duration::from_millis(200))
+            // Ready long enough for a readiness probe on a loaded Windows
+            // runner to see it, still far too briefly to count as stable.
+            || (mode == "flap" && ready_at.elapsed() >= Duration::from_millis(500))
         {
             return;
         }
@@ -792,7 +794,7 @@ async fn early_exit_and_missing_command_report_errors_with_bounded_retries() {
 }
 
 async fn wait_exhausted(manager: &ManagedServers) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(10);
     while !manager.snapshot()[0].restart_exhausted {
         assert!(
             Instant::now() < deadline,
