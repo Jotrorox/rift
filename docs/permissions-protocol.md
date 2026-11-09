@@ -155,7 +155,10 @@ has an array:
 Rift fills the reserved keys `server` (the backend name), `world`,
 `dimension` (for example `minecraft:the_nether`) and `gamemode`
 (`survival`, `creative`, `adventure`, `spectator`). Each has at most one value
-in an active set. Other keys are custom.
+in an active set. Other keys are custom. A backend fills all four from its own
+player state; the proxy fills `server`, `dimension` and `gamemode` from the
+session and the play packets it relays, never `world` (see
+[contexts on the proxy](permissions.md#contexts-on-the-proxy)).
 
 A node's contexts are satisfied when every one of its pairs is in the active
 set (subset test); the empty set is global and always satisfied. A node that

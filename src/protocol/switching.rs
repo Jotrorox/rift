@@ -29,6 +29,10 @@ pub(crate) struct SwitchingCapabilities {
     pub config_information: i32,
     pub play_payload: i32,
     pub config_payload: i32,
+    /// Clientbound Respawn and Game Event, read only for the player's
+    /// `dimension` and `gamemode` contexts.
+    respawn: i32,
+    game_event: i32,
     pub config_pack_pop: i32,
     command: i32,
     signed_command: i32,
@@ -58,6 +62,8 @@ const V1_21_8: SwitchingCapabilities = SwitchingCapabilities {
     config_information: 0x00,
     play_payload: 0x15,
     config_payload: 0x02,
+    respawn: 0x4b,
+    game_event: 0x22,
     config_pack_pop: 0x08,
     command: 0x06,
     signed_command: 0x07,
@@ -79,6 +85,7 @@ const V1_21: SwitchingCapabilities = SwitchingCapabilities {
     commands: 0x11,
     play_information: 0x0a,
     play_payload: 0x12,
+    respawn: 0x47,
     command: 0x04,
     signed_command: 0x05,
     chat_acknowledgement: 0x03,
@@ -98,6 +105,8 @@ const V1_21_2: SwitchingCapabilities = SwitchingCapabilities {
     join_game: 0x2c,
     play_information: 0x0c,
     play_payload: 0x14,
+    respawn: 0x4c,
+    game_event: 0x23,
     command: 0x05,
     signed_command: 0x06,
     chat_acknowledgement: 0x04,
@@ -109,6 +118,8 @@ const V1_21_2: SwitchingCapabilities = SwitchingCapabilities {
 const V1_21_5: SwitchingCapabilities = SwitchingCapabilities {
     join_game: 0x2b,
     commands: 0x10,
+    respawn: 0x4b,
+    game_event: 0x22,
     system_chat: 0x72,
     suggestion_response: 0x0f,
     chat_checksum: true,
@@ -118,6 +129,8 @@ const V1_21_5: SwitchingCapabilities = SwitchingCapabilities {
 };
 const V1_21_11: SwitchingCapabilities = SwitchingCapabilities {
     join_game: 0x30,
+    respawn: 0x50,
+    game_event: 0x26,
     system_chat: 0x77,
     ..V1_21_8
 };
@@ -125,6 +138,8 @@ const V26_1: SwitchingCapabilities = SwitchingCapabilities {
     join_game: 0x31,
     play_information: 0x0e,
     play_payload: 0x16,
+    respawn: 0x52,
+    game_event: 0x26,
     command: 0x07,
     signed_command: 0x08,
     chat_acknowledgement: 0x06,
@@ -138,11 +153,94 @@ const V26_2: SwitchingCapabilities = SwitchingCapabilities {
 };
 const V26_3: SwitchingCapabilities = SwitchingCapabilities {
     join_game: 0x32,
+    respawn: 0x54,
+    game_event: 0x27,
     system_chat: 0x7c,
     varint_game_modes: true,
     last_parser: 61,
     ..V26_2
 };
+
+const OVERWORLD: &str = "minecraft:overworld";
+const NETHER: &str = "minecraft:the_nether";
+const END: &str = "minecraft:the_end";
+
+/// The `dimension` context for a world: its namespaced key, which for the
+/// vanilla worlds (and Paper's main three) is also the dimension type's key.
+fn dimension(world: &str) -> Option<String> {
+    (!world.is_empty()).then(|| world.to_owned())
+}
+
+/// A player's game mode, as Join Game, Respawn and Game Event carry it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GameMode {
+    Survival,
+    Creative,
+    Adventure,
+    Spectator,
+}
+
+impl GameMode {
+    fn from_id(id: i64) -> Option<Self> {
+        Some(match id {
+            0 => Self::Survival,
+            1 => Self::Creative,
+            2 => Self::Adventure,
+            3 => Self::Spectator,
+            _ => return None,
+        })
+    }
+
+    /// The `gamemode` context value, spelled as the backend adapters report it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Survival => "survival",
+            Self::Creative => "creative",
+            Self::Adventure => "adventure",
+            Self::Spectator => "spectator",
+        }
+    }
+}
+
+/// What one clientbound play packet says about where the player is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum WorldUpdate {
+    /// Join Game or Respawn: the player is in a new world. `None` for a
+    /// value the packet does not name in a form Rift can map.
+    Spawn {
+        dimension: Option<String>,
+        gamemode: Option<GameMode>,
+    },
+    /// Game Event 3: the game mode changed in place.
+    GameMode(GameMode),
+}
+
+/// The dimension and game mode the backend last told the client, for the
+/// proxy's `dimension` and `gamemode` contexts. The proxy never learns a
+/// Bukkit world name, so `world` comes only from backends.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PlayerWorld {
+    pub dimension: Option<String>,
+    pub gamemode: Option<GameMode>,
+}
+
+impl PlayerWorld {
+    /// Apply an update; `true` when anything changed.
+    pub(crate) fn apply(&mut self, update: WorldUpdate) -> bool {
+        match update {
+            WorldUpdate::Spawn {
+                dimension,
+                gamemode,
+            } => {
+                let changed = self.dimension != dimension || self.gamemode != gamemode;
+                self.dimension = dimension;
+                self.gamemode = gamemode;
+                changed
+            }
+            WorldUpdate::GameMode(mode) => self.gamemode.replace(mode) != Some(mode),
+        }
+    }
+}
 
 pub(super) fn for_version(version: ProtocolVersion) -> Option<SwitchingCapabilities> {
     match version.number() {
@@ -198,6 +296,21 @@ impl SwitchingCapabilities {
             super::legacy::world(self.protocol, packet)?;
             return Ok(());
         }
+        let (_, secure) = self.join_game_fields(packet)?;
+        // Modern online forwarding preserves the Mojang UUID used to validate the
+        // client's secure chat key. Offline network sessions have no such identity.
+        if secure && !authenticated {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "Unauthenticated Rift network sessions require enforce-secure-profile=false on backends.",
+            ));
+        }
+        Ok(())
+    }
+
+    /// A 1.20.2+ Join Game, checked to its last byte: the world it spawns
+    /// the player in and whether the backend enforces secure profiles.
+    fn join_game_fields(self, packet: &Packet) -> io::Result<(WorldUpdate, bool)> {
         let mut bytes = packet.data.as_slice();
         take(&mut bytes, 4)?; // entity id
         boolean(&mut bytes)?;
@@ -214,29 +327,7 @@ impl SwitchingCapabilities {
         for _ in 0..3 {
             boolean(&mut bytes)?;
         }
-        if self.protocol < 766 {
-            read_string(&mut bytes, 32767)?;
-        } else {
-            read_varint(&mut bytes)?;
-        } // Dimension registry ID since 1.20.5.
-        read_string(&mut bytes, 32767)?; // world name
-        take(&mut bytes, 8)?; // seed
-        if self.varint_game_modes {
-            read_varint(&mut bytes)?;
-            read_varint(&mut bytes)?; // Optional VarInt: zero means absent.
-        } else {
-            take(&mut bytes, 2)?;
-        }
-        boolean(&mut bytes)?; // debug
-        boolean(&mut bytes)?; // flat
-        if boolean(&mut bytes)? {
-            read_string(&mut bytes, 32767)?;
-            take(&mut bytes, 8)?;
-        }
-        read_varint(&mut bytes)?; // portal cooldown
-        if self.sea_level {
-            read_varint(&mut bytes)?; // Added in 1.21.2.
-        }
+        let world = self.spawn_info(&mut bytes)?;
         if self.online_mode {
             boolean(&mut bytes)?;
         }
@@ -244,15 +335,141 @@ impl SwitchingCapabilities {
         if !bytes.is_empty() {
             return Err(invalid("trailing Join Game data"));
         }
-        // Modern online forwarding preserves the Mojang UUID used to validate the
-        // client's secure chat key. Offline network sessions have no such identity.
-        if secure && !authenticated {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "Unauthenticated Rift network sessions require enforce-secure-profile=false on backends.",
-            ));
+        Ok((world, secure))
+    }
+
+    /// The spawn info shared by 1.20.2+ Join Game and Respawn
+    /// (`CommonPlayerSpawnInfo`). A game mode outside 0-3 is not an error;
+    /// it only leaves `gamemode` unknown.
+    fn spawn_info(self, bytes: &mut &[u8]) -> io::Result<WorldUpdate> {
+        if self.protocol < 766 {
+            read_string(bytes, 32767)?;
+        } else {
+            read_varint(bytes)?;
+        } // Dimension registry ID since 1.20.5.
+        let world = read_string(bytes, 32767)?;
+        take(bytes, 8)?; // seed
+        let mode = if self.varint_game_modes {
+            let mode = read_varint(bytes)?;
+            read_varint(bytes)?; // Optional VarInt: zero means absent.
+            i64::from(mode)
+        } else {
+            i64::from(take(bytes, 2)?[0] as i8)
+        };
+        boolean(bytes)?; // debug
+        boolean(bytes)?; // flat
+        if boolean(bytes)? {
+            read_string(bytes, 32767)?;
+            take(bytes, 8)?;
         }
-        Ok(())
+        read_varint(bytes)?; // portal cooldown
+        if self.sea_level {
+            read_varint(bytes)?; // Added in 1.21.2.
+        }
+        Ok(WorldUpdate::Spawn {
+            dimension: dimension(world),
+            gamemode: GameMode::from_id(mode),
+        })
+    }
+
+    /// What a clientbound play packet says about the player's `dimension`
+    /// and `gamemode`: Join Game and Respawn name both, Game Event 3 the game
+    /// mode alone. Every other packet costs three ID comparisons. Context
+    /// tracking must never break the relay, so a packet that does not parse
+    /// exactly is `None` (skip the update), except a Join Game, which always
+    /// starts a new world and so forgets what it cannot read.
+    pub(crate) fn world_update(self, packet: &Packet) -> Option<WorldUpdate> {
+        if packet.id == self.game_event {
+            // Unsigned byte event and float value since 1.8. Event 3 changes
+            // the game mode to the value's ID.
+            let [3, value @ ..] = packet.data.as_slice() else {
+                return None;
+            };
+            let value = f32::from_be_bytes(value.try_into().ok()?);
+            if value.fract() != 0.0 {
+                return None;
+            }
+            return GameMode::from_id(value as i64).map(WorldUpdate::GameMode);
+        }
+        if packet.id == self.join_game {
+            let world = if self.protocol < 764 {
+                super::legacy::world(self.protocol, packet)
+                    .and_then(|(_, respawn)| self.legacy_respawn(&respawn.data))
+            } else {
+                self.join_game_fields(packet).map(|(world, _)| world)
+            };
+            return Some(world.unwrap_or(WorldUpdate::Spawn {
+                dimension: None,
+                gamemode: None,
+            }));
+        }
+        if packet.id != self.respawn {
+            return None;
+        }
+        if self.protocol < 764 {
+            return self.legacy_respawn(&packet.data).ok();
+        }
+        let mut bytes = packet.data.as_slice();
+        let world = self.spawn_info(&mut bytes).ok()?;
+        take(&mut bytes, 1).ok()?; // data kept
+        bytes.is_empty().then_some(world)
+    }
+
+    /// A pre-1.20.2 Respawn, in the layouts `legacy::world` writes.
+    fn legacy_respawn(self, data: &[u8]) -> io::Result<WorldUpdate> {
+        let version = self.protocol;
+        let mut bytes = data;
+        let (dimension, mode) = if version < 735 {
+            let id = i32::from_be_bytes(take(&mut bytes, 4)?.try_into().unwrap());
+            if version < 477 {
+                take(&mut bytes, 1)?; // difficulty
+            }
+            if version >= 573 {
+                take(&mut bytes, 8)?; // seed
+            }
+            let mode = take(&mut bytes, 1)?[0];
+            read_string(&mut bytes, 16)?; // level type
+            let dimension = match id {
+                -1 => Some(NETHER.to_owned()),
+                0 => Some(OVERWORLD.to_owned()),
+                1 => Some(END.to_owned()),
+                _ => None,
+            };
+            // Bit 3 was the hardcore flag before 1.16.2.
+            (dimension, i64::from(mode & 7))
+        } else {
+            if (751..=758).contains(&version) {
+                super::nbt::named(&mut bytes)?;
+            } else {
+                read_string(&mut bytes, 32767)?;
+            } // dimension type
+            let world = read_string(&mut bytes, 32767)?;
+            take(&mut bytes, 8)?; // seed
+            let modes = take(&mut bytes, 2)?;
+            let mode = if version < 751 {
+                i64::from(modes[0] & 7)
+            } else {
+                i64::from(modes[0] as i8)
+            };
+            boolean(&mut bytes)?; // debug
+            boolean(&mut bytes)?; // flat
+            take(&mut bytes, 1)?; // copy metadata
+            if version >= 759 && boolean(&mut bytes)? {
+                read_string(&mut bytes, 32767)?;
+                take(&mut bytes, 8)?;
+            }
+            if version >= 763 {
+                read_varint(&mut bytes)?; // portal cooldown
+            }
+            (dimension(world), mode)
+        };
+        if !bytes.is_empty() {
+            return Err(invalid("trailing legacy Respawn data"));
+        }
+        Ok(WorldUpdate::Spawn {
+            dimension,
+            gamemode: GameMode::from_id(mode),
+        })
     }
 
     /// Consume only proxy commands whose signature chain cannot be damaged. Signed

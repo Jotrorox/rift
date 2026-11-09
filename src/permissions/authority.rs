@@ -128,8 +128,8 @@ struct Cached {
 struct Online {
     sessions: usize,
     name: String,
-    /// `server`, `world`, `dimension` and `gamemode`, as far as the proxy
-    /// knows them.
+    /// `server` from the session, `dimension` and `gamemode` from the play
+    /// packets the backend sends; `world` only when set explicitly.
     proxy: ContextSet,
     /// Reported by the player's backend, keys from
     /// `permissions.contexts.external`.
@@ -996,8 +996,10 @@ impl Authority {
     }
 
     /// The player moved to `server`: the proxy contexts restart from the
-    /// server alone, and backend-reported and Lua-provided contexts are
-    /// cleared until they are reported again.
+    /// server alone (the new backend's Join Game or Respawn refills
+    /// `dimension` and `gamemode` through
+    /// [`Authority::set_session_contexts`]), and backend-reported and
+    /// Lua-provided contexts are cleared until they are reported again.
     pub fn switch_server(&self, uuid: Uuid, server: &str) {
         let mut state = self.state_mut();
         let arriving = state
@@ -1162,6 +1164,45 @@ impl Authority {
             }
         }
         Ok(())
+    }
+
+    /// The dimension and game mode the proxy last saw for an online player in
+    /// the play packets their backend sends (Join Game, Respawn, Game Event);
+    /// `None` clears one. `server` is kept, and `world` is never set here: a
+    /// Bukkit world name is not on the wire, so only backends report it. A
+    /// value the context syntax refuses is left out. Takes only a read lock
+    /// when nothing changes, and does nothing for an offline player.
+    pub fn set_session_contexts(
+        &self,
+        uuid: Uuid,
+        dimension: Option<&str>,
+        gamemode: Option<&str>,
+    ) {
+        let pairs = [
+            (context::DIMENSION, dimension),
+            (context::GAMEMODE, gamemode),
+        ];
+        let current = |proxy: &ContextSet| {
+            pairs
+                .iter()
+                .all(|(key, value)| match (proxy.get(key), value) {
+                    (None, None) => true,
+                    (Some(current), Some(value)) => current.eq_ignore_ascii_case(value),
+                    _ => false,
+                })
+        };
+        match self.state().online.get(&uuid) {
+            Some(online) if !current(&online.proxy) => {}
+            _ => return,
+        }
+        if let Some(online) = self.state_mut().online.get_mut(&uuid) {
+            for (key, value) in pairs {
+                online.proxy.remove_key(key);
+                if let Some(value) = value {
+                    let _ = online.proxy.set(key, value);
+                }
+            }
+        }
     }
 
     /// Custom contexts a backend reports for a player, replacing its earlier

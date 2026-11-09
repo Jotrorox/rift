@@ -1958,3 +1958,102 @@ async fn legacy_barrier_discards_late_bundles_on_success() {
     .await
     .unwrap();
 }
+
+/// A 1.21.11 Respawn into `world` in game mode `mode`.
+fn respawn(world: &str, mode: u8) -> Packet {
+    let mut data = vec![2]; // Dimension type registry ID.
+    write_string(world, &mut data);
+    data.extend([0; 8]); // seed
+    data.extend([mode, 255, 0, 0, 0, 0, 63, 1]); // game modes, flags, death, cooldown, sea level, data kept
+    Packet::new(0x50, data)
+}
+
+#[tokio::test]
+async fn relayed_play_packets_keep_the_proxy_dimension_and_game_mode_contexts() {
+    timeout(Duration::from_secs(3), async {
+        let authority = std::sync::Arc::new(crate::permissions::Authority::memory(
+            &crate::config::PermissionsConfig::default(),
+        ));
+        let player = rift_permissions::Uuid::from_bytes([7; 16]);
+        let (mut session, mut client, mut backend) = session().await;
+        session.track_permission_contexts(authority.clone());
+        play(&mut session, &mut client, &mut backend, Codec::default()).await;
+        // Join Game arrives before the player is registered with the authority.
+        assert_eq!(
+            session.world(),
+            &protocol::PlayerWorld {
+                dimension: Some("minecraft:overworld".into()),
+                gamemode: Some(protocol::GameMode::Survival),
+            }
+        );
+        authority.join(player, "Player", "lobby");
+        assert_eq!(authority.contexts(player).to_string(), "server=lobby");
+        session.sync_permission_contexts();
+        assert_eq!(
+            authority.contexts(player).to_string(),
+            "dimension=minecraft:overworld;gamemode=survival;server=lobby"
+        );
+
+        async fn relay(
+            session: &mut Session<DuplexStream, DuplexStream>,
+            client: &mut DuplexStream,
+            backend: &mut DuplexStream,
+            packet: Packet,
+        ) {
+            Codec::default().write(backend, &packet).await.unwrap();
+            assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+            assert_eq!(receive(client, Codec::default()).await, packet);
+        }
+        relay(
+            &mut session,
+            &mut client,
+            &mut backend,
+            respawn("minecraft:the_nether", 1),
+        )
+        .await;
+        assert_eq!(
+            authority.contexts(player).to_string(),
+            "dimension=minecraft:the_nether;gamemode=creative;server=lobby"
+        );
+        relay(
+            &mut session,
+            &mut client,
+            &mut backend,
+            Packet::new(0x26, vec![3, 0x40, 0x40, 0, 0]),
+        )
+        .await; // spectator
+        assert_eq!(
+            authority.contexts(player).to_string(),
+            "dimension=minecraft:the_nether;gamemode=spectator;server=lobby"
+        );
+        // Unreadable packets with those IDs are relayed and change nothing.
+        relay(
+            &mut session,
+            &mut client,
+            &mut backend,
+            Packet::new(0x50, vec![1, 2, 3]),
+        )
+        .await;
+        relay(
+            &mut session,
+            &mut client,
+            &mut backend,
+            Packet::new(0x26, vec![3, 0x40]),
+        )
+        .await;
+        assert_eq!(
+            authority.contexts(player).to_string(),
+            "dimension=minecraft:the_nether;gamemode=spectator;server=lobby"
+        );
+        // A switch restarts from the server; the runtime syncs again after it.
+        authority.switch_server(player, "survival");
+        assert_eq!(authority.contexts(player).to_string(), "server=survival");
+        session.sync_permission_contexts();
+        assert_eq!(
+            authority.contexts(player).to_string(),
+            "dimension=minecraft:the_nether;gamemode=spectator;server=survival"
+        );
+    })
+    .await
+    .unwrap();
+}

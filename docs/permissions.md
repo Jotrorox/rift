@@ -81,18 +81,37 @@ returns `nil` for it, so a script can tell "denied" from "never set".
 
 Proxy-side checks use the contexts Rift knows for an online player:
 
-- `server`, the backend they are on. The proxy does not track `world`,
-  `dimension` or `gamemode` (it would have to follow every Respawn and Game
-  Event packet across protocol versions); nodes that require them apply on the
-  backends, whose adapters fill them, but not in proxy-side checks.
+- `server`, the backend they are on.
+- `dimension` and `gamemode`, read from the play packets Rift relays from that
+  backend on every supported version (1.8.9–26.3): Join Game and Respawn name
+  both, and the game-mode Game Event updates `gamemode` in place. `dimension`
+  is the world's namespaced key, so the vanilla worlds are
+  `minecraft:overworld`, `minecraft:the_nether` and `minecraft:the_end`
+  exactly as the backend adapters report them (before 1.16 the packets carry
+  only those three, as dimension IDs). `gamemode` is `survival`, `creative`,
+  `adventure` or `spectator`. A packet Rift cannot read is relayed unchanged
+  and leaves the values as they were; a Join Game it cannot read clears them.
+- Not `world`: a Bukkit world name (`world_nether`) never crosses the wire, so
+  nodes that require `world` apply on the backends, whose adapters fill it,
+  but not in proxy-side checks.
 - Custom contexts reported by the player's backend, for keys listed in
   `permissions.contexts.external`. A report replaces the backend's earlier one
   and is accepted only while the player is on that backend, or while the proxy
   forwards their connection to it.
 - Custom contexts from Lua [context providers](#context-providers).
 
-Reported and provided contexts are cleared on every server switch. Offline
-players have no contexts, so only global nodes apply to them.
+Reported and provided contexts are cleared on every server switch, and the
+proxy's own restart from the new `server`; the new backend's Join Game fills
+`dimension` and `gamemode` again. Offline players have no contexts, so only
+global nodes apply to them.
+
+A backend computes the reserved contexts from its own player state, which is
+more precise: it knows `world`, and a custom Paper world with a vanilla
+environment reports that environment's dimension (`minecraft:the_nether`)
+where the proxy sees the world's own key. Grants scoped to the three vanilla
+dimensions and to game modes resolve the same on both sides. The `/perms`
+entries in a player's command tree follow a context change with the backend's
+next command tree, as they do for any other permission change.
 
 ## Storage and revisions
 
