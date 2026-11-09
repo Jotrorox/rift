@@ -369,6 +369,12 @@ impl PlayersApi<'_> {
             .map_err(|error| error.to_string())
     }
 
+    /// `players.visible-to`: the node a viewer needs to see the player (the
+    /// resolved `rift.visible-to` meta), or `None` when everyone sees them.
+    pub fn visible_to(&self, target: &str) -> Result<Option<String>, String> {
+        Ok(self.get(target)?.and_then(|player| player.visible_to))
+    }
+
     /// `players.clear-dialog`: close the dialog Rift showed, if still open.
     pub fn clear_dialog(&self, target: &str) -> Result<bool, String> {
         let owner = crate::dialog::Owner::Plugin(self.0.spec.name.clone());
@@ -564,6 +570,47 @@ impl PermissionsApi<'_> {
             },
         };
         self.apply(change).map(drop)
+    }
+
+    /// `meta`: one meta value of the player in their current contexts, as
+    /// prefix and suffix resolve (the lowest rank, then more context pairs).
+    pub fn meta_value(&self, uuid: &str, key: &str) -> Option<String> {
+        let uuid = Uuid::parse(uuid).ok()?;
+        let active = self.authority().contexts(uuid);
+        self.authority()
+            .meta(uuid, &active)
+            .meta
+            .remove(&key.to_ascii_lowercase())
+    }
+
+    /// `set-meta`: the user's meta node `key` in exactly `contexts` (global
+    /// without), expiring at `expires_at` (Unix seconds) if given; `None`
+    /// removes the node in those contexts. Returns whether anything changed.
+    /// `rift.visible-to` is the key a vanish plugin sets (see
+    /// [`crate::players::VISIBLE_TO`]).
+    pub fn set_meta(
+        &self,
+        uuid: &str,
+        key: &str,
+        value: Option<&str>,
+        contexts: ContextSet,
+        expires_at: Option<u64>,
+    ) -> Result<bool, String> {
+        let subject = SubjectRef::User(Uuid::parse(uuid).map_err(|error| error.to_string())?);
+        let change = match value {
+            Some(value) => {
+                let mut node = self
+                    .node(Node::meta(key, value).and_then(|node| node.with_contexts(contexts)))?;
+                node.expires_at = expires_at;
+                Change::SetNode { subject, node }
+            }
+            None => Change::UnsetNode {
+                subject,
+                key: NodeKey::new(NodeKind::Meta, key, contexts)
+                    .map_err(|error| error.to_string())?,
+            },
+        };
+        self.apply(change)
     }
 
     /// `add-group`: a global `inherit` node. Returns whether anything changed.

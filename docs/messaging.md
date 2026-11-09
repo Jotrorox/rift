@@ -254,8 +254,12 @@ capacity the way CloudNet plugins follow service lifecycle events.
 `rift.events.control` reports command name and success, excluding status/player
 details. `rift.events.reload` reports the active revision after successful reload.
 `rift.events.players` reports players as they join, switch servers and quit:
-`{"event":"join","connection_id":"7","uuid":"…","name":"Alice","server":"lobby"}`.
+`{"event":"join","connection_id":"7","uuid":"…","name":"Alice","server":"lobby","visible_to":null}`.
 A `switch` also carries the `previous` server, and a `quit` names the last one.
+`visible_to` is the node a viewer needs to see the player
+([visibility](permissions.md#visibility)), or `null`; a `visibility` event
+reports a change of it, with the old value in `previous_visible_to`.
+`rift.players.list` and `get` include `visible_to` for every player.
 `uuid` is lowercase 32-digit hex without hyphens. Events for one player arrive in order.
 `rift.events.permissions` carries every committed [permission](permissions.md)
 change, the same JSON as `rift.perms.update`.

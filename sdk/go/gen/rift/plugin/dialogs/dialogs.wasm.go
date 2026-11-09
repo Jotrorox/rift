@@ -2,10 +2,10 @@
 
 package dialogs
 
-// This file contains wasmimport and wasmexport declarations for "rift:plugin@0.1.2".
+// This file contains wasmimport and wasmexport declarations for "rift:plugin@0.1.3".
 
-//go:wasmexport rift:plugin/dialogs@0.1.2#dialog
-//export rift:plugin/dialogs@0.1.2#dialog
+//go:wasmexport rift:plugin/dialogs@0.1.3#dialog
+//export rift:plugin/dialogs@0.1.3#dialog
 func wasmexport_Dialog(response *DialogResponse) {
 	response_ := *response
 	Exports.Dialog(response_)
