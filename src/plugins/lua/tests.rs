@@ -31,7 +31,7 @@ impl Fixture for LuaFixture {
         std::fs::write(
             folder.join("plugin.toml"),
             format!(
-                "name = \"{name}\"\nversion = \"1\"\napi = \"0.1\"\nengine = \"lua\"\n{extra}\n[lua]\nmemory_limit_mb = 64\n"
+                "name = \"{name}\"\nversion = \"1\"\napi = \"0.2\"\nengine = \"lua\"\n{extra}\n[lua]\nmemory_limit_mb = 64\n"
             ),
         )
         .unwrap();
@@ -76,7 +76,7 @@ fn folder(extra: &str, files: &[(&str, &str)]) -> PathBuf {
     }
     std::fs::write(
         plugin.join("plugin.toml"),
-        format!("name = \"t\"\nversion = \"1\"\napi = \"0.1\"\nengine = \"lua\"\n{extra}"),
+        format!("name = \"t\"\nversion = \"1\"\napi = \"0.2\"\nengine = \"lua\"\n{extra}"),
     )
     .unwrap();
     root
@@ -284,6 +284,7 @@ end)
     let Action::Deny(errors) = session(&runtime, 1, "A").decision("login").await.unwrap() else {
         panic!("login should deny with the errors");
     };
+    let errors = errors.to_string();
     assert!(
         errors.contains("rift.on is only available while the plugin initializes"),
         "{errors}"

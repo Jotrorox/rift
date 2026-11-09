@@ -6,24 +6,24 @@ import (
 	"go.bytecodealliance.org/cm"
 )
 
-// This file contains wasmimport and wasmexport declarations for "rift:plugin@0.1.0".
+// This file contains wasmimport and wasmexport declarations for "rift:plugin@0.2.0".
 
-//go:wasmimport rift:plugin/store@0.1.0 get
+//go:wasmimport rift:plugin/store@0.2.0 get
 //go:noescape
 func wasmimport_Get(namespace0 *uint8, namespace1 uint32, key0 *uint8, key1 uint32, result *cm.Result[OptionListU8Shape, cm.Option[cm.List[uint8]], string])
 
-//go:wasmimport rift:plugin/store@0.1.0 set
+//go:wasmimport rift:plugin/store@0.2.0 set
 //go:noescape
 func wasmimport_Set(namespace0 *uint8, namespace1 uint32, key0 *uint8, key1 uint32, value0 *uint8, value1 uint32, result *cm.Result[string, struct{}, string])
 
-//go:wasmimport rift:plugin/store@0.1.0 delete
+//go:wasmimport rift:plugin/store@0.2.0 delete
 //go:noescape
 func wasmimport_Delete(namespace0 *uint8, namespace1 uint32, key0 *uint8, key1 uint32, result *cm.Result[string, bool, string])
 
-//go:wasmimport rift:plugin/store@0.1.0 increment
+//go:wasmimport rift:plugin/store@0.2.0 increment
 //go:noescape
 func wasmimport_Increment(namespace0 *uint8, namespace1 uint32, key0 *uint8, key1 uint32, delta0 uint64, result *cm.Result[string, int64, string])
 
-//go:wasmimport rift:plugin/store@0.1.0 list
+//go:wasmimport rift:plugin/store@0.2.0 list
 //go:noescape
 func wasmimport_List(namespace0 *uint8, namespace1 uint32, prefix0 *uint8, prefix1 uint32, result *cm.Result[cm.List[cm.Tuple[string, cm.List[uint8]]], cm.List[cm.Tuple[string, cm.List[uint8]]], string])

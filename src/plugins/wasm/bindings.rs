@@ -1,4 +1,4 @@
-//! Host bindings for the `core` world of `rift:plugin@0.1.0`: generated
+//! Host bindings for the `core` world of `rift:plugin@0.2.0`: generated
 //! types and traits, the trait implementations that forward every import to
 //! [`Services`](crate::plugins::services::Services), and conversions between
 //! the generated types and the engine-neutral [`api`] types. WASI is linked
@@ -11,7 +11,7 @@ wasmtime::component::bindgen!({
     world: "rift:plugin/core",
 });
 
-use rift::plugin::{bus, log, meta, permissions, players, servers, store, timers, types};
+use self::rift::plugin::{bus, log, meta, permissions, players, servers, store, timers, types};
 
 /// Guest paths of the granted directories (`meta.data-dir`, `meta.config-dir`).
 pub(super) const DATA_DIR: &str = "/data";
@@ -103,15 +103,20 @@ pub(super) fn route_decision(decision: types::RouteDecision) -> api::RouteDecisi
     }
 }
 
-pub(super) fn action(action: types::Action) -> api::Action {
-    match action {
+/// Fails for a `-json` case whose text is not a valid text component; the
+/// host then treats the decision like any other invalid one.
+pub(super) fn action(action: types::Action) -> Result<api::Action, String> {
+    use crate::text::Text;
+    Ok(match action {
         types::Action::Continue => api::Action::Continue,
-        types::Action::Deny(reason) => api::Action::Deny(reason),
+        types::Action::Deny(reason) => api::Action::Deny(reason.into()),
         types::Action::Server(server) => api::Action::Server(server),
-        types::Action::Message(text) => api::Action::Message(text),
+        types::Action::Message(text) => api::Action::Message(text.into()),
         types::Action::Queue(server) => api::Action::Queue(server),
         types::Action::LeaveQueue => api::Action::LeaveQueue,
-    }
+        types::Action::DenyJson(reason) => api::Action::Deny(Text::json(&reason, "deny reason")?),
+        types::Action::MessageJson(text) => api::Action::Message(Text::json(&text, "message")?),
+    })
 }
 
 pub(super) fn suggestions(suggestions: Vec<types::Suggestion>) -> Vec<api::Suggestion> {
@@ -252,8 +257,16 @@ impl players::Host for State {
         self.services.players().message(&target, &text)
     }
 
+    fn message_json(&mut self, target: String, text_json: String) -> Result<bool, String> {
+        self.services.players().message_json(&target, &text_json)
+    }
+
     fn action_bar(&mut self, target: String, text: String) -> Result<bool, String> {
         self.services.players().action_bar(&target, &text)
+    }
+
+    fn action_bar_json(&mut self, target: String, text_json: String) -> Result<bool, String> {
+        self.services.players().action_bar_json(&target, &text_json)
     }
 
     fn title(&mut self, target: String, spec: types::TitleSpec) -> Result<bool, String> {
@@ -287,12 +300,20 @@ impl players::Host for State {
         self.services.players().kick(&target, &reason)
     }
 
+    fn kick_json(&mut self, target: String, reason_json: String) -> Result<bool, String> {
+        self.services.players().kick_json(&target, &reason_json)
+    }
+
     fn transfer(&mut self, target: String, server: String) -> Result<bool, String> {
         self.services.players().transfer(&target, &server)
     }
 
     fn broadcast(&mut self, text: String) -> Result<u32, String> {
         self.services.players().broadcast(&text)
+    }
+
+    fn broadcast_json(&mut self, text_json: String) -> Result<u32, String> {
+        self.services.players().broadcast_json(&text_json)
     }
 }
 

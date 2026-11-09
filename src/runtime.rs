@@ -624,12 +624,10 @@ pub async fn handle(
                 use rift::extensions::Action;
                 let extension = session.extension.as_ref().unwrap();
                 if let Action::Deny(reason) = extension.decision("login").await? {
-                    return Err(io::Error::new(io::ErrorKind::PermissionDenied, reason));
+                    return Err(rift::text::denied(reason));
                 }
                 match extension.decision("initial_server").await? {
-                    Action::Deny(reason) => {
-                        Err(io::Error::new(io::ErrorKind::PermissionDenied, reason))
-                    }
+                    Action::Deny(reason) => Err(rift::text::denied(reason)),
                     Action::Server(server) => Ok(Some(server)),
                     _ => Ok(None),
                 }
@@ -639,11 +637,11 @@ pub async fn handle(
                 Ok(selected) => extension_selection = selected,
                 Err(error) => {
                     let reason = if error.kind() == io::ErrorKind::PermissionDenied {
-                        error.to_string()
+                        rift::text::reason(&error)
                     } else {
                         "Login extension failed. Please try again later.".into()
                     };
-                    let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect(&reason)).await;
+                    let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect_text(&reason)).await;
                     return Err(error);
                 }
             }
@@ -881,21 +879,16 @@ pub async fn handle(
                     if !session.client.state.settled(rift::protocol::State::Play) {
                         phase_deadline = Deadline::now() + Duration::from_secs(30);
                         // Tab lists and boss bars are state and apply after the next join.
-                        if !matches!(action, PlayerAction::Kick(_) | PlayerAction::RawKick(_) | PlayerAction::TabList(_) | PlayerAction::BossBar { .. }) { continue; }
+                        if !matches!(action, PlayerAction::Kick(_) | PlayerAction::TabList(_) | PlayerAction::BossBar { .. }) { continue; }
                     }
                     match action {
-                        PlayerAction::Message(text) => timeout(HANDSHAKE_TIMEOUT, session.send_system_message(&text)).await??,
-                        PlayerAction::ActionBar(text) => timeout(HANDSHAKE_TIMEOUT, session.send_action_bar(&text)).await??,
+                        PlayerAction::Message(text) => timeout(HANDSHAKE_TIMEOUT, session.send_text(&text)).await??,
+                        PlayerAction::ActionBar(text) => timeout(HANDSHAKE_TIMEOUT, session.send_action_bar_text(&text)).await??,
                         PlayerAction::Title { title, subtitle, times } => {
                             timeout(HANDSHAKE_TIMEOUT, session.send_title(&title, subtitle.as_deref(), times)).await??;
                         }
-                        PlayerAction::RawMessage(component) => timeout(HANDSHAKE_TIMEOUT, session.send_system_component(&component)).await??,
                         PlayerAction::Kick(reason) => {
-                            let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect(&reason)).await;
-                            break;
-                        }
-                        PlayerAction::RawKick(reason) => {
-                            let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect_component(&reason)).await;
+                            let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect_text(&reason)).await;
                             break;
                         }
                         // Forwarded plugin messages are addressed to a server, not to
@@ -1311,13 +1304,14 @@ pub async fn handle(
                             }
                             Err(error) => {
                                 let reason = if error.kind() == io::ErrorKind::PermissionDenied {
-                                    error.to_string()
+                                    rift::text::reason(&error)
                                 } else {
                                     "The server connection was lost and no fallback was available."
                                         .into()
                                 };
                                 let _ =
-                                    timeout(HANDSHAKE_TIMEOUT, session.disconnect(&reason)).await;
+                                    timeout(HANDSHAKE_TIMEOUT, session.disconnect_text(&reason))
+                                        .await;
                                 return Err(error);
                             }
                         }

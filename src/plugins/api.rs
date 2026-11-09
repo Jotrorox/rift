@@ -1,4 +1,4 @@
-//! Engine-neutral mirrors of the `rift:plugin@0.1.0` WIT types
+//! Engine-neutral mirrors of the `rift:plugin@0.2.0` WIT types
 //! (`wit/rift-plugin.wit`). Engines translate their own values (Lua tables,
 //! wasmtime bindgen records) into these; the host never sees engine values.
 //! Core types are reused where their shape already matches the contract.
@@ -12,7 +12,11 @@ pub use crate::{
 };
 
 /// The `rift:plugin` package version this host implements.
-pub const API_VERSION: &str = "0.1";
+pub const API_VERSION: &str = "0.2";
+/// Older contract versions whose Lua and script plugins still run unchanged:
+/// 0.2 only added functions and decisions. A WebAssembly component is bound
+/// to the exact interfaces it was built against and needs a rebuild.
+pub const LUA_COMPATIBLE: &[&str] = &["0.1"];
 
 /// Log severity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

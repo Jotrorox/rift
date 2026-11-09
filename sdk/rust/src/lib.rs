@@ -1,7 +1,7 @@
 //! Guest SDK for Rift WebAssembly plugins.
 //!
 //! A Rift plugin is a WebAssembly component built for `wasm32-wasip2` against
-//! the `plugin` world of `rift:plugin@0.1.0`. This crate ships that WIT,
+//! the `plugin` world of `rift:plugin@0.2.0`. This crate ships that WIT,
 //! generates the bindings and wraps them, so a plugin is an ordinary
 //! `cdylib` crate:
 //!
@@ -10,7 +10,7 @@
 //! crate-type = ["cdylib"]
 //!
 //! [dependencies]
-//! rift-plugin = "0.1"
+//! rift-plugin = "0.2"
 //! ```
 //!
 //! ```no_run
@@ -66,6 +66,36 @@
 //!
 //! WASI 0.2 (`std::fs` on the granted directories, clocks, random) works
 //! through the standard library. A `wasi:http` helper is not provided.
+//!
+//! # Rich text
+//!
+//! Messages, action bars, kicks and deny reasons are plain text by default.
+//! For colours, line breaks, hover text and click events, pass a JSON text
+//! component to the `_json` forms: [`Action::deny_json`],
+//! [`Action::message_json`], [`players::message_json`],
+//! [`players::action_bar_json`], [`players::kick_json`] and
+//! [`players::broadcast_json`]. Rift spells hover and click events the way
+//! each player's client reads them, so either the 1.21.5+ form
+//! (`click_event`, `hover_event`) or the older one (`clickEvent`,
+//! `hoverEvent`) works for every client.
+//!
+//! ```no_run
+//! use rift_plugin::{Action, players};
+//! use serde_json::json;
+//!
+//! let invite = json!([
+//!     {"text": "Alex invited you to their party. "},
+//!     {"text": "[Accept]", "color": "green",
+//!      "click_event": {"action": "run_command", "command": "/party accept Alex"},
+//!      "hover_event": {"action": "show_text", "value": "Join Alex's party"}},
+//! ]);
+//! players::message_json("Sam", &invite.to_string()).ok();
+//!
+//! let banned = Action::deny_json(json!({
+//!     "text": "You are banned\n", "color": "red",
+//!     "extra": [{"text": "Reason: spam", "color": "gray"}],
+//! }));
+//! ```
 
 #![warn(missing_docs)]
 
@@ -76,7 +106,7 @@
 pub mod bindings {
     wit_bindgen::generate!({
         path: "wit",
-        world: "rift:plugin/plugin@0.1.0",
+        world: "rift:plugin/plugin@0.2.0",
         pub_export_macro: true,
         export_macro_name: "__export_rift_plugin",
         default_bindings_module: "rift_plugin::bindings",
@@ -258,14 +288,26 @@ impl CommandSpec {
 }
 
 impl Action {
-    /// `deny(reason)`.
+    /// `deny(reason)`: plain text of 1..=1024 bytes.
     pub fn deny(reason: impl Into<String>) -> Self {
         Self::Deny(reason.into())
+    }
+
+    /// `deny-json(reason)`: a JSON text component of at most 32 KiB, given
+    /// as a [`serde_json::Value`] or as JSON text.
+    pub fn deny_json(reason: impl ToString) -> Self {
+        Self::DenyJson(reason.to_string())
     }
 
     /// `message(text)`: reply to the player who ran a command.
     pub fn message(text: impl Into<String>) -> Self {
         Self::Message(text.into())
+    }
+
+    /// `message-json(text)`: reply with a JSON text component of at most
+    /// 32 KiB, given as a [`serde_json::Value`] or as JSON text.
+    pub fn message_json(text: impl ToString) -> Self {
+        Self::MessageJson(text.to_string())
     }
 
     /// `server(name)`: send the player to a backend.
@@ -285,9 +327,13 @@ impl Suggestion {
 }
 
 /// The joined players. `target` is a name, a UUID or a connection id.
+///
+/// The `_json` functions take a JSON text component as text, for example
+/// `&serde_json::json!({...}).to_string()`; see [rich text](crate#rich-text).
 pub mod players {
     pub use crate::bindings::rift::plugin::players::{
-        action_bar, boss_bar, broadcast, get, kick, list, message, names, tab_list, title, transfer,
+        action_bar, action_bar_json, boss_bar, broadcast, broadcast_json, get, kick, kick_json,
+        list, message, message_json, names, tab_list, title, transfer,
     };
 }
 

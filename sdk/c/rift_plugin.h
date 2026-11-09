@@ -98,9 +98,14 @@ typedef struct rift_plugin_types_route_decision_t {
 #define RIFT_PLUGIN_TYPES_ROUTE_DECISION_REJECT 2
 
 // The answer to a decision hook. Each hook accepts a subset:
-// - login, before-transfer: continue, deny
-// - initial-server: continue, deny, server
-// - command: continue, message, server, queue, leave-queue
+// - login, before-transfer: continue, deny, deny-json
+// - initial-server: continue, deny, deny-json, server
+// - command: continue, message, message-json, server, queue, leave-queue
+// 
+// `deny` and `message` are plain text of 1..=1024 bytes. `deny-json`
+// and `message-json` are JSON text components of at most 32 KiB, for
+// colours, line breaks, hover text and click events; text that does not
+// start with `{`, `[` or `"` is shown as written.
 typedef struct rift_plugin_types_action_t {
   uint8_t tag;
   union {
@@ -108,6 +113,8 @@ typedef struct rift_plugin_types_action_t {
     rift_plugin_string_t     server;
     rift_plugin_string_t     message;
     rift_plugin_string_t     queue;
+    rift_plugin_string_t     deny_json;
+    rift_plugin_string_t     message_json;
   } val;
 } rift_plugin_types_action_t;
 
@@ -117,6 +124,8 @@ typedef struct rift_plugin_types_action_t {
 #define RIFT_PLUGIN_TYPES_ACTION_MESSAGE 3
 #define RIFT_PLUGIN_TYPES_ACTION_QUEUE 4
 #define RIFT_PLUGIN_TYPES_ACTION_LEAVE_QUEUE 5
+#define RIFT_PLUGIN_TYPES_ACTION_DENY_JSON 6
+#define RIFT_PLUGIN_TYPES_ACTION_MESSAGE_JSON 7
 
 typedef struct rift_plugin_types_suggestion_t {
   rift_plugin_string_t   text;
@@ -484,26 +493,34 @@ typedef struct {
   exports_rift_plugin_handler_http_response_t val;
 } exports_rift_plugin_handler_option_http_response_t;
 
-// Imported Functions from `rift:plugin/players@0.1.0`
+// Imported Functions from `rift:plugin/players@0.2.0`
 // Players, optionally only those on one server or service group.
 extern bool rift_plugin_players_list(rift_plugin_string_t *maybe_server, rift_plugin_players_list_player_info_t *ret, rift_plugin_string_t *err);
 extern bool rift_plugin_players_get(rift_plugin_string_t *target, rift_plugin_players_option_player_info_t *ret, rift_plugin_string_t *err);
 // Names starting with `prefix`, sorted.
 extern void rift_plugin_players_names(rift_plugin_string_t *maybe_prefix, rift_plugin_list_string_t *ret);
-// Each returns whether the player was online.
+// Each returns whether the player was online. Plain text is 1..=1024
+// bytes. The `-json` functions take a JSON text component of at most
+// 32 KiB instead; text that does not start with `{`, `[` or `"` is
+// shown as written. Rift spells hover and click events the way each
+// player's client reads them.
 extern bool rift_plugin_players_message(rift_plugin_string_t *target, rift_plugin_string_t *text, bool *ret, rift_plugin_string_t *err);
+extern bool rift_plugin_players_message_json(rift_plugin_string_t *target, rift_plugin_string_t *text_json, bool *ret, rift_plugin_string_t *err);
 extern bool rift_plugin_players_action_bar(rift_plugin_string_t *target, rift_plugin_string_t *text, bool *ret, rift_plugin_string_t *err);
+extern bool rift_plugin_players_action_bar_json(rift_plugin_string_t *target, rift_plugin_string_t *text_json, bool *ret, rift_plugin_string_t *err);
 extern bool rift_plugin_players_title(rift_plugin_string_t *target, rift_plugin_players_title_spec_t *title, bool *ret, rift_plugin_string_t *err);
 // JSON text components; both `none` restores the configured tab list.
 extern bool rift_plugin_players_tab_list(rift_plugin_string_t *target, rift_plugin_string_t *maybe_header_json, rift_plugin_string_t *maybe_footer_json, bool *ret, rift_plugin_string_t *err);
 // `none` removes the bar called `name`.
 extern bool rift_plugin_players_boss_bar(rift_plugin_string_t *target, rift_plugin_string_t *name, rift_plugin_players_boss_bar_spec_t *maybe_bar, bool *ret, rift_plugin_string_t *err);
 extern bool rift_plugin_players_kick(rift_plugin_string_t *target, rift_plugin_string_t *reason, bool *ret, rift_plugin_string_t *err);
+extern bool rift_plugin_players_kick_json(rift_plugin_string_t *target, rift_plugin_string_t *reason_json, bool *ret, rift_plugin_string_t *err);
 extern bool rift_plugin_players_transfer(rift_plugin_string_t *target, rift_plugin_string_t *server, bool *ret, rift_plugin_string_t *err);
 // Returns how many players received the message.
 extern bool rift_plugin_players_broadcast(rift_plugin_string_t *text, uint32_t *ret, rift_plugin_string_t *err);
+extern bool rift_plugin_players_broadcast_json(rift_plugin_string_t *text_json, uint32_t *ret, rift_plugin_string_t *err);
 
-// Imported Functions from `rift:plugin/store@0.1.0`
+// Imported Functions from `rift:plugin/store@0.2.0`
 extern bool rift_plugin_store_get(rift_plugin_string_t *namespace_, rift_plugin_string_t *key, rift_plugin_option_list_u8_t *ret, rift_plugin_string_t *err);
 extern bool rift_plugin_store_set(rift_plugin_string_t *namespace_, rift_plugin_string_t *key, rift_plugin_list_u8_t *value, rift_plugin_string_t *err);
 // Returns whether an entry existed.
@@ -513,7 +530,7 @@ extern bool rift_plugin_store_increment(rift_plugin_string_t *namespace_, rift_p
 // Entries whose key starts with `prefix`, sorted by key.
 extern bool rift_plugin_store_list(rift_plugin_string_t *namespace_, rift_plugin_string_t *prefix, rift_plugin_list_tuple2_string_list_u8_t *ret, rift_plugin_string_t *err);
 
-// Imported Functions from `rift:plugin/permissions@0.1.0`
+// Imported Functions from `rift:plugin/permissions@0.2.0`
 // Whether the node is true in the player's current contexts.
 extern bool rift_plugin_permissions_has(rift_plugin_string_t *uuid, rift_plugin_string_t *node);
 // Set the user's global permission node; `none` removes it.
@@ -526,7 +543,7 @@ extern void rift_plugin_permissions_groups(rift_plugin_string_t *uuid, rift_plug
 // Every group with its weight, display name and nodes, as a JSON object.
 extern void rift_plugin_permissions_list_groups(rift_plugin_string_t *ret);
 
-// Imported Functions from `rift:plugin/bus@0.1.0`
+// Imported Functions from `rift:plugin/bus@0.2.0`
 // Returns how many subscribers received the message.
 extern bool rift_plugin_bus_publish(rift_plugin_string_t *subject, rift_plugin_list_u8_t *payload, rift_plugin_string_t *maybe_reply, uint32_t *ret, rift_plugin_string_t *err);
 // Send a request and wait for the first reply.
@@ -538,7 +555,7 @@ extern bool rift_plugin_bus_unsubscribe(uint64_t handle);
 // Append to a durable stream; returns the sequence number.
 extern bool rift_plugin_bus_stream_publish(rift_plugin_string_t *subject, rift_plugin_list_u8_t *payload, uint64_t *ret, rift_plugin_string_t *err);
 
-// Imported Functions from `rift:plugin/servers@0.1.0`
+// Imported Functions from `rift:plugin/servers@0.2.0`
 extern bool rift_plugin_servers_create(rift_plugin_string_t *group, rift_plugin_string_t *ret, rift_plugin_string_t *err);
 extern bool rift_plugin_servers_remove(rift_plugin_string_t *name, rift_plugin_string_t *ret, rift_plugin_string_t *err);
 extern bool rift_plugin_servers_start(rift_plugin_string_t *name, rift_plugin_string_t *ret, rift_plugin_string_t *err);
@@ -548,7 +565,7 @@ extern bool rift_plugin_servers_download(rift_plugin_string_t *template_, rift_p
 // templates, transfer, drain, maintenance, reload) with a JSON payload.
 extern bool rift_plugin_servers_control(rift_plugin_string_t *operation, rift_plugin_string_t *payload_json, rift_plugin_string_t *ret, rift_plugin_string_t *err);
 
-// Imported Functions from `rift:plugin/timers@0.1.0`
+// Imported Functions from `rift:plugin/timers@0.2.0`
 // Repeats every `ms` milliseconds (at least 10).
 extern uint64_t rift_plugin_timers_every(uint32_t ms);
 // Fires once after `ms` milliseconds.
@@ -556,10 +573,10 @@ extern uint64_t rift_plugin_timers_after(uint32_t ms);
 // Returns whether the timer existed.
 extern bool rift_plugin_timers_cancel(uint64_t handle);
 
-// Imported Functions from `rift:plugin/log@0.1.0`
+// Imported Functions from `rift:plugin/log@0.2.0`
 extern void rift_plugin_log_log(rift_plugin_log_level_t level, rift_plugin_string_t *message);
 
-// Imported Functions from `rift:plugin/meta@0.1.0`
+// Imported Functions from `rift:plugin/meta@0.2.0`
 extern void rift_plugin_meta_name(rift_plugin_string_t *ret);
 extern void rift_plugin_meta_version(rift_plugin_string_t *ret);
 // Guest path of the plugin's private data directory (`/data`).
@@ -571,7 +588,7 @@ extern double rift_plugin_meta_clock(void);
 // Unix time in seconds.
 extern int64_t rift_plugin_meta_time(void);
 
-// Exported Functions from `rift:plugin/handler@0.1.0`
+// Exported Functions from `rift:plugin/handler@0.2.0`
 bool exports_rift_plugin_handler_init(rift_plugin_string_t *config_json, exports_rift_plugin_handler_registration_t *ret, rift_plugin_string_t *err);
 bool exports_rift_plugin_handler_reload(rift_plugin_string_t *config_json, rift_plugin_string_t *err);
 void exports_rift_plugin_handler_shutdown(rift_plugin_string_t *reason);

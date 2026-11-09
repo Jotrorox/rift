@@ -35,8 +35,9 @@ interfaces remain available. `on_route` still runs before the handshake and has
 
 Each callback receives one owned context table. Return `nil` to continue. A
 non-nil result must have exactly one of the fields permitted below. Strings must
-be nonempty UTF-8, at most 1024 bytes. Invalid results and unknown server names
-are errors; Rift never treats an error as permission to proceed.
+be nonempty UTF-8, at most 1024 bytes. A deny reason may instead be a chat
+component table (see [rich text](#rich-text)). Invalid results and unknown
+server names are errors; Rift never treats an error as permission to proceed.
 
 | Callback | When it runs | Additional context | Permitted result |
 | --- | --- | --- | --- |
@@ -223,8 +224,9 @@ every keystroke, and further requests get an empty answer. `/server <name>`
 completes from the destinations the player may join, without extensions.
 Completion needs Minecraft 1.19.3 or newer and network mode. Commands without
 `suggest` show no suggestions.
-Commands may return nil, `{ message = "text" }`, `{ server = "name" }`,
-`{ queue = "name" }` or `{ leave_queue = true }`. Server actions still pass
+Commands may return nil, `{ message = "text" }` (or a chat component table, see
+[rich text](#rich-text)), `{ server = "name" }`, `{ queue = "name" }` or
+`{ leave_queue = true }`. Server actions still pass
 `before_transfer` and all host admission checks. Signed backend arguments stay
 with their original backend; proxy arguments use unsigned Brigadier strings.
 Protect destinations in both `initial_server` and `before_transfer`: a command
@@ -286,8 +288,10 @@ are `null`, as in the Lua context.
 | `{"action":"deny","reason":"…"}` | every decided hook |
 | `{"action":"server","server":"lobby-2"}` | `initial_server` only |
 
-Replies are validated exactly like Lua results: strings must contain 1–1024
-bytes, a server must be configured, and an invalid reply is an error, so login
+A `reason` is a string of plain text or a JSON text component, an object or a
+list, such as `{"action":"deny","reason":{"text":"Banned","color":"red"}}`
+(see [rich text](#rich-text)). Replies are validated exactly like Lua results:
+strings must contain 1–1024 bytes, a server must be configured, and an invalid reply is an error, so login
 is rejected and a transfer target is skipped. A reply that arrives after the
 timeout is dropped. A timed-out request may still have been processed, so
 **decisions must not have side effects**.
@@ -520,14 +524,14 @@ names a configured backend or service group; a group matches all its instances.
 | `rift.players.list(server)` | Array of player tables; `server` is optional |
 | `rift.players.get(player)` | Player table, or nil when the player is offline |
 | `rift.players.names(prefix)` | Sorted array of player names; `prefix` (optional) keeps names starting with it, ignoring ASCII case |
-| `rift.players.message(player, text)` | Boolean: a chat message was queued |
-| `rift.players.action_bar(player, text)` | Boolean: action-bar text was queued |
+| `rift.players.message(player, text)` | Boolean: a chat message was queued; `text` is a string or a chat component table |
+| `rift.players.action_bar(player, text)` | Boolean: action-bar text was queued; `text` is a string or a chat component table |
 | `rift.players.title(player, title)` | Boolean: a title was queued; `title` is text or an options table |
 | `rift.players.tab_list(player, options)` | Boolean: a tab list header and footer were queued; omit `options` to restore the configured ones |
 | `rift.players.boss_bar(player, name, options)` | Boolean: a boss bar was queued; omit `options` to remove the bar called `name` |
-| `rift.players.kick(player, reason)` | Boolean: a disconnect with this reason was queued |
+| `rift.players.kick(player, reason)` | Boolean: a disconnect with this reason (a string or a chat component table) was queued |
 | `rift.players.transfer(player, server)` | Boolean: a transfer request was queued |
-| `rift.players.broadcast(text, server)` | Number of players a chat message was queued for; `server` is optional |
+| `rift.players.broadcast(text, server)` | Number of players a chat message (a string or a chat component table) was queued for; `server` is optional |
 
 Player tables contain `uuid`, `name`, `server` (the last committed backend),
 `connection_id` (a decimal string, matching `ctx.connection_id`) and `protocol`.
@@ -537,7 +541,9 @@ closes. Pending logins and players on other Rift processes are not listed.
 Title options are `title` and `subtitle` (at least one), plus `fade_in_ms`,
 `stay_ms` and `fade_out_ms` (integers from 0 to 60000; defaults 500, 3500 and
 1000; rounded down to 50 ms ticks). A title without a subtitle clears any earlier
-subtitle. Text, titles and reasons are 1–1024 bytes of UTF-8, shown as plain text.
+subtitle. Titles are 1–1024 bytes of UTF-8, shown as plain text. Messages,
+action bars and kick reasons are the same plain text, or chat component tables
+as described under [rich text](#rich-text).
 
 Tab list options are `header` and `footer`, each a string or chat component
 table of up to 4096 bytes, with the same placeholders as the `tab_list` setting
@@ -606,6 +612,76 @@ player where they are without a message, and the current server is never a
 target. A service group selects one of its instances. A kick closes the
 connection with the given reason and runs `disconnect` as usual. Invalid
 arguments, unknown servers and exceeded budgets fail the callback.
+
+### Rich text
+
+Chat messages, action bars, broadcasts, kick reasons, deny reasons and command
+replies are plain text by default: a string of 1–1024 bytes, shown exactly as
+written. For colours, line breaks, hover text and click events, give a
+[JSON text component](https://minecraft.wiki/w/Text_component_format) instead:
+
+- in Lua (configuration callbacks and [Lua plugins](plugins-lua.md)), a chat
+  component table where the string would go, as for tab lists:
+  `{ deny = { text = "Banned", color = "red" } }`,
+  `rift.players.message(player, { text = "Hi", bold = true })`;
+- in [bus replies](#decisions-answered-over-the-message-bus), an object or a
+  list as the `reason`;
+- in WebAssembly plugins, the `-json` functions and decisions of the plugin
+  contract (`players.message-json`, `action-bar-json`, `kick-json`,
+  `broadcast-json`, `action::deny-json`, `action::message-json`), which take
+  the component as JSON text.
+
+Rift never reads JSON out of a plain string, so a plugin that relays what a
+player typed cannot be made to send click events. A component may be at most
+32 KiB of compact JSON (a Lua table at most 1024 values in 16 levels); it must
+not be empty, must not contain `null` and must have an NBT form, as every
+component does. An invalid component fails the call or the decision like any
+other invalid argument.
+
+Minecraft 1.21.5 renamed `clickEvent` and `hoverEvent` to `click_event` and
+`hover_event` and changed their fields (`clickEvent.value` became `url`,
+`command`, `page` or `value`; `hoverEvent.contents` became `value` for text and
+plain fields for items and entities). Write either form: Rift rewrites the
+events of every message, action bar, kick and denial into the form each
+player's client reads, and when a component carries both forms for one event
+it keeps the matching one. An event the client cannot express, such as
+`show_dialog` before 1.21.5, is dropped; the text stays.
+
+A party invitation with buttons, and a ban screen:
+
+```lua
+rift.players.message(target.uuid, {
+    { text = inviter .. " invited you to their party. " },
+    {
+        text = "[Accept]", color = "green", bold = true,
+        click_event = { action = "run_command", command = "/party accept " .. inviter },
+        hover_event = { action = "show_text", value = "Join " .. inviter .. "'s party" },
+    },
+    { text = " " },
+    {
+        text = "[Decline]", color = "red", bold = true,
+        click_event = { action = "run_command", command = "/party decline " .. inviter },
+    },
+})
+
+rift.config.plugins = {
+    api_version = 3,
+    login = function(ctx)
+        local ban = rift.store.get("bans", ctx.uuid)
+        if ban then
+            return { deny = {
+                text = "You are banned from this network\n\n", color = "red", bold = true,
+                extra = {
+                    { text = "Reason: ", color = "gray", bold = false },
+                    { text = ban, color = "white", bold = false },
+                },
+            } }
+        end
+    end,
+}
+```
+
+Logs and admin replies show a component's words without formatting.
 
 ## Queue behavior
 

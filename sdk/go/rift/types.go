@@ -100,9 +100,9 @@ func (d RouteDecision) lower() types.RouteDecision {
 }
 
 // Action answers a decision hook. Each hook accepts a subset:
-//   - login, before-transfer: Continue, Deny
-//   - initial-server: Continue, Deny, Server
-//   - command: Continue, Message, Server, Queue, LeaveQueue
+//   - login, before-transfer: Continue, Deny, DenyJSON
+//   - initial-server: Continue, Deny, DenyJSON, Server
+//   - command: Continue, Message, MessageJSON, Server, Queue, LeaveQueue
 type Action struct {
 	kind  uint8
 	value string
@@ -115,6 +115,8 @@ const (
 	actionMessage
 	actionQueue
 	actionLeaveQueue
+	actionDenyJSON
+	actionMessageJSON
 )
 
 // Continue lets the event proceed unchanged.
@@ -123,11 +125,19 @@ func Continue() Action { return Action{kind: actionContinue} }
 // Deny refuses the login or transfer with a reason shown to the player.
 func Deny(reason string) Action { return Action{kind: actionDeny, value: reason} }
 
+// DenyJSON refuses the login or transfer with a JSON text component of at
+// most 32 KiB, for colours, line breaks and hover text.
+func DenyJSON(reason string) Action { return Action{kind: actionDenyJSON, value: reason} }
+
 // Server sends the player to a server.
 func Server(name string) Action { return Action{kind: actionServer, value: name} }
 
 // Message replies to a command with a chat message.
 func Message(text string) Action { return Action{kind: actionMessage, value: text} }
+
+// MessageJSON replies to a command with a JSON text component of at most
+// 32 KiB, for colours, hover text and click events.
+func MessageJSON(text string) Action { return Action{kind: actionMessageJSON, value: text} }
 
 // Queue puts the player into a server's queue.
 func Queue(server string) Action { return Action{kind: actionQueue, value: server} }
@@ -147,6 +157,10 @@ func (a Action) lower() types.Action {
 		return types.ActionQueue(a.value)
 	case actionLeaveQueue:
 		return types.ActionLeaveQueue()
+	case actionDenyJSON:
+		return types.ActionDenyJSON(a.value)
+	case actionMessageJSON:
+		return types.ActionMessageJSON(a.value)
 	default:
 		return types.ActionContinue()
 	}

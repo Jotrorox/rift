@@ -14,7 +14,7 @@
 /// - The guest is single-threaded; the host never calls one instance
 ///   concurrently.
 /// - Additive changes bump the minor version; breaking changes move to 1.0.
-package rift:plugin@0.1.0;
+package rift:plugin@0.2.0;
 
 interface types {
     /// Log severity.
@@ -85,9 +85,14 @@ interface types {
     }
 
     /// The answer to a decision hook. Each hook accepts a subset:
-    /// - login, before-transfer: continue, deny
-    /// - initial-server: continue, deny, server
-    /// - command: continue, message, server, queue, leave-queue
+    /// - login, before-transfer: continue, deny, deny-json
+    /// - initial-server: continue, deny, deny-json, server
+    /// - command: continue, message, message-json, server, queue, leave-queue
+    ///
+    /// `deny` and `message` are plain text of 1..=1024 bytes. `deny-json`
+    /// and `message-json` are JSON text components of at most 32 KiB, for
+    /// colours, line breaks, hover text and click events; text that does not
+    /// start with `{`, `[` or `"` is shown as written.
     variant action {
         continue,
         deny(string),
@@ -95,6 +100,8 @@ interface types {
         message(string),
         queue(string),
         leave-queue,
+        deny-json(string),
+        message-json(string),
     }
 
     record suggestion {
@@ -244,18 +251,26 @@ interface players {
     get: func(target: string) -> result<option<player-info>, string>;
     /// Names starting with `prefix`, sorted.
     names: func(prefix: option<string>) -> list<string>;
-    /// Each returns whether the player was online.
+    /// Each returns whether the player was online. Plain text is 1..=1024
+    /// bytes. The `-json` functions take a JSON text component of at most
+    /// 32 KiB instead; text that does not start with `{`, `[` or `"` is
+    /// shown as written. Rift spells hover and click events the way each
+    /// player's client reads them.
     message: func(target: string, text: string) -> result<bool, string>;
+    message-json: func(target: string, text-json: string) -> result<bool, string>;
     action-bar: func(target: string, text: string) -> result<bool, string>;
+    action-bar-json: func(target: string, text-json: string) -> result<bool, string>;
     title: func(target: string, title: title-spec) -> result<bool, string>;
     /// JSON text components; both `none` restores the configured tab list.
     tab-list: func(target: string, header-json: option<string>, footer-json: option<string>) -> result<bool, string>;
     /// `none` removes the bar called `name`.
     boss-bar: func(target: string, name: string, bar: option<boss-bar-spec>) -> result<bool, string>;
     kick: func(target: string, reason: string) -> result<bool, string>;
+    kick-json: func(target: string, reason-json: string) -> result<bool, string>;
     transfer: func(target: string, server: string) -> result<bool, string>;
     /// Returns how many players received the message.
     broadcast: func(text: string) -> result<u32, string>;
+    broadcast-json: func(text-json: string) -> result<u32, string>;
 }
 
 /// The durable key-value store. Namespaces are prefixed with
