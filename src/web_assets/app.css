@@ -188,9 +188,13 @@ input:focus-visible,select:focus-visible,textarea:focus-visible{outline:3px soli
 tbody tr[aria-current=true] td{background:var(--accent-soft)}
 td.unlisted{color:var(--secondary)}
 
-/* Server list favicon and chips (parent groups). */
-.favicon-row{display:flex;align-items:center;gap:12px;padding:0 var(--pad) 14px}
-.favicon-row img{width:64px;height:64px;border:1px solid var(--separator);border-radius:8px;image-rendering:pixelated}
+/* Server list icon picker and chips (parent groups). */
+.favicon-picker{display:flex;align-items:center;gap:12px;padding:8px;border:1px dashed var(--border);border-radius:var(--control);background:var(--surface)}
+.favicon-picker.dragging{border-color:var(--link);background:var(--accent-soft)}
+.favicon-preview{flex:none;display:grid;place-items:center;width:64px;height:64px;border-radius:6px;background:var(--fill)}
+.favicon-preview img{width:64px;height:64px;border-radius:6px;image-rendering:pixelated}
+.favicon-actions{display:flex;flex-direction:column;gap:6px;min-width:0}
+.favicon-picker.disabled .favicon-preview{opacity:.5}
 .chip-list{display:flex;flex-wrap:wrap;gap:6px}
 .chip{display:inline-flex;align-items:center;gap:2px;min-height:24px;padding:0 2px 0 10px;border-radius:999px;background:var(--fill);color:var(--label);font-size:.75rem;font-weight:500;white-space:nowrap}
 .chip button{display:inline-grid;place-items:center;width:20px;height:20px;padding:0;border:0;border-radius:50%;background:transparent;color:var(--secondary);font-size:.875rem;line-height:1;cursor:pointer}

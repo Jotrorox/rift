@@ -397,6 +397,28 @@ fn revision(client: Client) -> Value {
     client.get("/api/config").expect(200).value()["revision"].clone()
 }
 
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    bytes
+        .chunks(3)
+        .flat_map(|chunk| {
+            let value = chunk
+                .iter()
+                .enumerate()
+                .fold(0u32, |value, (index, &byte)| {
+                    value | (byte as u32) << (16 - 8 * index)
+                });
+            (0..4).map(move |index| {
+                if index <= chunk.len() {
+                    ALPHABET[(value >> (18 - 6 * index) & 63) as usize] as char
+                } else {
+                    '='
+                }
+            })
+        })
+        .collect()
+}
+
 fn eventually_closed(address: SocketAddr) {
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
@@ -2040,11 +2062,52 @@ fn console_settings_edit_permission_groups_memberships_tab_list_and_server_list(
         json!({"motd": {"text": "Welcome", "color": "gold"}, "max_players": 50, "sample": ["one"]}),
     )
     .expect(200);
+    // Uploaded favicons arrive as PNG data URLs; file paths stay Lua-only.
     put(
         "/api/definitions/server_list",
         json!({"motd": "x", "favicon": "icon.png"}),
     )
     .expect(400);
+    put(
+        "/api/definitions/server_list",
+        json!({"motd": "x", "hosts": {}}),
+    )
+    .expect(400);
+    let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+    png.extend(64u32.to_be_bytes());
+    png.extend(64u32.to_be_bytes());
+    png.extend([8, 6, 0, 0, 0, 0, 0, 0, 0]);
+    let favicon = format!("data:image/png;base64,{}", base64(&png));
+    let mut wide = png.clone();
+    wide[19] = 128;
+    put(
+        "/api/definitions/server_list",
+        json!({"motd": "x", "favicon": format!("data:image/png;base64,{}", base64(&wide))}),
+    )
+    .expect(400);
+    put(
+        "/api/definitions/server_list",
+        json!({"motd": "x", "favicon": favicon}),
+    )
+    .expect(200);
+    put(
+        "/api/definitions/server_list",
+        json!({"motd": {"text": "Welcome", "color": "gold"}, "max_players": 50, "sample": ["one"]}),
+    )
+    .expect(200);
+    let values = client.get("/api/definitions").expect(200).value();
+    assert_eq!(values["server_list"]["favicon"], favicon);
+    put(
+        "/api/definitions/server_list",
+        json!({"motd": {"text": "Welcome", "color": "gold"}, "max_players": 50, "favicon": false}),
+    )
+    .expect(200);
+    assert!(client.get("/api/definitions").expect(200).value()["server_list"]["favicon"].is_null());
+    put(
+        "/api/definitions/server_list",
+        json!({"motd": {"text": "Welcome", "color": "gold"}, "max_players": 50, "sample": ["one"]}),
+    )
+    .expect(200);
     let values = client.get("/api/definitions").expect(200).value();
     assert_eq!(
         values["permission_groups"]["staff"],
