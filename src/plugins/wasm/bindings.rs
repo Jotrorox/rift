@@ -1,17 +1,32 @@
-//! Host bindings for the `core` world of `rift:plugin@0.1.0`: generated
-//! types and traits, the trait implementations that forward every import to
+//! Host bindings for `rift:plugin@0.1.1`: generated types and traits, the
+//! trait implementations that forward every import to
 //! [`Services`](crate::plugins::services::Services), and conversions between
 //! the generated types and the engine-neutral [`api`] types. WASI is linked
 //! separately (see [`super::wasi`]).
+//!
+//! The host binds world `base` (every import and the `handler` export that
+//! every component has) and, separately, world `optional`, whose exports a
+//! component built against an older 0.1 lacks; see [`Optional::load`].
 use super::State;
 use crate::plugins::api;
 
 wasmtime::component::bindgen!({
     path: "wit",
-    world: "rift:plugin/core",
+    world: "rift:plugin/base",
 });
 
-use rift::plugin::{bus, log, meta, permissions, players, servers, store, timers, types};
+/// The optional exports (`dialogs`, since 0.1.1), sharing `base`'s types.
+pub(super) mod optional {
+    wasmtime::component::bindgen!({
+        path: "wit",
+        world: "rift:plugin/optional",
+        with: {
+            "rift:plugin/types": super::rift::plugin::types,
+        },
+    });
+}
+
+use self::rift::plugin::{bus, log, meta, permissions, players, servers, store, timers, types};
 
 /// Guest paths of the granted directories (`meta.data-dir`, `meta.config-dir`).
 pub(super) const DATA_DIR: &str = "/data";
@@ -223,6 +238,24 @@ pub(super) fn bus_message(message: api::BusMessage) -> types::BusMessage {
     }
 }
 
+/// A dialog click: `context.dialog` holds the action, values and payload.
+pub(super) fn dialog_response(mut context: api::Context) -> types::DialogResponse {
+    let dialog = context
+        .dialog
+        .take()
+        .unwrap_or_else(|| crate::dialog::Response {
+            action: String::new(),
+            values: serde_json::Map::new(),
+            payload: None,
+        });
+    types::DialogResponse {
+        ctx: self::context(context),
+        action: dialog.action,
+        values_json: serde_json::Value::Object(dialog.values).to_string(),
+        payload_json: dialog.payload.map(|payload| payload.to_string()),
+    }
+}
+
 pub(super) fn rift_event(event: api::RiftEvent) -> types::RiftEvent {
     types::RiftEvent {
         subject: event.subject,
@@ -281,6 +314,14 @@ impl players::Host for State {
         self.services
             .players()
             .boss_bar(&target, &name, bar.as_ref())
+    }
+
+    fn dialog(&mut self, target: String, dialog_json: String) -> Result<bool, String> {
+        self.services.players().dialog(&target, &dialog_json)
+    }
+
+    fn clear_dialog(&mut self, target: String) -> Result<bool, String> {
+        self.services.players().clear_dialog(&target)
     }
 
     fn kick(&mut self, target: String, reason: String) -> Result<bool, String> {
@@ -484,7 +525,9 @@ mod tests {
         .into_iter()
         .map(hook)
         .collect();
-        assert_eq!(names, api::Hook::ALL);
+        // `dialog` has no WIT case, so 0.1.0 components keep loading.
+        assert_eq!(names, api::Hook::ALL[..api::Hook::ALL.len() - 1]);
+        assert_eq!(api::Hook::ALL.last(), Some(&api::Hook::Dialog));
         let converted = context(api::Context {
             id: 9,
             name: "Alex".into(),

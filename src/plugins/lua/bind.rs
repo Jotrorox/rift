@@ -35,6 +35,7 @@ const EVENTS: &[(&str, Option<Hook>)] = &[
     ("message", Some(Hook::Message)),
     ("timer", Some(Hook::Timer)),
     ("event", Some(Hook::Event)),
+    ("dialog", Some(Hook::Dialog)),
     ("reload", None),
     ("shutdown", None),
 ];
@@ -794,6 +795,24 @@ fn players(lua: &Lua, state: &Rc<State>) -> mlua::Result<Table> {
                     .map_err(runtime)
             },
         )?,
+    )?;
+    let services = state.services.clone();
+    api.raw_set(
+        "dialog",
+        function(lua, state, move |_, (target, spec): (String, Value)| {
+            let dialog = crate::extensions::players::dialog(spec)?;
+            services
+                .players()
+                .show_dialog(&target, dialog)
+                .map_err(runtime)
+        })?,
+    )?;
+    let services = state.services.clone();
+    api.raw_set(
+        "clear_dialog",
+        function(lua, state, move |_, target: String| {
+            services.players().clear_dialog(&target).map_err(runtime)
+        })?,
     )?;
     let services = state.services.clone();
     api.raw_set(

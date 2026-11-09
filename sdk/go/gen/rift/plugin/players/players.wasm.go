@@ -6,48 +6,56 @@ import (
 	"go.bytecodealliance.org/cm"
 )
 
-// This file contains wasmimport and wasmexport declarations for "rift:plugin@0.1.0".
+// This file contains wasmimport and wasmexport declarations for "rift:plugin@0.1.1".
 
-//go:wasmimport rift:plugin/players@0.1.0 list
+//go:wasmimport rift:plugin/players@0.1.1 list
 //go:noescape
 func wasmimport_List(server0 uint32, server1 *uint8, server2 uint32, result *cm.Result[cm.List[PlayerInfo], cm.List[PlayerInfo], string])
 
-//go:wasmimport rift:plugin/players@0.1.0 get
+//go:wasmimport rift:plugin/players@0.1.1 get
 //go:noescape
 func wasmimport_Get(target0 *uint8, target1 uint32, result *cm.Result[OptionPlayerInfoShape, cm.Option[PlayerInfo], string])
 
-//go:wasmimport rift:plugin/players@0.1.0 names
+//go:wasmimport rift:plugin/players@0.1.1 names
 //go:noescape
 func wasmimport_Names(prefix0 uint32, prefix1 *uint8, prefix2 uint32, result *cm.List[string])
 
-//go:wasmimport rift:plugin/players@0.1.0 message
+//go:wasmimport rift:plugin/players@0.1.1 message
 //go:noescape
 func wasmimport_Message(target0 *uint8, target1 uint32, text0 *uint8, text1 uint32, result *cm.Result[string, bool, string])
 
-//go:wasmimport rift:plugin/players@0.1.0 action-bar
+//go:wasmimport rift:plugin/players@0.1.1 action-bar
 //go:noescape
 func wasmimport_ActionBar(target0 *uint8, target1 uint32, text0 *uint8, text1 uint32, result *cm.Result[string, bool, string])
 
-//go:wasmimport rift:plugin/players@0.1.0 title
+//go:wasmimport rift:plugin/players@0.1.1 title
 //go:noescape
 func wasmimport_Title(target0 *uint8, target1 uint32, title0 *uint8, title1 uint32, title2 uint32, title3 *uint8, title4 uint32, title5 uint32, title6 uint32, title7 uint32, result *cm.Result[string, bool, string])
 
-//go:wasmimport rift:plugin/players@0.1.0 tab-list
+//go:wasmimport rift:plugin/players@0.1.1 tab-list
 //go:noescape
 func wasmimport_TabList(target0 *uint8, target1 uint32, headerJson0 uint32, headerJson1 *uint8, headerJson2 uint32, footerJson0 uint32, footerJson1 *uint8, footerJson2 uint32, result *cm.Result[string, bool, string])
 
-//go:wasmimport rift:plugin/players@0.1.0 boss-bar
+//go:wasmimport rift:plugin/players@0.1.1 boss-bar
 //go:noescape
 func wasmimport_BossBar(target0 *uint8, target1 uint32, name0 *uint8, name1 uint32, bar0 uint32, bar1 *uint8, bar2 uint32, bar3 float32, bar4 *uint8, bar5 uint32, bar6 *uint8, bar7 uint32, bar8 uint32, bar9 uint32, bar10 uint32, result *cm.Result[string, bool, string])
 
-//go:wasmimport rift:plugin/players@0.1.0 kick
+//go:wasmimport rift:plugin/players@0.1.1 kick
 //go:noescape
 func wasmimport_Kick(target0 *uint8, target1 uint32, reason0 *uint8, reason1 uint32, result *cm.Result[string, bool, string])
 
-//go:wasmimport rift:plugin/players@0.1.0 transfer
+//go:wasmimport rift:plugin/players@0.1.1 dialog
+//go:noescape
+func wasmimport_Dialog(target0 *uint8, target1 uint32, dialogJson0 *uint8, dialogJson1 uint32, result *cm.Result[string, bool, string])
+
+//go:wasmimport rift:plugin/players@0.1.1 clear-dialog
+//go:noescape
+func wasmimport_ClearDialog(target0 *uint8, target1 uint32, result *cm.Result[string, bool, string])
+
+//go:wasmimport rift:plugin/players@0.1.1 transfer
 //go:noescape
 func wasmimport_Transfer(target0 *uint8, target1 uint32, server0 *uint8, server1 uint32, result *cm.Result[string, bool, string])
 
-//go:wasmimport rift:plugin/players@0.1.0 broadcast
+//go:wasmimport rift:plugin/players@0.1.1 broadcast
 //go:noescape
 func wasmimport_Broadcast(text0 *uint8, text1 uint32, result *cm.Result[string, uint32, string])

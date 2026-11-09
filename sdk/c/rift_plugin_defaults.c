@@ -1,4 +1,5 @@
-// Weak no-op implementations of every `rift:plugin/handler` export.
+// Weak no-op implementations of every `rift:plugin/handler` export and of
+// `rift:plugin/dialogs` (dialog clicks, since 0.1.1).
 //
 // Link this file next to the generated `rift_plugin.c` and define only the
 // hooks your plugin needs; a strong definition in your own source replaces
@@ -100,4 +101,10 @@ RIFT_WEAK void exports_rift_plugin_handler_timer(uint64_t handle) { (void)handle
 
 RIFT_WEAK void exports_rift_plugin_handler_event(exports_rift_plugin_handler_rift_event_t *event) {
   rift_plugin_types_rift_event_free(event);
+}
+
+// Dialog clicks need no registration; a plugin that shows no dialogs never
+// receives one.
+RIFT_WEAK void exports_rift_plugin_dialogs_dialog(exports_rift_plugin_dialogs_dialog_response_t *response) {
+  rift_dialog_response_free(response);
 }

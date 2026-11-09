@@ -259,6 +259,14 @@ impl LuaEngine {
             ctx.raw_set("word", input.word.as_str())?;
             ctx.raw_set("position", input.position)?;
         }
+        if let Some(dialog) = &input.dialog {
+            ctx.raw_set("action", dialog.action.as_str())?;
+            let values = serde_json::Value::Object(dialog.values.clone());
+            ctx.raw_set("values", bind::to_lua(lua, &values)?)?;
+            if let Some(payload) = &dialog.payload {
+                ctx.raw_set("payload", bind::to_lua(lua, payload)?)?;
+            }
+        }
         let services = self.state.services.clone();
         let uuid = input.uuid.clone();
         ctx.raw_set(
@@ -374,7 +382,10 @@ impl LuaEngine {
                 let value = self.first(name, self.request(&request)?)?;
                 Reply::Http(crate::http_script::response(value)?)
             }
-            Event::Join(ctx) | Event::AfterTransfer(ctx) | Event::Disconnect(ctx) => {
+            Event::Join(ctx)
+            | Event::AfterTransfer(ctx)
+            | Event::Disconnect(ctx)
+            | Event::Dialog(ctx) => {
                 // As in script mode, observers must return nil.
                 let input = self.context(&ctx, hook)?;
                 for handler in self.state.handlers(name) {

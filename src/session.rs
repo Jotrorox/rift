@@ -198,7 +198,16 @@ pub enum SessionEvent {
     /// it with [`Session::answer_suggestions`].
     Suggestions(SuggestionRequest),
     BungeeCord(crate::bungeecord::Request),
+    /// A click on a plugin action of the dialog Rift showed.
+    Dialog(DialogClick),
     Disconnected,
+}
+
+/// A click on a plugin action of a dialog Rift showed, for its owner.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DialogClick {
+    pub owner: crate::dialog::Owner,
+    pub response: crate::dialog::Response,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -264,6 +273,9 @@ pub struct Session<C, B> {
     legacy_state: protocol::LegacyState,
     tab_list: protocol::TabList,
     boss_bars: protocol::BossBars,
+    /// The dialog Rift showed and who receives its clicks, while it may
+    /// still be open: a backend dialog, a clear or a reconfiguration ends it.
+    dialog: Option<(std::sync::Arc<crate::dialog::Dialog>, crate::dialog::Owner)>,
     suggestions: SuggestionBudget,
 }
 
@@ -304,6 +316,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             legacy_state: protocol::LegacyState::default(),
             tab_list: protocol::TabList::default(),
             boss_bars: protocol::BossBars::default(),
+            dialog: None,
             suggestions: SuggestionBudget::default(),
         })
     }
@@ -623,7 +636,8 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                         result = &mut login => { break result?; }
                         event = self.forward(), if self.backend.is_some() => match event? {
                             // Dropped: the client asks again for its next keystroke.
-                            SessionEvent::Packet | SessionEvent::ProxyCommand(_) | SessionEvent::Suggestions(_) | SessionEvent::BungeeCord(_) => {}
+                            // Dialog clicks are dropped like commands: the old world is going away.
+                            SessionEvent::Packet | SessionEvent::ProxyCommand(_) | SessionEvent::Suggestions(_) | SessionEvent::BungeeCord(_) | SessionEvent::Dialog(_) => {}
                             SessionEvent::BackendClosed | SessionEvent::BackendFailed => {}
                             SessionEvent::ClientClosed => return Err(io::Error::new(
                                 io::ErrorKind::UnexpectedEof, "client closed during replacement login")),
@@ -768,6 +782,8 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             self.joined = false;
             self.tab_list.reset();
             self.boss_bars.reset();
+            // Configuration closes every screen, dialogs included.
+            self.dialog = None;
             self.replay_client_options(&mut backend, State::Configuration)
                 .await?;
             // Resource packs are common-listener state and survive a fresh play
@@ -871,7 +887,8 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                     SessionEvent::Packet
                     | SessionEvent::ProxyCommand(_)
                     | SessionEvent::Suggestions(_)
-                    | SessionEvent::BungeeCord(_),
+                    | SessionEvent::BungeeCord(_)
+                    | SessionEvent::Dialog(_),
                 )) => {}
                 Poll::Ready(Ok(SessionEvent::BackendClosed | SessionEvent::BackendFailed)) => {
                     return Ok(());
@@ -1169,6 +1186,53 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         self.boss_bars.revision()
     }
 
+    /// Show a dialog (1.21.6+), replacing whatever dialog is open. Clicks on
+    /// its plugin actions are reported to `owner` as [`SessionEvent::Dialog`].
+    /// A player who is not in a world (between servers) does not get it.
+    pub async fn show_dialog(
+        &mut self,
+        dialog: std::sync::Arc<crate::dialog::Dialog>,
+        owner: crate::dialog::Owner,
+    ) -> io::Result<()> {
+        self.client.flush_pending().await?;
+        if !self.joined || !self.client.state.settled(State::Play) {
+            return Ok(());
+        }
+        let packet = protocol::dialog::show(self.version()?, dialog.wire())?;
+        self.send_client(&packet).await?;
+        self.dialog = Some((dialog, owner));
+        Ok(())
+    }
+
+    /// Close the dialog Rift showed, if it is still open. A dialog the
+    /// backend showed since is left alone.
+    pub async fn clear_dialog(&mut self) -> io::Result<()> {
+        if self.dialog.take().is_none() {
+            return Ok(());
+        }
+        self.client.flush_pending().await?;
+        if !self.joined || !self.client.state.settled(State::Play) {
+            return Ok(());
+        }
+        let packet = protocol::dialog::clear(self.version()?)?;
+        self.send_client(&packet).await
+    }
+
+    /// Match a `rift:` click against the open dialog.
+    fn dialog_click(&mut self, id: &str, payload: Option<serde_json::Value>) -> SessionEvent {
+        let Some((dialog, owner)) = &self.dialog else {
+            return SessionEvent::Packet;
+        };
+        let Some((response, closes)) = dialog.resolve(id, payload) else {
+            return SessionEvent::Packet;
+        };
+        let owner = owner.clone();
+        if closes {
+            self.dialog = None;
+        }
+        SessionEvent::Dialog(DialogClick { owner, response })
+    }
+
     /// Whether `send_bungeecord` can currently reach a playing backend.
     pub fn bungeecord_ready(&self) -> bool {
         self.bungeecord
@@ -1353,6 +1417,14 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                         // backend, including during configuration or switching.
                         return Ok(SessionEvent::Packet);
                     }
+                    if let Some(click) = protocol::dialog::click(version, phase, &packet)?
+                        && click.id.starts_with("rift:")
+                    {
+                        // Rift's namespace never reaches a backend. A click on
+                        // a dialog that is gone, or a made-up one, is dropped.
+                        let payload = click.payload()?;
+                        return Ok(self.dialog_click(&click.id, payload));
+                    }
                     self.remember_client_packet(phase, &packet)?;
                     let backend = self.backend.as_mut().unwrap();
                     if kind == PacketKind::LoginPluginResponse {
@@ -1462,6 +1534,12 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                         None => (packet, None),
                     };
                     let backend_packet = untranslated.as_ref().unwrap_or(&packet);
+                    // A backend dialog replaces Rift's; a backend clear closes it.
+                    if self.dialog.is_some()
+                        && protocol::dialog::backend(version, phase, &packet).is_some()
+                    {
+                        self.dialog = None;
+                    }
                     if phase == State::Play {
                         self.legacy_state.observe(version, &packet)?;
                         if !self.tab_list.observe(version, &packet)? {
@@ -1560,6 +1638,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                             self.joined = false;
                             self.tab_list.reset();
                             self.boss_bars.reset();
+                            self.dialog = None;
                             self.client
                                 .queue(version, Direction::Clientbound, &packet)?;
                         }

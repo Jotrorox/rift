@@ -109,7 +109,7 @@ What differs is the environment:
 
 - `rift.on(event, fn)` accepts the events of `rift.lua` (`route`, `http`,
   `status`, `login`, `initial_server`, `before_transfer`, `join`,
-  `after_transfer`, `disconnect`) plus `event` (Rift events from
+  `after_transfer`, `disconnect`, `dialog`) plus `event` (Rift events from
   `rift.events.*`, as `{ subject, payload, payload_json }`), `timer` (timers
   started without a function), `message` (subscriptions without a function),
   `reload` (called with the new configuration table when `hot_reload = true`;
@@ -137,7 +137,7 @@ mode:
 
 | Contract | In a persistent Lua plugin |
 | --- | --- |
-| `players.*` | `rift.players.list`, `get`, `names`, `message`, `action_bar`, `title`, `tab_list`, `boss_bar`, `kick`, `transfer`, `broadcast`, as in API v2. |
+| `players.*` | `rift.players.list`, `get`, `names`, `message`, `action_bar`, `title`, `tab_list`, `boss_bar`, `dialog`, `clear_dialog`, `kick`, `transfer`, `broadcast`, as in API v2. Clicks on the plugin's [dialogs](dialogs.md) reach its `rift.on("dialog", fn)` handlers. |
 | `store.*` | `rift.store.*`. Namespaces are private (`plugin.<name>.<namespace>`). `delete` returns whether the entry existed, `increment`'s delta defaults to 1, and `rift.store.list(namespace, prefix)` returns `{ key, value }` entries sorted by key. |
 | `permissions.*` | `rift.permissions.*`. `groups` returns effective groups, including inherited ones and `default`; `rift.permissions.list_groups()` returns every group of the [permission store](permissions.md#persistent-plugins). Lua also has `rift.permissions.check(uuid, node, contexts?)` (true, false or nil) and `rift.permissions.meta(uuid, contexts?)`. |
 | `bus.publish`, `bus.request` | `rift.publish(subject, payload, reply?)` returns `{ delivered = n }`; `rift.request(subject, payload, timeout_ms)` waits for a reply. |

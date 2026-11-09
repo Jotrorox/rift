@@ -881,6 +881,7 @@ pub async fn handle(
                     if !session.client.state.settled(rift::protocol::State::Play) {
                         phase_deadline = Deadline::now() + Duration::from_secs(30);
                         // Tab lists and boss bars are state and apply after the next join.
+                        // Dialogs are dropped: configuration closes every screen.
                         if !matches!(action, PlayerAction::Kick(_) | PlayerAction::RawKick(_) | PlayerAction::TabList(_) | PlayerAction::BossBar { .. }) { continue; }
                     }
                     match action {
@@ -919,6 +920,12 @@ pub async fn handle(
                                 timeout(HANDSHAKE_TIMEOUT, session.sync_boss_bars(&boss_bars)).await??;
                                 boss_bars_synced = Some((session.boss_bar_revision(), boss_bars_revision));
                             }
+                        }
+                        PlayerAction::Dialog { dialog, owner } => {
+                            timeout(HANDSHAKE_TIMEOUT, session.show_dialog(dialog, owner)).await??;
+                        }
+                        PlayerAction::ClearDialog => {
+                            timeout(HANDSHAKE_TIMEOUT, session.clear_dialog()).await??;
                         }
                         PlayerAction::Transfer(target) => {
                             if !session.can_switch() { continue; }
@@ -1252,6 +1259,17 @@ pub async fn handle(
                         current_backend = target;
                         phase_deadline = Deadline::now() + Duration::from_secs(30);
                     }
+                }
+                Ok(SessionEvent::Dialog(click)) => {
+                    let live_snapshot = snapshot.latest();
+                    let network = Network {
+                        snapshot: &live_snapshot,
+                        addresses: &live_snapshot.addresses,
+                        metrics: &metrics,
+                    };
+                    network
+                        .dialog(&session, &current_backend, event, click)
+                        .await;
                 }
                 Ok(SessionEvent::Disconnected) => break,
                 Ok(SessionEvent::ClientClosed) => {

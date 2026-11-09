@@ -13,8 +13,13 @@
 /// - Every hook is an export and every export has a default in each SDK.
 /// - The guest is single-threaded; the host never calls one instance
 ///   concurrently.
-/// - Additive changes bump the minor version; breaking changes move to 1.0.
-package rift:plugin@0.1.0;
+/// - Additive changes keep compiled components loading: new host functions,
+///   new types and new interfaces, never a changed type or a new case in an
+///   existing enum or variant. Wasmtime matches `@0.1.x` names with each
+///   other, so 0.1.1 adds the optional `dialogs` export and the dialog host
+///   functions without breaking components built against 0.1.0.
+/// - Breaking changes move to 1.0.
+package rift:plugin@0.1.1;
 
 interface types {
     /// Log severity.
@@ -233,6 +238,25 @@ interface types {
         stay: s32,
         fade-out: s32,
     }
+
+    /// A click on a plugin action of a dialog this plugin showed with
+    /// `players.dialog` (since 0.1.1).
+    record dialog-response {
+        /// The player who clicked. `server` is their current backend; the
+        /// command, target and suggestion fields are empty.
+        ctx: context,
+        /// The action's `id` as the plugin wrote it, such as `submit`.
+        action: string,
+        /// The player's input values by key, as a JSON object: strings for
+        /// text and single-option inputs, booleans, numbers. `{}` for a
+        /// `custom` action. They come from the client: check them like any
+        /// player input.
+        values-json: string,
+        /// The action's `payload` (`custom`) or `additions`
+        /// (`dynamic/custom`) as JSON, exactly as the plugin wrote it. Rift
+        /// keeps it, so the client can neither see nor change it.
+        payload-json: option<string>,
+    }
 }
 
 /// The joined players. `target` is a name, a UUID or a connection id.
@@ -253,6 +277,16 @@ interface players {
     /// `none` removes the bar called `name`.
     boss-bar: func(target: string, name: string, bar: option<boss-bar-spec>) -> result<bool, string>;
     kick: func(target: string, reason: string) -> result<bool, string>;
+    /// Show a dialog to a player on Minecraft 1.21.6 or newer, replacing any
+    /// open one (since 0.1.1). `dialog-json` is a dialog in the vanilla JSON
+    /// format; see docs/dialogs.md for the accepted subset. Buttons whose
+    /// `custom` or `dynamic/custom` action has an `id` without a namespace
+    /// come back through the `dialogs` export. Returns false when the player
+    /// is offline, older than 1.21.6 or has too many undelivered actions; an
+    /// invalid dialog is an error.
+    dialog: func(target: string, dialog-json: string) -> result<bool, string>;
+    /// Close the dialog this Rift showed, if it is still open (since 0.1.1).
+    clear-dialog: func(target: string) -> result<bool, string>;
     transfer: func(target: string, server: string) -> result<bool, string>;
     /// Returns how many players received the message.
     broadcast: func(text: string) -> result<u32, string>;
@@ -375,8 +409,20 @@ interface handler {
     event: func(event: rift-event);
 }
 
-/// Imports and exports without WASI; the host links WASI separately.
-world core {
+/// Dialog clicks (since 0.1.1). Optional: the host calls it only for
+/// components that export it, so components built against 0.1.0 still load.
+/// It runs as an observer, under the same limit as `join`.
+interface dialogs {
+    use types.{dialog-response};
+
+    /// A player clicked a plugin action of a dialog this plugin showed.
+    dialog: func(response: dialog-response);
+}
+
+/// Every import and the exports every component has, without WASI: what the
+/// host requires. Exports added in later 0.1 releases are looked up
+/// separately.
+world base {
     import players;
     import store;
     import permissions;
@@ -386,6 +432,17 @@ world core {
     import log;
     import meta;
     export handler;
+}
+
+/// The optional exports, which the host looks up one by one.
+world optional {
+    export dialogs;
+}
+
+/// Imports and exports without WASI; the host links WASI separately.
+world core {
+    include base;
+    export dialogs;
 }
 
 /// The world guests build against. TinyGo's `wasip2` target expects the
