@@ -1,8 +1,9 @@
 //! `rift dev`: a throwaway proxy for plugin authors. An in-memory permission
 //! store, the messaging bus on localhost with a generated certificate, one
 //! backend principal with the `backend` preset and a printed token, so a Paper
-//! or Pumpkin server runs against a real Rift in one command.
-use rift::config::{Admin, Config, MessagingConfig, MessagingPrincipal, Route};
+//! or Pumpkin server runs against a real Rift in one command. The dashboard and
+//! HTTP API run on localhost too, so groups can be edited while testing.
+use rift::config::{Admin, Config, MessagingConfig, MessagingPrincipal, Route, WebConfig};
 use std::{
     collections::BTreeMap,
     env, fs, io,
@@ -11,13 +12,14 @@ use std::{
 };
 
 pub const USAGE: &str = "Usage: rift dev [--listen 127.0.0.1:25565] [--backend 127.0.0.1:25566] [--server dev]\n\
-    [--bus 127.0.0.1:7443] [--admin 127.0.0.1:9091] [--dir rift-dev]\n\
+    [--bus 127.0.0.1:7443] [--admin 127.0.0.1:9091] [--web 127.0.0.1:8080|off] [--dir rift-dev]\n\
     Starts a development proxy: in-memory permission store, messaging bus on --bus with a\n\
     self-signed certificate written to --dir, and backend principal server.<server> whose token\n\
-    is printed (RIFT_DEV_TOKEN, generated unless set). Nothing is saved.";
+    is printed (RIFT_DEV_TOKEN, generated unless set). The dashboard and HTTP API listen on\n\
+    --web and accept the admin token (RIFT_ADMIN_TOKEN, else RIFT_DEV_TOKEN). Nothing is saved.";
 
 /// The token variable of the backend principal, also used for the admin
-/// service unless `RIFT_ADMIN_TOKEN` is set.
+/// service and the dashboard unless `RIFT_ADMIN_TOKEN` is set.
 const TOKEN_ENV: &str = "RIFT_DEV_TOKEN";
 const ADMIN_TOKEN_ENV: &str = "RIFT_ADMIN_TOKEN";
 
@@ -28,6 +30,7 @@ pub struct Dev {
     server: String,
     bus: SocketAddr,
     admin: SocketAddr,
+    web: Option<SocketAddr>,
     ca: PathBuf,
 }
 
@@ -62,6 +65,7 @@ pub fn prepare(args: &[String]) -> io::Result<Dev> {
     let mut server = "dev".to_owned();
     let mut bus = "127.0.0.1:7443".to_owned();
     let mut admin = "127.0.0.1:9091".to_owned();
+    let mut web = "127.0.0.1:8080".to_owned();
     let mut dir = PathBuf::from("rift-dev");
     let mut options = args.iter();
     while let Some(option) = options.next() {
@@ -74,6 +78,7 @@ pub fn prepare(args: &[String]) -> io::Result<Dev> {
             "--server" => server.clone_from(value),
             "--bus" => bus.clone_from(value),
             "--admin" => admin.clone_from(value),
+            "--web" => web.clone_from(value),
             "--dir" => dir = PathBuf::from(value),
             _ => return Err(invalid(format!("unknown option {option}\n{USAGE}"))),
         }
@@ -86,6 +91,16 @@ pub fn prepare(args: &[String]) -> io::Result<Dev> {
         .map_err(|_| invalid("--admin needs an IP address and port"))?;
     if !admin.ip().is_loopback() {
         return Err(invalid("--admin must be a loopback address"));
+    }
+    let web: Option<SocketAddr> = match web.as_str() {
+        "off" => None,
+        web => Some(
+            web.parse()
+                .map_err(|_| invalid("--web needs an IP address and port, or off"))?,
+        ),
+    };
+    if web.is_some_and(|web| !web.ip().is_loopback()) {
+        return Err(invalid("--web must be a loopback address"));
     }
     let principal = format!(
         "{}{server}",
@@ -114,6 +129,11 @@ pub fn prepare(args: &[String]) -> io::Result<Dev> {
         None => random_token()?,
     };
     let admin_token = secret(ADMIN_TOKEN_ENV)?.unwrap_or_else(|| token.clone());
+    if web.is_some() && !admin_token.bytes().all(|byte| byte.is_ascii_graphic()) {
+        return Err(invalid(format!(
+            "the dashboard accepts the admin token, so {ADMIN_TOKEN_ENV} (or {TOKEN_ENV}) must be printable ASCII without spaces; or pass --web off"
+        )));
+    }
     // SAFETY: called from `main` before the runtime or any other thread starts.
     unsafe {
         env::set_var(TOKEN_ENV, &token);
@@ -141,6 +161,11 @@ pub fn prepare(args: &[String]) -> io::Result<Dev> {
             .map(|permission| (*permission).to_owned())
             .collect(),
     });
+    config.web = web.map(|listen| WebConfig {
+        listen,
+        token: Some(admin_token.clone()),
+        ..WebConfig::default()
+    });
     config.validate()?;
     Ok(Dev {
         config,
@@ -149,6 +174,7 @@ pub fn prepare(args: &[String]) -> io::Result<Dev> {
         server,
         bus,
         admin,
+        web,
         ca,
     })
 }
@@ -171,6 +197,7 @@ pub async fn run(dev: Dev) -> io::Result<()> {
         server,
         bus,
         admin,
+        web,
         ca,
     } = dev;
     let listen = config.listeners["default"];
@@ -198,5 +225,10 @@ pub async fn run(dev: Dev) -> io::Result<()> {
     println!(
         "rift dev: edit permissions with: {ADMIN_TOKEN_ENV}={admin_token} rift admin --address {admin} perms help"
     );
+    if let Some(web) = web {
+        println!(
+            "rift dev: dashboard at http://{web}/; log in under API access with the token {admin_token}"
+        );
+    }
     crate::runtime::serve(config, None).await
 }

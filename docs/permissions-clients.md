@@ -31,8 +31,8 @@ Each backend authenticates as its own principal `server.<name>` with the
 [principal permissions](permissions-protocol.md#principal-permissions)),
 and gets the proxy's CA (or certificate) and its token through an
 environment variable. For local development, `rift dev` starts a proxy with
-such a principal and prints its token and a client configuration
-(see [`rift dev`](permissions.md#rift-dev)).
+such a principal and prints its token, a client configuration and the
+dashboard URL (see [`rift dev`](permissions.md#rift-dev)).
 
 ## Rust client
 

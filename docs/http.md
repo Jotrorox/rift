@@ -414,6 +414,10 @@ Reading needs the `perms` or `config` permission; writing needs `config`.
 typed nodes, compiled subjects, changes and change events are those of the
 [permissions protocol](permissions-protocol.md).
 
+[`rift dev`](permissions.md#rift-dev) serves this API and the dashboard on
+`http://127.0.0.1:8080/` with its admin token as `web.token`, so plugin authors
+can edit groups while a backend is connected.
+
 Writes take a JSON object (`Content-Type: application/json`), `{}` when there
 is nothing to send. Every write accepts an optional `reason` (at most 256
 bytes) that the change log keeps. Successful writes return the
