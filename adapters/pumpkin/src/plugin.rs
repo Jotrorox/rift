@@ -53,6 +53,7 @@ use crate::{
     command::{error_message, plain_text, split_args},
     config,
     contexts::{CalculatorFn, CalculatorHandle, Calculators, PlayerState, Reported, base_contexts},
+    forwarding::{self, ProxySettings},
     logging,
     presence::Presence,
     registry::{self, Registrations},
@@ -231,6 +232,15 @@ impl RiftPermissionsPlugin {
         log::info!(
             "rift-permissions: started as server {server}; proxy {address}, offline policy {policy}"
         );
+        let proxy = &context.server.advanced_config.networking.proxy;
+        if let Some(warning) = forwarding::warning(ProxySettings {
+            enabled: proxy.enabled,
+            velocity: proxy.velocity.enabled,
+            velocity_secret: !proxy.velocity.secret.is_empty(),
+            bungeecord: proxy.bungeecord.enabled,
+        }) {
+            log::warn!("rift-permissions: {warning}");
+        }
         *lock(&self.running) = Some(Running { runtime, backend });
         Ok(())
     }
