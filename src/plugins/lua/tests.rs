@@ -431,12 +431,8 @@ async fn the_same_handler_body_runs_in_rift_lua_and_as_a_plugin() {
     for runtime in [&script, &plugin] {
         let permissions = &runtime.plugins().persistent.base.permissions;
         let vip = format!("{:02x}", 2u8).repeat(16);
-        permissions
-            .set_override(&vip, "vip.join", Some(true))
-            .unwrap();
-        permissions
-            .set_override(&vip, "greet.use", Some(true))
-            .unwrap();
+        permissions.grant(&vip, "vip.join");
+        permissions.grant(&vip, "greet.use");
         assert_eq!(
             session(runtime, 1, "Blocked")
                 .decision("login")

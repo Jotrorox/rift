@@ -6,8 +6,9 @@ complete Lua source, validates changes, saves and applies them, and reloads edit
 made on disk. Its managed servers panel reports lifecycle state and requests
 server starts and stops, creates instances from service groups, and removes
 instances with explicit file retention/deletion labels. It also provides live server
-logs and console commands, field-based group/template editing, configuration
-deployment history, rollback and operator audit records. The status website runs separately at <http://127.0.0.1:9090>.
+logs and console commands, field-based group/template editing, permission
+groups, players, nodes and their change history, configuration deployment
+history, rollback and operator audit records. The status website runs separately at <http://127.0.0.1:9090>.
 The dashboard assets are embedded in the binary; no Node installation or
 separate frontend server is needed at runtime.
 
@@ -217,15 +218,17 @@ rift.config.web = {
 | `audit` | View operator records; group-scoped operators see only their own records |
 | `extensions` | Invoke configured Lua `/ext` handlers |
 | `files` | Browse, download, upload, edit and delete files in template folders (unrestricted scope only) and managed server directories within scope |
+| `perms` | Read the [permission store](permissions.md) through `/api/perms` and the dashboard's permission views: groups, players, compiled subjects, traces, registered nodes, the change log and exports. Writing needs `config` |
 | `plugins` | Restart persistent [plugins](plugins.md#operator-surface) (unrestricted scope only); reading plugin state needs `read`, plugin logs `logs` |
 
 Omitting `groups` permits all groups and static managed servers. A list restricts
 server actions and logs to instances of those groups; an empty list permits no
 server targets. Scoped listings omit other groups/servers, backend routing and
 configuration paths. Global counters and listener information remain visible.
-`config`, `deploy`, `extensions` and `plugins` require unrestricted scope because Lua,
-configuration and plugin changes can affect the whole proxy, and the plugin
-endpoints refuse group-scoped operators entirely. `config` exposes any secrets
+`config`, `deploy`, `extensions`, `plugins` and `perms` require unrestricted
+scope because Lua, configuration and plugin changes can affect the whole proxy,
+permission data covers every server, and the plugin endpoints refuse
+group-scoped operators entirely. `config` exposes any secrets
 in the Lua source and can change credentials. The legacy `web.token` and
 the generated token retain full privileges. Once `web.token` or any named
 operator is configured, no token is generated. Tokens must be
@@ -263,9 +266,10 @@ Errors use `{"error":"description"}`. `GET /api` provides endpoint discovery.
 | `GET /api/definitions` | Structured `templates`, `service_groups`, `permission_groups`, `tab_list`, `server_list` and the active `revision`; includes private paths and executable arguments. Absent settings are `null` |
 | `PUT /api/definitions/{section}/{name}` | Apply `{revision, definition}`; section is `templates`, `service_groups` or `permission_groups`, and `null` removes a definition |
 | `PUT /api/definitions/{section}` | Apply `{revision, definition}` to `tab_list` or `server_list`; `null` turns the setting off |
-| `GET /api/permissions` | `{enabled, members, truncated}`: up to 1000 stored group memberships as `{uuid, name, groups}`, with `name` set for online players |
-| `POST /api/permissions/members/{player}/{group}` | Add a player (lowercase UUID, or the name of an online player) to a permission group with `{}`; returns `{changed}` |
-| `DELETE /api/permissions/members/{player}/{group}` | Remove a player from a permission group with `{}`; returns `{changed}` |
+| `/api/perms/...` | The permission store; see [Permissions API](#permissions-api) |
+| `GET /api/permissions` | Deprecated alias, kept for one release: `{enabled, members, truncated}`: up to 1000 users with global group memberships in the permission store as `{uuid, name, groups}`, with `name` the online or last-seen name |
+| `POST /api/permissions/members/{player}/{group}` | Add a player (UUID, or a known player name) to an existing permission group with `{}`; returns `{changed, revision}` |
+| `DELETE /api/permissions/members/{player}/{group}` | Remove a player from a permission group with `{}`; returns `{changed, revision}` |
 | `GET /api/deployments` | Retained deployment metadata, active revision, retention limit and durability flag; never includes source |
 | `POST /api/deployments/{id}/rollback` | Validate and restore a retained configuration with `{revision}` |
 | `GET /api/audit` | Latest operator records and durability flag |
@@ -373,21 +377,168 @@ validate all references and live-instance restrictions, then use the same save
 transaction as source edits. Templates affect future provisioning; existing
 instance files are preserved. Scaling policies can change while instances run.
 
-The same editor covers the network settings on the Server list, Tab list and
-Permissions pages. `tab_list` and `server_list` definitions replace the whole
+The same editor covers the network settings on the Server list and Tab list
+pages. `tab_list` and `server_list` definitions replace the whole
 setting with the fields of their Lua tables; text fields take a string or a chat
 component. A server list edit keeps the configured `favicon` and `hosts`, which
 can only be set in Lua, so a definition containing either is rejected.
 `GET /api/definitions` returns the favicon as its `data:` URL. Permission group
-definitions take `inherits` and `permissions` as in `extensions.groups` and need
-extensions with `api_version = 2`; edits return `409` otherwise.
+definitions take the fields of `extensions.groups` (`inherits`, `permissions`,
+`weight`, `prefix`, `suffix`, `meta`) and need extensions with `api_version = 2`
+or `3`; edits return `409` otherwise. They change configuration; the dashboard's
+permission views edit the store directly through `/api/perms`.
 
-Group memberships are runtime state in the extension store, as with
-`rift.permissions.add_group` and `remove_group`. Changing them doesn't create a
-configuration revision; it applies to the next permission check and is
-recorded in the audit log as `group_membership` with a `uuid/group` target.
-Everyone belongs to `default` implicitly, so it can't be assigned. Every
-permissions endpoint requires the `config` permission.
+The `/api/permissions` membership routes predate `/api/perms` and stay as
+aliases for one release. Memberships are global `inherit` nodes in the
+[permission store](permissions.md); changing one creates a permission revision
+with actor `operator:<name>` and an operator audit record `group_membership`
+with a `uuid/group` target. Everyone belongs to `default` implicitly, so it
+can't be assigned. Reading needs `perms` or `config`, changing needs `config`.
+Use `PUT /api/perms/users/{uuid}/nodes` and `DELETE
+/api/perms/users/{uuid}/nodes/inherit:{group}` instead.
+
+## Permissions API
+
+`/api/perms` reads and edits the [permission store](permissions.md); the
+dashboard's Groups, Players, Nodes and Activity views use nothing else. Every
+write goes through the same single write path as `/perms`, Lua and the bus, so
+it is validated the same way, applies to the next check, is pushed to backends,
+and creates one revision in the change log with actor `operator:<name>` (the
+web operator, `admin` for `web.token`, `local` for the generated token). Each
+write also leaves an operator audit record (`GET /api/audit`) such as
+`PUT perms_user_nodes` with the user and node as target. A write that changes
+nothing creates no revision and returns `"ops": 0`.
+
+Reading needs the `perms` or `config` permission; writing needs `config`.
+`POST /api/perms/trace` only reads, so `perms` is enough for it. Shapes such as
+typed nodes, compiled subjects, changes and change events are those of the
+[permissions protocol](permissions-protocol.md).
+
+[`rift dev`](permissions.md#rift-dev) serves this API and the dashboard on
+`http://127.0.0.1:8080/` with its admin token as `web.token`, so plugin authors
+can edit groups while a backend is connected.
+
+Writes take a JSON object (`Content-Type: application/json`), `{}` when there
+is nothing to send. Every write accepts an optional `reason` (at most 256
+bytes) that the change log keeps. Successful writes return the
+[applied](permissions-protocol.md#applied) result, sometimes with extra
+members:
+
+```json
+{"revision": 413, "ops": 1, "changed_users": ["0123456789abcdef0123456789abcdef"], "changed_groups": []}
+```
+
+Errors carry the protocol's error code next to the message:
+
+```json
+{"error": "unknown group \"ghost\"", "code": "not_found"}
+```
+
+| Code | Status |
+| --- | --- |
+| `invalid_request` | `400` (also `413` for a body that is too large, `415` for a wrong content type) |
+| `forbidden` | `403` |
+| `not_found` | `404` |
+| `conflict` | `409`, for example creating a group that exists or promoting past a track's last group |
+| `limit` | `422`, a `permissions.limits` value would be exceeded |
+| `unavailable` | `503` |
+| `internal` | `500` |
+
+Authentication and permission failures from the web service itself
+(`401`, and `403` for a missing operator permission) carry no `code`.
+
+Users in paths and bodies are a UUID, plain or dashed, or the name of a player
+the proxy has seen (online first, then the last-seen name). Every UUID is a
+valid user: one the store has never seen simply has no nodes.
+
+**Node ids.** A node in a path is named by its slot, `<kind>:<key>`, followed
+by `@<contexts>` when it has contexts, with the canonical context string
+(pairs sorted, `;` between them): `permission:essentials.fly`,
+`inherit:vip@server=survival`, `prefix:100`, `meta:homes@region=spawn;server=survival`.
+The key is the protocol's storage key (the pattern, group, priority or meta
+key). A subject holds one node per slot, so the id stays the same across
+edits and restarts, and a client can build it from the typed node without
+asking. Percent-encode it as one path segment
+(`permission%3Aessentials.fly%40server%3Dsurvival`). Listings return each
+node's id.
+
+| Method and path | Purpose |
+| --- | --- |
+| `GET /api/perms/revision` | `{revision}`: the last committed revision |
+| `GET /api/perms/backends` | `{revision, backends: [{principal, server, revision, hello_at, last_seen, client_version, requests, stale}]}`: every backend principal that has sent a `rift.perms.*` request since the proxy started. `revision` is what its last `hello` reported; `stale` when that is ahead of the proxy (its store went back), or behind it and it has not said `hello` since; times are Unix seconds |
+| `GET /api/perms/registered` | `{registered: [{owner, node, description, default, plugin}]}`: nodes backend plugins registered, sorted by node |
+| `GET /api/perms/search?node=&like=&kind=&subjects=&source=&limit=` | `{holders: [{subject, name, id, node}], truncated}`: who sets a node directly. `node` is an exact storage key, `like` a SQL `LIKE` pattern as in bulk filters; `subjects` is `any`, `users` or `groups` |
+| `GET /api/perms/users?q=&group=&limit=` | `{users: [{uuid, name, online, groups}], truncated}`: players in the store (everyone who joined or has nodes), sorted by name. `q` matches part of the name or the start of the UUID; `group` keeps those with a positive `inherit` node for it in any context. `groups` lists global parents |
+| `GET /api/perms/users/{user}` | `{uuid, name, online, primary_group, effective_primary_group, tracks, contexts, nodes: [{id, node}], revision}`; `primary_group` is the explicit one or `null`, `contexts` the player's current proxy contexts |
+| `PATCH /api/perms/users/{user}` | `{primary_group}`: set the explicit primary group, `null` to clear it |
+| `GET /api/perms/users/{user}/nodes` | `{subject, nodes: [{id, node}], revision}` |
+| `PUT /api/perms/users/{user}/nodes` | Set the typed node in the body, replacing the node in its slot; the result adds its `id` |
+| `PUT /api/perms/users/{user}/nodes/{id}` | Replace that node with the body, which may move it to another slot (other contexts, say); `404` when no node has that id |
+| `DELETE /api/perms/users/{user}/nodes/{id}` | Remove the node; `"ops": 0` when it was not there |
+| `DELETE /api/perms/users/{user}/nodes` | Remove every node, or with `{contexts}` only those with exactly these contexts |
+| `GET /api/perms/users/{user}/compiled?server=&world=&dimension=&gamemode=&...` | `{subject, contexts, contexts_from, meta, groups}`: the compiled subject exactly as backends receive it, and the meta view and group memberships in the contexts given. Every query parameter is a context pair (repeat a custom key for several values); with none, the player's current contexts are used and `contexts_from` is `proxy` |
+| `GET /api/perms/groups` | `{revision, groups: [{name, weight, display_name, parents, nodes, tracks}]}`; `parents` are the group's `inherit` nodes, `nodes` a count |
+| `POST /api/perms/groups` | Create `{name, weight?, display_name?}`; `201` with the result and `name` |
+| `GET /api/perms/groups/{name}` | `{name, weight, display_name, tracks, nodes: [{id, node}], revision}` |
+| `PATCH /api/perms/groups/{name}` | `{weight?, display_name?}`, at least one; `display_name: null` clears it |
+| `DELETE /api/perms/groups/{name}` | Delete a group and its nodes. `inherit` nodes naming it stay and grant nothing. `default` cannot be deleted |
+| `GET`, `PUT`, `DELETE /api/perms/groups/{name}/nodes[/{id}]` | The same node routes as for users; `weight` and `display_name` nodes are allowed here |
+| `GET /api/perms/tracks` | `{revision, tracks: [{name, groups}]}` |
+| `GET /api/perms/tracks/{name}` | `{name, groups}` |
+| `PUT /api/perms/tracks/{name}` | Create or replace with `{groups}`, lowest first, distinct |
+| `DELETE /api/perms/tracks/{name}` | Delete a track; players keep their groups |
+| `POST /api/perms/tracks/{name}/promote` | `{user, contexts?}`: move the player to the next group in exactly these contexts; the result adds `user` |
+| `POST /api/perms/tracks/{name}/demote` | `{user, contexts?}`: move the player to the previous group |
+| `GET /api/perms/audit?since=&actor=&subject=&limit=` | `{revision, events}`: [change events](permissions-protocol.md#change-event) in revision order. With `since`, the first `limit` after that revision; otherwise the latest `limit` (default 100, at most 1000). `actor` is an actor string (`operator:alice`, `cli`); `subject` is `user:<uuid>`, `group:<name>`, a bare UUID or a group name |
+| `POST /api/perms/trace` | `{user, node, contexts?}` → `{node, result, winner, losers, ranks, contexts, contexts_from, uuid, revision}`: the answer for the node, the winning entry and why every other matching entry lost. `ranks` maps each rank to `user:<uuid>` or `group:<name>`. Without `contexts`, the player's current ones are used |
+| `POST /api/perms/apply` | `{change, reason?}`: apply one raw [change](permissions-protocol.md#change), any `op` including `batch` |
+| `POST /api/perms/bulk` | `{filter, patch, dry_run?, reason?}`: a bulk edit in one revision. With `dry_run: true` nothing is written and the reply is `{dry_run: true, count, ops}`; otherwise the result with `dry_run: false` |
+| `POST /api/perms/import?replace=` | Import a LuckPerms `/lp export` file sent as the raw body, JSON (`application/json`) or gzipped (`application/gzip`), at most 32 MiB. Returns `{revision, ops, groups, users, tracks, skipped}`. Additive; `replace=true` first deletes earlier imported nodes |
+| `GET /api/perms/export?gzip=` | The whole store in the LuckPerms export format; with `gzip` a gzipped download named `luckperms-export.json.gz` |
+
+For example, give a player a temporary permission on one server, check it, and
+move them up a track:
+
+```sh
+curl -s -X PUT http://127.0.0.1:8080/api/perms/users/Alice/nodes \
+  -H "Authorization: Bearer $RIFT_WEB_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"kind": "permission", "key": "essentials.fly", "value": true,
+       "contexts": {"server": "survival"}, "expires_at": 1762800000, "reason": "event"}'
+# {"revision":414,"ops":1,"changed_users":["0123…"],"changed_groups":[],"id":"permission:essentials.fly@server=survival"}
+
+curl -s -X POST http://127.0.0.1:8080/api/perms/trace \
+  -H "Authorization: Bearer $RIFT_WEB_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"user": "Alice", "node": "essentials.fly", "contexts": {"server": "survival"}}'
+# {"node":"essentials.fly","result":true,"winner":{"entry":{"k":"perm","key":"essentials.fly","v":true,"ctx":{"server":"survival"},"rank":0,"exp":1762800000},"specificity":"exact","outcome":"won"},"losers":[],"ranks":[{"rank":0,"subject":"user:0123…"},{"rank":1,"subject":"group:vip"}],…}
+
+curl -s -X POST http://127.0.0.1:8080/api/perms/tracks/ranks/promote \
+  -H "Authorization: Bearer $RIFT_WEB_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"user": "Alice"}'
+
+# Remove the node again by its id.
+curl -s -X DELETE 'http://127.0.0.1:8080/api/perms/users/Alice/nodes/permission%3Aessentials.fly%40server%3Dsurvival' \
+  -H "Authorization: Bearer $RIFT_WEB_TOKEN" -H 'Content-Type: application/json' -d '{}'
+```
+
+Create a group with a prefix, preview a bulk edit, and move a LuckPerms
+installation over:
+
+```sh
+api() { curl -s -H "Authorization: Bearer $RIFT_WEB_TOKEN" -H 'Content-Type: application/json' "$@"; }
+api -X POST http://127.0.0.1:8080/api/perms/groups -d '{"name": "vip", "weight": 10, "display_name": "VIP"}'
+api -X PUT http://127.0.0.1:8080/api/perms/groups/vip/nodes -d '{"kind": "prefix", "priority": 100, "text": "&6[VIP] "}'
+api -X POST http://127.0.0.1:8080/api/perms/bulk -d '{"filter": {"kind": "permission", "key_like": "essentials.%"},
+  "patch": {"value": false}, "dry_run": true}'
+# {"dry_run":true,"count":3,"ops":[{"op":"node","subject":{"group":"vip"},"before":{…,"value":true},"after":{…,"value":false}},…]}
+curl -s -X POST 'http://127.0.0.1:8080/api/perms/import' -H "Authorization: Bearer $RIFT_WEB_TOKEN" \
+  -H 'Content-Type: application/gzip' --data-binary @luckperms-export.json.gz
+# {"revision":420,"ops":312,"groups":6,"users":41,"tracks":1,"skipped":[{"subject":"group:mod","key":"r=^worldedit","reason":"…"}]}
+curl -s 'http://127.0.0.1:8080/api/perms/export?gzip' -H "Authorization: Bearer $RIFT_WEB_TOKEN" -o rift-export.json.gz
+```
+
+The import and export routes are the same as `/perms import` and `/perms
+export` and read and write the format described under
+[LuckPerms import and export](permissions.md#luckperms-import-and-export).
 
 The dashboard follows selected server logs every second, retaining a bounded
 128 KiB view. Logs contain server output and may include private information;

@@ -1,0 +1,24 @@
+[package]
+name = "rift-permissions-ffi"
+description = "C ABI over the Rift permissions client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+# librift_perms.so / .dylib / rift_perms.dll, matching include/rift_perms.h.
+name = "rift_perms"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+log = "0.4"
+rift-permissions.workspace = true
+rift-permissions-client.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[dev-dependencies]
+bytes.workspace = true
+rcgen.workspace = true
+rift.workspace = true
+rustls.workspace = true

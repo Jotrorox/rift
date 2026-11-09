@@ -1,0 +1,6 @@
+{
+  "kind": "wire",
+  "name": "meta-view",
+  "type": "meta_view",
+  "json": {"prefix": "&c[Admin] ", "suffix": null, "meta": {"homes": "5"}, "primary_group": "admin"}
+}

@@ -22,6 +22,12 @@ Session code selects the capability for command handling,
 world validation, client information/brand replay, resource-pack removal and
 bundle tracking. Pre-1.20.2 contracts also map Respawn, keepalive, tab-list and
 boss-bar packets, dimension layouts and named command argument parsers.
+Every capability also maps clientbound Respawn and Game Event, which Rift reads
+(with Join Game) only for the player's `dimension` and `gamemode` permission
+contexts; a packet that does not parse exactly is relayed unchanged and skipped.
+Their IDs come from minecraft-data `protocol.json` for each release through
+26.1 and from the `GameProtocols` registration order of the official 26.2 and
+26.3 server artifacts below (Respawn `0x52`/`0x54`, Game Event `0x26`/`0x27`).
 
 Every capability must have a pinned `switchable` fixture in `tests/servers.json`.
 A Rust test checks the capability and fixture sets agree.

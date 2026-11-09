@@ -3,6 +3,7 @@ mod admission;
 mod bungee_runtime;
 mod check;
 mod control;
+mod dev;
 mod events;
 mod health;
 mod messaging_runtime;
@@ -38,6 +39,8 @@ const USAGE: &str = "Usage: rift [<listen-ip:port> <backend-ip:port>]\n\
     --strict also checks environment secrets, the instance database and extension store,\n\
     port binds, and whether a running Rift could reload to this configuration\n\
     rift admin [--address <loopback-ip:port>] <command> (run an authenticated administrator command)\n\
+    rift admin perms <command> (the /perms grammar; rift admin perms help lists it)\n\
+    rift dev [options] (development proxy for plugin authors; see rift dev --help)\n\
     rift node --controller <host:port> --name <node> --root <dir> --ca <pem> (run servers for a controller; see rift node --help)\n\
     rift --version (print package version)\n\
     rift --license (print project license and third-party notices)\n\
@@ -51,9 +54,44 @@ const USAGE: &str = "Usage: rift [<listen-ip:port> <backend-ip:port>]\n\
     Invalid reloads retain the working configuration. Stop and drain: Ctrl-C or SIGTERM.\n\
     IPv6: rift '[::]:25565' '[::1]:25566'";
 
-#[tokio::main]
-async fn main() -> ExitCode {
-    match start().await {
+fn main() -> ExitCode {
+    let args: Vec<String> = env::args().skip(1).collect();
+    // `rift dev` sets its token variables before any thread exists.
+    let dev = match args.first().map(String::as_str) {
+        Some("dev")
+            if args
+                .get(1)
+                .is_some_and(|arg| arg == "--help" || arg == "-h") =>
+        {
+            println!("{}", dev::USAGE);
+            return ExitCode::SUCCESS;
+        }
+        Some("dev") => match dev::prepare(&args[1..]) {
+            Ok(dev) => Some(dev),
+            Err(error) => {
+                eprintln!("rift: {error}");
+                return ExitCode::FAILURE;
+            }
+        },
+        _ => None,
+    };
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("rift: cannot start the async runtime: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let result = runtime.block_on(async move {
+        match dev {
+            Some(dev) => dev::run(dev).await,
+            None => start(args).await,
+        }
+    });
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("rift: {error}");
@@ -62,8 +100,7 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn start() -> io::Result<()> {
-    let args: Vec<String> = env::args().skip(1).collect();
+async fn start(args: Vec<String>) -> io::Result<()> {
     if args.first().is_some_and(|arg| arg == "admin") {
         return crate::admin::client(&args[1..]).await;
     }

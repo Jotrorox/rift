@@ -1,0 +1,57 @@
+{
+  "kind": "resolve",
+  "name": "default-implicit",
+  "description": "Every user inherits default without a stored edge; any other group ranks above it.",
+  "now": 1000,
+  "users": {
+    "00000000000000000000000000000001": {"nodes": []},
+    "00000000000000000000000000000002": {
+      "nodes": [{"kind": "inherit", "group": "vip", "value": true}]
+    }
+  },
+  "groups": {
+    "default": {
+      "nodes": [
+        {"kind": "permission", "key": "chat.use", "value": true},
+        {"kind": "permission", "key": "spawn.use", "value": true}
+      ]
+    },
+    "vip": {"nodes": [{"kind": "permission", "key": "chat.use", "value": false}]}
+  },
+  "checks": [
+    {"user": "00000000000000000000000000000001", "node": "chat.use", "expect": true},
+    {"user": "00000000000000000000000000000001", "node": "group.default", "expect": true},
+    {"user": "00000000000000000000000000000002", "node": "chat.use", "expect": false},
+    {"user": "00000000000000000000000000000002", "node": "spawn.use", "expect": true}
+  ],
+  "compiled": {
+    "00000000000000000000000000000001": {
+      "revision": 1,
+      "uuid": "00000000000000000000000000000001",
+      "primary_group": "default",
+      "entries": [
+        {"k": "group", "key": "default", "v": true, "ctx": {}, "rank": 1},
+        {"k": "perm", "key": "chat.use", "v": true, "ctx": {}, "rank": 1},
+        {"k": "perm", "key": "spawn.use", "v": true, "ctx": {}, "rank": 1}
+      ],
+      "prefix": [],
+      "suffix": [],
+      "meta": []
+    },
+    "00000000000000000000000000000002": {
+      "revision": 1,
+      "uuid": "00000000000000000000000000000002",
+      "primary_group": "vip",
+      "entries": [
+        {"k": "group", "key": "vip", "v": true, "ctx": {}, "rank": 1},
+        {"k": "perm", "key": "chat.use", "v": false, "ctx": {}, "rank": 1},
+        {"k": "group", "key": "default", "v": true, "ctx": {}, "rank": 2},
+        {"k": "perm", "key": "chat.use", "v": true, "ctx": {}, "rank": 2},
+        {"k": "perm", "key": "spawn.use", "v": true, "ctx": {}, "rank": 2}
+      ],
+      "prefix": [],
+      "suffix": [],
+      "meta": []
+    }
+  }
+}

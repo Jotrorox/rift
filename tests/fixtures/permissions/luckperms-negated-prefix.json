@@ -1,0 +1,6 @@
+{
+  "kind": "luckperms",
+  "name": "negated-prefix",
+  "node": {"type": "prefix", "key": "prefix.1.x", "value": false},
+  "error": "invalid"
+}

@@ -1,0 +1,6 @@
+{
+  "kind": "wire",
+  "name": "context-report",
+  "type": "context_report",
+  "json": {"uuid": "0123456789abcdef0123456789abcdef", "contexts": {"region": "spawn"}}
+}

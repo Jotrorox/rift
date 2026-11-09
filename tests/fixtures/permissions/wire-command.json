@@ -1,0 +1,9 @@
+{
+  "kind": "wire",
+  "name": "command",
+  "type": "command_request",
+  "json": {
+    "actor_uuid": "0123456789abcdef0123456789abcdef",
+    "args": ["user", "Alice", "permission", "set", "fly", "true"]
+  }
+}

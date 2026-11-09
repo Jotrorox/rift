@@ -15,3 +15,6 @@ ruler = bytes((i & -i).bit_length() - 1 for i in range(1, 16385))
 encoder = zlib.compressobj(9, zlib.DEFLATED, 15, 9, zlib.Z_HUFFMAN_ONLY)
 out.joinpath('long_codes.zlib').write_bytes(encoder.compress(ruler) + encoder.flush())
 ```
+
+`luckperms-export.json` is a hand-written `/lp export` file (LuckPerms 5) for the
+importer tests in `src/permissions/tests.rs`.

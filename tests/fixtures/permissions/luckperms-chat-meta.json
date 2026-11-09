@@ -1,0 +1,6 @@
+{
+  "kind": "luckperms",
+  "name": "chat-meta",
+  "node": {"type": "prefix", "key": "prefix.100.&6[V.I.P] ", "value": true},
+  "expect": [{"kind": "prefix", "priority": 100, "text": "&6[V.I.P] ", "source": "import"}]
+}

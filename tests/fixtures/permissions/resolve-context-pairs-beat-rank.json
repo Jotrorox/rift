@@ -1,0 +1,52 @@
+{
+  "kind": "resolve",
+  "name": "context-pairs-beat-rank",
+  "description": "More context pairs win before rank is compared: a group's server grant beats the user's global denial there.",
+  "now": 1000,
+  "users": {
+    "00000000000000000000000000000001": {
+      "nodes": [
+        {"kind": "permission", "key": "fly", "value": false},
+        {"kind": "inherit", "group": "vip", "value": true}
+      ]
+    }
+  },
+  "groups": {
+    "vip": {
+      "nodes": [
+        {"kind": "permission", "key": "fly", "value": true, "contexts": {"server": "survival"}}
+      ]
+    }
+  },
+  "checks": [
+    {
+      "user": "00000000000000000000000000000001",
+      "node": "fly",
+      "contexts": {"server": "survival"},
+      "expect": true
+    },
+    {
+      "user": "00000000000000000000000000000001",
+      "node": "fly",
+      "contexts": {"server": "lobby"},
+      "expect": false
+    },
+    {"user": "00000000000000000000000000000001", "node": "fly", "expect": false}
+  ],
+  "compiled": {
+    "00000000000000000000000000000001": {
+      "revision": 1,
+      "uuid": "00000000000000000000000000000001",
+      "primary_group": "vip",
+      "entries": [
+        {"k": "perm", "key": "fly", "v": false, "ctx": {}, "rank": 0},
+        {"k": "group", "key": "vip", "v": true, "ctx": {}, "rank": 1},
+        {"k": "perm", "key": "fly", "v": true, "ctx": {"server": "survival"}, "rank": 1},
+        {"k": "group", "key": "default", "v": true, "ctx": {}, "rank": 2}
+      ],
+      "prefix": [],
+      "suffix": [],
+      "meta": []
+    }
+  }
+}

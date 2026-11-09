@@ -1,0 +1,6 @@
+{
+  "kind": "wire",
+  "name": "reply-error",
+  "type": "reply",
+  "json": {"ok": false, "error": "unknown group \"vip\"", "code": "not_found"}
+}

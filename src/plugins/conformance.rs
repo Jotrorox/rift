@@ -822,9 +822,7 @@ pub(crate) async fn hello_example(engines: Engines, example: &Path) {
     );
 
     let base = &runtime.plugins().persistent.base;
-    base.permissions
-        .set_override(&uuid(1), "hello.use", Some(true))
-        .unwrap();
+    base.permissions.grant(&uuid(1), "hello.use");
     let (_presence, mut actions) = runtime
         .players()
         .register(1, &[1; 16], "Player1", 774, "lobby");

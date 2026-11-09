@@ -1,0 +1,6 @@
+{
+  "kind": "luckperms",
+  "name": "weight-and-display-name",
+  "node": {"type": "weight", "key": "weight.50"},
+  "expect": [{"kind": "weight", "weight": 50, "source": "import"}]
+}

@@ -28,9 +28,9 @@ Run servers on more machines with `rift node` agents that the proxy controls
 over its message bus, with label- and capacity-based placement; see
 [multiple hosts](docs/nodes.md) and [examples/nodes.lua](examples/nodes.lua).
 The dashboard provides live server logs and commands, structured group/template
-editing, server list, tab list and permission group editing with group
-memberships, configuration deployment history and rollback, scoped operator
-tokens, and retained audit records. See the [HTTP operator guide](docs/http.md).
+editing, server list and tab list editing, permission groups, players, tracks,
+registered nodes and their change history, configuration deployment history
+and rollback, scoped operator tokens, and retained audit records. See the [HTTP operator guide](docs/http.md).
 Managed Minecraft processes need their own Java runtime and explicit EULA acceptance.
 
 ## Quick start
@@ -159,8 +159,15 @@ three ways to run code:
 
 Plugins get login and transfer decisions, lifecycle events, commands with UUID
 permission checks, FIFO server queues, durable namespaced state, timers,
-permission groups, the message bus and an online-player API for messages,
-titles, action bars, tab lists, kicks, broadcasts and transfers.
+permissions, the message bus and an online-player API for messages, titles,
+action bars, tab lists, kicks, broadcasts and transfers.
+
+Permissions live in Rift's [permission store](docs/permissions.md):
+LuckPerms-style users, groups, weights, contexts, temporary nodes, tracks,
+prefixes and meta, with change events and LuckPerms import, managed with
+`/perms`, `rift admin perms`, `/api/perms` and the dashboard. `rift.lua`
+reaches it through `rift.permissions` with `extensions.api_version = 3`, and
+Paper and Pumpkin backends check it through their adapters.
 
 ```lua
 rift.plugin("hello-lua", { deny = "Mallory" }) -- plugins/hello-lua/plugin.toml
@@ -220,6 +227,7 @@ also includes for offline use.
 - [Managed servers](https://jotrorox.github.io/rift/docs/managed-servers/): local processes, automatic start/stop and persistent worlds.
 - [Multiple hosts](https://jotrorox.github.io/rift/docs/nodes/): `rift node` agents, placement across machines and failure handling.
 - [HTTP services](https://jotrorox.github.io/rift/docs/http/): web dashboard, status, API and Lua extensions.
+- [Permissions](https://jotrorox.github.io/rift/docs/permissions/): the network permission store, LuckPerms import, the dashboard and the Lua API; the [protocol](https://jotrorox.github.io/rift/docs/permissions-protocol/) backends speak; the [Rust client, testing crate and C ABI](https://jotrorox.github.io/rift/docs/permissions-clients/); [RiftPerms for Paper](https://jotrorox.github.io/rift/docs/permissions-java/) and the [Pumpkin adapter](https://jotrorox.github.io/rift/docs/permissions-pumpkin/).
 - [Messaging](https://jotrorox.github.io/rift/docs/messaging/): plugin messaging, [Lua API](https://jotrorox.github.io/rift/docs/messaging-lua/) and [QUIC protocol](https://jotrorox.github.io/rift/docs/messaging-protocol/).
 - [BungeeCord compatibility](https://jotrorox.github.io/rift/docs/bungeecord/): backend plugin transfers, queries, forwarding, messages and kicks.
 - [Network protocol](https://jotrorox.github.io/rift/docs/network-protocol/): backend switching and recovery.

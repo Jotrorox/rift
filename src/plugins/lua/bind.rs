@@ -965,7 +965,45 @@ fn permissions(lua: &Lua, state: &Rc<State>) -> mlua::Result<Table> {
             decoded(lua, &services.permissions().list_groups())
         })?,
     )?;
+    // Lua only, as in `rift.permissions` of extensions API v3: the node as
+    // true, false or nil (undefined), and the player's prefix, suffix and
+    // meta, in explicit contexts or the player's current ones.
+    let services = state.services.clone();
+    api.raw_set(
+        "check",
+        function(
+            lua,
+            state,
+            move |_, (uuid, node, contexts): (String, String, Value)| {
+                let contexts = optional_contexts(&contexts)?;
+                services
+                    .permissions()
+                    .check(&uuid, &node, contexts.as_ref())
+                    .map_err(runtime)
+            },
+        )?,
+    )?;
+    let services = state.services.clone();
+    api.raw_set(
+        "meta",
+        function(lua, state, move |lua, (uuid, contexts): (String, Value)| {
+            let contexts = optional_contexts(&contexts)?;
+            let meta = services
+                .permissions()
+                .meta(&uuid, contexts.as_ref())
+                .map_err(runtime)?;
+            decoded(lua, &meta)
+        })?,
+    )?;
     Ok(api)
+}
+
+/// `nil` for the player's current contexts, or a context table.
+fn optional_contexts(value: &Value) -> mlua::Result<Option<rift_permissions::ContextSet>> {
+    match value {
+        Value::Nil => Ok(None),
+        value => crate::permissions::lua::contexts(value).map(Some),
+    }
 }
 
 /// `rift.servers.*` wait for the control service and return its decoded

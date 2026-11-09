@@ -1,0 +1,37 @@
+# RiftPerms: answers permission checks from the Rift proxy's data.
+# docs/permissions-java.md in the Rift repository describes every setting.
+
+# This backend's name, as the proxy knows it. It is the "server" context of
+# every check here, so it must match the backend names used in grants.
+server: survival-1
+
+bus:
+  # The proxy's messaging listener (messaging.listen in rift.lua).
+  address: 127.0.0.1:4222
+  # The DNS name in the listener's certificate.
+  server_name: localhost
+  # The listener's certificate (or its CA), relative to this folder.
+  certificate: messaging-cert.pem
+  # Environment variable holding this server's bus token (principal server.<name>).
+  token_env: RIFT_PERMS_TOKEN
+
+# How long a joining player waits for their snapshot before the offline
+# policy answers for them (retried every 5 s afterwards).
+join_timeout_ms: 2000
+# How long writes, /perms and Vault writes wait for the proxy.
+request_timeout_ms: 5000
+
+# What a player gets when no snapshot came from the proxy (unreachable, or no
+# answer within join_timeout_ms):
+#   deny          - nothing is set: plugin defaults and operator status apply
+#   last_snapshot - the replica saved when RiftPerms was last disabled (snapshot_file)
+#   fallback_file - groups and users in fallback_file, compiled like the proxy does;
+#                   unlisted players get "default" (format: docs/permissions-java.md)
+offline_policy: deny
+snapshot_file: replica.json
+fallback_file: fallback.json
+
+# Register Vault Permission and Chat providers when Vault is installed.
+vault: true
+# Register the %rift_...% PlaceholderAPI expansion when PlaceholderAPI is installed.
+placeholders: true

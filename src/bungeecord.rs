@@ -55,7 +55,8 @@ pub enum Request {
     /// Rift extension: running servers with state and player limits. The
     /// target is a server name, a service group name or `ALL`.
     RiftServers(String),
-    /// Rift extension: whether a player belongs to a proxy permission group.
+    /// Rift extension: whether a player is in a permission group (directly,
+    /// inherited or `default`), answered from their compiled subject.
     RiftInGroup {
         player: String,
         group: String,

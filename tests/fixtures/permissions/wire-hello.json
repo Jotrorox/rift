@@ -1,0 +1,10 @@
+{
+  "kind": "wire",
+  "name": "hello",
+  "type": "hello_request",
+  "json": {
+    "server": "survival-1",
+    "revision": 410,
+    "client_version": "rift-permissions-client/0.1.0"
+  }
+}

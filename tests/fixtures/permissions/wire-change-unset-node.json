@@ -1,0 +1,12 @@
+{
+  "kind": "wire",
+  "name": "change-unset-node",
+  "type": "change",
+  "json": {
+    "op": "unset_node",
+    "subject": {"group": "vip"},
+    "kind": "prefix",
+    "key": "100",
+    "contexts": {"server": "survival"}
+  }
+}

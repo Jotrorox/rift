@@ -3,7 +3,7 @@
 This page describes the events, commands, permissions, queues and host
 services that plugins use, as the configuration script sees them: player
 callbacks with a verified identity, permission-checked commands, FIFO queues,
-durable state, scheduled jobs and bus decisions, in API versions 1 and 2.
+durable state, scheduled jobs and bus decisions, in API versions 1 to 3.
 Persistent [Lua](plugins-lua.md) and WebAssembly plugins receive the same
 events through the [plugin contract](plugins.md), with the same validation;
 [the plugin overview](plugins.md) explains the execution modes, the dispatch
@@ -11,14 +11,15 @@ order and the trust model.
 
 [`examples/extensions.lua`](../examples/extensions.lua) is a runnable authenticated
 network with a FIFO survival queue, a staff-only server, durable visit counters,
-recurring jobs and optional HTTP permission refresh.
+recurring jobs, permission groups and optional HTTP permission refresh.
 It uses the existing Paper/Velocity forwarding setup in
 [`examples/online.lua`](../examples/online.lua). Run `rift --check
 examples/extensions.lua`, then start with `RIFT_FORWARDING_SECRET` set. Clients
 must use Java 1.19.3–26.3, which supports both switching and online authentication.
 
-Set `rift.config.plugins = { api_version = 2, ... }` for the current API
-(or `api_version = 1` for the original contract), or use
+Set `rift.config.plugins = { api_version = 3, ... }` for the current API
+(`api_version = 2` is the same without `rift.permissions`, and `api_version = 1`
+is the original contract), or use
 `rift.on(event, callback)` and `rift.command(name, definition)` from a script or
 [folder-based plugin](lua.md). `rift.config.plugins` is the preferred name;
 `rift.config.extensions` (and an `extensions` field in a returned table) is
@@ -46,10 +47,12 @@ are errors; Rift never treats an error as permission to proceed.
 | `after_transfer(ctx)` | When an admitted transfer attempt completes or fails | `server` (source), `target`, `reason`, `success` | `nil` |
 | `disconnect(ctx)` | Session teardown, including an authenticated login that never joined | Last committed `server`, or nil; `reason = "session_closed"` | `nil` |
 
-Common player context fields are `api_version` (1 or 2), `authenticated = true`, `uuid`
+Common player context fields are `api_version` (1, 2 or 3), `authenticated = true`, `uuid`
 (lowercase 32-digit hex, no hyphens), canonical Mojang `name`, `connection_id`
 (decimal string), `listener`, normalized `hostname`, `peer_ip`, and `protocol`.
-`ctx.has_permission("node")` returns a boolean. Call it with a dot, not a colon.
+`ctx.has_permission("node")` returns a boolean from the [permission
+store](permissions.md), in the contexts Rift knows for the player; a node nobody
+set is `false`. Call it with a dot, not a colon.
 `default_server` is the route/legacy `on_route` selection, or nil for an unmatched
 hostname; it is a proposal, not an established attachment. It does not expand
 `network.initial`. `server` is nil until the first join, then the last committed
@@ -142,19 +145,19 @@ the existing bounded, nonblocking broker API. Publications already delivered
 before a callback fails are not rolled back.
 
 Rust owns session identity, committed server, pending transfer, permissions,
-capacity leases and FIFO tickets. API v1 retains its original permission
-snapshot and admission state contract. API v2 also owns shared storage, live
-permission overrides, permission group memberships and job scheduling. Each store/permission mutation and HTTP
-request takes effect independently; later callback failure does not roll it back.
+capacity leases and FIFO tickets. API v1 retains its original admission state
+contract. API v2 also owns shared storage and job scheduling, and API v3 adds
+writes to the permission store. Each store/permission mutation and HTTP request
+takes effect independently; later callback failure does not roll it back.
 
 ## Permissions and commands
 
 ```lua
 rift.config.plugins = {
-    api_version = 1,
-    permissions = {
-        ["*"] = { ["network.queue"] = true },
-        ["0123456789abcdef0123456789abcdef"] = { ["network.staff"] = true },
+    api_version = 3,
+    groups = {
+        default = { permissions = { ["network.queue"] = true } },
+        staff = { inherits = { "default" }, permissions = { ["network.staff"] = true } },
     },
     commands = {
         staff = {
@@ -165,10 +168,13 @@ rift.config.plugins = {
 }
 ```
 
-Configured permissions are granted by authenticated UUID. `*` grants nodes to
-all authenticated players. An absent grant denies. API v1 accepts exact nodes
-and grants (`true`) only. API v2 also accepts wildcards, denials (`false`),
-permission groups and live grant/deny overrides, described below.
+Command permissions are checked against the [permission store](permissions.md)
+for the authenticated UUID, in the contexts Rift knows for the player. A node
+nobody set denies. Grant nodes with groups (configured as above, or at runtime),
+with user nodes from `rift.permissions` in API v3, or in the dashboard. The
+`extensions.permissions` grant table of earlier versions is rejected; see
+[upgrading](permissions.md#upgrading-from-extensions-api-v2). A command
+permission is a lowercase node without wildcards.
 
 Register up to 64 lowercase command names using letters, digits, `_` or `-`
 (maximum 64 bytes). `server` and `hub` are reserved. Each registration must have
@@ -230,7 +236,7 @@ A service with its own database, such as a ban system, can decide `login`,
 `initial_server` and `before_transfer` without running in Lua. Rust sends a
 request on the [message bus](messaging.md) and waits asynchronously, so a slow
 responder holds no Lua worker and no extension slot. Decisions require
-`api_version = 2`.
+`api_version = 2` or later.
 
 ```lua
 rift.config.plugins = {
@@ -309,16 +315,17 @@ principals = {
 [`rift.events.players`](messaging.md#rift-control-subjects) reports joins, server
 switches and quits, so services that only follow players need no Lua at all.
 
-## API v2 host services
+## Host services (API v2 and v3)
 
 These APIs are available only in authenticated extension callbacks and scheduled
-jobs with `api_version = 2`. They are unavailable in legacy route/HTTP/message
+jobs with `api_version = 2` or `3`. They are unavailable in legacy route/HTTP/message
 callbacks, except that `rift.players` also works in `on_message` and `on_http`
-when extensions use API v2. Configuration loading, `rift check` and candidate reload validation
+when extensions use API v2 or v3. Configuration loading, `rift check` and candidate reload validation
 never execute jobs, HTTP requests or storage operations. Capture API references
 in initialization freely (`local store = require("rift.store")`); calling them
-there is an error. `require("rift.http")`, `require("rift.permissions")` and
-`require("rift.players")` work in the same way. All methods use a dot, not a colon.
+there is an error. `require("rift.http")` and `require("rift.players")` work in
+the same way. All methods use a dot, not a colon. API v3 adds
+`rift.permissions`, described in [permissions](permissions.md#lua-api).
 
 ### Persistent state
 
@@ -349,9 +356,10 @@ Stores written by earlier Rift versions (versioned binary snapshots) are
 converted at startup. The original snapshot is kept as `<file>.v1-backup`; to go
 back to an earlier Rift version, restore it in place of the database.
 Namespaces organize data; they do not isolate mutually untrusted plugins.
-Namespaces beginning with `rift.` are reserved for host-owned data such as group
-memberships, and namespaces beginning with `plugin.` hold persistent plugins'
-private data; `rift.store` methods reject both.
+Namespaces beginning with `rift.` are reserved for host-owned data, such as the
+group memberships of API v2 that an upgrade copies into the permission store,
+and namespaces beginning with `plugin.` hold persistent plugins' private data;
+`rift.store` methods reject both.
 
 | Method | Result |
 | --- | --- |
@@ -367,8 +375,7 @@ A read followed by a write is not atomic; use increment for concurrent counters.
 Namespaces and keys are UTF-8 strings of 1–128 bytes. Values have a 64 KiB limit.
 Plugin data, everything in `rift.store` namespaces, is limited to 4096 entries
 and 1 MiB, counting each entry as its namespace, key and value plus 8 bytes.
-Host-owned data such as group memberships has a separate limit of 65536 entries
-and 8 MiB, so a full plugin store cannot block membership changes. Exceeding a
+Host-owned data has a separate limit of 65536 entries and 8 MiB. Exceeding a
 limit fails without changing committed state.
 
 Each mutation commits only the entries it changes, in one SQLite transaction
@@ -394,7 +401,7 @@ rift.config.plugins.jobs = {
 
 Register up to 32 named jobs using lowercase letters, digits, `_`, `-` or `.`
 (1–64 bytes). Each requires `every_ms` (an integer from 100 to 86400000) and a
-`run` function. Its context contains only `api_version = 2` and `job`; it has no
+`run` function. Its context contains only `api_version` and `job`; it has no
 player identity. Return nil. The first run waits a full interval, and each next
 run waits a full interval after completion. Jobs never overlap by name, including
 across reloads. Missed intervals are skipped, never queued for catch-up.
@@ -430,8 +437,9 @@ local response = rift.http.request("directory", {
     method = "GET", path = "0123456789abcdef0123456789abcdef",
 })
 if response.status == 200 then
-    rift.permissions.set("0123456789abcdef0123456789abcdef",
-        "network.staff", response.body == "allow")
+    -- API v3; the write commits before the call returns.
+    rift.permissions.user("0123456789abcdef0123456789abcdef")
+        :set("network.staff", response.body == "allow")
 end
 ```
 
@@ -463,111 +471,17 @@ lowercase. Bodies are limited to 64 KiB, headers to 32 entries/8 KiB. Configured
 `timeout_ms` defaults to 1000 and must be 1–5000; the enclosing callback's
 remaining deadline always takes precedence. There are no automatic retries.
 
-### Permission groups and wildcards
+### Permissions
 
-```lua
-rift.config.plugins = {
-    api_version = 2,
-    storage = { path = "extensions.state" },
-    permissions = {
-        ["0123456789abcdef0123456789abcdef"] = { ["ranks.manage"] = true },
-    },
-    groups = {
-        default = { permissions = { ["network.queue"] = true, ["chat.color"] = false } },
-        staff = {
-            inherits = { "default" },
-            permissions = { ["network.*"] = true, ["chat.color"] = true },
-        },
-        admin = {
-            inherits = { "staff" },
-            permissions = { ["*"] = true, ["network.shutdown"] = false },
-        },
-    },
-    commands = {
-        rank = {
-            permission = "ranks.manage",
-            run = function(ctx)
-                -- /rank <uuid>: add a player to staff.
-                rift.permissions.add_group(ctx.args, "staff")
-                return { message = "Added " .. ctx.args .. " to staff" }
-            end,
-        },
-    },
-}
-```
-
-In API v2, permission tables in `permissions` and in groups map patterns to
-`true` (grant) or `false` (deny). A pattern is an exact node, `prefix.*` or `*`.
-`network.*` matches `network.staff` and `network.staff.kick`, but not `network`.
-`*` matches every node. Within one table, the most specific matching pattern
-wins: the exact node, then the longest `prefix.*`, then `*`. Checks always name
-exact nodes. `ctx.has_permission("network.*")` is false, and
-`rift.permissions.has` rejects it.
-
-Define up to 64 groups. Each has an optional `permissions` table and an optional
-`inherits` list of up to 16 other groups. Group names follow permission node
-rules. Unknown parents and inheritance cycles fail configuration loading.
-Everyone belongs to `default` when it is defined. Other memberships are stored
-per player. When several of a player's groups match a node:
-
-- A group overrides every group it inherits from, directly or transitively.
-- Among the remaining matches, any denial wins.
-
-`vip` granting `chat.color` therefore loses to `default` denying it unless `vip`
-inherits `default`. Most groups should inherit `default`.
-
-| Method | Result |
-| --- | --- |
-| `rift.permissions.add_group(uuid, group)` | Boolean: whether the membership was added |
-| `rift.permissions.remove_group(uuid, group)` | Boolean: whether a membership was removed |
-| `rift.permissions.groups(uuid)` | Sorted list of the player's stored groups, without `default` |
-
-Membership methods take a lowercase 32-digit player UUID; `*` is rejected. Adding
-requires a currently configured group other than `default`. A player can belong
-to at most 16 groups. Memberships live in the extension store under the reserved
-`rift.groups` namespace. With `storage` they survive restarts; without it they
-reset. They count toward the store's host data limit, not the plugin one, and
-they follow its commit rules: a membership changes only after its write commits. A reload
-that removes a group leaves its memberships dormant: they grant nothing, can be
-removed, and apply again if the group returns. Configuration has no static member
-lists. Grant the first manager through `permissions`, as shown above.
-
-Backend plugins can ask whether a player is in a group with the `RiftInGroup`
-request on the [BungeeCord channel](bungeecord.md#rift-requests).
-
-### Live permissions
-
-V2 `ctx.has_permission(node)` and command authorization consult current host
-permissions each time. `rift.permissions.has(uuid, node)` checks any UUID.
-`rift.permissions.set(uuid, pattern, true)` grants and `false` revokes, including
-configured and group grants. The pattern may be a wildcard: setting `network.*`
-to false revokes every `network.` node. Set nil to remove the override and return
-to the configured policy. UUIDs use lowercase 32-digit hex, or `*` for a default
-override.
-
-Rift checks layers in this order and uses the first one with a matching pattern:
-
-1. UUID overrides
-2. `*` overrides
-3. Configured UUID permissions
-4. Groups
-5. Configured `*` permissions
-
-Inside a layer, the most specific pattern wins, so a broader pattern in an earlier
-layer beats an exact node in a later one. At most 4096 `(UUID, pattern)` overrides
-can exist. Overrides survive reconnects and reloads within this process but reset
-on restart. Persist application policy in the store or group memberships, or
-refresh it from a service when needed.
-
-A committed reload updates configured v2 grants and groups for existing players
-while their callback source and command registrations stay pinned. Overrides continue to
-apply until explicitly reset. A candidate or rejected reload changes no live
-grants. Commands check permission before invoking Lua, including after worker
-scheduling; transfers and queue admission see updated permissions through their
-existing `before_transfer` policy. Revocation does not eject someone already on
-a server or undo an action whose authorization check has completed. The extension
-example optionally refreshes a staff grant from HTTP and revokes it before each
-request so a failed refresh leaves that grant denied.
+Permission groups, memberships, live grants and their Lua API (`rift.permissions`
+with `api_version = 3`) are described in [permissions](permissions.md). The
+`extensions.groups` table is mirrored into the permission store on every
+committed reload; [groups as configuration](permissions.md#groups-as-configuration)
+lists its fields. Persistent plugins reach the same store through the
+contract's `permissions` interface, described in
+[permissions](permissions.md#persistent-plugins). Backend plugins can ask
+whether a player is in a group with the `RiftInGroup` request on the
+[BungeeCord channel](bungeecord.md#rift-requests).
 
 ### Online players
 
@@ -583,7 +497,7 @@ rift.config.plugins.commands.alert = {
     run = function(ctx)
         local sent = 0
         for _, player in ipairs(rift.players.list()) do
-            if rift.permissions.has(player.uuid, "network.staff")
+            if rift.permissions.check(player.uuid, "network.staff") == true
                 and rift.players.message(player.uuid, "[Staff] " .. ctx.name .. ": " .. ctx.args)
             then
                 sent = sent + 1
@@ -595,7 +509,7 @@ rift.config.plugins.commands.alert = {
 ```
 
 `rift.players` lists the players who are in a world on this Rift process and
-queues actions for them. It works in callbacks, jobs, and (with API v2)
+queues actions for them. It works in callbacks, jobs, and (with API v2 or v3)
 `on_message` and `on_http`, so a messaging handler can relay cross-server chat or
 an HTTP endpoint can kick a player. A `player` argument is a lowercase UUID
 (32 hex digits, no hyphens) or a case-insensitive name. A `server` argument
@@ -634,9 +548,9 @@ footer across server switches until the next call or disconnect, and
 
 ```lua
 rift.config.plugins = {
-    api_version = 2,
+    api_version = 3,
     join = function(ctx)
-        if rift.permissions.has(ctx.uuid, "network.vip") then
+        if rift.permissions.check(ctx.uuid, "network.vip") == true then
             rift.players.tab_list(ctx.uuid, { header = { text = "VIP Lounge", color = "light_purple" } })
         end
     end,

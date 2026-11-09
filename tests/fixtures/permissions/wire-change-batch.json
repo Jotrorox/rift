@@ -1,0 +1,16 @@
+{
+  "kind": "wire",
+  "name": "change-batch",
+  "type": "change",
+  "json": {
+    "op": "batch",
+    "changes": [
+      {"op": "create_group", "name": "vip", "weight": 0},
+      {
+        "op": "set_node",
+        "subject": {"group": "vip"},
+        "node": {"kind": "permission", "key": "fly", "value": true}
+      }
+    ]
+  }
+}

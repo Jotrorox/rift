@@ -288,6 +288,64 @@ fn already_connected() -> io::Error {
     )
 }
 
+/// The UUID an offline-mode server gives `name`: a version 3 UUID of the MD5
+/// of `OfflinePlayer:<name>`, as vanilla and Bukkit compute it. Pumpkin
+/// derives its own (the first 16 bytes of SHA-256 of the name); sessions then
+/// use the UUID the backend confirms at login.
+pub fn offline_uuid(name: &str) -> [u8; 16] {
+    let mut digest = md5(format!("OfflinePlayer:{name}").as_bytes());
+    digest[6] = (digest[6] & 0x0f) | 0x30;
+    digest[8] = (digest[8] & 0x3f) | 0x80;
+    digest
+}
+
+/// RFC 1321 MD5, only for offline UUIDs; never for security.
+fn md5(input: &[u8]) -> [u8; 16] {
+    const SHIFTS: [u32; 64] = [
+        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5,
+        9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10,
+        15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+    ];
+    let table: [u32; 64] =
+        std::array::from_fn(|i| ((i as f64 + 1.0).sin().abs() * 4_294_967_296.0) as u32);
+    let mut message = input.to_vec();
+    let bits = (input.len() as u64).wrapping_mul(8);
+    message.push(0x80);
+    while message.len() % 64 != 56 {
+        message.push(0);
+    }
+    message.extend_from_slice(&bits.to_le_bytes());
+    let mut state: [u32; 4] = [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476];
+    for chunk in message.as_chunks::<64>().0 {
+        let words: [u32; 16] = std::array::from_fn(|i| {
+            u32::from_le_bytes(chunk[i * 4..i * 4 + 4].try_into().expect("four bytes"))
+        });
+        let [mut a, mut b, mut c, mut d] = state;
+        for i in 0..64 {
+            let (f, g) = match i / 16 {
+                0 => ((b & c) | (!b & d), i),
+                1 => ((d & b) | (!d & c), (5 * i + 1) % 16),
+                2 => (b ^ c ^ d, (3 * i + 5) % 16),
+                _ => (c ^ (b | !d), (7 * i) % 16),
+            };
+            let rotated = a
+                .wrapping_add(f)
+                .wrapping_add(table[i])
+                .wrapping_add(words[g])
+                .rotate_left(SHIFTS[i]);
+            (a, b, c, d) = (d, b.wrapping_add(rotated), b, c);
+        }
+        for (word, value) in state.iter_mut().zip([a, b, c, d]) {
+            *word = word.wrapping_add(value);
+        }
+    }
+    let mut digest = [0; 16];
+    for (index, word) in state.iter().enumerate() {
+        digest[index * 4..index * 4 + 4].copy_from_slice(&word.to_le_bytes());
+    }
+    digest
+}
+
 pub(crate) fn valid_username(name: &str) -> bool {
     (1..=16).contains(&name.len())
         && name
@@ -298,6 +356,22 @@ pub(crate) fn valid_username(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn offline_uuids_match_bukkit() {
+        assert_eq!(
+            md5(b""),
+            [
+                0xd4, 0x1d, 0x8c, 0xd9, 0x8f, 0x00, 0xb2, 0x04, 0xe9, 0x80, 0x09, 0x98, 0xec, 0xf8,
+                0x42, 0x7e
+            ]
+        );
+        // python3 -c 'import uuid,hashlib;print(uuid.UUID(bytes=hashlib.md5(b"OfflinePlayer:Notch").digest(),version=3).hex)'
+        assert_eq!(
+            rift_permissions::Uuid::from_bytes(offline_uuid("Notch")).to_string(),
+            "b50ad385829d3141a2167e7d7539ba7f"
+        );
+    }
 
     #[test]
     fn presence_tracks_switches_and_cleans_up_on_drop() {

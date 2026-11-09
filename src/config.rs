@@ -17,6 +17,7 @@ pub use crate::{http_script::HttpScript, script::RouteScript};
 pub use managed::ManagedServer;
 pub use messaging::{MessagingConfig, MessagingPrincipal, MessagingStream, MessagingSubscription};
 pub use nodes::{LOCAL_NODE, NodeConfig, NodeSelector, Placement, valid_node_directory};
+pub use permissions::PermissionsConfig;
 pub use services::{InstanceStorage, ServiceGroup, ServiceInstance, ServiceScaling};
 pub use status::{
     StatusBackend, StatusConfig, StatusExposure, StatusLink, StatusPage, StatusPanels,
@@ -26,6 +27,7 @@ pub use templates::ServerTemplate;
 mod managed;
 mod messaging;
 mod nodes;
+mod permissions;
 mod server_list;
 mod services;
 mod status;
@@ -85,6 +87,8 @@ pub struct Config {
     pub server_list: Option<ServerList>,
     /// Rift-owned tab list header/footer and optional network-wide entries.
     pub tab_list: Option<crate::tab_list::TabList>,
+    /// Permission store limits and the contexts backends may report.
+    pub permissions: PermissionsConfig,
     pub metrics: Option<SocketAddr>,
     pub admin: Option<Admin>,
     pub maintenance: bool,
@@ -195,6 +199,7 @@ pub const ADMIN_PERMISSIONS: &[&str] = &[
     "servers",
     "plugins",
     "logs",
+    "perms",
 ];
 
 /// Grants available to named `web.operators`.
@@ -209,10 +214,12 @@ pub const WEB_PERMISSIONS: &[&str] = &[
     "extensions",
     "files",
     "plugins",
+    "perms",
 ];
 
-/// These grants can affect the whole proxy, so they require unrestricted scope.
-const UNSCOPED_WEB_PERMISSIONS: &[&str] = &["config", "deploy", "extensions", "plugins"];
+/// These grants can affect or reveal the whole proxy, so they require
+/// unrestricted scope. Permission data is network-wide, so `perms` is here too.
+const UNSCOPED_WEB_PERMISSIONS: &[&str] = &["config", "deploy", "extensions", "plugins", "perms"];
 
 /// Identities that Rift itself records in operator audit logs.
 const RESERVED_OPERATOR_NAMES: &[&str] = &[
@@ -357,6 +364,7 @@ impl Config {
             status_cache: None,
             server_list: None,
             tab_list: None,
+            permissions: PermissionsConfig::default(),
             metrics: None,
             admin: None,
             maintenance: false,
@@ -524,6 +532,7 @@ impl Config {
                     "status_cache",
                     "server_list",
                     "tab_list",
+                    "permissions",
                     "metrics",
                     "admin",
                     "maintenance",
@@ -738,6 +747,7 @@ impl Config {
             .transpose()?;
             let server_list = server_list::parse(&root, directory)?;
             let tab_list = tab_list::parse(&root)?;
+            let permissions = permissions::parse(&root)?;
             let metrics = match root.get::<Value>("metrics").map_err(|e| e.to_string())? {
                 Value::Nil | Value::Boolean(false) => None,
                 value => Some(
@@ -850,6 +860,7 @@ impl Config {
                 status_cache,
                 server_list,
                 tab_list,
+                permissions,
                 metrics,
                 admin,
                 maintenance,
@@ -910,6 +921,13 @@ impl Config {
             if !self.authentication.online_mode {
                 return Err(invalid("extensions requires authentication.online_mode"));
             }
+            if extensions.legacy_grants().is_some() {
+                return Err(invalid(
+                    "extensions.permissions was removed: grant nodes with rift.permissions.user(uuid):set(node, true) in an extensions.api_version = 3 callback, with extensions.groups, or in the dashboard. Rift copies these grants into the permission store once when it starts (see docs/permissions.md); then delete the field",
+                ));
+            }
+            permissions::validate_groups(extensions.config_groups(), &self.permissions.limits)
+                .map_err(invalid)?;
             for (backend, capacity) in &extensions.queues {
                 if !(1..=100_000).contains(capacity) {
                     return Err(invalid("extensions.queues: capacity must be 1..=100000"));
@@ -1167,7 +1185,7 @@ impl Config {
                         .any(|p| UNSCOPED_WEB_PERMISSIONS.contains(&p.as_str()))
                     {
                         return Err(invalid(format!(
-                            "{path}: config, deploy, extensions and plugins require unrestricted group access"
+                            "{path}: config, deploy, extensions, plugins and perms require unrestricted group access"
                         )));
                     }
                 }

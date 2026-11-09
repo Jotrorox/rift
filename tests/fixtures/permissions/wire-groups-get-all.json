@@ -1,0 +1,7 @@
+{
+  "kind": "wire",
+  "name": "groups-get-all",
+  "description": "An empty request lists every group without permission nodes.",
+  "type": "groups_get_request",
+  "json": {}
+}

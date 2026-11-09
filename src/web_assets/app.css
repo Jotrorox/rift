@@ -188,7 +188,7 @@ input:focus-visible,select:focus-visible,textarea:focus-visible{outline:3px soli
 tbody tr[aria-current=true] td{background:var(--accent-soft)}
 td.unlisted{color:var(--secondary)}
 
-/* Server list favicon and permission group memberships. */
+/* Server list favicon and chips (parent groups). */
 .favicon-row{display:flex;align-items:center;gap:12px;padding:0 var(--pad) 14px}
 .favicon-row img{width:64px;height:64px;border:1px solid var(--separator);border-radius:8px;image-rendering:pixelated}
 .chip-list{display:flex;flex-wrap:wrap;gap:6px}
@@ -197,6 +197,29 @@ td.unlisted{color:var(--secondary)}
 .chip button:hover:not(:disabled){background:var(--fill-strong);color:var(--label)}
 .chip button:disabled{opacity:.4;cursor:default}
 .chip button:focus-visible{outline:3px solid var(--accent-soft);outline-offset:1px;box-shadow:0 0 0 1px var(--link)}
+
+/* Permission views: the group tree, track order and revision diffs. */
+td.tree-depth-1{padding-left:calc(var(--pad) + 18px)}
+td.tree-depth-2{padding-left:calc(var(--pad) + 36px)}
+td.tree-depth-3{padding-left:calc(var(--pad) + 54px)}
+td.tree-depth-4{padding-left:calc(var(--pad) + 72px)}
+td.tree-depth-5{padding-left:calc(var(--pad) + 90px)}
+td:is(.tree-depth-1,.tree-depth-2,.tree-depth-3,.tree-depth-4,.tree-depth-5)>button:first-child:before{content:"↳";margin-right:6px;color:var(--secondary)}
+th.group-row{padding-top:14px;background:var(--surface);color:var(--label);font-size:.8125rem}
+.chip-row{padding:0 var(--pad) 12px}
+.flush-heading{margin:4px 0 8px;font-size:.8125rem;font-weight:600;color:var(--label)}
+.track-list{counter-reset:track;display:grid;gap:6px;margin:0;padding:0 var(--pad) 14px;list-style:none}
+.track-list li{display:flex;align-items:center;gap:12px;min-height:40px;padding:4px 6px 4px 12px;border:1px solid var(--separator);border-radius:var(--control);background:var(--well)}
+.track-list li>span:first-child{flex:1}
+.track-list li:not(.muted):before{counter-increment:track;content:counter(track) ".";min-width:2ch;color:var(--secondary);font-variant-numeric:tabular-nums}
+td.diff-cell{background:var(--well)}
+tbody tr:hover td.diff-cell{background:var(--well)}
+.diff-title{margin:0 0 6px;font-size:.8125rem;font-weight:600}
+.diff{margin:0 0 14px;padding:10px 12px;border:1px solid var(--separator);border-radius:var(--control);background:var(--surface);font:.8125rem/1.6 var(--mono);white-space:pre-wrap;overflow-wrap:anywhere}
+.diff:last-child{margin-bottom:0}
+.diff-add{color:var(--green);background:var(--green-soft)}
+.diff-del{color:var(--red);background:var(--red-soft)}
+.diff-same{color:var(--secondary)}
 
 /* Editor and log output. */
 .config-meta{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;padding:12px var(--pad);color:var(--secondary);font-size:.8125rem;overflow-wrap:anywhere}
