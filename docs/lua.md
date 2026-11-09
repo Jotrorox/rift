@@ -152,8 +152,8 @@ end)
 
 -- Requires online authentication, Velocity forwarding and a permission grant.
 rift.config.extensions = {
-    api_version = 1,
-    permissions = { ["*"] = { ["greeting.hello"] = true } },
+    api_version = 2,
+    groups = { default = { permissions = { ["greeting.hello"] = true } } },
 }
 rift.command("hello", {
     permission = "greeting.hello",

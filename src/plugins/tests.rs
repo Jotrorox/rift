@@ -612,6 +612,70 @@ async fn command_names_have_exactly_one_owner() {
 }
 
 #[tokio::test]
+async fn plugin_permissions_read_and_write_the_permission_store() {
+    use rift_permissions::{Actor, Change, Source, Uuid};
+    let root = directory();
+    let mocks = Mocks::default();
+    let player = "01".repeat(16);
+    let mut plan = Plan::new(|event, _| Ok(Reply::default_for(event.hook())));
+    let uuid = player.clone();
+    plan.init = Arc::new(move |_, services| {
+        let permissions = services.permissions();
+        assert!(!permissions.has(&uuid, "chat.color"));
+        permissions.set(&uuid, "chat.color", Some(true))?;
+        permissions.set(&uuid, "chat.shout", Some(false))?;
+        permissions.set("*", "chat.join", Some(true))?;
+        assert!(permissions.has(&uuid, "chat.color"));
+        assert!(permissions.has(&uuid, "chat.join"));
+        assert!(!permissions.has(&uuid, "chat.shout"));
+        assert_eq!(permissions.check(&uuid, "chat.shout", None)?, Some(false));
+        assert_eq!(permissions.check(&uuid, "chat.other", None)?, None);
+        permissions.set(&uuid, "chat.shout", None)?;
+        assert_eq!(permissions.check(&uuid, "chat.shout", None)?, None);
+        assert!(permissions.add_group(&uuid, "vip")?);
+        assert!(!permissions.add_group(&uuid, "vip")?, "already a member");
+        assert_eq!(permissions.groups(&uuid), ["vip", "default"]);
+        assert!(permissions.has(&uuid, "kit.vip"), "inherited from vip");
+        assert!(permissions.remove_group(&uuid, "vip")?);
+        assert!(!permissions.remove_group(&uuid, "vip")?);
+        assert_eq!(permissions.groups(&uuid), ["default"]);
+        let groups: serde_json::Value = serde_json::from_str(&permissions.list_groups()).unwrap();
+        assert_eq!(groups["vip"]["weight"], 10, "{groups}");
+        assert!(permissions.set("not-a-uuid", "a", Some(true)).is_err());
+        assert!(!permissions.has("not-a-uuid", "chat.color"));
+        Ok(())
+    });
+    mocks.plan("keeper", plan);
+    let broker = Broker::default();
+    let config = config("", vec![spec(&root, "keeper", "", "{}")]);
+    let runtime = Extensions::with_engines(&config, broker.clone(), None, mocks.engines()).unwrap();
+    let authority = runtime.permissions().clone();
+    for change in [
+        Change::CreateGroup {
+            name: "vip".into(),
+            weight: 10,
+            display_name: None,
+        },
+        Change::SetNode {
+            subject: rift_permissions::SubjectRef::Group("vip".into()),
+            node: rift_permissions::Node::permission("kit.vip", true).unwrap(),
+        },
+    ] {
+        authority.apply(Actor::Cli, change).unwrap();
+    }
+    runtime.plugins().start().await.unwrap();
+    let user = authority.user(Uuid::parse(&player).unwrap()).unwrap();
+    assert_eq!(user.nodes.len(), 1, "{:?}", user.nodes);
+    assert_eq!(user.nodes[0].source, Source::Plugin("keeper".into()));
+    let query = crate::permissions::LogQuery {
+        actor: Some(Actor::Lua("plugin:keeper".into())),
+        ..Default::default()
+    };
+    // One revision per write that changed something; no-ops record none.
+    assert_eq!(authority.log(&query).unwrap().len(), 6);
+}
+
+#[tokio::test]
 async fn plugin_commands_check_permissions_and_suggest() {
     let root = directory();
     let mocks = Mocks::default();

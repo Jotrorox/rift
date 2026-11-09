@@ -62,7 +62,7 @@ fn priority(value: &Value) -> mlua::Result<i32> {
 }
 
 /// A context table: keys to a string or a list of strings.
-fn contexts(value: &Value) -> mlua::Result<ContextSet> {
+pub(crate) fn contexts(value: &Value) -> mlua::Result<ContextSet> {
     let mut set = ContextSet::new();
     match value {
         Value::Nil => {}

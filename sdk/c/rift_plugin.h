@@ -514,15 +514,16 @@ extern bool rift_plugin_store_increment(rift_plugin_string_t *namespace_, rift_p
 extern bool rift_plugin_store_list(rift_plugin_string_t *namespace_, rift_plugin_string_t *prefix, rift_plugin_list_tuple2_string_list_u8_t *ret, rift_plugin_string_t *err);
 
 // Imported Functions from `rift:plugin/permissions@0.1.0`
+// Whether the node is true in the player's current contexts.
 extern bool rift_plugin_permissions_has(rift_plugin_string_t *uuid, rift_plugin_string_t *node);
-// `none` removes a direct grant or denial.
+// Set the user's global permission node; `none` removes it.
 extern bool rift_plugin_permissions_set(rift_plugin_string_t *uuid, rift_plugin_string_t *node, bool *maybe_value, rift_plugin_string_t *err);
 // Returns whether membership changed.
 extern bool rift_plugin_permissions_add_group(rift_plugin_string_t *uuid, rift_plugin_string_t *group, bool *ret, rift_plugin_string_t *err);
 extern bool rift_plugin_permissions_remove_group(rift_plugin_string_t *uuid, rift_plugin_string_t *group, bool *ret, rift_plugin_string_t *err);
 // The player's groups, including inherited and `default`.
 extern void rift_plugin_permissions_groups(rift_plugin_string_t *uuid, rift_plugin_list_string_t *ret);
-// The configured groups with their permissions, as a JSON object.
+// Every group with its weight, display name and nodes, as a JSON object.
 extern void rift_plugin_permissions_list_groups(rift_plugin_string_t *ret);
 
 // Imported Functions from `rift:plugin/bus@0.1.0`
