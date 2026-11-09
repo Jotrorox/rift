@@ -919,6 +919,7 @@ mod tests {
             publish,
             subscribe,
             control,
+            players: false,
         }
     }
 

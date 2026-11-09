@@ -16,6 +16,7 @@ pub mod messaging;
 pub mod node;
 pub mod permissions;
 pub mod players;
+pub mod players_service;
 pub mod plugins;
 pub mod preflight;
 pub mod protocol;

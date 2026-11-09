@@ -10,6 +10,7 @@ fn identity() -> Identity {
         publish: vec!["game.>".into(), "_INBOX.>".into()],
         subscribe: vec!["game.>".into(), "_INBOX.>".into()],
         control: false,
+        players: false,
     }
 }
 fn configs() -> (quinn::ServerConfig, quinn::ClientConfig) {
@@ -75,6 +76,45 @@ fn wildcard_permissions_require_containment_not_overlap() {
     assert!(peer.can_subscribe(">").is_ok());
     assert!(peer.can_publish("rift.control.reload", None).is_ok());
     assert!(peer.can_publish("rift.events.player", None).is_err());
+}
+
+#[test]
+fn the_player_api_needs_its_own_grant_and_only_control_may_answer_it() {
+    let mut peer = identity();
+    peer.publish = vec![
+        "rift.players.*".into(),
+        "rift.control.*".into(),
+        "_INBOX.>".into(),
+    ];
+    peer.subscribe = vec![">".into()];
+    // A publish grant alone is not enough, as for `rift.control`.
+    assert!(peer.can_publish("rift.players.kick", None).is_err());
+    peer.players = true;
+    assert!(
+        peer.can_publish("rift.players.kick", Some("_INBOX.a"))
+            .is_ok()
+    );
+    assert!(
+        peer.can_publish("rift.players.kick", Some("game.x"))
+            .is_err()
+    );
+    // `players` is not `control`.
+    assert!(peer.can_publish("rift.control.stop", None).is_err());
+    // Receiving player requests would expose every caller's actions and
+    // let the subscriber answer in Rift's place.
+    for pattern in [
+        "rift.players.kick",
+        "rift.players.*",
+        "rift.players.>",
+        "rift.*.kick",
+        "rift.players",
+    ] {
+        assert!(peer.can_subscribe(pattern).is_err(), "{pattern}");
+    }
+    peer.control = true;
+    assert!(peer.can_subscribe("rift.players.*").is_ok());
+    peer.players = false;
+    assert!(peer.can_publish("rift.players.kick", None).is_err());
 }
 
 #[test]
@@ -464,6 +504,7 @@ async fn plugin_connections_are_capped_per_identity_and_never_crowd_out_nodes() 
         publish: vec![],
         subscribe: vec![],
         control: false,
+        players: false,
     };
     let server = Server::bind(
         "127.0.0.1:0".parse().unwrap(),

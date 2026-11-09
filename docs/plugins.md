@@ -10,7 +10,7 @@ runs:
 | --- | --- | --- | --- |
 | **script** | `rift.lua`, its modules and script-mode plugin folders, in the sandboxed configuration VM | Sandboxed: instruction and memory budgets, no I/O | `rift.on`, `rift.command`, `rift.config.plugins`, `rift.plugin` for a folder without a persistent manifest |
 | **persistent** | A plugin folder installed on disk with a `plugin.toml`, running in its own long-lived Lua state or WebAssembly instance on its own OS thread | Trusted: runs with Rift's process privileges | `rift.plugin(name, config)` |
-| **remote** | A service on the [message bus](messaging.md) that answers `login`, `initial_server` and `before_transfer` | Whatever the service is; Rift only reads its replies | `rift.config.plugins.decisions` |
+| **remote** | A service on the [message bus](messaging.md) that answers `login`, `initial_server` and `before_transfer`, and calls the `players` interface as [`rift.players.*`](messaging.md#player-api-subjects) | Whatever the service is; Rift only reads its replies and checks its login's grants | `rift.config.plugins.decisions`, `messaging.principals` |
 
 Persistent plugins come in two engines: [Lua](plugins-lua.md) (LuaJIT, the
 same `rift` API as `rift.lua`) and WebAssembly components written in
@@ -398,7 +398,9 @@ appear in the [operator audit log](http.md#authentication-and-access) as
 `plugin started`, `plugin stopped`, `plugin restarting`, `plugin failed`,
 `plugin reloaded` and `plugin reload_failed` by `system`, and operator
 restarts as `plugin restart_requested` by the operator (`local-admin` for the
-admin socket, `rift.control` for the bus, a name no web operator can have). Records carry the plugin name, never
+admin socket; on the bus `bus:<login>`, `plugin:<name>` for another plugin
+and `rift.control` for the configuration script, names no web operator can
+have). Records carry the plugin name, never
 error text. The HTTP and admin requests themselves are audited as usual.
 
 **Metrics** on the status service's `/metrics`:

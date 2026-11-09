@@ -47,6 +47,9 @@ pub struct Identity {
     pub publish: Vec<String>,
     pub subscribe: Vec<String>,
     pub control: bool,
+    /// May publish on `rift.players.*` (with a matching publish grant):
+    /// message, kick and transfer players without `control`.
+    pub players: bool,
 }
 impl std::fmt::Debug for Identity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -55,6 +58,7 @@ impl std::fmt::Debug for Identity {
             .field("publish", &self.publish)
             .field("subscribe", &self.subscribe)
             .field("control", &self.control)
+            .field("players", &self.players)
             .finish_non_exhaustive()
     }
 }
@@ -151,6 +155,7 @@ impl Identity {
             || reserved(subject, "rift.perms.update")
             || reserved(subject, rift_permissions::wire::CHANGES)
             || (!self.control && reserved(subject, "rift.control"))
+            || (!self.players && reserved(subject, crate::players_service::PREFIX))
             || (reserved(subject, "rift.node") && !self.node_scope(subject))
             || !self.publish.iter().any(|p| covers(p, subject))
         {
@@ -168,6 +173,10 @@ impl Identity {
         validate_pattern(pattern)?;
         if (!self.control
             && (overlaps(pattern, "rift.control.>") || covers(pattern, "rift.control")))
+            // A subscriber to player requests could read every caller's
+            // kicks and answer them in Rift's place.
+            || (!self.control
+                && (overlaps(pattern, "rift.players.>") || covers(pattern, crate::players_service::PREFIX)))
             // Node commands carry secrets such as the forwarding secret.
             || (!self.control
                 && !self.node_scope(pattern)

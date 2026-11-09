@@ -130,6 +130,7 @@ rift.config.managed_servers.survival={{node='node1',directory='survival',
                     publish,
                     subscribe,
                     control: false,
+                    players: false,
                 }],
                 ..Default::default()
             },

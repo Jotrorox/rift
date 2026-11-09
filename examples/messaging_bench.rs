@@ -67,6 +67,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             publish: vec!["bench.>".into()],
             subscribe: vec!["bench.>".into()],
             control: false,
+            players: false,
         }],
         ..Default::default()
     };
