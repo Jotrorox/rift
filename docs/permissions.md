@@ -293,7 +293,7 @@ switch, before the `join` and `after_transfer` callbacks. `player` has `uuid`,
 ## Persistent plugins
 
 Persistent [plugins](plugins.md), in Lua or WebAssembly, use the store through
-the `permissions` interface of the plugin contract (`rift:plugin@0.1.0`). Its
+the `permissions` interface of the plugin contract (`rift:plugin@0.1`). Its
 six calls keep their signatures and map onto the store like this:
 
 | Contract call | In the permission store |

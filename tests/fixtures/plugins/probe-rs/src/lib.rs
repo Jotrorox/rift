@@ -6,7 +6,11 @@
 //!   and `join`.
 //! - `reload(config)`: fails when `config.fail` is set.
 //! - `login(ctx)`: name `Spin` loops forever, name `Trap` panics (a trap
-//!   after the panic message on stderr), anyone else continues.
+//!   after the panic message on stderr), name `Dialog` is shown a dialog with
+//!   a text input `answer` and a `dynamic/custom` action `reply` (additions
+//!   `{"round": 1}`) and continues, anyone else continues.
+//! - `dialog(response)`: messages the player `<action> <values> <payload>`.
+//!   The registration does not list it: dialog clicks need none.
 //! - `join(ctx)`: name `Spin` loops forever.
 //! - `command(ctx)`: prints `probe stdout <args>` and a partial line to
 //!   stdout, then replies with a JSON report of what the guest can see:
@@ -14,7 +18,9 @@
 //!   `meta.data-dir` and
 //!   `meta.config-dir`, the environment's variable names and the outcome of
 //!   a TCP connection to 127.0.0.1:9.
-use rift_plugin::{Action, CommandSpec, Context, Hook, Plugin, Registration, meta};
+use rift_plugin::{
+    Action, CommandSpec, Context, DialogResponse, Hook, Plugin, Registration, meta, players,
+};
 use serde::Deserialize;
 use std::io::Write;
 
@@ -54,8 +60,36 @@ impl Plugin for Probe {
         match ctx.name.as_str() {
             "Spin" => spin(),
             "Trap" => panic!("probe trap"),
+            "Dialog" => {
+                let shown = players::show_dialog(
+                    &ctx.uuid,
+                    &serde_json::json!({
+                        "type": "notice",
+                        "title": "Probe",
+                        "inputs": [{"type": "text", "key": "answer", "label": "Answer"}],
+                        "action": {"label": "Reply", "action": {
+                            "type": "dynamic/custom", "id": "reply", "additions": {"round": 1},
+                        }},
+                    }),
+                );
+                assert_eq!(shown, Ok(true));
+                // Invalid dialogs are the plugin's error, not the player's.
+                let invalid = players::dialog(&ctx.uuid, r#"{"type":"notice"}"#);
+                assert!(invalid.unwrap_err().contains("title is required"));
+                Action::Continue
+            }
             _ => Action::Continue,
         }
+    }
+
+    fn dialog(&mut self, response: DialogResponse) {
+        let text = format!(
+            "{} {} {}",
+            response.action,
+            response.values_json,
+            response.payload_json.as_deref().unwrap_or("-")
+        );
+        let _ = players::message(&response.ctx.uuid, &text);
     }
 
     fn join(&mut self, ctx: Context) {

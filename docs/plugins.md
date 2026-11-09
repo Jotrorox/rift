@@ -2,7 +2,7 @@
 
 Rift has one plugin system. A plugin is anything that receives Rift's events
 and calls Rift's host API, and every plugin uses the same contract,
-[`wit/rift-plugin.wit`](../wit/rift-plugin.wit) (`rift:plugin@0.1.0`): one
+[`wit/rift-plugin.wit`](../wit/rift-plugin.wit) (`rift:plugin@0.1.1`): one
 event schema, one set of answers, one host API. What differs is where the code
 runs:
 
@@ -153,6 +153,7 @@ list from `rift.on`, `rift.command`, timers and subscriptions.
 | `message` | observer | a message on a subscription the plugin made | none (queued; interrupted after 60 s) | – |
 | `timer` | observer | a tick of a timer the plugin started | none (queued; interrupted after 60 s) | – |
 | `event` | observer | a `rift.events.*` publication | none (queued; interrupted after 60 s) | – |
+| `dialog` | observer, owner only | a click on a plugin action of a [dialog](dialogs.md) the plugin showed | none (queued; interrupted after 60 s) | – |
 | `init`, `reload`, `shutdown` | lifecycle | registration / ok / none | 30 s / 5 s / 10 s | init fails the plugin; reload keeps the old configuration |
 
 Player hooks (`login`, `initial_server`, `before_transfer`, `command`,
@@ -194,7 +195,9 @@ them; the script's observers run separately, as before. Each command has
 exactly one owner: the configuration script or one persistent plugin. A name
 registered twice, by two plugins or by a plugin and the script, is a load
 error. `message` and `timer` go only to the plugin that made the subscription
-or timer; `event` goes to every plugin that registered it.
+or timer; `event` goes to every plugin that registered it. `dialog` goes only
+to whoever showed the dialog (the script or one plugin) and needs no entry in
+`registration.hooks`: the WIT `hook` enum has no case for it.
 
 ## Lifecycle, failures, restarts and reloads
 
@@ -277,7 +280,7 @@ and the SDK guides map it to each language.
 
 | Interface | Functions | Notes |
 | --- | --- | --- |
-| `players` | `list(server?)`, `get(target)`, `names(prefix?)`, `message`, `action-bar`, `title`, `tab-list`, `boss-bar`, `kick`, `transfer`, `broadcast` | `target` is a name, a UUID or a connection id. Actions return whether the player was online. Transfers pass `before_transfer`. |
+| `players` | `list(server?)`, `get(target)`, `names(prefix?)`, `message`, `action-bar`, `title`, `tab-list`, `boss-bar`, `dialog`, `clear-dialog`, `kick`, `transfer`, `broadcast` | `target` is a name, a UUID or a connection id. Actions return whether the player was online. Transfers pass `before_transfer`. `dialog` and `clear-dialog` (since 0.1.1) show and close [dialogs](dialogs.md). |
 | `store` | `get`, `set`, `delete`, `increment`, `list(namespace, prefix)` | The durable store shared with API v2. Namespaces are private: `plugin.<name>.<namespace>`, which the configuration script's `rift.store` cannot read or write. |
 | `permissions` | `has`, `set`, `add-group`, `remove-group`, `groups`, `list-groups` | Rift's [permission store](permissions.md#persistent-plugins): user nodes and group memberships, checked in the player's current contexts. |
 | `bus` | `publish`, `request(subject, payload, timeout_ms)`, `subscribe(subject, queue_group?)`, `unsubscribe`, `stream-publish` | Messages arrive through the `message` hook. At most 256 subscriptions; requests wait at most 60 s. |
@@ -423,7 +426,18 @@ deadline interrupts, captured output and compilation cache are described in
 The WIT keeps guests in C and Go pleasant: WASI 0.2 without `async`, `stream`
 or `future`; no `resource` types (host-managed things are `u64` handles); plain
 records, variants and lists; configuration and free-form payloads as JSON
-strings; every hook an export with a default in each SDK. Additive changes bump
-the minor version; breaking changes move to 1.0. Guests build against world
-`plugin`, which includes the WASI CLI imports; world `core` is the same without
-WASI.
+strings; every hook an export with a default in each SDK. Guests build
+against world `plugin`, which includes the WASI CLI imports; world `core` is the
+same without WASI.
+
+Additions keep compiled components loading. Wasmtime matches interface
+versions on the `0.1` track, so a component built against `0.1.0` links
+against this `0.1.1` host and the other way round. An addition may bring new
+host functions, types and interfaces, but never changes an existing type or
+adds a case to an existing enum or variant, since exports are checked exactly.
+A new export lives in its own interface, which the host looks up when it
+loads a component and treats as optional: world `base` holds what every
+component has, world `optional` what later releases added (`dialogs` in
+0.1.1). A host function a component calls needs a host that has it; a
+component that only exports something new still loads on older 0.1 hosts.
+Breaking changes move to 1.0.

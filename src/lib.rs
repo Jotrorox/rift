@@ -2,6 +2,7 @@ pub mod auth;
 pub mod bungeecord;
 pub mod config;
 pub mod database;
+pub mod dialog;
 pub mod extensions;
 pub mod files;
 mod forwarding;

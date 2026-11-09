@@ -34,6 +34,7 @@ const HOOKS: &[&str] = &[
     "disconnect",
     "before_transfer",
     "after_transfer",
+    "dialog",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -242,6 +243,7 @@ impl ExtensionScript {
                 "disconnect",
                 "before_transfer",
                 "after_transfer",
+                "dialog",
                 "commands",
                 "permissions",
                 "groups",
@@ -255,7 +257,14 @@ impl ExtensionScript {
             ],
         )?;
         if api_version == 1 {
-            for name in ["storage", "integrations", "jobs", "groups", "decisions"] {
+            for name in [
+                "storage",
+                "integrations",
+                "jobs",
+                "groups",
+                "decisions",
+                "dialog",
+            ] {
                 if !table.raw_get::<Value>(name)?.is_nil() {
                     return Err(mlua::Error::runtime(format!(
                         "extensions.{name} requires api_version = 2 or later"
@@ -487,6 +496,9 @@ impl ExtensionScript {
                 ctx.set("word", input.word.as_str())?;
                 ctx.set("position", input.position)?;
             }
+            if let Some(dialog) = &input.dialog {
+                dialog_fields(&lua, &ctx, dialog, deadline)?;
+            }
             let permissions = runtime.clone();
             let uuid = input.uuid.clone();
             ctx.set(
@@ -574,6 +586,29 @@ impl ExtensionScript {
         };
         run().map_err(|error| invalid(format!("extensions.on_permission_change: {error:.2048}")))
     }
+}
+
+/// `ctx.action`, `ctx.values` and `ctx.payload` of a `dialog` handler, in
+/// script mode and in persistent Lua plugins alike.
+pub(crate) fn dialog_fields(
+    lua: &mlua::Lua,
+    ctx: &Table,
+    dialog: &crate::dialog::Response,
+    deadline: Instant,
+) -> mlua::Result<()> {
+    ctx.set("action", dialog.action.as_str())?;
+    let values = serde_json::Value::Object(dialog.values.clone());
+    ctx.set(
+        "values",
+        crate::http_script::json_value(lua, &values, 0, deadline)?,
+    )?;
+    if let Some(payload) = &dialog.payload {
+        ctx.set(
+            "payload",
+            crate::http_script::json_value(lua, payload, 0, deadline)?,
+        )?;
+    }
+    Ok(())
 }
 
 /// The actor label of writes made by `on_permission_change` handlers, whose
@@ -750,6 +785,9 @@ pub struct Context {
     /// The argument being completed and its 1-based position, for `suggest`.
     pub word: String,
     pub position: usize,
+    /// `dialog`: the click on a plugin action of a dialog the receiver showed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dialog: Option<crate::dialog::Response>,
 }
 impl Context {
     pub fn authenticated(id: u64, profile: &AuthenticatedProfile) -> Self {
@@ -1073,6 +1111,27 @@ impl Extensions {
             jobs: Arc::new(Semaphore::new(1)),
         })
     }
+    /// Deliver a click on a dialog's plugin action to whoever showed it: the
+    /// configuration script's `dialog` handler, or the persistent plugin of
+    /// that name (queued like other observers). A plugin that is gone, or a
+    /// script without a handler, drops it.
+    pub async fn dialog(
+        &self,
+        mut input: Context,
+        owner: crate::dialog::Owner,
+        response: crate::dialog::Response,
+        jobs: &Arc<Semaphore>,
+    ) -> io::Result<()> {
+        input.dialog = Some(response);
+        match owner {
+            crate::dialog::Owner::Script => {
+                self.call("dialog", &input, jobs).await?;
+            }
+            crate::dialog::Owner::Plugin(name) => self.plugins.dialog(&name, input),
+        }
+        Ok(())
+    }
+
     /// The plugin chain: the Lua hook first because it is cheap and local,
     /// then persistent plugins, then a configured bus decision. Script
     /// commands go to the script only; observers also reach every
@@ -1096,6 +1155,11 @@ impl Extensions {
                 self.plugins.observe(hook, input);
                 result?
             }
+            // A dialog click goes to its owner only; see `Extensions::dialog`.
+            "dialog" => match script {
+                Some(script) => script.await?,
+                None => Action::Continue,
+            },
             _ => self.plugins.decide(hook, input, script).await?,
         };
         self.known_destination(action)
@@ -1356,6 +1420,17 @@ impl ExtensionSession {
             }
         }
     }
+    /// Deliver a dialog click for this player; see [`Extensions::dialog`].
+    pub async fn dialog(
+        &self,
+        owner: crate::dialog::Owner,
+        response: crate::dialog::Response,
+    ) -> io::Result<()> {
+        self.runtime
+            .dialog(self.context.clone(), owner, response, &self.jobs)
+            .await
+    }
+
     async fn notify(&self, hook: &str, input: &Context) {
         if let Err(error) = self.runtime.call(hook, input, &self.jobs).await {
             eprintln!("rift: {error}");

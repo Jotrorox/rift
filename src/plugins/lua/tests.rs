@@ -465,3 +465,60 @@ async fn the_same_handler_body_runs_in_rift_lua_and_as_a_plugin() {
     }
     plugin.plugins().shutdown().await;
 }
+
+#[tokio::test]
+async fn plugins_show_dialogs_and_receive_their_clicks() {
+    let root = folder(
+        "",
+        &[(
+            "init.lua",
+            r#"
+rift.on("login", function(ctx)
+    assert(rift.players.dialog(ctx.uuid, {
+        type = "notice",
+        title = "Welcome",
+        inputs = { { type = "text", key = "nick", label = "Nickname" } },
+        action = { label = "Save", action = { type = "dynamic/custom", id = "save", additions = { step = 2 } } },
+    }))
+    local ok, err = pcall(rift.players.dialog, ctx.uuid, { type = "notice" })
+    assert(not ok and err:find("title is required"), err)
+end)
+rift.on("dialog", function(ctx)
+    rift.players.message(ctx.uuid, ctx.action .. " " .. ctx.values.nick .. " " .. ctx.payload.step)
+end)
+"#,
+        )],
+    );
+    let broker = Broker::default();
+    let runtime = started(&root, "{}", &broker).await;
+    let (_handle, mut actions) = runtime.players().register(1, &[1; 16], "A", 774, "lobby");
+    let player = session(&runtime, 1, "A");
+    assert_eq!(player.decision("login").await.unwrap(), Action::Continue);
+    let Some(crate::extensions::PlayerAction::Dialog { dialog, owner }) = actions.try_recv().ok()
+    else {
+        panic!("expected a dialog");
+    };
+    assert_eq!(owner, crate::dialog::Owner::Plugin("t".into()));
+    let id = dialog.wire()["action"]["action"]["id"].as_str().unwrap();
+    let (response, closes) = dialog
+        .resolve(id, Some(serde_json::json!({"nick": "Steve"})))
+        .unwrap();
+    assert!(closes);
+    player.dialog(owner, response).await.unwrap();
+    let message = tokio::time::timeout(Duration::from_secs(5), actions.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        message,
+        crate::extensions::PlayerAction::Message("save Steve 2".into())
+    );
+    // A click for a plugin that is not configured is dropped.
+    let (response, _) = dialog.resolve(id, None).unwrap();
+    player
+        .dialog(crate::dialog::Owner::Plugin("gone".into()), response)
+        .await
+        .unwrap();
+    runtime.plugins().shutdown().await;
+    assert!(actions.try_recv().is_err());
+}
