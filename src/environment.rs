@@ -71,9 +71,20 @@ pub fn is_protected(name: &str) -> bool {
 /// can still write Rift's files or signal it, and the flag resets on `execve`,
 /// so children are dumpable again (they do not hold Rift's secrets after
 /// [`protect`]). Elsewhere this does nothing.
+///
+/// `RIFT_DUMPABLE=1` skips it, for a debugging session or for monitoring
+/// that counts Rift's descriptors through `/proc/<pid>/fd` (see
+/// docs/operations.md). The variable is read before anything else, so it
+/// cannot be turned on later by a reload.
 pub fn harden_process() {
     #[cfg(target_os = "linux")]
     {
+        if std::env::var_os(KEEP_DUMPABLE).is_some_and(|value| value == "1") {
+            eprintln!(
+                "rift: warning: {KEEP_DUMPABLE}=1: processes of the same user can read Rift's environment and memory, and a crash writes a core dump"
+            );
+            return;
+        }
         // SAFETY: a plain prctl without pointer arguments.
         if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
             eprintln!(
@@ -83,6 +94,9 @@ pub fn harden_process() {
         }
     }
 }
+
+/// Set to `1` to keep Rift dumpable on Linux; see [`harden_process`].
+pub const KEEP_DUMPABLE: &str = "RIFT_DUMPABLE";
 
 /// Valid names for `env` keys and `inherit_env` entries: what a POSIX shell
 /// accepts, so the variable can be read the same way everywhere.

@@ -441,9 +441,15 @@ two side effects:
 - **No core dumps.** A crashing Rift writes no core file, because it would
   contain every secret. Debug a crash with a build run under a debugger
   started by root, or reproduce it on a host without production secrets.
-- **No same-user debugging.** `gdb -p`, `strace -p`, `perf` and `py-spy`-style
-  tools started as Rift's user are refused; run them as root (which has
-  `CAP_SYS_PTRACE`) instead.
+- **No same-user debugging or descriptor inspection.** `gdb -p`, `strace -p`,
+  `perf`, `lsof -p` and monitoring that lists `/proc/<pid>/fd` (open-file
+  counts in process exporters) are refused when they run as Rift's user; run
+  them as root (which has `CAP_SYS_PTRACE`) instead. `/proc/<pid>/status` and
+  `stat` stay readable, so CPU and memory monitoring keeps working.
+
+For a debugging session, start Rift with `RIFT_DUMPABLE=1` to skip this; Rift
+logs a warning at startup. It is read once, before anything else, so a reload
+cannot change it.
 
 This is hygiene, not isolation. Managed servers still run as Rift's user: they
 can read every file Rift can (the configuration, `rift.sqlite3`, the
