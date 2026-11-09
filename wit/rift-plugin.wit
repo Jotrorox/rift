@@ -271,17 +271,18 @@ interface store {
     %list: func(namespace: string, prefix: string) -> result<list<tuple<string, list<u8>>>, string>;
 }
 
-/// Live permissions and durable groups.
+/// Rift's permission store: user nodes and group memberships.
 interface permissions {
+    /// Whether the node is true in the player's current contexts.
     has: func(uuid: string, node: string) -> bool;
-    /// `none` removes a direct grant or denial.
+    /// Set the user's global permission node; `none` removes it.
     set: func(uuid: string, node: string, value: option<bool>) -> result<_, string>;
     /// Returns whether membership changed.
     add-group: func(uuid: string, group: string) -> result<bool, string>;
     remove-group: func(uuid: string, group: string) -> result<bool, string>;
     /// The player's groups, including inherited and `default`.
     groups: func(uuid: string) -> list<string>;
-    /// The configured groups with their permissions, as a JSON object.
+    /// Every group with its weight, display name and nodes, as a JSON object.
     list-groups: func() -> string;
 }
 

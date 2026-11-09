@@ -319,7 +319,7 @@ pub mod store {
     }
 }
 
-/// Live permissions and durable groups.
+/// Rift's permission store: user nodes and group memberships.
 pub mod permissions {
     pub use crate::bindings::rift::plugin::permissions::{
         add_group, groups, has, list_groups, remove_group, set,

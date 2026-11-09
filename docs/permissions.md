@@ -271,6 +271,31 @@ switch, before the `join` and `after_transfer` callbacks. `player` has `uuid`,
 `name` and `server`. Keys must be custom (not `server`, `world`, `dimension` or
 `gamemode`); at most 16 providers.
 
+## Persistent plugins
+
+Persistent [plugins](plugins.md), in Lua or WebAssembly, use the store through
+the `permissions` interface of the plugin contract (`rift:plugin@0.1.0`). Its
+six calls keep their signatures and map onto the store like this:
+
+| Contract call | In the permission store |
+| --- | --- |
+| `has(uuid, node)` | the node in the player's current proxy contexts, like `ctx.has_permission`; undefined is false |
+| `set(uuid, node, some(value))` | sets the user's global permission node; `uuid` `*` sets it on `default` |
+| `set(uuid, node, none)` | unsets that global node |
+| `add-group(uuid, group)` | sets a global `inherit` node; returns whether anything changed |
+| `remove-group(uuid, group)` | unsets the global `inherit` node; returns whether anything changed |
+| `groups(uuid)` | the groups the player is in, in their current contexts: direct, inherited and `default`, in rank order |
+| `list-groups()` | every group as a JSON object keyed by name: `name`, `weight`, `display_name` and `nodes` |
+
+Writes are committed when the call returns and persist like any other store
+change. They are recorded with actor `lua:plugin:<name>`, whatever the
+plugin's engine, and the nodes carry source `plugin:<name>`. Nodes with
+contexts, expiry, meta, tracks and group edits are not part of the contract;
+use the dashboard, `/perms` or `rift.lua` with API v3 for them. Persistent Lua
+plugins also have `rift.permissions.check(uuid, node, contexts?)` (true, false
+or nil) and `rift.permissions.meta(uuid, contexts?)`, as in the Lua API above;
+without contexts they use the player's current ones.
+
 ## LuckPerms import and export
 
 The authority reads the JSON that `/lp export` writes, gzipped or plain:
