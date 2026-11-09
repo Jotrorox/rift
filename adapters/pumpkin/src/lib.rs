@@ -23,6 +23,7 @@ pub mod check;
 pub mod command;
 pub mod config;
 pub mod contexts;
+pub mod forwarding;
 #[cfg(feature = "plugin")]
 mod logging;
 pub mod presence;
