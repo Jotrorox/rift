@@ -24,27 +24,33 @@ fn group_candidates_balance_load_inherit_access_and_expand_fallbacks() {
         .register([1; 16], "Alice", "lobby-1")
         .unwrap();
     assert_eq!(
-        network.initial_candidates("lobby", false, "Bob").unwrap(),
+        network
+            .initial_candidates("lobby", false, "Bob", None)
+            .unwrap(),
         ["lobby-2", "lobby-1", "backup"]
     );
     assert_eq!(
-        network.initial_candidates("lobby-1", false, "Bob").unwrap(),
+        network
+            .initial_candidates("lobby-1", false, "Bob", None)
+            .unwrap(),
         ["lobby-1", "backup"]
     );
     assert!(
         network
-            .initial_candidates("lobby", false, "Blocked")
+            .initial_candidates("lobby", false, "Blocked", None)
             .is_err()
     );
     assert!(
         network
-            .initial_candidates("lobby-1", false, "Blocked")
+            .initial_candidates("lobby-1", false, "Blocked", None)
             .is_err()
     );
     assert_eq!(network.recovery_candidates("lobby-1"), ["backup"]);
     drop(player);
     assert_eq!(
-        network.initial_candidates("lobby", false, "Bob").unwrap(),
+        network
+            .initial_candidates("lobby", false, "Bob", None)
+            .unwrap(),
         ["lobby-1", "lobby-2", "backup"]
     );
 }
@@ -104,18 +110,20 @@ fn explicit_initial_order_filters_access_without_using_backend_fallbacks() {
     };
     assert_eq!(
         network
-            .initial_candidates("survival", true, "ALICE")
+            .initial_candidates("survival", true, "ALICE", None)
             .unwrap(),
         ["restricted", "lobby", "backup"]
     );
     assert_eq!(
-        network.initial_candidates("survival", true, "Bob").unwrap(),
+        network
+            .initial_candidates("survival", true, "Bob", None)
+            .unwrap(),
         ["lobby", "backup"]
     );
     // An explicit initial list replaces the direct primary, including its ACL.
     assert_eq!(
         network
-            .initial_candidates("restricted", true, "Eve")
+            .initial_candidates("restricted", true, "Eve", None)
             .unwrap(),
         ["lobby", "backup"]
     );
@@ -131,18 +139,18 @@ fn selected_route_permissions_are_terminal_and_cannot_be_bypassed_by_fallbacks()
         metrics: &metrics,
     };
     let error = network
-        .initial_candidates("restricted", false, "Bob")
+        .initial_candidates("restricted", false, "Bob", None)
         .unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
     assert_eq!(
         network
-            .initial_candidates("restricted", false, "Alice")
+            .initial_candidates("restricted", false, "Alice", None)
             .unwrap(),
         ["restricted", "lobby"]
     );
     assert_eq!(
         network
-            .initial_candidates("missing", false, "Alice")
+            .initial_candidates("missing", false, "Alice", None)
             .unwrap_err()
             .kind(),
         io::ErrorKind::PermissionDenied
@@ -160,13 +168,13 @@ fn ordinary_routes_keep_their_order_and_filter_restricted_fallbacks() {
     };
     assert_eq!(
         network
-            .initial_candidates("survival", false, "Eve")
+            .initial_candidates("survival", false, "Eve", None)
             .unwrap(),
         ["survival", "backup", "lobby"]
     );
     assert_eq!(
         network
-            .initial_candidates("survival", false, "Alice")
+            .initial_candidates("survival", false, "Alice", None)
             .unwrap(),
         ["survival", "restricted", "backup", "lobby"]
     );

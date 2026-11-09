@@ -220,12 +220,19 @@ impl Network<'_> {
         primary: &str,
         use_initial: bool,
         name: &str,
+        uuid: Option<rift_permissions::Uuid>,
     ) -> io::Result<Vec<String>> {
         let config = &self.snapshot.config;
         if !use_initial && !config.can_access(primary, name) {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "You do not have access to this server.",
+            ));
+        }
+        if !use_initial && !self.snapshot.dev_admits(primary, uuid) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "This server is in development mode.",
             ));
         }
         let candidates = if use_initial {
@@ -248,7 +255,7 @@ impl Network<'_> {
             .snapshot
             .candidates(&candidates)
             .into_iter()
-            .filter(|server| config.can_access(server, name))
+            .filter(|server| self.snapshot.admits(server, name, uuid))
             .collect())
     }
 
@@ -431,12 +438,13 @@ impl Network<'_> {
             .identity()
             .ok_or_else(|| io::Error::other("missing player identity"))?;
         let config = &self.snapshot.config;
+        let uuid = expected_uuid(session);
         let expanded = self.snapshot.candidates(candidates);
         let candidates: Vec<_> = expanded
             .iter()
             .filter(|server| {
                 server.as_str() != current
-                    && config.can_access(server, &identity.name)
+                    && self.snapshot.admits(server, &identity.name, uuid)
                     && self.snapshot.reachable(server)
                     && self.serves(server, session)
             })
@@ -531,11 +539,12 @@ impl Network<'_> {
         let Some(identity) = session.identity() else {
             return Vec::new();
         };
+        let uuid = expected_uuid(session);
         config
             .backends
             .keys()
             .chain(config.service_groups.keys())
-            .filter(|name| *name != current && config.can_access(name, &identity.name))
+            .filter(|name| *name != current && self.snapshot.admits(name, &identity.name, uuid))
             .cloned()
             .collect()
     }
@@ -551,6 +560,8 @@ impl Network<'_> {
         let identity = session
             .identity()
             .ok_or_else(|| io::Error::other("missing player identity"))?;
+        let uuid = expected_uuid(session);
+        let admits = |server: &str| self.snapshot.admits(server, &identity.name, uuid);
         let words: Vec<_> = command.split_whitespace().collect();
         let extension_action = if let Some(extension) = &session.extension
             && words.first().is_some_and(|name| extension.intercepts(name))
@@ -573,7 +584,7 @@ impl Network<'_> {
                 Action::Server(target) => (vec![target], None),
                 Action::Message(message) => (Vec::new(), Some(message)),
                 Action::Queue(target) => {
-                    let message = if !config.can_access(&target, &identity.name) {
+                    let message = if !admits(&target) {
                         "You do not have access to that server.".into()
                     } else {
                         match session.extension.as_ref().unwrap().enqueue(&target) {
@@ -596,7 +607,7 @@ impl Network<'_> {
                     let servers: Vec<_> = config
                         .backends
                         .keys()
-                        .filter(|server| config.can_access(server, &identity.name))
+                        .filter(|server| admits(server))
                         .map(String::as_str)
                         .collect();
                     (
@@ -614,15 +625,10 @@ impl Network<'_> {
                     Vec::new(),
                     Some(format!("You are already on {current}.").into()),
                 ),
-                ["server", target]
-                    if !config.is_destination(target)
-                        || !config.can_access(target, &identity.name) =>
-                {
-                    (
-                        Vec::new(),
-                        Some("Server unavailable or you do not have access to it.".into()),
-                    )
-                }
+                ["server", target] if !config.is_destination(target) || !admits(target) => (
+                    Vec::new(),
+                    Some("Server unavailable or you do not have access to it.".into()),
+                ),
                 ["server", target] => (vec![(*target).to_owned()], None),
                 ["hub"] if config.network.hubs.iter().any(|hub| hub == current) => {
                     (Vec::new(), Some("You are already in a hub.".into()))

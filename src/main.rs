@@ -5,6 +5,7 @@ mod check;
 mod control;
 mod dev;
 mod events;
+mod groups;
 mod health;
 mod messaging_runtime;
 mod metrics;
