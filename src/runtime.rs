@@ -2401,6 +2401,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
             .map_err(io::Error::other)?
             .map(|handler| handler.with_players(initial.extensions.player_api()));
     let messaging_controls = crate::messaging_runtime::Controls::new(initial.messaging.clone())?;
+    let player_requests = crate::messaging_runtime::PlayerRequests::new(initial.messaging.clone())?;
     let permission_bus = initial.perms.listen()?;
     initial.addresses = Arc::new(
         initial
@@ -2434,7 +2435,9 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         receiver.clone(),
         metrics.clone(),
         admin_commands.clone(),
+        app.workflows.clone(),
     ));
+    background.spawn(player_requests.run(receiver.clone(), app.workflows.clone()));
     // Subscribe before any plugin starts so its first lifecycle change is
     // audited too.
     background.spawn(audit_plugins(

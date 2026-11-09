@@ -216,6 +216,7 @@ fn applies_joins_and_notifies_through_a_proxy() {
                 "rift.events.permissions".into(),
             ],
             control: false,
+            players: false,
         };
         let auth = AuthConfig {
             identities: vec![identity],
