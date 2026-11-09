@@ -2057,3 +2057,119 @@ async fn relayed_play_packets_keep_the_proxy_dimension_and_game_mode_contexts() 
     .await
     .unwrap();
 }
+
+/// A Custom Click Action (1.21.9–1.21.11) with an optional NBT payload.
+fn custom_click(id: &str, payload: Option<&serde_json::Value>) -> Packet {
+    let mut tag = Vec::new();
+    match payload {
+        Some(payload) => {
+            // Reuse the dialog encoder's NBT form: skip its VarInt holder prefix.
+            let show = protocol::dialog::show(ProtocolVersion::new(774).unwrap(), payload).unwrap();
+            tag.extend_from_slice(&show.data[1..]);
+        }
+        None => tag.push(0),
+    }
+    let mut data = Vec::new();
+    write_string(id, &mut data);
+    protocol::write_varint(tag.len() as i32, &mut data);
+    data.extend(tag);
+    Packet::new(0x41, data)
+}
+
+#[tokio::test]
+async fn rift_dialog_clicks_reach_the_owner_and_never_the_backend() {
+    timeout(Duration::from_secs(3), async {
+        let (mut session, mut client, mut backend) = session().await;
+        play(&mut session, &mut client, &mut backend, Codec::default()).await;
+        let dialog = std::sync::Arc::new(
+            crate::dialog::Dialog::parse(&serde_json::json!({
+                "type": "notice",
+                "title": "Rules",
+                "pause": false,
+                "after_action": "none",
+                "inputs": [{"type": "boolean", "key": "agree", "label": "I agree"}],
+                "action": {"label": "OK", "action": {"type": "dynamic/custom", "id": "ok"}},
+            }))
+            .unwrap(),
+        );
+        let owner = crate::dialog::Owner::Plugin("rules".into());
+        session
+            .show_dialog(dialog.clone(), owner.clone())
+            .await
+            .unwrap();
+        let shown = receive(&mut client, Codec::default()).await;
+        assert_eq!(shown.id, 0x8a);
+        let id = dialog.wire()["action"]["action"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        // A click on Rift's dialog becomes an event for its owner.
+        let click = custom_click(&id, Some(&serde_json::json!({"agree": true})));
+        Codec::default().write(&mut client, &click).await.unwrap();
+        let SessionEvent::Dialog(event) = session.forward().await.unwrap() else {
+            panic!("expected a dialog click");
+        };
+        assert_eq!(event.owner, owner);
+        assert_eq!(event.response.action, "ok");
+        assert_eq!(event.response.values["agree"], true);
+        // after_action none keeps the dialog open for more clicks.
+        Codec::default().write(&mut client, &click).await.unwrap();
+        assert!(matches!(
+            session.forward().await.unwrap(),
+            SessionEvent::Dialog(_)
+        ));
+
+        // Made-up rift: clicks are dropped, never forwarded.
+        let forged = custom_click("rift:dialog/999999/0", None);
+        Codec::default().write(&mut client, &forged).await.unwrap();
+        assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+        // Other namespaces belong to the backend.
+        let theirs = custom_click("myserver:vote", None);
+        Codec::default().write(&mut client, &theirs).await.unwrap();
+        assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+        assert_eq!(receive(&mut backend, Codec::default()).await, theirs);
+
+        // A backend dialog replaces Rift's: later clicks on it are dropped and
+        // clearing leaves the backend's dialog alone.
+        let backend_dialog = Packet::new(0x8a, vec![1]);
+        Codec::default()
+            .write(&mut backend, &backend_dialog)
+            .await
+            .unwrap();
+        assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+        assert_eq!(receive(&mut client, Codec::default()).await, backend_dialog);
+        Codec::default().write(&mut client, &click).await.unwrap();
+        assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+        session.clear_dialog().await.unwrap();
+        assert!(
+            timeout(
+                Duration::from_millis(10),
+                receive(&mut client, Codec::default())
+            )
+            .await
+            .is_err()
+        );
+
+        // Clearing Rift's own dialog sends Clear Dialog once.
+        session.show_dialog(dialog, owner).await.unwrap();
+        assert_eq!(receive(&mut client, Codec::default()).await.id, 0x8a);
+        session.clear_dialog().await.unwrap();
+        assert_eq!(
+            receive(&mut client, Codec::default()).await,
+            Packet::empty(0x89)
+        );
+        session.clear_dialog().await.unwrap();
+        // Nothing of Rift's namespace reached the backend.
+        assert!(
+            timeout(
+                Duration::from_millis(10),
+                receive(&mut backend, Codec::default())
+            )
+            .await
+            .is_err()
+        );
+    })
+    .await
+    .unwrap();
+}

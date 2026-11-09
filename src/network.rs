@@ -29,6 +29,45 @@ pub fn expected_uuid<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrit
 }
 
 impl Network<'_> {
+    /// Deliver a click on a dialog's plugin action to whoever showed the
+    /// dialog. A failing handler is logged; the session carries on, as after
+    /// a failing `join` observer.
+    pub async fn dialog<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin>(
+        &self,
+        session: &Session<C, B>,
+        current: &str,
+        event: &Connection,
+        click: rift::session::DialogClick,
+    ) {
+        let result = match &session.extension {
+            Some(extension) => extension.dialog(click.owner, click.response).await,
+            // Without player hooks (persistent plugins in offline mode) there
+            // is no extension session; plugins still get their clicks.
+            None => {
+                let mut context = rift::extensions::Context {
+                    id: event.id(),
+                    protocol: session.handshake.protocol,
+                    server: Some(current.to_owned()),
+                    ..Default::default()
+                };
+                if let Some(identity) = session.identity() {
+                    context.name = identity.name;
+                }
+                if let Some(uuid) = expected_uuid(session) {
+                    context.uuid = uuid.to_string();
+                }
+                let jobs = Arc::new(tokio::sync::Semaphore::new(1));
+                self.snapshot
+                    .extensions
+                    .dialog(context, click.owner, click.response, &jobs)
+                    .await
+            }
+        };
+        if let Err(error) = result {
+            eprintln!("rift: dialog: {error}");
+        }
+    }
+
     /// Publish the player's compiled subject for backend replicas before the
     /// connection to `backend` is forwarded.
     pub fn push_permissions<
@@ -140,6 +179,7 @@ impl Network<'_> {
                                 timeout(Duration::from_secs(5), session.send_bungeecord(&payload)).await??;
                             }
                     }
+                    SessionEvent::Dialog(click) => self.dialog(session, current, event, click).await,
                     SessionEvent::ClientClosed => return Err(io::Error::new(
                         io::ErrorKind::UnexpectedEof, "client closed while destination was starting",
                     )),

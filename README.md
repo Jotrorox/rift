@@ -174,7 +174,8 @@ rift.plugin("hello-lua", { deny = "Mallory" }) -- plugins/hello-lua/plugin.toml
 ```
 
 Start with the [plugin overview](docs/plugins.md), including its trust model,
-then [events, commands and policy](docs/extensions.md) and the guides for
+then [events, commands and policy](docs/extensions.md), [dialogs](docs/dialogs.md)
+(1.21.6+ screens with inputs and buttons, shown from the proxy) and the guides for
 [Lua](docs/plugins-lua.md), [Rust](docs/plugins-rust.md), [C](docs/plugins-c.md)
 and [Go](docs/plugins-go.md). [`examples/plugins`](examples/plugins) has the same
 plugin in all four languages, and [`examples/extensions.lua`](examples/extensions.lua)
