@@ -393,7 +393,7 @@ async fn backends_replicate_act_and_resync_through_the_real_proxy() {
             (socket, seen)
         })
     };
-    let (_backend_socket, seen) = pushed.await.unwrap();
+    let (mut backend_socket, seen) = pushed.await.unwrap();
     let _player_socket = player.await.unwrap();
     assert!(
         seen,
@@ -611,6 +611,44 @@ async fn backends_replicate_act_and_resync_through_the_real_proxy() {
     assert!(
         check().contains("undefined"),
         "the lobby cannot report for Alice"
+    );
+
+    // dimension and gamemode: the proxy reads them from the play packets it
+    // relays, here a 1.8 Join Game and then a game mode Game Event.
+    proxy.perms(&[
+        "user",
+        "Alice",
+        "permission",
+        "set",
+        "fly.nether",
+        "true",
+        "dimension=minecraft:the_nether",
+        "gamemode=creative",
+    ]);
+    let fly = || proxy.perms(&["check", "Alice", "fly.nether"]);
+    assert!(fly().contains("undefined"), "{}", fly());
+    let mut join = 7_i32.to_be_bytes().to_vec();
+    join.extend([1, 0xff, 2, 20]); // creative, the nether, difficulty, max players
+    write_string("default", &mut join);
+    join.push(0); // reduced debug info
+    backend_socket
+        .write_all(&Codec::default().encode(&Packet::new(0x01, join)).unwrap())
+        .unwrap();
+    eventually("the nether in creative", || fly().contains("= true")).await;
+    let mut survival_mode = vec![3];
+    survival_mode.extend(0.0_f32.to_be_bytes());
+    backend_socket
+        .write_all(
+            &Codec::default()
+                .encode(&Packet::new(0x2b, survival_mode))
+                .unwrap(),
+        )
+        .unwrap();
+    eventually("survival", || fly().contains("undefined")).await;
+    let info = proxy.perms(&["user", "Alice", "info"]);
+    assert!(
+        info.contains("dimension=minecraft:the_nether") && info.contains("gamemode=survival"),
+        "{info}"
     );
 
     // The retained stream holds every change.

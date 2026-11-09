@@ -549,6 +549,8 @@ pub async fn handle(
             || snapshot.authenticator.is_some()
             || snapshot.perms.has_principals();
         let network_enabled = session.switch_supported() && network_configured;
+        // Proxy-side checks see the dimension and game mode the backend sends.
+        session.track_permission_contexts(snapshot.extensions.permissions().clone());
         if network_enabled {
             session.enable_network()?;
             session.enable_permission_commands(snapshot.extensions.permissions().clone());
@@ -1137,6 +1139,8 @@ pub async fn handle(
                                 );
                                 directory = Some(handle);
                                 actions = Some(receiver);
+                                // Joining set the proxy contexts to `server` alone.
+                                session.sync_permission_contexts();
                             }
                         }
                         if registered_backend != current_backend {
@@ -1145,6 +1149,8 @@ pub async fn handle(
                             }
                             if let Some(directory) = &directory {
                                 directory.set_server(&current_backend);
+                                // The switch reset them after the new Join Game.
+                                session.sync_permission_contexts();
                             }
                             registered_backend.clone_from(&current_backend);
                             if let Some(extension) = &mut session.extension {

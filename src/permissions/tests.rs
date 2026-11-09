@@ -1176,3 +1176,73 @@ fn errors_map_onto_wire_codes() {
     .into();
     assert_eq!(io.kind(), std::io::ErrorKind::InvalidInput);
 }
+
+#[test]
+fn proxy_contexts_follow_the_session_dimension_and_game_mode_until_a_switch() {
+    let authority = Arc::new(authority());
+    let scoped = |key: &str, value: &str| ContextSet::of(key, value).unwrap();
+    for (node, contexts) in [
+        ("fly", scoped("gamemode", "creative")),
+        ("portal", scoped("dimension", "minecraft:the_nether")),
+    ] {
+        authority
+            .apply(
+                Actor::Cli,
+                set(
+                    user(ALICE),
+                    perm(node, true).with_contexts(contexts).unwrap(),
+                ),
+            )
+            .unwrap();
+    }
+    let checks = |authority: &Authority| {
+        (
+            authority.check_active(ALICE, "fly"),
+            authority.check_active(ALICE, "portal"),
+        )
+    };
+    // Offline players have no contexts to update.
+    authority.set_session_contexts(ALICE, Some("minecraft:the_nether"), Some("creative"));
+    assert!(authority.contexts(ALICE).is_empty());
+
+    authority.join(ALICE, "Alice", "lobby");
+    assert_eq!(
+        checks(&authority),
+        (Tristate::Undefined, Tristate::Undefined)
+    );
+    authority.set_session_contexts(ALICE, Some("minecraft:the_nether"), Some("creative"));
+    assert_eq!(
+        authority.contexts(ALICE).to_string(),
+        "dimension=minecraft:the_nether;gamemode=creative;server=lobby"
+    );
+    assert_eq!(checks(&authority), (Tristate::True, Tristate::True));
+    // A game mode change keeps the dimension, and the reverse.
+    authority.set_session_contexts(ALICE, Some("minecraft:the_nether"), Some("survival"));
+    assert_eq!(checks(&authority), (Tristate::Undefined, Tristate::True));
+    authority.set_session_contexts(ALICE, Some("minecraft:overworld"), Some("creative"));
+    assert_eq!(checks(&authority), (Tristate::True, Tristate::Undefined));
+    // Backend-reported `world` and custom contexts are left alone; a value
+    // the context syntax refuses is left out.
+    authority
+        .set_proxy_context(ALICE, "world", Some("world_nether"))
+        .unwrap();
+    authority.set_session_contexts(ALICE, Some("bad;key"), None);
+    assert_eq!(
+        authority.contexts(ALICE).to_string(),
+        "server=lobby;world=world_nether"
+    );
+
+    // A switch restarts from the server; the new world's packets refill them.
+    authority.set_session_contexts(ALICE, Some("minecraft:the_nether"), Some("creative"));
+    authority.switch_server(ALICE, "survival");
+    assert_eq!(authority.contexts(ALICE).to_string(), "server=survival");
+    assert_eq!(
+        checks(&authority),
+        (Tristate::Undefined, Tristate::Undefined)
+    );
+    authority.set_session_contexts(ALICE, Some("minecraft:the_nether"), Some("creative"));
+    assert_eq!(checks(&authority), (Tristate::True, Tristate::True));
+    assert_eq!(authority.server_of(ALICE).as_deref(), Some("survival"));
+    authority.leave(ALICE);
+    assert!(authority.contexts(ALICE).is_empty());
+}

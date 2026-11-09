@@ -310,3 +310,89 @@ fn legacy_login_profile_keys_are_bounded_and_do_not_shift_the_uuid() {
         assert!(super::super::start_identity(version, &invalid).is_err());
     }
 }
+
+#[test]
+fn legacy_join_game_and_respawn_name_the_dimension_and_game_mode() {
+    use crate::protocol::{GameMode, switching::WorldUpdate};
+    let spawn = |dimension: &str, gamemode| {
+        Some(WorldUpdate::Spawn {
+            dimension: Some(dimension.to_owned()),
+            gamemode: Some(gamemode),
+        })
+    };
+    for number in (0..764).filter(|n| ids(*n).is_some()) {
+        let caps = ProtocolVersion::new(number).unwrap().switching().unwrap();
+        let (packet, respawn) = join(number);
+        // The fixture joins the overworld in creative (hardcore before 1.16.2).
+        let overworld = spawn("minecraft:overworld", GameMode::Creative);
+        assert_eq!(caps.world_update(&packet), overworld, "protocol {number}");
+        // The switching table's Respawn ID is the one in legacy_ids.rs.
+        let id = ids(number).unwrap().respawn;
+        assert_eq!(
+            caps.world_update(&Packet::new(id, respawn.clone())),
+            overworld,
+            "protocol {number}"
+        );
+        // The same Respawn into the nether in spectator.
+        let mut nether = if number < 735 {
+            let mut data = respawn.clone();
+            data[..4].copy_from_slice(&(-1_i32).to_be_bytes());
+            data
+        } else {
+            let mut from = Vec::new();
+            write_string("minecraft:overworld", &mut from);
+            let mut to = Vec::new();
+            write_string("minecraft:the_nether", &mut to);
+            let mut data = Vec::new();
+            let mut rest = respawn.as_slice();
+            while let Some(at) = rest.windows(from.len()).position(|w| w == from) {
+                data.extend(&rest[..at]);
+                data.extend(&to);
+                rest = &rest[at + from.len()..];
+            }
+            data.extend(rest);
+            data
+        };
+        let mode = if number >= 573 {
+            let seed = 12345_i64.to_be_bytes();
+            nether.windows(8).position(|w| w == seed).unwrap() + 8
+        } else {
+            4 + usize::from(number < 477)
+        };
+        assert_eq!(nether[mode], 1, "protocol {number}");
+        nether[mode] = 3;
+        assert_eq!(
+            caps.world_update(&Packet::new(id, nether.clone())),
+            spawn("minecraft:the_nether", GameMode::Spectator),
+            "protocol {number}"
+        );
+        // Truncated or padded Respawns are skipped; a Join Game Rift cannot
+        // read forgets the old world.
+        for cut in 0..nether.len() {
+            let packet = Packet::new(id, nether[..cut].to_vec());
+            assert_eq!(caps.world_update(&packet), None, "protocol {number}");
+        }
+        nether.push(0);
+        assert_eq!(caps.world_update(&Packet::new(id, nether)), None);
+        let truncated = Packet::new(packet.id, packet.data[..packet.data.len() - 1].to_vec());
+        assert_eq!(
+            caps.world_update(&truncated),
+            Some(WorldUpdate::Spawn {
+                dimension: None,
+                gamemode: None,
+            })
+        );
+    }
+    // Pre-1.16 dimensions are IDs; one outside the vanilla three is unknown.
+    let caps = ProtocolVersion::new(340).unwrap().switching().unwrap();
+    let mut data = 7_i32.to_be_bytes().to_vec();
+    data.extend([2, 0]);
+    write_string("default", &mut data);
+    assert_eq!(
+        caps.world_update(&Packet::new(0x35, data)),
+        Some(WorldUpdate::Spawn {
+            dimension: None,
+            gamemode: Some(GameMode::Survival),
+        })
+    );
+}
