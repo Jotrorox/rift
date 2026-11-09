@@ -1375,15 +1375,25 @@ async fn apply_definition(
             "permission groups require extensions with api_version = 2 or 3; configure them in Lua first",
         );
     }
-    if section == "server_list"
-        && ["favicon", "hosts"]
-            .iter()
-            .any(|field| definition.get(field).is_some())
-    {
+    if section == "server_list" && definition.get("hosts").is_some() {
         return error(
             StatusCode::BAD_REQUEST,
-            "set the favicon and per-host entries in Lua; edits keep the configured ones",
+            "set per-host entries in Lua; edits keep the configured ones",
         );
+    }
+    // A favicon is an uploaded PNG data URL, or `false` to remove it; omitting
+    // it keeps the configured one, including a file set in Lua.
+    if section == "server_list"
+        && let Some(favicon) = definition.get("favicon")
+    {
+        let checked = match favicon {
+            Value::Bool(false) => Ok(()),
+            Value::String(url) => rift::server_list::favicon_data(url).map(drop),
+            _ => Err("expected a PNG data URL or false".to_owned()),
+        };
+        if let Err(message) = checked {
+            return error(StatusCode::BAD_REQUEST, format!("favicon: {message}"));
+        }
     }
     let source = match operator::edited_source(source, section, name, definition) {
         Ok(s) => s,
