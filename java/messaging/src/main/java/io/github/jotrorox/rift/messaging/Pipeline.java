@@ -5,6 +5,7 @@ import java.io.OutputStream;
 import java.util.ArrayDeque;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
 import tech.kwik.core.QuicStream;
 
 /**
@@ -13,6 +14,9 @@ import tech.kwik.core.QuicStream;
  * which fails every unanswered frame.
  */
 final class Pipeline {
+    /** How long a failed write waits for the server's ERROR frame before failing on its own. */
+    private static final long ERROR_GRACE_MS = 1_000;
+
     private final QuicStream stream;
     private final OutputStream out;
     private final ArrayDeque<CompletableFuture<Void>> pending = new ArrayDeque<>();
@@ -44,9 +48,18 @@ final class Pipeline {
                 result.complete(null);
             }
         } catch (IOException e) {
-            fail(e);
+            writeFailed(e);
         }
         return result;
+    }
+
+    /**
+     * The server stops the stream right after its ERROR frame, so a write can fail before the reader
+     * has handed that frame over. Give the reader a moment, so callers see the server's reason (an
+     * ACL denial, say) rather than the stopped stream; {@link #fail} keeps the first cause.
+     */
+    private void writeFailed(IOException e) {
+        CompletableFuture.delayedExecutor(ERROR_GRACE_MS, TimeUnit.MILLISECONDS).execute(() -> fail(e));
     }
 
     synchronized boolean healthy() {

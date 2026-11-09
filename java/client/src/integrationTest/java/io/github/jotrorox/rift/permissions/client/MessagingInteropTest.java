@@ -100,7 +100,8 @@ class MessagingInteropTest {
     void aclDenialsAreTypedErrors() throws Exception {
         ExecutionException publish = assertThrows(ExecutionException.class,
                 () -> backend.publish("forbidden.subject", bytes("x")).get(10, TimeUnit.SECONDS));
-        MessagingException denied = assertInstanceOf(MessagingException.class, publish.getCause());
+        MessagingException denied = assertInstanceOf(MessagingException.class, publish.getCause(),
+                () -> "publish failed with " + publish.getCause());
         assertEquals(MessagingException.PERMISSION, denied.code());
         ExecutionException events = assertThrows(ExecutionException.class,
                 () -> peer.publish("rift.events.permissions", bytes("spoof")).get(10, TimeUnit.SECONDS));
