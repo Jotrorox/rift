@@ -5,7 +5,7 @@
 //! Joins, server switches and quits are published on `rift.events.players`
 //! and tell the permission authority who is online and on which server.
 use super::fields;
-use crate::{messaging::Broker, permissions::Authority};
+use crate::{messaging::Broker, permissions::Authority, text::Text};
 use mlua::{Lua, Table, Value};
 use std::{
     cell::Cell,
@@ -25,19 +25,17 @@ const MAX_TITLE_MS: i64 = 60_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlayerAction {
-    Message(String),
-    ActionBar(String),
+    /// Plain text or a JSON text component already checked by `Text`.
+    Message(Text),
+    ActionBar(Text),
     /// Fade-in, stay and fade-out are ticks.
     Title {
         title: String,
         subtitle: Option<String>,
         times: [i32; 3],
     },
-    Kick(String),
+    Kick(Text),
     Transfer(String),
-    /// A JSON text component, already checked by `protocol::validate_component`.
-    RawMessage(serde_json::Value),
-    RawKick(serde_json::Value),
     /// A BungeeCord plugin message for the player's backend. The session drops
     /// it if the player has left `server` before the message can be sent.
     Forward {
@@ -550,10 +548,7 @@ impl Players {
 
     /// Queue a chat message for every player on `server` (everyone for
     /// `None`) and count those that accepted it.
-    pub fn broadcast(&self, message: &str, server: Option<&str>) -> Result<usize, String> {
-        if message.is_empty() || message.len() > MAX_TEXT {
-            return Err("message must contain 1..=1024 bytes".into());
-        }
+    pub fn broadcast(&self, message: &Text, server: Option<&str>) -> Result<usize, String> {
         let matches = self.matcher(server.map(str::to_owned))?;
         Ok(self
             .lock()
@@ -562,7 +557,7 @@ impl Players {
             .filter(|entry| {
                 entry
                     .actions
-                    .try_send(PlayerAction::Message(message.to_owned()))
+                    .try_send(PlayerAction::Message(message.clone()))
                     .is_ok()
             })
             .count())
@@ -719,7 +714,7 @@ impl Players {
             (
                 "message",
                 "message",
-                PlayerAction::Message as fn(String) -> PlayerAction,
+                PlayerAction::Message as fn(Text) -> PlayerAction,
             ),
             ("action_bar", "action bar text", PlayerAction::ActionBar),
             ("kick", "kick reason", PlayerAction::Kick),
@@ -728,11 +723,10 @@ impl Players {
             let (players, charge) = (self.clone(), budget.clone());
             api.raw_set(
                 name,
-                lua.create_function(move |_, (target, value): (String, String)| {
+                lua.create_function(move |_, (target, value): (String, Value)| {
                     charge()?;
-                    players
-                        .send(&target, action(text(value, label)?))
-                        .map_err(lua_error)
+                    let text = Text::lua(value, label).map_err(mlua::Error::runtime)?;
+                    players.send(&target, action(text)).map_err(lua_error)
                 })?,
             )?;
         }
@@ -800,9 +794,9 @@ impl Players {
         let players = self.clone();
         api.raw_set(
             "broadcast",
-            lua.create_function(move |_, (message, server): (String, Option<String>)| {
+            lua.create_function(move |_, (message, server): (Value, Option<String>)| {
                 budget()?;
-                let message = text(message, "message")?;
+                let message = Text::lua(message, "message").map_err(mlua::Error::runtime)?;
                 let matches = players.matcher(server).map_err(error)?;
                 Ok(players
                     .lock()

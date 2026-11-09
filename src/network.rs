@@ -581,7 +581,7 @@ impl Network<'_> {
                             Err(error) => error.to_string(),
                         }
                     };
-                    (Vec::new(), Some(message))
+                    (Vec::new(), Some(message.into()))
                 }
                 Action::LeaveQueue => {
                     session.extension.as_ref().unwrap().leave_queue();
@@ -601,15 +601,19 @@ impl Network<'_> {
                         .collect();
                     (
                         Vec::new(),
-                        Some(format!(
-                            "Current server: {current}. Available servers: {}",
-                            servers.join(", ")
-                        )),
+                        Some(
+                            format!(
+                                "Current server: {current}. Available servers: {}",
+                                servers.join(", ")
+                            )
+                            .into(),
+                        ),
                     )
                 }
-                ["server", target] if *target == current => {
-                    (Vec::new(), Some(format!("You are already on {current}.")))
-                }
+                ["server", target] if *target == current => (
+                    Vec::new(),
+                    Some(format!("You are already on {current}.").into()),
+                ),
                 ["server", target]
                     if !config.is_destination(target)
                         || !config.can_access(target, &identity.name) =>
@@ -628,7 +632,7 @@ impl Network<'_> {
             }
         };
         if let Some(message) = message {
-            session.send_system_message(&message).await?;
+            session.send_text(&message).await?;
             return Ok(None);
         }
         match self
@@ -643,9 +647,8 @@ impl Network<'_> {
             {
                 // The old attachment remains usable after preflight failures,
                 // including a target's ban or whitelist rejection.
-                session
-                    .send_system_message(&format!("Unable to switch servers: {error}"))
-                    .await?;
+                let reason = rift::text::reason(&error).prefixed("Unable to switch servers: ");
+                session.send_text(&reason).await?;
                 Ok(None)
             }
             Err(error) => Err(error),

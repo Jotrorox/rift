@@ -21,7 +21,7 @@ pub use dialog::supported as dialogs_supported;
 pub use framing::{Codec, MAX_FRAME_SIZE, MAX_PACKET_SIZE, Packet, Reader};
 pub(crate) use legacy::LegacyState;
 pub use packets::{Handshake, NextState, PacketKind, ProtocolVersion, disconnect, status_response};
-pub use packets::{PlayerIdentity, action_bar, system_message, title};
+pub use packets::{PlayerIdentity, action_bar, action_bar_component, system_message, title};
 pub use packets::{disconnect_component, system_component, validate_component};
 pub(crate) use packets::{login_identity, start_identity, success_identity};
 pub use state::{ConnectionState, Direction, State};

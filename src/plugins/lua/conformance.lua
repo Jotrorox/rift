@@ -50,11 +50,33 @@ for _, hook in ipairs({ "login", "initial_server", "before_transfer" }) do
     end)
 end
 
-for _, hook in ipairs({ "join", "after_transfer", "disconnect" }) do
+for _, hook in ipairs({ "after_transfer", "disconnect" }) do
     rift.on(hook, function()
         behave(hook)
     end)
 end
+
+-- With `rich` (a chat component table), `join` sends it through every
+-- player-facing text function and reports the results.
+local function show(ok, result)
+    if ok then
+        return tostring(result)
+    end
+    return "error(" .. tostring(result) .. ")"
+end
+
+rift.on("join", function(ctx)
+    behave("join")
+    local rich = config.rich
+    if rich ~= nil then
+        local players = rift.players
+        local message = show(pcall(players.message, ctx.uuid, rich))
+        local action_bar = show(pcall(players.action_bar, ctx.uuid, rich))
+        local broadcast = show(pcall(players.broadcast, rich))
+        local kick = show(pcall(players.kick, ctx.uuid, rich))
+        report("rich " .. message .. " " .. action_bar .. " " .. broadcast .. " " .. kick)
+    end
+end)
 
 rift.on("route", function(connection)
     behave("route")
@@ -102,6 +124,9 @@ for _, command in ipairs(config.commands or {}) do
         suggest = suggest,
         run = function(ctx)
             behave("command")
+            if (config.decide or {}).command ~= nil then
+                return decide("command")
+            end
             return { message = "hi " .. ctx.args }
         end,
     })

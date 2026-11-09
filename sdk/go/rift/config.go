@@ -299,3 +299,97 @@ func (p *jsonScanner) skip(depth int) bool {
 		return p.number()
 	}
 }
+
+// words appends the visible text of one JSON text component value: strings,
+// list items, and an object's text (or translation fallback or key)
+// followed by its extra components. Everything else is validated and
+// skipped.
+func (p *jsonScanner) words(out *strings.Builder, depth int) bool {
+	if depth > 64 {
+		return false
+	}
+	p.ws()
+	switch {
+	case p.peek('"'):
+		text, ok := p.str()
+		out.WriteString(text)
+		return ok
+	case p.consume('['):
+		p.ws()
+		if p.consume(']') {
+			return true
+		}
+		for {
+			if !p.words(out, depth+1) {
+				return false
+			}
+			p.ws()
+			if p.consume(']') {
+				return true
+			}
+			if !p.consume(',') {
+				return false
+			}
+		}
+	case p.consume('{'):
+		var text, fallback, translate string
+		var extra strings.Builder
+		p.ws()
+		if !p.consume('}') {
+			for {
+				p.ws()
+				key, ok := p.str()
+				if !ok {
+					return false
+				}
+				p.ws()
+				if !p.consume(':') {
+					return false
+				}
+				p.ws()
+				switch {
+				case key == "extra":
+					if !p.words(&extra, depth+1) {
+						return false
+					}
+				case (key == "text" || key == "fallback" || key == "translate") && p.peek('"'):
+					value, ok := p.str()
+					if !ok {
+						return false
+					}
+					switch key {
+					case "text":
+						text = value
+					case "fallback":
+						fallback = value
+					default:
+						translate = value
+					}
+				default:
+					if !p.skip(depth + 1) {
+						return false
+					}
+				}
+				p.ws()
+				if p.consume('}') {
+					break
+				}
+				if !p.consume(',') {
+					return false
+				}
+			}
+		}
+		switch {
+		case text != "":
+			out.WriteString(text)
+		case fallback != "":
+			out.WriteString(fallback)
+		default:
+			out.WriteString(translate)
+		}
+		out.WriteString(extra.String())
+		return true
+	default:
+		return p.skip(depth)
+	}
+}

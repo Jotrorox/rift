@@ -2,7 +2,7 @@
 
 Rift has one plugin system. A plugin is anything that receives Rift's events
 and calls Rift's host API, and every plugin uses the same contract,
-[`wit/rift-plugin.wit`](../wit/rift-plugin.wit) (`rift:plugin@0.1.1`): one
+[`wit/rift-plugin.wit`](../wit/rift-plugin.wit) (`rift:plugin@0.1.2`): one
 event schema, one set of answers, one host API. What differs is where the code
 runs:
 
@@ -166,8 +166,9 @@ retried), so a ban list cannot silently allow everyone; `rift check` and `rift
 check --strict` warn when persistent plugins are configured without it.
 Turning `online_mode` on or off restarts every persistent plugin. Answers are
 validated exactly like Lua results and bus replies: strings are 1–1024 bytes,
-servers must exist, and an answer a hook does not accept is a failure of the
-plugin.
+JSON text components (the `deny-json` and `message-json` answers of the
+optional `decisions` export, which a WebAssembly component that has it answers
+decision hooks with instead of `handler`) at most 32 KiB, servers must exist, and an answer a hook does not accept is a failure of the plugin.
 
 **Deny or continue.** When a plugin misses its deadline, `on_timeout` applies;
 when it fails (a handler error, a trap, an invalid answer, or the plugin is
@@ -280,7 +281,7 @@ and the SDK guides map it to each language.
 
 | Interface | Functions | Notes |
 | --- | --- | --- |
-| `players` | `list(server?)`, `get(target)`, `names(prefix?)`, `message`, `action-bar`, `title`, `tab-list`, `boss-bar`, `dialog`, `clear-dialog`, `kick`, `transfer`, `broadcast` | `target` is a name, a UUID or a connection id. Actions return whether the player was online. Transfers pass `before_transfer`. `dialog` and `clear-dialog` (since 0.1.1) show and close [dialogs](dialogs.md). |
+| `players` | `list(server?)`, `get(target)`, `names(prefix?)`, `message`, `action-bar`, `title`, `tab-list`, `boss-bar`, `dialog`, `clear-dialog`, `kick`, `transfer`, `broadcast`, `message-json`, `action-bar-json`, `kick-json`, `broadcast-json` | `target` is a name, a UUID or a connection id. Actions return whether the player was online. Transfers pass `before_transfer`. `dialog` and `clear-dialog` (since 0.1.1) show and close [dialogs](dialogs.md). The `-json` functions (since 0.1.2) take a JSON text component for colours, hover text and click events ([rich text](extensions.md#rich-text)); Lua takes a chat component table in place of the string. |
 | `store` | `get`, `set`, `delete`, `increment`, `list(namespace, prefix)` | The durable store shared with API v2. Namespaces are private: `plugin.<name>.<namespace>`, which the configuration script's `rift.store` cannot read or write. |
 | `permissions` | `has`, `set`, `add-group`, `remove-group`, `groups`, `list-groups` | Rift's [permission store](permissions.md#persistent-plugins): user nodes and group memberships, checked in the player's current contexts. |
 | `bus` | `publish`, `request(subject, payload, timeout_ms)`, `subscribe(subject, queue_group?)`, `unsubscribe`, `stream-publish` | Messages arrive through the `message` hook. At most 256 subscriptions; requests wait at most 60 s. |
@@ -432,12 +433,12 @@ same without WASI.
 
 Additions keep compiled components loading. Wasmtime matches interface
 versions on the `0.1` track, so a component built against `0.1.0` links
-against this `0.1.1` host and the other way round. An addition may bring new
+against this `0.1.2` host and the other way round. An addition may bring new
 host functions, types and interfaces, but never changes an existing type or
 adds a case to an existing enum or variant, since exports are checked exactly.
 A new export lives in its own interface, which the host looks up when it
 loads a component and treats as optional: world `base` holds what every
-component has, world `optional` what later releases added (`dialogs` in
-0.1.1). A host function a component calls needs a host that has it; a
+component has, worlds `optional` and `optional-decisions` what later releases added
+(`dialogs` in 0.1.1, `decisions` in 0.1.2). A host function a component calls needs a host that has it; a
 component that only exports something new still loads on older 0.1 hosts.
 Breaking changes move to 1.0.

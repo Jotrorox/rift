@@ -38,6 +38,7 @@ use super::{
 use bindings::{
     Base as Core, BasePre,
     optional::{Optional, OptionalIndices},
+    optional_decisions::{OptionalDecisions, OptionalDecisionsIndices},
 };
 use std::{
     collections::HashMap,
@@ -151,17 +152,27 @@ struct CorePre {
     /// `None` for a component without the `dialogs` export (built against
     /// rift:plugin 0.1.0).
     optional: Option<OptionalIndices>,
+    /// `None` for a component without the `decisions` export (built against
+    /// rift:plugin 0.1.0 or 0.1.1).
+    decisions: Option<OptionalDecisionsIndices>,
 }
 
+/// One instance's exports: the required ones and the optional ones it has.
+type Instance = (Core, Option<Optional>, Option<OptionalDecisions>);
+
 impl CorePre {
-    fn instantiate(&self, store: &mut Store<State>) -> wasmtime::Result<(Core, Option<Optional>)> {
+    fn instantiate(&self, store: &mut Store<State>) -> wasmtime::Result<Instance> {
         let instance = self.base.instance_pre().instantiate(&mut *store)?;
         let core = Core::new(&mut *store, &instance)?;
         let optional = match &self.optional {
             Some(indices) => Some(indices.load(&mut *store, &instance)?),
             None => None,
         };
-        Ok((core, optional))
+        let decisions = match &self.decisions {
+            Some(indices) => Some(indices.load(&mut *store, &instance)?),
+            None => None,
+        };
+        Ok((core, optional, decisions))
     }
 }
 
@@ -178,7 +189,12 @@ fn prepare(spec: &PluginSpec, component: &Component) -> Result<CorePre, String> 
             )
         })?;
     let optional = OptionalIndices::new(base.instance_pre()).ok();
-    Ok(CorePre { base, optional })
+    let decisions = OptionalDecisionsIndices::new(base.instance_pre()).ok();
+    Ok(CorePre {
+        base,
+        optional,
+        decisions,
+    })
 }
 
 /// The plugin's component, ready to instantiate: from memory, from the disk
@@ -267,7 +283,7 @@ pub(crate) fn create(
         "instantiation",
         Some(spec.manifest.init_deadline()),
     );
-    let (core, optional) = match pre.instantiate(&mut store) {
+    let (core, optional, decisions) = match pre.instantiate(&mut store) {
         Ok(instance) => instance,
         Err(error) => {
             let reason = describe(&mut store, error);
@@ -280,6 +296,7 @@ pub(crate) fn create(
         store,
         core,
         optional,
+        decisions,
         manifest: spec.manifest.clone(),
         registration: None,
         broken: None,
@@ -303,6 +320,7 @@ struct WasmEngine {
     core: Core,
     /// The optional exports this component has.
     optional: Option<Optional>,
+    decisions: Option<OptionalDecisions>,
     manifest: Manifest,
     registration: Option<Registration>,
     /// Set by the first trap: the instance's state is suspect from then on.
@@ -375,6 +393,50 @@ impl PluginEngine for WasmEngine {
                 .map(|()| Reply::None)
                 .map_err(|error| CallError::Fatal(self.fail(error)));
         }
+        // The `decisions` export, when the component has it, answers the
+        // decision hooks with rich text instead of `handler`.
+        let mut invalid = None;
+        if let Some(decisions) = &self.decisions {
+            let guest = decisions.rift_plugin_decisions();
+            let mut decide = |decision| match bindings::decision(decision) {
+                Ok(action) => Reply::Action(action),
+                Err(error) => {
+                    invalid = Some(error);
+                    Reply::Action(crate::extensions::Action::Continue)
+                }
+            };
+            let result = match &event {
+                Event::Login(context) => Some(
+                    guest
+                        .call_login(&mut *store, &bindings::context(context.clone()))
+                        .map(&mut decide),
+                ),
+                Event::InitialServer(context) => Some(
+                    guest
+                        .call_initial_server(&mut *store, &bindings::context(context.clone()))
+                        .map(&mut decide),
+                ),
+                Event::BeforeTransfer(context) => Some(
+                    guest
+                        .call_before_transfer(&mut *store, &bindings::context(context.clone()))
+                        .map(&mut decide),
+                ),
+                Event::Command(context) => Some(
+                    guest
+                        .call_command(&mut *store, &bindings::context(context.clone()))
+                        .map(&mut decide),
+                ),
+                _ => None,
+            };
+            if let Some(result) = result {
+                let reply = result.map_err(|error| CallError::Fatal(self.fail(error)))?;
+                return match invalid {
+                    Some(error) => Err(CallError::Handler(format!("invalid decision: {error}"))),
+                    None => Ok(reply),
+                };
+            }
+        }
+        let decide = |action| Reply::Action(bindings::action(action));
         let guest = self.core.rift_plugin_handler();
         let result = match event {
             Event::Route(connection) => guest
@@ -382,16 +444,16 @@ impl PluginEngine for WasmEngine {
                 .map(|decision| Reply::Route(bindings::route_decision(decision))),
             Event::Login(context) => guest
                 .call_login(store, &bindings::context(context))
-                .map(|action| Reply::Action(bindings::action(action))),
+                .map(decide),
             Event::InitialServer(context) => guest
                 .call_initial_server(store, &bindings::context(context))
-                .map(|action| Reply::Action(bindings::action(action))),
+                .map(decide),
             Event::BeforeTransfer(context) => guest
                 .call_before_transfer(store, &bindings::context(context))
-                .map(|action| Reply::Action(bindings::action(action))),
+                .map(decide),
             Event::Command(context) => guest
                 .call_command(store, &bindings::context(context))
-                .map(|action| Reply::Action(bindings::action(action))),
+                .map(decide),
             Event::Suggest(context) => guest
                 .call_suggest(store, &bindings::context(context))
                 .map(|list| Reply::Suggestions(bindings::suggestions(list))),

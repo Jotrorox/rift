@@ -384,6 +384,64 @@ async fn malformed_decisions_unknown_servers_and_runaway_callbacks_fail_closed()
 }
 
 #[tokio::test]
+async fn deny_reasons_and_messages_may_be_chat_component_tables() {
+    use crate::text::Text;
+    let runtime = runtime(
+        r#"api_version=1,
+        login=function(ctx)
+            if ctx.name == 'Player1' then
+                return { deny = { text = 'Banned', color = 'red', extra = { { text = '\nspam', italic = true } } } }
+            end
+            if ctx.name == 'Player2' then return { deny = {} } end
+            if ctx.name == 'Player3' then return { deny = { text = function() end } } end
+            if ctx.name == 'Player4' then return { deny = 'plain' } end
+        end,
+        before_transfer=function(ctx) return { deny = { { text = 'Not now', color = 'gold' } } } end"#,
+    );
+    let banned = Text::Component(serde_json::json!({
+        "text": "Banned", "color": "red", "extra": [{"text": "\nspam", "italic": true}],
+    }));
+    assert_eq!(
+        runtime
+            .session(context(1))
+            .unwrap()
+            .decision("login")
+            .await
+            .unwrap(),
+        Action::Deny(banned)
+    );
+    for id in [2, 3] {
+        let error = runtime
+            .session(context(id))
+            .unwrap()
+            .decision("login")
+            .await;
+        assert!(error.is_err(), "Player{id}");
+    }
+    assert_eq!(
+        runtime
+            .session(context(4))
+            .unwrap()
+            .decision("login")
+            .await
+            .unwrap(),
+        Action::Deny("plain".into())
+    );
+    let error = runtime
+        .session(context(1))
+        .unwrap()
+        .before_transfer("game", "command")
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    assert_eq!(error.to_string(), "Not now");
+    assert_eq!(
+        crate::text::reason(&error),
+        Text::Component(serde_json::json!([{"text": "Not now", "color": "gold"}]))
+    );
+}
+
+#[tokio::test]
 async fn fifo_capacity_cannot_be_bypassed_and_drop_releases_tickets_and_leases() {
     let runtime = runtime("api_version=1, queues={game=1}");
     let mut occupant = runtime.session(context(1)).unwrap();

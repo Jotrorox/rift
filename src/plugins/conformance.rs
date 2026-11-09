@@ -14,7 +14,7 @@
 //! | Key | Behaviour |
 //! | --- | --- |
 //! | `tag` (string) | `init` reports `init <tag>`; a hot reload adopts the new configuration and reports `reload <tag>` (`-` without a tag). `shutdown(reason)` reports `shutdown <reason>`. |
-//! | `decide` | Object from `login`, `initial_server`, `before_transfer` to the action that hook returns, in the serde form of [`Action`]: `"continue"`, `{"deny": "..."}`, `{"server": "..."}`. Missing hooks continue. |
+//! | `decide` | Object from `login`, `initial_server`, `before_transfer` (and `command`, which then answers this instead of `hi <args>`) to the action that hook returns, in the serde form of [`Action`]: `"continue"`, `{"deny": "..."}`, `{"server": "..."}`. A `deny` or `message` holding an object or a list is a JSON text component, returned through the `-json` form. Missing hooks continue. |
 //! | `slow` | Hooks that busy-wait 300 ms (calling the host clock) before answering. |
 //! | `fail` | Object from hook name to `"handler"` (the handler fails with an error containing `database down`) or `"fatal"` (a trap: the instance fails; the Lua guest exhausts its memory limit, the WebAssembly guest panics). WebAssembly hooks have no error result, so its "handler" failure answers a decision the hook rejects, carrying `database down`. |
 //! | `commands` | List of `{name, permission, suggest}`; `suggest` is `"none"`, `"players"`, `"servers"`, `"dynamic"` or a list of strings. Every command answers `{"message": "hi <args>"}`; a dynamic `suggest` returns `alpha`, `beta`, `gamma`. |
@@ -25,6 +25,7 @@
 //! | `route_reject` | `{ip, reason}`: `route` rejects connections from `ip` with `reason`. |
 //! | `status_motd` | `status` replaces the MOTD with this text. |
 //! | `http` | `{path, body}`: `http` answers that path with status 200, `text/plain` and `body`. |
+//! | `rich` | A JSON text component. `join` sends it to the joining player with `players.message-json`, `action-bar-json`, `broadcast-json` and `kick-json`, in that order, and reports `rich <message> <action bar> <broadcast> <kick>` (each result, or `error(<message>)`). |
 //!
 //! Every hook the guest handles reports its name (`login`, `command`, `join`,
 //! ...) before acting. The guest registers route, status, http, login,
@@ -45,6 +46,7 @@ use crate::{
     config::Config,
     extensions::{ExtensionSession, Extensions, PlayerAction},
     messaging::{Broker, Subscription},
+    text::Text,
 };
 use serde_json::json;
 use std::{
@@ -523,6 +525,79 @@ pub(crate) async fn command_names_have_one_owner(fixture: &dyn Fixture) {
     );
 }
 
+pub(crate) async fn rich_text_reaches_players(fixture: &dyn Fixture) {
+    let mut lab = Lab::new(fixture);
+    let banned = json!({
+        "text": "Banned",
+        "color": "red",
+        "extra": [{"text": "\nReason: spam", "color": "gray", "italic": true}],
+    });
+    let invite = json!([
+        {"text": "Alex invited you. "},
+        {
+            "text": "[Accept]",
+            "color": "green",
+            "click_event": {"action": "run_command", "command": "/party accept Alex"},
+            "hover_event": {"action": "show_text", "value": {"text": "Join", "bold": true}},
+        },
+    ]);
+    let plugins = vec![
+        lab.plugin(
+            "rich",
+            "",
+            json!({
+                "decide": {"login": {"deny": banned}, "command": {"message": invite}},
+                "commands": [command("party", json!("none"))],
+                "grant": [[uuid(1), "test.command"]],
+                "rich": invite,
+            }),
+        ),
+        // An empty component is not a valid decision: on_failure applies.
+        lab.plugin(
+            "empty",
+            "",
+            json!({"decide": {"initial_server": {"deny": {}}}}),
+        ),
+    ];
+    let runtime = lab.runtime(&config("", plugins)).await;
+    assert_eq!(
+        session(&runtime, 1).decision("login").await.unwrap(),
+        Action::Deny(Text::Component(banned))
+    );
+    let error = session(&runtime, 1)
+        .decision("initial_server")
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("must not be empty"), "{error}");
+    assert_eq!(
+        session(&runtime, 1).command("party").await.unwrap(),
+        Action::Message(Text::Component(invite.clone()))
+    );
+
+    let (_presence, mut actions) = runtime
+        .players()
+        .register(1, &[1; 16], "Player1", 774, "lobby");
+    session(&runtime, 1).ready("lobby").await;
+    lab.wait(|entry| entry == "rich:rich true true 1 true")
+        .await;
+    let mut received = Vec::new();
+    for _ in 0..4 {
+        let action = timeout(Duration::from_secs(5), actions.recv());
+        received.push(action.await.unwrap().unwrap());
+    }
+    let text = Text::Component(invite);
+    assert_eq!(
+        received,
+        [
+            PlayerAction::Message(text.clone()),
+            PlayerAction::ActionBar(text.clone()),
+            PlayerAction::Message(text.clone()),
+            PlayerAction::Kick(text),
+        ]
+    );
+    runtime.plugins().shutdown().await;
+}
+
 pub(crate) async fn commands_check_permissions(fixture: &dyn Fixture) {
     let mut lab = Lab::new(fixture);
     let plugins = vec![lab.plugin(
@@ -932,6 +1007,14 @@ macro_rules! conformance_tests {
                 return;
             }
             $crate::plugins::conformance::command_names_have_one_owner(&$fixture).await;
+        }
+
+        #[tokio::test]
+        async fn rich_text_reaches_players() {
+            if !$ready {
+                return;
+            }
+            $crate::plugins::conformance::rich_text_reaches_players(&$fixture).await;
         }
 
         #[tokio::test]

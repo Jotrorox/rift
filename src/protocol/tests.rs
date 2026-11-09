@@ -995,6 +995,40 @@ fn command_parser_properties_follow_each_registry() {
 }
 
 #[test]
+fn components_spell_hover_and_click_events_for_the_client() {
+    let typed = serde_json::json!({
+        "text": "[Accept]",
+        "click_event": {"action": "run_command", "command": "/party accept"},
+    });
+    let legacy = serde_json::json!({
+        "text": "[Accept]",
+        "clickEvent": {"action": "run_command", "value": "/party accept"},
+    });
+    let json = |packet: Packet| {
+        let text = read_string(&mut packet.data.as_slice(), 262144).unwrap();
+        serde_json::from_str::<serde_json::Value>(text).unwrap()
+    };
+    // 1.20.2 reads JSON in play; it gets the legacy spelling.
+    let old = ProtocolVersion::new(764).unwrap();
+    assert_eq!(json(system_component(old, &typed).unwrap()), legacy);
+    assert_eq!(json(action_bar_component(old, &typed).unwrap()), legacy);
+    assert_eq!(
+        json(disconnect_component(Some(old), State::Play, &typed).unwrap()),
+        legacy
+    );
+    // Login is JSON in every version: 1.21.5 gets the typed spelling.
+    let new = ProtocolVersion::new(770).unwrap();
+    assert_eq!(
+        json(disconnect_component(Some(new), State::Login, &legacy).unwrap()),
+        typed
+    );
+    assert_eq!(
+        json(disconnect_component(Some(new), State::Login, &typed).unwrap()),
+        typed
+    );
+}
+
+#[test]
 fn json_components_keep_json_until_1_20_3_and_then_follow_vanilla_nbt_conversion() {
     let component = serde_json::json!({"extra": ["a", {"bold": true}, 7, 2.5, 10_000_000_000_i64]});
     let json = component.to_string();

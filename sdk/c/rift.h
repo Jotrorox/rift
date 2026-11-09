@@ -231,6 +231,44 @@ static inline void rift_action_queue(rift_action_t *ret, const char *queue) {
 }
 
 // ---------------------------------------------------------------------------
+// Decisions with rich text (since 0.1.2)
+//
+// Define `exports_rift_plugin_decisions_<hook>` instead of
+// `exports_rift_plugin_handler_<hook>` to answer `login`, `initial_server`,
+// `before_transfer` or `command` with a JSON text component. The weak
+// defaults of the `decisions` export call your handler hooks, so a plugin
+// without rich text defines only those.
+
+typedef rift_plugin_types_decision_t rift_decision_t;
+
+// The payload is copied, so literals and borrowed strings are fine here.
+static inline void rift_decision_with(rift_decision_t *ret, uint8_t tag, const char *text) {
+  memset(ret, 0, sizeof *ret);
+  ret->tag = tag;
+  // Every payload-carrying case is a string at the same offset.
+  ret->val.deny = rift_string_dup(text);
+}
+
+// `deny-json` and `message-json`: a JSON text component of at most 32 KiB,
+// for colours, line breaks, hover text and click events.
+static inline void rift_decision_deny_json(rift_decision_t *ret, const char *reason_json) {
+  rift_decision_with(ret, RIFT_PLUGIN_TYPES_DECISION_DENY_JSON, reason_json);
+}
+static inline void rift_decision_message_json(rift_decision_t *ret, const char *text_json) {
+  rift_decision_with(ret, RIFT_PLUGIN_TYPES_DECISION_MESSAGE_JSON, text_json);
+}
+
+// A plain action as a decision; the action's payload moves into `ret`.
+static inline void rift_decision_from_action(rift_decision_t *ret, rift_action_t *action) {
+  memset(ret, 0, sizeof *ret);
+  // `action`'s cases are the first cases of `decision`, in the same order.
+  ret->tag = action->tag;
+  if (action->tag != RIFT_PLUGIN_TYPES_ACTION_CONTINUE && action->tag != RIFT_PLUGIN_TYPES_ACTION_LEAVE_QUEUE) {
+    ret->val.deny = action->val.deny;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Registration (what `init` returns)
 
 static inline void rift_registration_init(rift_registration_t *reg) {
@@ -314,6 +352,19 @@ static inline bool rift_show_dialog(const rift_string_t *target, const char *dia
     return false;
   }
   return queued;
+}
+
+// Like `rift_message`, with `text_json` a JSON text component of at most
+// 32 KiB, for colours, hover text and click events.
+static inline bool rift_message_json(const rift_string_t *target, const char *text_json) {
+  rift_string_t t = *target, msg = rift_str(text_json), err = {NULL, 0};
+  bool online = false;
+  if (!rift_plugin_players_message_json(&t, &msg, &online, &err)) {
+    rift_log(RIFT_WARN, "players.message-json failed: " RIFT_STR_FMT, RIFT_STR_ARG(err));
+    rift_string_free(&err);
+    return false;
+  }
+  return online;
 }
 
 // ---------------------------------------------------------------------------

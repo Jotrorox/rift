@@ -588,7 +588,7 @@ async fn probe_report(runtime: &Extensions, args: &str) -> Report {
     else {
         panic!("probe did not reply with a message");
     };
-    serde_json::from_str(&text).unwrap()
+    serde_json::from_str(&text.to_string()).unwrap()
 }
 
 #[tokio::test]

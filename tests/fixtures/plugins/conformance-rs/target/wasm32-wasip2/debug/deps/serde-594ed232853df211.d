@@ -1,0 +1,12 @@
+/Users/johannes/.t3/worktrees/rift/t3-507aca94/tests/fixtures/plugins/conformance-rs/target/wasm32-wasip2/debug/deps/serde-594ed232853df211.d: /Users/johannes/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs /Users/johannes/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs /Users/johannes/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs /Users/johannes/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs /Users/johannes/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs /Users/johannes/.t3/worktrees/rift/t3-507aca94/tests/fixtures/plugins/conformance-rs/target/wasm32-wasip2/debug/build/serde-b3c5982476a12406/out/private.rs
+
+/Users/johannes/.t3/worktrees/rift/t3-507aca94/tests/fixtures/plugins/conformance-rs/target/wasm32-wasip2/debug/deps/libserde-594ed232853df211.rmeta: /Users/johannes/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs /Users/johannes/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs /Users/johannes/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs /Users/johannes/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs /Users/johannes/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs /Users/johannes/.t3/worktrees/rift/t3-507aca94/tests/fixtures/plugins/conformance-rs/target/wasm32-wasip2/debug/build/serde-b3c5982476a12406/out/private.rs
+
+/Users/johannes/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs:
+/Users/johannes/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs:
+/Users/johannes/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs:
+/Users/johannes/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs:
+/Users/johannes/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs:
+/Users/johannes/.t3/worktrees/rift/t3-507aca94/tests/fixtures/plugins/conformance-rs/target/wasm32-wasip2/debug/build/serde-b3c5982476a12406/out/private.rs:
+
+# env-dep:OUT_DIR=/Users/johannes/.t3/worktrees/rift/t3-507aca94/tests/fixtures/plugins/conformance-rs/target/wasm32-wasip2/debug/build/serde-b3c5982476a12406/out

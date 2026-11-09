@@ -12,6 +12,7 @@ use crate::plugins::{
     api::{BossBarSpec, CommandSpec, Hook, Level, PlayerInfo, SuggestKind, TitleSpec},
     services::Services,
 };
+use crate::text::Text;
 use mlua::{Function, Lua, LuaString, MultiValue, Table, Value};
 use std::{
     cell::{Cell, RefCell},
@@ -695,24 +696,26 @@ fn players(lua: &Lua, state: &Rc<State>) -> mlua::Result<Table> {
             lua.create_sequence_from(services.players().names(prefix.as_deref()))
         })?,
     )?;
-    type Send = fn(&Services, &str, &str) -> Result<bool, String>;
-    let texts: [(&str, Send); 3] = [
-        ("message", |services, target, text| {
-            services.players().message(target, text)
+    // A string is plain text and a table a chat component.
+    type Send = fn(&Services, &str, Text) -> Result<bool, String>;
+    let texts: [(&str, &str, Send); 3] = [
+        ("message", "message", |services, target, text| {
+            services.players().message_text(target, text)
         }),
-        ("action_bar", |services, target, text| {
-            services.players().action_bar(target, text)
+        ("action_bar", "action bar text", |services, target, text| {
+            services.players().action_bar_text(target, text)
         }),
-        ("kick", |services, target, text| {
-            services.players().kick(target, text)
+        ("kick", "kick reason", |services, target, text| {
+            services.players().kick_text(target, text)
         }),
     ];
-    for (name, send) in texts {
+    for (name, label, send) in texts {
         let services = state.services.clone();
         api.raw_set(
             name,
-            function(lua, state, move |_, (target, text): (String, String)| {
-                send(&services, &target, &text).map_err(runtime)
+            function(lua, state, move |_, (target, text): (String, Value)| {
+                let text = Text::lua(text, label).map_err(runtime)?;
+                send(&services, &target, text).map_err(runtime)
             })?,
         )?;
     }
@@ -830,10 +833,11 @@ fn players(lua: &Lua, state: &Rc<State>) -> mlua::Result<Table> {
         function(
             lua,
             state,
-            move |_, (message, server): (String, Option<String>)| {
+            move |_, (message, server): (Value, Option<String>)| {
+                let message = Text::lua(message, "message").map_err(runtime)?;
                 services
                     .players()
-                    .broadcast_to(&message, server.as_deref())
+                    .broadcast_text(message, server.as_deref())
                     .map_err(runtime)
             },
         )?,

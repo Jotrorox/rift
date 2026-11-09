@@ -137,7 +137,7 @@ mode:
 
 | Contract | In a persistent Lua plugin |
 | --- | --- |
-| `players.*` | `rift.players.list`, `get`, `names`, `message`, `action_bar`, `title`, `tab_list`, `boss_bar`, `dialog`, `clear_dialog`, `kick`, `transfer`, `broadcast`, as in API v2. Clicks on the plugin's [dialogs](dialogs.md) reach its `rift.on("dialog", fn)` handlers. |
+| `players.*` | `rift.players.list`, `get`, `names`, `message`, `action_bar`, `title`, `tab_list`, `boss_bar`, `dialog`, `clear_dialog`, `kick`, `transfer`, `broadcast`, as in API v2. `message`, `action_bar`, `kick` and `broadcast`, like `deny` and `message` results, take a chat component table in place of the string ([rich text](extensions.md#rich-text)). Clicks on the plugin's [dialogs](dialogs.md) reach its `rift.on("dialog", fn)` handlers. |
 | `store.*` | `rift.store.*`. Namespaces are private (`plugin.<name>.<namespace>`). `delete` returns whether the entry existed, `increment`'s delta defaults to 1, and `rift.store.list(namespace, prefix)` returns `{ key, value }` entries sorted by key. |
 | `permissions.*` | `rift.permissions.*`. `groups` returns effective groups, including inherited ones and `default`; `rift.permissions.list_groups()` returns every group of the [permission store](permissions.md#persistent-plugins). Lua also has `rift.permissions.check(uuid, node, contexts?)` (true, false or nil) and `rift.permissions.meta(uuid, contexts?)`. |
 | `bus.publish`, `bus.request` | `rift.publish(subject, payload, reply?)` returns `{ delivered = n }`; `rift.request(subject, payload, timeout_ms)` waits for a reply. |
