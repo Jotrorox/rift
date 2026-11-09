@@ -234,8 +234,7 @@ fn grant(runtime: &Extensions, id: u64, node: &str) {
         .persistent
         .base
         .permissions
-        .set_override(&uuid, node, Some(true))
-        .unwrap();
+        .grant(&uuid, node);
 }
 
 fn instance(runtime: &Extensions) -> Arc<Instance> {

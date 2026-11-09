@@ -1,0 +1,42 @@
+{
+  "kind": "resolve",
+  "name": "multi-valued-custom-context",
+  "description": "A node naming two values of a key needs both in the active set.",
+  "now": 1000,
+  "users": {
+    "00000000000000000000000000000001": {
+      "nodes": [
+        {"kind": "permission", "key": "x", "value": true, "contexts": {"region": ["a", "b"]}}
+      ]
+    }
+  },
+  "groups": {},
+  "checks": [
+    {
+      "user": "00000000000000000000000000000001",
+      "node": "x",
+      "contexts": {"region": "a"},
+      "expect": null
+    },
+    {
+      "user": "00000000000000000000000000000001",
+      "node": "x",
+      "contexts": {"region": ["a", "b"]},
+      "expect": true
+    }
+  ],
+  "compiled": {
+    "00000000000000000000000000000001": {
+      "revision": 1,
+      "uuid": "00000000000000000000000000000001",
+      "primary_group": "default",
+      "entries": [
+        {"k": "perm", "key": "x", "v": true, "ctx": {"region": ["a", "b"]}, "rank": 0},
+        {"k": "group", "key": "default", "v": true, "ctx": {}, "rank": 1}
+      ],
+      "prefix": [],
+      "suffix": [],
+      "meta": []
+    }
+  }
+}

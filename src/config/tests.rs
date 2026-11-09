@@ -113,6 +113,52 @@ fn limits_and_individual_limit_fields_are_optional() {
 }
 
 #[test]
+fn permissions_section_sets_limits_external_contexts_and_sweeps() {
+    let config = |permissions: &str| {
+        Config::from_lua(
+            &format!(
+                "return {{ listeners = {{ a = '[::1]:25565' }}, backends = {{ b = '[::1]:25566' }}, routes = {{ a = 'b' }} {permissions} }}"
+            ),
+            "test.lua",
+        )
+    };
+    assert_eq!(
+        config("").unwrap().permissions,
+        PermissionsConfig::default()
+    );
+    let parsed = config(
+        ", permissions = { limits = { groups = 10, user_nodes = 20 }, contexts = { external = { 'region', 'plot' } }, sweep_interval_ms = 5000 }",
+    )
+    .unwrap()
+    .permissions;
+    assert_eq!((parsed.limits.groups, parsed.limits.user_nodes), (10, 20));
+    assert_eq!(
+        parsed.limits.parents,
+        rift_permissions::Limits::default().parents
+    );
+    assert_eq!(
+        parsed.external_contexts,
+        ["plot".to_owned(), "region".to_owned()].into()
+    );
+    assert_eq!(parsed.sweep_interval, Duration::from_secs(5));
+    for invalid in [
+        ", permissions = true",
+        ", permissions = { typo = 1 }",
+        ", permissions = { limits = { groups = 0 } }",
+        ", permissions = { limits = { batch = 10 } }",
+        ", permissions = { limits = { parents = 1025 } }",
+        ", permissions = { contexts = { external = { 'server' } } }",
+        ", permissions = { contexts = { external = { 'Region' } } }",
+        ", permissions = { contexts = { external = { 'a', 'a' } } }",
+        ", permissions = { contexts = { external = { x = 'region' } } }",
+        ", permissions = { contexts = { internal = {} } }",
+        ", permissions = { sweep_interval_ms = 999 }",
+    ] {
+        assert!(config(invalid).is_err(), "{invalid}");
+    }
+}
+
+#[test]
 fn hook_is_optional_but_must_be_a_function() {
     assert!(
         Config::from_lua(VALID, "test.lua")
@@ -1405,6 +1451,59 @@ fn messaging_quic_requires_tls_and_explicit_principal_acls() {
     assert_eq!(messaging.streams["events"].config.max_messages, 20);
     assert!(messaging.streams["events"].config.sync_on_write);
     // Loading configs does not read private files or resolve environment secrets.
+}
+
+#[test]
+fn messaging_backend_preset_grants_the_permission_protocol() {
+    let config = Config::from_lua(&with_security(r#"
+        messaging = {
+            listen = '127.0.0.1:4222', certificate = 'server.pem', private_key = 'server.key',
+            principals = {
+                {name = 'server.survival', token_env = 'SURVIVAL_TOKEN', preset = 'backend'},
+                {name = 'server.lobby', token_env = 'LOBBY_TOKEN', preset = 'backend', publish = {'game.>', 'rift.perms.hello'}},
+            },
+        }
+    "#), "preset.lua").unwrap();
+    let messaging = config.messaging.unwrap();
+    let survival = &messaging.principals[0];
+    assert!(survival.publish.iter().any(|p| p == "rift.perms.subject.*"));
+    assert!(survival.publish.iter().any(|p| p == "rift.perms.command"));
+    assert!(
+        survival
+            .subscribe
+            .iter()
+            .any(|p| p == "rift.perms.update.>")
+    );
+    assert!(
+        survival
+            .subscribe
+            .iter()
+            .any(|p| p == "rift.events.permissions")
+    );
+    assert!(!survival.control);
+    let lobby = &messaging.principals[1];
+    assert_eq!(lobby.publish[0], "game.>");
+    assert_eq!(
+        lobby
+            .publish
+            .iter()
+            .filter(|p| *p == "rift.perms.hello")
+            .count(),
+        1
+    );
+    let error = Config::from_lua(
+        &with_security(
+            r#"
+        messaging = {
+            listen = '127.0.0.1:4222', certificate = 'server.pem', private_key = 'server.key',
+            principals = {{name = 'server.x', token_env = 'X_TOKEN', preset = 'everything'}},
+        }
+    "#,
+        ),
+        "preset.lua",
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("unknown preset"), "{error}");
 }
 
 #[test]

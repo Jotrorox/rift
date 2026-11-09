@@ -1,0 +1,22 @@
+{
+  "kind": "luckperms",
+  "name": "any-of-contexts",
+  "description": "LuckPerms' any-value sets expand to one node per value; world=global means no context.",
+  "node": {"key": "kit.use", "context": {"server": ["a", "b"], "world": "global"}},
+  "expect": [
+    {
+      "kind": "permission",
+      "key": "kit.use",
+      "value": true,
+      "contexts": {"server": "a"},
+      "source": "import"
+    },
+    {
+      "kind": "permission",
+      "key": "kit.use",
+      "value": true,
+      "contexts": {"server": "b"},
+      "source": "import"
+    }
+  ]
+}

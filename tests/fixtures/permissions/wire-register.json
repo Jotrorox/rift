@@ -1,0 +1,11 @@
+{
+  "kind": "wire",
+  "name": "register",
+  "type": "register_request",
+  "json": [
+    {"node": "essentials.fly", "description": "Fly", "default": "op", "plugin": "Essentials"},
+    {"node": "myplugin:fly", "default": "op:2"},
+    {"node": "chat.use", "default": "true"},
+    {"node": "x", "default": "not_op"}
+  ]
+}

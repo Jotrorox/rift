@@ -117,17 +117,16 @@ per-instance capacity of its service group's queue, then the group's
 Zero means Rift knows no limit for the server; the backend's own `max-players`
 still applies.
 
-`RiftInGroup` answers whether a player belongs to a permission group defined in
-`extensions.groups`. Membership follows the same rules as permission checks: a
-player belongs to the groups added with `rift.permissions.add_group` or the
-dashboard, to every group those inherit from, and to `default` and its parents
-when `default` is defined. Memberships of groups the current configuration no
-longer defines do not count, and an undefined group returns false. The player
-name ignores ASCII case and the response uses the canonical name; the group
-name is compared exactly and repeated as sent. The boolean is a single byte
-(`DataInput.readBoolean`). Missing players produce no reply, and so does every
-`RiftInGroup` request without extensions using `api_version = 2`, since
-permission groups do not exist then.
+`RiftInGroup` answers whether a player is in a group of the [permission
+store](permissions.md), from the player's compiled subject in the contexts Rift
+knows for them (their server, dimension and game mode, and custom contexts
+reported by the backend or Lua providers). A player is in the groups they inherit directly, every group those
+inherit, and `default`, unless a negated `inherit` node blocks it; memberships
+limited to other contexts, expired ones, and groups that no longer exist do
+not count. The player name ignores ASCII case and the response uses the
+canonical name; the group name ignores ASCII case and is repeated as sent. The
+boolean is a single byte (`DataInput.readBoolean`). Missing players produce no
+reply. The store always exists, with or without extensions.
 
 A lobby selector can list a group's servers:
 

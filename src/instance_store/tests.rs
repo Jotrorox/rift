@@ -3,9 +3,11 @@ use crate::{
     managed::{ManagedServers, Phase},
     players::PlayerRegistry,
 };
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
+use rusqlite::Connection;
+use std::{
+    path::PathBuf,
+    sync::atomic::{AtomicUsize, Ordering},
+    time::Duration,
 };
 
 struct Fixture {
@@ -380,17 +382,16 @@ fn exclusive_lock_corruption_and_newer_schema_have_clear_errors() {
     let fixture = Fixture::new("persistent");
     let store = fixture.store();
     assert!(
-        Store::open(&store.path)
+        Store::open(store.database().path())
             .unwrap_err()
             .to_string()
             .contains("already in use")
     );
-    let path = store.path.clone();
+    let path = store.database().path().to_owned();
     store
-        .connection
+        .database()
         .lock()
-        .unwrap()
-        .execute_batch("PRAGMA user_version=99")
+        .execute_batch("UPDATE rift_schema SET version = 99 WHERE component = 'instances'")
         .unwrap();
     drop(store);
     assert!(
@@ -505,13 +506,15 @@ fn version_one_databases_migrate_and_ports_become_unique_per_node() {
             .unwrap();
     }
     let store = fixture.store();
-    let version: u32 = store
-        .connection
+    let version = database::version(&store.database().lock(), "instances").unwrap();
+    assert_eq!(version, 2);
+    // Older releases read the version from user_version.
+    let legacy: u32 = store
+        .database()
         .lock()
-        .unwrap()
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 2);
+    assert_eq!(legacy, 2);
     // The sequence survives, so names are never reused after the upgrade.
     let (_, name, _) = fixture.ready(&store);
     assert_eq!(name, "games-5");
@@ -519,7 +522,7 @@ fn version_one_databases_migrate_and_ports_become_unique_per_node() {
     assert_eq!(store.reserved_ports().unwrap(), BTreeSet::from([port]));
     assert!(store.reserved_ports_on(Some("node1")).unwrap().is_empty());
     let insert = |name: &str, node: &str| {
-        store.connection.lock().unwrap().execute(
+        store.database().lock().execute(
             "INSERT INTO instances (name,node,port,phase,definition) VALUES (?1,?2,?3,'ready','{}')",
             params![name, node, port],
         )

@@ -1,0 +1,7 @@
+{
+  "kind": "wire",
+  "name": "resync",
+  "type": "resync_request",
+  "description": "/perms sync asks every replica to say hello again and refetch everything",
+  "json": {"revision": 413}
+}

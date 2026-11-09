@@ -1,0 +1,7 @@
+{
+  "kind": "wire",
+  "name": "change-event-bad-actor",
+  "type": "change_event",
+  "json": {"revision": 2, "at": 0, "actor": "root", "ops": []},
+  "error": true
+}

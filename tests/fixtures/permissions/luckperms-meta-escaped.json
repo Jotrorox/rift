@@ -1,0 +1,7 @@
+{
+  "kind": "luckperms",
+  "name": "meta-escaped",
+  "description": "LuckPerms escapes dots in meta keys and values as \\.",
+  "node": {"type": "meta", "key": "meta.tab\\.color.dark\\.gold", "value": true},
+  "expect": [{"kind": "meta", "key": "tab.color", "value": "dark.gold", "source": "import"}]
+}

@@ -260,6 +260,60 @@ fn v2_jobs_run_in_the_executable_and_state_survives_restart() {
     assert!(count > last_count);
 }
 
+/// The permission store in the fixture's `rift.sqlite3`, opened while no Rift runs.
+fn permissions(fixture: &Fixture) -> rift::permissions::Authority {
+    let database = rift::database::Database::open(&fixture.0.join("rift.sqlite3")).unwrap();
+    rift::permissions::Authority::open(std::sync::Arc::new(database), &Default::default()).unwrap()
+}
+
+#[test]
+fn upgrade_copies_extension_permissions_once_then_refuses_the_removed_field() {
+    use rift_permissions::{Actor, ContextSet, Tristate, Uuid};
+    let fixture = Fixture::new();
+    let configuration = |legacy: &str| {
+        format!(
+            "rift.config.extensions = {{ api_version=3, storage={{path='state.bin'}}, {legacy}
+            groups={{staff={{permissions={{['network.staff']=true}}}}}} }}; {}",
+            online_config("127.0.0.1:25566".parse().unwrap())
+        )
+    };
+    let player = "01".repeat(16);
+    fixture.write(&configuration(&format!(
+        "permissions={{['{player}']={{['network.kick']=true}}}},"
+    )));
+    let checked = Command::new(env!("CARGO_BIN_EXE_rift"))
+        .current_dir(&fixture.0)
+        .args(["check", "rift.lua"])
+        .output()
+        .unwrap();
+    assert!(!checked.status.success());
+    assert!(
+        String::from_utf8_lossy(&checked.stderr).contains("extensions.permissions was removed"),
+        "{:?}",
+        checked.stderr
+    );
+    // The first start copies the grants, then refuses to run with the field.
+    fixture
+        .spawn_security(&[], Some("velocity-fixture-secret"))
+        .failure("extensions.permissions was removed");
+    let player = Uuid::parse(&player).unwrap();
+    let store = permissions(&fixture);
+    let global = ContextSet::new();
+    assert_eq!(store.check(player, "network.kick", &global), Tristate::True);
+    let log = store.log(&Default::default()).unwrap();
+    assert_eq!((log.len(), log[0].actor.clone()), (1, Actor::System));
+    drop(store);
+    fixture.write(&configuration(""));
+    let started = fixture.spawn_security(&[], Some("velocity-fixture-secret"));
+    started.listener();
+    drop(started);
+    // The upgrade did not repeat; the configured groups were mirrored once.
+    let store = permissions(&fixture);
+    assert_eq!(store.revision(), 2);
+    assert_eq!(store.check(player, "network.kick", &global), Tristate::True);
+    assert_eq!(store.group("staff").unwrap().nodes.len(), 1);
+}
+
 impl Drop for Fixture {
     fn drop(&mut self) {
         fs::remove_dir_all(&self.0).unwrap();
@@ -1036,6 +1090,27 @@ fn strict_check(fixture: &Fixture, envs: &[(&str, &str)]) -> (bool, String) {
             String::from_utf8_lossy(&output.stderr)
         ),
     )
+}
+
+#[test]
+fn strict_check_warns_about_command_permissions_nobody_holds() {
+    let fixture = Fixture::new();
+    fixture.write(&format!(
+        "{}\nrift.config.extensions = {{ api_version = 3, commands = {{ fly = {{ permission = 'essentials.fly', run = function() end }}, ban = {{ permission = 'network.ban', run = function() end }} }}, groups = {{ staff = {{ permissions = {{ ['network.*'] = true }} }} }} }}",
+        online_config("127.0.0.1:25566".parse().unwrap()).replacen("return {", "rift.setup {", 1)
+    ));
+    let (ok, output) = strict_check(
+        &fixture,
+        &[("RIFT_TEST_FORWARDING_SECRET", "velocity-secret-value")],
+    );
+    assert!(ok, "warnings do not fail the check: {output}");
+    assert!(
+        output.contains(
+            "warning: extensions.commands.fly: permission essentials.fly is neither registered by a backend nor granted anywhere"
+        ),
+        "{output}"
+    );
+    assert!(!output.contains("extensions.commands.ban"), "{output}");
 }
 
 #[test]

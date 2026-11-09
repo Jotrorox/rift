@@ -1,0 +1,42 @@
+{
+  "kind": "resolve",
+  "name": "expiry-through-inherit",
+  "description": "A temporary parent's nodes expire with the edge.",
+  "now": 1000,
+  "users": {
+    "00000000000000000000000000000001": {
+      "nodes": [{"kind": "inherit", "group": "vip", "value": true, "expires_at": 1500}]
+    }
+  },
+  "groups": {
+    "vip": {
+      "nodes": [
+        {"kind": "permission", "key": "fly", "value": true},
+        {"kind": "permission", "key": "short", "value": true, "expires_at": 1200}
+      ]
+    }
+  },
+  "checks": [
+    {"user": "00000000000000000000000000000001", "node": "fly", "now": 1499, "expect": true},
+    {"user": "00000000000000000000000000000001", "node": "fly", "now": 1500, "expect": null},
+    {"user": "00000000000000000000000000000001", "node": "group.vip", "now": 1500, "expect": null},
+    {"user": "00000000000000000000000000000001", "node": "short", "now": 1199, "expect": true},
+    {"user": "00000000000000000000000000000001", "node": "short", "now": 1200, "expect": null}
+  ],
+  "compiled": {
+    "00000000000000000000000000000001": {
+      "revision": 1,
+      "uuid": "00000000000000000000000000000001",
+      "primary_group": "vip",
+      "entries": [
+        {"k": "group", "key": "vip", "v": true, "ctx": {}, "rank": 1, "exp": 1500},
+        {"k": "perm", "key": "fly", "v": true, "ctx": {}, "rank": 1, "exp": 1500},
+        {"k": "perm", "key": "short", "v": true, "ctx": {}, "rank": 1, "exp": 1200},
+        {"k": "group", "key": "default", "v": true, "ctx": {}, "rank": 2}
+      ],
+      "prefix": [],
+      "suffix": [],
+      "meta": []
+    }
+  }
+}

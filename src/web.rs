@@ -495,6 +495,12 @@ fn router(kind: Kind, address: SocketAddr, mut app: App) -> Router {
             .route("/api/reload", post(reload))
             .route("/ext", any(extension))
             .route("/ext/{*path}", any(extension))
+            .merge(
+                rift::permissions::http::router().layer(middleware::from_fn_with_state(
+                    app.clone(),
+                    permission_caller,
+                )),
+            )
             .layer(middleware::from_fn_with_state(app.clone(), admin_guard)),
         Kind::Status => Router::new()
             .route("/", get(status_html))
@@ -720,8 +726,10 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
             }
         }
         let segments: Vec<_> = path.trim_start_matches('/').split('/').collect();
+        // A trace only reads, although it is a POST.
         let mutation = request.method() != axum::http::Method::GET
-            && request.method() != axum::http::Method::HEAD;
+            && request.method() != axum::http::Method::HEAD
+            && segments != ["api", "perms", "trace"];
         let permission = if extension {
             "extensions"
         } else {
@@ -736,8 +744,11 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
                 | ["api", "groups", _, "instances"]
                 | ["api", "instances", _]
                 | ["api", "operations", _] => "servers",
+                // Permission data: `perms` (or `config`) reads, `config` writes.
+                ["api", "perms", ..] | ["api", "permissions", ..] if !mutation => "perms",
                 ["api", "definitions", ..]
                 | ["api", "permissions", ..]
+                | ["api", "perms", ..]
                 | ["api", "config", ..]
                 | ["api", "reload"] => "config",
                 ["api", "deployments", ..] => "deploy",
@@ -758,6 +769,20 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
                 .take(128)
                 .collect(),
             ),
+            // Users, groups and tracks; validated by the handlers.
+            [
+                "api",
+                "perms",
+                "users" | "groups" | "tracks",
+                name,
+                rest @ ..,
+            ] => {
+                let mut target = decode_name(name).unwrap_or_default();
+                if let ["nodes", id] = rest {
+                    target = format!("{target}/{}", decode_name(id).unwrap_or_default());
+                }
+                (true, target.chars().take(128).collect())
+            }
             // Template folders are shared by every group.
             ["api", "files", "templates", rest @ ..] => (
                 access.groups.is_none(),
@@ -836,7 +861,11 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
         let authorized = if access.allows(NODE_PERMISSION) && access.permissions.is_some() {
             !mutation && matches!(segments.as_slice(), ["api", "files", "templates", ..])
         } else {
-            (permission.is_empty() || access.allows(permission)) && in_scope
+            // `config` already exposes everything `perms` can read.
+            let granted = permission.is_empty()
+                || access.allows(permission)
+                || (permission == "perms" && access.allows("config"));
+            granted && in_scope
         };
         let operation = match segments.as_slice() {
             ["api", "servers", _, "start"] => "start",
@@ -851,6 +880,17 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
             ["api", "definitions", "tab_list"] => "edit_tab_list",
             ["api", "definitions", "server_list"] => "edit_server_list",
             ["api", "permissions", "members", _, _] => "group_membership",
+            ["api", "perms", "users", _] => "perms_user",
+            ["api", "perms", "users", _, "nodes", ..] => "perms_user_nodes",
+            ["api", "perms", "groups"] => "perms_create_group",
+            ["api", "perms", "groups", _] => "perms_group",
+            ["api", "perms", "groups", _, "nodes", ..] => "perms_group_nodes",
+            ["api", "perms", "tracks", _] => "perms_track",
+            ["api", "perms", "tracks", _, "promote"] => "perms_promote",
+            ["api", "perms", "tracks", _, "demote"] => "perms_demote",
+            ["api", "perms", "apply"] => "perms_apply",
+            ["api", "perms", "bulk"] => "perms_bulk",
+            ["api", "perms", "import"] => "perms_import",
             ["api", "deployments", _, "rollback"] => "rollback",
             ["api", "config"] => "configuration",
             ["api", "config", "validate"] => "validate",
@@ -894,6 +934,22 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
         return response;
     }
     drop(snapshot);
+    next.run(request).await
+}
+/// Give the `/api/perms` handlers the authority and the operator that
+/// `admin_guard` authenticated.
+async fn permission_caller(State(app): State<App>, mut request: Request, next: Next) -> Response {
+    let Some(operator) = request
+        .extensions()
+        .get::<Access>()
+        .map(|access| access.name.clone())
+    else {
+        return error(StatusCode::UNAUTHORIZED, "a valid bearer token is required");
+    };
+    let authority = app.snapshot().extensions.permissions().clone();
+    request
+        .extensions_mut()
+        .insert(rift::permissions::http::Caller::new(authority, &operator));
     next.run(request).await
 }
 /// The only grant of a node agent's token: reading template files.
@@ -1316,7 +1372,7 @@ async fn apply_definition(
     {
         return error(
             StatusCode::CONFLICT,
-            "permission groups require extensions with api_version = 2; configure them in Lua first",
+            "permission groups require extensions with api_version = 2 or 3; configure them in Lua first",
         );
     }
     if section == "server_list"
@@ -1345,78 +1401,111 @@ async fn apply_definition(
 }
 /// Members are capped so a large store cannot produce an unbounded response.
 const MAX_LISTED_MEMBERS: usize = 1000;
-async fn permission_groups(State(app): State<App>) -> Json<Value> {
-    let snapshot = app.snapshot();
-    let Some(memberships) = snapshot.extensions.group_memberships() else {
-        return Json(json!({"enabled":false,"members":[],"truncated":false}));
-    };
-    let names = snapshot.extensions.players().names();
-    let members: Vec<Value> = memberships
-        .iter()
-        .take(MAX_LISTED_MEMBERS)
-        .map(|(uuid, groups)| json!({"uuid":uuid,"name":names.get(uuid),"groups":groups}))
-        .collect();
-    Json(json!({
-        "enabled": true,
-        "members": members,
-        "truncated": memberships.len() > MAX_LISTED_MEMBERS,
-    }))
+/// Users with global group memberships in the permission store.
+async fn permission_groups(State(app): State<App>) -> Response {
+    let extensions = app.snapshot().extensions.clone();
+    let names = extensions.players().names();
+    let listed =
+        tokio::task::spawn_blocking(move || extensions.permissions().members(MAX_LISTED_MEMBERS))
+            .await;
+    match listed {
+        Ok(Ok((members, truncated))) => {
+            let members: Vec<Value> = members
+                .into_iter()
+                .map(|member| {
+                    let uuid = member.uuid.to_string();
+                    let name = names.get(&uuid).cloned().or(member.name);
+                    json!({"uuid": uuid, "name": name, "groups": member.groups})
+                })
+                .collect();
+            Json(json!({"enabled": true, "members": members, "truncated": truncated}))
+                .into_response()
+        }
+        Ok(Err(failure)) => error(StatusCode::SERVICE_UNAVAILABLE, failure),
+        Err(failure) => error(StatusCode::INTERNAL_SERVER_ERROR, failure),
+    }
 }
 async fn add_member(
     State(app): State<App>,
+    Extension(access): Extension<Access>,
     Path((uuid, group)): Path<(String, String)>,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
-    membership(app, uuid, group, body, true).await
+    membership(app, access, uuid, group, body, true).await
 }
 async fn remove_member(
     State(app): State<App>,
+    Extension(access): Extension<Access>,
     Path((uuid, group)): Path<(String, String)>,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
-    membership(app, uuid, group, body, false).await
+    membership(app, access, uuid, group, body, false).await
 }
+/// Add or remove a global `inherit` node through the permission authority.
 async fn membership(
     app: App,
+    access: Access,
     uuid: String,
     group: String,
     body: Result<Json<Value>, JsonRejection>,
     add: bool,
 ) -> Response {
+    use rift::permissions::PermError;
+    use rift_permissions::{Actor, Change, Node, NodeKind, SubjectRef, node::NodeKey};
     if let Err(error) = payload(body, &[]) {
         return error.into_response();
     }
     let extensions = app.snapshot().extensions.clone();
-    // An online player may be named instead of identified by UUID.
-    let hexadecimal = uuid.len() == 32 && uuid.bytes().all(|b| b.is_ascii_hexdigit());
-    let uuid = if hexadecimal {
-        uuid
-    } else {
-        match extensions
-            .players()
-            .names()
-            .into_iter()
-            .find(|(_, name)| name.eq_ignore_ascii_case(&uuid))
-        {
-            Some((uuid, _)) => uuid,
-            None => {
-                return error(
-                    StatusCode::NOT_FOUND,
-                    "no online player has that name; use their UUID",
-                );
+    let actor = format!("operator:{}", access.name)
+        .parse()
+        .unwrap_or_else(|_| Actor::Operator("dashboard".into()));
+    let result = tokio::task::spawn_blocking(move || {
+        let permissions = extensions.permissions();
+        // A player may be named instead of identified by UUID.
+        let user = match rift_permissions::Uuid::parse(&uuid) {
+            Ok(user) => user,
+            Err(_) => permissions
+                .user_by_name(&uuid)?
+                .ok_or(PermError::NotFound {
+                    what: "player",
+                    name: uuid,
+                })?,
+        };
+        let subject = SubjectRef::User(user);
+        let change = if add {
+            if group.eq_ignore_ascii_case(rift_permissions::DEFAULT_GROUP) {
+                return Err(PermError::Conflict(
+                    "every player belongs to the default group implicitly".into(),
+                ));
             }
-        }
-    };
-    let result =
-        tokio::task::spawn_blocking(move || extensions.change_group_membership(&uuid, &group, add))
-            .await;
+            if permissions.group(&group.to_ascii_lowercase()).is_none() {
+                return Err(PermError::NotFound {
+                    what: "permission group",
+                    name: group,
+                });
+            }
+            Change::SetNode {
+                subject,
+                node: Node::inherit(&group, true)?,
+            }
+        } else {
+            Change::UnsetNode {
+                subject,
+                key: NodeKey::new(NodeKind::Inherit, &group, Default::default())?,
+            }
+        };
+        permissions.apply(actor, change)
+    })
+    .await;
     match result {
-        Ok(Ok(changed)) => Json(json!({"changed":changed})).into_response(),
+        Ok(Ok(applied)) => {
+            Json(json!({"changed": applied.ops > 0, "revision": applied.revision})).into_response()
+        }
         Ok(Err(failure)) => error(
-            match failure.kind() {
-                io::ErrorKind::InvalidInput => StatusCode::BAD_REQUEST,
-                io::ErrorKind::Unsupported => StatusCode::CONFLICT,
-                _ => StatusCode::SERVICE_UNAVAILABLE,
+            match &failure {
+                PermError::NotFound { what: "player", .. } => StatusCode::NOT_FOUND,
+                PermError::Storage(_) | PermError::Deadline => StatusCode::SERVICE_UNAVAILABLE,
+                _ => StatusCode::BAD_REQUEST,
             },
             failure,
         ),
@@ -1920,7 +2009,7 @@ async fn standalone_metrics(state: State<App>) -> Response {
 }
 async fn discovery() -> Json<Value> {
     Json(
-        json!({"version":1,"endpoints":["GET /api/access","GET /api/status","GET /api/servers","POST /api/servers/{name}/start","POST /api/servers/{name}/stop","GET /api/servers/{name}/logs","POST /api/servers/{name}/console","GET /api/groups","GET /api/nodes","GET /api/plugins","GET /api/plugins/{name}","GET /api/plugins/{name}/logs","POST /api/plugins/{name}/restart","POST /api/groups/{name}/instances","GET /api/templates","POST /api/templates/{name}/download","GET /api/software/{type}/versions","GET|PUT|DELETE /api/files/templates/{path}","GET|PUT|DELETE /api/files/servers/{name}/{path}","DELETE /api/instances/{name}","GET /api/definitions","PUT /api/definitions/{section}/{name}","PUT /api/definitions/{section}","GET /api/permissions","POST /api/permissions/members/{uuid}/{group}","DELETE /api/permissions/members/{uuid}/{group}","GET /api/deployments","POST /api/deployments/{id}/rollback","GET /api/audit","GET /api/operations/{id}","GET /api/metrics","GET /api/config","POST /api/config/validate","PUT /api/config","POST /api/reload"],"extensions":"/ext/* -> on_http(request)","source_limit_bytes":control::MAX_SOURCE}),
+        json!({"version":1,"endpoints":["GET /api/access","GET /api/status","GET /api/servers","POST /api/servers/{name}/start","POST /api/servers/{name}/stop","GET /api/servers/{name}/logs","POST /api/servers/{name}/console","GET /api/groups","GET /api/nodes","GET /api/plugins","GET /api/plugins/{name}","GET /api/plugins/{name}/logs","POST /api/plugins/{name}/restart","POST /api/groups/{name}/instances","GET /api/templates","POST /api/templates/{name}/download","GET /api/software/{type}/versions","GET|PUT|DELETE /api/files/templates/{path}","GET|PUT|DELETE /api/files/servers/{name}/{path}","DELETE /api/instances/{name}","GET /api/definitions","PUT /api/definitions/{section}/{name}","PUT /api/definitions/{section}","GET /api/permissions","POST /api/permissions/members/{uuid}/{group}","DELETE /api/permissions/members/{uuid}/{group}","GET /api/perms/revision","GET /api/perms/backends","GET /api/perms/registered","GET /api/perms/search","GET /api/perms/users","GET|PATCH /api/perms/users/{user}","GET|PUT|DELETE /api/perms/users/{user}/nodes","PUT|DELETE /api/perms/users/{user}/nodes/{id}","GET /api/perms/users/{user}/compiled","GET|POST /api/perms/groups","GET|PATCH|DELETE /api/perms/groups/{name}","GET|PUT|DELETE /api/perms/groups/{name}/nodes","PUT|DELETE /api/perms/groups/{name}/nodes/{id}","GET /api/perms/tracks","GET|PUT|DELETE /api/perms/tracks/{name}","POST /api/perms/tracks/{name}/promote","POST /api/perms/tracks/{name}/demote","GET /api/perms/audit","POST /api/perms/trace","POST /api/perms/apply","POST /api/perms/bulk","POST /api/perms/import","GET /api/perms/export","GET /api/deployments","POST /api/deployments/{id}/rollback","GET /api/audit","GET /api/operations/{id}","GET /api/metrics","GET /api/config","POST /api/config/validate","PUT /api/config","POST /api/reload"],"extensions":"/ext/* -> on_http(request)","source_limit_bytes":control::MAX_SOURCE}),
     )
 }
 async fn config_source(State(app): State<App>) -> Json<Value> {

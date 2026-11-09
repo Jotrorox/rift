@@ -1100,3 +1100,253 @@ async fn skewed_packets_over_the_frame_limit_compress_below_it() {
         Some(packet)
     );
 }
+
+/// 1.20.2+ spawn info naming `world` (also the dimension type before 1.20.5)
+/// and game mode `mode`, with a death location so every optional field is
+/// exercised.
+fn spawn_info(number: i32, world: &str, mode: u8) -> Vec<u8> {
+    let mut data = Vec::new();
+    if number < 766 {
+        write_string(world, &mut data);
+    } else {
+        data.push(2); // Dimension type registry ID.
+    }
+    write_string(world, &mut data);
+    data.extend([0; 8]); // seed
+    data.extend([mode, if number >= 777 { 0 } else { 255 }]);
+    data.extend([0, 0, 1]); // debug, flat, death location
+    write_string("minecraft:overworld", &mut data);
+    data.extend([0; 8]);
+    data.push(0); // portal cooldown
+    if number >= 768 {
+        data.push(63);
+    } // Sea level.
+    data
+}
+
+fn modern_join(number: i32, id: i32, world: &str, mode: u8) -> Packet {
+    let mut data = 1_i32.to_be_bytes().to_vec();
+    data.extend([0, 1]); // hardcore, world count
+    write_string("minecraft:overworld", &mut data);
+    data.extend([20, 8, 8, 0, 1, 0]); // limits, flags
+    data.extend(spawn_info(number, world, mode));
+    if number >= 776 {
+        data.push(0);
+    } // Backend online mode.
+    if number >= 766 {
+        data.push(0);
+    } // Enforce secure profile.
+    Packet::new(id, data)
+}
+
+fn game_event(id: i32, event: u8, value: f32) -> Packet {
+    let mut data = vec![event];
+    data.extend(value.to_be_bytes());
+    Packet::new(id, data)
+}
+
+fn spawn(dimension: &str, gamemode: GameMode) -> Option<switching::WorldUpdate> {
+    Some(switching::WorldUpdate::Spawn {
+        dimension: Some(dimension.to_owned()),
+        gamemode: Some(gamemode),
+    })
+}
+
+#[test]
+fn modern_join_respawn_and_game_events_name_the_dimension_and_game_mode() {
+    // Clientbound Login, Respawn and Game Event IDs: minecraft-data
+    // protocol.json through 26.1; GameProtocols registration order of the
+    // official 26.2 and 26.3 server jars (javap) after that.
+    let versions = [
+        (764, 0x29, 0x43, 0x20),
+        (765, 0x29, 0x45, 0x20),
+        (766, 0x2b, 0x47, 0x22),
+        (767, 0x2b, 0x47, 0x22),
+        (768, 0x2c, 0x4c, 0x23),
+        (769, 0x2c, 0x4c, 0x23),
+        (770, 0x2b, 0x4b, 0x22),
+        (771, 0x2b, 0x4b, 0x22),
+        (772, 0x2b, 0x4b, 0x22),
+        (773, 0x30, 0x50, 0x26),
+        (774, 0x30, 0x50, 0x26),
+        (775, 0x31, 0x52, 0x26),
+        (776, 0x31, 0x52, 0x26),
+        (777, 0x32, 0x54, 0x27),
+    ];
+    for (number, join, respawn, event) in versions {
+        let caps = ProtocolVersion::new(number).unwrap().switching().unwrap();
+        assert_eq!(caps.join_game, join, "protocol {number}");
+        let packet = modern_join(number, join, "minecraft:the_nether", 1);
+        caps.validate_join(&packet, false).unwrap();
+        assert_eq!(
+            caps.world_update(&packet),
+            spawn("minecraft:the_nether", GameMode::Creative),
+            "protocol {number}"
+        );
+        // A Join Game Rift cannot read still starts a new world.
+        let mut broken = packet.clone();
+        broken.data.push(0);
+        assert_eq!(
+            caps.world_update(&broken),
+            Some(switching::WorldUpdate::Spawn {
+                dimension: None,
+                gamemode: None,
+            })
+        );
+
+        let mut data = spawn_info(number, "minecraft:the_end", 3);
+        data.push(1); // data kept
+        let packet = Packet::new(respawn, data);
+        assert_eq!(
+            caps.world_update(&packet),
+            spawn("minecraft:the_end", GameMode::Spectator),
+            "protocol {number}"
+        );
+        // A custom world keeps its own key; an unknown game mode is unknown.
+        let mut data = spawn_info(number, "plugin:arena", 7);
+        data.push(0);
+        assert_eq!(
+            caps.world_update(&Packet::new(respawn, data)),
+            Some(switching::WorldUpdate::Spawn {
+                dimension: Some("plugin:arena".into()),
+                gamemode: None,
+            })
+        );
+        // Anything else with the Respawn ID is skipped, never an error.
+        for cut in 0..packet.data.len() {
+            let cut = Packet::new(respawn, packet.data[..cut].to_vec());
+            assert_eq!(caps.world_update(&cut), None, "protocol {number}");
+        }
+        let mut trailing = packet.clone();
+        trailing.data.push(0);
+        assert_eq!(caps.world_update(&trailing), None);
+
+        assert_eq!(
+            caps.world_update(&game_event(event, 3, 2.0)),
+            Some(switching::WorldUpdate::GameMode(GameMode::Adventure)),
+            "protocol {number}"
+        );
+        for skipped in [
+            game_event(event, 3, 1.5),
+            game_event(event, 3, 4.0),
+            game_event(event, 3, -1.0),
+            game_event(event, 3, f32::NAN),
+            game_event(event, 7, 1.0), // Rain level.
+            Packet::new(event, vec![3, 0, 0]),
+            Packet::empty(event),
+            game_event(0x7e, 3, 1.0),
+        ] {
+            assert_eq!(caps.world_update(&skipped), None, "protocol {number}");
+        }
+    }
+}
+
+#[test]
+fn every_switching_version_reads_the_game_mode_game_event() {
+    // minecraft-data protocol.json `game_state_change` (reason 3,
+    // `change_game_mode`, with a float value) for each release through
+    // 26.1; the 26.2 and 26.3 server jars' GameProtocols after that.
+    let versions = [
+        (47, 0x2b),
+        (107, 0x1e),
+        (108, 0x1e),
+        (109, 0x1e),
+        (110, 0x1e),
+        (210, 0x1e),
+        (315, 0x1e),
+        (316, 0x1e),
+        (335, 0x1e),
+        (338, 0x1e),
+        (340, 0x1e),
+        (393, 0x20),
+        (401, 0x20),
+        (404, 0x20),
+        (477, 0x1e),
+        (480, 0x1e),
+        (485, 0x1e),
+        (490, 0x1e),
+        (498, 0x1e),
+        (573, 0x1f),
+        (575, 0x1f),
+        (578, 0x1f),
+        (735, 0x1e),
+        (736, 0x1e),
+        (751, 0x1d),
+        (753, 0x1d),
+        (754, 0x1d),
+        (755, 0x1e),
+        (756, 0x1e),
+        (757, 0x1e),
+        (758, 0x1e),
+        (759, 0x1b),
+        (760, 0x1d),
+        (761, 0x1c),
+        (762, 0x1f),
+        (763, 0x1f),
+        (764, 0x20),
+        (765, 0x20),
+        (766, 0x22),
+        (767, 0x22),
+        (768, 0x23),
+        (769, 0x23),
+        (770, 0x22),
+        (771, 0x22),
+        (772, 0x22),
+        (773, 0x26),
+        (774, 0x26),
+        (775, 0x26),
+        (776, 0x26),
+        (777, 0x27),
+    ];
+    let supported: Vec<i32> = (0..=800)
+        .filter(|number| {
+            ProtocolVersion::new(*number).is_ok_and(ProtocolVersion::supports_switching)
+        })
+        .collect();
+    assert_eq!(
+        versions
+            .iter()
+            .map(|(number, _)| *number)
+            .collect::<Vec<_>>(),
+        supported
+    );
+    for (number, event) in versions {
+        let caps = ProtocolVersion::new(number).unwrap().switching().unwrap();
+        for (value, mode) in [
+            (0.0, GameMode::Survival),
+            (1.0, GameMode::Creative),
+            (2.0, GameMode::Adventure),
+            (3.0, GameMode::Spectator),
+        ] {
+            assert_eq!(
+                caps.world_update(&game_event(event, 3, value)),
+                Some(switching::WorldUpdate::GameMode(mode)),
+                "protocol {number}"
+            );
+        }
+        assert_eq!(caps.world_update(&game_event(event, 1, 0.0)), None);
+    }
+}
+
+#[test]
+fn player_world_reports_only_real_changes() {
+    let mut world = PlayerWorld::default();
+    let nether = spawn("minecraft:the_nether", GameMode::Survival).unwrap();
+    assert!(world.apply(nether.clone()));
+    assert!(!world.apply(nether));
+    assert!(world.apply(switching::WorldUpdate::GameMode(GameMode::Creative)));
+    assert!(!world.apply(switching::WorldUpdate::GameMode(GameMode::Creative)));
+    assert_eq!(
+        world,
+        PlayerWorld {
+            dimension: Some("minecraft:the_nether".into()),
+            gamemode: Some(GameMode::Creative),
+        }
+    );
+    assert!(world.apply(switching::WorldUpdate::Spawn {
+        dimension: None,
+        gamemode: None,
+    }));
+    assert_eq!(world, PlayerWorld::default());
+    assert_eq!(GameMode::Spectator.name(), "spectator");
+}

@@ -1,0 +1,33 @@
+{
+  "kind": "resolve",
+  "name": "negated-default",
+  "description": "A global negated inherit of default removes the implicit edge.",
+  "now": 1000,
+  "users": {
+    "00000000000000000000000000000001": {
+      "nodes": [
+        {"kind": "inherit", "group": "default", "value": false},
+        {"kind": "permission", "key": "own", "value": true}
+      ]
+    }
+  },
+  "groups": {"default": {"nodes": [{"kind": "permission", "key": "chat.use", "value": true}]}},
+  "checks": [
+    {"user": "00000000000000000000000000000001", "node": "chat.use", "expect": null},
+    {"user": "00000000000000000000000000000001", "node": "group.default", "expect": null},
+    {"user": "00000000000000000000000000000001", "node": "own", "expect": true}
+  ],
+  "compiled": {
+    "00000000000000000000000000000001": {
+      "revision": 1,
+      "uuid": "00000000000000000000000000000001",
+      "primary_group": "default",
+      "entries": [
+        {"k": "perm", "key": "own", "v": true, "ctx": {}, "rank": 0}
+      ],
+      "prefix": [],
+      "suffix": [],
+      "meta": []
+    }
+  }
+}

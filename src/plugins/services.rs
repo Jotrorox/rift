@@ -13,10 +13,15 @@ use super::{
     worker::{Queue, Shared},
 };
 use crate::{
-    extensions::{PlayerAction, Players, permissions::Permissions, storage::Store},
+    extensions::{PlayerAction, Players, storage::Store},
     messaging::{Broker, Error as BusError, Stream},
+    permissions::Authority,
 };
 use bytes::Bytes;
+use rift_permissions::{
+    Actor, Change, ContextSet, DEFAULT_GROUP, Node, NodeKind, Source, SubjectRef, Tristate, Uuid,
+    node::NodeKey,
+};
 use std::{
     collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
@@ -47,7 +52,8 @@ const MAX_COMPONENT_BYTES: usize = 32 * 1024;
 pub(crate) struct Base {
     pub players: Players,
     pub store: Store,
-    pub permissions: Permissions,
+    /// The process-wide permission authority.
+    pub permissions: Arc<Authority>,
     pub broker: Broker,
     /// Retained streams, attached by the runtime once they are open.
     pub streams: Arc<RwLock<Arc<HashMap<String, Stream>>>>,
@@ -449,40 +455,135 @@ impl StoreApi<'_> {
     }
 }
 
-/// `permissions`: live permissions and durable groups.
+/// `permissions`: the contract's six calls over Rift's permission store
+/// (see docs/permissions.md#persistent-plugins). Writes are recorded with
+/// actor `lua:plugin:<name>` and nodes carry source `plugin:<name>`.
 pub struct PermissionsApi<'a>(&'a Arc<Inner>);
 
 impl PermissionsApi<'_> {
+    fn authority(&self) -> &Authority {
+        &self.0.base.permissions
+    }
+
+    /// The plugin name as an actor and source label, which allow 96 bytes
+    /// of `[A-Za-z0-9_.:-]` (plugin names allow 128 of `[A-Za-z0-9_-]`).
+    fn label(&self) -> String {
+        let mut label = format!("plugin:{}", self.0.spec.name);
+        label.truncate(96);
+        label
+    }
+
+    /// `has`: the node resolves to true in the contexts the proxy knows for
+    /// the player, like `ctx.has_permission`. Undefined is false.
     pub fn has(&self, uuid: &str, node: &str) -> bool {
-        self.0.base.permissions.has(uuid, node)
+        Uuid::parse(uuid)
+            .is_ok_and(|uuid| self.authority().check_active(uuid, node) == Tristate::True)
     }
 
-    pub fn set(&self, uuid: &str, node: &str, value: Option<bool>) -> Result<(), String> {
-        self.0.base.permissions.set_override(uuid, node, value)
+    /// The node in `contexts`, or in the player's current contexts:
+    /// `Some(true)`, `Some(false)` or `None` for undefined.
+    pub fn check(
+        &self,
+        uuid: &str,
+        node: &str,
+        contexts: Option<&ContextSet>,
+    ) -> Result<Option<bool>, String> {
+        let uuid = Uuid::parse(uuid).map_err(|error| error.to_string())?;
+        let active = contexts
+            .cloned()
+            .unwrap_or_else(|| self.authority().contexts(uuid));
+        Ok(self.authority().check(uuid, node, &active).as_option())
     }
 
-    pub fn add_group(&self, uuid: &str, group: &str) -> Result<bool, String> {
-        self.change(uuid, group, true)
-    }
-
-    pub fn remove_group(&self, uuid: &str, group: &str) -> Result<bool, String> {
-        self.change(uuid, group, false)
-    }
-
-    fn change(&self, uuid: &str, group: &str, add: bool) -> Result<bool, String> {
-        self.0
-            .base
-            .permissions
-            .change_group(uuid, group, add, Instant::now() + STORE_WAIT)
+    /// Prefix, suffix, meta and primary group as JSON, in `contexts` or the
+    /// player's current contexts.
+    pub fn meta(&self, uuid: &str, contexts: Option<&ContextSet>) -> Result<String, String> {
+        let uuid = Uuid::parse(uuid).map_err(|error| error.to_string())?;
+        let active = contexts
+            .cloned()
+            .unwrap_or_else(|| self.authority().contexts(uuid));
+        serde_json::to_string(&self.authority().meta(uuid, &active))
             .map_err(|error| error.to_string())
     }
 
-    pub fn groups(&self, uuid: &str) -> Vec<String> {
-        self.0.base.permissions.effective_groups(uuid)
+    /// `set`: a global permission node of the user (`*`: of `default`);
+    /// `None` removes it.
+    pub fn set(&self, uuid: &str, node: &str, value: Option<bool>) -> Result<(), String> {
+        let subject = if uuid == "*" {
+            SubjectRef::Group(DEFAULT_GROUP.to_owned())
+        } else {
+            SubjectRef::User(Uuid::parse(uuid).map_err(|error| error.to_string())?)
+        };
+        let change = match value {
+            Some(value) => Change::SetNode {
+                subject,
+                node: self.node(Node::permission(node, value))?,
+            },
+            None => Change::UnsetNode {
+                subject,
+                key: NodeKey::new(NodeKind::Permission, node, ContextSet::new())
+                    .map_err(|error| error.to_string())?,
+            },
+        };
+        self.apply(change).map(drop)
     }
 
+    /// `add-group`: a global `inherit` node. Returns whether anything changed.
+    pub fn add_group(&self, uuid: &str, group: &str) -> Result<bool, String> {
+        let user = SubjectRef::User(Uuid::parse(uuid).map_err(|error| error.to_string())?);
+        let node = self.node(Node::inherit(group, true))?;
+        self.apply(Change::SetNode {
+            subject: user,
+            node,
+        })
+    }
+
+    /// `remove-group`: removes the global `inherit` node. Returns whether
+    /// anything changed.
+    pub fn remove_group(&self, uuid: &str, group: &str) -> Result<bool, String> {
+        let user = SubjectRef::User(Uuid::parse(uuid).map_err(|error| error.to_string())?);
+        let key = NodeKey::new(NodeKind::Inherit, group, ContextSet::new())
+            .map_err(|error| error.to_string())?;
+        self.apply(Change::UnsetNode { subject: user, key })
+    }
+
+    /// `groups`: the groups the player is in, in the contexts the proxy
+    /// knows for them: direct, inherited and `default`, in rank order.
+    pub fn groups(&self, uuid: &str) -> Vec<String> {
+        let Ok(uuid) = Uuid::parse(uuid) else {
+            return Vec::new();
+        };
+        let active = self.authority().contexts(uuid);
+        self.authority()
+            .compiled(uuid)
+            .groups(&active, rift_permissions::unix_now())
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// `list-groups`: every group of the store with its weight, display name
+    /// and nodes, as a JSON object keyed by group name.
     pub fn list_groups(&self) -> String {
-        self.0.base.permissions.groups_value().to_string()
+        serde_json::to_string(&*self.authority().groups()).unwrap_or_else(|_| "{}".into())
+    }
+
+    fn node(&self, node: Result<Node, rift_permissions::Error>) -> Result<Node, String> {
+        let node = node.map_err(|error| error.to_string())?;
+        Ok(match self.label().parse::<Source>() {
+            Ok(source) => node.with_source(source),
+            Err(_) => node,
+        })
+    }
+
+    fn apply(&self, change: Change) -> Result<bool, String> {
+        let actor = format!("lua:{}", self.label())
+            .parse::<Actor>()
+            .unwrap_or_else(|_| Actor::Lua("plugin".into()));
+        self.authority()
+            .apply_with(actor, change, None, Some(Instant::now() + STORE_WAIT))
+            .map(|applied| applied.ops > 0)
+            .map_err(|error| error.to_string())
     }
 }
 

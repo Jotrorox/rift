@@ -17,6 +17,23 @@ fn runtime(extension: &str) -> Extensions {
     )
     .unwrap()
 }
+/// Grant `nodes` in the runtime's permission store to a player UUID, or with
+/// `*` to the `default` group everyone inherits.
+fn grant(runtime: &Extensions, who: &str, nodes: &[&str]) {
+    let subject = if who == "*" {
+        SubjectRef::Group(rift_permissions::DEFAULT_GROUP.into())
+    } else {
+        SubjectRef::User(Uuid::parse(who).unwrap())
+    };
+    for node in nodes {
+        let node = Node::permission(node, true).unwrap();
+        let change = rift_permissions::Change::SetNode {
+            subject: subject.clone(),
+            node,
+        };
+        runtime.permissions().apply(Actor::Cli, change).unwrap();
+    }
+}
 fn context(id: u64) -> Context {
     Context::authenticated(
         id,
@@ -83,11 +100,13 @@ async fn group_queue_capacity_and_fifo_follow_live_instance_membership() {
 fn version_schema_and_authenticated_mode_are_required() {
     for invalid in [
         "",
-        "api_version = 3",
+        "api_version = 4",
         "api_version = 1, typo = true",
         "api_version = 1, login = true",
         "api_version = 1, commands = { hub = { permission = 'use', run = function() end } }",
         "api_version = 1, commands = { game = { run = function() end } }",
+        "api_version = 1, commands = { game = { permission = 'mod.*', run = function() end } }",
+        "api_version = 1, commands = { game = { permission = 'Mod.Use', run = function() end } }",
         "api_version = 1, commands = { game = { permission = 'use', run = function() end, suggest = 'worlds' } }",
         "api_version = 1, commands = { game = { permission = 'use', run = function() end, suggest = true } }",
         "api_version = 1, permissions = { Player = { use = true } }",
@@ -112,7 +131,6 @@ fn version_schema_and_authenticated_mode_are_required() {
 async fn verified_identity_permissions_and_command_arguments_reach_lua() {
     let runtime = runtime(
         r#"api_version = 1,
-        permissions = { ['01010101010101010101010101010101'] = { ['route.game'] = true } },
         login = function(ctx)
             assert(ctx.api_version == 1 and ctx.authenticated)
             assert(ctx.uuid == '01010101010101010101010101010101' and ctx.name == 'Player1')
@@ -124,6 +142,11 @@ async fn verified_identity_permissions_and_command_arguments_reach_lua() {
             return {server='game'}
         end } }
     "#,
+    );
+    grant(
+        &runtime,
+        "01010101010101010101010101010101",
+        &["route.game"],
     );
     let allowed = runtime.session(context(1)).unwrap();
     assert_eq!(allowed.decision("login").await.unwrap(), Action::Continue);
@@ -147,7 +170,6 @@ async fn verified_identity_permissions_and_command_arguments_reach_lua() {
 async fn command_suggestions_follow_permissions_and_complete_the_last_word() {
     let runtime = runtime(
         r#"api_version = 1,
-        permissions = { ['01010101010101010101010101010101'] = { ['mod.ban'] = true, ['mod.go'] = true } },
         commands = {
             ban = { permission = 'mod.ban', run = function() end, suggest = function(ctx)
                 assert(ctx.command == 'ban' and ctx.name == 'Player1')
@@ -163,6 +185,11 @@ async fn command_suggestions_follow_permissions_and_complete_the_last_word() {
             plain = { permission = 'mod.go', run = function() end },
         },
     "#,
+    );
+    grant(
+        &runtime,
+        "01010101010101010101010101010101",
+        &["mod.ban", "mod.go"],
     );
     let texts = |suggestions: Vec<Suggestion>| -> Vec<String> {
         suggestions.into_iter().map(|s| s.text).collect()
@@ -238,9 +265,10 @@ async fn command_suggestions_follow_permissions_and_complete_the_last_word() {
 #[tokio::test]
 async fn declarative_player_suggestions_list_joined_players() {
     let runtime = runtime(
-        r#"api_version = 1, permissions = { ['*'] = { ['use'] = true } },
+        r#"api_version = 1,
         commands = { msg = { permission = 'use', run = function() end, suggest = 'players' } }"#,
     );
+    grant(&runtime, "*", &["use"]);
     let _bob = runtime.players().register(3, &[3; 16], "bob", 774, "lobby");
     let _alice = runtime
         .players()
@@ -276,8 +304,9 @@ async fn malformed_or_slow_suggestions_fail_without_suggesting() {
         "error('broken')",
     ] {
         let runtime = runtime(&format!(
-            "api_version = 1, permissions = {{ ['*'] = {{ use = true }} }}, commands = {{ ban = {{ permission = 'use', run = function() end, suggest = function() {body} end }} }}"
+            "api_version = 1, commands = {{ ban = {{ permission = 'use', run = function() end, suggest = function() {body} end }} }}"
         ));
+        grant(&runtime, "*", &["use"]);
         let session = runtime.session(context(1)).unwrap();
         assert!(
             timeout(Duration::from_secs(1), session.suggest("ban", "", Vec::new))
@@ -288,8 +317,9 @@ async fn malformed_or_slow_suggestions_fail_without_suggesting() {
         );
     }
     let runtime = runtime(
-        "api_version = 1, permissions = { ['*'] = { use = true } }, commands = { ban = { permission = 'use', run = function() end, suggest = function() local t = {} for i = 1, 1000 do t[i] = 'p' .. i end return t end } }",
+        "api_version = 1, commands = { ban = { permission = 'use', run = function() end, suggest = function() local t = {} for i = 1, 1000 do t[i] = 'p' .. i end return t end } }",
     );
+    grant(&runtime, "*", &["use"]);
     let session = runtime.session(context(1)).unwrap();
     assert_eq!(
         session.suggest("ban", "", Vec::new).await.unwrap().len(),
@@ -543,7 +573,7 @@ fn concurrent_admissions_never_overbook_the_last_slot() {
 
 fn dynamic_config(api_version: u32) -> Config {
     let extension = format!(
-        "api_version={api_version}, permissions={{['*']={{['route.dynamic']=true}}}}, commands={{warp={{permission='route.dynamic',run=function(ctx) return {{server=ctx.args}} end}}}}"
+        "api_version={api_version}, commands={{warp={{permission='route.dynamic',run=function(ctx) return {{server=ctx.args}} end}}}}"
     );
     let source = source(&extension).replace(
         "routes = { public = 'lobby' }",
@@ -558,6 +588,7 @@ async fn existing_extension_sessions_follow_committed_instance_destinations() {
         let config = dynamic_config(api_version);
         let runtime =
             Extensions::new(&config, Broker::new(Default::default()).unwrap(), None).unwrap();
+        grant(&runtime, "*", &["route.dynamic"]);
         let existing = runtime.session(context(1)).unwrap();
         assert!(existing.command("warp arena-1").await.is_err());
         assert_eq!(
@@ -626,6 +657,7 @@ async fn rejected_extension_candidate_cannot_publish_new_instance_destinations()
         let config = dynamic_config(api_version);
         let runtime =
             Extensions::new(&config, Broker::new(Default::default()).unwrap(), None).unwrap();
+        grant(&runtime, "*", &["route.dynamic"]);
         let existing = runtime.session(context(1)).unwrap();
         let mut rejected = config.clone();
         rejected.add_instance("arena", "arena-1", 25010).unwrap();

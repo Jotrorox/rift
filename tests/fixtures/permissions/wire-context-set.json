@@ -1,0 +1,7 @@
+{
+  "kind": "wire",
+  "name": "context-set",
+  "type": "context_set",
+  "json": {"server": "survival", "region": ["b", "a"]},
+  "expect": {"region": ["a", "b"], "server": "survival"}
+}

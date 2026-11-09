@@ -145,9 +145,12 @@ message identifiers.
 
 ## Rust example
 
+The client lives in the `rift-messaging` crate, which backend plugins use
+without depending on Rift itself; `rift::messaging::quic` re-exports it.
+
 ```rust,no_run
 use bytes::Bytes;
-use rift::messaging::quic::{Client, tls_client_config};
+use rift_messaging::{Client, tls_client_config};
 
 # async fn example() -> std::io::Result<()> {
 let tls = tls_client_config("certs/ca.pem")?;

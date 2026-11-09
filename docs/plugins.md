@@ -279,7 +279,7 @@ and the SDK guides map it to each language.
 | --- | --- | --- |
 | `players` | `list(server?)`, `get(target)`, `names(prefix?)`, `message`, `action-bar`, `title`, `tab-list`, `boss-bar`, `kick`, `transfer`, `broadcast` | `target` is a name, a UUID or a connection id. Actions return whether the player was online. Transfers pass `before_transfer`. |
 | `store` | `get`, `set`, `delete`, `increment`, `list(namespace, prefix)` | The durable store shared with API v2. Namespaces are private: `plugin.<name>.<namespace>`, which the configuration script's `rift.store` cannot read or write. |
-| `permissions` | `has`, `set`, `add-group`, `remove-group`, `groups`, `list-groups` | Live permissions and durable groups, as in API v2. |
+| `permissions` | `has`, `set`, `add-group`, `remove-group`, `groups`, `list-groups` | Rift's [permission store](permissions.md#persistent-plugins): user nodes and group memberships, checked in the player's current contexts. |
 | `bus` | `publish`, `request(subject, payload, timeout_ms)`, `subscribe(subject, queue_group?)`, `unsubscribe`, `stream-publish` | Messages arrive through the `message` hook. At most 256 subscriptions; requests wait at most 60 s. |
 | `servers` | `create`, `remove`, `start`, `stop`, `download`, `control(operation, payload_json)` | The same `rift.control.*` operations as the bus, awaiting the reply (at most 60 s). |
 | `timers` | `every(ms)`, `after(ms)`, `cancel(handle)` | Ticks arrive through the `timer` hook. At least 10 ms; at most 1024 timers. |

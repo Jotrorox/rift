@@ -1,0 +1,8 @@
+{
+  "kind": "wire",
+  "name": "node-invalid-reserved-context",
+  "description": "A reserved key with two values could never apply.",
+  "type": "node",
+  "json": {"kind": "permission", "key": "a", "value": true, "contexts": {"server": ["a", "b"]}},
+  "error": true
+}

@@ -241,6 +241,7 @@ impl Client {
                 "succeeded" | "failed" => {
                     return Response {
                         status: operation["http_status"].as_u64().unwrap() as u16,
+                        raw: Vec::new(),
                         headers: response.headers,
                         body: if operation["status"] == "succeeded" {
                             operation["result"].to_string()
@@ -255,6 +256,16 @@ impl Client {
     }
 
     fn send(&self, method: &str, path: &str, headers: &[(&str, &str)], body: &str) -> Response {
+        self.send_bytes(method, path, headers, body.as_bytes())
+    }
+
+    fn send_bytes(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+    ) -> Response {
         let mut stream = connect(self.address);
         let default_host = self.address.to_string();
         let host = headers
@@ -274,14 +285,24 @@ impl Client {
             }
         }
         request.push_str("\r\n");
-        request.push_str(body);
-        stream.write_all(request.as_bytes()).unwrap();
-        let mut response = String::new();
-        let read = stream.read_to_string(&mut response);
-        let (headers, body) = response.split_once("\r\n\r\n").unwrap_or_else(|| {
-            panic!("{method} {path}: incomplete HTTP response ({read:?}): {response:?}")
-        });
-        let headers = headers.to_ascii_lowercase();
+        let mut request = request.into_bytes();
+        request.extend_from_slice(body);
+        stream.write_all(&request).unwrap();
+        let mut response = Vec::new();
+        let read = stream.read_to_end(&mut response);
+        let split = response
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .unwrap_or_else(|| {
+                panic!(
+                    "{method} {path}: incomplete HTTP response ({read:?}): {:?}",
+                    String::from_utf8_lossy(&response)
+                )
+            });
+        let raw = response[split + 4..].to_vec();
+        let headers = String::from_utf8_lossy(&response[..split]).to_ascii_lowercase();
+        let body = String::from_utf8_lossy(&raw).into_owned();
+        let body = body.as_str();
         if let Err(error) = &read {
             // A rejected oversized request can close with unread request bytes.
             // Accept that reset only after checking the entire response framing.
@@ -300,7 +321,7 @@ impl Client {
                 .find_map(|line| line.strip_prefix("content-length: "));
             if let Some(length) = length {
                 assert_eq!(
-                    body.len(),
+                    raw.len(),
                     length.parse::<usize>().unwrap(),
                     "{method} {path}: truncated response"
                 );
@@ -316,6 +337,7 @@ impl Client {
             status,
             headers,
             body,
+            raw,
         }
     }
 }
@@ -324,6 +346,8 @@ struct Response {
     status: u16,
     headers: String,
     body: String,
+    /// The body bytes as received (before chunked decoding).
+    raw: Vec<u8>,
 }
 
 impl Response {
@@ -2002,7 +2026,7 @@ fn console_settings_edit_permission_groups_memberships_tab_list_and_server_list(
     .expect(200);
     put(
         "/api/definitions/permission_groups/broken",
-        json!({"inherits": ["missing"]}),
+        json!({"permissions": {"bad node": true}}),
     )
     .expect(400);
     put("/api/definitions/permission_groups/Staff", json!({})).expect(400);
@@ -2036,7 +2060,7 @@ fn console_settings_edit_permission_groups_memberships_tab_list_and_server_list(
     assert!(fixture.read().contains(&source));
     assert_eq!(client.get("/ext/test").expect(200).body, "hook preserved");
 
-    // Memberships are runtime state in the extension store, not configuration.
+    // Memberships are runtime state in the permission store, not configuration.
     let uuid = "0123456789abcdef0123456789abcdef";
     let member = |method: &str, group: &str| {
         client.json(
@@ -2056,13 +2080,17 @@ fn console_settings_edit_permission_groups_memberships_tab_list_and_server_list(
     client
         .json("POST", "/api/permissions/members/Offline/staff", json!({}))
         .expect(404);
-    client
-        .json(
-            "POST",
-            &format!("/api/permissions/members/{}/staff", uuid.to_uppercase()),
-            json!({}),
-        )
-        .expect(400);
+    assert_eq!(
+        client
+            .json(
+                "POST",
+                &format!("/api/permissions/members/{}/staff", uuid.to_uppercase()),
+                json!({}),
+            )
+            .expect(200)
+            .value()["changed"],
+        false
+    );
     assert_eq!(revision(client), before);
     assert_eq!(
         client.get("/api/permissions").expect(200).value(),
@@ -2088,13 +2116,13 @@ fn console_settings_edit_permission_groups_memberships_tab_list_and_server_list(
 }
 
 #[test]
-fn permission_groups_require_api_v2_extensions() {
+fn permission_group_definitions_require_extensions() {
     let fixture = Fixture::new();
     let _process = fixture.start(&fixture.source("", ""));
     let client = fixture.client();
     assert_eq!(
-        client.get("/api/permissions").expect(200).value()["enabled"],
-        false
+        client.get("/api/permissions").expect(200).value(),
+        json!({"enabled": true, "members": [], "truncated": false})
     );
     assert!(client.get("/api/definitions").expect(200).value()["permission_groups"].is_null());
     client
@@ -2110,7 +2138,7 @@ fn permission_groups_require_api_v2_extensions() {
             "/api/permissions/members/0123456789abcdef0123456789abcdef/staff",
             json!({}),
         )
-        .expect(409);
+        .expect(400);
 }
 
 #[test]
@@ -2384,6 +2412,817 @@ fn nodes_are_listed_and_node_tokens_only_read_template_files() {
         .send("PUT", "/api/files/templates/game/evil.jar", &[], "x")
         .expect(403);
     assert!(!directory.join("local/templates/game/evil.jar").exists());
+}
+
+const PERMS_TOKEN: &str = "test-permission-viewer-token";
+const EDITOR_TOKEN: &str = "test-permission-editor-token";
+const READER_TOKEN: &str = "test-status-reader-token-01";
+const PLAYER: &str = "0123456789abcdef0123456789abcdef";
+
+/// Admin, a `perms` viewer, a `config` editor and a `read`-only operator.
+fn permission_fixture() -> (Fixture, Process) {
+    let fixture = Fixture::new();
+    let source = fixture.source(
+        &format!(
+            "token = '{TOKEN}', operators = {{ \
+             viewer = {{ token = '{PERMS_TOKEN}', permissions = {{'perms'}} }}, \
+             editor = {{ token = '{EDITOR_TOKEN}', permissions = {{'config'}} }}, \
+             reader = {{ token = '{READER_TOKEN}', permissions = {{'read'}} }} }},"
+        ),
+        "",
+    );
+    let process = fixture.start(&source);
+    (fixture, process)
+}
+
+fn as_operator(fixture: &Fixture, token: &'static str) -> Client {
+    Client {
+        token: Some(token),
+        ..Client::new(fixture.web)
+    }
+}
+
+/// Percent-encode one path segment.
+fn segment(text: &str) -> String {
+    text.bytes()
+        .map(|b| match b {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+fn error_code(response: Response, status: u16) -> String {
+    let value = response.expect(status).value();
+    assert!(value["error"].is_string(), "{value}");
+    value["code"].as_str().unwrap().to_owned()
+}
+
+#[test]
+fn permission_api_authorizes_reads_and_writes_by_operator_permission() {
+    let (fixture, _process) = permission_fixture();
+    let viewer = as_operator(&fixture, PERMS_TOKEN);
+    let editor = as_operator(&fixture, EDITOR_TOKEN);
+    let reader = as_operator(&fixture, READER_TOKEN);
+    let anonymous = Client::new(fixture.web);
+
+    anonymous.get("/api/perms/revision").expect(401);
+    anonymous
+        .json("POST", "/api/perms/groups", json!({"name": "vip"}))
+        .expect(401);
+    for path in [
+        "/api/perms/revision",
+        "/api/perms/groups",
+        "/api/perms/users",
+        "/api/permissions",
+    ] {
+        reader.get(path).expect(403);
+        viewer.get(path).expect(200);
+        editor.get(path).expect(200);
+    }
+    // Reads are open to `perms`, writes need `config`.
+    viewer
+        .json("POST", "/api/perms/groups", json!({"name": "vip"}))
+        .expect(403);
+    viewer
+        .json(
+            "POST",
+            &format!("/api/permissions/members/{PLAYER}/vip"),
+            json!({}),
+        )
+        .expect(403);
+    viewer.get("/api/perms/export").expect(200);
+    editor
+        .json("POST", "/api/perms/groups", json!({"name": "vip"}))
+        .expect(201);
+    // A trace is a read even though it is a POST.
+    let trace = viewer
+        .json(
+            "POST",
+            "/api/perms/trace",
+            json!({"user": PLAYER, "node": "group.vip"}),
+        )
+        .expect(200)
+        .value();
+    assert_eq!(trace["result"], Value::Null);
+    reader
+        .json(
+            "POST",
+            "/api/perms/trace",
+            json!({"user": PLAYER, "node": "a"}),
+        )
+        .expect(403);
+    // Writes are recorded with the operator; reads (including the trace) are not.
+    let audit = fixture
+        .client()
+        .authenticated()
+        .get("/api/audit")
+        .expect(200)
+        .value();
+    let records = audit["records"].as_array().unwrap();
+    assert!(records.iter().any(|r| r["actor"] == "editor"
+        && r["action"] == "POST perms_create_group"
+        && r["outcome"] == "accepted"));
+    assert!(records.iter().any(|r| r["actor"] == "viewer"
+        && r["action"] == "POST perms_create_group"
+        && r["outcome"] == "denied"));
+    assert!(
+        !records
+            .iter()
+            .any(|r| r["action"].as_str().unwrap().contains("trace") && r["actor"] == "viewer")
+    );
+    let events = viewer.get("/api/perms/audit").expect(200).value()["events"].clone();
+    assert_eq!(events[0]["actor"], "operator:editor");
+
+    // `perms` is network-wide, so group-scoped operators cannot hold it.
+    let scoped = fixture.source(
+        &format!("token = '{TOKEN}', operators = {{ viewer = {{ token = '{PERMS_TOKEN}', permissions = {{'perms'}}, groups = {{'lobby'}} }} }},"),
+        "",
+    );
+    let admin = fixture.client().authenticated();
+    let rejected = admin
+        .json("POST", "/api/config/validate", json!({"source": scoped}))
+        .value();
+    assert!(
+        rejected
+            .to_string()
+            .contains("perms require unrestricted group access"),
+        "{rejected}"
+    );
+    let unknown = fixture.source(
+        &format!("token = '{TOKEN}', operators = {{ viewer = {{ token = '{PERMS_TOKEN}', permissions = {{'permissions'}} }} }},"),
+        "",
+    );
+    let rejected = admin
+        .json("POST", "/api/config/validate", json!({"source": unknown}))
+        .value();
+    assert!(
+        rejected.to_string().contains("plugins, perms"),
+        "{rejected}"
+    );
+}
+
+#[test]
+fn permission_api_edits_groups_users_tracks_and_nodes() {
+    let (fixture, _process) = permission_fixture();
+    let admin = fixture.client().authenticated();
+    let editor = as_operator(&fixture, EDITOR_TOKEN);
+
+    // Groups.
+    let created = editor
+        .json(
+            "POST",
+            "/api/perms/groups",
+            json!({"name": "VIP", "weight": 10, "display_name": "VIP"}),
+        )
+        .expect(201)
+        .value();
+    assert_eq!(created["name"], "vip");
+    assert!(created["revision"].as_u64().unwrap() > 0);
+    assert_eq!(
+        error_code(
+            editor.json("POST", "/api/perms/groups", json!({"name": "vip"})),
+            409
+        ),
+        "conflict"
+    );
+    assert_eq!(
+        error_code(
+            editor.json("POST", "/api/perms/groups", json!({"name": "bad name"})),
+            400
+        ),
+        "invalid_request"
+    );
+    editor
+        .json(
+            "POST",
+            "/api/perms/groups",
+            json!({"name": "x", "colour": 1}),
+        )
+        .expect(400);
+    editor
+        .send(
+            "POST",
+            "/api/perms/groups",
+            &[("Content-Type", "text/plain")],
+            "{\"name\":\"x\"}",
+        )
+        .expect(415);
+    editor
+        .json(
+            "POST",
+            "/api/perms/groups",
+            json!({"name": "staff", "weight": 50}),
+        )
+        .expect(201);
+    editor
+        .json(
+            "PATCH",
+            "/api/perms/groups/vip",
+            json!({"weight": 20, "reason": "rebalance"}),
+        )
+        .expect(200);
+    editor
+        .json("PATCH", "/api/perms/groups/vip", json!({}))
+        .expect(400);
+    assert_eq!(
+        error_code(
+            editor.json("PATCH", "/api/perms/groups/ghost", json!({"weight": 1})),
+            404
+        ),
+        "not_found"
+    );
+    let put = |path: &str, node: Value| editor.json("PUT", path, node).expect(200).value();
+    let kit = put(
+        "/api/perms/groups/vip/nodes",
+        json!({"kind": "permission", "key": "Kit.VIP", "value": true}),
+    );
+    assert_eq!(kit["id"], "permission:kit.vip");
+    assert_eq!(kit["ops"], 1);
+    put(
+        "/api/perms/groups/vip/nodes",
+        json!({"kind": "prefix", "priority": 100, "text": "&6[VIP] "}),
+    );
+    put(
+        "/api/perms/groups/staff/nodes",
+        json!({"kind": "inherit", "group": "vip", "value": true}),
+    );
+    assert_eq!(
+        error_code(
+            editor.json(
+                "PUT",
+                "/api/perms/groups/ghost/nodes",
+                json!({"kind": "permission", "key": "a", "value": true}),
+            ),
+            404
+        ),
+        "not_found"
+    );
+    assert_eq!(
+        error_code(
+            editor.json(
+                "PUT",
+                "/api/perms/groups/vip/nodes",
+                json!({"kind": "permission", "key": "bad node", "value": true}),
+            ),
+            400
+        ),
+        "invalid_request"
+    );
+    let groups = admin.get("/api/perms/groups").expect(200).value();
+    let names: Vec<_> = groups["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| g["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["default", "staff", "vip"]);
+    assert_eq!(groups["groups"][1]["parents"][0]["group"], "vip");
+    assert_eq!(groups["groups"][2]["weight"], 20);
+    assert_eq!(groups["groups"][2]["display_name"], "VIP");
+    let vip = admin.get("/api/perms/groups/vip").expect(200).value();
+    assert!(
+        vip["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["id"] == "prefix:100" && n["node"]["text"] == "&6[VIP] ")
+    );
+    admin.get("/api/perms/groups/ghost").expect(404);
+    assert!(
+        admin
+            .get("/api/perms/groups/staff/nodes")
+            .expect(200)
+            .value()["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n["id"] == "inherit:vip")
+    );
+
+    // Users: nodes with contexts and expiry, by UUID (either form).
+    let user = format!("/api/perms/users/{PLAYER}");
+    put(
+        &format!("{user}/nodes"),
+        json!({"kind": "inherit", "group": "staff", "value": true}),
+    );
+    let fly = put(
+        "/api/perms/users/01234567-89ab-cdef-0123-456789abcdef/nodes",
+        json!({"kind": "permission", "key": "essentials.fly", "value": true,
+               "contexts": {"server": "survival"}, "expires_at": 4_000_000_000u64}),
+    );
+    let fly_id = fly["id"].as_str().unwrap().to_owned();
+    assert_eq!(fly_id, "permission:essentials.fly@server=survival");
+    assert_eq!(fly["changed_users"], json!([PLAYER]));
+    assert_eq!(
+        error_code(
+            editor.json(
+                "PUT",
+                &format!("{user}/nodes"),
+                json!({"kind": "weight", "weight": 1})
+            ),
+            400
+        ),
+        "invalid_request"
+    );
+    editor
+        .json(
+            "PUT",
+            "/api/perms/users/Nobody/nodes",
+            json!({"kind": "permission", "key": "a", "value": true}),
+        )
+        .expect(404);
+    editor
+        .json(
+            "PUT",
+            "/api/perms/users/not%20a%20name/nodes",
+            json!({"kind": "permission", "key": "a", "value": true}),
+        )
+        .expect(400);
+    let info = admin.get(&user).expect(200).value();
+    assert_eq!(info["nodes"].as_array().unwrap().len(), 2);
+    assert_eq!(info["effective_primary_group"], "staff");
+    assert_eq!(info["primary_group"], Value::Null);
+    assert_eq!(info["online"], false);
+    editor
+        .json("PATCH", &user, json!({"primary_group": "vip"}))
+        .expect(200);
+    assert_eq!(admin.get(&user).expect(200).value()["primary_group"], "vip");
+    editor
+        .json("PATCH", &user, json!({"primary_group": null}))
+        .expect(200);
+    editor.json("PATCH", &user, json!({})).expect(400);
+
+    // Search users by UUID prefix and by group.
+    let found = admin
+        .get("/api/perms/users?q=01234567-89")
+        .expect(200)
+        .value();
+    assert_eq!(found["users"][0]["uuid"], PLAYER);
+    assert_eq!(found["users"][0]["groups"], json!(["staff"]));
+    assert_eq!(
+        admin
+            .get("/api/perms/users?group=staff")
+            .expect(200)
+            .value()["users"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        admin.get("/api/perms/users?group=vip").expect(200).value()["users"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    admin.get("/api/perms/users?limit=0").expect(400);
+    admin.get("/api/perms/users?colour=red").expect(400);
+
+    // The compiled subject, and the meta in the requested contexts.
+    let compiled = admin
+        .get(&format!("{user}/compiled?server=survival"))
+        .expect(200)
+        .value();
+    assert_eq!(compiled["subject"]["uuid"], PLAYER);
+    assert_eq!(compiled["contexts"], json!({"server": "survival"}));
+    assert_eq!(compiled["contexts_from"], "request");
+    assert_eq!(compiled["meta"]["prefix"], "&6[VIP] ");
+    assert_eq!(compiled["groups"], json!(["staff", "vip", "default"]));
+    assert!(
+        compiled["subject"]["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["key"] == "essentials.fly" && e["rank"] == 0)
+    );
+    let offline = admin.get(&format!("{user}/compiled")).expect(200).value();
+    assert_eq!(offline["contexts_from"], "proxy");
+    assert_eq!(offline["contexts"], json!({}));
+    admin.get(&format!("{user}/compiled?a%3Bb=x")).expect(400);
+
+    // Trace: the winner, the losers and which subject each rank is.
+    let trace = |node: &str, contexts: Value| {
+        admin
+            .json(
+                "POST",
+                "/api/perms/trace",
+                json!({"user": PLAYER, "node": node, "contexts": contexts}),
+            )
+            .expect(200)
+            .value()
+    };
+    let traced = trace("essentials.fly", json!({"server": "survival"}));
+    assert_eq!(traced["result"], true);
+    assert_eq!(traced["winner"]["entry"]["rank"], 0);
+    assert_eq!(
+        traced["ranks"][0],
+        json!({"rank": 0, "subject": format!("user:{PLAYER}")})
+    );
+    let elsewhere = trace("essentials.fly", json!({"server": "lobby"}));
+    assert_eq!(elsewhere["result"], Value::Null);
+    assert_eq!(elsewhere["losers"][0]["outcome"], "context_mismatch");
+    let inherited = trace("kit.vip", json!({}));
+    assert_eq!(inherited["result"], true);
+    let rank = inherited["winner"]["entry"]["rank"].clone();
+    assert!(
+        inherited["ranks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["rank"] == rank && r["subject"] == "group:vip"),
+        "{inherited}"
+    );
+    admin
+        .json(
+            "POST",
+            "/api/perms/trace",
+            json!({"user": PLAYER, "node": "bad node"}),
+        )
+        .expect(400);
+
+    // Moving a node to another context keeps one node; unknown ids are 404.
+    let moved = editor
+        .json(
+            "PUT",
+            &format!("{user}/nodes/{}", segment(&fly_id)),
+            json!({"kind": "permission", "key": "essentials.fly", "value": true,
+                   "contexts": {"server": "lobby"}}),
+        )
+        .expect(200)
+        .value();
+    assert_eq!(moved["id"], "permission:essentials.fly@server=lobby");
+    let ids: Vec<_> = admin.get(&format!("{user}/nodes")).expect(200).value()["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        ids,
+        ["inherit:staff", "permission:essentials.fly@server=lobby"]
+    );
+    editor
+        .json(
+            "PUT",
+            &format!("{user}/nodes/{}", segment("permission:missing")),
+            json!({"kind": "permission", "key": "missing", "value": true}),
+        )
+        .expect(404);
+    editor
+        .json(
+            "DELETE",
+            &format!("{user}/nodes/{}", segment("nonsense")),
+            json!({}),
+        )
+        .expect(400);
+    let lobby = segment("permission:essentials.fly@server=lobby");
+    let removed = editor
+        .json(
+            "DELETE",
+            &format!("{user}/nodes/{lobby}"),
+            json!({"reason": "cleanup"}),
+        )
+        .expect(200)
+        .value();
+    assert_eq!(removed["ops"], 1);
+    let again = editor
+        .json("DELETE", &format!("{user}/nodes/{lobby}"), json!({}))
+        .expect(200)
+        .value();
+    assert_eq!(again["ops"], 0);
+
+    // Tracks, promotion and demotion.
+    let second = "00000000000000000000000000000002";
+    editor
+        .json(
+            "PUT",
+            "/api/perms/tracks/ranks",
+            json!({"groups": ["default", "vip", "staff"]}),
+        )
+        .expect(200);
+    editor
+        .json(
+            "PUT",
+            "/api/perms/tracks/ranks",
+            json!({"groups": ["vip", "vip"]}),
+        )
+        .expect(400);
+    assert_eq!(
+        admin.get("/api/perms/tracks").expect(200).value()["tracks"],
+        json!([{"name": "ranks", "groups": ["default", "vip", "staff"]}])
+    );
+    admin.get("/api/perms/tracks/ranks").expect(200);
+    admin.get("/api/perms/tracks/ghost").expect(404);
+    let promote = |direction: &str| {
+        editor.json(
+            "POST",
+            &format!("/api/perms/tracks/ranks/{direction}"),
+            json!({"user": second}),
+        )
+    };
+    promote("promote").expect(200);
+    let promoted = promote("promote").expect(200).value();
+    assert_eq!(promoted["user"], second);
+    assert_eq!(
+        admin
+            .get(&format!("/api/perms/users/{second}"))
+            .expect(200)
+            .value()["nodes"][0]["id"],
+        "inherit:staff"
+    );
+    assert_eq!(error_code(promote("promote"), 409), "conflict");
+    promote("demote").expect(200);
+    assert_eq!(
+        admin
+            .get(&format!("/api/perms/users/{second}"))
+            .expect(200)
+            .value()["tracks"],
+        json!(["ranks"])
+    );
+    editor
+        .json(
+            "POST",
+            "/api/perms/tracks/ghost/promote",
+            json!({"user": second}),
+        )
+        .expect(404);
+    editor
+        .json("DELETE", "/api/perms/tracks/ranks", json!({}))
+        .expect(200);
+    admin.get("/api/perms/tracks/ranks").expect(404);
+
+    // Registered nodes, revision and backends.
+    assert_eq!(
+        admin.get("/api/perms/registered").expect(200).value(),
+        json!({"registered": []})
+    );
+    let revision = admin.get("/api/perms/revision").expect(200).value()["revision"]
+        .as_u64()
+        .unwrap();
+    assert!(revision > 5);
+    assert_eq!(
+        admin.get("/api/perms/backends").expect(200).value(),
+        json!({"revision": revision, "backends": []})
+    );
+
+    // Who holds a node.
+    let holders = admin
+        .get("/api/perms/search?node=kit.vip")
+        .expect(200)
+        .value();
+    assert_eq!(holders["holders"][0]["subject"], json!({"group": "vip"}));
+    assert_eq!(holders["holders"][0]["id"], "permission:kit.vip");
+    let members = admin
+        .get("/api/perms/search?kind=inherit&node=staff&subjects=users")
+        .expect(200)
+        .value();
+    assert_eq!(members["holders"][0]["subject"], json!({"user": PLAYER}));
+    admin.get("/api/perms/search?subjects=nobody").expect(400);
+    admin.get("/api/perms/search?node=a&like=b").expect(400);
+
+    // Raw changes and bulk edits with a dry run.
+    let applied = editor
+        .json(
+            "POST",
+            "/api/perms/apply",
+            json!({"change": {"op": "set_node", "subject": {"group": "vip"},
+                              "node": {"kind": "meta", "key": "homes", "value": "5"}},
+                   "reason": "from a script"}),
+        )
+        .expect(200)
+        .value();
+    assert_eq!(applied["ops"], 1);
+    editor
+        .json(
+            "POST",
+            "/api/perms/apply",
+            json!({"change": {"op": "explode"}}),
+        )
+        .expect(400);
+    editor
+        .json(
+            "POST",
+            "/api/perms/apply",
+            json!({"change": {"op": "delete_group", "name": "default"}}),
+        )
+        .expect(400);
+    let before = admin.get("/api/perms/revision").expect(200).value()["revision"].clone();
+    let filter = json!({"kind": "permission", "key_like": "kit.%"});
+    let patch = json!({"value": false});
+    let preview = editor
+        .json(
+            "POST",
+            "/api/perms/bulk",
+            json!({"filter": filter, "patch": patch, "dry_run": true}),
+        )
+        .expect(200)
+        .value();
+    assert_eq!(preview["dry_run"], true);
+    assert_eq!(preview["count"], 1);
+    assert_eq!(preview["ops"][0]["after"]["value"], false);
+    assert_eq!(
+        admin.get("/api/perms/revision").expect(200).value()["revision"],
+        before
+    );
+    let done = editor
+        .json(
+            "POST",
+            "/api/perms/bulk",
+            json!({"filter": filter, "patch": patch}),
+        )
+        .expect(200)
+        .value();
+    assert_eq!(done["dry_run"], false);
+    assert_eq!(done["ops"], 1);
+    editor
+        .json(
+            "POST",
+            "/api/perms/bulk",
+            json!({"filter": {}, "patch": {}}),
+        )
+        .expect(400);
+
+    // Audit filters.
+    let audit = |query: &str| {
+        admin
+            .get(&format!("/api/perms/audit{query}"))
+            .expect(200)
+            .value()["events"]
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+    let all = audit("?limit=1000");
+    assert!(
+        all.windows(2)
+            .all(|w| w[0]["revision"].as_u64() < w[1]["revision"].as_u64())
+    );
+    assert!(all.iter().all(|e| e["actor"] == "operator:editor"));
+    assert_eq!(audit("?limit=2").len(), 2);
+    let since = all[2]["revision"].as_u64().unwrap();
+    let after = audit(&format!("?since={since}&limit=1"));
+    assert_eq!(after[0]["revision"].as_u64().unwrap(), since + 1);
+    let vip_events = audit("?subject=group:vip");
+    assert!(!vip_events.is_empty());
+    assert!(
+        vip_events
+            .iter()
+            .all(|e| e["groups"].as_array().unwrap().contains(&json!("vip")))
+    );
+    let user_events = audit(&format!("?subject={PLAYER}"));
+    assert!(!user_events.is_empty());
+    assert!(
+        user_events
+            .iter()
+            .all(|e| e["changed"].as_array().unwrap().contains(&json!(PLAYER)))
+    );
+    assert!(audit("?actor=operator:nobody").is_empty());
+    assert_eq!(audit("?actor=operator:editor").len(), all.len().min(100));
+    let reasons: Vec<_> = all.iter().filter_map(|e| e["reason"].as_str()).collect();
+    for reason in ["rebalance", "from a script", "cleanup"] {
+        assert!(reasons.contains(&reason), "{reasons:?}");
+    }
+    admin.get("/api/perms/audit?actor=nobody").expect(400);
+    admin.get("/api/perms/audit?since=x").expect(400);
+
+    // Clearing and deleting.
+    editor
+        .json("DELETE", &format!("{user}/nodes"), json!({}))
+        .expect(200);
+    assert!(
+        admin.get(&user).expect(200).value()["nodes"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    editor
+        .json("DELETE", "/api/perms/groups/default", json!({}))
+        .expect(400);
+    editor
+        .json("DELETE", "/api/perms/groups/staff", json!({}))
+        .expect(200);
+    admin.get("/api/perms/groups/staff").expect(404);
+    // Each write left an operator audit record naming its target.
+    let records = admin.get("/api/audit").expect(200).value()["records"].clone();
+    let records = records.as_array().unwrap();
+    for (action, target) in [
+        ("PUT perms_group_nodes", "vip".to_owned()),
+        ("PATCH perms_group", "vip".to_owned()),
+        (
+            "DELETE perms_user_nodes",
+            format!("{PLAYER}/permission:essentials.fly@server=lobby"),
+        ),
+        ("POST perms_promote", "ranks".to_owned()),
+        ("POST perms_bulk", String::new()),
+    ] {
+        assert!(
+            records.iter().any(|r| r["action"] == action
+                && r["target"] == target.as_str()
+                && r["outcome"] == "accepted"),
+            "{action} {target}: {records:?}"
+        );
+    }
+    // The old membership routes still work on the same store.
+    admin
+        .json(
+            "POST",
+            &format!("/api/permissions/members/{PLAYER}/vip"),
+            json!({}),
+        )
+        .expect(200);
+    assert_eq!(
+        admin.get(&user).expect(200).value()["nodes"][0]["id"],
+        "inherit:vip"
+    );
+}
+
+#[test]
+fn permission_api_imports_and_exports_luckperms_files() {
+    use flate2::{Compression, read::GzDecoder, write::GzEncoder};
+    let (fixture, _process) = permission_fixture();
+    let admin = fixture.client().authenticated();
+    let editor = as_operator(&fixture, EDITOR_TOKEN);
+    let viewer = as_operator(&fixture, PERMS_TOKEN);
+    let file = fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/luckperms-export.json"
+    ))
+    .unwrap();
+    let import = |client: Client, query: &str, kind: &str, body: &[u8]| {
+        client.send_bytes(
+            "POST",
+            &format!("/api/perms/import{query}"),
+            &[("Content-Type", kind)],
+            body,
+        )
+    };
+    import(viewer, "", "application/json", &file).expect(403);
+    import(editor, "", "text/plain", &file).expect(415);
+    assert_eq!(
+        error_code(
+            import(editor, "", "application/json", b"{\"groups\": 7}"),
+            400
+        ),
+        "invalid_request"
+    );
+    let report = import(editor, "", "application/json", &file)
+        .expect(200)
+        .value();
+    assert_eq!(report["groups"], 4);
+    assert_eq!(report["tracks"], 1);
+    assert!(report["ops"].as_u64().unwrap() > 10);
+    assert!(
+        !report["skipped"].as_array().unwrap().is_empty(),
+        "{report}"
+    );
+    let groups = admin.get("/api/perms/groups").expect(200).value();
+    let vip = groups["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|g| g["name"] == "vip")
+        .unwrap()
+        .clone();
+    assert_eq!(vip["weight"], 10);
+    assert_eq!(vip["display_name"], "VIP");
+    assert_eq!(
+        admin.get("/api/perms/tracks/staff").expect(200).value()["groups"],
+        json!(["default", "vip", "mod", "admin"])
+    );
+    let event = admin.get("/api/perms/audit?limit=1").expect(200).value()["events"][0].clone();
+    assert_eq!(event["actor"], "operator:editor");
+    assert_eq!(event["reason"], "LuckPerms import");
+
+    // Export, then import the gzipped export with replace: nothing changes and
+    // a second export is identical.
+    let exported = viewer.get("/api/perms/export").expect(200);
+    assert!(exported.headers.contains("content-type: application/json"));
+    let exported = exported.value();
+    assert!(exported["groups"]["vip"]["nodes"].as_array().unwrap().len() > 3);
+    let gzipped = viewer.get("/api/perms/export?gzip").expect(200);
+    assert!(gzipped.headers.contains("content-type: application/gzip"));
+    assert!(gzipped.headers.contains("luckperms-export.json.gz"));
+    let mut text = String::new();
+    GzDecoder::new(&gzipped.raw[..])
+        .read_to_string(&mut text)
+        .unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&text).unwrap(), exported);
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(text.as_bytes()).unwrap();
+    let gzip = encoder.finish().unwrap();
+    // Additive: every node is already in its slot.
+    let again = import(editor, "", "application/gzip", &gzip)
+        .expect(200)
+        .value();
+    assert_eq!(again["ops"], 0, "{again}");
+    // Replacing rewrites the imported nodes to the same result.
+    import(editor, "?replace=true", "application/gzip", &gzip).expect(200);
+    assert_eq!(admin.get("/api/perms/export").expect(200).value(), exported);
+    admin.get("/api/perms/export?gzip=maybe").expect(400);
+    import(editor, "?replace=perhaps", "application/json", &file).expect(400);
 }
 
 #[test]

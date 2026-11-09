@@ -23,6 +23,10 @@ pub struct MessagingConfig {
     pub streams: BTreeMap<String, MessagingStream>,
 }
 
+/// `messaging.principals[].preset` granting a backend permission replica its
+/// subjects; see [`crate::permissions::backend_grants`].
+pub const BACKEND_PRESET: &str = "backend";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessagingPrincipal {
     pub name: String,
@@ -432,9 +436,39 @@ pub(super) fn parse(root: &Table) -> Result<Option<MessagingConfig>, String> {
     for principal in array(&values, "messaging", "principals", 1024)? {
         fields(
             &principal,
-            &["name", "token_env", "publish", "subscribe", "control"],
+            &[
+                "name",
+                "token_env",
+                "publish",
+                "subscribe",
+                "control",
+                "preset",
+            ],
             "messaging.principals",
         )?;
+        let mut publish = patterns(&principal, "messaging.principals", "publish", Vec::new())?;
+        let mut subscribe = patterns(&principal, "messaging.principals", "subscribe", Vec::new())?;
+        match optional_string(&principal, "messaging.principals", "preset")?.as_deref() {
+            None => {}
+            Some(BACKEND_PRESET) => {
+                let (preset_publish, preset_subscribe) = crate::permissions::backend_grants();
+                for (list, preset) in [
+                    (&mut publish, preset_publish),
+                    (&mut subscribe, preset_subscribe),
+                ] {
+                    for pattern in preset {
+                        if !list.contains(&pattern) {
+                            list.push(pattern);
+                        }
+                    }
+                }
+            }
+            Some(other) => {
+                return Err(format!(
+                    "messaging.principals.preset: unknown preset {other:?}; expected \"{BACKEND_PRESET}\""
+                ));
+            }
+        }
         config.principals.push(MessagingPrincipal {
             name: string(
                 principal.raw_get("name").map_err(|e| e.to_string())?,
@@ -444,8 +478,8 @@ pub(super) fn parse(root: &Table) -> Result<Option<MessagingConfig>, String> {
                 principal.raw_get("token_env").map_err(|e| e.to_string())?,
                 "messaging.principals.token_env",
             )?,
-            publish: patterns(&principal, "messaging.principals", "publish", Vec::new())?,
-            subscribe: patterns(&principal, "messaging.principals", "subscribe", Vec::new())?,
+            publish,
+            subscribe,
             control: boolean(&principal, "messaging.principals", "control", false)?,
         });
     }

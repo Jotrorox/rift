@@ -1,0 +1,6 @@
+{
+  "kind": "luckperms",
+  "name": "inheritance",
+  "node": {"type": "inheritance", "key": "group.VIP", "value": true},
+  "expect": [{"kind": "inherit", "group": "vip", "value": true, "source": "import"}]
+}

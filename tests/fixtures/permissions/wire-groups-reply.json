@@ -1,0 +1,21 @@
+{
+  "kind": "wire",
+  "name": "groups-reply",
+  "type": "groups_reply",
+  "json": {
+    "revision": 412,
+    "groups": [
+      {"name": "default", "weight": 0, "nodes": []},
+      {
+        "name": "vip",
+        "weight": 10,
+        "display_name": "VIP",
+        "nodes": [
+          {"kind": "inherit", "group": "default", "value": true},
+          {"kind": "prefix", "priority": 100, "text": "&6[VIP] "},
+          {"kind": "meta", "key": "homes", "value": "5"}
+        ]
+      }
+    ]
+  }
+}

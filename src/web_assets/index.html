@@ -41,10 +41,18 @@
         <ul class="nav" aria-labelledby="nav-heading-configuration">
           <li id="nav-script"><a href="#script"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7 5 3 10l4 5M13 5l4 5-4 5"/></svg>Lua script</a></li>
           <li id="nav-definitions"><a href="#definitions"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 6H11M15 6h1.5M3.5 14H5M9 14h7.5"/><circle cx="13" cy="6" r="2"/><circle cx="7" cy="14" r="2"/></svg>Groups &amp; templates</a></li>
-          <li id="nav-permissions"><a href="#permissions"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8" cy="6.5" r="3"/><path d="M2.5 16.5c.6-3 2.7-4.5 5.5-4.5 1.2 0 2.3.3 3.2.8M13.5 13.5l1.75 1.75 3.25-3.5"/></svg>Permissions</a></li>
           <li id="nav-plugins"><a href="#plugins"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7.5 3v3.5M12.5 3v3.5M5 6.5h10v3a5 5 0 0 1-10 0zM10 14.5V17"/></svg>Plugins</a></li>
           <li id="nav-extensions"><a href="#extensions"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7 3.5c-2 0-2 1-2 2.5v1.5c0 1.5-1 2.5-2 2.5 1 0 2 1 2 2.5V14c0 1.5 0 2.5 2 2.5M13 3.5c2 0 2 1 2 2.5v1.5c0 1.5 1 2.5 2 2.5-1 0-2 1-2 2.5V14c0 1.5 0 2.5-2 2.5"/></svg>Extensions</a></li>
           <li id="nav-reference"><a href="#reference"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 15.5v-11A1.5 1.5 0 0 1 5.5 3H16v11H5.5A1.5 1.5 0 0 0 4 15.5 1.5 1.5 0 0 0 5.5 17H16"/></svg>Reference</a></li>
+        </ul>
+      </div>
+      <div class="nav-section" id="section-permissions">
+        <h2 class="nav-heading" id="nav-heading-permissions">Permissions</h2>
+        <ul class="nav" aria-labelledby="nav-heading-permissions">
+          <li id="nav-perm-groups"><a href="#perm-groups"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="7" y="2.5" width="6" height="4.5" rx="1.2"/><rect x="2.5" y="13" width="6" height="4.5" rx="1.2"/><rect x="11.5" y="13" width="6" height="4.5" rx="1.2"/><path d="M10 7v3M5.5 13v-3h9v3"/></svg>Groups</a></li>
+          <li id="nav-perm-users"><a href="#perm-users"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8" cy="6.5" r="3"/><path d="M2.5 16.5c.6-3 2.7-4.5 5.5-4.5 1.2 0 2.3.3 3.2.8M13.5 13.5l1.75 1.75 3.25-3.5"/></svg>Users</a></li>
+          <li id="nav-perm-nodes"><a href="#perm-nodes"><svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="7" cy="10" r="3.5"/><path d="M10.5 10H17v3M14 10v2"/></svg>Nodes</a></li>
+          <li id="nav-perm-activity"><a href="#perm-activity"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M2.5 10h3l2-5 3.5 10 2-5h4.5"/></svg>Activity</a></li>
         </ul>
       </div>
       <div class="nav-section" id="section-activity">
@@ -207,27 +215,125 @@
           </section>
         </section>
 
-        <section class="view" id="view-permissions" aria-labelledby="view-title" hidden>
-          <div class="page-head"><p class="page-intro">Groups grant permission nodes for extension commands and <code>rift.permissions.has</code>. A group overrides the groups it inherits from, and everyone belongs to <code>default</code> when it exists. Membership changes apply immediately and survive restarts.</p><button type="button" class="button secondary" id="permissions-refresh">Refresh</button></div>
-          <div class="notice warning hidden" id="permissions-unavailable" role="status">Permission groups need extensions with <code>api_version = 2</code>, which require online authentication. Configure them in the Lua script first.</div>
-          <section class="panel" id="permission-groups-panel" aria-label="Permission groups">
-            <div class="panel-heading"><h2>Groups</h2><span class="muted small" id="permission-group-count">—</span></div>
-            <div class="table-wrap"><table><thead><tr><th scope="col">Group</th><th scope="col">Inherits from</th><th scope="col">Nodes</th><th scope="col" class="numeric">Members</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead><tbody id="permission-groups"><tr><td colspan="5" class="empty">Waiting for data</td></tr></tbody></table></div>
-            <form id="permission-group-form">
-              <div class="form-row top"><div class="field grow"><label for="permission-group-select">Group</label><select id="permission-group-select"><option value="">New group</option></select></div><div class="field grow"><label for="permission-group-name">Name</label><input id="permission-group-name" class="mono" pattern="[a-z0-9_.\-]{1,64}" maxlength="64" spellcheck="false" required></div></div>
-              <div class="definition-grid group-editor">
-                <div class="field"><label for="permission-group-inherits">Inherits from <span class="muted">One group per line</span></label><textarea id="permission-group-inherits" spellcheck="false" placeholder="default"></textarea></div>
-                <div class="field"><label for="permission-group-nodes">Permission nodes</label><textarea id="permission-group-nodes" spellcheck="false" placeholder="network.chat.*&#10;-network.chat.color" aria-describedby="permission-group-nodes-help"></textarea><p class="field-help" id="permission-group-nodes-help">One per line; <code>-node</code> denies. <code>prefix.*</code> and <code>*</code> match many nodes, and the most specific match wins.</p></div>
-              </div>
-              <div class="editor-actions"><div class="action-group"><button type="button" class="button destructive" id="permission-group-delete">Delete group</button></div><div class="action-group"><button type="submit" class="button" id="permission-group-save">Save &amp; apply</button></div></div>
-            </form>
-            <p class="operation-result" id="permission-group-result" role="status" aria-live="polite">Saving validates the complete configuration and checks its revision.</p>
+        <section class="view" id="view-perm-groups" aria-labelledby="view-title" hidden>
+          <div class="page-head"><p class="page-intro">Groups grant permission nodes, prefixes, suffixes and meta. Heavier groups win, then closer ones, and everyone inherits <code>default</code> last. Edits are stored in the permission store, apply on the next check and reach backends immediately. Nodes marked <span class="tag">config</span> come from <code>extensions.groups</code> in Lua and are restored on reload.</p><button type="button" class="button secondary" id="perm-groups-refresh">Refresh</button></div>
+          <section class="panel" id="perm-groups-panel" aria-labelledby="perm-groups-heading">
+            <div class="panel-heading"><h2 id="perm-groups-heading">Groups</h2><span class="muted small" id="perm-group-count">—</span></div>
+            <div class="table-wrap"><table><thead><tr><th scope="col">Group</th><th scope="col" class="numeric">Weight</th><th scope="col">Inherits from</th><th scope="col" class="numeric">Nodes</th><th scope="col">Tracks</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead><tbody id="perm-groups"><tr><td colspan="6" class="empty">Waiting for data</td></tr></tbody></table></div>
+            <form class="form-row top" id="perm-group-create-form" aria-label="Create a group"><div class="field grow"><label for="perm-group-create-name">New group</label><input id="perm-group-create-name" class="mono" pattern="[A-Za-z0-9_.\-]{1,64}" maxlength="64" autocomplete="off" spellcheck="false" placeholder="vip" required></div><div class="field"><label for="perm-group-create-weight">Weight</label><input id="perm-group-create-weight" type="number" step="1" value="0"></div><div class="field grow"><label for="perm-group-create-display">Display name <span class="muted">Optional</span></label><input id="perm-group-create-display" maxlength="256" autocomplete="off"></div><button type="submit" class="button" id="perm-group-create">Create group</button></form>
+            <p class="operation-result" id="perm-groups-result" role="status" aria-live="polite"></p>
           </section>
-          <section class="panel" id="permission-members-panel" aria-label="Group members">
-            <div class="panel-heading"><h2>Members</h2><span class="muted small" id="permission-member-count">—</span></div>
-            <form class="form-row" id="permission-member-form"><div class="field grow"><label for="permission-member-player">Player</label><input id="permission-member-player" class="mono" maxlength="36" autocomplete="off" spellcheck="false" placeholder="UUID, or the name of an online player" required></div><div class="field member-group"><label for="permission-member-group">Group</label><select id="permission-member-group"></select></div><button class="button" type="submit" id="permission-member-add">Add to group</button></form>
-            <div class="table-wrap"><table><thead><tr><th scope="col">Player</th><th scope="col">UUID</th><th scope="col">Groups</th></tr></thead><tbody id="permission-members"><tr><td colspan="3" class="empty">Waiting for data</td></tr></tbody></table></div>
-            <p class="operation-result" id="permission-member-result" role="status" aria-live="polite"></p>
+          <section class="panel hidden" id="perm-group-panel" aria-labelledby="perm-group-heading">
+            <div class="panel-heading"><h2 id="perm-group-heading">Group</h2><button type="button" class="button destructive" id="perm-group-delete">Delete group</button></div>
+            <form class="form-row" id="perm-group-form"><div class="field"><label for="perm-group-weight">Weight <span class="muted">Higher wins</span></label><input id="perm-group-weight" type="number" step="1" required></div><div class="field grow"><label for="perm-group-display">Display name</label><input id="perm-group-display" maxlength="256" autocomplete="off" placeholder="None"></div><button type="submit" class="button secondary" id="perm-group-save">Save group</button></form>
+            <p class="operation-result" id="perm-group-result" role="status" aria-live="polite"></p>
+          </section>
+          <section class="panel hidden" id="perm-group-nodes-panel" aria-labelledby="perm-group-nodes-heading">
+            <div class="panel-heading"><h2 id="perm-group-nodes-heading">Nodes of the group</h2><span class="muted small" id="perm-group-node-count">—</span></div>
+            <div class="table-wrap"><table><thead><tr><th scope="col">Kind</th><th scope="col">Node</th><th scope="col">Value</th><th scope="col">Contexts</th><th scope="col">Expires</th><th scope="col">Source</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead><tbody id="perm-group-nodes"><tr><td colspan="7" class="empty">Waiting for data</td></tr></tbody></table></div>
+            <form id="perm-group-node-form" aria-labelledby="perm-group-node-form-heading">
+              <h3 class="sr-only" id="perm-group-node-form-heading">Add or edit a node</h3>
+              <div class="form-row top">
+                <div class="field"><label for="perm-group-node-kind">Kind</label><select id="perm-group-node-kind"><option value="permission">Permission</option><option value="inherit">Parent group</option><option value="prefix">Prefix</option><option value="suffix">Suffix</option><option value="meta">Meta</option></select></div>
+                <div class="field grow"><label for="perm-group-node-key" id="perm-group-node-key-label">Permission node</label><input id="perm-group-node-key" class="mono" maxlength="256" autocomplete="off" spellcheck="false" placeholder="essentials.fly" required></div>
+                <div class="field" id="perm-group-node-grant-field"><label for="perm-group-node-grant">Effect</label><select id="perm-group-node-grant"><option value="true">Grant</option><option value="false">Deny</option></select></div>
+                <div class="field grow hidden" id="perm-group-node-value-field"><label for="perm-group-node-value" id="perm-group-node-value-label">Text</label><input id="perm-group-node-value" maxlength="1024" autocomplete="off" spellcheck="false"></div>
+              </div>
+              <div class="form-row">
+                <div class="field grow"><label for="perm-group-node-contexts">Contexts <span class="muted">Optional</span></label><input id="perm-group-node-contexts" class="mono" autocomplete="off" spellcheck="false" placeholder="server=survival, world=world_nether" aria-describedby="perm-group-node-contexts-help"><p class="field-help" id="perm-group-node-contexts-help"><code>key=value</code> pairs, all of which must be active. Empty applies everywhere.</p></div>
+                <div class="field"><label for="perm-group-node-expiry">Expires</label><select id="perm-group-node-expiry"><option value="">Never</option><option value="3600">In 1 hour</option><option value="86400">In 1 day</option><option value="604800">In 7 days</option><option value="2592000">In 30 days</option><option value="date">On a date…</option></select></div>
+                <div class="field"><label for="perm-group-node-date">Expiry date</label><input id="perm-group-node-date" type="datetime-local" disabled></div>
+              </div>
+              <div class="editor-actions"><div class="action-group"><button type="button" class="button secondary hidden" id="perm-group-node-cancel">Cancel edit</button></div><div class="action-group"><button type="submit" class="button" id="perm-group-node-save">Add node</button></div></div>
+            </form>
+            <p class="operation-result" id="perm-group-node-result" role="status" aria-live="polite"></p>
+          </section>
+          <section class="panel" id="perm-tracks-panel" aria-labelledby="perm-tracks-heading">
+            <div class="panel-heading"><h2 id="perm-tracks-heading">Tracks</h2><span class="muted small" id="perm-track-count">—</span></div>
+            <p class="panel-note">Promoting moves a player to the next group on a track; demoting moves them back. Order groups from lowest to highest.</p>
+            <div class="table-wrap"><table><thead><tr><th scope="col">Track</th><th scope="col">Groups, lowest first</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead><tbody id="perm-tracks"><tr><td colspan="3" class="empty">Waiting for data</td></tr></tbody></table></div>
+            <form id="perm-track-form" aria-label="Track editor">
+              <div class="form-row top"><div class="field grow"><label for="perm-track-select">Track</label><select id="perm-track-select"><option value="">New track</option></select></div><div class="field grow"><label for="perm-track-name">Name</label><input id="perm-track-name" class="mono" pattern="[A-Za-z0-9_.\-]{1,64}" maxlength="64" autocomplete="off" spellcheck="false" required></div></div>
+              <ol class="track-list" id="perm-track-groups" aria-label="Groups on the track, lowest first"></ol>
+              <div class="form-row"><div class="field grow"><label for="perm-track-add-group">Add group</label><select id="perm-track-add-group"></select></div><button type="button" class="button secondary" id="perm-track-add">Add to track</button></div>
+              <div class="editor-actions"><div class="action-group"><button type="button" class="button destructive" id="perm-track-delete">Delete track</button></div><div class="action-group"><button type="submit" class="button" id="perm-track-save">Save track</button></div></div>
+            </form>
+            <p class="operation-result" id="perm-track-result" role="status" aria-live="polite"></p>
+          </section>
+        </section>
+
+        <section class="view" id="view-perm-users" aria-labelledby="view-title" hidden>
+          <div class="page-head"><p class="page-intro">Find a player by name or UUID, then edit their own nodes, parent groups and track position. The compiled view shows exactly what backends receive and resolve checks against.</p></div>
+          <section class="panel" id="perm-users-panel" aria-labelledby="perm-users-heading">
+            <div class="panel-heading"><h2 id="perm-users-heading">Players</h2><span class="muted small" id="perm-user-count">—</span></div>
+            <form class="form-row" id="perm-user-search-form" role="search"><div class="field grow"><label for="perm-user-query">Name or UUID</label><input id="perm-user-query" type="search" maxlength="64" autocomplete="off" spellcheck="false" placeholder="Alice or 0123abcd…"></div><div class="field member-group"><label for="perm-user-group">Group</label><select id="perm-user-group"><option value="">Any group</option></select></div><button type="submit" class="button" id="perm-user-search">Search</button></form>
+            <div class="table-wrap"><table><thead><tr><th scope="col">Player</th><th scope="col">UUID</th><th scope="col">Status</th><th scope="col">Groups</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead><tbody id="perm-users"><tr><td colspan="5" class="empty">Search to list players.</td></tr></tbody></table></div>
+            <p class="operation-result" id="perm-users-result" role="status" aria-live="polite"></p>
+          </section>
+          <section class="panel hidden" id="perm-user-panel" aria-labelledby="perm-user-heading">
+            <div class="panel-heading"><h2 id="perm-user-heading">Player</h2><span class="muted small address" id="perm-user-uuid"></span></div>
+            <dl class="service-list" id="perm-user-summary"></dl>
+            <form class="form-row top" id="perm-user-primary-form"><div class="field grow"><label for="perm-user-primary">Primary group</label><select id="perm-user-primary"><option value="">Automatic (heaviest parent)</option></select></div><button type="submit" class="button secondary" id="perm-user-primary-save">Save primary group</button></form>
+            <h3 class="panel-note flush-heading">Parent groups</h3>
+            <div class="chip-row"><div class="chip-list" id="perm-user-parents"></div></div>
+            <form class="form-row" id="perm-user-parent-form" aria-label="Add a parent group"><div class="field grow"><label for="perm-user-parent-group">Add parent</label><select id="perm-user-parent-group"></select></div><div class="field grow"><label for="perm-user-parent-contexts">Contexts <span class="muted">Optional</span></label><input id="perm-user-parent-contexts" class="mono" autocomplete="off" spellcheck="false" placeholder="server=survival"></div><div class="field"><label for="perm-user-parent-expiry">Expires</label><select id="perm-user-parent-expiry"><option value="">Never</option><option value="3600">In 1 hour</option><option value="86400">In 1 day</option><option value="604800">In 7 days</option><option value="2592000">In 30 days</option><option value="date">On a date…</option></select></div><div class="field"><label for="perm-user-parent-date">Expiry date</label><input id="perm-user-parent-date" type="datetime-local" disabled></div><button type="submit" class="button" id="perm-user-parent-add">Add parent</button></form>
+            <form class="form-row" id="perm-user-track-form" aria-label="Promote or demote"><div class="field grow"><label for="perm-user-track">Track</label><select id="perm-user-track"></select></div><div class="field grow"><label for="perm-user-track-contexts">Contexts <span class="muted">Optional</span></label><input id="perm-user-track-contexts" class="mono" autocomplete="off" spellcheck="false" placeholder="server=survival"></div><div class="action-group"><button type="button" class="button secondary" id="perm-user-demote">Demote</button><button type="button" class="button" id="perm-user-promote">Promote</button></div></form>
+            <p class="operation-result" id="perm-user-result" role="status" aria-live="polite"></p>
+          </section>
+          <section class="panel hidden" id="perm-user-nodes-panel" aria-labelledby="perm-user-nodes-heading">
+            <div class="panel-heading"><h2 id="perm-user-nodes-heading">Nodes of the player</h2><span class="muted small" id="perm-user-node-count">—</span></div>
+            <div class="table-wrap"><table><thead><tr><th scope="col">Kind</th><th scope="col">Node</th><th scope="col">Value</th><th scope="col">Contexts</th><th scope="col">Expires</th><th scope="col">Source</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead><tbody id="perm-user-nodes"><tr><td colspan="7" class="empty">Waiting for data</td></tr></tbody></table></div>
+            <form id="perm-user-node-form" aria-labelledby="perm-user-node-form-heading">
+              <h3 class="sr-only" id="perm-user-node-form-heading">Add or edit a node</h3>
+              <div class="form-row top">
+                <div class="field"><label for="perm-user-node-kind">Kind</label><select id="perm-user-node-kind"><option value="permission">Permission</option><option value="inherit">Parent group</option><option value="prefix">Prefix</option><option value="suffix">Suffix</option><option value="meta">Meta</option></select></div>
+                <div class="field grow"><label for="perm-user-node-key" id="perm-user-node-key-label">Permission node</label><input id="perm-user-node-key" class="mono" maxlength="256" autocomplete="off" spellcheck="false" placeholder="essentials.fly" required></div>
+                <div class="field" id="perm-user-node-grant-field"><label for="perm-user-node-grant">Effect</label><select id="perm-user-node-grant"><option value="true">Grant</option><option value="false">Deny</option></select></div>
+                <div class="field grow hidden" id="perm-user-node-value-field"><label for="perm-user-node-value" id="perm-user-node-value-label">Text</label><input id="perm-user-node-value" maxlength="1024" autocomplete="off" spellcheck="false"></div>
+              </div>
+              <div class="form-row">
+                <div class="field grow"><label for="perm-user-node-contexts">Contexts <span class="muted">Optional</span></label><input id="perm-user-node-contexts" class="mono" autocomplete="off" spellcheck="false" placeholder="server=survival, world=world_nether" aria-describedby="perm-user-node-contexts-help"><p class="field-help" id="perm-user-node-contexts-help"><code>key=value</code> pairs, all of which must be active. Empty applies everywhere.</p></div>
+                <div class="field"><label for="perm-user-node-expiry">Expires</label><select id="perm-user-node-expiry"><option value="">Never</option><option value="3600">In 1 hour</option><option value="86400">In 1 day</option><option value="604800">In 7 days</option><option value="2592000">In 30 days</option><option value="date">On a date…</option></select></div>
+                <div class="field"><label for="perm-user-node-date">Expiry date</label><input id="perm-user-node-date" type="datetime-local" disabled></div>
+              </div>
+              <div class="editor-actions"><div class="action-group"><button type="button" class="button secondary hidden" id="perm-user-node-cancel">Cancel edit</button></div><div class="action-group"><button type="submit" class="button" id="perm-user-node-save">Add node</button></div></div>
+            </form>
+            <p class="operation-result" id="perm-user-node-result" role="status" aria-live="polite"></p>
+          </section>
+          <section class="panel hidden" id="perm-compiled-panel" aria-labelledby="perm-compiled-heading">
+            <div class="panel-heading"><h2 id="perm-compiled-heading">What backends see</h2><span class="muted small" id="perm-compiled-revision">—</span></div>
+            <p class="panel-note">Leave the contexts empty to use the player’s current ones on the proxy.</p>
+            <form class="form-row" id="perm-compiled-form"><div class="field grow"><label for="perm-compiled-server">Server</label><input id="perm-compiled-server" class="mono" autocomplete="off" spellcheck="false"></div><div class="field grow"><label for="perm-compiled-world">World</label><input id="perm-compiled-world" class="mono" autocomplete="off" spellcheck="false"></div><div class="field grow"><label for="perm-compiled-dimension">Dimension</label><input id="perm-compiled-dimension" class="mono" autocomplete="off" spellcheck="false" placeholder="minecraft:overworld"></div><div class="field"><label for="perm-compiled-gamemode">Game mode</label><select id="perm-compiled-gamemode"><option value="">Any</option><option>survival</option><option>creative</option><option>adventure</option><option>spectator</option></select></div><div class="field grow"><label for="perm-compiled-extra">Other contexts</label><input id="perm-compiled-extra" class="mono" autocomplete="off" spellcheck="false" placeholder="region=spawn"></div><button type="submit" class="button secondary" id="perm-compiled-show">Show</button></form>
+            <dl class="service-list" id="perm-compiled-meta"></dl>
+            <div class="table-wrap"><table><thead><tr><th scope="col">Entry</th><th scope="col">Value</th><th scope="col">Contexts</th><th scope="col">From</th><th scope="col">Expires</th></tr></thead><tbody id="perm-compiled-entries"><tr><td colspan="5" class="empty">Waiting for data</td></tr></tbody></table></div>
+            <form class="form-row top" id="perm-trace-form"><div class="field grow"><label for="perm-trace-node">Check a node in these contexts</label><input id="perm-trace-node" class="mono" maxlength="256" autocomplete="off" spellcheck="false" placeholder="essentials.fly" required></div><button type="submit" class="button" id="perm-trace-check">Check</button></form>
+            <p class="operation-result" id="perm-trace-result" role="status" aria-live="polite"></p>
+            <div class="table-wrap hidden" id="perm-trace-table"><table><thead><tr><th scope="col">Outcome</th><th scope="col">Entry</th><th scope="col">Value</th><th scope="col">Contexts</th><th scope="col">From</th></tr></thead><tbody id="perm-trace-rows"></tbody></table></div>
+          </section>
+        </section>
+
+        <section class="view" id="view-perm-nodes" aria-labelledby="view-title" hidden>
+          <div class="page-head"><p class="page-intro">Permission nodes backend plugins registered, with their descriptions and defaults. A default applies only where no group or player sets the node. Choose a node to see who holds it.</p><button type="button" class="button secondary" id="perm-nodes-refresh">Refresh</button></div>
+          <section class="panel" id="perm-registered-panel" aria-labelledby="perm-registered-heading">
+            <div class="panel-heading"><h2 id="perm-registered-heading">Registered nodes</h2><span class="muted small" id="perm-registered-count">—</span></div>
+            <form class="form-row" id="perm-registered-form" role="search"><div class="field grow"><label for="perm-registered-filter">Filter</label><input id="perm-registered-filter" type="search" autocomplete="off" spellcheck="false" placeholder="Node, plugin or description"></div></form>
+            <div class="table-wrap"><table><thead><tr><th scope="col">Node</th><th scope="col">Default</th><th scope="col">Description</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead><tbody id="perm-registered"><tr><td colspan="4" class="empty">Waiting for data</td></tr></tbody></table></div>
+          </section>
+          <section class="panel" id="perm-holders-panel" aria-labelledby="perm-holders-heading">
+            <div class="panel-heading"><h2 id="perm-holders-heading">Who holds a node</h2><span class="muted small" id="perm-holder-count"></span></div>
+            <form class="form-row" id="perm-holders-form" role="search"><div class="field grow"><label for="perm-holders-node">Node</label><input id="perm-holders-node" class="mono" maxlength="256" autocomplete="off" spellcheck="false" placeholder="essentials.fly" required></div><button type="submit" class="button" id="perm-holders-search">Find holders</button></form>
+            <div class="table-wrap"><table><thead><tr><th scope="col">Holder</th><th scope="col">Value</th><th scope="col">Contexts</th><th scope="col">Expires</th><th scope="col">Source</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead><tbody id="perm-holders"><tr><td colspan="6" class="empty">Choose a node to list who sets it directly.</td></tr></tbody></table></div>
+            <p class="operation-result" id="perm-holders-result" role="status" aria-live="polite"></p>
+          </section>
+        </section>
+
+        <section class="view" id="view-perm-activity" aria-labelledby="view-title" hidden>
+          <div class="page-head"><p class="page-intro">Every committed permission change with its revision, who made it and why. Open a revision to compare each node before and after.</p><button type="button" class="button secondary" id="perm-activity-refresh">Refresh</button></div>
+          <section class="panel" id="perm-activity-panel" aria-labelledby="perm-activity-heading">
+            <div class="panel-heading"><h2 id="perm-activity-heading">Changes</h2><span class="muted small" id="perm-activity-count">—</span></div>
+            <form class="form-row" id="perm-activity-form" role="search"><div class="field grow"><label for="perm-activity-actor">Actor</label><input id="perm-activity-actor" class="mono" autocomplete="off" spellcheck="false" placeholder="operator:admin"></div><div class="field grow"><label for="perm-activity-subject">Subject</label><input id="perm-activity-subject" class="mono" autocomplete="off" spellcheck="false" placeholder="group:vip or a player UUID"></div><div class="field"><label for="perm-activity-since">After revision</label><input id="perm-activity-since" type="number" min="0" step="1"></div><button type="submit" class="button" id="perm-activity-apply">Filter</button></form>
+            <div class="table-wrap"><table><thead><tr><th scope="col" class="numeric">Revision</th><th scope="col">Time</th><th scope="col">Actor</th><th scope="col">Changes</th><th scope="col">Reason</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead><tbody id="perm-activity"><tr><td colspan="6" class="empty">Waiting for data</td></tr></tbody></table></div>
+            <p class="operation-result" id="perm-activity-result" role="status" aria-live="polite"></p>
           </section>
         </section>
 

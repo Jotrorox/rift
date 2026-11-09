@@ -203,9 +203,7 @@ def enabled_checks(binary, threshold):
                    fields("PlayerCount", "absent"), fields("PlayerList", "absent"),
                    fields("PlayerCount", "all"), fields("PlayerList", "all"),
                    fields("RiftServers"), fields("RiftServers", "absent"),
-                   fields("RiftServers", "all"), fields("RiftInGroup", "Alice"),
-                   # Groups need API v2 extensions, which this network lacks.
-                   fields("RiftInGroup", "Alice", "default")]
+                   fields("RiftServers", "all"), fields("RiftInGroup", "Alice")]
         for channel in ALIASES:
             for request in invalid:
                 send(source, request, channel)
@@ -213,6 +211,9 @@ def enabled_checks(binary, threshold):
         barrier(alice, source)
         assert [(channel, body) for channel, body in payloads(source, start) if channel in ALIASES] == [
             (CHANNEL, fields("GetServer", "lobby"))]
+        # The permission store needs no extensions: everyone is in default.
+        query(source, fields("RiftInGroup", "Alice", "default"),
+              fields("RiftInGroup", "Alice", "default") + b"\x01")
         assert not survival.connections, "malformed Connect transferred the player"
 
         # Client spoofing cannot execute a transfer, query the proxy, or reach

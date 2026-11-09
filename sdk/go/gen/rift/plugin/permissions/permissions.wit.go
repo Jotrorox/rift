@@ -2,7 +2,7 @@
 
 // Package permissions represents the imported interface "rift:plugin/permissions@0.1.0".
 //
-// Live permissions and durable groups.
+// Rift's permission store: user nodes and group memberships.
 package permissions
 
 import (
@@ -10,6 +10,8 @@ import (
 )
 
 // Has represents the imported function "has".
+//
+// Whether the node is true in the player's current contexts.
 //
 //	has: func(uuid: string, node: string) -> bool
 //
@@ -24,7 +26,7 @@ func Has(uuid string, node string) (result bool) {
 
 // Set represents the imported function "set".
 //
-// `none` removes a direct grant or denial.
+// Set the user's global permission node; `none` removes it.
 //
 //	set: func(uuid: string, node: string, value: option<bool>) -> result<_, string>
 //
@@ -78,7 +80,7 @@ func Groups(uuid string) (result cm.List[string]) {
 
 // ListGroups represents the imported function "list-groups".
 //
-// The configured groups with their permissions, as a JSON object.
+// Every group with its weight, display name and nodes, as a JSON object.
 //
 //	list-groups: func() -> string
 //

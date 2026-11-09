@@ -238,6 +238,12 @@ pub struct Session<C, B> {
     backend: Option<Connection<B>>,
     pub handshake: Handshake,
     pub extension: Option<crate::extensions::ExtensionSession>,
+    /// The authority behind the proxy's own `/perms` and `/rp`, once enabled.
+    permission_commands: Option<std::sync::Arc<crate::permissions::Authority>>,
+    /// The authority whose `dimension` and `gamemode` contexts follow `world`.
+    permission_contexts: Option<std::sync::Arc<crate::permissions::Authority>>,
+    /// The dimension and game mode the backend last told the client.
+    world: protocol::PlayerWorld,
     version: Option<ProtocolVersion>,
     login_start: Option<Packet>,
     identity: Option<PlayerIdentity>,
@@ -275,6 +281,9 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             version: ProtocolVersion::new(handshake.protocol).ok(),
             backend: None,
             extension: None,
+            permission_commands: None,
+            permission_contexts: None,
+            world: protocol::PlayerWorld::default(),
             handshake,
             login_start: None,
             identity: None,
@@ -310,6 +319,77 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
 
     pub fn set_extension(&mut self, extension: crate::extensions::ExtensionSession) {
         self.extension = Some(extension);
+    }
+
+    /// Answer `/perms` and `/rp` on the proxy (network sessions only). An
+    /// extension or plugin command of the same name takes precedence.
+    pub fn enable_permission_commands(
+        &mut self,
+        authority: std::sync::Arc<crate::permissions::Authority>,
+    ) {
+        self.permission_commands = Some(authority);
+    }
+
+    /// Keep `authority`'s `dimension` and `gamemode` contexts for this player
+    /// in step with the Join Game, Respawn and Game Event packets the backend
+    /// sends. Only packets with those IDs are read; one that does not parse
+    /// leaves the contexts as they were and is still relayed unchanged.
+    pub fn track_permission_contexts(
+        &mut self,
+        authority: std::sync::Arc<crate::permissions::Authority>,
+    ) {
+        self.permission_contexts = Some(authority);
+    }
+
+    /// The dimension and game mode the backend last told the client.
+    pub fn world(&self) -> &protocol::PlayerWorld {
+        &self.world
+    }
+
+    /// Push the dimension and game mode last seen to the authority. Changes
+    /// are pushed as they are seen; call this as well after the player is
+    /// registered or moved to another server, which restart the proxy
+    /// contexts from `server` alone after the new world's Join Game.
+    pub fn sync_permission_contexts(&self) {
+        sync_world(
+            self.permission_contexts.as_deref(),
+            self.identity.as_ref(),
+            &self.world,
+        );
+    }
+
+    fn observe_world(&mut self, version: ProtocolVersion, packet: &Packet) {
+        observe_world(
+            &mut self.world,
+            self.permission_contexts.as_deref(),
+            self.identity.as_ref(),
+            version,
+            packet,
+        );
+    }
+
+    /// The proxy's `/perms` names this player sees in the command tree.
+    fn visible_permission_commands(&self) -> Vec<(String, bool)> {
+        let (Some(authority), Some(uuid)) = (
+            &self.permission_commands,
+            self.identity.as_ref().and_then(|identity| identity.uuid),
+        ) else {
+            return Vec::new();
+        };
+        let uuid = rift_permissions::Uuid::from_bytes(uuid);
+        if !crate::permissions::command::may_use(authority, uuid) {
+            return Vec::new();
+        }
+        let extension = self
+            .extension
+            .as_ref()
+            .map(|e| e.commands())
+            .unwrap_or_default();
+        crate::permissions::command::COMMAND_NAMES
+            .iter()
+            .filter(|name| !extension.iter().any(|command| command == *name))
+            .map(|name| ((*name).to_owned(), false))
+            .collect()
     }
 
     pub fn version(&self) -> io::Result<ProtocolVersion> {
@@ -643,6 +723,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                     self.send_client(&packet).await?;
                 }
                 self.tab_list.reset();
+                self.observe_world(version, &join);
                 let (join, respawn) = caps.legacy_world(&join)?;
                 self.send_client(&join).await?;
                 self.send_client(&respawn).await?;
@@ -1289,6 +1370,9 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                                 self.extension
                                     .as_ref()
                                     .is_some_and(|extension| extension.intercepts(name))
+                                    || (self.permission_commands.is_some()
+                                        && crate::permissions::command::COMMAND_NAMES
+                                            .contains(&name))
                             })?
                     {
                         if self.suggestions.allow() {
@@ -1310,6 +1394,9 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                                 self.extension
                                     .as_ref()
                                     .is_some_and(|extension| extension.intercepts(name))
+                                    || (self.permission_commands.is_some()
+                                        && crate::permissions::command::COMMAND_NAMES
+                                            .contains(&name))
                             })?
                     {
                         if let Some(acknowledgement) = acknowledgement {
@@ -1381,6 +1468,13 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                             // Rift owns the header and footer.
                             return Ok(SessionEvent::Packet);
                         }
+                        observe_world(
+                            &mut self.world,
+                            self.permission_contexts.as_deref(),
+                            self.identity.as_ref(),
+                            version,
+                            &packet,
+                        );
                     }
                     match kind {
                         PacketKind::LoginPluginRequest => {
@@ -1479,10 +1573,11 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                                 raw = None;
                                 // Rebuilt per tree, so permission changes
                                 // show with the backend's next Commands packet.
-                                let commands =
+                                let mut commands =
                                     self.extension.as_ref().map_or_else(Vec::new, |extension| {
                                         extension.visible_commands()
                                     });
+                                commands.extend(self.visible_permission_commands());
                                 caps.network_commands_with(&packet, &commands)?
                             } else {
                                 packet
@@ -1592,6 +1687,43 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         self.client.state.close();
         self.client.io.shutdown().await
     }
+}
+
+/// Follow a clientbound play packet's world, in the client's protocol, and
+/// push a change to the authority.
+fn observe_world(
+    world: &mut protocol::PlayerWorld,
+    authority: Option<&crate::permissions::Authority>,
+    identity: Option<&PlayerIdentity>,
+    version: ProtocolVersion,
+    packet: &Packet,
+) {
+    if authority.is_none() {
+        return;
+    }
+    if let Some(update) = version
+        .switching()
+        .and_then(|caps| caps.world_update(packet))
+        && world.apply(update)
+    {
+        sync_world(authority, identity, world);
+    }
+}
+
+fn sync_world(
+    authority: Option<&crate::permissions::Authority>,
+    identity: Option<&PlayerIdentity>,
+    world: &protocol::PlayerWorld,
+) {
+    let (Some(authority), Some(uuid)) = (authority, identity.and_then(|identity| identity.uuid))
+    else {
+        return;
+    };
+    authority.set_session_contexts(
+        rift_permissions::Uuid::from_bytes(uuid),
+        world.dimension.as_deref(),
+        world.gamemode.map(protocol::GameMode::name),
+    );
 }
 
 fn encryption_unsupported() -> io::Error {

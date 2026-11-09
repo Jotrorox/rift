@@ -1,0 +1,19 @@
+{
+  "kind": "wire",
+  "name": "node-normalised",
+  "description": "Patterns and contexts are lowercased; source store and empty fields are omitted.",
+  "type": "node",
+  "json": {
+    "kind": "permission",
+    "key": "Essentials.FLY",
+    "value": false,
+    "contexts": {"World": "Nether"},
+    "source": "store"
+  },
+  "expect": {
+    "kind": "permission",
+    "key": "essentials.fly",
+    "value": false,
+    "contexts": {"world": "nether"}
+  }
+}

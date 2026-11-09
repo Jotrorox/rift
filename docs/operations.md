@@ -93,7 +93,7 @@ returned Lua configuration table before starting:
 admin = {
     listen = "127.0.0.1:9091",
     token_env = "RIFT_ADMIN_TOKEN",
-    permissions = { "status", "servers", "maintenance", "drain", "transfer", "reload", "shutdown", "plugins", "logs" },
+    permissions = { "status", "servers", "maintenance", "drain", "transfer", "reload", "shutdown", "plugins", "logs", "perms" },
 },
 maintenance = false,
 draining = {}, -- For example, { "survival" } blocks new attachments to survival.
@@ -139,6 +139,11 @@ a different `token_env` variable. It defaults to `127.0.0.1:9091`; use
 maintenance state. Commands fail with an actionable error when authentication,
 permission checks or validation fail. Use the local CLI through SSH for remote
 administration.
+
+The `perms` permission grants `rift admin perms <command>`, the
+[`/perms` grammar](permissions.md#commands) with console rights, plus `log`,
+`compiled`, `doctor` and `backends`; import and export paths are resolved where
+the CLI runs and read or written by the proxy.
 
 The `servers` permission grants `rift admin servers`, `rift admin start <backend>`
 and `rift admin stop <backend>` for configured [managed servers](managed-servers.md).

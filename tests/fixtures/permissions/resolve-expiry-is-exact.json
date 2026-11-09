@@ -1,0 +1,35 @@
+{
+  "kind": "resolve",
+  "name": "expiry-is-exact",
+  "description": "A node expiring at t applies before t and is absent from t on, whether or not it was compiled in.",
+  "now": 1000,
+  "users": {
+    "00000000000000000000000000000001": {
+      "nodes": [
+        {"kind": "permission", "key": "fly", "value": true, "expires_at": 2000},
+        {"kind": "permission", "key": "old", "value": true, "expires_at": 500}
+      ]
+    }
+  },
+  "groups": {},
+  "checks": [
+    {"user": "00000000000000000000000000000001", "node": "fly", "expect": true},
+    {"user": "00000000000000000000000000000001", "node": "fly", "now": 1999, "expect": true},
+    {"user": "00000000000000000000000000000001", "node": "fly", "now": 2000, "expect": null},
+    {"user": "00000000000000000000000000000001", "node": "old", "expect": null}
+  ],
+  "compiled": {
+    "00000000000000000000000000000001": {
+      "revision": 1,
+      "uuid": "00000000000000000000000000000001",
+      "primary_group": "default",
+      "entries": [
+        {"k": "perm", "key": "fly", "v": true, "ctx": {}, "rank": 0, "exp": 2000},
+        {"k": "group", "key": "default", "v": true, "ctx": {}, "rank": 1}
+      ],
+      "prefix": [],
+      "suffix": [],
+      "meta": []
+    }
+  }
+}

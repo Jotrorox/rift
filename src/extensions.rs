@@ -1,9 +1,15 @@
-//! Authenticated extensions. Rust owns durable state, live permissions, scheduled
+//! Authenticated extensions. Rust owns durable state, permissions, scheduled
 //! work, admission leases and FIFO tickets; Lua invocations remain isolated.
 use crate::{
-    auth::AuthenticatedProfile, config::Config, messaging::Broker, protocol::Suggestion, script,
+    auth::AuthenticatedProfile,
+    config::{Config, PermissionsConfig},
+    messaging::Broker,
+    permissions::{self, Authority},
+    protocol::Suggestion,
+    script,
 };
 use mlua::{Function, Table, Value};
+use rift_permissions::{Actor, ChangeEvent, ContextSet, Group, Node, SubjectRef, Tristate, Uuid};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     io,
@@ -13,8 +19,8 @@ use std::{
 use tokio::sync::Semaphore;
 
 pub(crate) mod decisions;
+mod groups;
 mod integrations;
-pub(crate) mod permissions;
 pub(crate) mod players;
 mod scheduler;
 pub(crate) mod storage;
@@ -39,7 +45,15 @@ pub struct ExtensionScript {
     jobs: BTreeMap<String, Duration>,
     hooks: BTreeSet<String>,
     commands: BTreeMap<String, Command>,
-    permissions: permissions::Policy,
+    /// `extensions.groups`, mirrored as `source = 'config'` group nodes.
+    groups: BTreeMap<String, Group>,
+    /// The removed `extensions.permissions`, kept only so startup can copy
+    /// it into the permission store once; validation rejects it.
+    legacy_grants: Option<Vec<(SubjectRef, Node)>>,
+    /// Context keys with a `rift.permissions.contexts.provide` callback.
+    context_providers: BTreeSet<String>,
+    /// Whether `rift.permissions.on_change` handlers are registered.
+    permission_events: bool,
     pub queues: BTreeMap<String, usize>,
     decisions: BTreeMap<String, decisions::Decision>,
 }
@@ -48,6 +62,21 @@ pub struct ExtensionScript {
 struct Command {
     permission: String,
     suggest: Suggest,
+}
+
+impl ExtensionScript {
+    /// `(command, permission)` of every command, sorted by command.
+    pub fn command_permissions(&self) -> Vec<(String, String)> {
+        self.commands
+            .iter()
+            .map(|(name, command)| (name.clone(), command.permission.clone()))
+            .collect()
+    }
+
+    /// `extensions.groups`, as mirrored into the permission store.
+    pub fn groups(&self) -> &BTreeMap<String, Group> {
+        &self.groups
+    }
 }
 
 /// How a command's arguments are completed: not at all, from online player
@@ -79,6 +108,9 @@ pub(crate) fn fields(table: &Table, allowed: &[&str]) -> mlua::Result<()> {
     }
     Ok(())
 }
+/// Lua `rift.permissions.contexts.provide` callbacks per configuration.
+const MAX_CONTEXT_PROVIDERS: usize = 16;
+
 pub(crate) fn token(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
@@ -109,10 +141,21 @@ impl ExtensionScript {
         &self.decisions
     }
 
-    /// `extensions.groups` with their own permissions and `inherits` lists.
-    /// API v1 has no groups.
+    /// `extensions.groups` with the field names of the configuration. API v1
+    /// has no groups.
     pub fn permission_groups(&self) -> Option<serde_json::Value> {
-        (self.api_version == 2).then(|| self.permissions.groups_value())
+        (self.api_version >= 2).then(|| groups::value(&self.groups))
+    }
+
+    /// The groups the configuration defines, as mirrored into the store.
+    pub fn config_groups(&self) -> &BTreeMap<String, Group> {
+        &self.groups
+    }
+
+    /// Grants from the removed `extensions.permissions`, as store nodes, or
+    /// `None` when the field is absent.
+    pub fn legacy_grants(&self) -> Option<&[(SubjectRef, Node)]> {
+        self.legacy_grants.as_deref()
     }
 
     /// Environment variables the extension configuration reads, as
@@ -182,11 +225,10 @@ impl ExtensionScript {
             return Err(mlua::Error::runtime("extensions must be a table"));
         };
         let api_version = match table.raw_get::<Value>("api_version")? {
-            Value::Integer(1) => 1,
-            Value::Integer(2) => 2,
+            Value::Integer(version @ 1..=3) => version as u8,
             _ => {
                 return Err(mlua::Error::runtime(
-                    "extensions.api_version must be 1 or 2",
+                    "extensions.api_version must be 1, 2 or 3",
                 ));
             }
         };
@@ -208,13 +250,27 @@ impl ExtensionScript {
                 "integrations",
                 "jobs",
                 "decisions",
+                "on_permission_change",
+                "context_providers",
             ],
         )?;
         if api_version == 1 {
             for name in ["storage", "integrations", "jobs", "groups", "decisions"] {
                 if !table.raw_get::<Value>(name)?.is_nil() {
                     return Err(mlua::Error::runtime(format!(
-                        "extensions.{name} requires api_version = 2"
+                        "extensions.{name} requires api_version = 2 or later"
+                    )));
+                }
+            }
+        }
+        if api_version < 3 {
+            for (name, api) in [
+                ("on_permission_change", "rift.permissions.on_change"),
+                ("context_providers", "rift.permissions.contexts.provide"),
+            ] {
+                if !table.raw_get::<Value>(name)?.is_nil() {
+                    return Err(mlua::Error::runtime(format!(
+                        "extensions.{name} ({api}) requires api_version = 3"
                     )));
                 }
             }
@@ -257,9 +313,9 @@ impl ExtensionScript {
                     ));
                 }
                 let permission: String = command.raw_get("permission")?;
-                if !token(&permission) {
+                if !rift_permissions::node::valid_node(&permission) || permission.ends_with('*') {
                     return Err(mlua::Error::runtime(
-                        "command permission must be a nonempty permission node",
+                        "command permission must be a lowercase permission node without wildcards",
                     ));
                 }
                 command.raw_get::<Function>("run")?;
@@ -287,7 +343,41 @@ impl ExtensionScript {
                 );
             }
         }
-        let permissions = permissions::Policy::parse(&table, api_version)?;
+        let groups = groups::parse(table.raw_get("groups")?)?;
+        let legacy_grants = groups::legacy(table.raw_get("permissions")?)?;
+        let mut context_providers = BTreeSet::new();
+        match table.raw_get::<Value>("context_providers")? {
+            Value::Nil => {}
+            Value::Table(providers) => {
+                for entry in providers.pairs::<String, Function>() {
+                    let (key, _) = entry?;
+                    if rift_permissions::context::RESERVED.contains(&key.as_str())
+                        || ContextSet::of(&key, "x").is_err()
+                        || key != key.to_ascii_lowercase()
+                        || context_providers.len() >= MAX_CONTEXT_PROVIDERS
+                    {
+                        return Err(mlua::Error::runtime(format!(
+                            "context provider {key:?}: use a custom key of 1 to 64 bytes of [a-z0-9_.:-] (not server, world, dimension or gamemode), at most {MAX_CONTEXT_PROVIDERS} providers"
+                        )));
+                    }
+                    context_providers.insert(key);
+                }
+            }
+            _ => {
+                return Err(mlua::Error::runtime(
+                    "extensions.context_providers must map context keys to functions",
+                ));
+            }
+        }
+        let permission_events = match table.raw_get::<Value>("on_permission_change")? {
+            Value::Nil => false,
+            Value::Function(_) => true,
+            _ => {
+                return Err(mlua::Error::runtime(
+                    "extensions.on_permission_change must be a function",
+                ));
+            }
+        };
         let mut queues = BTreeMap::new();
         if let Some(entries) = table.raw_get::<Option<Table>>("queues")? {
             for entry in entries.pairs::<String, usize>() {
@@ -306,7 +396,10 @@ impl ExtensionScript {
             jobs,
             hooks,
             commands,
-            permissions,
+            groups,
+            legacy_grants,
+            context_providers,
+            permission_events,
             queues,
             decisions,
         }))
@@ -340,19 +433,11 @@ impl ExtensionScript {
         parse: impl FnOnce(&str, Value) -> mlua::Result<T>,
     ) -> io::Result<T> {
         let run = || -> mlua::Result<T> {
-            let (lua, root) = script::load(&self.source, deadline)?;
-            script::install_messaging(&lua, Some(runtime.broker.clone()), deadline)?;
-            if self.api_version == 2 {
-                let api: Table = lua.named_registry_value("rift.runtime")?;
-                runtime.store.install(&lua, &api, deadline)?;
-                runtime.permissions.install(&lua, &api, deadline)?;
-                runtime.players.install(&lua, &api, deadline)?;
-                integrations::install(&lua, &api, &self.integrations, deadline)?;
-            }
-            let Value::Table(root) = root else {
-                return Err(mlua::Error::runtime("configuration must return a table"));
+            let actor = match (hook, input.command.as_deref()) {
+                ("command" | "suggest" | "job", Some(name)) => format!("{hook}.{name}"),
+                _ => hook.to_owned(),
             };
-            let extensions: Table = root.raw_get("extensions")?;
+            let (lua, extensions) = self.prepare(&actor, deadline, runtime)?;
             let callback: Function = if hook == "command" || hook == "suggest" {
                 extensions
                     .raw_get::<Table>("commands")?
@@ -417,7 +502,83 @@ impl ExtensionScript {
         };
         run().map_err(|error| invalid(format!("extensions.{hook}: {error:.2048}")))
     }
+
+    /// Evaluate the configuration with this API version's host services and
+    /// return its `extensions` table. Permission writes are recorded with
+    /// actor `lua:<actor>`.
+    fn prepare(
+        &self,
+        actor: &str,
+        deadline: Instant,
+        runtime: &Extensions,
+    ) -> mlua::Result<(mlua::Lua, Table)> {
+        let (lua, root) = script::load(&self.source, deadline)?;
+        script::install_messaging(&lua, Some(runtime.broker.clone()), deadline)?;
+        if self.api_version >= 2 {
+            let api: Table = lua.named_registry_value("rift.runtime")?;
+            runtime.store.install(&lua, &api, deadline)?;
+            runtime.players.install(&lua, &api, deadline)?;
+            integrations::install(&lua, &api, &self.integrations, deadline)?;
+            if self.api_version == 3 {
+                let actor = Actor::Lua(actor.to_owned());
+                permissions::lua::install(&lua, &api, &runtime.permissions, actor, deadline)?;
+            }
+        }
+        let Value::Table(root) = root else {
+            return Err(mlua::Error::runtime("configuration must return a table"));
+        };
+        Ok((lua, root.raw_get("extensions")?))
+    }
+
+    /// Evaluate the context providers for a player.
+    fn provide_contexts(
+        &self,
+        input: &Context,
+        deadline: Instant,
+        runtime: &Extensions,
+    ) -> io::Result<ContextSet> {
+        let run = || -> mlua::Result<ContextSet> {
+            let (lua, extensions) = self.prepare("contexts", deadline, runtime)?;
+            let providers: Table = extensions.raw_get("context_providers")?;
+            let player = lua.create_table()?;
+            player.raw_set("uuid", input.uuid.as_str())?;
+            player.raw_set("name", input.name.as_str())?;
+            player.raw_set("server", input.server.as_deref())?;
+            let mut contexts = ContextSet::new();
+            for key in &self.context_providers {
+                let provider: Function = providers.raw_get(key.as_str())?;
+                let value: Value = provider.call(player.clone())?;
+                permissions::lua::add_values(&mut contexts, key, value)?;
+            }
+            script::check_deadline(deadline)?;
+            Ok(contexts)
+        };
+        run().map_err(|error| invalid(format!("extensions.context_providers: {error:.2048}")))
+    }
+
+    /// Call `on_permission_change` once for each op of a committed change.
+    fn permission_changed(
+        &self,
+        event: &ChangeEvent,
+        deadline: Instant,
+        runtime: &Extensions,
+    ) -> io::Result<()> {
+        let run = || -> mlua::Result<()> {
+            let (lua, extensions) = self.prepare(PERMISSION_EVENTS, deadline, runtime)?;
+            let handler: Function = extensions.raw_get("on_permission_change")?;
+            for op in permissions::lua::events(&lua, event, deadline)? {
+                handler.call::<Value>(op)?;
+                script::check_deadline(deadline)?;
+            }
+            Ok(())
+        };
+        run().map_err(|error| invalid(format!("extensions.on_permission_change: {error:.2048}")))
+    }
 }
+
+/// The actor label of writes made by `on_permission_change` handlers, whose
+/// own changes are not fed back to them.
+const PERMISSION_EVENTS: &str = "permission_change";
 
 /// A decision hook's answer. Serialized like a Lua result table:
 /// `"continue"`, `{"deny":"reason"}`, `"leave_queue"`.
@@ -600,6 +761,40 @@ impl Context {
         }
     }
 }
+/// Host-owned extension store namespace of API v2 group memberships:
+/// UUID to comma-separated group names. Read once on upgrade, never written.
+const MEMBERSHIPS: &str = "rift.groups";
+
+/// What the one-time upgrade copies into the permission store: memberships
+/// from the extension store namespace `rift.groups` as `inherit` nodes, and
+/// the grants of the removed `extensions.permissions`. The extension store is
+/// opened briefly and left unchanged, so a downgrade still finds it.
+pub fn upgrade_nodes(config: &Config) -> io::Result<Vec<(SubjectRef, Node)>> {
+    let Some(script) = &config.extensions else {
+        return Ok(Vec::new());
+    };
+    let mut nodes = Vec::new();
+    if let Some(storage) = &script.storage {
+        let store = storage::Store::open(Some(storage))?;
+        for (key, value) in store.namespace(MEMBERSHIPS) {
+            let (Ok(uuid), Ok(groups)) = (Uuid::parse(&key), std::str::from_utf8(&value)) else {
+                eprintln!(
+                    "rift: permission upgrade skipped an invalid {MEMBERSHIPS} entry {key:?}"
+                );
+                continue;
+            };
+            for group in groups.split(',') {
+                match Node::inherit(group, true) {
+                    Ok(node) => nodes.push((SubjectRef::User(uuid), node)),
+                    Err(error) => eprintln!("rift: permission upgrade skipped {key}: {error}"),
+                }
+            }
+        }
+    }
+    nodes.extend(script.legacy_grants.iter().flatten().cloned());
+    Ok(nodes)
+}
+
 #[derive(Default)]
 struct HostState {
     leases: BTreeMap<u64, BTreeSet<String>>,
@@ -617,7 +812,10 @@ pub struct Extensions {
     host: Arc<Mutex<HostState>>,
     broker: Broker,
     store: storage::Store,
-    permissions: permissions::Permissions,
+    /// The process-wide permission authority, shared by every generation.
+    permissions: Arc<Authority>,
+    /// This generation's `permissions` section, applied on activation.
+    permissions_config: PermissionsConfig,
     players: Players,
     job_gates: Arc<Mutex<BTreeMap<String, Weak<Semaphore>>>>,
     /// The dispatch chain: this script, persistent plugins, bus responders.
@@ -641,12 +839,32 @@ impl Extensions {
             .collect()
     }
 
+    /// A generation for `config`. The first one gets a private in-memory
+    /// permission store; see [`Extensions::with_permissions`].
     pub fn new(config: &Config, broker: Broker, previous: Option<&Self>) -> io::Result<Self> {
-        Self::with_engines(
+        Self::build(
             config,
             broker,
             previous,
             crate::plugins::worker::Engines::builtin(),
+            None,
+        )
+    }
+
+    /// [`Extensions::new`] with the permission authority the first generation
+    /// uses; later generations keep their predecessor's.
+    pub fn with_permissions(
+        config: &Config,
+        broker: Broker,
+        previous: Option<&Self>,
+        permissions: Option<Arc<Authority>>,
+    ) -> io::Result<Self> {
+        Self::build(
+            config,
+            broker,
+            previous,
+            crate::plugins::worker::Engines::builtin(),
+            permissions,
         )
     }
 
@@ -657,6 +875,16 @@ impl Extensions {
         broker: Broker,
         previous: Option<&Self>,
         engines: crate::plugins::worker::Engines,
+    ) -> io::Result<Self> {
+        Self::build(config, broker, previous, engines, None)
+    }
+
+    fn build(
+        config: &Config,
+        broker: Broker,
+        previous: Option<&Self>,
+        engines: crate::plugins::worker::Engines,
+        permissions: Option<Arc<Authority>>,
     ) -> io::Result<Self> {
         if let Some(previous) = previous {
             ExtensionScript::live_compatible(previous.script.as_ref(), config.extensions.as_ref())
@@ -678,7 +906,7 @@ impl Extensions {
         };
         let permissions = match previous {
             Some(previous) => previous.permissions.clone(),
-            None => permissions::Permissions::open(store.clone())?,
+            None => permissions.unwrap_or_else(|| Arc::new(Authority::memory(&config.permissions))),
         };
         let backends = previous.map_or_else(
             || {
@@ -698,7 +926,14 @@ impl Extensions {
             |previous| previous.groups.clone(),
         );
         let players = previous.map_or_else(
-            || Players::new(backends.clone(), groups.clone(), broker.clone()),
+            || {
+                Players::new(
+                    backends.clone(),
+                    groups.clone(),
+                    broker.clone(),
+                    permissions.clone(),
+                )
+            },
             |previous| previous.players.clone(),
         );
         let plugins = crate::plugins::Host::new(
@@ -723,6 +958,7 @@ impl Extensions {
             broker,
             store,
             permissions,
+            permissions_config: config.permissions.clone(),
             job_gates: previous.map_or_else(
                 || Arc::new(Mutex::new(BTreeMap::new())),
                 |p| p.job_gates.clone(),
@@ -768,58 +1004,55 @@ impl Extensions {
         &self.players
     }
 
-    /// The directory for Lua outside extension callbacks; only API v2 exposes it.
+    /// The directory for Lua outside extension callbacks; API v2 and later
+    /// expose it.
     pub fn player_api(&self) -> Option<Players> {
         self.script
             .as_ref()
-            .filter(|script| script.api_version == 2)
+            .filter(|script| script.api_version >= 2)
             .map(|_| self.players.clone())
     }
 
-    /// Durable permission group memberships (UUID -> groups), or `None`
-    /// without API v2 extensions.
-    pub fn group_memberships(&self) -> Option<BTreeMap<String, BTreeSet<String>>> {
-        self.player_api()?;
-        Some(self.permissions.memberships())
+    #[cfg(test)]
+    pub(crate) fn broker(&self) -> &Broker {
+        &self.broker
     }
 
-    /// Whether a player belongs to a permission group, directly, through
-    /// `default` or by inheritance; `None` without API v2 extensions.
-    pub fn in_group(&self, uuid: &str, group: &str) -> Option<bool> {
-        self.player_api()?;
-        Some(self.permissions.in_group(uuid, group))
+    /// The permission authority every surface reads and writes through.
+    pub fn permissions(&self) -> &Arc<Authority> {
+        &self.permissions
     }
 
-    /// Add a player to a permission group or remove them from it, as
-    /// `rift.permissions.add_group` and `remove_group` do. This writes to the
-    /// extension store, so call it off the async runtime.
-    pub fn change_group_membership(&self, uuid: &str, group: &str, add: bool) -> io::Result<bool> {
-        if self.player_api().is_none() {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "permission groups require extensions with api_version = 2",
-            ));
-        }
-        self.permissions
-            .change_group(uuid, group, add, Instant::now() + Duration::from_secs(5))
+    /// `(command, permission)` of every extension command.
+    pub fn command_permissions(&self) -> Vec<(String, String)> {
+        self.script
+            .as_ref()
+            .map(ExtensionScript::command_permissions)
+            .unwrap_or_default()
     }
 
-    /// Publish the permission baseline only after the configuration transaction commits.
+    /// Apply the `permissions` section and mirror `extensions.groups` into
+    /// the store, once the configuration transaction has committed.
     pub fn activate(&self) {
-        if let Some(script) = &self.script
-            && script.api_version == 2
-        {
-            self.permissions.replace(&script.permissions);
+        self.permissions.configure(&self.permissions_config);
+        let empty = BTreeMap::new();
+        let groups = self
+            .script
+            .as_ref()
+            .filter(|script| script.api_version >= 2)
+            .map_or(&empty, |script| &script.groups);
+        if let Err(error) = self.permissions.mirror_config(groups) {
+            eprintln!(
+                "rift: extensions.groups could not be mirrored into the permission store: {error}"
+            );
         }
     }
-    /// API v1 checks its static grants; API v2 and persistent plugins
-    /// without extensions use live permissions.
+
+    /// `ctx.has_permission` and command permissions: the node resolves to
+    /// true in the contexts the proxy knows for the player.
     fn permits(&self, uuid: &str, node: &str) -> bool {
-        match &self.script {
-            Some(script) if script.api_version == 1 => script.permissions.grants(uuid, node),
-            Some(_) => self.permissions.has(uuid, node),
-            None => self.plugins.has_plugins() && self.permissions.has(uuid, node),
-        }
+        Uuid::parse(uuid)
+            .is_ok_and(|uuid| self.permissions.check_active(uuid, node) == Tristate::True)
     }
 
     /// Whether authenticated sessions get player hooks: with extensions or
@@ -1210,6 +1443,7 @@ impl ExtensionSession {
             .leases
             .insert(self.context.id, BTreeSet::from([server.into()]));
         self.context.server = Some(server.into());
+        self.provide_contexts().await;
         if let Some(mut input) = self.pending.take() {
             input.success = Some(true);
             self.leave_queue();
@@ -1220,6 +1454,34 @@ impl ExtensionSession {
             self.notify("join", &self.context).await;
         }
     }
+    /// Run the Lua context providers for the player's current server and
+    /// hand the result to the permission authority.
+    async fn provide_contexts(&self) {
+        let Some(script) = self.runtime.script.as_ref() else {
+            return;
+        };
+        let Ok(uuid) = Uuid::parse(&self.context.uuid) else {
+            return;
+        };
+        if script.api_version < 3 || script.context_providers.is_empty() {
+            return;
+        }
+        let provided = self
+            .runtime
+            .spawn(
+                &self.context,
+                &self.jobs,
+                |script, input, deadline, runtime| {
+                    script.provide_contexts(input, deadline, runtime)
+                },
+            )
+            .await;
+        match provided {
+            Ok(contexts) => self.runtime.permissions.provide_contexts(uuid, contexts),
+            Err(error) => eprintln!("rift: {error}"),
+        }
+    }
+
     pub fn enqueue(&self, target: &str) -> io::Result<usize> {
         if !self.queues().contains_key(target) {
             return Err(invalid("No queue is configured for that server."));

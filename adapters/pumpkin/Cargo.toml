@@ -1,0 +1,58 @@
+[package]
+name = "rift-permissions-pumpkin"
+description = "Rift permissions for Pumpkin: answers permission checks from the proxy's replica"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-2-Clause"
+publish = false
+
+# Built on its own, outside the root workspace: Pumpkin is a large git
+# dependency that the proxy's default build and CI should not pay for.
+[workspace]
+
+[lib]
+# The cdylib is the plugin Pumpkin loads. The rlib lets other Pumpkin plugins
+# depend on this crate (with `default-features = false`) for the service type.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["plugin"]
+# Export the plugin entrypoint (`plugin`, `METADATA`, `PUMPKIN_API_VERSION`).
+# Plugins that only use the service turn this off so they do not export it too.
+plugin = []
+
+[dependencies]
+# Pin every Pumpkin crate to one revision: a native plugin must be built
+# against exactly the server's sources (and with the same rustc).
+pumpkin = { package = "pumpkin-core", git = "https://github.com/Pumpkin-MC/Pumpkin", rev = "ae36c3a56059a82147cf52ffd55bf6e256f81107" }
+pumpkin-util = { git = "https://github.com/Pumpkin-MC/Pumpkin", rev = "ae36c3a56059a82147cf52ffd55bf6e256f81107" }
+rift-permissions = { path = "../../crates/rift-permissions" }
+rift-permissions-client = { path = "../../crates/rift-permissions-client" }
+log = { version = "0.4", features = ["std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1.54", features = ["macros", "rt-multi-thread", "sync", "time", "io-std", "signal"] }
+toml = "1.1"
+tracing = "0.1.44"
+uuid = { version = "1.29", default-features = false }
+
+# Feature parity with the Pumpkin server binary at the pinned revision. The
+# plugin shares Pumpkin's types with the server, and a cargo feature can change
+# a type's layout (smallvec's `union`, hashbrown's default hasher), so every
+# feature the server enables on a shared crate is enabled here too. When
+# bumping Pumpkin, compare `cargo tree -e normal --format '{p}|{f}'` of this
+# crate and of `-p pumpkin` in Pumpkin's workspace (tokio's `io-std` and
+# `signal` above are part of this list).
+hashbrown = { version = "0.17", default-features = false, features = ["default-hasher", "serde"] }
+hyper = { version = "1.12", features = ["full"] }
+indexmap = { version = "2.14", features = ["serde"] }
+smallvec = { version = "1.16", features = ["serde", "union"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "ring"] }
+tokio-util = { version = "0.7.20", features = ["codec", "io"] }
+
+[dev-dependencies]
+rift-permissions-testing = { path = "../../crates/rift-permissions-testing" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

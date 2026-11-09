@@ -1,0 +1,53 @@
+{
+  "kind": "resolve",
+  "name": "pumpkin-namespaced-nodes",
+  "description": "Pumpkin plugin:node spellings work as written; * stays a whole trailing segment.",
+  "now": 1000,
+  "users": {
+    "00000000000000000000000000000001": {
+      "nodes": [{"kind": "inherit", "group": "builder", "value": true}]
+    }
+  },
+  "groups": {
+    "builder": {
+      "nodes": [
+        {"kind": "permission", "key": "minecraft:command.*", "value": true},
+        {"kind": "permission", "key": "minecraft:command.op", "value": false},
+        {"kind": "permission", "key": "myplugin:fly", "value": true}
+      ]
+    }
+  },
+  "checks": [
+    {
+      "user": "00000000000000000000000000000001",
+      "node": "minecraft:command.gamemode",
+      "expect": true
+    },
+    {
+      "user": "00000000000000000000000000000001",
+      "node": "MINECRAFT:COMMAND.GAMEMODE",
+      "expect": true
+    },
+    {"user": "00000000000000000000000000000001", "node": "minecraft:command.op", "expect": false},
+    {"user": "00000000000000000000000000000001", "node": "minecraft:command", "expect": null},
+    {"user": "00000000000000000000000000000001", "node": "myplugin:fly", "expect": true},
+    {"user": "00000000000000000000000000000001", "node": "minecraft:*", "expect": null}
+  ],
+  "compiled": {
+    "00000000000000000000000000000001": {
+      "revision": 1,
+      "uuid": "00000000000000000000000000000001",
+      "primary_group": "builder",
+      "entries": [
+        {"k": "group", "key": "builder", "v": true, "ctx": {}, "rank": 1},
+        {"k": "perm", "key": "minecraft:command.*", "v": true, "ctx": {}, "rank": 1},
+        {"k": "perm", "key": "minecraft:command.op", "v": false, "ctx": {}, "rank": 1},
+        {"k": "perm", "key": "myplugin:fly", "v": true, "ctx": {}, "rank": 1},
+        {"k": "group", "key": "default", "v": true, "ctx": {}, "rank": 2}
+      ],
+      "prefix": [],
+      "suffix": [],
+      "meta": []
+    }
+  }
+}

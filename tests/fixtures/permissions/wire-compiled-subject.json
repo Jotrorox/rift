@@ -1,0 +1,26 @@
+{
+  "kind": "wire",
+  "name": "compiled-subject",
+  "description": "The compiled subject from the design document, plus a group entry.",
+  "type": "compiled_subject",
+  "json": {
+    "revision": 412,
+    "uuid": "0123456789abcdef0123456789abcdef",
+    "primary_group": "vip",
+    "entries": [
+      {
+        "k": "perm",
+        "key": "essentials.fly",
+        "v": true,
+        "ctx": {"server": "survival"},
+        "rank": 0,
+        "exp": 1762800000
+      },
+      {"k": "perm", "key": "network.*", "v": true, "ctx": {}, "rank": 2},
+      {"k": "group", "key": "vip", "v": true, "ctx": {}, "rank": 1}
+    ],
+    "prefix": [{"p": 100, "t": "&6[VIP] ", "ctx": {}, "rank": 1}],
+    "suffix": [],
+    "meta": [{"key": "homes", "v": "5", "ctx": {}, "rank": 1}]
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "kind": "luckperms",
+  "name": "regex",
+  "node": {"type": "regex_permission", "key": "r=essentials\\..*", "value": true},
+  "error": "regex"
+}

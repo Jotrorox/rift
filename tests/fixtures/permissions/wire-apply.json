@@ -1,0 +1,14 @@
+{
+  "kind": "wire",
+  "name": "apply",
+  "type": "apply_request",
+  "json": {
+    "change": {
+      "op": "set_node",
+      "subject": {"user": "0123456789abcdef0123456789abcdef"},
+      "node": {"kind": "inherit", "group": "vip", "value": true}
+    },
+    "actor_uuid": "0123456789abcdef0123456789abcdef",
+    "reason": "vault playerAddGroup"
+  }
+}
