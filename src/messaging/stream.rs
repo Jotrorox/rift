@@ -633,7 +633,7 @@ fn open_state(directory: PathBuf, config: StreamConfig) -> Result<State> {
         .create(true)
         .truncate(false)
         .open(directory.join("stream.lock"))?;
-    lock.try_lock().map_err(|e| {
+    crate::database::lock_exclusive(&lock).map_err(|e| {
         Error::Storage(format!(
             "stream directory is already open or cannot be locked: {e}"
         ))
