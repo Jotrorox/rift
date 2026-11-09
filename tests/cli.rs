@@ -63,9 +63,13 @@ fn help_is_successful_and_describes_the_interface() {
     assert!(dev.status.success());
     let text = String::from_utf8(dev.stdout).unwrap();
     assert!(text.contains("in-memory permission store"), "{text}");
+    assert!(text.contains("--web 127.0.0.1:8080|off"), "{text}");
     let bad = run(&["dev", "--bogus", "x"]);
     assert!(!bad.status.success());
     assert!(String::from_utf8_lossy(&bad.stderr).contains("unknown option --bogus"));
+    let exposed = run(&["dev", "--web", "0.0.0.0:8080"]);
+    assert!(!exposed.status.success());
+    assert!(String::from_utf8_lossy(&exposed.stderr).contains("--web must be a loopback address"));
 }
 
 #[test]

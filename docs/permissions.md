@@ -457,16 +457,25 @@ instance database (`rift.perms-changes/`).
 permission store in memory, the bus on `127.0.0.1:7443` with a self-signed
 certificate written to `./rift-dev/ca.pem`, one backend `dev` at
 `127.0.0.1:25566` whose principal `server.dev` has the `backend` preset and
-`control = true`, and the admin service on `127.0.0.1:9091`. It prints the
-token (`RIFT_DEV_TOKEN`, generated unless set), a ready plugin configuration
-and the `rift admin perms` command line:
+`control = true`, the admin service on `127.0.0.1:9091`, and the
+[dashboard](#dashboard) and [HTTP API](http.md#permissions-api) on
+`http://127.0.0.1:8080/`. It prints the token (`RIFT_DEV_TOKEN`, generated
+unless set), a ready plugin configuration, the `rift admin perms` command line
+and the dashboard URL:
 
 ```sh
 rift dev --server paper --backend 127.0.0.1:25566
 ```
 
-Options: `--listen`, `--backend`, `--server`, `--bus`, `--admin`, `--dir`.
-Nothing is saved; run the backend in offline mode.
+The admin service and the dashboard accept the admin token: `RIFT_ADMIN_TOKEN`
+if set, otherwise the `RIFT_DEV_TOKEN` value. Enter it under API access in the
+dashboard, or send it as `Authorization: Bearer <token>`. Groups edited there
+reach the connected backends like any other change, and
+`GET /api/perms/backends` lists them.
+
+Options: `--listen`, `--backend`, `--server`, `--bus`, `--admin`, `--web`
+(a loopback address, or `off`), `--dir`. Nothing is saved; run the backend in
+offline mode.
 
 ## Dashboard
 

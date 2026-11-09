@@ -171,24 +171,7 @@ impl Proxy {
 
     /// `GET <path>` from the HTTP API, which must answer 200; its JSON body.
     fn api(&self, path: &str) -> serde_json::Value {
-        let mut stream = TcpStream::connect(self.web).unwrap();
-        write!(
-            stream,
-            "GET {path} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {WEB_TOKEN}\r\nConnection: close\r\n\r\n",
-            self.web
-        )
-        .unwrap();
-        let mut response = String::new();
-        stream.read_to_string(&mut response).unwrap();
-        let (head, body) = response.split_once("\r\n\r\n").unwrap();
-        assert!(head.starts_with("HTTP/1.1 200"), "GET {path}: {response}");
-        assert!(
-            !head
-                .to_ascii_lowercase()
-                .contains("transfer-encoding: chunked"),
-            "GET {path}: {head}"
-        );
-        serde_json::from_str(body).unwrap_or_else(|error| panic!("GET {path} ({error}): {body}"))
+        api(self.web, WEB_TOKEN, path)
     }
 
     fn config(&self, server: &str) -> Config {
@@ -212,6 +195,34 @@ impl Proxy {
         );
         client
     }
+}
+
+/// `GET <path>` from the web service with a bearer token, which must answer
+/// 200; the response head and body.
+fn get(web: SocketAddr, token: &str, path: &str) -> (String, String) {
+    let mut stream = TcpStream::connect(web).unwrap();
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: {web}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n",
+    )
+    .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+    let (head, body) = response.split_once("\r\n\r\n").unwrap();
+    assert!(head.starts_with("HTTP/1.1 200"), "GET {path}: {response}");
+    assert!(
+        !head
+            .to_ascii_lowercase()
+            .contains("transfer-encoding: chunked"),
+        "GET {path}: {head}"
+    );
+    (head.to_owned(), body.to_owned())
+}
+
+/// `GET <path>` from the HTTP API; its JSON body.
+fn api(web: SocketAddr, token: &str, path: &str) -> serde_json::Value {
+    let (_, body) = get(web, token, path);
+    serde_json::from_str(&body).unwrap_or_else(|error| panic!("GET {path} ({error}): {body}"))
 }
 
 fn uuid_of(name: &str) -> Uuid {
@@ -658,6 +669,8 @@ async fn rift_dev_serves_a_backend_with_one_command() {
             "127.0.0.1:0",
             "--admin",
             "127.0.0.1:0",
+            "--web",
+            "127.0.0.1:0",
             "--server",
             "paper",
         ])
@@ -684,9 +697,10 @@ async fn rift_dev_serves_a_backend_with_one_command() {
             }
         });
     }
-    let (mut token, mut bus, mut admin, mut preset) = (None, None, None, false);
+    let (mut token, mut bus, mut admin, mut web, mut preset) = (None, None, None, None, false);
+    let mut dashboard = false;
     let mut logs = Vec::new();
-    while token.is_none() || bus.is_none() || admin.is_none() {
+    while token.is_none() || bus.is_none() || admin.is_none() || web.is_none() {
         let line = lines
             .recv_timeout(Duration::from_secs(15))
             .unwrap_or_else(|error| panic!("rift dev ({error}): {logs:?}"));
@@ -699,11 +713,20 @@ async fn rift_dev_serves_a_backend_with_one_command() {
         if let Some(address) = line.strip_prefix("rift: admin on ") {
             admin = address.parse::<SocketAddr>().ok();
         }
+        if let Some(address) = line.strip_prefix("rift: web on ") {
+            web = address.parse::<SocketAddr>().ok();
+        }
         preset |= line.contains("preset = \"backend\"");
+        dashboard |= line.starts_with("rift dev: dashboard at http://127.0.0.1:0/");
         logs.push(line);
     }
     let token = token.unwrap();
+    let web = web.unwrap();
     assert!(preset, "rift dev prints the ACL preset: {logs:?}");
+    assert!(
+        dashboard && logs.iter().any(|line| line.ends_with(&token)),
+        "rift dev prints the dashboard URL and token: {logs:?}"
+    );
     let mut config = Config::new(
         bus.unwrap().to_string(),
         "localhost",
@@ -739,6 +762,28 @@ async fn rift_dev_serves_a_backend_with_one_command() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("vip (weight 10)"));
+    // The dashboard accepts the same token and lists the connected backend.
+    let (head, page) = get(web, &token, "/");
+    assert!(head.contains("text/html"), "{head}");
+    assert!(page.contains("<html"), "{page}");
+    let groups = api(web, &token, "/api/perms/groups");
+    assert!(
+        groups["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|group| group["name"] == "vip"),
+        "{groups}"
+    );
+    let backends = api(web, &token, "/api/perms/backends");
+    assert!(
+        backends["backends"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|backend| backend["principal"] == "server.paper" && backend["server"] == "paper"),
+        "{backends}"
+    );
     let _ = child.kill();
     let _ = child.wait();
     drop(lines);
