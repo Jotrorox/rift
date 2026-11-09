@@ -54,6 +54,7 @@ public final class RiftPermsPlugin extends JavaPlugin {
             client = PermissionsClient.builder()
                     .messaging(bus)
                     .server(config.server())
+                    .group(config.group())
                     .joinTimeout(config.joinTimeout())
                     .requestTimeout(config.requestTimeout())
                     .offlinePolicy(config.offlinePolicy())

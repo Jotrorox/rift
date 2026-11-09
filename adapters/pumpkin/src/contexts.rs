@@ -13,7 +13,7 @@ use std::{
 use pumpkin_util::GameMode;
 use rift_permissions::{
     ContextSet, Uuid,
-    context::{DIMENSION, GAMEMODE, RESERVED, SERVER, WORLD},
+    context::{DIMENSION, GAMEMODE, GROUP, RESERVED, SERVER, WORLD},
 };
 
 /// What the adapter reads from a Pumpkin player for the reserved contexts.
@@ -37,17 +37,20 @@ pub const fn gamemode_name(mode: GameMode) -> &'static str {
     }
 }
 
-/// The reserved contexts for a player on this backend. A value the context
+/// The reserved contexts for a player on this backend, with `group` when
+/// the backend is an instance of a service group. A value the context
 /// syntax refuses (a world folder containing `=`, say) is left out rather
 /// than failing the check.
-pub fn base_contexts(server: &str, state: &PlayerState<'_>) -> ContextSet {
+pub fn base_contexts(server: &str, group: Option<&str>, state: &PlayerState<'_>) -> ContextSet {
     let mut set = ContextSet::new();
     for (key, value) in [
-        (SERVER, server),
-        (WORLD, state.world),
-        (DIMENSION, state.dimension),
-        (GAMEMODE, gamemode_name(state.gamemode)),
+        (SERVER, Some(server)),
+        (GROUP, group),
+        (WORLD, Some(state.world)),
+        (DIMENSION, Some(state.dimension)),
+        (GAMEMODE, Some(gamemode_name(state.gamemode))),
     ] {
+        let Some(value) = value else { continue };
         if let Err(error) = set.insert(key, value) {
             log::debug!("rift-permissions: leaving out context {key}: {error}");
         }
@@ -235,16 +238,19 @@ mod tests {
             dimension: "minecraft:the_nether",
             gamemode: GameMode::Creative,
         };
-        let set = base_contexts("Survival-1", &state);
+        let set = base_contexts("Survival-1", None, &state);
         assert_eq!(
             set.to_string(),
             "dimension=minecraft:the_nether;gamemode=creative;server=survival-1;world=world_nether"
         );
+        let instance = base_contexts("lobby-2", Some("Lobby"), &state);
+        assert_eq!(instance.get(GROUP), Some("lobby"));
+        assert_eq!(instance.get(SERVER), Some("lobby-2"));
         let odd = PlayerState {
             world: "a=b",
             ..state
         };
-        let set = base_contexts("lobby", &odd);
+        let set = base_contexts("lobby", None, &odd);
         assert_eq!(set.get(WORLD), None);
         assert_eq!(set.get(SERVER), Some("lobby"));
     }
