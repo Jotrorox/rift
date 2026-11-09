@@ -3400,3 +3400,167 @@ fn plugins_are_listed_restarted_and_audited_over_http_the_admin_socket_and_metri
     );
     assert!(scrape.contains("# TYPE rift_plugin_call_seconds histogram\n"));
 }
+
+#[test]
+fn service_groups_start_stop_and_switch_mode_as_a_whole_across_reload_and_restart() {
+    let fixture = Fixture::new();
+    let source = fixture.source(
+        &format!(
+            "token = '{TOKEN}', operators = {{ lobby_staff = {{ token = '{OPERATOR_TOKEN}', permissions = {{'read','servers','audit'}}, groups = {{'lobby'}} }}, viewer = {{ token = 'test-group-viewer-operator', permissions = {{'read'}} }} }},"
+        ),
+        "admin = { listen = '127.0.0.1:0', permissions = { 'servers' } }, service_groups = { lobby = { command = {'unused'}, directory = 'lobby/{name}', port_range = {26320,26322} }, survival = { command = {'unused'}, directory = 'survival/{name}', port_range = {26323,26325} } },",
+    );
+    let local = |socket: SocketAddr, args: &[&str]| -> Value {
+        let mut stream = connect(socket);
+        writeln!(stream, "{}", json!({"token":ADMIN_TOKEN,"args":args})).unwrap();
+        let mut line = String::new();
+        BufReader::new(stream).read_line(&mut line).unwrap();
+        serde_json::from_str(&line).unwrap()
+    };
+    let process = fixture.start(&source);
+    let admin = fixture.client().authenticated();
+    let staff = Client {
+        token: Some(OPERATOR_TOKEN),
+        ..fixture.client()
+    };
+    let viewer = Client {
+        token: Some("test-group-viewer-operator"),
+        ..fixture.client()
+    };
+    let group = |client: Client, name: &str| -> Value {
+        client.get("/api/groups").expect(200).value()["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|group| group["name"] == name)
+            .cloned()
+            .unwrap()
+    };
+    admin
+        .instance("POST", "/api/groups/lobby/instances", json!({}))
+        .expect(201);
+    let lobby = group(admin, "lobby");
+    assert_eq!(
+        (lobby["suspended"].clone(), lobby["mode"].clone()),
+        (json!(false), json!("active"))
+    );
+    assert_eq!(lobby["dev_permission"], "rift.group.lobby.dev");
+    assert_eq!(lobby["summary"]["stopped"], 1);
+
+    // Authentication, origin, body, permission and group scope.
+    fixture
+        .client()
+        .json("POST", "/api/groups/lobby/stop", json!({}))
+        .expect(401);
+    admin
+        .send("POST", "/api/groups/lobby/stop", &[], "{}")
+        .expect(415);
+    admin
+        .json("POST", "/api/groups/lobby/stop", json!({"force":true}))
+        .expect(400);
+    viewer
+        .json("POST", "/api/groups/lobby/stop", json!({}))
+        .expect(403);
+    staff
+        .json("POST", "/api/groups/survival/stop", json!({}))
+        .expect(403);
+    staff
+        .json("PUT", "/api/groups/survival/mode", json!({"mode":"dev"}))
+        .expect(403);
+    admin
+        .json("POST", "/api/groups/missing/start", json!({}))
+        .expect(404);
+    admin
+        .json("PUT", "/api/groups/lobby/mode", json!({"mode":"paused"}))
+        .expect(400);
+    admin
+        .json("PUT", "/api/groups/lobby/mode", json!({}))
+        .expect(400);
+
+    // Stopping pauses every empty member and blocks new instances.
+    let stopped = staff
+        .json("POST", "/api/groups/lobby/stop", json!({}))
+        .expect(202)
+        .value();
+    assert_eq!(stopped["suspended"], true);
+    assert_eq!(
+        stopped["instances"],
+        json!([{"name":"lobby-1","result":"stopping"}])
+    );
+    let server = &admin.get("/api/servers").expect(200).value()["servers"][0];
+    assert_eq!(server["group_suspended"], true);
+    assert_eq!(server["automatic_enabled"], false);
+    assert_eq!(server["draining"], true);
+    admin
+        .instance("POST", "/api/groups/lobby/instances", json!({}))
+        .expect(409);
+    // The other group is untouched.
+    assert_eq!(group(admin, "survival")["suspended"], false);
+
+    let dev = staff
+        .json("PUT", "/api/groups/lobby/mode", json!({"mode":"dev"}))
+        .expect(200)
+        .value();
+    assert_eq!(dev["mode"], "dev");
+    assert_eq!(dev["dev_permission"], "rift.group.lobby.dev");
+    assert_eq!(
+        admin.get("/api/servers").expect(200).value()["servers"][0]["group_mode"],
+        "dev"
+    );
+
+    // Both survive a reload and a restart.
+    admin.json("POST", "/api/reload", json!({})).expect(200);
+    let lobby = group(admin, "lobby");
+    assert_eq!(
+        (lobby["suspended"].clone(), lobby["mode"].clone()),
+        (json!(true), json!("dev"))
+    );
+    drop(process);
+    let mut process = fixture.start(&source);
+    let socket: SocketAddr = process.wait_for_log("rift: admin on ").parse().unwrap();
+    let local = |args: &[&str]| local(socket, args);
+    let lobby = group(admin, "lobby");
+    assert_eq!(
+        (lobby["suspended"].clone(), lobby["mode"].clone()),
+        (json!(true), json!("dev"))
+    );
+    let server = &admin.get("/api/servers").expect(200).value()["servers"][0];
+    assert_eq!(
+        server["automatic_enabled"], false,
+        "explicit stop survives restart"
+    );
+
+    // The admin socket shares the operations.
+    let started = local(&["group", "start", "lobby"]);
+    assert_eq!(started["ok"], true, "{started}");
+    assert_eq!(started["data"]["suspended"], false);
+    assert_eq!(started["data"]["instances"][0]["name"], "lobby-1");
+    let active = local(&["group", "mode", "lobby", "active"]);
+    assert_eq!(active["data"]["mode"], "active", "{active}");
+    assert_eq!(local(&["group", "mode", "lobby", "paused"])["ok"], false);
+    assert_eq!(local(&["group", "stop", "missing"])["ok"], false);
+    let lobby = group(admin, "lobby");
+    assert_eq!(
+        (lobby["suspended"].clone(), lobby["mode"].clone()),
+        (json!(false), json!("active"))
+    );
+    assert_eq!(
+        admin.get("/api/servers").expect(200).value()["servers"][0]["automatic_enabled"],
+        true,
+        "start clears the explicit stop"
+    );
+
+    let audit = admin.get("/api/audit").expect(200).value();
+    let records = audit["records"].as_array().unwrap();
+    for action in ["POST stop_group", "PUT group_mode"] {
+        assert!(
+            records.iter().any(|r| r["action"] == action
+                && r["actor"] == "lobby_staff"
+                && r["target"] == "lobby"),
+            "missing audit record {action}: {audit}"
+        );
+    }
+    assert!(records.iter().any(|r| r["action"] == "POST stop_group"
+        && r["actor"] == "viewer"
+        && r["outcome"] == "denied"));
+}
