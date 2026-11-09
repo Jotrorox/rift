@@ -3,6 +3,7 @@ package rift
 import (
 	"go.bytecodealliance.org/cm"
 
+	"github.com/Jotrorox/rift/sdk/go/gen/rift/plugin/dialogs"
 	"github.com/Jotrorox/rift/sdk/go/gen/rift/plugin/handler"
 	"github.com/Jotrorox/rift/sdk/go/gen/rift/plugin/types"
 )
@@ -27,6 +28,7 @@ var (
 	onMessage        = func(BusMessage) {}
 	onTimer          = func(uint64) {}
 	onEvent          = func(Event) {}
+	onDialog         = func(DialogResponse) {}
 )
 
 // handled records the hooks that have a handler, for registrations that
@@ -134,7 +136,12 @@ func OnEvent(f func(Event)) {
 	handled[HookEvent] = true
 }
 
+// OnDialog sets the handler for clicks on plugin actions of dialogs shown
+// with ShowDialog. It needs no hook in the registration.
+func OnDialog(f func(DialogResponse)) { onDialog = f }
+
 func init() {
+	dialogs.Exports.Dialog = func(r types.DialogResponse) { onDialog(liftDialogResponse(r)) }
 	e := &handler.Exports
 	e.Init = func(configJSON string) cm.Result[handler.RegistrationShape, types.Registration, string] {
 		reg, err := onInit(configJSON)

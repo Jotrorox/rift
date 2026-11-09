@@ -3,6 +3,7 @@
 //! protocols, in which case `translation` rewrites the packets that differ.
 mod boss_bar;
 mod compression;
+pub(crate) mod dialog;
 mod framing;
 mod legacy;
 mod nbt;
@@ -16,6 +17,7 @@ pub(crate) use boss_bar::BossBars;
 pub use boss_bar::{
     BossBar, COLORS, FLAG_NAMES, MAX_BOSS_BARS, STYLES, supported as boss_bars_supported,
 };
+pub use dialog::supported as dialogs_supported;
 pub use framing::{Codec, MAX_FRAME_SIZE, MAX_PACKET_SIZE, Packet, Reader};
 pub(crate) use legacy::LegacyState;
 pub use packets::{Handshake, NextState, PacketKind, ProtocolVersion, disconnect, status_response};

@@ -6,28 +6,28 @@ import (
 	"go.bytecodealliance.org/cm"
 )
 
-// This file contains wasmimport and wasmexport declarations for "rift:plugin@0.1.0".
+// This file contains wasmimport and wasmexport declarations for "rift:plugin@0.1.1".
 
-//go:wasmimport rift:plugin/meta@0.1.0 name
+//go:wasmimport rift:plugin/meta@0.1.1 name
 //go:noescape
 func wasmimport_Name(result *string)
 
-//go:wasmimport rift:plugin/meta@0.1.0 version
+//go:wasmimport rift:plugin/meta@0.1.1 version
 //go:noescape
 func wasmimport_Version(result *string)
 
-//go:wasmimport rift:plugin/meta@0.1.0 data-dir
+//go:wasmimport rift:plugin/meta@0.1.1 data-dir
 //go:noescape
 func wasmimport_DataDir(result *string)
 
-//go:wasmimport rift:plugin/meta@0.1.0 config-dir
+//go:wasmimport rift:plugin/meta@0.1.1 config-dir
 //go:noescape
 func wasmimport_ConfigDir(result *cm.Option[string])
 
-//go:wasmimport rift:plugin/meta@0.1.0 clock
+//go:wasmimport rift:plugin/meta@0.1.1 clock
 //go:noescape
 func wasmimport_Clock() (result0 float64)
 
-//go:wasmimport rift:plugin/meta@0.1.0 time
+//go:wasmimport rift:plugin/meta@0.1.1 time
 //go:noescape
 func wasmimport_Time() (result0 uint64)

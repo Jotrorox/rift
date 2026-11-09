@@ -1,11 +1,12 @@
 //! `engine = "wasm"`: WebAssembly components on Wasmtime.
 //!
 //! A plugin is a component built against the `plugin` world of
-//! `rift:plugin@0.1.0` (`wit/rift-plugin.wit`). Each instance owns one
+//! `rift:plugin@0.1` (`wit/rift-plugin.wit`); components built against 0.1.0
+//! load too, without the exports later 0.1 releases added. Each instance owns one
 //! [`Store`] and one component instance, created on the plugin's own thread
 //! and called synchronously, one call at a time, by the worker.
 //!
-//! - [`bindings`]: the `core` world's host traits, forwarding to
+//! - [`bindings`]: the host traits of the `base` world, forwarding to
 //!   [`Services`], and conversions to the neutral [`api`] types.
 //! - [`wasi`]: the WASI 0.2 command imports (TinyGo needs the whole set) and
 //!   `wasi:http`, restricted by the manifest's `[capabilities]`.
@@ -34,7 +35,10 @@ use super::{
     services::Services,
     worker::{CallError, Engine as PluginEngine},
 };
-use bindings::{Core, CorePre};
+use bindings::{
+    Base as Core, BasePre,
+    optional::{Optional, OptionalIndices},
+};
 use std::{
     collections::HashMap,
     path::Path,
@@ -139,24 +143,48 @@ fn compile(spec: &PluginSpec, wasm: &[u8]) -> Result<Component, String> {
     })
 }
 
+/// A component with its imports resolved: the required handler exports,
+/// and the optional ones it has.
+#[derive(Clone)]
+struct CorePre {
+    base: BasePre<State>,
+    /// `None` for a component without the `dialogs` export (built against
+    /// rift:plugin 0.1.0).
+    optional: Option<OptionalIndices>,
+}
+
+impl CorePre {
+    fn instantiate(&self, store: &mut Store<State>) -> wasmtime::Result<(Core, Option<Optional>)> {
+        let instance = self.base.instance_pre().instantiate(&mut *store)?;
+        let core = Core::new(&mut *store, &instance)?;
+        let optional = match &self.optional {
+            Some(indices) => Some(indices.load(&mut *store, &instance)?),
+            None => None,
+        };
+        Ok((core, optional))
+    }
+}
+
 /// Resolve every import against the linker and find the handler exports.
-fn prepare(spec: &PluginSpec, component: &Component) -> Result<CorePre<State>, String> {
-    linker()?
+fn prepare(spec: &PluginSpec, component: &Component) -> Result<CorePre, String> {
+    let base = linker()?
         .instantiate_pre(component)
-        .and_then(CorePre::new)
+        .and_then(BasePre::new)
         .map_err(|error| {
             format!(
                 "{} does not fit this Rift's rift:plugin {} host: {error:#}",
                 entry_name(spec),
                 api::API_VERSION
             )
-        })
+        })?;
+    let optional = OptionalIndices::new(base.instance_pre()).ok();
+    Ok(CorePre { base, optional })
 }
 
 /// The plugin's component, ready to instantiate: from memory, from the disk
 /// cache or freshly compiled (and then cached).
-fn load(spec: &PluginSpec) -> Result<CorePre<State>, String> {
-    type Loaded = HashMap<String, (String, CorePre<State>)>;
+fn load(spec: &PluginSpec) -> Result<CorePre, String> {
+    type Loaded = HashMap<String, (String, CorePre)>;
     static LOADED: OnceLock<Mutex<Loaded>> = OnceLock::new();
     let loaded = LOADED.get_or_init(Mutex::default);
     let (wasm, key) = read(spec)?;
@@ -239,8 +267,8 @@ pub(crate) fn create(
         "instantiation",
         Some(spec.manifest.init_deadline()),
     );
-    let core = match pre.instantiate(&mut store) {
-        Ok(core) => core,
+    let (core, optional) = match pre.instantiate(&mut store) {
+        Ok(instance) => instance,
         Err(error) => {
             let reason = describe(&mut store, error);
             stdout.finish();
@@ -251,6 +279,7 @@ pub(crate) fn create(
     Ok(Box::new(WasmEngine {
         store,
         core,
+        optional,
         manifest: spec.manifest.clone(),
         registration: None,
         broken: None,
@@ -272,6 +301,8 @@ fn describe(store: &mut Store<State>, error: wasmtime::Error) -> String {
 struct WasmEngine {
     store: Store<State>,
     core: Core,
+    /// The optional exports this component has.
+    optional: Option<Optional>,
     manifest: Manifest,
     registration: Option<Registration>,
     /// Set by the first trap: the instance's state is suspect from then on.
@@ -331,8 +362,20 @@ impl PluginEngine for WasmEngine {
             hook.name(),
             Some(self.manifest.run_limit(hook)),
         );
-        let guest = self.core.rift_plugin_handler();
         let store = &mut self.store;
+        if let Event::Dialog(context) = event {
+            // A component built against 0.1.0 has no `dialogs` export; it
+            // cannot have shown a dialog either.
+            let Some(optional) = &self.optional else {
+                return Ok(Reply::None);
+            };
+            return optional
+                .rift_plugin_dialogs()
+                .call_dialog(store, &bindings::dialog_response(context))
+                .map(|()| Reply::None)
+                .map_err(|error| CallError::Fatal(self.fail(error)));
+        }
+        let guest = self.core.rift_plugin_handler();
         let result = match event {
             Event::Route(connection) => guest
                 .call_route(store, &bindings::connection(connection))
@@ -374,6 +417,7 @@ impl PluginEngine for WasmEngine {
             Event::Event(event) => guest
                 .call_event(store, &bindings::rift_event(event))
                 .map(|()| Reply::None),
+            Event::Dialog(_) => unreachable!("dispatched above"),
         };
         result.map_err(|error| CallError::Fatal(self.fail(error)))
     }

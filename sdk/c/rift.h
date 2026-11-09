@@ -44,6 +44,7 @@ typedef rift_plugin_types_registration_t rift_registration_t;
 typedef rift_plugin_types_bus_message_t rift_bus_message_t;
 typedef rift_plugin_types_hook_t rift_hook_t;
 typedef rift_plugin_types_level_t rift_level_t;
+typedef rift_plugin_types_dialog_response_t rift_dialog_response_t;
 
 // ---------------------------------------------------------------------------
 // Allocation
@@ -191,6 +192,9 @@ static inline void rift_string_list_free(rift_string_list_t *list) {
 
 static inline void rift_context_free(rift_context_t *ctx) { rift_plugin_types_context_free(ctx); }
 static inline void rift_bus_message_free(rift_bus_message_t *msg) { rift_plugin_types_bus_message_free(msg); }
+static inline void rift_dialog_response_free(rift_dialog_response_t *response) {
+  rift_plugin_types_dialog_response_free(response);
+}
 
 // ---------------------------------------------------------------------------
 // Actions (decision hooks write into `ret`)
@@ -293,6 +297,23 @@ static inline bool rift_message(const rift_string_t *target, const char *text) {
     return false;
   }
   return online;
+}
+
+// Shows `target` a dialog given as JSON in the vanilla dialog format
+// (Minecraft 1.21.6+). Buttons whose `custom` or `dynamic/custom` action has
+// an `id` without a namespace come back to
+// `exports_rift_plugin_dialogs_dialog`. Returns whether the dialog was
+// queued: false for an offline or pre-1.21.6 player, and for an invalid
+// dialog, whose error is logged.
+static inline bool rift_show_dialog(const rift_string_t *target, const char *dialog_json) {
+  rift_string_t t = *target, json = rift_str(dialog_json), err = {NULL, 0};
+  bool queued = false;
+  if (!rift_plugin_players_dialog(&t, &json, &queued, &err)) {
+    rift_log(RIFT_WARN, "players.dialog failed: " RIFT_STR_FMT, RIFT_STR_ARG(err));
+    rift_string_free(&err);
+    return false;
+  }
+  return queued;
 }
 
 // ---------------------------------------------------------------------------

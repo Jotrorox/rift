@@ -42,7 +42,7 @@ strip = true
 
 The release profile above keeps the component small. Check the result with
 `wasm-tools component wit my_plugin.wasm`: it exports
-`rift:plugin/handler@0.1.0` and imports the `rift:plugin/*` interfaces it uses.
+`rift:plugin/handler@0.1.x` and imports the `rift:plugin/*` interfaces it uses.
 
 ## A minimal plugin
 
@@ -116,6 +116,7 @@ example and the host's conformance fixture.
 | `log` | `log::info!` and friends: the SDK installs a logger before `init`. Also re-exported as `rift_plugin::log::info!`. |
 | `result<T, string>` | `Result<T, String>` with the host's message. |
 | WASI | `std::fs` on the granted directories (`/data`, `/host`), clocks and random through the standard library. |
+| `dialogs` export, `players.dialog` | [Dialogs](dialogs.md): `players::show_dialog(target, &serde_json::Value)` (or `players::dialog` with JSON text) and `players::clear_dialog`; clicks reach `Plugin::dialog(DialogResponse)`, whose `values::<T>()` and `payload::<T>()` decode the JSON. No registration needed. |
 
 ## Gotchas
 

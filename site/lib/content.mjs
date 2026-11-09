@@ -17,6 +17,8 @@ export const DOCS = [
     blurb: 'One contract, three execution modes, plugin.toml, lifecycle and the trust model.' },
   { slug: 'extensions', file: 'docs/extensions.md', title: 'Events, commands and policy', group: 'Plugins',
     blurb: 'Login and transfer hooks, commands, permissions, queues and durable state.' },
+  { slug: 'dialogs', file: 'docs/dialogs.md', title: 'Dialogs', group: 'Plugins',
+    blurb: 'Screens with inputs and buttons on 1.21.6+, shown by plugins through the proxy.' },
   { slug: 'plugins-lua', file: 'docs/plugins-lua.md', title: 'Lua plugins', group: 'Plugins',
     blurb: 'Persistent plugins in their own LuaJIT state, and the JIT switch.' },
   { slug: 'plugins-rust', file: 'docs/plugins-rust.md', title: 'Rust plugins', group: 'Plugins',

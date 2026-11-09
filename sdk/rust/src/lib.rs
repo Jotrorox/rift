@@ -1,7 +1,7 @@
 //! Guest SDK for Rift WebAssembly plugins.
 //!
 //! A Rift plugin is a WebAssembly component built for `wasm32-wasip2` against
-//! the `plugin` world of `rift:plugin@0.1.0`. This crate ships that WIT,
+//! the `plugin` world of `rift:plugin@0.1.1`. This crate ships that WIT,
 //! generates the bindings and wraps them, so a plugin is an ordinary
 //! `cdylib` crate:
 //!
@@ -64,6 +64,43 @@
 //! logger before `init`, so `log::info!` and friends reach Rift's log.
 //! Plugin configuration arrives as JSON; decode it with [`config()`].
 //!
+//! # Dialogs
+//!
+//! [`players::show_dialog`] shows a dialog (Minecraft 1.21.6+) in the
+//! vanilla JSON format. A button whose `custom` or `dynamic/custom` action
+//! has an `id` without a namespace comes back to [`Plugin::dialog`]:
+//!
+//! ```no_run
+//! use rift_plugin::{Context, DialogResponse, Plugin, players};
+//! use serde_json::json;
+//!
+//! #[derive(Default)]
+//! struct Rules;
+//!
+//! impl Plugin for Rules {
+//!     fn join(&mut self, ctx: Context) {
+//!         let _ = players::show_dialog(&ctx.uuid, &json!({
+//!             "type": "confirmation",
+//!             "title": "Server rules",
+//!             "body": "Be nice.",
+//!             "yes": {"label": "Accept", "action": {"type": "custom", "id": "accept"}},
+//!             "no": {"label": "Leave", "action": {"type": "custom", "id": "leave"}},
+//!         }));
+//!     }
+//!
+//!     fn dialog(&mut self, response: DialogResponse) {
+//!         if response.action == "leave" {
+//!             let _ = players::kick(&response.ctx.uuid, "You declined the rules.");
+//!         }
+//!     }
+//! }
+//! # rift_plugin::export!(Rules);
+//! ```
+//!
+//! The dialog functions are new in rift:plugin 0.1.1. A plugin that calls
+//! them needs a Rift that implements 0.1.1; older hosts refuse to load it.
+//! A plugin that does not call them loads on every 0.1 host.
+//!
 //! WASI 0.2 (`std::fs` on the granted directories, clocks, random) works
 //! through the standard library. A `wasi:http` helper is not provided.
 
@@ -76,7 +113,7 @@
 pub mod bindings {
     wit_bindgen::generate!({
         path: "wit",
-        world: "rift:plugin/plugin@0.1.0",
+        world: "rift:plugin/plugin@0.1.1",
         pub_export_macro: true,
         export_macro_name: "__export_rift_plugin",
         default_bindings_module: "rift_plugin::bindings",
@@ -85,9 +122,9 @@ pub mod bindings {
 }
 
 pub use bindings::rift::plugin::types::{
-    Action, BossBarSpec, BusMessage, CommandSpec, Connection, Context, Hook, HttpRequest,
-    HttpResponse, Level, Ping, PlayerInfo, Registration, RiftEvent, RouteDecision, StatusOverride,
-    SuggestKind, Suggestion, TitleSpec,
+    Action, BossBarSpec, BusMessage, CommandSpec, Connection, Context, DialogResponse, Hook,
+    HttpRequest, HttpResponse, Level, Ping, PlayerInfo, Registration, RiftEvent, RouteDecision,
+    StatusOverride, SuggestKind, Suggestion, TitleSpec,
 };
 
 use serde::de::DeserializeOwned;
@@ -172,6 +209,11 @@ pub trait Plugin: Default + 'static {
 
     /// A Rift event (`rift.events.*`).
     fn event(&mut self, event: RiftEvent) {}
+
+    /// A player clicked a plugin action of a dialog this plugin showed with
+    /// [`players::show_dialog`]. Delivered without being listed in
+    /// [`Registration::hooks`].
+    fn dialog(&mut self, response: DialogResponse) {}
 }
 
 /// Exports a [`Plugin`] implementation as the component's
@@ -274,6 +316,25 @@ impl Action {
     }
 }
 
+impl DialogResponse {
+    /// The player's input values, decoded from `values_json`. They come from
+    /// the client: validate them like any player input.
+    pub fn values<T: DeserializeOwned>(&self) -> Result<T, String> {
+        serde_json::from_str(&self.values_json)
+            .map_err(|error| format!("invalid dialog values: {error}"))
+    }
+
+    /// The action's `payload` or `additions`, as the plugin wrote it; `None`
+    /// when it had none.
+    pub fn payload<T: DeserializeOwned>(&self) -> Result<Option<T>, String> {
+        self.payload_json
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|error| format!("invalid dialog payload: {error}"))
+    }
+}
+
 impl Suggestion {
     /// A suggestion without a tooltip.
     pub fn new(text: impl Into<String>) -> Self {
@@ -287,8 +348,16 @@ impl Suggestion {
 /// The joined players. `target` is a name, a UUID or a connection id.
 pub mod players {
     pub use crate::bindings::rift::plugin::players::{
-        action_bar, boss_bar, broadcast, get, kick, list, message, names, tab_list, title, transfer,
+        action_bar, boss_bar, broadcast, clear_dialog, dialog, get, kick, list, message, names,
+        tab_list, title, transfer,
     };
+
+    /// Show a dialog in the vanilla JSON format (Minecraft 1.21.6+). Returns
+    /// false when the player is offline, older than 1.21.6 or has too many
+    /// undelivered actions; an invalid dialog is an error.
+    pub fn show_dialog(target: &str, dialog: &serde_json::Value) -> Result<bool, String> {
+        self::dialog(target, &dialog.to_string())
+    }
 }
 
 /// The durable key-value store. Namespaces are prefixed with
@@ -509,6 +578,12 @@ pub mod __private {
 
         fn event(event: RiftEvent) {
             with(|p: &mut P| p.event(event))
+        }
+    }
+
+    impl<P: Plugin> crate::bindings::exports::rift::plugin::dialogs::Guest for Adapter<P> {
+        fn dialog(response: DialogResponse) {
+            with(|p: &mut P| p.dialog(response))
         }
     }
 }

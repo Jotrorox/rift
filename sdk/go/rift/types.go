@@ -280,6 +280,20 @@ type BusMessage struct {
 	Reply   *string
 }
 
+// DialogResponse is a click on a plugin action of a dialog this plugin
+// showed with ShowDialog.
+type DialogResponse struct {
+	Ctx    Context // the player; Server is their current backend
+	Action string  // the action's id as the plugin wrote it, such as "submit"
+	// ValuesJSON holds the player's input values by key as a JSON object
+	// ("{}" for a custom action). They come from the client: validate them
+	// like any player input.
+	ValuesJSON string
+	// PayloadJSON is the action's payload or additions as the plugin wrote
+	// it, or nil. Rift keeps it, so the client can neither see nor change it.
+	PayloadJSON *string
+}
+
 // Event mirrors a rift.events.* publication.
 type Event struct {
 	Subject     string // for example rift.events.players
@@ -313,6 +327,15 @@ type BossBar struct {
 	DarkenSky bool
 	PlayMusic bool
 	CreateFog bool
+}
+
+func liftDialogResponse(r types.DialogResponse) DialogResponse {
+	return DialogResponse{
+		Ctx:         liftContext(r.Ctx),
+		Action:      r.Action,
+		ValuesJSON:  r.ValuesJSON,
+		PayloadJSON: liftOpt(r.PayloadJSON),
+	}
 }
 
 func liftContext(c types.Context) Context {
