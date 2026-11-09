@@ -2,7 +2,7 @@
 # target/wasm32-wasip2/release/hello_rs.wasm next to this file.
 name = "hello-rs"
 version = "0.1.0"
-api = "0.2"
+api = "0.1"
 mode = "persistent"
 engine = "wasm"
 entry = "hello_rs.wasm"

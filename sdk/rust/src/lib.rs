@@ -1,7 +1,7 @@
 //! Guest SDK for Rift WebAssembly plugins.
 //!
 //! A Rift plugin is a WebAssembly component built for `wasm32-wasip2` against
-//! the `plugin` world of `rift:plugin@0.2.0`. This crate ships that WIT,
+//! the `plugin` world of `rift:plugin@0.1.2`. This crate ships that WIT,
 //! generates the bindings and wraps them, so a plugin is an ordinary
 //! `cdylib` crate:
 //!
@@ -10,7 +10,7 @@
 //! crate-type = ["cdylib"]
 //!
 //! [dependencies]
-//! rift-plugin = "0.2"
+//! rift-plugin = "0.1"
 //! ```
 //!
 //! ```no_run
@@ -64,6 +64,44 @@
 //! logger before `init`, so `log::info!` and friends reach Rift's log.
 //! Plugin configuration arrives as JSON; decode it with [`config()`].
 //!
+//! # Dialogs
+//!
+//! [`players::show_dialog`] shows a dialog (Minecraft 1.21.6+) in the
+//! vanilla JSON format. A button whose `custom` or `dynamic/custom` action
+//! has an `id` without a namespace comes back to [`Plugin::dialog`]:
+//!
+//! ```no_run
+//! use rift_plugin::{Context, DialogResponse, Plugin, players};
+//! use serde_json::json;
+//!
+//! #[derive(Default)]
+//! struct Rules;
+//!
+//! impl Plugin for Rules {
+//!     fn join(&mut self, ctx: Context) {
+//!         let _ = players::show_dialog(&ctx.uuid, &json!({
+//!             "type": "confirmation",
+//!             "title": "Server rules",
+//!             "body": "Be nice.",
+//!             "yes": {"label": "Accept", "action": {"type": "custom", "id": "accept"}},
+//!             "no": {"label": "Leave", "action": {"type": "custom", "id": "leave"}},
+//!         }));
+//!     }
+//!
+//!     fn dialog(&mut self, response: DialogResponse) {
+//!         if response.action == "leave" {
+//!             let _ = players::kick(&response.ctx.uuid, "You declined the rules.");
+//!         }
+//!     }
+//! }
+//! # rift_plugin::export!(Rules);
+//! ```
+//!
+//! The dialog functions are new in rift:plugin 0.1.1. A plugin that calls
+//! them needs a Rift that implements 0.1.1; older hosts refuse to load it.
+//! A plugin that does not call them loads on every 0.1 host. The same holds
+//! for the rich text functions of 0.1.2 below.
+//!
 //! WASI 0.2 (`std::fs` on the granted directories, clocks, random) works
 //! through the standard library. A `wasi:http` helper is not provided.
 //!
@@ -106,7 +144,7 @@
 pub mod bindings {
     wit_bindgen::generate!({
         path: "wit",
-        world: "rift:plugin/plugin@0.2.0",
+        world: "rift:plugin/plugin@0.1.2",
         pub_export_macro: true,
         export_macro_name: "__export_rift_plugin",
         default_bindings_module: "rift_plugin::bindings",
@@ -115,10 +153,18 @@ pub mod bindings {
 }
 
 pub use bindings::rift::plugin::types::{
-    Action, BossBarSpec, BusMessage, CommandSpec, Connection, Context, Hook, HttpRequest,
+    BossBarSpec, BusMessage, CommandSpec, Connection, Context, DialogResponse, Hook, HttpRequest,
     HttpResponse, Level, Ping, PlayerInfo, Registration, RiftEvent, RouteDecision, StatusOverride,
     SuggestKind, Suggestion, TitleSpec,
 };
+
+/// The answer to a decision hook: the contract's `decision` variant, which is
+/// `action` plus `DenyJson` and `MessageJson` for rich text (since 0.1.2).
+///
+/// The SDK answers through the `decisions` export, which hosts from 0.1.2
+/// call. An older host calls the `handler` hooks instead and shows the rich
+/// cases as their plain words.
+pub type Action = bindings::rift::plugin::types::Decision;
 
 use serde::de::DeserializeOwned;
 
@@ -202,6 +248,11 @@ pub trait Plugin: Default + 'static {
 
     /// A Rift event (`rift.events.*`).
     fn event(&mut self, event: RiftEvent) {}
+
+    /// A player clicked a plugin action of a dialog this plugin showed with
+    /// [`players::show_dialog`]. Delivered without being listed in
+    /// [`Registration::hooks`].
+    fn dialog(&mut self, response: DialogResponse) {}
 }
 
 /// Exports a [`Plugin`] implementation as the component's
@@ -316,6 +367,25 @@ impl Action {
     }
 }
 
+impl DialogResponse {
+    /// The player's input values, decoded from `values_json`. They come from
+    /// the client: validate them like any player input.
+    pub fn values<T: DeserializeOwned>(&self) -> Result<T, String> {
+        serde_json::from_str(&self.values_json)
+            .map_err(|error| format!("invalid dialog values: {error}"))
+    }
+
+    /// The action's `payload` or `additions`, as the plugin wrote it; `None`
+    /// when it had none.
+    pub fn payload<T: DeserializeOwned>(&self) -> Result<Option<T>, String> {
+        self.payload_json
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|error| format!("invalid dialog payload: {error}"))
+    }
+}
+
 impl Suggestion {
     /// A suggestion without a tooltip.
     pub fn new(text: impl Into<String>) -> Self {
@@ -332,9 +402,16 @@ impl Suggestion {
 /// `&serde_json::json!({...}).to_string()`; see [rich text](crate#rich-text).
 pub mod players {
     pub use crate::bindings::rift::plugin::players::{
-        action_bar, action_bar_json, boss_bar, broadcast, broadcast_json, get, kick, kick_json,
-        list, message, message_json, names, tab_list, title, transfer,
+        action_bar, action_bar_json, boss_bar, broadcast, broadcast_json, clear_dialog, dialog,
+        get, kick, kick_json, list, message, message_json, names, tab_list, title, transfer,
     };
+
+    /// Show a dialog in the vanilla JSON format (Minecraft 1.21.6+). Returns
+    /// false when the player is offline, older than 1.21.6 or has too many
+    /// undelivered actions; an invalid dialog is an error.
+    pub fn show_dialog(target: &str, dialog: &serde_json::Value) -> Result<bool, String> {
+        self::dialog(target, &dialog.to_string())
+    }
 }
 
 /// The durable key-value store. Namespaces are prefixed with
@@ -505,20 +582,21 @@ pub mod __private {
             with(|p: &mut P| p.route(connection))
         }
 
-        fn login(ctx: Context) -> Action {
-            with(|p: &mut P| p.login(ctx))
+        // Hosts before 0.1.2 call these; later ones call `decisions`.
+        fn login(ctx: Context) -> PlainAction {
+            plain(with(|p: &mut P| p.login(ctx)))
         }
 
-        fn initial_server(ctx: Context) -> Action {
-            with(|p: &mut P| p.initial_server(ctx))
+        fn initial_server(ctx: Context) -> PlainAction {
+            plain(with(|p: &mut P| p.initial_server(ctx)))
         }
 
-        fn before_transfer(ctx: Context) -> Action {
-            with(|p: &mut P| p.before_transfer(ctx))
+        fn before_transfer(ctx: Context) -> PlainAction {
+            plain(with(|p: &mut P| p.before_transfer(ctx)))
         }
 
-        fn command(ctx: Context) -> Action {
-            with(|p: &mut P| p.command(ctx))
+        fn command(ctx: Context) -> PlainAction {
+            plain(with(|p: &mut P| p.command(ctx)))
         }
 
         fn suggest(ctx: Context) -> Vec<Suggestion> {
@@ -557,6 +635,77 @@ pub mod __private {
             with(|p: &mut P| p.event(event))
         }
     }
+
+    impl<P: Plugin> crate::bindings::exports::rift::plugin::dialogs::Guest for Adapter<P> {
+        fn dialog(response: DialogResponse) {
+            with(|p: &mut P| p.dialog(response))
+        }
+    }
+
+    impl<P: Plugin> crate::bindings::exports::rift::plugin::decisions::Guest for Adapter<P> {
+        fn login(ctx: Context) -> Action {
+            with(|p: &mut P| p.login(ctx))
+        }
+
+        fn initial_server(ctx: Context) -> Action {
+            with(|p: &mut P| p.initial_server(ctx))
+        }
+
+        fn before_transfer(ctx: Context) -> Action {
+            with(|p: &mut P| p.before_transfer(ctx))
+        }
+
+        fn command(ctx: Context) -> Action {
+            with(|p: &mut P| p.command(ctx))
+        }
+    }
+
+    use crate::bindings::rift::plugin::types::Action as PlainAction;
+
+    /// A decision for a host before 0.1.2, which has no rich text: a JSON
+    /// text component becomes its words.
+    pub(crate) fn plain(action: Action) -> PlainAction {
+        match action {
+            Action::Continue => PlainAction::Continue,
+            Action::Deny(reason) => PlainAction::Deny(reason),
+            Action::Server(server) => PlainAction::Server(server),
+            Action::Message(text) => PlainAction::Message(text),
+            Action::Queue(server) => PlainAction::Queue(server),
+            Action::LeaveQueue => PlainAction::LeaveQueue,
+            Action::DenyJson(reason) => PlainAction::Deny(words(&reason)),
+            Action::MessageJson(text) => PlainAction::Message(words(&text)),
+        }
+    }
+
+    /// The visible text of a JSON text component, without formatting.
+    pub(crate) fn words(json: &str) -> String {
+        fn collect(value: &serde_json::Value, out: &mut String) {
+            match value {
+                serde_json::Value::String(text) => out.push_str(text),
+                serde_json::Value::Array(items) => items.iter().for_each(|item| collect(item, out)),
+                serde_json::Value::Object(fields) => {
+                    if let Some(text) = ["text", "fallback", "translate"]
+                        .iter()
+                        .find_map(|key| fields.get(*key).and_then(|value| value.as_str()))
+                    {
+                        out.push_str(text);
+                    }
+                    if let Some(extra) = fields.get("extra") {
+                        collect(extra, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        match serde_json::from_str(json) {
+            Ok(value) => {
+                let mut out = String::new();
+                collect(&value, &mut out);
+                out
+            }
+            Err(_) => json.to_owned(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -580,6 +729,26 @@ mod tests {
         ));
         assert_eq!(registration.hooks, vec![Hook::Login, Hook::Command]);
         assert!(Registration::default().commands.is_empty());
+    }
+
+    #[test]
+    fn older_hosts_get_the_words_of_rich_decisions() {
+        use crate::bindings::rift::plugin::types::Action as PlainAction;
+        let banned = Action::deny_json(serde_json::json!({
+            "text": "Banned", "color": "red", "extra": [{"text": ": spam"}],
+        }));
+        assert!(matches!(
+            crate::__private::plain(banned),
+            PlainAction::Deny(reason) if reason == "Banned: spam"
+        ));
+        assert!(matches!(
+            crate::__private::plain(Action::message_json("[\"a\",{\"text\":\"b\"}]")),
+            PlainAction::Message(text) if text == "ab"
+        ));
+        assert!(matches!(
+            crate::__private::plain(Action::deny("x")),
+            PlainAction::Deny(reason) if reason == "x"
+        ));
     }
 
     #[test]

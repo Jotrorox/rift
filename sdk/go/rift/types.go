@@ -1,6 +1,8 @@
 package rift
 
 import (
+	"strings"
+
 	"go.bytecodealliance.org/cm"
 
 	"github.com/Jotrorox/rift/sdk/go/gen/rift/plugin/types"
@@ -157,13 +159,54 @@ func (a Action) lower() types.Action {
 		return types.ActionQueue(a.value)
 	case actionLeaveQueue:
 		return types.ActionLeaveQueue()
+	// Hosts before rift:plugin 0.1.2 call the handler hooks and have no
+	// rich text: they get the component's words.
 	case actionDenyJSON:
-		return types.ActionDenyJSON(a.value)
+		return types.ActionDeny(componentWords(a.value))
 	case actionMessageJSON:
-		return types.ActionMessageJSON(a.value)
+		return types.ActionMessage(componentWords(a.value))
 	default:
 		return types.ActionContinue()
 	}
+}
+
+// lowerDecision is the answer of the decisions export (rift:plugin 0.1.2).
+func (a Action) lowerDecision() types.Decision {
+	switch a.kind {
+	case actionDeny:
+		return types.DecisionDeny(a.value)
+	case actionServer:
+		return types.DecisionServer(a.value)
+	case actionMessage:
+		return types.DecisionMessage(a.value)
+	case actionQueue:
+		return types.DecisionQueue(a.value)
+	case actionLeaveQueue:
+		return types.DecisionLeaveQueue()
+	case actionDenyJSON:
+		return types.DecisionDenyJSON(a.value)
+	case actionMessageJSON:
+		return types.DecisionMessageJSON(a.value)
+	default:
+		return types.DecisionContinue()
+	}
+}
+
+// componentWords is the visible text of a JSON text component, without
+// formatting; text that is not a valid component is returned as it is. It
+// uses the configuration scanner rather than encoding/json, which would add
+// hundreds of kilobytes to every plugin.
+func componentWords(text string) string {
+	p := &jsonScanner{s: text}
+	var out strings.Builder
+	if !p.words(&out, 0) {
+		return text
+	}
+	p.ws()
+	if p.i != len(p.s) {
+		return text
+	}
+	return out.String()
 }
 
 // Suggestion is one completion offered by the suggest hook.
@@ -294,6 +337,20 @@ type BusMessage struct {
 	Reply   *string
 }
 
+// DialogResponse is a click on a plugin action of a dialog this plugin
+// showed with ShowDialog.
+type DialogResponse struct {
+	Ctx    Context // the player; Server is their current backend
+	Action string  // the action's id as the plugin wrote it, such as "submit"
+	// ValuesJSON holds the player's input values by key as a JSON object
+	// ("{}" for a custom action). They come from the client: validate them
+	// like any player input.
+	ValuesJSON string
+	// PayloadJSON is the action's payload or additions as the plugin wrote
+	// it, or nil. Rift keeps it, so the client can neither see nor change it.
+	PayloadJSON *string
+}
+
 // Event mirrors a rift.events.* publication.
 type Event struct {
 	Subject     string // for example rift.events.players
@@ -327,6 +384,15 @@ type BossBar struct {
 	DarkenSky bool
 	PlayMusic bool
 	CreateFog bool
+}
+
+func liftDialogResponse(r types.DialogResponse) DialogResponse {
+	return DialogResponse{
+		Ctx:         liftContext(r.Ctx),
+		Action:      r.Action,
+		ValuesJSON:  r.ValuesJSON,
+		PayloadJSON: liftOpt(r.PayloadJSON),
+	}
 }
 
 func liftContext(c types.Context) Context {

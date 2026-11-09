@@ -62,7 +62,7 @@ impl Guest {
         std::fs::write(
             folder.join("plugin.toml"),
             format!(
-                "name = \"{}\"\nversion = \"0.1.0\"\napi = \"0.2\"\nengine = \"wasm\"\nentry = \"plugin.wasm\"\n{manifest_extra}",
+                "name = \"{}\"\nversion = \"0.1.0\"\napi = \"0.1\"\nengine = \"wasm\"\nentry = \"plugin.wasm\"\n{manifest_extra}",
                 self.name
             ),
         )
@@ -444,7 +444,7 @@ impl Fixture for WasmFixture {
         std::fs::write(
             folder.join("plugin.toml"),
             format!(
-                "name = \"{name}\"\nversion = \"1\"\napi = \"0.2\"\nengine = \"wasm\"\nentry = \"plugin.wasm\"\n{extra}"
+                "name = \"{name}\"\nversion = \"1\"\napi = \"0.1\"\nengine = \"wasm\"\nentry = \"plugin.wasm\"\n{extra}"
             ),
         )
         .unwrap();
@@ -840,6 +840,38 @@ async fn the_memory_limit_applies_to_each_instance() {
     let root = directory();
     let config = configure(&root, &guest, "[wasm]\nmemory_limit_mb = 16\n", "{}");
     let runtime = start(&config, &broker).await;
+    assert_eq!(instance(&runtime).status(), Status::Running);
+    runtime.plugins().shutdown().await;
+}
+
+#[tokio::test]
+async fn components_show_dialogs_and_receive_clicks_without_registering_a_hook() {
+    let Some(guest) = probe() else { return };
+    let root = directory();
+    let config = configure(&root, &guest, "", "{}");
+    let runtime = start(&config, &Broker::default()).await;
+    let (_handle, mut actions) = runtime
+        .players()
+        .register(31, &[31; 16], "Dialog", 774, "lobby");
+    let player = session(&runtime, 31, "Dialog");
+    assert_eq!(player.decision("login").await.unwrap(), Action::Continue);
+    let Ok(PlayerAction::Dialog { dialog, owner }) = actions.try_recv() else {
+        panic!("expected a dialog");
+    };
+    assert_eq!(owner, crate::dialog::Owner::Plugin(guest.name.clone()));
+    let id = dialog.wire()["action"]["action"]["id"].as_str().unwrap();
+    let (response, _) = dialog
+        .resolve(id, Some(serde_json::json!({"answer": "42"})))
+        .unwrap();
+    player.dialog(owner, response).await.unwrap();
+    let message = timeout(Duration::from_secs(5), actions.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        message,
+        PlayerAction::Message(r#"reply {"answer":"42"} {"round":1}"#.into())
+    );
     assert_eq!(instance(&runtime).status(), Status::Running);
     runtime.plugins().shutdown().await;
 }

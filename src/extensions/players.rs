@@ -50,6 +50,14 @@ pub enum PlayerAction {
         name: String,
         bar: Option<crate::protocol::BossBar>,
     },
+    /// Show a dialog, replacing any open one; clicks on its plugin actions go
+    /// to `owner`.
+    Dialog {
+        dialog: Arc<crate::dialog::Dialog>,
+        owner: crate::dialog::Owner,
+    },
+    /// Close the dialog Rift showed, if it is still open.
+    ClearDialog,
 }
 
 struct Entry {
@@ -262,6 +270,19 @@ pub(crate) fn boss_bar(name: String, value: Option<Table>) -> mlua::Result<Playe
             flags,
         }),
     })
+}
+
+/// A dialog from Lua: a table in the vanilla dialog format or the same as
+/// JSON text.
+pub(crate) fn dialog(value: Value) -> mlua::Result<crate::dialog::Dialog> {
+    match value {
+        Value::String(text) => crate::dialog::Dialog::parse_json(&text.to_str()?),
+        Value::Table(_) => {
+            crate::dialog::from_lua(value).and_then(|spec| crate::dialog::Dialog::parse(&spec))
+        }
+        _ => Err("dialog expects a table or JSON text".into()),
+    }
+    .map_err(mlua::Error::runtime)
 }
 
 const INVALID_TARGET: &str = "player must be a lowercase UUID (32 hex digits) or a player name";
@@ -584,6 +605,34 @@ impl Players {
         Ok(true)
     }
 
+    /// Show a dialog (`Some`) or close the one Rift showed (`None`). False
+    /// means that the player is offline, older than 1.21.6, or has a full
+    /// queue.
+    pub fn dialog(
+        &self,
+        target: &str,
+        dialog: Option<crate::dialog::Dialog>,
+        owner: crate::dialog::Owner,
+    ) -> std::io::Result<bool> {
+        let sessions = self.lock();
+        let entry = find(&sessions, target)
+            .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))?;
+        let Some((_, entry)) = entry else {
+            return Ok(false);
+        };
+        if !crate::protocol::dialogs_supported(entry.protocol) {
+            return Ok(false);
+        }
+        let action = match dialog {
+            Some(dialog) => PlayerAction::Dialog {
+                dialog: Arc::new(dialog),
+                owner,
+            },
+            None => PlayerAction::ClearDialog,
+        };
+        Ok(entry.actions.try_send(action).is_ok())
+    }
+
     fn info(lua: &Lua, entry: &Entry, id: u64) -> mlua::Result<Table> {
         let player = lua.create_table()?;
         player.raw_set("uuid", entry.uuid.as_str())?;
@@ -709,6 +758,27 @@ impl Players {
                     players.boss_bar(&target, &name, bar).map_err(error)
                 },
             )?,
+        )?;
+        let (players, charge) = (self.clone(), budget.clone());
+        api.raw_set(
+            "dialog",
+            lua.create_function(move |_, (target, spec): (String, Value)| {
+                charge()?;
+                let dialog = dialog(spec)?;
+                players
+                    .dialog(&target, Some(dialog), crate::dialog::Owner::Script)
+                    .map_err(lua_error)
+            })?,
+        )?;
+        let (players, charge) = (self.clone(), budget.clone());
+        api.raw_set(
+            "clear_dialog",
+            lua.create_function(move |_, target: String| {
+                charge()?;
+                players
+                    .dialog(&target, None, crate::dialog::Owner::Script)
+                    .map_err(lua_error)
+            })?,
         )?;
         let (players, charge) = (self.clone(), budget.clone());
         api.raw_set(

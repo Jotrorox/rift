@@ -44,6 +44,7 @@ typedef rift_plugin_types_registration_t rift_registration_t;
 typedef rift_plugin_types_bus_message_t rift_bus_message_t;
 typedef rift_plugin_types_hook_t rift_hook_t;
 typedef rift_plugin_types_level_t rift_level_t;
+typedef rift_plugin_types_dialog_response_t rift_dialog_response_t;
 
 // ---------------------------------------------------------------------------
 // Allocation
@@ -191,6 +192,9 @@ static inline void rift_string_list_free(rift_string_list_t *list) {
 
 static inline void rift_context_free(rift_context_t *ctx) { rift_plugin_types_context_free(ctx); }
 static inline void rift_bus_message_free(rift_bus_message_t *msg) { rift_plugin_types_bus_message_free(msg); }
+static inline void rift_dialog_response_free(rift_dialog_response_t *response) {
+  rift_plugin_types_dialog_response_free(response);
+}
 
 // ---------------------------------------------------------------------------
 // Actions (decision hooks write into `ret`)
@@ -225,13 +229,43 @@ static inline void rift_action_message(rift_action_t *ret, const char *text) {
 static inline void rift_action_queue(rift_action_t *ret, const char *queue) {
   rift_action_with(ret, RIFT_PLUGIN_TYPES_ACTION_QUEUE, queue);
 }
+
+// ---------------------------------------------------------------------------
+// Decisions with rich text (since 0.1.2)
+//
+// Define `exports_rift_plugin_decisions_<hook>` instead of
+// `exports_rift_plugin_handler_<hook>` to answer `login`, `initial_server`,
+// `before_transfer` or `command` with a JSON text component. The weak
+// defaults of the `decisions` export call your handler hooks, so a plugin
+// without rich text defines only those.
+
+typedef rift_plugin_types_decision_t rift_decision_t;
+
+// The payload is copied, so literals and borrowed strings are fine here.
+static inline void rift_decision_with(rift_decision_t *ret, uint8_t tag, const char *text) {
+  memset(ret, 0, sizeof *ret);
+  ret->tag = tag;
+  // Every payload-carrying case is a string at the same offset.
+  ret->val.deny = rift_string_dup(text);
+}
+
 // `deny-json` and `message-json`: a JSON text component of at most 32 KiB,
 // for colours, line breaks, hover text and click events.
-static inline void rift_action_deny_json(rift_action_t *ret, const char *reason_json) {
-  rift_action_with(ret, RIFT_PLUGIN_TYPES_ACTION_DENY_JSON, reason_json);
+static inline void rift_decision_deny_json(rift_decision_t *ret, const char *reason_json) {
+  rift_decision_with(ret, RIFT_PLUGIN_TYPES_DECISION_DENY_JSON, reason_json);
 }
-static inline void rift_action_message_json(rift_action_t *ret, const char *text_json) {
-  rift_action_with(ret, RIFT_PLUGIN_TYPES_ACTION_MESSAGE_JSON, text_json);
+static inline void rift_decision_message_json(rift_decision_t *ret, const char *text_json) {
+  rift_decision_with(ret, RIFT_PLUGIN_TYPES_DECISION_MESSAGE_JSON, text_json);
+}
+
+// A plain action as a decision; the action's payload moves into `ret`.
+static inline void rift_decision_from_action(rift_decision_t *ret, rift_action_t *action) {
+  memset(ret, 0, sizeof *ret);
+  // `action`'s cases are the first cases of `decision`, in the same order.
+  ret->tag = action->tag;
+  if (action->tag != RIFT_PLUGIN_TYPES_ACTION_CONTINUE && action->tag != RIFT_PLUGIN_TYPES_ACTION_LEAVE_QUEUE) {
+    ret->val.deny = action->val.deny;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -301,6 +335,23 @@ static inline bool rift_message(const rift_string_t *target, const char *text) {
     return false;
   }
   return online;
+}
+
+// Shows `target` a dialog given as JSON in the vanilla dialog format
+// (Minecraft 1.21.6+). Buttons whose `custom` or `dynamic/custom` action has
+// an `id` without a namespace come back to
+// `exports_rift_plugin_dialogs_dialog`. Returns whether the dialog was
+// queued: false for an offline or pre-1.21.6 player, and for an invalid
+// dialog, whose error is logged.
+static inline bool rift_show_dialog(const rift_string_t *target, const char *dialog_json) {
+  rift_string_t t = *target, json = rift_str(dialog_json), err = {NULL, 0};
+  bool queued = false;
+  if (!rift_plugin_players_dialog(&t, &json, &queued, &err)) {
+    rift_log(RIFT_WARN, "players.dialog failed: " RIFT_STR_FMT, RIFT_STR_ARG(err));
+    rift_string_free(&err);
+    return false;
+  }
+  return queued;
 }
 
 // Like `rift_message`, with `text_json` a JSON text component of at most

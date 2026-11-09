@@ -378,6 +378,28 @@ impl PlayersApi<'_> {
             .map_err(str::to_owned)
     }
 
+    /// `players.dialog`: show a dialog given as JSON (the vanilla dialog
+    /// format). Clicks on its plugin actions come back to this plugin.
+    pub fn dialog(&self, target: &str, dialog_json: &str) -> Result<bool, String> {
+        self.show_dialog(target, crate::dialog::Dialog::parse_json(dialog_json)?)
+    }
+
+    /// Show an already validated dialog on behalf of this plugin.
+    pub fn show_dialog(&self, target: &str, dialog: crate::dialog::Dialog) -> Result<bool, String> {
+        let owner = crate::dialog::Owner::Plugin(self.0.spec.name.clone());
+        self.players()
+            .dialog(target, Some(dialog), owner)
+            .map_err(|error| error.to_string())
+    }
+
+    /// `players.clear-dialog`: close the dialog Rift showed, if still open.
+    pub fn clear_dialog(&self, target: &str) -> Result<bool, String> {
+        let owner = crate::dialog::Owner::Plugin(self.0.spec.name.clone());
+        self.players()
+            .dialog(target, None, owner)
+            .map_err(|error| error.to_string())
+    }
+
     pub fn kick(&self, target: &str, reason: &str) -> Result<bool, String> {
         self.kick_text(target, Text::plain(reason, "kick reason")?)
     }

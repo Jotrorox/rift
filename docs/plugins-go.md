@@ -69,7 +69,7 @@ func main() {}
 # plugins/my-plugin/plugin.toml
 name = "my-plugin"
 version = "0.1.0"
-api = "0.2"
+api = "0.1"
 engine = "wasm"
 entry = "my_plugin.wasm"
 
@@ -91,7 +91,8 @@ Lua examples.
 | `handler` exports | `rift.OnInit`, `rift.OnLogin`, `rift.OnCommand`, ... set from a package `init` function. The host calls exports right after instantiation and never runs `main`, which must exist but stays empty. |
 | `registration` | `rift.Registration{Commands, Hooks}`. Leave `Hooks` nil and the SDK lists exactly the hooks you set a handler for. |
 | `action` | `rift.Continue()`, `rift.Deny`, `rift.DenyJSON`, `rift.Server`, `rift.Message`, `rift.MessageJSON`, `rift.Queue`, `rift.LeaveQueue()` (the `JSON` forms take a JSON text component, see [rich text](extensions.md#rich-text)); `route` answers are `rift.RouteDefault()`, `rift.RouteBackend`, `rift.RouteReject`. |
-| `players` | `rift.Players`, `rift.Player`, `rift.PlayerNames`, `rift.SendMessage`, `rift.SendMessageJSON`, `rift.SendActionBar`, `rift.SendActionBarJSON`, `rift.SendTitle`, `rift.SetTabList`, `rift.SetBossBar`, `rift.Kick`, `rift.KickJSON`, `rift.Transfer`, `rift.Broadcast`, `rift.BroadcastJSON`. |
+| `players` | `rift.Players`, `rift.Player`, `rift.PlayerNames`, `rift.SendMessage`, `rift.SendMessageJSON`, `rift.SendActionBar`, `rift.SendActionBarJSON`, `rift.SendTitle`, `rift.SetTabList`, `rift.SetBossBar`, `rift.ShowDialog`, `rift.ClearDialog`, `rift.Kick`, `rift.KickJSON`, `rift.Transfer`, `rift.Broadcast`, `rift.BroadcastJSON`. |
+| `dialogs` export | `rift.OnDialog(func(rift.DialogResponse))` receives clicks on the plugin's [dialogs](dialogs.md); it needs no hook in the registration. |
 | `store` | `rift.StoreGet`, `StoreSet`, `StoreDelete`, `StoreIncrement`, `StoreList`. |
 | `permissions` | `rift.HasPermission`, `SetPermission`, `AddGroup`, `RemoveGroup`, `Groups`, `ListGroupsJSON`. |
 | `bus` | `rift.Publish`, `Reply`, `Request`, `Subscribe`, `Unsubscribe`, `StreamPublish`. |
