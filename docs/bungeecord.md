@@ -119,8 +119,8 @@ still applies.
 
 `RiftInGroup` answers whether a player is in a group of the [permission
 store](permissions.md), from the player's compiled subject in the contexts Rift
-knows for them (their server, and custom contexts reported by the backend or Lua
-providers). A player is in the groups they inherit directly, every group those
+knows for them (their server, dimension and game mode, and custom contexts
+reported by the backend or Lua providers). A player is in the groups they inherit directly, every group those
 inherit, and `default`, unless a negated `inherit` node blocks it; memberships
 limited to other contexts, expired ones, and groups that no longer exist do
 not count. The player name ignores ASCII case and the response uses the
