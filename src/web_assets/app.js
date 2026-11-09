@@ -6,7 +6,7 @@
     token: "", revision: null, baseline: "", writable: false,
     loaded: false, busy: false, polling: false, fetchingSource: false,
     session: 0, mutation: 0, remoteChanged: false, conflicted: false, online: false,
-    serverButtons: [], view: "overview",
+    serverButtons: [], groupButtons: [], managedServers: [], view: "overview",
     permissions: null, groups: null, logServer: "", logCursor: null, logPolling: false, definitions: {}, definitionRevision: null, definitionDirty: false, definitionVersion: 0, definitionSection: "service_groups", definitionName: "", definitionInputs: new Map(),
     // Unsaved edits on the server list, tab list and permission group forms.
     settingsDirty: { serverList: false, tabList: false },
@@ -68,7 +68,7 @@
     $("edit-state").className = `tag ${dirty() ? "warning" : state.loaded ? "good" : ""}`;
     text("source-size", `${$("source").value.split("\n").length.toLocaleString()} lines`);
     $("conflict").classList.toggle("hidden", !state.remoteChanged);
-    for (const { button, unavailable } of state.serverButtons) button.disabled = state.busy || unavailable || !allowed("servers");
+    for (const { button, unavailable } of [...state.serverButtons, ...state.groupButtons]) button.disabled = state.busy || unavailable || !allowed("servers");
     $("console-send").disabled = state.busy || !state.logServer || !allowed("console");
     $("definition-save").disabled = state.busy || !state.definitionRevision || !allowed("config");
     $("definition-delete").disabled = state.busy || !state.definitionRevision || !$("definition-select").value || !allowed("config");
@@ -204,60 +204,11 @@
     td.textContent = value ?? "—"; td.className = className; row.append(td);
     return td;
   }
-  function renderStatus(status) {
-    const metrics = status.metrics || {}, listeners = status.listeners || [], backends = status.backends || [];
-    const checks = status.health_checks_enabled !== false;
-    const healthy = checks ? backends.filter((backend) => backend.healthy === true).length : 0;
-    const unknown = checks ? backends.filter((backend) => typeof backend.healthy !== "boolean").length : backends.length;
-    text("version", status.version ? `v${status.version}` : "");
-    text("metric-active", count(metrics.active));
-    text("metric-accepted", `${count(metrics.accepted)} accepted since startup`);
-    text("metric-backends", unknown === backends.length && backends.length ? "Unmonitored" : `${healthy} / ${backends.length}`);
-    text("metric-health", unknown ? `${unknown} without a health result` : "Healthy backends / total");
-    text("metric-traffic", bytes(number(metrics.sent) + number(metrics.received)));
-    text("metric-directions", `${bytes(metrics.sent)} sent · ${bytes(metrics.received)} received`);
-    text("metric-uptime", uptime(status.uptime_seconds));
-    text("metric-errors", `${count(metrics.errors)} errors · ${count(metrics.reloads)} reloads`);
-    text("listener-count", `${listeners.length} configured`);
-    text("backend-count", `${backends.length} configured`);
-    text("last-update", `Updated ${new Date().toLocaleTimeString()}`);
-    if (status.config_path) text("config-path", status.config_path);
-    table("listeners", listeners, 2, (tr, listener) => { cell(tr, listener.name); cell(tr, listener.address, "address"); });
-    table("backends", backends, 3, (tr, backend) => {
-      cell(tr, backend.name); cell(tr, backend.address, "address");
-      const td = cell(tr, ""), span = document.createElement("span");
-      span.className = `health ${!checks ? "unknown" : backend.healthy === false ? "bad" : backend.healthy === true ? "" : "unknown"}`;
-      span.textContent = !checks ? "Checks disabled" : backend.healthy === false ? "Unhealthy" : backend.healthy === true ? "Healthy" : "Unknown";
-      td.append(span);
-    });
+  function renderServers() {
+    const group = $("servers-group").value;
+    const servers = state.managedServers.filter((server) => !group || server.group === group);
     state.serverButtons = [];
-    table("service-groups", status.service_groups || [], 6, (tr, group) => {
-      cell(tr, group.name);
-      cell(tr, (group.port_range || []).join("–"));
-      cell(tr, group.storage === "disposable" ? "Disposable game" : "Persistent world");
-      cell(tr, group.template || "Prepared directories");
-      cell(tr, (group.instances || []).join(", ") || "None created");
-      const actions = cell(tr, ""), button = document.createElement("button");
-      button.type = "button"; button.className = "button secondary"; button.textContent = "Create instance";
-      button.setAttribute("aria-label", `Create instance in ${group.name}`);
-      const full = Boolean(group.scaling) && (group.instances || []).length >= number(group.scaling.max_instances);
-      if (full) button.title = "This group has reached its scaling maximum. Remove an instance or raise max_instances first.";
-      state.serverButtons.push({ button, unavailable: full });
-      button.addEventListener("click", () => { if (!button.disabled) instanceOperation(group.name, "create", group.storage); });
-      actions.append(button);
-    });
-    const nodes = status.nodes || [];
-    $("nodes-panel").hidden = !nodes.length;
-    text("node-count", `${nodes.filter((node) => node.state === "online").length} of ${nodes.length} online`);
-    table("nodes", nodes, 6, (tr, node) => {
-      cell(tr, node.name);
-      cell(tr, node.state === "never_connected" ? "never connected" : node.state, `state ${node.state === "online" ? "running" : node.state === "unreachable" ? "failed" : "stopped"}`);
-      cell(tr, node.address, "address");
-      cell(tr, (node.labels || []).join(", ") || "—");
-      cell(tr, `${count(node.instances)} of ${count(node.max_instances)}`);
-      cell(tr, node.memory_mb ? `${count(node.allocated_memory_mb)} of ${count(node.memory_mb)} MiB` : `${count(node.allocated_memory_mb)} MiB, no limit`);
-    }, "No nodes configured.");
-    table("managed-servers", status.managed_servers || [], 10, (tr, server) => {
+    table("managed-servers", servers, 10, (tr, server) => {
       cell(tr, server.name); cell(tr, server.state, `state ${server.state}`);
       cell(tr, `${count(server.players)} players · ${count(server.reservations)} attachments`);
       cell(tr, wakeLabel(server));
@@ -294,7 +245,108 @@
         });
         actions.append(button);
       }
-    }, "No managed servers yet. Create one from a service group.");
+    }, group ? `No instances in ${group} yet.` : "No managed servers yet. Create one from a service group.");
+  }
+  function renderStatus(status) {
+    const metrics = status.metrics || {}, listeners = status.listeners || [], backends = status.backends || [];
+    const checks = status.health_checks_enabled !== false;
+    const healthy = checks ? backends.filter((backend) => backend.healthy === true).length : 0;
+    const unknown = checks ? backends.filter((backend) => typeof backend.healthy !== "boolean").length : backends.length;
+    text("version", status.version ? `v${status.version}` : "");
+    text("metric-active", count(metrics.active));
+    text("metric-accepted", `${count(metrics.accepted)} accepted since startup`);
+    text("metric-backends", unknown === backends.length && backends.length ? "Unmonitored" : `${healthy} / ${backends.length}`);
+    text("metric-health", unknown ? `${unknown} without a health result` : "Healthy backends / total");
+    text("metric-traffic", bytes(number(metrics.sent) + number(metrics.received)));
+    text("metric-directions", `${bytes(metrics.sent)} sent · ${bytes(metrics.received)} received`);
+    text("metric-uptime", uptime(status.uptime_seconds));
+    text("metric-errors", `${count(metrics.errors)} errors · ${count(metrics.reloads)} reloads`);
+    text("listener-count", `${listeners.length} configured`);
+    text("backend-count", `${backends.length} configured`);
+    text("last-update", `Updated ${new Date().toLocaleTimeString()}`);
+    if (status.config_path) text("config-path", status.config_path);
+    table("listeners", listeners, 2, (tr, listener) => { cell(tr, listener.name); cell(tr, listener.address, "address"); });
+    table("backends", backends, 3, (tr, backend) => {
+      cell(tr, backend.name); cell(tr, backend.address, "address");
+      const td = cell(tr, ""), span = document.createElement("span");
+      span.className = `health ${!checks ? "unknown" : backend.healthy === false ? "bad" : backend.healthy === true ? "" : "unknown"}`;
+      span.textContent = !checks ? "Checks disabled" : backend.healthy === false ? "Unhealthy" : backend.healthy === true ? "Healthy" : "Unknown";
+      td.append(span);
+    });
+    state.groupButtons = [];
+    table("service-groups", status.service_groups || [], 7, (tr, group) => {
+      const names = group.instances || [], summary = group.summary || {}, enabled = (key) => number(summary[key]);
+      cell(tr, group.name);
+      const badges = cell(tr, "");
+      for (const [label, kind] of groupStatus(group)) {
+        const tag = document.createElement("span"); tag.className = `tag ${kind}`; tag.textContent = label; badges.append(tag);
+      }
+      cell(tr, (group.port_range || []).join("–"));
+      cell(tr, group.storage === "disposable" ? "Disposable game" : "Persistent world");
+      cell(tr, group.template || "Prepared directories");
+      cell(tr, instanceSummary(group)).title = names.join(", ");
+      const actions = cell(tr, ""); actions.className = "action-group";
+      const button = (label, aria, unavailable, title, click, className = "button subtle") => {
+        const element = document.createElement("button");
+        element.type = "button"; element.className = className; element.textContent = label;
+        element.setAttribute("aria-label", aria);
+        if (title) element.title = title;
+        state.groupButtons.push({ button: element, unavailable });
+        element.addEventListener("click", () => { if (!element.disabled) click(); });
+        actions.append(element);
+        return element;
+      };
+      const full = Boolean(group.scaling) && names.length >= number(group.scaling.max_instances);
+      button("Create instance", `Create instance in ${group.name}`, full || Boolean(group.suspended),
+        group.suspended ? "This group is stopped. Start it before creating instances."
+          : full ? "This group has reached its scaling maximum. Remove an instance or raise max_instances first." : "",
+        () => instanceOperation(group.name, "create", group.storage), "button secondary");
+      // Without a summary (older servers) every action stays available.
+      const allUp = Boolean(group.summary) && names.length > 0 && enabled("running") + enabled("starting") === names.length;
+      button("Start all", `Start every instance of ${group.name}`, !group.suspended && allUp,
+        group.suspended ? "Resume scaling and start every instance." : "Start every instance that is not running.",
+        () => groupOperation(group, "start"));
+      button("Stop all", `Stop every instance of ${group.name}`, Boolean(group.suspended),
+        group.suspended ? "This group is already stopped." : "Keep new players out, pause scaling and stop every instance once it is empty.",
+        () => {
+          const players = enabled("players");
+          if (!window.confirm(`Stop every instance of ${group.name}? New players can't join and scaling pauses until you start the group.${players ? ` Instances with players (${count(players)} now) keep running until they leave.` : ""}`)) return;
+          groupOperation(group, "stop");
+        });
+      const dev = group.mode === "dev";
+      button(dev ? "Leave dev mode" : "Dev mode", `${dev ? "Leave dev mode for" : "Put into dev mode:"} ${group.name}`, false,
+        dev ? "Let everyone join again and resume scaling." : `Only players with ${group.dev_permission || "the group's dev permission"} can join; scaling pauses.`,
+        () => {
+          if (!dev && !window.confirm(`Put ${group.name} into dev mode? Only players with the permission ${group.dev_permission || `rift.group.${group.name}.dev`} can join, and automatic scaling pauses. Players already connected stay.`)) return;
+          groupOperation(group, "mode", dev ? "active" : "dev");
+        });
+      if (allowed("config")) {
+        const edit = document.createElement("button");
+        edit.type = "button"; edit.className = "button subtle"; edit.textContent = "Edit";
+        edit.setAttribute("aria-label", `Edit the ${group.name} definition`);
+        edit.addEventListener("click", () => editGroup(group.name));
+        actions.append(edit);
+      }
+    });
+    const groupFilter = $("servers-group"), filtered = groupFilter.value;
+    groupFilter.replaceChildren();
+    for (const [value, label] of [["", "All groups"], ...(status.service_groups || []).map((group) => [group.name, group.name])]) {
+      const option = document.createElement("option"); option.value = value; option.textContent = label; groupFilter.append(option);
+    }
+    groupFilter.value = (status.service_groups || []).some((group) => group.name === filtered) ? filtered : "";
+    const nodes = status.nodes || [];
+    $("nodes-panel").hidden = !nodes.length;
+    text("node-count", `${nodes.filter((node) => node.state === "online").length} of ${nodes.length} online`);
+    table("nodes", nodes, 6, (tr, node) => {
+      cell(tr, node.name);
+      cell(tr, node.state === "never_connected" ? "never connected" : node.state, `state ${node.state === "online" ? "running" : node.state === "unreachable" ? "failed" : "stopped"}`);
+      cell(tr, node.address, "address");
+      cell(tr, (node.labels || []).join(", ") || "—");
+      cell(tr, `${count(node.instances)} of ${count(node.max_instances)}`);
+      cell(tr, node.memory_mb ? `${count(node.allocated_memory_mb)} of ${count(node.memory_mb)} MiB` : `${count(node.allocated_memory_mb)} MiB, no limit`);
+    }, "No nodes configured.");
+    state.managedServers = status.managed_servers || [];
+    renderServers();
     const root = $("files-root").value || state.files.root;
     $("files-root").replaceChildren();
     for (const [value, label] of [["templates", "Templates"], ...(status.managed_servers || []).map((server) => [`server:${server.name}`, `Server · ${server.name}`])]) {
@@ -1396,6 +1448,11 @@
     } finally { state.busy = false; controls(); }
   }
   function wakeLabel(server) {
+    if (server.group_suspended) return `Paused · group ${server.group} stopped; start the group to resume`;
+    const label = baseWakeLabel(server);
+    return server.group_mode === "dev" ? `${label} · dev mode` : label;
+  }
+  function baseWakeLabel(server) {
     if (server.restart_exhausted) return "Paused · restart retries exhausted; Start to retry";
     if (server.automatic_enabled === false) return "Paused by Stop; Start to resume";
     return server.automatic_start ? "Enabled" : "Explicit start only";
@@ -1452,6 +1509,65 @@
       handleError(error, true);
       if (!error.status) result(`${error.message} Reloading may have moved or disabled this service. Check the configured address.`, "warning");
     } finally { state.busy = false; controls(); }
+  }
+  // The status badges of a service group row, most important first.
+  function groupStatus(group) {
+    const draining = number(group.summary?.draining), badges = [];
+    if (group.suspended) badges.push(draining ? [`Stopping · ${count(draining)} draining`, "warning"] : ["Stopped", ""]);
+    if (group.mode === "dev") badges.push(["Dev mode", "accent"]);
+    if (!badges.length) badges.push(["Active", "good"]);
+    return badges;
+  }
+  function instanceSummary(group) {
+    const names = group.instances || [], summary = group.summary;
+    if (!names.length) return "None created";
+    if (!summary) return names.join(", ");
+    const parts = [["running", "running"], ["starting", "starting"], ["stopping", "stopping"], ["stopped", "stopped"], ["failed", "failed"], ["unknown", "unreachable"]]
+      .filter(([key]) => number(summary[key])).map(([key, label]) => `${count(summary[key])} ${label}`);
+    return [...parts, `${count(summary.players)} ${number(summary.players) === 1 ? "player" : "players"}`].join(" · ");
+  }
+  function groupOutcome(group, action, outcome) {
+    if (action === "mode") return outcome.mode === "dev"
+      ? `${group} is in dev mode. Only players with ${outcome.dev_permission} can join and scaling is paused; players already connected stay.`
+      : `${group} is active again. Everyone can join${outcome.suspended ? " once the group is started" : " and scaling resumes"}.`;
+    const tally = new Map(), failures = [];
+    for (const instance of outcome.instances || []) {
+      tally.set(instance.result, (tally.get(instance.result) || 0) + 1);
+      if (instance.result === "failed") failures.push(`${instance.name}: ${instance.message}`);
+    }
+    const labels = { starting: "starting", running: "already running", stopping: "stopping", stopped: "already stopped", draining: "draining until their players leave", failed: "failed" };
+    const parts = [...tally].map(([result, total]) => `${total} ${labels[result] || result}`);
+    const counted = parts.length ? ` ${parts.join(", ")}.` : " It has no instances yet.";
+    const lead = action === "start"
+      ? `Started ${group}.${counted} Scaling resumes${outcome.mode === "dev" ? ", except while the group is in dev mode" : ""}.`
+      : `Stopped ${group}.${counted} New players are kept out and scaling is paused until you start the group.`;
+    return failures.length ? `${lead} ${failures.join("; ")}` : lead;
+  }
+  async function groupOperation(group, action, mode) {
+    if (state.busy) return;
+    state.busy = true; controls();
+    const name = group.name, path = `/api/groups/${encodeURIComponent(name)}/${action}`;
+    text("group-result", action === "mode" ? `Switching ${name} to ${mode === "dev" ? "dev mode" : "active"}…` : `${action === "start" ? "Starting" : "Stopping"} ${name}…`);
+    $("group-result").className = "operation-result";
+    try {
+      const outcome = await request(path, action === "mode" ? { method: "PUT", body: JSON.stringify({ mode }) } : { method: "POST", body: "{}" });
+      const failed = (outcome.instances || []).some((instance) => instance.result === "failed");
+      text("group-result", groupOutcome(name, action, outcome));
+      $("group-result").className = `operation-result ${failed ? "warning" : "success"}`;
+      await refreshStatus({ syncSource: false });
+    } catch (error) {
+      if (error.status === 401 || error.status === 403) $("auth-panel").open = true;
+      text("group-result", error.message || "The group request failed.");
+      $("group-result").className = "operation-result error";
+    } finally { state.busy = false; controls(); }
+  }
+  async function editGroup(name) {
+    if (state.definitionDirty && !window.confirm("Discard unsaved definition fields?")) return;
+    window.location.hash = "#definitions";
+    try {
+      if ($("definition-section").value !== "service_groups") { $("definition-section").value = "service_groups"; await loadDefinitions(); }
+      $("definition-select").value = name; renderDefinition();
+    } catch (error) { text("definition-result", error.message); }
   }
   async function serverOperation(name, action) {
     if (state.busy) return;
@@ -1515,6 +1631,7 @@
       $("server-result").className = "operation-result error";
     } finally { state.busy = false; controls(); }
   }
+  $("servers-group").addEventListener("change", () => { renderServers(); controls(); });
   $("source").addEventListener("input", controls);
   $("source").addEventListener("keydown", (event) => {
     if ((event.ctrlKey || event.metaKey) && event.key === "Enter") { event.preventDefault(); validate(); }
