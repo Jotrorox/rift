@@ -1,7 +1,33 @@
 {
+  "attribute": {
+    "down": {
+      "generic.max_absorption": "generic.luck"
+    }
+  },
   "game_event": {
     "renames": {
       "entity_roar": "entity_action"
+    },
+    "up": {
+      "entity_shake": "entity_action"
+    },
+    "down": {
+      "unequip": "equip"
+    }
+  },
+  "sound_event": {
+    "down": {
+      "block.sponge.break": "block.grass.break",
+      "block.sponge.fall": "block.grass.fall",
+      "block.sponge.hit": "block.grass.hit",
+      "block.sponge.place": "block.grass.place",
+      "block.sponge.step": "block.grass.step",
+      "block.sponge.absorb": "item.bucket.fill",
+      "block.wet_sponge.break": "block.grass.break",
+      "block.wet_sponge.fall": "block.grass.fall",
+      "block.wet_sponge.hit": "block.grass.hit",
+      "block.wet_sponge.place": "block.grass.place",
+      "block.wet_sponge.step": "block.grass.step"
     }
   }
 }
