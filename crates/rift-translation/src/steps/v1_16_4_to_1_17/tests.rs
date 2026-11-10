@@ -1,6 +1,6 @@
 use super::{
     NEWER, OLDER,
-    common::testing::{Out, awaiting_codec, hex, recorded, replay, send},
+    common::testing::{Out, awaiting_codec, hex, recorded, replay, send, with_stand_ins},
     down::Down,
     up::Up,
 };
@@ -735,4 +735,71 @@ fn block_stand_ins_keep_shape_and_water() {
     );
     assert_eq!(state(OLDER, NEWER, "cauldron[level=0]"), "cauldron");
     assert_eq!(state(OLDER, NEWER, "grass_path"), "dirt_path");
+}
+
+#[test]
+fn recorded_sessions_replay_with_codec_stand_ins() {
+    with_stand_ins(|| {
+        for (name, mut step, sides, clientbound, serverbound) in [
+            ("up", up(), UP, OLDER, NEWER),
+            ("down", down(), DOWN, NEWER, OLDER),
+        ] {
+            for (direction, recorded) in [(Clientbound, clientbound), (Serverbound, serverbound)] {
+                let Some(result) = replay(&mut *step, sides, recorded, direction) else {
+                    continue;
+                };
+                assert!(
+                    result.failed.is_empty(),
+                    "{name} {direction:?}: {:?}",
+                    result.failed
+                );
+                assert!(result.awaiting_codec.is_empty());
+            }
+        }
+    });
+}
+
+/// Every packet a step emits for the recorded `name` packets, by name.
+fn converted(
+    step: &mut dyn Step,
+    sides: (i32, i32),
+    from: i32,
+    name: &str,
+) -> Vec<(String, Vec<u8>)> {
+    recorded(from, Clientbound, name)
+        .iter()
+        .flat_map(|body| send(step, sides, Clientbound, Play, name, body).unwrap())
+        .map(|out| (out.name, out.data))
+        .collect()
+}
+
+#[test]
+fn split_packets_match_what_the_other_server_sends() {
+    with_stand_ins(|| {
+        let mut up = up();
+        let titles = converted(&mut *up, UP, OLDER, "set_titles");
+        if titles.is_empty() {
+            eprintln!("no corpus; skipped");
+            return;
+        }
+        // The same `/title` commands on a 1.17 server.
+        for name in super::TITLES {
+            let ours: Vec<_> = titles
+                .iter()
+                .filter(|(n, _)| n == name)
+                .map(|(_, d)| d.clone())
+                .collect();
+            assert_eq!(ours, recorded(NEWER, Clientbound, name), "{name}");
+        }
+        let mut down = down();
+        let mut merged: Vec<_> = super::TITLES
+            .iter()
+            .flat_map(|name| converted(&mut *down, DOWN, NEWER, name))
+            .map(|(_, data)| data)
+            .collect();
+        let mut real = recorded(OLDER, Clientbound, "set_titles");
+        merged.sort();
+        real.sort();
+        assert_eq!(merged, real);
+    });
 }
