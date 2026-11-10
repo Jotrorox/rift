@@ -92,6 +92,7 @@ rift.config.managed_servers.survival = {
 | `env` | None | Extra environment variables, `{ NAME = "value" }`. Values are literal (integers are written as numbers); service groups expand `{name}`, `{group}` and `{port}` in them. They are set after inheritance and win over inherited variables. |
 | `inherit_env` | Everything | `false` inherits nothing from Rift; a list such as `{ "PATH", "HOME", "JAVA_HOME" }` inherits only those. Rift's own secrets are never inherited either way. |
 | `messaging` | None | `{ preset = "backend", publish = {...}, subscribe = {...} }`: give the server (each instance of a group) its own bus login; see [bus logins](#bus-logins-for-instances). |
+| `isolation` | `"off"` | `"landlock"` or `"required"`, or `{ mode = ..., read = {...}, write = {...} }`: confine the process to its own directory; see [isolation](#isolation). |
 
 Commands run without a shell: arguments containing spaces remain single
 arguments, and `$VARIABLE`, `~`, redirection and shell operators are not expanded.
@@ -601,6 +602,56 @@ group's template ships RiftPerms but the group has no `messaging` block.
 Everything else a server inherits from Rift is still subject to
 [`env` and `inherit_env`](#configuration); the variables above are set last,
 so `env` cannot override them.
+
+## Isolation
+
+Managed servers run as Rift's user, so without isolation a server plugin can
+read everything Rift can: `rift.lua`, `rift.sqlite3`, the messaging key,
+`local/instance-key` (with which it could mint any instance's
+[bus token](#bus-logins-for-instances)) and other instances' directories, and
+it can read other instances' tokens from `/proc/<pid>/environ`. On Linux 5.13
+and newer, `isolation` confines a server with
+[Landlock](https://docs.kernel.org/userspace-api/landlock.html), which needs
+no privilege:
+
+```lua
+rift.config.service_groups.lobby = {
+    -- ...
+    isolation = "landlock",
+    -- or: isolation = { mode = "required", read = { "/srv/shared-maps" }, write = { "/srv/backups/lobby" } },
+}
+```
+
+A confined server may read and write its own directory and `/tmp` (shared
+by every confined server, so keep Rift's configuration and instance
+directories out of it); read and
+execute `/usr`, `/lib*`, `/bin`, `/sbin`, the Java installation its command
+resolves to and every existing absolute path in its command line (a shared
+`/absolute/paper.jar`); and read the system files name resolution, TLS, time
+zones and user lookups need (never the rest of `/etc`, where a packaged Rift
+keeps `rift.lua`), the random devices, its own `/proc/self` and the
+system-wide `/proc` and `/sys` files the JVM sizes itself from. Everything
+else is invisible, other processes' `/proc` entries included. `read` adds
+paths it may read and execute, `write` paths it may also write; relative paths
+are relative to the configuration, and on [nodes](nodes.md) they must be
+absolute paths on the node. On Linux 6.12 (Landlock ABI 6) the server also
+cannot signal processes outside its sandbox, Rift included. Networking is not
+restricted: plugins listen on their own ports (votes, maps, queries) and
+connect to databases.
+
+| `isolation` | Where Landlock is available | Elsewhere (macOS, Windows, Linux before 5.13 or without Landlock) |
+| --- | --- | --- |
+| `"off"` (default) | unconfined | unconfined |
+| `"landlock"` | confined | **starts unconfined**, as Rift's user, and logs why on every start |
+| `"required"` | confined | **refuses to start**, with the reason as the start failure |
+
+`rift check` prints, for every server and group with `isolation`, what this
+host gives it (`isolation service_groups.lobby: landlock ABI 6 (filesystem,
+signals)`) or the fallback and what it means. A plugin that writes outside its
+directory (a world on another disk, a shared database file) needs that path in
+`write`; check the server log after enabling isolation. Changing `isolation`
+is a change of the process definition, like `command`. `memory_mb` sets the
+heap and placement only; Rift does not yet enforce a process memory limit.
 
 ## Servers on other hosts
 
