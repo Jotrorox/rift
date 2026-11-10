@@ -44,8 +44,8 @@
 //! # Integration points
 //!
 //! - Biome IDs from 1.16.2 index the biome registry the server sends; they
-//!   pass unchanged until the registries codec maps them
-//!   ([`packets::biome_ids`], [`chunks_biomes`]).
+//!   are mapped by name where that numbering changes, across 1.16.1 / 1.16.2
+//!   and 1.20.4 / 1.20.5 ([`packets::biome_ids`], [`chunks_biomes`]).
 //! - [`model::World::biome_bits`], the width of that registry's global
 //!   palette, is unknown until the registries codec sets it; without it a
 //!   1.17 column going to 1.18 keeps at most 8 biomes per section.
@@ -139,6 +139,8 @@ fn install_needs_chunk(source: i32, target: i32) -> bool {
         || block_entity::changes_content(source, target)
         || container::block_global_bits(source) != container::block_global_bits(target)
         || (source < 768 && target >= 768)
+        // Biome IDs follow the registry's entry order from 1.20.5.
+        || crosses(source, target, &[766])
 }
 
 /// Install this codec's default routes for the builder's pair.
@@ -231,7 +233,7 @@ pub fn install<S: HasShared + 'static>(mut builder: RouteBuilder<S>) -> RouteBui
     if crosses(source, target, &[755, 761, 765, 766, 768, 773, 777]) || sounds || particles {
         builder = builder.default_handler(Clientbound, Play, "explode", explode::explode::<S>);
     }
-    if crosses(source, target, &[770]) {
+    if crosses(source, target, &[766, 770]) {
         builder = builder.default_handler(Clientbound, Play, "chunks_biomes", chunks_biomes::<S>);
     }
     builder
@@ -249,6 +251,7 @@ pub fn chunks_biomes<S: HasShared>(
     let shared = step.shared();
     let (source, target) = (shared.backend, shared.client);
     let world = shared.chunk.world;
+    let synced = packets::synced_biome_ids(shared);
     let mut scratch = std::mem::take(&mut shared.chunk.scratch);
     let mut reader = Reader::new(&packet.data);
     let mut writer = Writer::with_capacity(packet.data.len() + 16);
@@ -277,9 +280,20 @@ pub fn chunks_biomes<S: HasShared>(
                 0
             };
             let format = Format::biomes(target, world.biome_bits.unwrap_or(bits));
-            // INTEGRATION: data-driven biome IDs pass unchanged until the
-            // registries codec provides their mapping.
-            biomes.convert(None, &format, &mut scratch.values, &mut scratch.raw)?;
+            let map = synced.as_ref().map(|(table, fallback)| {
+                move |id: i32| {
+                    usize::try_from(id)
+                        .ok()
+                        .and_then(|id| table.get(id).copied())
+                        .unwrap_or(*fallback)
+                }
+            });
+            biomes.convert(
+                map.as_ref().map(|map| map as &dyn Fn(i32) -> i32),
+                &format,
+                &mut scratch.values,
+                &mut scratch.raw,
+            )?;
             biomes.write(&mut out, target)?;
             if target == 770 {
                 written_padding += if biomes.data.len() < 128 { 1 } else { 2 };

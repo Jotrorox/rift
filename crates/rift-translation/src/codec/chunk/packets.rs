@@ -82,20 +82,28 @@ pub fn biome_ids(from: i32, to: i32) -> Option<&'static Mapping> {
 
 /// Across 1.16.1 / 1.16.2, where one side numbers biomes by its built-in
 /// registry and the other by the registry the server sent (or the client
-/// was sent): the client's ID for each backend ID, by name, with the
-/// client's plains for biomes it lacks.
-fn synced_biome_ids(shared: &Shared) -> Option<(Vec<i32>, i32)> {
+/// was sent), and across 1.20.4 / 1.20.5, where the registry codec's own
+/// IDs give way to the order of `registry_data` entries (1.16.2 to 1.17.1 servers
+/// number biomes with gaps: the nether's are 170 to 173): the client's ID
+/// for each backend ID, by name, with the client's plains for biomes it
+/// lacks. `None` where every ID maps to itself.
+pub(super) fn synced_biome_ids(shared: &Shared) -> Option<(Vec<i32>, i32)> {
     use crate::codec::registries::{self, Side};
-    if (shared.backend < 751) == (shared.client < 751) {
+    let crosses = |boundary: i32| (shared.backend < boundary) != (shared.client < boundary);
+    if !crosses(751) && !crosses(766) {
         return None;
     }
     const BIOME: &str = "worldgen/biome";
     let fallback = registries::id_of(shared, Side::Client, BIOME, "plains").unwrap_or(0);
     let size = registries::size(shared, Side::Backend, BIOME);
-    let table = (0..size as i32)
+    let table: Vec<i32> = (0..size as i32)
         .map(|id| registries::map(shared, Direction::Clientbound, BIOME, id).unwrap_or(fallback))
         .collect();
-    Some((table, fallback))
+    let identity = table
+        .iter()
+        .enumerate()
+        .all(|(id, mapped)| id as i32 == *mapped);
+    (crosses(751) || !identity).then_some((table, fallback))
 }
 
 fn plains(protocol: i32) -> i32 {
