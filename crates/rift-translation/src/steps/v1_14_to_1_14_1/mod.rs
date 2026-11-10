@@ -1,4 +1,8 @@
 //! Minecraft 1.14 (protocol 477) and 1.14.1 (protocol 480).
+//!
+//! The two protocols share packet IDs and layouts. Villagers and wandering
+//! traders gained an entity data field (the head-shake timer), which the
+//! entity codec converts; everything else passes through.
 mod down;
 mod up;
 
