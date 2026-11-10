@@ -239,8 +239,28 @@ def decode_report(session, limit=8):
     return report[:limit * 4]
 
 
-def run_cell(server, proxy, protocol, steps, label, directory, args):
-    """Run the scenario for one client protocol on a running server."""
+# Every later cell on a reused server builds this much further along x, out
+# of the view distance of the earlier build sites.
+CELL_SPACING = 128
+
+
+def reset_world(server):
+    """Undo the global state an earlier cell's scenario left on a reused
+    server (the scoreboard, team, boss bar and world border), so the next
+    cell's commands change something and are seen. Runs before its players
+    join; errors for things that do not exist are harmless."""
+    cmd = scenario.Commands(server.protocol, server.software)
+    lines = ["scoreboard objectives remove riftobj", cmd.team("remove", "riftteam"),
+             "worldborder set 59999968", "worldborder warning distance 5"]
+    if server.protocol >= 393:
+        lines.append("bossbar remove rift:bar")
+    for line in lines:
+        server.console(line)
+
+
+def run_cell(server, proxy, protocol, steps, label, directory, args, cell=0):
+    """Run the scenario for one client protocol on a running server; `cell`
+    counts the cells run on it before."""
     result = dict(server=server.name, server_version=server.release, server_protocol=server.protocol,
                   client=release(protocol), client_protocol=protocol, via=args.via,
                   status="FAIL", steps=[], findings=[], logs=str(directory))
@@ -249,6 +269,8 @@ def run_cell(server, proxy, protocol, steps, label, directory, args):
     log_start, proxy_start = server.offset(), proxy.offset() if proxy else 0
     ref = via = None
     try:
+        if cell:
+            reset_world(server)
         via_port = proxy.port if proxy else server.port
         try:
             ref_reg = matrix_registries.registries(server.protocol)
@@ -267,7 +289,7 @@ def run_cell(server, proxy, protocol, steps, label, directory, args):
         result["joined"] = round(time.monotonic() - begun, 1)
         x, y, z = (int(v // 1) for v in ref.position[:3])
         surface = fixtures.surface(server.protocol, server.software)
-        base = (0, surface if surface is not None else y, 0)
+        base = (cell * CELL_SPACING, surface if surface is not None else y, 0)
         cx = scenario.Context(server, ref, via, ref_reg, via_reg, base)
         for entry in steps:
             reason = entry.applies(server.protocol, protocol, server.software)
@@ -364,10 +386,10 @@ def run_server(name, clients, args, steps):
                 f"on port {server.port}")
         if args.via != "direct":
             proxy = Proxy(args.via, server, workdir, args.trace, args.binary).start()
-        for protocol in clients or [server.protocol]:
+        for cell, protocol in enumerate(clients or [server.protocol]):
             label = f"{server.name}-client-{release(protocol)}"
             directory = RUNS / f"{stamp}-{label}"
-            result = run_cell(server, proxy, protocol, steps, label, directory, args)
+            result = run_cell(server, proxy, protocol, steps, label, directory, args, cell)
             result["server_start"] = server.started
             results.append(result)
             print(summary_line(result), flush=True)

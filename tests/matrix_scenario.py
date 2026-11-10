@@ -645,7 +645,7 @@ def step_teleport(cx):
             raise StepFailure(f"{session.label} ended at {session.position[:3]}, expected x={expected} y={y}")
     # Blocks set in a chunk the client has not received yet arrive inside the
     # chunk data, not as block updates: wait for the chunks around the build.
-    wanted = {(cx_, cz) for cx_ in range(-1, 2) for cz in range(-1, 2)}
+    wanted = {((x >> 4) + cx_, (z >> 4) + cz) for cx_ in range(-1, 2) for cz in range(-1, 2)}
     for session in (cx.ref, cx.via):
         deadline = time.monotonic() + 20
         while not wanted <= session.chunks:
