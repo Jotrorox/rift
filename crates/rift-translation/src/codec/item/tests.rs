@@ -828,6 +828,32 @@ mod layouts {
             )
             .unwrap();
         assert_eq!(read(770, &outs[0], Click::read), click);
+        // A damaged sword hashes its damage as the 1.21.5 client would.
+        use crate::codec::item::components::{
+            Component, Value, hashed::hash_component, layouts::Layout,
+        };
+        let damage = Component {
+            kind: "damage",
+            value: Value::Int(5),
+        };
+        let hash = hash_component(&damage).unwrap();
+        let mut damaged = full.clone();
+        let mut stack = sword(769).unwrap();
+        stack.components.as_mut().unwrap().added.push(damage);
+        damaged.changed = vec![(36, ClickSlot::Full(Some(stack)))];
+        let outs = Defaults::new(769, 770)
+            .serverbound(
+                State::Play,
+                "container_click",
+                &body(|w| damaged.write(769, w)),
+            )
+            .unwrap();
+        let hashed = read(770, &outs[0], Click::read);
+        let damage_id = Layout::of(770).unwrap().id("damage").unwrap();
+        let ClickSlot::Hashed(Some(stack)) = &hashed.changed[0].1 else {
+            panic!("{hashed:?}");
+        };
+        assert_eq!(stack.components, vec![(damage_id, hash)]);
     }
 
     #[test]

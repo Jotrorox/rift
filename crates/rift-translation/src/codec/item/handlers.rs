@@ -2,7 +2,7 @@
 use super::{
     ItemStack, Stack,
     advancements::Advancements,
-    components::Components,
+    components::{self, Components},
     convert,
     convert::{item_id, item_name, map_item},
     merchant::Offers,
@@ -1094,25 +1094,40 @@ fn unhash(
     }))
 }
 
-/// A whole stack for a backend that wants hashes (1.21.5 on). A stack
-/// without components hashes to empty lists; for one with components the
-/// hashes are left out and the backend corrects the client.
+/// A whole stack for a backend that wants hashes (1.21.5 on): converted,
+/// then hashed the way the receiver's client hashes; components the
+/// component codec cannot hash get a wrong hash and the backend corrects
+/// the client.
 fn hash(
     shared: &mut Shared,
     direction: Direction,
     stack: &Stack,
 ) -> io::Result<Option<HashedStack>> {
-    let Some(stack) = stack else {
+    let mut stack = stack.clone();
+    convert::stack(shared, direction, &mut stack)?;
+    let target = shared.target(direction);
+    let Some(hashed) = components::hashed::from_stack(target, stack.as_ref())? else {
         return Ok(None);
     };
-    let mapped = map_item(shared, direction, stack.id)?;
-    // INTEGRATION: hashing component values (CRC32C over their hash-ops
-    // encoding) belongs to the component codec.
+    let layout = components::layouts::Layout::of(target)?;
+    let id = |kind: &str| {
+        layout
+            .id(kind)
+            .ok_or_else(|| invalid(&format!("protocol {target} has no {kind} component")))
+    };
     Ok(Some(HashedStack {
-        item: mapped.id,
-        count: stack.count,
-        components: Vec::new(),
-        removed: Vec::new(),
+        item: hashed.item,
+        count: hashed.count,
+        components: hashed
+            .added
+            .iter()
+            .map(|(kind, hash)| Ok((id(kind)?, *hash)))
+            .collect::<io::Result<_>>()?,
+        removed: hashed
+            .removed
+            .iter()
+            .map(|kind| id(kind))
+            .collect::<io::Result<_>>()?,
     }))
 }
 
