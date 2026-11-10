@@ -245,7 +245,7 @@ class Switching:
         self.worlds += 1
         modes = [gamemode_of(record.value) for record in session.packets(("login", "respawn"), login.index)]
         modes += [record.value.get("gameMode") for record in session.packets("game_state_change", login.index)
-                  if record.value.get("reason") == 3]
+                  if record.value.get("reason") in (3, "change_game_mode")]
         modes = [mode for mode in modes if mode is not None]
         expected = GAMEMODE[role] if backend.software != "pumpkin" else 1
         if not modes or int(modes[-1]) & 7 != expected:
