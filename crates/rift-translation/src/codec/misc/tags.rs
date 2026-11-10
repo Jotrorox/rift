@@ -35,6 +35,33 @@ fn fixed(protocol: i32) -> &'static [&'static str] {
     if protocol < 477 { &FIXED[..3] } else { &FIXED }
 }
 
+/// Registries the data names by their newest name that older protocols
+/// send under another: (newest name, older name, first protocol with the
+/// newest). A client rejects tags of a registry it does not know by name.
+const RENAMED: [(&str, &str, i32); 1] = [("painting_variant", "motive", 759)];
+
+/// `registry` (namespaced or not) as `protocol` names it on the wire.
+fn wire_name(protocol: i32, registry: &str) -> String {
+    match RENAMED
+        .iter()
+        .find(|(newest, _, first)| protocol < *first && strip(registry) == *newest)
+    {
+        Some((_, older, _)) => format!("minecraft:{older}"),
+        None => registry.to_owned(),
+    }
+}
+
+/// A registry name from `protocol`'s wire as the data names it.
+fn data_name(protocol: i32, registry: &str) -> String {
+    match RENAMED
+        .iter()
+        .find(|(_, older, first)| protocol < *first && strip(registry) == *older)
+    {
+        Some((newest, _, _)) => format!("minecraft:{newest}"),
+        None => registry.to_owned(),
+    }
+}
+
 /// One registry's tags as sent.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RegistryTags {
@@ -97,7 +124,7 @@ pub fn read(protocol: i32, data: &[u8]) -> io::Result<TagSet> {
         }
     } else {
         for _ in 0..reader.count()? {
-            let registry = reader.str()?.to_owned();
+            let registry = data_name(protocol, reader.str()?);
             set.registries.push(RegistryTags {
                 registry,
                 tags: read_tags(&mut reader)?,
@@ -133,7 +160,7 @@ pub fn write(protocol: i32, set: &TagSet) -> io::Result<Vec<u8>> {
     } else {
         writer.varint(set.registries.len() as i32);
         for registry in &set.registries {
-            writer.string(&registry.registry);
+            writer.string(&wire_name(protocol, &registry.registry));
             write_tags(&mut writer, &registry.tags);
         }
     }
@@ -413,6 +440,48 @@ mod tests {
         assert!(read(755, &bytes[..bytes.len() - 1]).is_err());
         assert!(read(755, &[0xff, 0xff, 0xff, 0xff, 0x07]).is_err());
         assert!(read(393, &[]).is_err());
+    }
+
+    #[test]
+    fn renamed_registries_go_by_the_receivers_name() {
+        // 1.19 calls painting tags painting_variant; 1.18.2 knows the
+        // registry only as motive and rejects tags of one it does not know.
+        let body = vanilla_update_tags(759).unwrap();
+        assert!(
+            read(759, &body)
+                .unwrap()
+                .registry_mut("painting_variant")
+                .is_some()
+        );
+        let mut step = Defaults::new(758, 759);
+        let out = step.clientbound(State::Play, "update_tags", &body).unwrap();
+        let wire: Vec<String> = {
+            let mut reader = Reader::new(&out[0].data);
+            (0..reader.count().unwrap())
+                .map(|_| {
+                    let name = reader.str().unwrap().to_owned();
+                    read_tags(&mut reader).unwrap();
+                    name
+                })
+                .collect()
+        };
+        assert!(wire.contains(&"minecraft:motive".to_owned()), "{wire:?}");
+        assert!(!wire.iter().any(|name| name.contains("painting_variant")));
+        // Read back, the data's name again; and a motive set goes up renamed.
+        let paintings = |protocol: i32, body: &[u8]| {
+            let mut set = read(protocol, body).unwrap();
+            let paintings = set.registry_mut("painting_variant").unwrap().clone();
+            names(
+                protocol,
+                &TagSet {
+                    registries: vec![paintings],
+                },
+            )
+        };
+        let back = Defaults::new(759, 758)
+            .clientbound(State::Play, "update_tags", &out[0].data)
+            .unwrap();
+        assert_eq!(paintings(759, &back[0].data), paintings(758, &out[0].data));
     }
 
     #[test]
