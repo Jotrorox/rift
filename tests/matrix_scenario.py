@@ -832,6 +832,11 @@ def step_particles_and_sounds(cx):
     via = sounds_seen(cx.via, cx.via_reg, cx.since("via"))
     if not ref:
         cx.scenario("no sounds")
+    if (cx.server.protocol < 393) != (cx.via.protocol < 393):
+        # 1.13 renamed the note block sounds.
+        harp = {"minecraft:block.note.harp": "minecraft:block.note_block.harp",
+                "minecraft:block.note_block.harp": "minecraft:block.note.harp"}
+        ref = [harp.get(name, name) for name in ref]
     cx.compare_names("sounds", "sound_event", ref, via)
     count = lambda session, who: len(session.packets("world_particles", cx.since(who)))
     if count(cx.via, "via") < count(cx.ref, "ref"):
@@ -983,7 +988,10 @@ def step_tab_complete(cx):
         if session.protocol < 393:
             session.send_packet("tab_complete", {"text": "/gamemo", "assumeCommand": False})
         else:
-            session.send_packet("tab_complete", {"transactionId": 7, "text": "/gamemo"})
+            # A 1.13 client leaves the slash out (its server would parse it
+            # as part of the command); 1.13.1 servers skip one.
+            text = "gamemo" if session.protocol == 393 else "/gamemo"
+            session.send_packet("tab_complete", {"transactionId": 7, "text": text})
         record = session.wait_packet("tab_complete", "suggestions", 8, mark)
         return sorted(entry if isinstance(entry, str) else entry["match"] for entry in record.value["matches"])
     cx.console(f"op {cx.ref.name}")
