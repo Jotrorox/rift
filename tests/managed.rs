@@ -71,16 +71,20 @@ fn managed_process_helper() {
             }
         });
     }
-    let ready_at = Instant::now();
+    // A flapping helper exits shortly after the supervisor's readiness probe
+    // connected, however long a loaded runner took to send it, and still far
+    // too soon to count as stable.
+    let mut probed_at = None;
     while !stopping.load(Ordering::Acquire) {
         if fs::remove_file("crash").is_ok()
-            // Ready long enough for a readiness probe on a loaded Windows
-            // runner to see it, still far too briefly to count as stable.
-            || (mode == "flap" && ready_at.elapsed() >= Duration::from_millis(500))
+            || (mode == "flap"
+                && probed_at.is_some_and(|at: Instant| at.elapsed() >= Duration::from_millis(300)))
         {
             return;
         }
-        let _ = listener.accept();
+        if listener.accept().is_ok() {
+            probed_at.get_or_insert_with(Instant::now);
+        }
         std::thread::sleep(Duration::from_millis(10));
     }
 }

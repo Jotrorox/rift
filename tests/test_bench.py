@@ -85,6 +85,28 @@ class SummaryTests(unittest.TestCase):
             self.assertEqual(bench.process_sample(123), {"cpu_s": 1.5, "rss_mib": 2})
 
 
+class WarmUpTests(unittest.TestCase):
+    def passes(self, *errors):
+        """One warmup pass per argument; a pass fails when its error is set."""
+        results = [([{"error": error}], [], []) for error in errors]
+
+        async def run_bursts(*_):
+            return results.pop(0)
+
+        return results, patch("bench.run_bursts", side_effect=run_bursts)
+
+    def test_repeats_until_the_proxy_has_shed_the_previous_burst(self):
+        results, run_bursts = self.passes("ConnectionResetError:104", None, None)
+        with run_bursts, patch("bench.time.sleep"):
+            bench.warm_up(1, "lua", 1)
+        self.assertEqual(len(results), 1)
+
+    def test_a_proxy_that_never_recovers_fails_the_run(self):
+        _, run_bursts = self.passes("ConnectionResetError:104")
+        with run_bursts, self.assertRaisesRegex(RuntimeError, "lua: sequential warmup failed"):
+            bench.warm_up(1, "lua", 1, settle=0)
+
+
 class BurstTests(unittest.IsolatedAsyncioTestCase):
     async def start_server(self, callback, **options):
         server = await asyncio.start_server(callback, "127.0.0.1", 0, **options)

@@ -31,6 +31,30 @@ struct Fixture {
     _serial: MutexGuard<'static, ()>,
 }
 
+/// Free ports below every platform's ephemeral range, held open until the
+/// caller drops them. The child binds these fixed addresses after its own
+/// `:0` listeners, and the kernel may hand a just-released ephemeral port to
+/// one of those (or to any outbound connection) first.
+fn reserve_fixed_ports(count: usize) -> Vec<TcpListener> {
+    const RANGE: std::ops::Range<u16> = 20_000..32_000;
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let span = usize::from(RANGE.end - RANGE.start);
+    // Start somewhere different in each test process.
+    let offset = std::process::id() as usize * 97;
+    let mut reservations = Vec::with_capacity(count);
+    for _ in 0..span {
+        let step = NEXT.fetch_add(1, Ordering::Relaxed);
+        let port = RANGE.start + ((offset + step) % span) as u16;
+        if let Ok(listener) = TcpListener::bind(("127.0.0.1", port)) {
+            reservations.push(listener);
+            if reservations.len() == count {
+                return reservations;
+            }
+        }
+    }
+    panic!("no free fixture ports in {RANGE:?}");
+}
+
 impl Fixture {
     fn new() -> Self {
         // These cases rebind fixed ports during reload. Serialize their fixtures
@@ -44,10 +68,7 @@ impl Fixture {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&directory).unwrap();
-        // Reserve all addresses together so none can be selected twice.
-        let reservations: Vec<_> = (0..3)
-            .map(|_| TcpListener::bind("127.0.0.1:0").unwrap())
-            .collect();
+        let reservations = reserve_fixed_ports(3);
         Self {
             directory,
             web: reservations[0].local_addr().unwrap(),
