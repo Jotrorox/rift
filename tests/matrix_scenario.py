@@ -666,10 +666,22 @@ def step_teleport(cx):
     # whose confirmation arrives after a newer teleport ("Wrong teleport id").
     time.sleep(1)
     x, y, z = cx.base
+    loaded = None
     if y < 0 and cx.via.protocol < 755:
         # Before 1.17 a client's world starts at 0 and the translator cuts
         # off what lies below: build on a platform that client can see.
-        cx.console(f"fill {x - 4} 0 {z - 4} {x + 24} 0 {z + 12} minecraft:stone")
+        # A later cell builds far from every player, where chunks are not
+        # loaded and `fill` fails: load them first, and retry until it took.
+        loaded = f"{x - 4} {z - 4} {x + 24} {z + 12}"
+        cx.console(f"forceload add {loaded}")
+        deadline = time.monotonic() + 15
+        while True:
+            since = cx.server.offset()
+            cx.console(f"fill {x - 4} 0 {z - 4} {x + 24} 0 {z + 12} minecraft:stone")
+            line = cx.server.wait_log(r"(?i)filled \d+|not loaded|no blocks were filled", 5, since)
+            if line is None or "not loaded" not in line or time.monotonic() > deadline:
+                break
+            time.sleep(0.5)
         y = 1
         cx.base = (x, y, z)
     marks = (cx.ref.mark(), cx.via.mark())
@@ -693,6 +705,8 @@ def step_teleport(cx):
                     cx.scenario(f"chunks {missing} never arrived")
                 raise StepFailure(f"the translated client never received chunks {missing}")
             time.sleep(0.1)
+    if loaded:
+        cx.console(f"forceload remove {loaded}")  # The players keep them loaded now.
     cx.sync()
 
 
