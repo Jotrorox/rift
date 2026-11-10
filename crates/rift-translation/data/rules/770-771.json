@@ -1,0 +1,8 @@
+{
+  "sound_event": {
+    "renames": {
+      "entity.leash_knot.break": "item.lead.break",
+      "entity.leash_knot.place": "item.lead.tied"
+    }
+  }
+}

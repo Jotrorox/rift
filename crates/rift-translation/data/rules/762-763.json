@@ -1,0 +1,27 @@
+{
+  "block_entity_type": {
+    "renames": {
+      "suspicious_sand": "brushable_block"
+    }
+  },
+  "item": {
+    "renames": {
+      "pottery_shard_archer": "archer_pottery_sherd",
+      "pottery_shard_arms_up": "arms_up_pottery_sherd",
+      "pottery_shard_prize": "prize_pottery_sherd",
+      "pottery_shard_skull": "skull_pottery_sherd"
+    }
+  },
+  "particle_type": {
+    "renames": {
+      "falling_cherry_leaves": "cherry_leaves"
+    }
+  },
+  "sound_event": {
+    "renames": {
+      "item.brush.brush_sand_completed": "item.brush.brushing.sand.complete",
+      "item.brush.brushing": "item.brush.brushing.generic",
+      "music.overworld.jungle_and_forest": "music.overworld.jungle"
+    }
+  }
+}
