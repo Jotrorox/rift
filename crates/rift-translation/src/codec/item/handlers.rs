@@ -2,7 +2,7 @@
 use super::{
     ItemStack, Stack,
     advancements::Advancements,
-    components::Components,
+    components::{self, Components},
     convert,
     convert::{item_id, item_name, map_item},
     merchant::Offers,
@@ -1127,10 +1127,10 @@ fn hash(
     let mut stack = stack.clone();
     convert::stack(shared, direction, &mut stack)?;
     let target = shared.target(direction);
-    let Some(hashed) = super::components::hashed::from_stack(target, stack.as_ref())? else {
+    let Some(hashed) = components::hashed::from_stack(target, stack.as_ref())? else {
         return Ok(None);
     };
-    let layout = super::components::layouts::Layout::of(target)?;
+    let layout = components::layouts::Layout::of(target)?;
     let id = |kind: &str| {
         layout
             .id(kind)

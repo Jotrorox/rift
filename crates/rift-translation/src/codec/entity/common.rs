@@ -3,7 +3,10 @@
 //! the structures other codecs own, and small wire conversions.
 use crate::{
     Direction,
-    codec::Shared,
+    codec::{
+        Shared,
+        registries::{self, Side},
+    },
     data,
     mapping::Mapping,
     version,
@@ -28,6 +31,34 @@ pub fn registry(
         return None;
     }
     Some(shared.mapping(direction, name))
+}
+
+/// The receiver's ID for the sender's `id` in `registry`: through the
+/// built-in mapping when both protocols build the registry in, else by
+/// entry name through what the registries codec saw on each side (one or
+/// both synchronise it). `None` when the receiver has no such entry; IDs of
+/// registries neither knows pass unchanged.
+pub fn registry_id(
+    shared: &mut Shared,
+    direction: Direction,
+    name: &'static str,
+    id: i32,
+) -> Option<i32> {
+    if let Some(mapping) = registry(shared, direction, name) {
+        return mapping.get(id);
+    }
+    if registries::size(shared, Side::sender(direction), name) == 0 {
+        return Some(id);
+    }
+    registries::map(shared, direction, name, id)
+}
+
+/// Whether the two protocols agree on whether `name` is built in, so that
+/// an unchanged built-in registry (or one synchronised on both sides, where
+/// the client side keeps the backend's numbering) keeps every ID.
+pub fn registry_unchanged(from: i32, to: i32, name: &str) -> bool {
+    data::version(from).registry(name).is_some() == data::version(to).registry(name).is_some()
+        && registry_identity(from, to, name)
 }
 
 /// Whether a built-in registry keeps every ID between two protocols (true

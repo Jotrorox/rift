@@ -222,7 +222,7 @@ fn unchanged(from: i32, to: i32, kind: Kind) -> bool {
 
 fn registry_kind_unchanged(from: i32, to: i32, kind: Kind) -> bool {
     kind.registry()
-        .is_none_or(|registry| common::registry_identity(from, to, registry))
+        .is_none_or(|registry| common::registry_unchanged(from, to, registry))
 }
 
 /// Constants Mojang renamed without changing their meaning.
@@ -486,11 +486,11 @@ fn convert_value(
             rw.w.u8(arm.clamp(0, 1) as u8);
         }
         (PaintingVariant, PaintingVariantHolder) | (WolfVariant, WolfVariantHolder) => {
-            // INTEGRATION: the IDs of data-driven registries follow the
-            // registries the backend synchronised; the registries codec
-            // should map them once it renumbers registry entries.
             let id = rw.r.varint()?;
-            rw.w.varint(id + 1);
+            match map_registry(shared, direction, target.from, id) {
+                Some(id) => drop(rw.w.varint(id + 1)),
+                None => return Ok(false),
+            }
         }
         (PaintingVariantHolder, PaintingVariant) | (WolfVariantHolder, WolfVariant) => {
             let holder = rw.r.varint()?;
@@ -498,7 +498,10 @@ fn convert_value(
                 skip_inline(from, target.from, &mut rw.r)?;
                 return Ok(false);
             }
-            rw.w.varint(holder - 1);
+            match map_registry(shared, direction, target.from, holder - 1) {
+                Some(id) => drop(rw.w.varint(id)),
+                None => return Ok(false),
+            }
         }
         (kind, _) => {
             skip_value(from, kind, &mut rw.r)?;
@@ -508,15 +511,11 @@ fn convert_value(
     Ok(true)
 }
 
-/// A registry-ID value in the receiver's terms. Data-driven registries
-/// keep their IDs (see the INTEGRATION note above); `None` when a built-in
-/// registry has no equivalent.
+/// A registry-ID value in the receiver's terms (see
+/// [`common::registry_id`]); `None` when the receiver has no equivalent.
 fn map_registry(shared: &mut Shared, direction: Direction, kind: Kind, id: i32) -> Option<i32> {
-    match kind
-        .registry()
-        .and_then(|registry| common::registry(shared, direction, registry))
-    {
-        Some(mapping) => mapping.get(id),
+    match kind.registry() {
+        Some(registry) => common::registry_id(shared, direction, registry, id),
         None => Some(id),
     }
 }
