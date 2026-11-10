@@ -169,14 +169,22 @@ pub(super) fn down(
         lossy = true;
         (1, 0)
     };
+    // 1.12 always has a data value; a missing or wider tag would not
+    // come back as it was.
+    let mut numeric = |tag: &mut Compound, key: &str| -> i16 {
+        match tag.remove(key) {
+            Some(Nbt::Int(value)) if i16::try_from(value).is_ok() => value as i16,
+            other => {
+                lossy = true;
+                other.and_then(|value| value.as_i64()).unwrap_or(0) as i16
+            }
+        }
+    };
     if damageable(id) {
-        damage = tag
-            .remove("Damage")
-            .and_then(|damage| damage.as_i64())
-            .unwrap_or(0) as i16;
+        damage = numeric(&mut tag, "Damage");
     }
     if id == FILLED_MAP {
-        damage = tag.remove("map").and_then(|map| map.as_i64()).unwrap_or(0) as i16;
+        damage = numeric(&mut tag, "map");
     }
     if id == BANNER || id == SHIELD {
         invert_banner_colors(&mut tag);
@@ -305,6 +313,10 @@ fn enchantments_up(tag: &mut Compound) -> bool {
                     lossy = true;
                     return None;
                 };
+                // Vanilla writes shorts; anything else would not come back.
+                lossy |= !matches!(entry.get("id"), Some(Nbt::Short(_)))
+                    || !matches!(entry.get("lvl"), Some(Nbt::Short(_)))
+                    || entry.len() != 2;
                 let mut converted = Compound::new();
                 converted.insert("id", format!("minecraft:{name}"));
                 converted.insert("lvl", entry.int("lvl").unwrap_or(0) as i16);
@@ -335,6 +347,7 @@ fn enchantments_down(tag: &mut Compound) -> bool {
                     lossy = true;
                     return None;
                 };
+                lossy |= !matches!(entry.get("lvl"), Some(Nbt::Short(_))) || entry.len() != 2;
                 let mut converted = Compound::new();
                 converted.insert("id", id as i16);
                 converted.insert("lvl", entry.int("lvl").unwrap_or(0) as i16);
