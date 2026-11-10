@@ -37,8 +37,35 @@ impl Out {
     }
 }
 
+/// With `RIFT_S02_DUMP` set, every packet the tests see the step produce is
+/// appended to that file as a JSON line, for `schema_check.py`.
+fn dump(direction: Direction, state: State, name: &str, data: &[u8]) {
+    let Some(path) = std::env::var_os("RIFT_S02_DUMP") else {
+        return;
+    };
+    use std::io::Write as _;
+    let line = serde_json::json!({
+        "to": if direction == Direction::Clientbound { "client" } else { "backend" },
+        "s": match state {
+            State::Login => "login",
+            State::Configuration => "configuration",
+            _ => "play",
+        },
+        "name": name,
+        "hex": to_hex(data),
+    });
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .unwrap();
+    writeln!(file, "{line}").unwrap();
+}
+
 fn collect(emitted: VecDeque<Emitted>) -> Vec<Out> {
-    emitted
+    let outs: Vec<Out> = emitted
         .into_iter()
         .map(|emitted| {
             let protocol = match emitted.direction {
@@ -55,7 +82,11 @@ fn collect(emitted: VecDeque<Emitted>) -> Vec<Out> {
                 data: emitted.packet.data,
             }
         })
-        .collect()
+        .collect();
+    for out in &outs {
+        dump(out.direction, out.state, &out.name, &out.data);
+    }
+    outs
 }
 
 /// Send the packet `name` (in the sender's protocol) through `step`.
@@ -797,7 +828,15 @@ fn complete_chunk(step: &mut Up, original: &[u8], converted: Vec<u8>) -> Vec<u8>
         backend_protocol: OLD,
     };
     world::complete(step, &mut cx, 0).unwrap();
-    emitted.pop_front().unwrap().packet.data
+    let completed = emitted.pop_front().unwrap().packet.data;
+    dump(
+        Direction::Clientbound,
+        State::Play,
+        "level_chunk",
+        &completed,
+    );
+    collect(emitted);
+    completed
 }
 
 #[test]
@@ -1153,6 +1192,7 @@ fn load(step: &mut Up, x: i32, z: i32, blocks: &[((i32, i32, i32), &str)]) -> (C
     };
     world::complete(step, &mut cx, 0).unwrap();
     let chunk = emitted.pop_front().unwrap().packet.data;
+    dump(Direction::Clientbound, State::Play, "level_chunk", &chunk);
     (
         Column::read(&chunk, Format::Flattened, true).unwrap(),
         collect(emitted),
