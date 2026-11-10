@@ -96,6 +96,30 @@ async fn group_queue_capacity_and_fifo_follow_live_instance_membership() {
     assert_eq!(runtime.queue_lengths()["game"], 0);
 }
 
+#[tokio::test]
+async fn players_on_an_instance_carry_its_service_group_as_a_context() {
+    let source = "return {listeners={public='127.0.0.1:0'},backends={hub='127.0.0.1:25001'},routes={public='hub'},service_groups={lobby={command={'unused'},directory='instances/{name}',port_range={26010,26013}}}}";
+    let mut config = Config::from_lua(source, "group-context.lua").unwrap();
+    config.add_instance("lobby", "lobby-3", 26012).unwrap();
+    let runtime = Extensions::new(&config, Broker::new(Default::default()).unwrap(), None).unwrap();
+    runtime.update_destinations(&config);
+    let uuid = Uuid::from_bytes([9; 16]);
+    let (player, _actions) = runtime
+        .players()
+        .register(9, &[9; 16], "Alice", 774, "lobby-3");
+    let contexts = || runtime.permissions().contexts(uuid).to_string();
+    assert_eq!(contexts(), "group=lobby;server=lobby-3");
+    player.set_server("hub");
+    assert_eq!(contexts(), "server=hub");
+    player.set_server("lobby-3");
+    assert_eq!(contexts(), "group=lobby;server=lobby-3");
+    // The import mapping knows the groups of the live configuration.
+    assert_eq!(
+        runtime.permissions().service_groups(),
+        ["lobby".to_owned()].into()
+    );
+}
+
 #[test]
 fn version_schema_and_authenticated_mode_are_required() {
     for invalid in [
