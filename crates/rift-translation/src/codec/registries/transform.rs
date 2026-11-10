@@ -69,7 +69,27 @@ pub fn apply(
         }
         _ => {}
     }
+    let attributes = match registry {
+        "dimension_type" | "worldgen/biome" => element.compound_mut("attributes"),
+        "timeline" => element.compound_mut("tracks"),
+        _ => None,
+    };
+    if let Some(attributes) = attributes {
+        known_attributes(to, attributes);
+    }
     Ok(())
+}
+
+/// Drop environment attributes the receiver lacks: its client fails to load
+/// a registry naming an attribute key it does not know (26.1 added light
+/// colours, 26.3 spawning and bed rules).
+fn known_attributes(protocol: i32, attributes: &mut Compound) {
+    let Some(known) = data::version(protocol).registry("environment_attribute") else {
+        return;
+    };
+    attributes
+        .0
+        .retain(|(key, _)| known.id(data::strip(key)).is_some());
 }
 
 /// Fields that pick the vanilla template of a registry (see
