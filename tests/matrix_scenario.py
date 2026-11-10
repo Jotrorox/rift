@@ -590,7 +590,7 @@ class Context:
 
     # Comparisons
 
-    def compare_names(self, what, registry, reference, translated, source=None, rename=True):
+    def compare_names(self, what, registry, reference, translated, source=None):
         """Every name the reference saw must reach the translated client: the
         same name if the client's version knows it, else any stand-in (INFO).
         IDs outside the client's registry fail. `source` is the protocol
@@ -601,8 +601,7 @@ class Context:
             self.fail(f"{what}: IDs outside the client's registries: {invalid[:5]}")
         remaining = list(translated)
         for name in reference:
-            target = (matrix_registries.renamed(registry, name, source or self.ref.protocol,
-                                                self.via.protocol) if rename else name)
+            target = matrix_registries.renamed(registry, name, source or self.ref.protocol, self.via.protocol)
             if target in remaining:
                 remaining.remove(target)
             elif name.startswith("<"):
