@@ -1,11 +1,13 @@
 """Registry names per protocol, for comparing what two clients of different
 versions saw.
 
-From 1.14 on the names come from the vanilla server's own data generator
-(`net.minecraft.data.Main --reports`: registries.json and blocks.json), run
-once per release under a lock and cached in RIFT_VIA_CACHE/reports. Before
-1.14 the generator has no registry report, so minecraft-data's items, blocks,
-entities, effects and particles files at the pinned commit are used.
+From 1.13 on item names and block states come from the vanilla server's own
+data generator (`net.minecraft.data.Main --reports`), run once per release
+under a lock and cached in RIFT_VIA_CACHE/reports; from 1.14 on every
+registry does (registries.json). 1.13's generator has no registry report, so
+its entity, effect and particle names, and all of 1.12's names, come from
+minecraft-data at the pinned commit. (minecraft-data reuses 1.13's item IDs
+for 1.13.1, which added five items, so its item data is not used there.)
 """
 
 import json
@@ -47,7 +49,11 @@ def reports(name):
                         shutil.rmtree(directory)
                     (Path(temporary) / "out").replace(directory)
     load = lambda report: json.loads((directory / "reports" / report).read_text())
-    return load("registries.json"), load("blocks.json"), directory / "reports"
+    if (directory / "reports" / "registries.json").exists():
+        registries = load("registries.json")
+    else:  # 1.13 reports only items and blocks.
+        registries = {"minecraft:item": {"entries": load("items.json")}}
+    return registries, load("blocks.json"), directory / "reports"
 
 
 def ordered(registry):
@@ -99,6 +105,12 @@ class Registries:
             self._reports()
         else:
             self._minecraft_data()
+            if protocol >= 393:
+                registries, blocks, path = reports(vanilla_for(protocol))
+                self.source += f"; items and block states from {path}"
+                self.names["item"] = ordered(registries["minecraft:item"])
+                self.states = {state["id"]: block for block, data in blocks.items() for state in data["states"]}
+                self.names["block"] = list(blocks)
         self.ids = {key: {name: index for index, name in enumerate(names)}
                     for key, names in self.names.items()}
 
