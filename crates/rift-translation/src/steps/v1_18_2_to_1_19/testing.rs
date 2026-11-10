@@ -68,6 +68,7 @@ impl Harness {
                         Direction::Clientbound => self.client,
                         Direction::Serverbound => self.backend,
                     };
+                    dump(protocol, direction, state, &packet, name);
                     Out {
                         direction,
                         state,
@@ -96,6 +97,37 @@ impl Harness {
         assert_eq!(out.len(), 1, "{name} produced {out:?}");
         out.remove(0)
     }
+}
+
+/// With `RIFT_SIGNING_ERA_DUMP` set to a file, every packet a step produced
+/// in a test is appended to it as a JSON line, for
+/// `tests/translation_signing_era.py` to decode with minecraft-data schemas.
+fn dump(protocol: i32, direction: Direction, state: State, packet: &Packet, source: &str) {
+    static FILE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let Some(path) = std::env::var_os("RIFT_SIGNING_ERA_DUMP") else {
+        return;
+    };
+    let line = serde_json::json!({
+        "protocol": protocol,
+        "d": if direction == Direction::Clientbound { "c" } else { "s" },
+        "s": match state {
+            State::Login => "login",
+            State::Configuration => "configuration",
+            _ => "play",
+        },
+        "id": packet.id,
+        "name": data::version(protocol).packet_name(state, direction, packet.id),
+        "from": source,
+        "hex": packet.data.iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
+    });
+    let _guard = FILE.lock().unwrap();
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .expect("dump file");
+    writeln!(file, "{line}").expect("dump line");
 }
 
 /// The bodies of every recorded `name` packet of `protocol`'s session, or
