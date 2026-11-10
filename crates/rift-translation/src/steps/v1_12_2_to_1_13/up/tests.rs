@@ -719,12 +719,14 @@ fn block_entities_complete_beds_banners_skulls_pots_and_note_blocks() {
     let mut body = Writer::new();
     body.position_legacy(position).u8(11);
     crate::nbt::Nbt::Compound(tag).write(&mut body, true);
+    // The chunk codec and the step both correct the block from the block
+    // entity: one update reaches the client, before the block entity.
     let outs = clientbound(&mut step, "block_entity_data", &body.buf);
     assert_eq!(outs.len(), 2, "{outs:?}");
-    assert_eq!(outs[0].name, "block_entity_data");
-    assert_eq!(outs[1].name, "block_update");
+    assert_eq!(outs[0].name, "block_update");
+    assert_eq!(outs[1].name, "block_entity_data");
     let blue = state("blue_bed[part=head,facing=south]");
-    assert_eq!(outs[1].data, block_update(position, blue));
+    assert_eq!(outs[0].data, block_update(position, blue));
     // Later updates of the same bed stay blue; another block forgets it.
     let out = only(clientbound(
         &mut step,
@@ -762,7 +764,8 @@ fn block_entities_complete_beds_banners_skulls_pots_and_note_blocks() {
         &hex("ffffa8c013fffe87c011"),
     ));
     assert_eq!(out.data, block_update(pot, state("flower_pot")));
-    let outs = clientbound(
+    // 1.13 pots have no block entity: only the potted plant arrives.
+    let out = only(clientbound(
         &mut step,
         "block_entity_data",
         &hex(concat!(
@@ -770,8 +773,9 @@ fn block_entities_complete_beds_banners_skulls_pots_and_note_blocks() {
             "77657203000178fffffea303000179000000040300017afffffe870300044461746100000000",
             "080002696400146d696e6563726166743a666c6f7765725f706f7400"
         )),
-    );
-    assert_eq!(outs[1].data, block_update(pot, state("potted_poppy")));
+    ));
+    assert_eq!(out.name, "block_update");
+    assert_eq!(out.data, block_update(pot, state("potted_poppy")));
 
     // A note block event tells instrument and note.
     let note = Position { x: 0, y: 64, z: 0 };

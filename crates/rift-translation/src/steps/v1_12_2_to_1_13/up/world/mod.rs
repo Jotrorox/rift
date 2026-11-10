@@ -258,6 +258,7 @@ fn block_update(step: &mut Up, cx: &mut Cx<'_>, state: State, packet: Packet) ->
     let mapping = step.shared.mapping(Direction::Clientbound, "block_state");
     let flattened = mapping.get(block).unwrap_or(0);
     let completed = complete_state(&mut step.world, position, flattened);
+    crate::codec::chunk::blocks::track(&mut step.shared, position, completed);
     let mut placed = [(key(position), completed as u16)];
     let changed = place(&mut step.world.store, &mut placed);
     let mut writer = Writer::with_capacity(12);
@@ -294,6 +295,7 @@ fn chunk_blocks_update(
         };
         let flattened = mapping.get(block).unwrap_or(0);
         let completed = complete_state(&mut step.world, position, flattened);
+        crate::codec::chunk::blocks::track(&mut step.shared, position, completed);
         placed.push((key(position), completed as u16));
     }
     reader.finish()?;
@@ -358,14 +360,25 @@ pub fn complete(step: &mut Up, cx: &mut Cx<'_>, start: usize) -> io::Result<()> 
         let (Some(state), Some(special)) = (known.state, known.special) else {
             continue;
         };
-        let Some(completed) = special.apply(state) else {
-            continue;
-        };
-        if completed != state {
-            known.state = Some(completed);
-            let mut writer = Writer::with_capacity(12);
-            writer.position_legacy(position).varint(completed);
-            cx.to_client(State::Play, Packet::new(ids.block_update, writer.buf));
+        let completed = special.apply(state).unwrap_or(state);
+        known.state = Some(completed);
+        let mut writer = Writer::with_capacity(12);
+        writer.position_legacy(position).varint(completed);
+        // The chunk codec corrects beds, banners, skulls and pots from the
+        // same block entity; its update carries what the step knows.
+        let codec = cx.emitted.range_mut(start..).find(|emitted| {
+            emitted.direction == Direction::Clientbound
+                && emitted.packet.id == ids.block_update
+                && Reader::new(&emitted.packet.data)
+                    .position_legacy()
+                    .is_ok_and(|at| at == position)
+        });
+        match codec {
+            Some(emitted) => emitted.packet.data = writer.buf,
+            None if completed != state => {
+                cx.to_client(State::Play, Packet::new(ids.block_update, writer.buf));
+            }
+            None => {}
         }
     }
     Ok(())
