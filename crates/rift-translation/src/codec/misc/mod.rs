@@ -10,6 +10,8 @@ pub mod screen;
 pub mod sound;
 pub mod stats;
 pub mod tags;
+#[cfg(test)]
+mod vectors;
 
 use super::HasShared;
 use crate::{Direction, State as Phase, step::RouteBuilder};
