@@ -402,6 +402,11 @@ fn corpus_entity_data_matches_tables() {
 fn corpus_converts_between_adjacent_protocols() {
     let mut report = BTreeMap::new();
     let mut failures = Vec::new();
+    // With RIFT_ENTITY_DUMP set, the converted packets are written there for
+    // `scripts/translation_entities.py --validate` to decode with the
+    // minecraft-data schemas.
+    let mut dump = std::env::var_os("RIFT_ENTITY_DUMP")
+        .map(|path| std::io::BufWriter::new(std::fs::File::create(path).expect("dump file")));
     for pair in PROTOCOLS.windows(2) {
         let (older, newer) = (pair[0].0, pair[1].0);
         for (client, backend) in [(newer, older), (older, newer)] {
@@ -440,6 +445,21 @@ fn corpus_converts_between_adjacent_protocols() {
                         continue;
                     }
                     converted += 1;
+                    if let Some(dump) = &mut dump {
+                        use std::io::Write;
+                        let id = data::version(client).expect_packet(
+                            Phase::Play,
+                            Direction::Clientbound,
+                            &sent.name,
+                        );
+                        writeln!(
+                            dump,
+                            r#"{{"from":{backend},"protocol":{client},"id":{id},"name":"{}","hex":"{}"}}"#,
+                            sent.name,
+                            hex(&sent.data)
+                        )
+                        .expect("dump written");
+                    }
                     let result =
                         round_trip(client, &types, &sent.name, &sent.data).and_then(|back| {
                             if back != [(sent.name.clone(), sent.data.clone())] {
@@ -914,20 +934,4 @@ fn removals_split_for_1_17() {
         .clientbound(Phase::Play, "remove_entity", &out[1].data)
         .unwrap();
     assert_eq!(back[0].data, [1, 5]);
-}
-
-#[test]
-#[ignore = "prints which handlers each step installs"]
-fn print_installed_handlers() {
-    for pair in PROTOCOLS.windows(2) {
-        let (older, newer) = (pair[0].0, pair[1].0);
-        for (client, backend) in [(newer, older), (older, newer)] {
-            let spawns = spawn::changes(backend, client);
-            let data = metadata::differs(backend, client);
-            let particles = particle::unchanged(backend, client);
-            eprintln!(
-                "{backend}->{client}: spawns {spawns} data {data} particles-unchanged {particles}"
-            );
-        }
-    }
 }

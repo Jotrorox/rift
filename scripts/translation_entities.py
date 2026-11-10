@@ -29,6 +29,8 @@ Usage (Python 3.11+, stdlib only):
 
     python3 scripts/translation_entities.py            # regenerate
     python3 scripts/translation_entities.py --check    # fail if stale
+    python3 scripts/translation_entities.py --report   # how versions align
+    python3 scripts/translation_entities.py --validate DUMP  # schema check
 """
 
 import argparse
@@ -1113,7 +1115,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--check", action="store_true", help="fail if data/entities is stale")
     parser.add_argument("--report", action="store_true", help="print how versions align")
+    parser.add_argument("--validate", metavar="DUMP",
+                        help="decode converted packets dumped by the entity codec's tests "
+                             "(RIFT_ENTITY_DUMP) with the minecraft-data schemas")
     args = parser.parse_args()
+    if args.validate:
+        validate(Path(args.validate))
+        return
     with ProcessPoolExecutor(max_workers=os.cpu_count()) as pool:
         models = dict(zip([protocol for protocol, _ in PROTOCOLS], pool.map(
             extract, [version for _, version in PROTOCOLS], [protocol for protocol, _ in PROTOCOLS])))
@@ -1140,6 +1148,45 @@ def main():
     for name in unknown:
         (OUTPUT / name).unlink()
         log(f"removed {OUTPUT / name}")
+
+
+def validate(dump):
+    """Decode every dumped packet with the minecraft-data (MIT) schema of
+    its protocol, through tests/protodef.py, an implementation independent
+    of the crate's. minecraft-data has no schema for some versions and is
+    wrong in places (see protodef.CORRECTIONS), so this reports rather than
+    judges: failures per version and packet, with one example each."""
+    sys.path.insert(0, str(ROOT / "tests"))
+    import protodef
+    checkout = CACHE / "ref" / "minecraft-data" / "data"
+    paths = json.loads((checkout / "dataPaths.json").read_text())["pc"]
+    releases = dict(PROTOCOLS)
+    decoders = {}
+    results = {}
+    for line in dump.read_text().splitlines():
+        packet = json.loads(line)
+        protocol = packet["protocol"]
+        if protocol not in decoders:
+            path = paths.get(releases[protocol], {}).get("protocol")
+            schema = json.loads((checkout / path / "protocol.json").read_text()) if path else None
+            decoders[protocol] = schema and protodef.Decoder(schema, "play", "clientbound")
+        decoder = decoders[protocol]
+        key = (releases[protocol], packet["name"])
+        entry = results.setdefault(key, [0, 0, None])
+        if decoder is None:
+            continue
+        try:
+            decoder.packet(packet["id"], bytes.fromhex(packet["hex"]))
+            entry[0] += 1
+        except Exception as error:  # A schema gap is as likely as a bug.
+            entry[1] += 1
+            entry[2] = entry[2] or f"{error} (from {packet['from']}: {packet['hex'][:120]})"
+    unchecked = sorted({version for (version, _), (ok, bad, _) in results.items() if ok == bad == 0})
+    print(f"no minecraft-data schema: {', '.join(unchecked) or 'none'}")
+    for (version, name), (ok, bad, example) in sorted(results.items()):
+        if ok or bad:
+            print(f"{version:8} {name:20} decoded {ok:5}  failed {bad:5}"
+                  + (f"  e.g. {example}" if example else ""))
 
 
 def report(models, keys):
