@@ -51,6 +51,17 @@ pub struct Section {
 }
 
 impl Section {
+    /// A section of `states` with the given light (2048 bytes, or 4096 with
+    /// sky light).
+    #[cfg(test)]
+    pub fn new(states: Box<[u16; SECTION_BLOCKS]>, light: Vec<u8>) -> Self {
+        Self {
+            states,
+            light,
+            raw: None,
+        }
+    }
+
     pub fn get(&self, index: usize) -> u16 {
         self.states[index]
     }

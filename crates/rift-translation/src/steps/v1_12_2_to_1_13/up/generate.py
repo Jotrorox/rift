@@ -13,6 +13,11 @@ from its jar (``~/.cache/rift-via/reports/1.13/datapack``, or the jar itself).
   still in 1.12 terms: ``name:damage``, or ``name:*`` for any damage value.
 * ``tags.json``: the complete resolved vanilla 1.13 block, item and fluid
   tags, as entry names.
+* ``faces.json``: for every 1.13 block state, which of its six faces are
+  full (down, up, north, south, west, east as bits 0 to 5): faces its
+  collision shape covers completely, from minecraft-data's 1.13
+  ``blockCollisionShapes.json`` (MIT). A block's value is one number when
+  all its states agree, else one per state in state order.
 * ``translations.json``: 1.12.2 translation keys whose 1.13 key differs,
   matched by identical English text in the two versions' ``en_us`` files
   (``.lang`` in 1.12.2, ``.json`` in 1.13). A text used by several 1.13
@@ -34,6 +39,8 @@ CACHE = pathlib.Path.home() / ".cache/rift-via"
 OLD_JAR = CACHE / "servers/vanilla-1.12.2.jar"
 NEW_JAR = CACHE / "servers/vanilla-1.13.jar"
 JDK = CACHE / "jdks/jdk8/bin"
+MINECRAFT_DATA = CACHE / "ref/minecraft-data/data/pc/1.13"
+CRATE_DATA = HERE.parents[3] / "data"
 
 # 1.12.2 registers these before any JSON recipe (CraftingManager.init).
 SPECIAL = [
@@ -199,6 +206,50 @@ def translations():
     return out
 
 
+def covered(boxes, axis, side):
+    """Whether the boxes cover the unit face of `axis` (0 x, 1 y, 2 z) at
+    `side` (0 or 1) completely."""
+    others = [other for other in range(3) if other != axis]
+    flat = [
+        (box[others[0]], box[others[0] + 3], box[others[1]], box[others[1] + 3])
+        for box in boxes
+        if (box[axis + 3] if side else box[axis]) == side
+    ]
+    if not flat:
+        return False
+    us = sorted({0.0, 1.0, *[v for f in flat for v in f[:2]]})
+    vs = sorted({0.0, 1.0, *[v for f in flat for v in f[2:]]})
+    for u0, u1 in zip(us, us[1:]):
+        for v0, v1 in zip(vs, vs[1:]):
+            u, v = (u0 + u1) / 2, (v0 + v1) / 2
+            if not any(a <= u <= b and c <= v <= d for a, b, c, d in flat):
+                return False
+    return True
+
+
+def faces():
+    raw = json.loads((MINECRAFT_DATA / "blockCollisionShapes.json").read_text())
+    shapes = {int(key): value for key, value in raw["shapes"].items()}
+    blocks = json.loads((CRATE_DATA / "393.json").read_text())["blocks"]
+    # Bit order: down, up, north, south, west, east.
+    sides = [(1, 0), (1, 1), (2, 0), (2, 1), (0, 0), (0, 1)]
+    out = {}
+    for name, properties, _ in blocks:
+        count = 1
+        for _, values in properties:
+            count *= len(values)
+        indices = raw["blocks"][name]
+        indices = indices if isinstance(indices, list) else [indices] * count
+        if len(indices) != count:
+            sys.exit(f"{name}: {len(indices)} shapes for {count} states")
+        masks = []
+        for index in indices:
+            boxes = shapes[index]
+            masks.append(sum(1 << bit for bit, (axis, side) in enumerate(sides) if covered(boxes, axis, side)))
+        out[name] = masks[0] if len(set(masks)) == 1 else masks
+    return out
+
+
 def write(name, value):
     text = json.dumps(value, separators=(",", ":"), sort_keys=name != "recipes.json")
     (HERE / name).write_text(text + "\n")
@@ -211,6 +262,7 @@ def main():
             sys.exit(f"missing {jar}")
     write("recipes.json", recipes())
     write("tags.json", tags())
+    write("faces.json", faces())
     write("translations.json", translations())
 
 

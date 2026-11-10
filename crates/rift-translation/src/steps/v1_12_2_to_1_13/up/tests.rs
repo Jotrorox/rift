@@ -1112,3 +1112,324 @@ fn whole_session_replays_without_step_errors() {
     }
     let _ = Rewriter::new(&[]);
 }
+
+/// A full column at (x, z) whose section 0 holds `blocks` (1.13 states)
+/// in air, as the 1.12 server sent it and as a chunk codec converted it.
+fn column(x: i32, z: i32, blocks: &[((i32, i32, i32), &str)]) -> (Vec<u8>, Vec<u8>) {
+    let mut states = Box::new([0u16; world::chunk::SECTION_BLOCKS]);
+    for ((bx, by, bz), name) in blocks {
+        states[(by << 8 | bz << 4 | bx) as usize] = state(name) as u16;
+    }
+    let mut sections: [Option<world::chunk::Section>; 16] = Default::default();
+    sections[0] = Some(world::chunk::Section::new(states, vec![0xff; 4096]));
+    let mut column = Column {
+        x,
+        z,
+        full: true,
+        sections,
+        biomes: Some(vec![1; 256]),
+        block_entities: vec![0],
+    };
+    let original = column.write(Format::Legacy);
+    column.biomes = Some([0, 0, 0, 1].repeat(256));
+    (original, column.write(Format::Flattened))
+}
+
+/// Load a synthetic column through the world completion; returns its
+/// completed 1.13 states by name at `probes`, and the extra packets.
+fn load(step: &mut Up, x: i32, z: i32, blocks: &[((i32, i32, i32), &str)]) -> (Column, Vec<Out>) {
+    let (original, converted) = column(x, z, blocks);
+    let id = data::version(OLD).expect_packet(State::Play, Direction::Clientbound, "level_chunk");
+    world::tap_chunk(step, &Packet::new(id, original)).unwrap();
+    let mut emitted = VecDeque::from([Emitted {
+        direction: Direction::Clientbound,
+        state: State::Play,
+        packet: Packet::new(packets::ids().level_chunk, converted),
+    }]);
+    let mut cx = Cx {
+        emitted: &mut emitted,
+        client_protocol: NEW,
+        backend_protocol: OLD,
+    };
+    world::complete(step, &mut cx, 0).unwrap();
+    let chunk = emitted.pop_front().unwrap().packet.data;
+    (
+        Column::read(&chunk, Format::Flattened, true).unwrap(),
+        collect(emitted),
+    )
+}
+
+fn name_at(column: &Column, (x, y, z): (i32, i32, i32)) -> String {
+    let section = column.sections[(y >> 4) as usize].as_ref().unwrap();
+    let state = section.get(((y & 15) << 8 | (z & 15) << 4 | (x & 15)) as usize);
+    data::version(NEW)
+        .block_states
+        .describe(i32::from(state))
+        .unwrap()
+}
+
+#[test]
+fn fences_panes_and_walls_connect_in_chunks_and_on_updates() {
+    let mut step = Up::new();
+    let (column, extra) = load(
+        &mut step,
+        0,
+        0,
+        &[
+            ((1, 1, 1), "oak_fence"),
+            ((2, 1, 1), "oak_fence"),
+            ((2, 1, 2), "oak_fence"),
+            ((0, 1, 1), "stone"),
+            ((3, 1, 1), "nether_brick_fence"),
+            ((5, 1, 5), "glass_pane"),
+            ((6, 1, 5), "iron_bars"),
+            ((5, 1, 4), "glass"),
+            ((8, 1, 8), "cobblestone_wall"),
+            ((8, 1, 9), "cobblestone_wall"),
+            ((8, 1, 10), "cobblestone_wall"),
+            ((9, 1, 8), "oak_fence_gate[facing=north]"),
+        ],
+    );
+    assert!(extra.is_empty(), "{extra:?}");
+    let at = |position| name_at(&column, position);
+    // East to the other oak fence and west to stone; not to the nether
+    // fence, which is another material.
+    assert_eq!(
+        at((1, 1, 1)),
+        "oak_fence[east=true,north=false,south=false,waterlogged=false,west=true]"
+    );
+    assert_eq!(
+        at((2, 1, 1)),
+        "oak_fence[east=false,north=false,south=true,waterlogged=false,west=true]"
+    );
+    // Panes join each other but not glass blocks (vanilla 1.12 excepts it).
+    assert_eq!(
+        at((5, 1, 5)),
+        "glass_pane[east=true,north=false,south=false,waterlogged=false,west=false]"
+    );
+    // A straight wall with air above has no post; the corner has one and
+    // joins the gate along the gate's line.
+    assert_eq!(
+        at((8, 1, 9)),
+        "cobblestone_wall[east=false,north=true,south=true,up=false,waterlogged=false,west=false]"
+    );
+    assert_eq!(
+        at((8, 1, 8)),
+        "cobblestone_wall[east=true,north=false,south=true,up=true,waterlogged=false,west=false]"
+    );
+    assert_eq!(
+        at((9, 1, 8)),
+        "oak_fence_gate[facing=north,in_wall=true,open=false,powered=false]"
+    );
+
+    // The backend removes the stone: the fence beside it is updated.
+    let outs = clientbound(
+        &mut step,
+        "block_update",
+        &block_update(Position { x: 0, y: 1, z: 1 }, 0),
+    );
+    assert_eq!(outs.len(), 2, "{outs:?}");
+    assert_eq!(outs[0].data, block_update(Position { x: 0, y: 1, z: 1 }, 0));
+    assert_eq!(
+        outs[1].data,
+        block_update(
+            Position { x: 1, y: 1, z: 1 },
+            state("oak_fence[east=true,north=false,south=false,waterlogged=false,west=false]")
+        )
+    );
+    // A fence placed (1.12 block 85) arrives connected.
+    let outs = clientbound(
+        &mut step,
+        "block_update",
+        &block_update(Position { x: 1, y: 1, z: 0 }, 85 << 4),
+    );
+    assert_eq!(
+        outs[0].data,
+        block_update(
+            Position { x: 1, y: 1, z: 0 },
+            state("oak_fence[east=false,north=false,south=true,waterlogged=false,west=false]")
+        )
+    );
+    assert_eq!(outs[1].name, "block_update");
+}
+
+#[test]
+fn neighbour_columns_are_reconnected_along_their_edges() {
+    let mut step = Up::new();
+    load(&mut step, 0, 0, &[((15, 2, 7), "oak_fence")]);
+    let (column, extra) = load(&mut step, 1, 0, &[((0, 2, 7), "oak_fence")]);
+    assert_eq!(
+        name_at(&column, (16, 2, 7)),
+        "oak_fence[east=false,north=false,south=false,waterlogged=false,west=true]"
+    );
+    let out = only(extra);
+    assert_eq!(out.name, "block_update");
+    assert_eq!(
+        out.data,
+        block_update(
+            Position { x: 15, y: 2, z: 7 },
+            state("oak_fence[east=true,north=false,south=false,waterlogged=false,west=false]")
+        )
+    );
+    // Unloading the second column leaves the first as the client has it.
+    let mut forget = Writer::new();
+    forget.i32(1).i32(0);
+    clientbound(&mut step, "forget_level_chunk", &forget.buf);
+    let outs = clientbound(
+        &mut step,
+        "block_update",
+        &block_update(Position { x: 15, y: 3, z: 7 }, 1 << 4),
+    );
+    assert_eq!(outs.len(), 1, "{outs:?}");
+}
+
+#[test]
+fn stairs_redstone_doors_plants_chests_and_more_get_their_shapes() {
+    let mut step = Up::new();
+    let (column, _) = load(
+        &mut step,
+        0,
+        0,
+        &[
+            // An outer corner: stairs facing east with stairs facing north
+            // behind them.
+            ((1, 1, 1), "oak_stairs[facing=east,half=bottom]"),
+            ((2, 1, 1), "oak_stairs[facing=north,half=bottom]"),
+            // Redstone running east into a repeater facing west, and up a
+            // stone block to wire on top.
+            ((4, 1, 4), "redstone_wire"),
+            ((5, 1, 4), "repeater[facing=west]"),
+            ((4, 1, 5), "stone"),
+            ((4, 2, 5), "redstone_wire"),
+            // Door halves as 1.12 flattens them: facing on the lower half,
+            // hinge on the upper.
+            ((7, 1, 7), "oak_door[half=lower,facing=east,open=true]"),
+            ((7, 2, 7), "oak_door[half=upper,hinge=right]"),
+            // A lilac whose upper half 1.12 sent without its type.
+            ((9, 1, 9), "lilac[half=lower]"),
+            ((9, 2, 9), "sunflower[half=upper]"),
+            // Two chests facing south side by side.
+            ((11, 1, 11), "chest[facing=south]"),
+            ((12, 1, 11), "chest[facing=south]"),
+            // A grown melon stem by a melon, chorus on end stone, snow on
+            // grass, fire beside planks over air, a vine under stone.
+            ((1, 1, 12), "melon_stem[age=7]"),
+            ((1, 1, 13), "melon"),
+            ((3, 1, 12), "end_stone"),
+            ((3, 2, 12), "chorus_plant"),
+            ((3, 3, 12), "chorus_flower"),
+            ((5, 1, 12), "grass_block"),
+            ((5, 2, 12), "snow"),
+            ((7, 4, 12), "fire"),
+            ((8, 4, 12), "oak_planks"),
+            ((10, 4, 12), "vine[north=true]"),
+            ((10, 5, 12), "stone"),
+            ((12, 1, 1), "tripwire"),
+            ((13, 1, 1), "tripwire_hook[facing=west]"),
+        ],
+    );
+    let at = |position| name_at(&column, position);
+    assert_eq!(
+        at((1, 1, 1)),
+        "oak_stairs[facing=east,half=bottom,shape=outer_left,waterlogged=false]"
+    );
+    assert_eq!(
+        at((4, 1, 4)),
+        "redstone_wire[east=side,north=none,power=0,south=up,west=none]"
+    );
+    assert_eq!(
+        at((7, 1, 7)),
+        "oak_door[facing=east,half=lower,hinge=right,open=true,powered=false]"
+    );
+    assert_eq!(
+        at((7, 2, 7)),
+        "oak_door[facing=east,half=upper,hinge=right,open=true,powered=false]"
+    );
+    assert_eq!(at((9, 2, 9)), "lilac[half=upper]");
+    assert_eq!(
+        at((11, 1, 11)),
+        "chest[facing=south,type=right,waterlogged=false]"
+    );
+    assert_eq!(
+        at((12, 1, 11)),
+        "chest[facing=south,type=left,waterlogged=false]"
+    );
+    assert_eq!(at((1, 1, 12)), "attached_melon_stem[facing=south]");
+    assert_eq!(
+        at((3, 2, 12)),
+        "chorus_plant[down=true,east=false,north=false,south=false,up=true,west=false]"
+    );
+    assert_eq!(at((5, 1, 12)), "grass_block[snowy=true]");
+    assert_eq!(
+        at((7, 4, 12)),
+        "fire[age=0,east=true,north=false,south=false,up=false,west=false]"
+    );
+    assert_eq!(
+        at((10, 4, 12)),
+        "vine[east=false,north=true,south=false,up=true,west=false]"
+    );
+    assert_eq!(
+        at((12, 1, 1)),
+        "tripwire[attached=false,disarmed=false,east=true,north=false,powered=false,south=false,west=false]"
+    );
+
+    // The melon is harvested: the stem straightens again.
+    let outs = clientbound(
+        &mut step,
+        "block_update",
+        &block_update(Position { x: 1, y: 1, z: 13 }, 0),
+    );
+    assert_eq!(outs.len(), 2, "{outs:?}");
+    assert_eq!(
+        outs[1].data,
+        block_update(Position { x: 1, y: 1, z: 12 }, state("melon_stem[age=7]"))
+    );
+    // An explosion takes the planks: the fire beside them goes out of the
+    // wall and the client is told.
+    let mut explode = Writer::new();
+    explode
+        .f32(8.5)
+        .f32(4.5)
+        .f32(12.5)
+        .f32(2.0)
+        .i32(1)
+        .i8(0)
+        .i8(0)
+        .i8(0)
+        .f32(0.0)
+        .f32(0.0)
+        .f32(0.0);
+    let outs = clientbound(&mut step, "explode", &explode.buf);
+    assert_eq!(outs.len(), 2, "{outs:?}");
+    assert_eq!(
+        outs[1].data,
+        block_update(
+            Position { x: 7, y: 4, z: 12 },
+            state("fire[age=0,east=false,north=false,south=false,up=false,west=false]")
+        )
+    );
+}
+
+#[test]
+fn the_block_store_stays_small_on_real_chunks() {
+    let Some(packets) = corpus(OLD) else {
+        eprintln!("no corpus for {OLD}: skipped");
+        return;
+    };
+    let mut step = Up::new();
+    let mut columns = 0;
+    for packet in packets
+        .iter()
+        .filter(|packet| packet.name(OLD) == "level_chunk")
+    {
+        complete_chunk(&mut step, &packet.data, flatten_chunk(&packet.data, true));
+        columns += 1;
+    }
+    let bytes = step.world.store_bytes();
+    eprintln!("{columns} columns in {bytes} bytes");
+    assert!(
+        bytes / columns < 4096,
+        "{} bytes per column",
+        bytes / columns
+    );
+}

@@ -8,6 +8,7 @@ pub struct Ids {
     pub commands: i32,
     pub stop_sound: i32,
     pub block_update: i32,
+    pub chunk_blocks_update: i32,
     pub level_chunk: i32,
     /// The 1.12 serverbound plugin message.
     pub custom_payload: i32,
@@ -27,6 +28,7 @@ pub fn ids() -> &'static Ids {
             commands: to_client("commands"),
             stop_sound: to_client("stop_sound"),
             block_update: to_client("block_update"),
+            chunk_blocks_update: to_client("chunk_blocks_update"),
             level_chunk: to_client("level_chunk"),
             custom_payload: backend.expect_packet(
                 State::Play,
