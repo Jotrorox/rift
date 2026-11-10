@@ -133,6 +133,11 @@ pub fn convert_packet(
             }))
         }
         Some(_) => return Err(invalid("block entity tag is not a compound")),
+        // 1.18 sends an empty tag (an ownerless skull's) as none; older
+        // clients load whatever tag comes and fail on a missing one.
+        None if source >= 757 && target < 757 => Some(Nbt::Compound(with_metadata(
+            None, &name, position.x, position.y, position.z,
+        ))),
         None => None,
     };
     Ok(Some((kind, nbt)))
@@ -743,5 +748,33 @@ mod tests {
         assert_eq!(action(573, "beehive"), Some(14));
         assert_eq!(action(757, "sign"), None);
         assert_eq!(action_name(340, 5), Some("flower_pot"));
+    }
+
+    #[test]
+    fn an_empty_1_18_tag_reaches_older_clients_as_id_and_position() {
+        let mut shared = Shared::new(756, 757);
+        let skull = data::version(757)
+            .expect_registry("block_entity_type")
+            .id("skull")
+            .unwrap();
+        let position = Position { x: 4, y: -60, z: 3 };
+        let (kind, nbt) =
+            convert_packet(&mut shared, Direction::Clientbound, position, skull, None)
+                .unwrap()
+                .unwrap();
+        assert_eq!(Some(kind), action(756, "skull"));
+        let tag = nbt.unwrap();
+        let tag = tag.as_compound().unwrap();
+        assert_eq!(tag.str("id"), Some("minecraft:skull"));
+        assert_eq!(
+            (tag.int("x"), tag.int("y"), tag.int("z")),
+            (Some(4), Some(-60), Some(3))
+        );
+        // Between 1.18 versions the empty tag stays empty.
+        let mut shared = Shared::new(757, 758);
+        let (_, nbt) = convert_packet(&mut shared, Direction::Clientbound, position, skull, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(nbt, None);
     }
 }
