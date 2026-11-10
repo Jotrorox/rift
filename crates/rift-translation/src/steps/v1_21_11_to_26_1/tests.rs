@@ -251,3 +251,63 @@ fn recorded_sessions_convert() {
         }
     }
 }
+
+/// Print what the steps make of the serverbound packets the corpus lacks,
+/// for an independent schema check (`SCHEMA <protocol> <state> <direction>
+/// <name> <hex>` lines): `cargo test dump_for_schema_check -- --ignored
+/// --nocapture`.
+#[test]
+#[ignore]
+fn dump_for_schema_check() {
+    let print = |protocol: i32, sent: Vec<Sent>| {
+        for Sent {
+            direction,
+            state,
+            name,
+            data,
+        } in sent
+        {
+            let hex: String = data.iter().map(|byte| format!("{byte:02x}")).collect();
+            println!("SCHEMA {protocol} {state:?} {direction:?} {name} {hex}");
+        }
+    };
+    let mut step = up();
+    print(
+        OLDER,
+        step.serverbound("interact", &interact_26_1(5, 0, [0.5, 1.0, 0.5], false))
+            .unwrap(),
+    );
+    print(OLDER, step.serverbound("attack", &hex("05")).unwrap());
+    print(
+        OLDER,
+        step.serverbound("spectator_action", &hex("05")).unwrap(),
+    );
+    let mut w = Writer::new();
+    w.varint(1)
+        .string("minecraft:keep_inventory")
+        .string("true");
+    print(OLDER, step.serverbound("set_game_rule", &w.buf).unwrap());
+    let mut step = down();
+    let mut at = Writer::new();
+    at.varint(5)
+        .varint(2)
+        .f32(0.5)
+        .f32(1.0)
+        .f32(0.5)
+        .varint(1)
+        .bool(true);
+    print(NEWER, step.serverbound("interact", &at.buf).unwrap());
+    print(
+        NEWER,
+        step.serverbound("interact", &hex("05 00 00 00")).unwrap(),
+    );
+    print(
+        NEWER,
+        step.serverbound("interact", &hex("05 01 00")).unwrap(),
+    );
+    step.clientbound("game_event", &hex("03 40400000")).unwrap();
+    print(
+        NEWER,
+        step.serverbound("interact", &hex("05 01 00")).unwrap(),
+    );
+}
