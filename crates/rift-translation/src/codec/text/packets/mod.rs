@@ -135,6 +135,41 @@ pub(super) struct Rule {
     pub needed: fn(i32, i32) -> bool,
 }
 
+/// Converters that emit packets of other names: the packets 1.17 split
+/// (titles, combat), the 1.19.3 player list forms, and the 1.20.3 score
+/// removal and resource pack removal.
+const RENAMING: &[&str] = &[
+    "set_titles",
+    "set_title_text",
+    "set_subtitle_text",
+    "set_action_bar_text",
+    "set_titles_animation",
+    "clear_titles",
+    "player_combat",
+    "player_combat_kill",
+    "player_combat_enter",
+    "player_combat_end",
+    "player_info",
+    "player_info_update",
+    "player_info_remove",
+    "reset_score",
+    "resource_pack_pop",
+];
+
+impl Rule {
+    /// Whether the rule converts its packet in `phase` from protocol `from`
+    /// to `to`: the sender has the packet, the pair needs it, and the
+    /// receiver has the same packet unless the converter renames it. A
+    /// packet that disappears otherwise is left to the step.
+    fn applies(&self, phase: Phase, from: i32, to: i32) -> bool {
+        let (source, target) = (crate::data::version(from), crate::data::version(to));
+        source.packet_id(phase, self.direction, self.name).is_some()
+            && (self.needed)(from, to)
+            && (RENAMING.contains(&self.name)
+                || target.packet_id(phase, self.direction, self.name).is_some())
+    }
+}
+
 const PLAY: &[Phase] = &[Phase::Play];
 const BOTH: &[Phase] = &[Phase::Configuration, Phase::Play];
 
@@ -227,9 +262,9 @@ pub(super) fn convert_forced(
             .into_iter()
             .flatten()
             .filter_map(|index| crate::version::PROTOCOLS.get(index))
-            .any(|(other, _)| (rule.needed)(from, *other))
+            .any(|(other, _)| rule.applies(phase, from, *other))
     } else {
-        (rule.needed)(from, to)
+        rule.applies(phase, from, to)
     };
     if !applies {
         return None;
@@ -260,16 +295,9 @@ fn install_one<S: HasShared + 'static>(
         builder.source(rule.direction).protocol,
         builder.target(rule.direction).protocol,
     );
-    if !(rule.needed)(from, to) {
-        return builder;
-    }
     let mut builder = builder;
     for phase in rule.phases {
-        if builder
-            .source(rule.direction)
-            .packet_id(*phase, rule.direction, rule.name)
-            .is_some()
-        {
+        if rule.applies(*phase, from, to) {
             builder = builder.default_handler(rule.direction, *phase, rule.name, handler);
         }
     }
@@ -280,3 +308,6 @@ pub(super) fn install<S: HasShared + 'static>(builder: RouteBuilder<S>) -> Route
     const _: () = assert!(RULES.len() <= 40, "add indices to install_rules");
     install_rules!(builder, 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39)
 }
+
+#[cfg(test)]
+mod tests;

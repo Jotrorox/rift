@@ -527,3 +527,46 @@ fn neighbours_parse_what_they_receive() {
     );
     let _ = Json::Null;
 }
+
+/// With `RIFT_TEXT_DUMP=<file>`, write every corpus packet converted to
+/// each adjacent protocol as JSON lines (`{"p":..,"s":..,"name":..,"hex":..}`)
+/// for `schema_check.py`, which decodes them with minecraft-data's schema
+/// of the receiving version.
+#[test]
+fn dump_conversions_for_schema_check() {
+    let Some(path) = std::env::var_os("RIFT_TEXT_DUMP") else {
+        return;
+    };
+    let mut lines = String::new();
+    for (index, (protocol, _)) in PROTOCOLS.iter().enumerate() {
+        let Some(packets) = corpus_packets(*protocol) else {
+            continue;
+        };
+        let neighbours = [index.checked_sub(1), Some(index + 1)]
+            .into_iter()
+            .flatten()
+            .filter_map(|index| PROTOCOLS.get(index).map(|(protocol, _)| *protocol));
+        for neighbour in neighbours {
+            for (state, name, data) in &packets {
+                let mut shared = Shared::new(neighbour, *protocol);
+                let Some(Ok(out)) =
+                    convert_forced(&mut shared, Direction::Clientbound, *state, name, data)
+                else {
+                    continue;
+                };
+                for (name, body) in out {
+                    let hex: String = body.iter().map(|byte| format!("{byte:02x}")).collect();
+                    let state = if *state == State::Play {
+                        "play"
+                    } else {
+                        "configuration"
+                    };
+                    lines.push_str(&format!(
+                        "{{\"from\":{protocol},\"p\":{neighbour},\"s\":\"{state}\",\"name\":\"{name}\",\"hex\":\"{hex}\"}}\n"
+                    ));
+                }
+            }
+        }
+    }
+    std::fs::write(path, lines).unwrap();
+}
