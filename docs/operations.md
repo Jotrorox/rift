@@ -1,17 +1,29 @@
 # Operating a Rift release
 
-Releases provide standalone executables for Linux x86_64, macOS ARM64 and Windows
-x86_64. Run `rift --license` to view the embedded licenses. Documentation and
-examples are available in the repository. The [README](../README.md) covers
-protocol support and backend configuration; this guide covers daily administration.
+Each release provides these assets for Linux x86_64, macOS ARM64 and Windows x86_64:
+
+| Asset | Contents |
+| --- | --- |
+| `rift-linux-x86_64.tar.gz`, `rift-macos-aarch64.tar.gz`, `rift-windows-x86_64.zip` | `rift` (`rift.exe` on Windows), `README.md`, `LICENSE`, `THIRD_PARTY_NOTICES`, `docs/` and `examples/` |
+| `rift-linux-x86_64`, `rift-macos-aarch64`, `rift-windows-x86_64.exe` | The same executable on its own, for scripted installs |
+| `SHA256SUMS` | SHA-256 checksums of every other asset |
+
+Every asset also has a signed [build provenance attestation](#verifying-a-download).
+Keep the archive's files together so relative links between the guides and
+examples keep working; the raw benchmark samples and the SDK sources stay
+online. Run `rift --license` to view the embedded licenses. The
+[README](../README.md) covers protocol support and backend configuration; this
+guide covers daily administration.
 
 ## First start
 
-Download the executable for your OS/CPU. On Linux, rename it and make it executable:
+Download the archive for your OS/CPU and `SHA256SUMS` from the same release,
+[verify](#verifying-a-download) it, and extract it into an empty directory.
+On Linux:
 
 ```sh
-mv rift-linux-x86_64 rift
-chmod +x rift
+sha256sum --check --ignore-missing SHA256SUMS
+tar xzf rift-linux-x86_64.tar.gz
 ./rift --version
 ./rift init
 # Edit listener and backend addresses for your server.
@@ -62,11 +74,30 @@ applies everything. Strict checks create nothing; testing whether a directory is
 writable creates a temporary file and removes it at once. Exit status is
 non-zero when any strict check fails.
 
-On macOS, rename `rift-macos-aarch64` to `rift`, run `chmod +x rift`, then use the
-same commands. On Windows, rename `rift-windows-x86_64.exe` to `rift.exe` and
-run it with `.\rift.exe`.
+On macOS, check with `shasum -a 256 --check --ignore-missing SHA256SUMS`,
+extract with `tar xzf rift-macos-aarch64.tar.gz`, then use the same commands.
+On Windows, compare `Get-FileHash .\rift-windows-x86_64.zip -Algorithm SHA256`
+with the file's line in `SHA256SUMS`, extract it with
+`Expand-Archive .\rift-windows-x86_64.zip -DestinationPath rift`, and run
+`.\rift.exe` inside the `rift` folder. If you use a standalone executable, rename
+it to `rift` (`rift.exe` on Windows) and, outside Windows, run `chmod +x rift`.
 `--version` identifies the Cargo package version; nightly builds may share that
 version, so retain the release tag when reporting issues.
+
+### Verifying a download
+
+`SHA256SUMS` detects a corrupted or incomplete download. Provenance
+attestations also prove that GitHub Actions built the file from this
+repository's release workflow. With the [GitHub CLI](https://cli.github.com/),
+verify any asset before running it:
+
+```sh
+gh attestation verify rift-linux-x86_64.tar.gz --repo Jotrorox/rift \
+  --signer-workflow Jotrorox/rift/.github/workflows/release.yml
+```
+
+The output names the source commit and the workflow run that built the file.
+For a nightly build, use `--signer-workflow Jotrorox/rift/.github/workflows/nightly.yml`.
 
 The generated configuration forwards port 25565 to loopback port 25566.
 Configure that backend as described in the README. For public Paper networks,
@@ -377,9 +408,9 @@ results without logging credentials.
 ## Linux systemd service
 
 The supplied [unit](../examples/rift.service) uses an unprivileged `rift` account
-and root-owned configuration. Run these commands from a repository checkout on
-a systemd host, with the downloaded executable saved as `rift` and a generated
-`rift.lua`. Create the account only if it does not exist:
+and root-owned configuration. Run these commands on a systemd host from the
+extracted Linux archive, after generating `rift.lua` there. Create the account
+only if it does not exist:
 
 ```sh
 sudo useradd --system --user-group --no-create-home --shell /usr/sbin/nologin rift
@@ -423,8 +454,7 @@ binary using the release runner's Ubuntu 24.04 runtime baseline. The
 [Compose example](../examples/compose.yaml) runs as UID/GID 65532 with a read-only
 root filesystem, no Linux capabilities, a read-only config directory, a writable
 `rift-state` volume at `/var/lib/rift` and a 40-second stop deadline.
-Download the Linux x86_64 executable as `rift` into a repository
-checkout, make it executable with `chmod +x rift`, then run from that checkout:
+Run from the extracted Linux x86_64 archive:
 
 ```sh
 mkdir config
@@ -605,9 +635,8 @@ during the drain. **Keep the supervisor stop deadline longer than Rift's drain**
 40 seconds in the examples. Apply systemd edits with `systemctl daemon-reload`.
 See systemd's [`ExecReload` and `TimeoutStopSec` documentation](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html).
 
-Download the new executable into a separate directory, rename it to `rift` and
-run `chmod +x rift`. Record both release tags and retain the previous executable.
-From the candidate directory:
+Verify and extract the new release archive into a separate directory. Record
+both release tags and retain the previous archive. From the candidate directory:
 
 ```sh
 # Validate compatibility before touching the running installation.
