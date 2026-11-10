@@ -2,7 +2,8 @@
 //! format: item and entity type names in hover events, the item stacks
 //! they show, and sprite atlases.
 use super::{
-    component::{Content, EntityInfo, HoverEvent, ItemInfo, ObjectInfo},
+    component::{Arg, Content, EntityInfo, HoverEvent, ItemInfo, ObjectInfo, primitive_text},
+    legacy::Part,
     version as v,
 };
 use crate::{
@@ -10,6 +11,7 @@ use crate::{
     codec::{Shared, item},
     data,
     nbt::Nbt,
+    steps,
 };
 
 /// Convert what `component` refers to from the sender's protocol to the
@@ -41,7 +43,52 @@ pub fn adapt(shared: &mut Shared, direction: Direction, component: &mut super::C
         {
             adapt_atlas(from, to, atlas, sprite);
         }
+        if from < v::FLATTENING && to >= v::FLATTENING {
+            upgrade_translation(component);
+        } else if from >= v::FLATTENING && to < v::FLATTENING {
+            legacy_translation(component);
+        }
     });
+}
+
+/// 1.13 renamed most translation keys; a client shows a key it lacks as
+/// the key itself.
+fn upgrade_translation(component: &mut super::Component) {
+    if let Content::Translate { key, .. } = &mut component.content
+        && let Some(renamed) = steps::v1_12_2_to_1_13::upgrade_translation_key(key)
+    {
+        *key = renamed.to_owned();
+    }
+}
+
+/// The 1.12 key with the same English text, or else the 1.13 English text
+/// as literal text with the arguments in place of its placeholders.
+fn legacy_translation(component: &mut super::Component) {
+    use steps::v1_12_2_to_1_13::{Legacy, legacy_translation};
+    let Content::Translate { key, args, .. } = &mut component.content else {
+        return;
+    };
+    let template = match legacy_translation(key) {
+        None => return,
+        Some(Legacy::Key(old)) => {
+            *key = old.to_owned();
+            return;
+        }
+        Some(Legacy::Text(template)) => template,
+    };
+    let args = std::mem::take(args);
+    let mut parts = Vec::new();
+    super::legacy::substitute_parts(template, args.len(), |part| match part {
+        Part::Literal("") => {}
+        Part::Literal(text) => parts.push(super::Component::text(text)),
+        Part::Arg(index) => parts.push(match &args[index] {
+            Arg::Component(arg) => (**arg).clone(),
+            Arg::Primitive(value) => super::Component::text(primitive_text(value)),
+        }),
+    });
+    component.content = Content::Text(String::new());
+    parts.append(&mut component.extra);
+    component.extra = parts;
 }
 
 /// 1.21.11 moved item sprites from the block atlas into their own.

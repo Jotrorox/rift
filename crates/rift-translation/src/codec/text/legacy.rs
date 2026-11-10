@@ -236,7 +236,7 @@ fn emit(component: &Component, parent: Format, state: &mut Format, out: &mut Str
     }
 }
 
-enum Part<'a> {
+pub(super) enum Part<'a> {
     Literal(&'a str),
     Arg(usize),
 }
@@ -244,7 +244,11 @@ enum Part<'a> {
 /// Split a translation template into literal text and argument references
 /// (`%s`, `%1$s`, `%%`), as vanilla's `TranslatableContents` does; a
 /// reference past the arguments renders as nothing.
-fn substitute_parts<'a>(template: &'a str, count: usize, mut part: impl FnMut(Part<'a>)) {
+pub(super) fn substitute_parts<'a>(
+    template: &'a str,
+    count: usize,
+    mut part: impl FnMut(Part<'a>),
+) {
     let mut next = 0;
     let mut rest = template;
     while let Some(index) = rest.find('%') {
