@@ -203,3 +203,86 @@ fn spear_stabs_do_not_reach_an_older_server() {
         one(Serverbound, "player_action", action(3))
     );
 }
+
+/// Drive a translator through login and configuration into play.
+fn playing(client: i32, backend: i32) -> crate::Translator {
+    use Direction::{Clientbound, Serverbound};
+    let mut translator = crate::Translator::new(client, backend).unwrap().unwrap();
+    let mut out = crate::Output::default();
+    for (direction, state, name) in [
+        (Clientbound, State::Login, "login_finished"),
+        (Serverbound, State::Login, "login_acknowledged"),
+        (Clientbound, State::Configuration, "finish_configuration"),
+        (Serverbound, State::Configuration, "finish_configuration"),
+    ] {
+        let protocol = match direction {
+            Clientbound => backend,
+            Serverbound => client,
+        };
+        let id = data::version(protocol).expect_packet(state, direction, name);
+        let body = if name == "login_finished" {
+            let mut w = Writer::new();
+            w.uuid(1).string("Steve").varint(0);
+            w.into_inner()
+        } else {
+            Vec::new()
+        };
+        let packet = Packet::new(id, body);
+        match direction {
+            Clientbound => translator.clientbound(packet, &mut out).unwrap(),
+            Serverbound => translator.serverbound(packet, &mut out).unwrap(),
+        }
+    }
+    translator
+}
+
+#[test]
+fn chains_across_1_21_7_to_1_21_11_convert_what_each_pair_changed() {
+    // A 1.21.11 client on a 1.21.8 server, and the reverse, for the same
+    // world spawn and default border both servers sent.
+    let spawn_1_21_8 = hex("0000000000000fc400000000");
+    let spawn_1_21_10 =
+        hex("136d696e6563726166743a6f766572776f726c640000000000000fc40000000000000000");
+    for (client, backend, border, spawn, expected_border, expected_spawn) in [
+        (
+            NEWER,
+            772,
+            hex(BORDER_1_21_10),
+            spawn_1_21_8.clone(),
+            hex(BORDER_1_21_11),
+            spawn_1_21_10.clone(),
+        ),
+        (
+            772,
+            NEWER,
+            hex(BORDER_1_21_11),
+            spawn_1_21_10.clone(),
+            hex(BORDER_1_21_10),
+            spawn_1_21_8.clone(),
+        ),
+    ] {
+        let mut translator = playing(client, backend);
+        for (name, body, expected) in [
+            ("initialize_border", border.clone(), expected_border.clone()),
+            (
+                "set_default_spawn_position",
+                spawn.clone(),
+                expected_spawn.clone(),
+            ),
+        ] {
+            let id =
+                data::version(backend).expect_packet(State::Play, Direction::Clientbound, name);
+            let mut out = crate::Output::default();
+            translator
+                .clientbound(Packet::new(id, body), &mut out)
+                .unwrap();
+            assert_eq!(out.client.len(), 1, "{name} {client} on {backend}");
+            let sent = &out.client[0].packet;
+            assert_eq!(
+                data::version(client).packet_name(State::Play, Direction::Clientbound, sent.id),
+                Some(name)
+            );
+            assert_eq!(sent.data, expected, "{name} {client} on {backend}");
+        }
+    }
+}
