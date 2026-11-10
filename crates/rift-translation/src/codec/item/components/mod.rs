@@ -37,7 +37,7 @@ pub mod hashed;
 pub mod layouts;
 mod rules;
 pub mod schema;
-mod stash;
+pub(super) mod stash;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
