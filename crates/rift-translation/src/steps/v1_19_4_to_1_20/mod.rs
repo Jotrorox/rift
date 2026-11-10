@@ -3,9 +3,9 @@
 //! What the pair changes, and who converts it:
 //!
 //! - Join game and respawn end with a portal cooldown from 1.20 (a newer
-//!   client gets none). 1.20 clients need the `generic_kill` and
-//!   `outside_border` damage types; 1.20 trim patterns name templates
-//!   1.19.4 lacks (see `v1_19_3_to_1_19_4::registries`).
+//!   client gets none). The registries codec gives 1.20 clients the
+//!   `generic_kill` and `outside_border` damage types and leaves 1.19.4
+//!   clients without the 1.20 trim patterns, whose templates they lack.
 //! - Signs get a back side: `open_sign_editor` says which side to edit and
 //!   `sign_update` which side was edited. A 1.19.4 client edits the side
 //!   the server asked for; a 1.20 client never edits the back of a sign on
@@ -32,9 +32,6 @@ pub const NEWER: i32 = 763;
 pub const UP: Option<Make> = up::STEP;
 /// A 1.19.4 client on a 1.20 backend.
 pub const DOWN: Option<Make> = down::STEP;
-
-/// Damage types of the official 1.20.1 server, in ID order.
-const DAMAGE_TYPES: &str = include_str!("data/damage_types.json");
 
 /// The experiment 1.20 made part of the game.
 const UPDATE_1_20: &str = "minecraft:update_1_20";

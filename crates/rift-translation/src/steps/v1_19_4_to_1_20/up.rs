@@ -1,18 +1,12 @@
 //! A 1.20 client on a 1.19.4 backend: backend packets are upgraded for the
 //! client and client packets downgraded for the backend.
-use super::{DAMAGE_TYPES, NEWER, OLDER, UPDATE_1_20};
+use super::{NEWER, OLDER, UPDATE_1_20};
 use crate::{
     Direction, Packet, State,
     codec::{HasShared, Shared},
     routed_step,
     step::{Cx, RouteBuilder, Routes},
-    steps::{
-        Make,
-        v1_19_3_to_1_19_4::{
-            play,
-            registries::{self, DamageType},
-        },
-    },
+    steps::{Make, v1_18_2_to_1_19::join, v1_19_3_to_1_19_4::play},
     wire::Rewriter,
 };
 use std::{io, sync::OnceLock};
@@ -25,11 +19,6 @@ impl HasShared for Up {
     fn shared(&mut self) -> &mut Shared {
         &mut self.shared
     }
-}
-
-fn damage_types() -> &'static [DamageType] {
-    static TYPES: OnceLock<Vec<DamageType>> = OnceLock::new();
-    TYPES.get_or_init(|| registries::parse_damage_types(DAMAGE_TYPES))
 }
 
 impl Up {
@@ -54,27 +43,21 @@ impl Up {
         })
     }
 
+    /// The registries codec converts the registries (damage types, trim
+    /// patterns whose template the receiver has); the portal cooldown comes
+    /// or goes.
     fn login(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
-        let direction = Direction::Clientbound;
-        let login = play::rewrite_login(&packet.data, OLDER, NEWER, |codec| {
-            // INTEGRATION: registry codec conversion (see `registries`).
-            registries::convert_biomes(&mut self.shared, direction, codec)?;
-            registries::ensure_damage_types(codec, damage_types())?;
-            registries::ensure_registry(codec, "trim_pattern");
-            registries::ensure_registry(codec, "trim_material");
-            registries::convert_trims(&mut self.shared, direction, codec)
-        })?;
-        cx.to_client(state, Packet::new(packet.id, login.body));
+        let data = join::convert_login(&mut self.shared, Direction::Clientbound, &packet.data)?;
+        cx.to_client(state, Packet::new(packet.id, data));
         Ok(())
     }
 
     fn respawn(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
-        let body = play::rewrite_respawn(&packet.data, OLDER, NEWER)?;
-        cx.to_client(state, Packet::new(packet.id, body));
+        let data = join::convert_respawn(&mut self.shared, Direction::Clientbound, &packet.data)?;
+        cx.to_client(state, Packet::new(packet.id, data));
         Ok(())
     }
 
-    /// A 1.19.4 sign has only the side 1.20 calls the front.
     fn open_sign_editor(
         &mut self,
         cx: &mut Cx<'_>,
