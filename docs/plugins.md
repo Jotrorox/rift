@@ -10,7 +10,7 @@ runs:
 | --- | --- | --- | --- |
 | **script** | `rift.lua`, its modules and script-mode plugin folders, in the sandboxed configuration VM | Sandboxed: instruction and memory budgets, no I/O | `rift.on`, `rift.command`, `rift.config.plugins`, `rift.plugin` for a folder without a persistent manifest |
 | **persistent** | A plugin folder installed on disk with a `plugin.toml`, running in its own long-lived Lua state or WebAssembly instance on its own OS thread | Trusted: runs with Rift's process privileges | `rift.plugin(name, config)` |
-| **remote** | A service on the [message bus](messaging.md) that answers `login`, `initial_server` and `before_transfer` | Whatever the service is; Rift only reads its replies | `rift.config.plugins.decisions` |
+| **remote** | A service on the [message bus](messaging.md) that answers `login`, `initial_server` and `before_transfer`, and calls the `players` interface as [`rift.players.*`](messaging.md#player-api-subjects) | Whatever the service is; Rift only reads its replies and checks its login's grants | `rift.config.plugins.decisions`, `messaging.principals` |
 
 Persistent plugins come in two engines: [Lua](plugins-lua.md) (LuaJIT, the
 same `rift` API as `rift.lua`) and WebAssembly components written in
@@ -103,7 +103,7 @@ restart = "on-failure"      # "never", "on-failure" or "always"; default "on-fai
 [capabilities]
 filesystem = ["data"]       # "data", "host" or absolute paths; default ["data"]
 network = true              # default true
-env = ["RELAXOBAN_DSN"]     # omit to inherit Rift's whole environment; [] for none
+env = ["RELAXOBAN_DSN"]     # omit to inherit Rift's environment minus its own secrets; [] for none
 
 [lua]                       # engine = "lua" only
 ffi = false                 # LuaJIT's FFI; default false
@@ -121,7 +121,7 @@ jit = true                  # false: interpret everything so deadlines interrupt
 | `hot_reload` | `false` | See [lifecycle](#lifecycle-failures-restarts-and-reloads). |
 | `[deadlines]` | per hook | Keys are `init`, `reload`, `shutdown` and the awaited hooks; observers have no deadline and are rejected here. Awaited hooks allow 1–10 000 ms, `http` up to 60 000. |
 | `[failure]` | | `on_timeout` overrides the per-hook default for every hook. |
-| `[capabilities]` | `filesystem = ["data"]`, `network = true`, all of `env` | `data` is `plugins/<name>/data/` (created on start, read-write); `host` is the configuration directory, read-only; an absolute path is read-write and, for WebAssembly, may not contain or lie inside `local/plugincache` or `plugins/`. WebAssembly enforces all three. Lua enforces `env` (`os.getenv`) and `network` (`rift.http.request`) but not `filesystem`: Lua `io` sees what Rift sees. |
+| `[capabilities]` | `filesystem = ["data"]`, `network = true`, all of `env` except [Rift's own secrets](operations.md#secrets-and-the-processes-rift-starts) | `data` is `plugins/<name>/data/` (created on start, read-write); `host` is the configuration directory, read-only; an absolute path is read-write and, for WebAssembly, may not contain or lie inside `local/plugincache` or `plugins/`. WebAssembly enforces all three. Lua enforces `env` (`os.getenv`) and `network` (`rift.http.request`) but not `filesystem`: Lua `io` sees what Rift sees. |
 | `[lua]` | | `engine = "lua"` only. See [the JIT and deadlines](plugins-lua.md#the-jit-and-deadlines). |
 | `[wasm]` | | `engine = "wasm"` only: per-instance limits; see [WebAssembly plugins](#webassembly-plugins). |
 
@@ -313,7 +313,8 @@ Install only plugins you would run as Rift's user.
   capabilities allow: with full WASI (`filesystem = ["host"]`,
   `network = true`, the whole environment) it can read `rift.sqlite3` and the
   configuration with its secrets, fill the disk through `data`, read every
-  secret in the environment, or open ports. Every plugin can also use the
+  secret in the environment (Rift's own token variables only when the
+  manifest names them in `env`), or open ports. Every plugin can also use the
   whole host API: kick players, change permissions, publish on the bus and
   start servers. Lua plugins, being trusted, can write anywhere Rift can,
   the cache included.
@@ -321,7 +322,8 @@ Install only plugins you would run as Rift's user.
   `network = false` and `env = []` (or a list of names) confine a WebAssembly
   plugin to its own folder; Lua honours `env` and `network` for the Rift API
   only. The defaults are permissive: `data`, network on and the whole
-  environment.
+  environment apart from Rift's own secrets. Lua's `io.popen` starts programs
+  with Rift's full environment.
 - **`rift check` prints the grants** for every plugin, including the Lua
   options and which grants Lua does not enforce, before anything runs.
 - **Rift never downloads or auto-enables plugins.** A plugin runs only when its
@@ -396,7 +398,9 @@ appear in the [operator audit log](http.md#authentication-and-access) as
 `plugin started`, `plugin stopped`, `plugin restarting`, `plugin failed`,
 `plugin reloaded` and `plugin reload_failed` by `system`, and operator
 restarts as `plugin restart_requested` by the operator (`local-admin` for the
-admin socket, `rift.control` for the bus, a name no web operator can have). Records carry the plugin name, never
+admin socket; on the bus `bus:<login>`, `plugin:<name>` for another plugin
+and `rift.control` for the configuration script, names no web operator can
+have). Records carry the plugin name, never
 error text. The HTTP and admin requests themselves are audited as usual.
 
 **Metrics** on the status service's `/metrics`:

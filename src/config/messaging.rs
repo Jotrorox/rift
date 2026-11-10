@@ -35,6 +35,9 @@ pub struct MessagingPrincipal {
     pub publish: Vec<String>,
     pub subscribe: Vec<String>,
     pub control: bool,
+    /// May call the `rift.players.*` API (with a matching publish grant)
+    /// without the much broader `control`.
+    pub players: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -442,6 +445,7 @@ pub(super) fn parse(root: &Table) -> Result<Option<MessagingConfig>, String> {
                 "publish",
                 "subscribe",
                 "control",
+                "players",
                 "preset",
             ],
             "messaging.principals",
@@ -481,6 +485,7 @@ pub(super) fn parse(root: &Table) -> Result<Option<MessagingConfig>, String> {
             publish,
             subscribe,
             control: boolean(&principal, "messaging.principals", "control", false)?,
+            players: boolean(&principal, "messaging.principals", "players", false)?,
         });
     }
     for subscription in array(&values, "messaging", "subscriptions", 1024)? {

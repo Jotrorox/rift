@@ -58,6 +58,7 @@ fn principal() -> Identity {
             "rift.events.permissions",
         ]),
         control: false,
+        players: false,
     }
 }
 
