@@ -1,0 +1,7 @@
+{
+  "game_event": {
+    "renames": {
+      "entity_roar": "entity_action"
+    }
+  }
+}
