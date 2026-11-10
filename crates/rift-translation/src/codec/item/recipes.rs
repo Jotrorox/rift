@@ -533,7 +533,14 @@ impl RecipeDisplay {
         &mut self,
         f: &mut dyn FnMut(&mut SlotDisplay) -> io::Result<()>,
     ) -> io::Result<()> {
-        let all: Vec<&mut SlotDisplay> = match self {
+        self.slots()
+            .into_iter()
+            .try_for_each(|display| display.visit(f))
+    }
+
+    /// The slot displays this recipe display holds directly, mutably.
+    pub fn slots(&mut self) -> Vec<&mut SlotDisplay> {
+        match self {
             Self::Shapeless {
                 ingredients,
                 result,
@@ -564,8 +571,7 @@ impl RecipeDisplay {
                 result,
                 station,
             } => vec![template, base, addition, result, station],
-        };
-        all.into_iter().try_for_each(|display| display.visit(f))
+        }
     }
 }
 
