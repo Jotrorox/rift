@@ -883,6 +883,70 @@ fn attributes_and_effects_follow_their_layouts() {
     assert_eq!(out[0].data, expected.buf);
 }
 
+/// Cat variants are built in until 1.21.5 and synchronised from then on,
+/// in a different order: they map by name.
+#[test]
+fn cat_variants_follow_their_names_across_1_21_5() {
+    use crate::codec::registries::{self, Side};
+    let cat = |protocol: i32| {
+        data::version(protocol)
+            .expect_registry("entity_type")
+            .id("cat")
+            .unwrap()
+    };
+    let field = |protocol: i32| {
+        let tables = tables::tables(protocol);
+        let fields = tables.fields("cat").unwrap();
+        let index = fields
+            .iter()
+            .position(|field| field.key == "Cat.DATA_VARIANT_ID")
+            .unwrap();
+        (
+            index as u8,
+            tables.serializer_id(fields[index].kind).unwrap(),
+        )
+    };
+    let red_769 = data::version(769)
+        .expect_registry("cat_variant")
+        .id("red")
+        .unwrap();
+    // Before any registry data the vanilla order applies.
+    let red_770 =
+        registries::id_of(&Shared::new(769, 770), Side::Backend, "cat_variant", "red").unwrap();
+    assert_ne!(red_769, red_770);
+    let entity_data = |protocol: i32, variant: i32| {
+        let (index, serializer) = field(protocol);
+        let mut body = Writer::new();
+        body.varint(8)
+            .u8(index)
+            .varint(serializer)
+            .varint(variant)
+            .u8(0xff);
+        body.buf
+    };
+    let spawn = |protocol: i32| {
+        let mut body = Writer::new();
+        body.varint(8).uuid(1).varint(cat(protocol));
+        body.f64(0.0).f64(63.0).f64(0.0).i8(0).i8(0).i8(0).varint(0);
+        body.i16(0).i16(0).i16(0);
+        body.buf
+    };
+    let mut down = Defaults::new(769, 770);
+    down.clientbound(Phase::Play, "add_entity", &spawn(770))
+        .unwrap();
+    let out = down
+        .clientbound(Phase::Play, "set_entity_data", &entity_data(770, red_770))
+        .unwrap();
+    assert_eq!(out[0].data, entity_data(769, red_769));
+    let mut up = Defaults::new(770, 769);
+    up.clientbound(Phase::Play, "add_entity", &spawn(769))
+        .unwrap();
+    let out = up
+        .clientbound(Phase::Play, "set_entity_data", &entity_data(769, red_769))
+        .unwrap();
+    assert_eq!(out[0].data, entity_data(770, red_770));
+}
+
 #[test]
 fn boats_split_by_wood_in_1_21_2() {
     let registry = |protocol: i32, name: &str| {
