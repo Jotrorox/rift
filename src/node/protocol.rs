@@ -101,6 +101,72 @@ pub struct Start {
     /// command that carries a secret; it is scoped to this instance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bus_certificate: Option<String>,
+    /// The server's `isolation`, applied by the agent on its own kernel.
+    /// Agents from before this field start the server unconfined.
+    #[serde(default, skip_serializing_if = "IsolationSpec::is_off")]
+    pub isolation: IsolationSpec,
+}
+
+/// [`crate::config::Isolation`] on the wire; paths are the node's.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IsolationSpec {
+    /// `off`, `landlock` or `required`.
+    #[serde(default)]
+    pub mode: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub read: Vec<PathBuf>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub write: Vec<PathBuf>,
+}
+
+impl IsolationSpec {
+    fn is_off(&self) -> bool {
+        self.mode.is_empty() || self.mode == "off"
+    }
+}
+
+impl From<&crate::config::Isolation> for IsolationSpec {
+    fn from(isolation: &crate::config::Isolation) -> Self {
+        Self {
+            mode: isolation.mode.as_str().to_owned(),
+            read: isolation.read.clone(),
+            write: isolation.write.clone(),
+        }
+    }
+}
+
+impl TryFrom<&IsolationSpec> for crate::config::Isolation {
+    type Error = io::Error;
+    fn try_from(spec: &IsolationSpec) -> io::Result<Self> {
+        use crate::config::IsolationMode;
+        let mode = match spec.mode.as_str() {
+            "" | "off" => IsolationMode::Off,
+            "landlock" => IsolationMode::Landlock,
+            "required" => IsolationMode::Required,
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "unknown isolation mode",
+                ));
+            }
+        };
+        if spec
+            .read
+            .iter()
+            .chain(&spec.write)
+            .any(|path| !path.is_absolute())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "isolation paths must be absolute",
+            ));
+        }
+        Ok(Self {
+            mode,
+            read: spec.read.clone(),
+            write: spec.write.clone(),
+        })
+    }
 }
 
 /// [`crate::config::ProcessEnvironment`] on the wire. The agent removes its

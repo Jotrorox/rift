@@ -28,6 +28,70 @@ impl Report {
 /// the configuration script runs sandboxed, persistent plugins run trusted
 /// with the listed capabilities. Plugins are never initialized here. Returns
 /// lines to print and warnings (engines this build lacks).
+/// One line per managed server or service group that asks for isolation:
+/// what this host's kernel gives it, and the fallback where it gives
+/// nothing. Servers on nodes are confined by their agent's kernel.
+pub fn isolation(config: &Config) -> Vec<String> {
+    use rift::config::IsolationMode;
+    #[cfg(target_os = "linux")]
+    let available = rift::managed::landlock::abi().map(rift::managed::landlock::describe);
+    #[cfg(not(target_os = "linux"))]
+    let available: Result<String, String> = Err("Landlock exists only on Linux".into());
+    let mut lines = Vec::new();
+    let definitions = config
+        .managed_servers
+        .iter()
+        .filter(|(name, _)| !config.instances.contains_key(*name))
+        .map(|(name, server)| {
+            (
+                format!("managed_servers.{name}"),
+                server,
+                server.node.is_some(),
+            )
+        })
+        .chain(config.service_groups.iter().map(|(name, group)| {
+            (
+                format!("service_groups.{name}"),
+                &group.server,
+                group.nodes.is_some(),
+            )
+        }));
+    for (path, server, remote) in definitions {
+        let mode = server.isolation.mode;
+        if mode == IsolationMode::Off {
+            continue;
+        }
+        let line = if remote {
+            format!(
+                "isolation {path}: {} on each node's kernel, applied by its agent",
+                mode.as_str()
+            )
+        } else {
+            match (&available, mode) {
+                (Ok(description), _) => format!("isolation {path}: {description}"),
+                (Err(reason), IsolationMode::Required) => format!(
+                    "isolation {path}: unavailable ({reason}); isolation = \"required\" refuses to start it"
+                ),
+                (Err(reason), _) => format!(
+                    "isolation {path}: unavailable ({reason}); runs unconfined as Rift's user and can read local/instance-key and other instances' tokens"
+                ),
+            }
+        };
+        lines.push(line);
+    }
+    if config
+        .service_groups
+        .values()
+        .any(|group| group.memory_mb.is_some())
+    {
+        lines.push(
+            "memory_mb sets -Xmx and placement only; Rift does not enforce a process memory limit"
+                .into(),
+        );
+    }
+    lines
+}
+
 /// Warnings about instance bus logins (see [`rift::instance_login`]):
 /// a group whose template ships RiftPerms but that issues no login (its
 /// instances would need a principal and token each, or fail to start the
