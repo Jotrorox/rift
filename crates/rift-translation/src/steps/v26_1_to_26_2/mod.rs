@@ -6,7 +6,9 @@
 //! signing key only on online-mode servers), and `spectator_action` took an
 //! optional entity ID so a spectator's click on nothing reaches the server.
 //! `set_player_team` (colour moved and became optional) and
-//! `update_attributes` (a list limit) belong to the shared codecs.
+//! `update_attributes` (a list limit) belong to the shared codecs. Beds lost
+//! their block entity (see `beds`).
+mod beds;
 mod down;
 mod up;
 
