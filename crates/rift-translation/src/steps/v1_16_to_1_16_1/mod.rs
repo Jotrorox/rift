@@ -1,4 +1,7 @@
 //! Minecraft 1.16 (protocol 735) and 1.16.1 (protocol 736).
+//!
+//! The two protocols have the same packets, layouts and registries (checked
+//! by `identical_protocols` in `v1_14_4_to_1_15::support`).
 mod down;
 mod up;
 

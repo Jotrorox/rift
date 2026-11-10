@@ -1,5 +1,6 @@
-//! A 1.15 client on a 1.15.1 backend: backend packets are downgraded for the
-//! client and client packets upgraded for the backend.
-use crate::steps::Make;
+//! A 1.15 client on a 1.15.1 backend: the protocols differ only in their
+//! number, so the shared codecs' defaults suffice.
+use super::{NEWER, OLDER};
+use crate::steps::v1_14_4_to_1_15::support::defaults_step;
 
-pub const STEP: Option<Make> = None;
+defaults_step!(Down, OLDER, NEWER);
