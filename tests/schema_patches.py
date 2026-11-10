@@ -206,6 +206,18 @@ def _patch_26_3(schema):
         ("duration", "varint"))
     # ServerboundPunchPacket: StreamCodec.unit (no body).
     server["packet_punch"] = ["container", []]
+    # ClientboundUpdateAdvancementsPacket: the added list holds
+    # PositionedAdvancement (AdvancementHolder, FLOAT x, FLOAT y); DisplayInfo
+    # no longer writes the position after the background. AdvancementType is
+    # an idMapper VarInt as before; CriterionProgress is optional INSTANT (a
+    # long), the same bytes as writeNullable/writeInstant.
+    added = _field(play["packet_advancements"], "advancementMapping")["type"][1]
+    display = _field(_field(added["type"], "value")["type"], "displayData")["type"][1]
+    display[1] = [field for field in display[1] if field["name"] not in ("xCord", "yCord")]
+    added["type"][1] += [{"name": "x", "type": "f32"}, {"name": "y", "type": "f32"}]
+    # SlotDisplay$TagSlotDisplay: ByteBufCodecs.holderSet(ITEM) (was
+    # TagKey.streamCodec): a tag name or a list of item IDs, like IDSet.
+    play["SlotDisplay"][1][1]["type"][1]["fields"]["tag"] = "IDSet"
 
 
 def _spawn_info(schema):
@@ -223,11 +235,6 @@ PATCHES = {"26.2": _patch_26_2, "26.3": _patch_26_3}
 UNVERIFIED = {
     "26.2": [],
     "26.3": [
-        (["play", "toClient", "types", "packet_advancements"],
-         "Advancement, DisplayInfo, AdvancementRequirements, AdvancementProgress, CriterionProgress "
-         "and the new PositionedAdvancement changed"),
-        (["play", "toClient", "types", "packet_declare_recipes"], "RecipePropertySet changed"),
-        (["play", "toClient", "types", "packet_recipe_book_add"], "Recipe/RecipeDisplay entries changed"),
         (["configuration", "toClient", "types", "packet_show_dialog"], "Dialog changed"),
         (["play", "toClient", "types", "packet_show_dialog"], "Dialog changed"),
         (SLOT_COMPONENTS + ["pot_decorations"], "PotDecorations changed (DecoratedPotPatterns)"),
