@@ -61,12 +61,6 @@ pub fn registry(from: i32, to: i32, sent: &Registry) -> io::Result<Option<Regist
         entry
             .element
             .as_ref()
-            .is_none_or(|element| items_exist(&sent.name, to, element))
-    });
-    entries.retain(|entry| {
-        entry
-            .element
-            .as_ref()
             .is_none_or(|element| !names_unknown_item(&sent.name, to, element))
     });
     let mut registry = Registry {
@@ -78,24 +72,6 @@ pub fn registry(from: i32, to: i32, sent: &Registry) -> io::Result<Option<Regist
         registry.renumber();
     }
     Ok(Some(registry))
-}
-
-/// Whether the items an element of `registry` names exist in `to`: the
-/// game decodes them as item references and fails on an unknown one, so an
-/// entry naming an item the receiver lacks (a 1.20 trim pattern whose
-/// template 1.19.4 has not got) cannot be sent.
-fn items_exist(registry: &str, to: i32, element: &Nbt) -> bool {
-    let field = match registry {
-        "trim_pattern" => "template_item",
-        "trim_material" => "ingredient",
-        _ => return true,
-    };
-    let Some(item) = element.as_compound().and_then(|element| element.str(field)) else {
-        return true;
-    };
-    crate::data::version(to)
-        .registry("item")
-        .is_none_or(|items| items.id(crate::data::strip(item)).is_some())
 }
 
 /// The receiver's vanilla registries that the sender's version does not

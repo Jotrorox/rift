@@ -161,7 +161,9 @@ fn downgraded_login_names_only_what_1_19_4_knows() {
     let items = data::version(OLDER).expect_registry("item");
     let sounds = data::version(OLDER).expect_registry("sound_event");
     // Patterns whose template 1.19.4 lacks (wayfinder, host, raiser,
-    // shaper, silence) are left out: its decoder rejects unknown items.
+    // shaper, silence) are left out: its decoder rejects the whole registry
+    // over one unknown item, and a stand-in item would name a template the
+    // pattern does not belong to.
     let patterns = entries(&after, "trim_pattern");
     assert_eq!(patterns.len(), 11);
     for (name, entry) in &patterns {
