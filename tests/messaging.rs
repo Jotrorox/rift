@@ -337,6 +337,56 @@ fn messaging_instance_child() {
     std::io::stdin().read_line(&mut command).unwrap();
 }
 
+/// A managed server stand-in with RiftPerms-style zero configuration: it
+/// finds the bus, its certificate, its name and its token in the `RIFT_*`
+/// variables Rift set, says hello as itself, and writes what happened to
+/// `login.json`. Then it listens like a server until `stop`.
+#[test]
+fn messaging_login_child() {
+    let Ok(properties) = fs::read_to_string("server.properties") else {
+        return;
+    };
+    let Ok(token) = std::env::var("RIFT_BUS_TOKEN") else {
+        return;
+    };
+    let variable = |name: &str| std::env::var(name).unwrap();
+    let port = properties
+        .lines()
+        .find_map(|line| line.strip_prefix("server-port="))
+        .unwrap()
+        .to_owned();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let report = runtime.block_on(async {
+        let client = quic::Client::connect(
+            variable("RIFT_BUS_ADDRESS").parse().unwrap(),
+            &variable("RIFT_BUS_SERVER_NAME"),
+            quic::tls_client_config(variable("RIFT_BUS_CERT")).unwrap(),
+            &token,
+        )
+        .await
+        .unwrap();
+        let hello = json!({"server": variable("RIFT_SERVER_NAME"), "revision": 0, "client_version": "test"});
+        let reply = client
+            .request("rift.perms.hello", Bytes::from(hello.to_string()), Duration::from_secs(5))
+            .await
+            .unwrap();
+        json!({
+            "server": variable("RIFT_SERVER_NAME"),
+            "group": variable("RIFT_SERVER_GROUP"),
+            "token": token,
+            "hello": serde_json::from_slice::<Value>(&reply.payload).unwrap(),
+        })
+    });
+    fs::write("login.json.tmp", report.to_string()).unwrap();
+    fs::rename("login.json.tmp", "login.json").unwrap();
+    let _listener = std::net::TcpListener::bind(format!("127.0.0.1:{port}")).unwrap();
+    let mut command = String::new();
+    std::io::stdin().read_line(&mut command).unwrap();
+}
+
 fn write_instance_config(fixture: &Fixture, url: &str, sha256: &str, port: u16) {
     let helper =
         serde_json::to_string(&std::env::current_exe().unwrap().to_string_lossy()).unwrap();
@@ -474,6 +524,98 @@ async fn channel_requests_download_create_start_stop_and_remove_instances() {
     .await;
     assert_eq!(refreshed["ok"], true, "{refreshed}");
     assert_eq!(hits.load(Ordering::SeqCst), 2, "refresh downloads again");
+    client.close();
+}
+
+/// One unchanged template for every instance: Rift issues each its own bus
+/// login, the process finds everything in `RIFT_*` variables and says hello
+/// as itself; after removal its token is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn instances_connect_with_their_own_login_until_removed() {
+    let fixture = Fixture::new();
+    let jar = b"downloaded server jar".to_vec();
+    let (http, _hits) = artifact_server(jar.clone(), None);
+    let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = reservation.local_addr().unwrap().port();
+    drop(reservation);
+    write_instance_config(
+        &fixture,
+        &format!("http://127.0.0.1:{http}/server.jar"),
+        &sha256(&jar),
+        port,
+    );
+    let source = fs::read_to_string(fixture.path.join("rift.lua"))
+        .unwrap()
+        .replace("'messaging_instance_child'", "'messaging_login_child'")
+        .replace(
+            "start_timeout_ms = 10000,",
+            "start_timeout_ms = 10000, messaging = { preset = 'backend' },",
+        );
+    fs::write(fixture.path.join("rift.lua"), source).unwrap();
+    let process = fixture.start();
+    let client = fixture.connect(&process).await;
+    let created = control(&client, "rift.control.create", json!({"group":"game"})).await;
+    assert_eq!(created["ok"], true, "{created}");
+    let name = created["data"]["name"].as_str().unwrap().to_owned();
+    let directory = fixture.path.join("temp/services").join(&name);
+    assert!(
+        directory.join("rift-bus.pem").is_file(),
+        "the certificate is written at creation"
+    );
+    let started = control(&client, "rift.control.start", json!({"name": name})).await;
+    assert_eq!(started["ok"], true, "{started}");
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let login = loop {
+        if let Ok(text) = fs::read_to_string(directory.join("login.json")) {
+            break serde_json::from_str::<Value>(&text).unwrap();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the instance never logged in"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(login["server"], name.as_str());
+    assert_eq!(login["group"], "game");
+    assert_eq!(login["hello"]["ok"], true, "{login}");
+    let token = login["token"].as_str().unwrap().to_owned();
+    assert!(token.starts_with(&format!("ri1.{name}.1.")), "{token}");
+    // The token belongs to this instance only, and nothing stores it.
+    let config = fs::read_to_string(fixture.path.join("rift.lua")).unwrap();
+    assert!(!config.contains(&token));
+    let holder = quic::Client::connect(process.address, "localhost", fixture.tls.clone(), &token)
+        .await
+        .unwrap();
+
+    let stopped = control(&client, "rift.control.stop", json!({"name": name})).await;
+    assert_eq!(stopped["ok"], true, "{stopped}");
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let removed = control(&client, "rift.control.remove", json!({"name": name})).await;
+        if removed["ok"] == true {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "{removed}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // Its open session is closed and the token no longer authenticates.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while holder
+        .publish("rift.perms.hello", Bytes::from_static(b"{}"))
+        .await
+        .is_ok()
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the removed instance stayed connected"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        quic::Client::connect(process.address, "localhost", fixture.tls.clone(), &token)
+            .await
+            .is_err()
+    );
     client.close();
 }
 

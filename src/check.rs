@@ -28,6 +28,87 @@ impl Report {
 /// the configuration script runs sandboxed, persistent plugins run trusted
 /// with the listed capabilities. Plugins are never initialized here. Returns
 /// lines to print and warnings (engines this build lacks).
+/// Warnings about instance bus logins (see [`rift::instance_login`]):
+/// a group whose template ships RiftPerms but that issues no login (its
+/// instances would need a principal and token each, or fail to start the
+/// plugin), and groups on nodes that would be told a loopback bus address.
+pub fn instance_logins(config: &Config) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for (name, group) in &config.service_groups {
+        let Some(template) = group
+            .template
+            .as_ref()
+            .and_then(|t| config.templates.get(t))
+        else {
+            continue;
+        };
+        if group.server.messaging.is_none()
+            && let Some(jar) = riftperms_jar(template)
+        {
+            warnings.push(format!(
+                "service_groups.{name}: template ships RiftPerms ({}) but the group has no messaging block, so its instances get no bus login; add messaging = {{ preset = \"backend\" }} to give each instance its own",
+                jar.display()
+            ));
+        }
+    }
+    let advertised = config
+        .messaging
+        .as_ref()
+        .is_some_and(|messaging| messaging.advertise.is_some());
+    let loopback = config
+        .messaging
+        .as_ref()
+        .and_then(|messaging| messaging.listen)
+        .is_some_and(|listen| listen.ip().is_loopback() || listen.ip().is_unspecified());
+    if !advertised && loopback {
+        let remote = config
+            .service_groups
+            .iter()
+            .filter(|(_, group)| group.nodes.is_some() && group.server.messaging.is_some())
+            .map(|(name, _)| format!("service_groups.{name}"))
+            .chain(
+                config
+                    .managed_servers
+                    .iter()
+                    .filter(|(_, server)| server.node.is_some() && server.messaging.is_some())
+                    .map(|(name, _)| format!("managed_servers.{name}")),
+            );
+        for path in remote {
+            warnings.push(format!(
+                "{path}: runs on nodes with a bus login, but without messaging.advertise its instances are told 127.0.0.1; set messaging.advertise to an address the nodes reach"
+            ));
+        }
+    }
+    warnings
+}
+
+/// A RiftPerms jar among a template's plugins or in a config layer's
+/// `plugins/` folder.
+fn riftperms_jar(template: &rift::config::ServerTemplate) -> Option<std::path::PathBuf> {
+    let riftperms = |path: &std::path::Path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                let name = name.to_ascii_lowercase();
+                name.starts_with("riftperms") && name.ends_with(".jar")
+            })
+    };
+    template
+        .plugins
+        .iter()
+        .find(|path| riftperms(path))
+        .cloned()
+        .or_else(|| {
+            template.configs.iter().find_map(|layer| {
+                std::fs::read_dir(layer.join("plugins"))
+                    .ok()?
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.path())
+                    .find(|path| riftperms(path))
+            })
+        })
+}
+
 pub fn plugins(config: &Config) -> (Vec<String>, Vec<String>) {
     let mut lines = Vec::new();
     let mut warnings = Vec::new();

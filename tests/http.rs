@@ -2011,6 +2011,40 @@ fn structured_definitions_preserve_lua_and_apply_safe_group_and_template_edits()
         .expect(200);
     assert!(fixture.read().contains(&source));
     assert_hook_preserved(client);
+    // A server's environment survives a structured edit: the values it
+    // reads are the ones it writes back.
+    let mut with_env = definition.clone();
+    with_env["env"] = json!({"DATABASE_URL":"jdbc:x","NAME":"{name}"});
+    with_env["inherit_env"] = json!(["PATH"]);
+    client
+        .json(
+            "PUT",
+            "/api/definitions/service_groups/lobby",
+            json!({"revision":revision(client),"definition":with_env}),
+        )
+        .expect(200);
+    let read =
+        client.get("/api/definitions").expect(200).value()["service_groups"]["lobby"].clone();
+    assert_eq!(read["env"], with_env["env"]);
+    assert_eq!(read["inherit_env"], json!(["PATH"]));
+    client
+        .json(
+            "PUT",
+            "/api/definitions/service_groups/lobby",
+            json!({"revision":revision(client),"definition":read}),
+        )
+        .expect(200);
+    assert_eq!(
+        client.get("/api/definitions").expect(200).value()["service_groups"]["lobby"]["env"],
+        with_env["env"]
+    );
+    client
+        .json(
+            "PUT",
+            "/api/definitions/service_groups/lobby",
+            json!({"revision":revision(client),"definition":definition}),
+        )
+        .expect(200);
     client
         .instance("POST", "/api/groups/lobby/instances", json!({}))
         .expect(201);

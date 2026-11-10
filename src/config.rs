@@ -14,7 +14,7 @@ use tokio::sync::Semaphore;
 pub use crate::message_script::MessageScript;
 pub use crate::server_list::{ServerList, StatusScript};
 pub use crate::{http_script::HttpScript, script::RouteScript};
-pub use managed::{ManagedServer, ProcessEnvironment};
+pub use managed::{InstanceMessaging, ManagedServer, ProcessEnvironment};
 pub use messaging::{MessagingConfig, MessagingPrincipal, MessagingStream, MessagingSubscription};
 pub use nodes::{LOCAL_NODE, NodeConfig, NodeSelector, Placement, valid_node_directory};
 pub use permissions::PermissionsConfig;
@@ -971,6 +971,22 @@ impl Config {
                     .map(|(name, group)| (format!("service_groups.{name}"), &group.server)),
             );
         for (path, server) in definitions {
+            if let Some(grants) = &server.messaging {
+                let listening = self
+                    .messaging
+                    .as_ref()
+                    .is_some_and(|messaging| messaging.listen.is_some());
+                if !listening {
+                    return Err(invalid(format!(
+                        "{path}.messaging: instance logins need messaging.listen with a certificate"
+                    )));
+                }
+                let max = self.messaging.as_ref().map_or(256, |m| m.max_subject_bytes);
+                for pattern in grants.publish.iter().chain(&grants.subscribe) {
+                    messaging::pattern_valid(pattern, max)
+                        .map_err(|error| invalid(format!("{path}.messaging: {error}")))?;
+                }
+            }
             for name in server.environment.inherit.iter().flatten() {
                 if let Some((field, _)) = secrets.iter().find(|(_, variable)| variable == name) {
                     return Err(invalid(format!(
@@ -1002,8 +1018,15 @@ impl Config {
             }
         }
         if let Some(messaging) = &self.messaging {
+            // Node agents and instance logins are identities the listener
+            // serves without a configured principal.
+            let logins = self
+                .managed_servers
+                .values()
+                .chain(self.service_groups.values().map(|group| &group.server))
+                .any(|server| server.messaging.is_some());
             messaging
-                .validate_with_nodes(!self.nodes.is_empty())
+                .validate_with_nodes(!self.nodes.is_empty() || logins)
                 .map_err(invalid)?;
         }
         if self.server_list.is_some() && self.status_cache.is_some() {
