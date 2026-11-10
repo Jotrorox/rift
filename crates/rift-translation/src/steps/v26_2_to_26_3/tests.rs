@@ -258,10 +258,25 @@ fn teleports_are_accepted_with_their_position() {
         down.one(Serverbound, "move_player_pos_rot", &moved.buf),
         ("accept_teleportation".into(), hex(ACCEPT_26_3))
     );
-    // Later movement passes as it is.
+    // The movement itself follows at the end of the client tick, unless the
+    // client moved again within it: one position per tick.
+    let names = |sent: Vec<crate::steps::v1_21_11_to_26_1::testing::Sent>| {
+        sent.into_iter().map(|sent| sent.name).collect::<Vec<_>>()
+    };
+    assert_eq!(
+        names(down.serverbound("client_tick_end", &[]).unwrap()),
+        ["move_player_pos_rot", "client_tick_end"]
+    );
+    down.serverbound("accept_teleportation", &hex("01"))
+        .unwrap();
+    down.serverbound("move_player_pos_rot", &moved.buf).unwrap();
     assert_eq!(
         down.one(Serverbound, "move_player_pos_rot", &moved.buf),
         ("move_player_pos_rot".into(), moved.buf.clone())
+    );
+    assert_eq!(
+        names(down.serverbound("client_tick_end", &[]).unwrap()),
+        ["client_tick_end"]
     );
     // A position-only follow-up keeps the rotation last reported.
     let mut rotation = Writer::new();

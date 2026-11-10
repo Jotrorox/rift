@@ -26,6 +26,9 @@ pub struct Down {
     /// A teleport the client accepted, completed by the movement packet a
     /// 26.2 client always sends right after accepting.
     accepted: Option<i32>,
+    /// That movement packet, held until the end of the client tick (see
+    /// `moved`).
+    deferred: Option<Packet>,
 }
 
 impl HasShared for Down {
@@ -47,6 +50,7 @@ impl Down {
             brewing_stand: None,
             rotation: None,
             accepted: None,
+            deferred: None,
         }
     }
 
@@ -81,6 +85,7 @@ impl Down {
                 .serverbound(Play, "swing", Self::swing)
                 .serverbound(Play, "player_action", Self::player_action)
                 .serverbound(Play, "sign_update", Self::sign_update)
+                .serverbound(Play, "client_tick_end", Self::client_tick_end)
                 .build()
         })
     }
@@ -123,6 +128,7 @@ impl Down {
     }
 
     fn spawned(&mut self) {
+        self.deferred = None;
         self.brewing_stand = None;
     }
 
@@ -250,10 +256,8 @@ impl Down {
     }
 
     /// 26.3 accepts a teleport with the position and rotation the client
-    /// took, and counts it as the client's movement: a 26.2 client's
-    /// acceptance and the movement packet it sends right after become one
-    /// 26.3 acceptance (passing both would be two positions in one tick,
-    /// for which a 26.3 server disconnects the player).
+    /// took: a 26.2 client's acceptance and the movement packet it sends
+    /// right after become one 26.3 acceptance.
     fn accept_teleportation(&mut self, _: &mut Cx<'_>, _: State, packet: Packet) -> io::Result<()> {
         let mut r = Reader::new(&packet.data);
         let id = r.varint()?;
@@ -263,6 +267,13 @@ impl Down {
     }
 
     /// Complete a pending acceptance with this movement, or pass it on.
+    ///
+    /// The movement packet still goes to the server, which may rely on it
+    /// (Pumpkin updates the player's chunks only from movement packets),
+    /// but only when the client sends no other position in that tick: a
+    /// 26.3 server disconnects a player for two positions in one client
+    /// tick. It is held until the tick ends, or dropped for the client's
+    /// own movement of that tick.
     fn moved(
         &mut self,
         cx: &mut Cx<'_>,
@@ -275,9 +286,11 @@ impl Down {
             self.rotation = rotation;
         }
         let Some(id) = self.accepted.take() else {
+            self.deferred = None;
             cx.to_backend(state, packet);
             return;
         };
+        self.deferred = Some(packet.clone());
         let rotation = self.rotation.unwrap_or_default();
         let mut w = Writer::with_capacity(37);
         w.varint(id);
@@ -289,6 +302,14 @@ impl Down {
             state,
             Packet::new(Self::ids().accept_teleportation, w.into_inner()),
         );
+    }
+
+    fn client_tick_end(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
+        if let Some(movement) = self.deferred.take() {
+            cx.to_backend(state, movement);
+        }
+        cx.to_backend(state, packet);
+        Ok(())
     }
 
     fn move_player_pos(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
