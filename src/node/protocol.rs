@@ -90,6 +90,149 @@ pub struct Start {
     /// Relative to the agent's `--root`.
     pub directory: PathBuf,
     pub port: u16,
+    /// `env` and `inherit_env` of the server. Agents from before this field
+    /// ignore it and start the server with their whole environment minus
+    /// nothing, so upgrade agents together with the controller.
+    #[serde(default, skip_serializing_if = "Environment::is_default")]
+    pub environment: Environment,
+    /// The bus certificate (PEM, public) for a server with a bus login: the
+    /// agent writes it into the server directory and points `RIFT_BUS_CERT`
+    /// at it. The login's token is in `environment`, which makes this the one
+    /// command that carries a secret; it is scoped to this instance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bus_certificate: Option<String>,
+    /// The server's `isolation`, applied by the agent on its own kernel.
+    /// Agents from before this field start the server unconfined.
+    #[serde(default, skip_serializing_if = "IsolationSpec::is_off")]
+    pub isolation: IsolationSpec,
+}
+
+/// [`crate::config::Isolation`] on the wire; paths are the node's.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IsolationSpec {
+    /// `off`, `landlock` or `required`.
+    #[serde(default)]
+    pub mode: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub read: Vec<PathBuf>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub write: Vec<PathBuf>,
+}
+
+impl IsolationSpec {
+    fn is_off(&self) -> bool {
+        self.mode.is_empty() || self.mode == "off"
+    }
+}
+
+impl From<&crate::config::Isolation> for IsolationSpec {
+    fn from(isolation: &crate::config::Isolation) -> Self {
+        Self {
+            mode: isolation.mode.as_str().to_owned(),
+            read: isolation.read.clone(),
+            write: isolation.write.clone(),
+        }
+    }
+}
+
+impl TryFrom<&IsolationSpec> for crate::config::Isolation {
+    type Error = io::Error;
+    fn try_from(spec: &IsolationSpec) -> io::Result<Self> {
+        use crate::config::IsolationMode;
+        let mode = match spec.mode.as_str() {
+            "" | "off" => IsolationMode::Off,
+            "landlock" => IsolationMode::Landlock,
+            "required" => IsolationMode::Required,
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "unknown isolation mode",
+                ));
+            }
+        };
+        if spec
+            .read
+            .iter()
+            .chain(&spec.write)
+            .any(|path| !path.is_absolute())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "isolation paths must be absolute",
+            ));
+        }
+        Ok(Self {
+            mode,
+            read: spec.read.clone(),
+            write: spec.write.clone(),
+        })
+    }
+}
+
+/// [`crate::config::ProcessEnvironment`] on the wire. The agent removes its
+/// own secrets (`--token-env`, `--forwarding-secret-env`) whatever this says.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Environment {
+    /// `None` inherits the agent's environment; `Some` only these names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherit: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub set: Vec<(String, String)>,
+}
+
+impl Environment {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+impl From<&crate::config::ProcessEnvironment> for Environment {
+    fn from(environment: &crate::config::ProcessEnvironment) -> Self {
+        Self {
+            inherit: environment
+                .inherit
+                .as_ref()
+                .map(|names| names.iter().cloned().collect()),
+            set: environment
+                .set
+                .iter()
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect(),
+        }
+    }
+}
+
+impl TryFrom<&Environment> for crate::config::ProcessEnvironment {
+    type Error = io::Error;
+    /// The agent checks names itself: they become `execve` arguments.
+    fn try_from(environment: &Environment) -> io::Result<Self> {
+        let invalid =
+            || io::Error::new(io::ErrorKind::InvalidInput, "invalid environment variable");
+        let names = environment
+            .inherit
+            .iter()
+            .flatten()
+            .chain(environment.set.iter().map(|(name, _)| name));
+        for name in names {
+            if !crate::environment::valid_name(name) {
+                return Err(invalid());
+            }
+        }
+        if environment
+            .set
+            .iter()
+            .any(|(_, value)| value.contains('\0'))
+        {
+            return Err(invalid());
+        }
+        Ok(Self {
+            inherit: environment
+                .inherit
+                .as_ref()
+                .map(|names| names.iter().cloned().collect()),
+            set: environment.set.iter().cloned().collect(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -149,8 +292,9 @@ pub struct Prepare {
     pub map: Option<String>,
     pub accept_eula: bool,
     /// `Some(online_mode)`: configure Velocity forwarding for Paper-family
-    /// software. The secret never crosses the bus; agents read their own copy
-    /// from `--forwarding-secret-env`.
+    /// software. The forwarding secret never crosses the bus; agents read
+    /// their own copy from `--forwarding-secret-env`. (The one secret that
+    /// does cross is an instance's bus token, in [`Start`].)
     pub forwarding: Option<bool>,
     /// `(name, value, replace)`: replaced settings always win, others are defaults.
     pub properties: Vec<(String, String, bool)>,
@@ -330,6 +474,36 @@ mod tests {
         assert_eq!(encode_base64(b"fo"), "Zm8=");
         for invalid in ["Zm8", "Z===", "Zm=v", "Zm8=Zm8=", "Zm.v"] {
             assert!(decode_base64(invalid).is_none(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn start_environment_is_optional_on_the_wire() {
+        // A controller from before `environment` sends none; the default
+        // inherits the agent's environment minus its secrets.
+        let old = r#"{"op":"start","server":"game-1","command":["java"],"directory":"game-1","port":30000}"#;
+        let Command::Start(start) = serde_json::from_str::<Command>(old).unwrap() else {
+            panic!("not a start");
+        };
+        assert_eq!(start.environment, Environment::default());
+        assert_eq!(serde_json::to_string(&Command::Start(start)).unwrap(), old);
+        let environment = Environment {
+            inherit: Some(vec!["PATH".into()]),
+            set: vec![("DB".into(), "x".into())],
+        };
+        let config = crate::config::ProcessEnvironment::try_from(&environment).unwrap();
+        assert_eq!(Environment::from(&config), environment);
+        for bad in [
+            Environment {
+                inherit: Some(vec!["A=B".into()]),
+                set: vec![],
+            },
+            Environment {
+                inherit: None,
+                set: vec![("X".into(), "a\0b".into())],
+            },
+        ] {
+            assert!(crate::config::ProcessEnvironment::try_from(&bad).is_err());
         }
     }
 }

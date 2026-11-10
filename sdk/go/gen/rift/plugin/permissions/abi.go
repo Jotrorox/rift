@@ -15,3 +15,24 @@ func lower_OptionBool(v cm.Option[bool]) (f0 uint32, f1 uint32) {
 	}
 	return
 }
+
+func lower_OptionString(v cm.Option[string]) (f0 uint32, f1 *uint8, f2 uint32) {
+	some := v.Some()
+	if some != nil {
+		f0 = 1
+		v1, v2 := cm.LowerString(*some)
+		f1 = (*uint8)(v1)
+		f2 = (uint32)(v2)
+	}
+	return
+}
+
+func lower_OptionU64(v cm.Option[uint64]) (f0 uint32, f1 uint64) {
+	some := v.Some()
+	if some != nil {
+		f0 = 1
+		v1 := (uint64)(*some)
+		f1 = (uint64)(v1)
+	}
+	return
+}

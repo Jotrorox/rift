@@ -33,6 +33,14 @@ const INSTANCES_V2: &str = "CREATE TABLE instances (
 /// is unaffected; older releases ignore the extra table.
 const GROUPS_COMPONENT: &str = "groups";
 const GROUPS_SCHEMA_VERSION: u32 = 1;
+/// Instance login generations live in their own schema component, like
+/// group states, so the instances schema and downgrades are unaffected.
+const LOGINS_COMPONENT: &str = "instance_logins";
+const LOGINS_SCHEMA_VERSION: u32 = 1;
+const LOGINS_V1: &str = "CREATE TABLE login_generations (
+    name TEXT PRIMARY KEY NOT NULL,
+    generation INTEGER NOT NULL CHECK(generation > 0)
+) STRICT;";
 
 const GROUPS_V1: &str = "CREATE TABLE group_states (
     name TEXT PRIMARY KEY NOT NULL,
@@ -175,6 +183,9 @@ impl Store {
         })?;
         database.migrate(GROUPS_COMPONENT, GROUPS_SCHEMA_VERSION, |_| {
             GROUPS_V1.to_owned()
+        })?;
+        database.migrate(LOGINS_COMPONENT, LOGINS_SCHEMA_VERSION, |_| {
+            LOGINS_V1.to_owned()
         })?;
         Ok(Self { database })
     }
@@ -464,8 +475,9 @@ impl Store {
             plan: plan.clone(),
         })
         .map_err(|e| self.error(e))?;
-        self.database
-            .lock()
+        let mut connection = self.database.lock();
+        let transaction = connection.transaction().map_err(|e| self.error(e))?;
+        transaction
             .execute(
                 "INSERT INTO instances (name,node,port,phase,definition) VALUES (?1,?2,?3,'creating',?4)",
                 params![
@@ -476,7 +488,32 @@ impl Store {
                 ],
             )
             .map_err(|e| self.error(e))?;
+        // Every creation of a name gets a new login generation, so a
+        // recreated instance never inherits its predecessor's bus token.
+        transaction
+            .execute(
+                "INSERT INTO login_generations (name,generation) VALUES (?1,1)
+                 ON CONFLICT(name) DO UPDATE SET generation=generation+1",
+                [name],
+            )
+            .map_err(|e| self.error(e))?;
+        transaction.commit().map_err(|e| self.error(e))?;
         Ok(())
+    }
+
+    /// The bus login generation of instance `name`; 0 if it was never
+    /// created here (a static managed server).
+    pub fn login_generation(&self, name: &str) -> io::Result<u64> {
+        let connection = self.database.lock();
+        let generation: Option<i64> = connection
+            .query_row(
+                "SELECT generation FROM login_generations WHERE name=?1",
+                [name],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| self.error(e))?;
+        Ok(generation.map_or(0, |generation| generation as u64))
     }
 
     pub fn commit_creation(&self, name: &str) -> io::Result<()> {

@@ -337,8 +337,8 @@ fn covering_patterns_list_every_wildcard() {
 
 fn authority() -> Arc<Authority> {
     let authority = Arc::new(Authority::memory(&PermissionsConfig::default()));
-    authority.join(ALICE, "Alice", "survival");
-    authority.join(BOB, "Bob", "survival");
+    authority.join(ALICE, "Alice", "survival", None);
+    authority.join(BOB, "Bob", "survival", None);
     authority
 }
 

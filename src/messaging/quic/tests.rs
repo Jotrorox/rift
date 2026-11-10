@@ -10,6 +10,7 @@ fn identity() -> Identity {
         publish: vec!["game.>".into(), "_INBOX.>".into()],
         subscribe: vec!["game.>".into(), "_INBOX.>".into()],
         control: false,
+        players: false,
     }
 }
 fn configs() -> (quinn::ServerConfig, quinn::ClientConfig) {
@@ -75,6 +76,45 @@ fn wildcard_permissions_require_containment_not_overlap() {
     assert!(peer.can_subscribe(">").is_ok());
     assert!(peer.can_publish("rift.control.reload", None).is_ok());
     assert!(peer.can_publish("rift.events.player", None).is_err());
+}
+
+#[test]
+fn the_player_api_needs_its_own_grant_and_only_control_may_answer_it() {
+    let mut peer = identity();
+    peer.publish = vec![
+        "rift.players.*".into(),
+        "rift.control.*".into(),
+        "_INBOX.>".into(),
+    ];
+    peer.subscribe = vec![">".into()];
+    // A publish grant alone is not enough, as for `rift.control`.
+    assert!(peer.can_publish("rift.players.kick", None).is_err());
+    peer.players = true;
+    assert!(
+        peer.can_publish("rift.players.kick", Some("_INBOX.a"))
+            .is_ok()
+    );
+    assert!(
+        peer.can_publish("rift.players.kick", Some("game.x"))
+            .is_err()
+    );
+    // `players` is not `control`.
+    assert!(peer.can_publish("rift.control.stop", None).is_err());
+    // Receiving player requests would expose every caller's actions and
+    // let the subscriber answer in Rift's place.
+    for pattern in [
+        "rift.players.kick",
+        "rift.players.*",
+        "rift.players.>",
+        "rift.*.kick",
+        "rift.players",
+    ] {
+        assert!(peer.can_subscribe(pattern).is_err(), "{pattern}");
+    }
+    peer.control = true;
+    assert!(peer.can_subscribe("rift.players.*").is_ok());
+    peer.players = false;
+    assert!(peer.can_publish("rift.players.kick", None).is_err());
 }
 
 #[test]
@@ -464,6 +504,7 @@ async fn plugin_connections_are_capped_per_identity_and_never_crowd_out_nodes() 
         publish: vec![],
         subscribe: vec![],
         control: false,
+        players: false,
     };
     let server = Server::bind(
         "127.0.0.1:0".parse().unwrap(),
@@ -661,5 +702,90 @@ async fn unvalidated_peers_get_a_retry_before_any_handshake() {
     drop(client);
     forward.abort();
     backward.abort();
+    server.shutdown().await;
+}
+
+/// An instance login authenticates by its token alone, with the grants of
+/// its registration; removing the instance closes its open connection and
+/// refuses the token from then on.
+#[tokio::test]
+async fn instance_logins_authenticate_and_revocation_closes_their_sessions() {
+    use crate::{config::InstanceMessaging, instance_login::Logins};
+    let (server_tls, client_tls) = configs();
+    let broker = Broker::default();
+    let logins = Arc::new(Logins::with_key([5; 32]));
+    logins.register(
+        "lobby-3",
+        1,
+        Some("lobby"),
+        InstanceMessaging {
+            publish: vec!["game.>".into(), "_INBOX.>".into()],
+            subscribe: vec!["game.>".into(), "_INBOX.>".into()],
+        },
+    );
+    let server = Server::bind(
+        "127.0.0.1:0".parse().unwrap(),
+        server_tls,
+        broker.clone(),
+        AuthConfig {
+            identities: vec![identity()],
+            dynamic: Some(Dynamic(logins.clone())),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let address = server.local_addr().unwrap();
+    let token = logins.token("lobby-3", 1);
+    let client = Client::connect(address, "localhost", client_tls.clone(), &token)
+        .await
+        .unwrap();
+    let mut local = broker.subscribe("game.hello", None).unwrap();
+    client
+        .publish("game.hello", Bytes::from_static(b"hi"))
+        .await
+        .unwrap();
+    let message = local.recv().await.unwrap();
+    assert_eq!(message.sender.as_deref(), Some("server.lobby-3"));
+    // Grants are the registration's: control subjects stay refused.
+    assert!(
+        client
+            .publish("rift.control.stop", Bytes::from_static(b"{}"))
+            .await
+            .is_err()
+    );
+    // A token for another generation is refused, as is a configured
+    // principal's token being mistaken for one.
+    assert!(
+        Client::connect(
+            address,
+            "localhost",
+            client_tls.clone(),
+            &logins.token("lobby-3", 2)
+        )
+        .await
+        .is_err()
+    );
+    logins.unregister("lobby-3");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while client
+        .publish("game.hello", Bytes::from_static(b"again"))
+        .await
+        .is_ok()
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the session stayed open"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        Client::connect(address, "localhost", client_tls.clone(), &token)
+            .await
+            .is_err()
+    );
+    // Configured principals are unaffected.
+    Client::connect(address, "localhost", client_tls, &identity().token)
+        .await
+        .unwrap();
     server.shutdown().await;
 }

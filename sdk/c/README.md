@@ -1,6 +1,6 @@
 # Rift C plugin SDK
 
-Write Rift WebAssembly plugins in C (or C++) against the `rift:plugin@0.1.2`
+Write Rift WebAssembly plugins in C (or C++) against the `rift:plugin@0.1.3`
 contract in [`wit/rift-plugin.wit`](../../wit/rift-plugin.wit).
 
 | File | What it is |

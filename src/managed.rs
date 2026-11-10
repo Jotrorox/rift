@@ -22,6 +22,9 @@ use crate::{
 };
 
 mod backend;
+/// Landlock confinement of managed servers (Linux).
+#[cfg(target_os = "linux")]
+pub mod landlock;
 use backend::{Local, ProcessBackend, Remote, Status};
 pub(crate) use backend::{spawn as spawn_process, stop_child, write_console};
 
@@ -93,7 +96,12 @@ struct Inner {
     shutdown: AtomicBool,
     instance_store: Mutex<Option<Arc<crate::instance_store::Store>>>,
     nodes: Nodes,
+    logins: LoginSlot,
 }
+
+/// The instance logins every worker reads when it starts a process, set
+/// once the bus is up ([`ManagedServers::set_logins`]).
+pub(crate) type LoginSlot = Arc<std::sync::RwLock<Option<Arc<crate::instance_login::Logins>>>>;
 
 #[derive(Debug)]
 struct Server {
@@ -208,8 +216,20 @@ impl Drop for ManagedLease {
     }
 }
 
+/// Register `config`'s secret variables so no child inherits them. Called
+/// wherever a configuration reaches the supervisor, before any spawn.
+pub fn protect_secrets(config: &Config) {
+    crate::environment::protect(
+        config
+            .secret_variables()
+            .into_iter()
+            .map(|(_, variable)| variable),
+    );
+}
+
 impl ManagedServers {
-    /// Construction is side-effect free and does not need a Tokio runtime.
+    /// Construction does not need a Tokio runtime and has no side effect
+    /// beyond [`protect_secrets`].
     pub fn new(config: &Config, players: Arc<PlayerRegistry>) -> Self {
         let nodes = Nodes::new(crate::messaging::Broker::default(), config);
         Self::with_nodes(config, players, nodes)
@@ -217,6 +237,7 @@ impl ManagedServers {
 
     /// Servers with a `node` run through that node's agent in `nodes`.
     pub fn with_nodes(config: &Config, players: Arc<PlayerRegistry>, nodes: Nodes) -> Self {
+        protect_secrets(config);
         let servers = config
             .managed_servers
             .iter()
@@ -236,11 +257,71 @@ impl ManagedServers {
             shutdown: AtomicBool::new(false),
             instance_store: Mutex::new(None),
             nodes,
+            logins: LoginSlot::default(),
         }))
     }
 
     pub fn nodes(&self) -> &Nodes {
         &self.0.nodes
+    }
+
+    /// Hand each process its bus login from now on (see
+    /// [`crate::instance_login`]), and issue the logins of the servers
+    /// already registered: static ones and instances restored at startup.
+    pub fn set_logins(
+        &self,
+        logins: Arc<crate::instance_login::Logins>,
+        config: &Config,
+    ) -> io::Result<()> {
+        *self
+            .0
+            .logins
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(logins);
+        let names: Vec<String> = lock(&self.0.servers).keys().cloned().collect();
+        for name in names {
+            self.issue_login(config, &name)?;
+        }
+        Ok(())
+    }
+
+    /// Issue `name` its login when its definition has a `messaging` block,
+    /// at the generation the instance database recorded for its creation
+    /// (0 for a static server), and put the bus certificate in its local
+    /// directory. Any other server has no login.
+    fn issue_login(&self, config: &Config, name: &str) -> io::Result<()> {
+        let logins = self
+            .0
+            .logins
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let Some(logins) = logins else {
+            return Ok(());
+        };
+        let Some(definition) = config.managed_servers.get(name) else {
+            return Ok(());
+        };
+        let Some(grants) = &definition.messaging else {
+            logins.unregister(name);
+            return Ok(());
+        };
+        let generation = match lock(&self.0.instance_store).as_ref() {
+            Some(store) => store.login_generation(name)?,
+            None => 0,
+        };
+        let group = config
+            .instances
+            .get(name)
+            .map(|instance| instance.group.as_str());
+        logins.register(name, generation, group, grants.clone());
+        if definition.node.is_none()
+            && definition.directory.is_dir()
+            && let Err(error) = logins.write_certificate(&definition.directory)
+        {
+            eprintln!("rift: cannot write the bus certificate for {name}: {error}");
+        }
+        Ok(())
     }
 
     /// The node running `name`, or `None` for this host and unknown names.
@@ -285,7 +366,13 @@ impl ManagedServers {
             return Ok(());
         }
         for server in servers.values() {
-            launch_worker(&runtime, server, &self.0.players, &self.0.nodes);
+            launch_worker(
+                &runtime,
+                server,
+                &self.0.players,
+                &self.0.nodes,
+                &self.0.logins,
+            );
         }
         Ok(())
     }
@@ -293,6 +380,7 @@ impl ManagedServers {
     /// Register a configured backend and give its child process a worker owner.
     /// The registry lock serializes registration against launch and shutdown.
     pub fn add(&self, config: &Config, name: &str) -> io::Result<()> {
+        protect_secrets(config);
         let runtime = tokio::runtime::Handle::try_current().map_err(io::Error::other)?;
         let mut servers = lock(&self.0.servers);
         self.check_running()?;
@@ -323,8 +411,17 @@ impl ManagedServers {
                 "managed server command is empty",
             ));
         }
+        // Before the worker exists, so even an autostarting server's first
+        // process has its login.
+        self.issue_login(config, name)?;
         let server = new_server(name, definition.clone(), endpoint);
-        launch_worker(&runtime, &server, &self.0.players, &self.0.nodes);
+        launch_worker(
+            &runtime,
+            &server,
+            &self.0.players,
+            &self.0.nodes,
+            &self.0.logins,
+        );
         servers.insert(name.to_owned(), server);
         lock(&self.0.retired).remove(name);
         Ok(())
@@ -376,6 +473,15 @@ impl ManagedServers {
                 {
                     lock(&inner.retired).insert(name.clone());
                     servers.remove(&name);
+                    // The process is gone; so are its login and sessions.
+                    if let Some(logins) = inner
+                        .logins
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .as_ref()
+                    {
+                        logins.unregister(&name);
+                    }
                 }
                 let _ = reply.send(());
             });
@@ -753,6 +859,7 @@ fn launch_worker(
     server: &Arc<Server>,
     players: &Arc<PlayerRegistry>,
     nodes: &Nodes,
+    logins: &LoginSlot,
 ) {
     let receiver = lock(&server.receiver).take().expect("single launch");
     match &server.config.node {
@@ -760,13 +867,13 @@ fn launch_worker(
             server.clone(),
             players.clone(),
             receiver,
-            Local::default(),
+            Local::new(logins.clone()),
         )),
         Some(node) => runtime.spawn(worker(
             server.clone(),
             players.clone(),
             receiver,
-            Remote::new(nodes.clone(), node.clone()),
+            Remote::new(nodes.clone(), node.clone(), logins.clone()),
         )),
     };
 }

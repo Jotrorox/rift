@@ -2,10 +2,10 @@
 
 package decisions
 
-// This file contains wasmimport and wasmexport declarations for "rift:plugin@0.1.2".
+// This file contains wasmimport and wasmexport declarations for "rift:plugin@0.1.3".
 
-//go:wasmexport rift:plugin/decisions@0.1.2#login
-//export rift:plugin/decisions@0.1.2#login
+//go:wasmexport rift:plugin/decisions@0.1.3#login
+//export rift:plugin/decisions@0.1.3#login
 func wasmexport_Login(ctx *Context) (result *Decision) {
 	ctx_ := *ctx
 	result_ := Exports.Login(ctx_)
@@ -13,8 +13,8 @@ func wasmexport_Login(ctx *Context) (result *Decision) {
 	return
 }
 
-//go:wasmexport rift:plugin/decisions@0.1.2#initial-server
-//export rift:plugin/decisions@0.1.2#initial-server
+//go:wasmexport rift:plugin/decisions@0.1.3#initial-server
+//export rift:plugin/decisions@0.1.3#initial-server
 func wasmexport_InitialServer(ctx *Context) (result *Decision) {
 	ctx_ := *ctx
 	result_ := Exports.InitialServer(ctx_)
@@ -22,8 +22,8 @@ func wasmexport_InitialServer(ctx *Context) (result *Decision) {
 	return
 }
 
-//go:wasmexport rift:plugin/decisions@0.1.2#before-transfer
-//export rift:plugin/decisions@0.1.2#before-transfer
+//go:wasmexport rift:plugin/decisions@0.1.3#before-transfer
+//export rift:plugin/decisions@0.1.3#before-transfer
 func wasmexport_BeforeTransfer(ctx *Context) (result *Decision) {
 	ctx_ := *ctx
 	result_ := Exports.BeforeTransfer(ctx_)
@@ -31,8 +31,8 @@ func wasmexport_BeforeTransfer(ctx *Context) (result *Decision) {
 	return
 }
 
-//go:wasmexport rift:plugin/decisions@0.1.2#command
-//export rift:plugin/decisions@0.1.2#command
+//go:wasmexport rift:plugin/decisions@0.1.3#command
+//export rift:plugin/decisions@0.1.3#command
 func wasmexport_Command(ctx *Context) (result *Decision) {
 	ctx_ := *ctx
 	result_ := Exports.Command(ctx_)

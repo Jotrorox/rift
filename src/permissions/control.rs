@@ -183,6 +183,24 @@ impl Bus {
         authority: Arc<Authority>,
         messaging: Option<&crate::config::MessagingConfig>,
     ) -> Self {
+        Self::with_instances(broker, authority, messaging, std::iter::empty())
+    }
+
+    /// [`Bus::new`] when managed instances get their own logins with these
+    /// subscribe grants (see [`crate::instance_login`]): they are replicas
+    /// too, so snapshots are pushed before a connection is forwarded.
+    pub fn with_instances<'a>(
+        broker: Broker,
+        authority: Arc<Authority>,
+        messaging: Option<&crate::config::MessagingConfig>,
+        instance_subscriptions: impl Iterator<Item = &'a [String]>,
+    ) -> Self {
+        let probe_instances = wire::update_subject(Uuid::from_u128(0));
+        let instance_replicas = instance_subscriptions.into_iter().any(|grants| {
+            grants
+                .iter()
+                .any(|pattern| pattern_matches(pattern, &probe_instances))
+        });
         let principals = messaging
             .map(|settings| {
                 settings
@@ -194,14 +212,15 @@ impl Bus {
             .unwrap_or_default();
         let published = Mutex::new(authority.revision());
         let probe = wire::update_subject(Uuid::from_u128(0));
-        let replicas = messaging.is_some_and(|settings| {
-            settings.principals.iter().any(|principal| {
-                principal
-                    .subscribe
-                    .iter()
-                    .any(|pattern| pattern_matches(pattern, &probe))
-            })
-        });
+        let replicas = instance_replicas
+            || messaging.is_some_and(|settings| {
+                settings.principals.iter().any(|principal| {
+                    principal
+                        .subscribe
+                        .iter()
+                        .any(|pattern| pattern_matches(pattern, &probe))
+                })
+            });
         Self {
             broker,
             authority,
@@ -919,6 +938,7 @@ mod tests {
             publish,
             subscribe,
             control,
+            players: false,
         }
     }
 
@@ -1093,7 +1113,7 @@ mod tests {
         )
         .await;
         assert_eq!(lobby["code"], "forbidden", "{lobby}");
-        authority.join(ALICE, "Alice", "survival");
+        authority.join(ALICE, "Alice", "survival", None);
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(
             authority.contexts(ALICE).get("region"),

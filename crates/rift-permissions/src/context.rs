@@ -14,8 +14,13 @@ use crate::error::{Error, invalid};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de, ser::SerializeMap};
 use std::{fmt, str::FromStr};
 
-/// The backend name a player is on.
+/// The backend name a player is on, such as `lobby-2` for an instance.
 pub const SERVER: &str = "server";
+/// The service group of that backend, such as `lobby`; absent on a backend
+/// that belongs to no group. A node limited to `server=lobby` never applies
+/// on a scaled instance, whose `server` is `lobby-2`; `group=lobby` does on
+/// every instance.
+pub const GROUP: &str = "group";
 /// The world name.
 pub const WORLD: &str = "world";
 /// The dimension, for example `minecraft:the_nether`.
@@ -23,7 +28,7 @@ pub const DIMENSION: &str = "dimension";
 /// The game mode: `survival`, `creative`, `adventure` or `spectator`.
 pub const GAMEMODE: &str = "gamemode";
 /// Keys Rift and the adapters fill themselves; each has one active value.
-pub const RESERVED: [&str; 4] = [SERVER, WORLD, DIMENSION, GAMEMODE];
+pub const RESERVED: [&str; 5] = [SERVER, GROUP, WORLD, DIMENSION, GAMEMODE];
 
 /// Longest context key in bytes.
 pub const MAX_KEY_LEN: usize = 64;

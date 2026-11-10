@@ -87,6 +87,8 @@ impl Snapshot {
         permissions: Option<Arc<rift::permissions::Authority>>,
     ) -> io::Result<Self> {
         config.validate()?;
+        // Before any worker of this generation can spawn a server.
+        rift::managed::protect_secrets(&config);
         let mut policies = BTreeMap::new();
         for (listener, route) in &config.routes {
             let policy = match route {
@@ -156,10 +158,16 @@ impl Snapshot {
         };
         let perms = previous.map_or_else(
             || {
-                let bus = Arc::new(rift::permissions::control::Bus::new(
+                let bus = Arc::new(rift::permissions::control::Bus::with_instances(
                     messaging.clone(),
                     extensions.permissions().clone(),
                     config.messaging.as_ref(),
+                    config
+                        .managed_servers
+                        .values()
+                        .chain(config.service_groups.values().map(|group| &group.server))
+                        .filter_map(|server| server.messaging.as_ref())
+                        .map(|grants| grants.subscribe.as_slice()),
                 ));
                 bus.install_directory();
                 bus
@@ -167,8 +175,10 @@ impl Snapshot {
             |old| old.perms.clone(),
         );
         perms.set_commands(extensions.command_permissions());
+        // One roster for every generation: the directory owns it, so it can
+        // keep each record's visibility rule current.
         let players = previous.map_or_else(
-            || Arc::new(PlayerRegistry::default()),
+            || extensions.players().roster().clone(),
             |old| old.players.clone(),
         );
         let nodes = previous.map_or_else(
@@ -485,9 +495,12 @@ pub async fn handle(
         event.stage = "status_request";
         timeout(HANDSHAKE_TIMEOUT, session.status_request()).await??;
         let maintenance = snapshot.control.maintenance(&snapshot.config);
+        // The public count: hidden players are not on the server list.
         let default = Document::new(
             session.handshake.protocol,
-            metrics.players.get(),
+            snapshot
+                .players
+                .count_for(rift::players::Viewer::Public, None) as u64,
             snapshot.config.limits.max_connections as u64,
             if maintenance {
                 "The network is under maintenance."
@@ -913,8 +926,15 @@ pub async fn handle(
                     if tab_synced == Some(tab_key) {
                         continue;
                     }
+                    let authority = live_snapshot.extensions.permissions();
+                    let own = session.identity().and_then(|identity| identity.uuid).unwrap_or_default();
+                    let holds = |node: &str| {
+                        authority.check_active(rift_permissions::Uuid::from_bytes(own), node)
+                            == rift_permissions::Tristate::True
+                    };
                     let view = rift::tab_list::view(
                         &live_snapshot.players,
+                        rift::players::Viewer::Player { uuid: own, holds: &holds },
                         live_snapshot.config.tab_list.as_ref(),
                         tab_override.as_ref(),
                         session.player_name().unwrap_or_default(),
@@ -1130,12 +1150,21 @@ pub async fn handle(
                         && let Some(identity) = session.identity()
                         && let Some(uuid) = identity.uuid
                     {
+                        // The rule goes in with the record, so no tab list or
+                        // count ever shows a hidden player, not even briefly.
+                        let visible_to = snapshot
+                            .extensions
+                            .players()
+                            .visibility(&uuid, &current_backend);
                         let registered = if let Some(reservation) = name_reservation.take() {
-                            reservation.register(uuid, &current_backend)
+                            reservation.register_visible(uuid, &current_backend, visible_to)
                         } else {
-                            snapshot
-                                .players
-                                .register(uuid, identity.name, &current_backend)
+                            snapshot.players.register_visible(
+                                uuid,
+                                identity.name,
+                                &current_backend,
+                                visible_to,
+                            )
                         };
                         match registered {
                             Ok(guard) => {
@@ -1198,13 +1227,16 @@ pub async fn handle(
                             }
                         }
                         if registered_backend != current_backend {
-                            if let Some(registration) = &registration {
-                                registration.set_server(&current_backend);
-                            }
+                            // The directory first: it resolves the rule for the
+                            // new server onto the roster record before the
+                            // roster moves the player there.
                             if let Some(directory) = &directory {
                                 directory.set_server(&current_backend);
                                 // The switch reset them after the new Join Game.
                                 session.sync_permission_contexts();
+                            }
+                            if let Some(registration) = &registration {
+                                registration.set_server(&current_backend);
                             }
                             registered_backend.clone_from(&current_backend);
                             if let Some(extension) = &mut session.extension {
@@ -1589,6 +1621,81 @@ async fn proxied_client(
         return Ok(false);
     }
     Ok(true)
+}
+
+/// Instance logins (see [`rift::instance_login`]) when the bus listens and
+/// some managed server or service group has a `messaging` block. The key is
+/// `local/instance-key` beside the configuration file, or in the working
+/// directory without one. Adding the first `messaging` block needs a
+/// restart, like other messaging changes.
+fn instance_logins(
+    config: &Config,
+    source: Option<&std::path::Path>,
+) -> io::Result<Option<Arc<rift::instance_login::Logins>>> {
+    let listening = config
+        .messaging
+        .as_ref()
+        .is_some_and(|messaging| messaging.listen.is_some());
+    let wanted = config
+        .managed_servers
+        .values()
+        .chain(config.service_groups.values().map(|group| &group.server))
+        .any(|server| server.messaging.is_some());
+    if !listening || !wanted {
+        return Ok(None);
+    }
+    let directory = source
+        .and_then(std::path::Path::parent)
+        .unwrap_or(std::path::Path::new("."));
+    rift::instance_login::Logins::open(directory)
+        .map(|logins| Some(Arc::new(logins)))
+        .map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "{}: {error}",
+                    directory.join(rift::instance_login::KEY_FILE).display()
+                ),
+            )
+        })
+}
+
+/// Where instances reach the bus: `messaging.advertise`, else the bound
+/// address with `127.0.0.1` for an unspecified IP, which only local
+/// instances can use (`rift check` warns about nodes then).
+fn bus_for_instances(config: &Config, bound: SocketAddr) -> io::Result<rift::instance_login::Bus> {
+    let messaging = config.messaging.as_ref().expect("listening");
+    let address = messaging.advertise.clone().unwrap_or_else(|| {
+        let ip = if bound.ip().is_unspecified() {
+            std::net::IpAddr::from([127, 0, 0, 1])
+        } else {
+            bound.ip()
+        };
+        SocketAddr::new(ip, bound.port()).to_string()
+    });
+    let server_name = messaging.advertise_server_name.clone().unwrap_or_else(|| {
+        messaging
+            .advertise
+            .as_deref()
+            .and_then(|advertise| advertise.rsplit_once(':'))
+            .map(|(host, _)| host.trim_matches(['[', ']']).to_owned())
+            .unwrap_or_else(|| "localhost".to_owned())
+    });
+    let path = messaging
+        .certificate
+        .as_ref()
+        .expect("validated with listen");
+    let certificate = std::fs::read_to_string(path).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("messaging.certificate ({}): {error}", path.display()),
+        )
+    })?;
+    Ok(rift::instance_login::Bus {
+        address,
+        server_name,
+        certificate,
+    })
 }
 
 /// Make `next` visible to new connections, in-flight sessions and health checks.
@@ -2393,12 +2500,23 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     initial.perms.set_changes_stream(changes.clone());
     streams.insert(rift_permissions::wire::CHANGES.to_owned(), changes);
     initial.messaging_streams = Arc::new(streams);
-    let messaging_server = crate::messaging_runtime::listen(&initial).await?;
+    let logins = instance_logins(&initial.config, source.as_deref())?;
+    let messaging_server = crate::messaging_runtime::listen(&initial, logins.clone()).await?;
+    if let (Some(logins), Some(server)) = (&logins, &messaging_server) {
+        logins.set_bus(bus_for_instances(
+            &initial.config,
+            server.local_addr().map_err(io::Error::other)?,
+        )?);
+        initial
+            .managed
+            .set_logins(logins.clone(), &initial.config)?;
+    }
     let message_handler =
         rift::message_script::MessageHandler::new(&initial.config, initial.messaging.clone())
             .map_err(io::Error::other)?
             .map(|handler| handler.with_players(initial.extensions.player_api()));
     let messaging_controls = crate::messaging_runtime::Controls::new(initial.messaging.clone())?;
+    let player_requests = crate::messaging_runtime::PlayerRequests::new(initial.messaging.clone())?;
     let permission_bus = initial.perms.listen()?;
     initial.addresses = Arc::new(
         initial
@@ -2432,7 +2550,11 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         receiver.clone(),
         metrics.clone(),
         admin_commands.clone(),
+        app.workflows.clone(),
     ));
+    background.spawn(player_requests.run(receiver.clone(), app.workflows.clone()));
+    // Keep visibility rules current as permissions change.
+    background.spawn(snapshot.extensions.players().clone().watch());
     // Subscribe before any plugin starts so its first lifecycle change is
     // audited too.
     background.spawn(audit_plugins(

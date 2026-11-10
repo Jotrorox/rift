@@ -334,3 +334,48 @@ fn check_lists_plugins_with_their_mode_and_never_starts_them() {
         String::from_utf8_lossy(&started.stderr)
     );
 }
+
+#[test]
+fn check_warns_when_a_template_ships_riftperms_without_instance_logins() {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.0.join("templates/lobby/plugins")).unwrap();
+    fs::write(
+        fixture
+            .0
+            .join("templates/lobby/plugins/RiftPerms-0.1.0.jar"),
+        "jar",
+    )
+    .unwrap();
+    fs::write(fixture.0.join("paper.jar"), "jar").unwrap();
+    fs::write(fixture.0.join("cert.pem"), "").unwrap();
+    fs::write(fixture.0.join("key.pem"), "").unwrap();
+    let source = |messaging: &str| {
+        format!(
+            "rift.config.listeners.public = '127.0.0.1:0'
+            rift.config.backends = {{}}
+            rift.config.routes.public = 'lobby'
+            rift.config.messaging = {{ listen = '127.0.0.1:0', certificate = 'cert.pem', private_key = 'key.pem',
+                principals = {{ {{ name = 'ops', token_env = 'OPS_TOKEN', publish = {{ 'rift.control.*' }}, subscribe = {{ '_INBOX.>' }}, control = true }} }} }}
+            rift.config.templates.lobby = {{ server_jar = 'paper.jar', configs = 'templates/lobby' }}
+            rift.config.service_groups.lobby = {{ template = 'lobby', port_range = {{ 26400, 26402 }}, command = {{ 'java' }}{messaging} }}"
+        )
+    };
+    fs::write(fixture.0.join("rift.lua"), source("")).unwrap();
+    let output = fixture.run(&["check"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("service_groups.lobby: template ships RiftPerms")
+            && stderr.contains("RiftPerms-0.1.0.jar"),
+        "{stderr}"
+    );
+    fs::write(
+        fixture.0.join("rift.lua"),
+        source(", messaging = { preset = 'backend' }"),
+    )
+    .unwrap();
+    let output = fixture.run(&["check"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(!stderr.contains("RiftPerms"), "{stderr}");
+}

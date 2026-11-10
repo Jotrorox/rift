@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import signal
 import socket
+import os
 import subprocess
 import threading
 import time
@@ -288,7 +289,12 @@ def test_operations(name, binary, directory, compression, rounds, result):
         descriptions = {role: mc.status(port, protocol)["description"]
                         for role, port in [("primary", primary_port), ("lobby", lobby_port)]}
         assert descriptions["primary"] != descriptions["lobby"]
-        proxy = stack.enter_context(mc.process([str(binary), "--config", str(path)], directory, "proxy.log"))
+        # Rift clears its dumpable flag on Linux, which hides /proc/<pid>/fd
+        # from processes of the same user; the descriptor-leak checks below
+        # read it, so keep this proxy dumpable.
+        environment = dict(os.environ, RIFT_DUMPABLE="1")
+        proxy = stack.enter_context(mc.process([str(binary), "--config", str(path)], directory, "proxy.log",
+                                               env=environment))
         mc.wait_ready(proxy, lambda: "metrics on" in (directory / "proxy.log").read_text(), directory / "proxy.log")
         resources = stack.enter_context(Resources(proxy, directory))
         # Change this very hostname's route during the reload loop. Teleporting

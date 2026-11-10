@@ -168,7 +168,18 @@ impl App {
     fn status_snapshot(&self, snapshot: &Snapshot, view: View) -> Value {
         let config = &snapshot.config;
         let settings = config.status.as_ref();
-        let players = self.metrics.backend_players();
+        // The status server is unauthenticated, so it shows the public
+        // count, without hidden players; `/api/status` shows everyone.
+        let players: BTreeMap<String, u64> = if view.status_server() {
+            snapshot
+                .players
+                .server_counts_for(rift::players::Viewer::Public)
+                .into_iter()
+                .map(|(server, count)| (server, count as u64))
+                .collect()
+        } else {
+            self.metrics.backend_players()
+        };
         let health_checks = config.health_check.is_some();
         let mut backends = Vec::with_capacity(config.backends.len());
         // Instances shown under a group's display name are numbered within it.
@@ -202,7 +213,11 @@ impl App {
         }
         let mut value = json!({
             "uptime_seconds":self.started.elapsed().as_secs(),
-            "players":self.metrics.players.get(),
+            "players":if view.status_server() {
+                snapshot.players.count_for(rift::players::Viewer::Public, None) as u64
+            } else {
+                self.metrics.players.get()
+            },
             "backends":backends,
             "health_checks_enabled":health_checks,
         });
@@ -446,6 +461,9 @@ fn router(kind: Kind, address: SocketAddr, mut app: App) -> Router {
             .route("/api/servers/{name}/stop", post(stop_server))
             .route("/api/servers/{name}/logs", get(server_logs))
             .route("/api/servers/{name}/console", post(server_console))
+            .route("/api/players", get(player_list))
+            .route("/api/players/{player}/message", post(message_player))
+            .route("/api/players/{player}/kick", post(kick_player))
             .route("/api/groups", get(service_groups))
             .route("/api/nodes", get(nodes))
             .route("/api/plugins", get(plugin_list))
@@ -743,6 +761,9 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
                 ["api", "servers", _, "logs"] | ["api", "plugins", _, "logs"] => "logs",
                 ["api", "plugins", _, "restart"] => "plugins",
                 ["api", "servers", _, "console"] => "console",
+                // Messaging or kicking a player is what a server console
+                // would do to them, scoped like one (see `in_scope`).
+                ["api", "players", _, "message" | "kick"] => "console",
                 ["api", "servers", _, _]
                 | ["api", "groups", _, "instances" | "start" | "stop" | "mode"]
                 | ["api", "instances", _]
@@ -836,6 +857,23 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
                     },
                 )
             }
+            // A player is in scope while they are on a server the operator
+            // may access; offline players only for unrestricted operators.
+            ["api", "players", name, ..] => {
+                let name = decode_name(name).unwrap_or_default();
+                let server = snapshot
+                    .extensions
+                    .players()
+                    .get(&name)
+                    .ok()
+                    .flatten()
+                    .map(|player| player.server);
+                (
+                    access.groups.is_none()
+                        || server.is_some_and(|server| access.server(&snapshot, &server)),
+                    name.chars().take(128).collect(),
+                )
+            }
             // Plugins act on the whole proxy: group-scoped operators see none.
             ["api", "plugins", rest @ ..] => {
                 let name = rest
@@ -874,6 +912,8 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
             ["api", "servers", _, "start"] => "start",
             ["api", "servers", _, "stop"] => "stop",
             ["api", "servers", _, "console"] => "console",
+            ["api", "players", _, "message"] => "message_player",
+            ["api", "players", _, "kick"] => "kick_player",
             ["api", "groups", _, "instances"] => "create_instance",
             ["api", "groups", _, "start"] => "start_group",
             ["api", "groups", _, "stop"] => "stop_group",
@@ -1089,6 +1129,64 @@ async fn admin_status(State(app): State<App>, Extension(access): Extension<Acces
     }
     Json(value)
 }
+/// `GET /api/players`: online players with their server, as
+/// `rift.players.list` reports them, limited to the operator's servers.
+async fn player_list(State(app): State<App>, Extension(access): Extension<Access>) -> Response {
+    let snapshot = app.snapshot();
+    match snapshot.extensions.players().list(None) {
+        Ok(mut players) => {
+            players.retain(|player| access.server(&snapshot, &player.server));
+            Json(json!({ "players": players })).into_response()
+        }
+        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, &message),
+    }
+}
+/// `POST /api/players/{player}/message` with `{"text": …}`.
+async fn message_player(
+    State(app): State<App>,
+    Path(player): Path<String>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    player_action(app, player, body, "text", "message").await
+}
+/// `POST /api/players/{player}/kick` with `{"reason": …}`.
+async fn kick_player(
+    State(app): State<App>,
+    Path(player): Path<String>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    player_action(app, player, body, "reason", "kick").await
+}
+/// One player action through [`rift::players_service`], so HTTP accepts
+/// exactly what the bus does. A JSON string is plain text; an object or a
+/// list is a text component (the `-json` operation). The type decides,
+/// never the content of a string.
+async fn player_action(
+    app: App,
+    player: String,
+    body: Result<Json<Value>, JsonRejection>,
+    field: &str,
+    operation: &str,
+) -> Response {
+    let value = match payload(body, &[field]) {
+        Ok(value) => value,
+        Err(error) => return error.into_response(),
+    };
+    let operation = match value.get(field) {
+        Some(Value::Object(_) | Value::Array(_)) => format!("{operation}-json"),
+        _ => operation.to_owned(),
+    };
+    let mut request = value;
+    request["target"] = json!(player);
+    let decoded =
+        rift::players_service::Request::decode(&operation, request.to_string().as_bytes());
+    let result = decoded.and_then(|request| request.execute(app.snapshot().extensions.players()));
+    match result {
+        Ok(Value::Bool(true)) => Json(json!({"online": true})).into_response(),
+        Ok(_) => error(StatusCode::NOT_FOUND, "player is not online"),
+        Err(message) => error(StatusCode::BAD_REQUEST, &message),
+    }
+}
 async fn managed_servers(
     State(app): State<App>,
     Extension(access): Extension<Access>,
@@ -1208,7 +1306,7 @@ async fn rollback(
 }
 fn definition_values(config: &Config) -> Value {
     let server = |s: &rift::config::ManagedServer| {
-        json!({
+        let mut value = json!({
             "directory": s.directory,
             "command": s.command,
             "autostart": s.autostart,
@@ -1218,7 +1316,29 @@ fn definition_values(config: &Config) -> Value {
             "stop_timeout_ms": s.stop_timeout.as_millis(),
             "restart_delay_ms": s.restart_delay.as_millis(),
             "restart_retries": s.restart_retries,
-        })
+        });
+        // Present only when set, so a structured edit writes them back
+        // instead of dropping a server's environment or bus login.
+        if !s.environment.set.is_empty() {
+            value["env"] = json!(s.environment.set);
+        }
+        match &s.environment.inherit {
+            Some(names) if names.is_empty() => value["inherit_env"] = json!(false),
+            Some(names) => value["inherit_env"] = json!(names),
+            None => {}
+        }
+        if s.isolation != rift::config::Isolation::default() {
+            value["isolation"] = if s.isolation.read.is_empty() && s.isolation.write.is_empty() {
+                json!(s.isolation.mode.as_str())
+            } else {
+                json!({"mode": s.isolation.mode.as_str(), "read": s.isolation.read, "write": s.isolation.write})
+            };
+        }
+        if let Some(messaging) = &s.messaging {
+            value["messaging"] =
+                json!({"publish": messaging.publish, "subscribe": messaging.subscribe});
+        }
+        value
     };
     let groups: BTreeMap<_, _> = config
         .service_groups
@@ -2069,7 +2189,7 @@ async fn standalone_metrics(state: State<App>) -> Response {
 }
 async fn discovery() -> Json<Value> {
     Json(
-        json!({"version":1,"endpoints":["GET /api/access","GET /api/status","GET /api/servers","POST /api/servers/{name}/start","POST /api/servers/{name}/stop","GET /api/servers/{name}/logs","POST /api/servers/{name}/console","GET /api/groups","GET /api/nodes","GET /api/plugins","GET /api/plugins/{name}","GET /api/plugins/{name}/logs","POST /api/plugins/{name}/restart","POST /api/groups/{name}/instances","GET /api/templates","POST /api/templates/{name}/download","GET /api/software/{type}/versions","GET|PUT|DELETE /api/files/templates/{path}","GET|PUT|DELETE /api/files/servers/{name}/{path}","DELETE /api/instances/{name}","GET /api/definitions","PUT /api/definitions/{section}/{name}","PUT /api/definitions/{section}","GET /api/permissions","POST /api/permissions/members/{uuid}/{group}","DELETE /api/permissions/members/{uuid}/{group}","GET /api/perms/revision","GET /api/perms/backends","GET /api/perms/registered","GET /api/perms/search","GET /api/perms/users","GET|PATCH /api/perms/users/{user}","GET|PUT|DELETE /api/perms/users/{user}/nodes","PUT|DELETE /api/perms/users/{user}/nodes/{id}","GET /api/perms/users/{user}/compiled","GET|POST /api/perms/groups","GET|PATCH|DELETE /api/perms/groups/{name}","GET|PUT|DELETE /api/perms/groups/{name}/nodes","PUT|DELETE /api/perms/groups/{name}/nodes/{id}","GET /api/perms/tracks","GET|PUT|DELETE /api/perms/tracks/{name}","POST /api/perms/tracks/{name}/promote","POST /api/perms/tracks/{name}/demote","GET /api/perms/audit","POST /api/perms/trace","POST /api/perms/apply","POST /api/perms/bulk","POST /api/perms/import","GET /api/perms/export","GET /api/deployments","POST /api/deployments/{id}/rollback","GET /api/audit","GET /api/operations/{id}","GET /api/metrics","GET /api/config","POST /api/config/validate","PUT /api/config","POST /api/reload"],"extensions":"/ext/* -> on_http(request)","source_limit_bytes":control::MAX_SOURCE}),
+        json!({"version":1,"endpoints":["GET /api/access","GET /api/status","GET /api/servers","POST /api/servers/{name}/start","POST /api/servers/{name}/stop","GET /api/servers/{name}/logs","POST /api/servers/{name}/console","GET /api/players","POST /api/players/{player}/message","POST /api/players/{player}/kick","GET /api/groups","GET /api/nodes","GET /api/plugins","GET /api/plugins/{name}","GET /api/plugins/{name}/logs","POST /api/plugins/{name}/restart","POST /api/groups/{name}/instances","GET /api/templates","POST /api/templates/{name}/download","GET /api/software/{type}/versions","GET|PUT|DELETE /api/files/templates/{path}","GET|PUT|DELETE /api/files/servers/{name}/{path}","DELETE /api/instances/{name}","GET /api/definitions","PUT /api/definitions/{section}/{name}","PUT /api/definitions/{section}","GET /api/permissions","POST /api/permissions/members/{uuid}/{group}","DELETE /api/permissions/members/{uuid}/{group}","GET /api/perms/revision","GET /api/perms/backends","GET /api/perms/registered","GET /api/perms/search","GET /api/perms/users","GET|PATCH /api/perms/users/{user}","GET|PUT|DELETE /api/perms/users/{user}/nodes","PUT|DELETE /api/perms/users/{user}/nodes/{id}","GET /api/perms/users/{user}/compiled","GET|POST /api/perms/groups","GET|PATCH|DELETE /api/perms/groups/{name}","GET|PUT|DELETE /api/perms/groups/{name}/nodes","PUT|DELETE /api/perms/groups/{name}/nodes/{id}","GET /api/perms/tracks","GET|PUT|DELETE /api/perms/tracks/{name}","POST /api/perms/tracks/{name}/promote","POST /api/perms/tracks/{name}/demote","GET /api/perms/audit","POST /api/perms/trace","POST /api/perms/apply","POST /api/perms/bulk","POST /api/perms/import","GET /api/perms/export","GET /api/deployments","POST /api/deployments/{id}/rollback","GET /api/audit","GET /api/operations/{id}","GET /api/metrics","GET /api/config","POST /api/config/validate","PUT /api/config","POST /api/reload"],"extensions":"/ext/* -> on_http(request)","source_limit_bytes":control::MAX_SOURCE}),
     )
 }
 async fn config_source(State(app): State<App>) -> Json<Value> {

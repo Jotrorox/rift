@@ -240,6 +240,25 @@ address.
 - The Velocity forwarding secret never crosses the network: Prepare commands
   only say whether to enable forwarding, and each agent writes the secret from
   its own environment.
+- One secret does cross the bus, deliberately: a server with a
+  [bus login](managed-servers.md#bus-logins-for-instances) gets its token in
+  every start command (and so after a crash recovery or an agent restart,
+  since the controller starts it again). The token is scoped to that one
+  instance and dies with it; the key that derives tokens stays on the
+  controller. The start command also carries the bus certificate, which the
+  agent writes to `rift-bus.pem` in the server directory.
+- A server's [`isolation`](managed-servers.md#isolation) is applied by the
+  agent on the node's kernel; `rift check` on the controller cannot tell what
+  that kernel offers. Agents older than the controller start every server
+  unconfined.
+- Servers on a node do not inherit the agent's secrets: the variables named by
+  `--token-env` and `--forwarding-secret-env` are removed from every server's
+  environment. A server's `env` and `inherit_env` travel with its start
+  command and apply on the node as they would locally, against the agent's
+  environment. Agents older than the controller ignore them, so upgrade
+  agents together with the controller. On Linux the agent clears its
+  dumpable flag at startup, like the proxy (see
+  [operations](operations.md#secrets-and-the-processes-rift-starts)).
 
 ## Operate nodes
 
