@@ -315,9 +315,13 @@ class Session(Client):
         x, y, z, yaw, pitch = target
         self.send_packet("teleport_confirm", {"teleportId": value["teleportId"],
                                               "x": x, "y": y, "z": z, "yaw": yaw, "pitch": pitch})
-        # Like a real client: confirm, then report the position.
-        self.send_packet("position_look", {"x": x, "y": y, "z": z, "yaw": yaw, "pitch": pitch,
-                                           "onGround": True, "flags": {"onGround": True}})
+        # Like a real client: confirm, then report the position. From 26.3 the
+        # confirmation carries the position itself, and a second position in
+        # the same tick is a kick (ServerGamePacketListenerImpl.handleMovePlayer).
+        if self.protocol < 777:
+            self.send_packet("position_look", {"x": x, "y": y, "z": z, "yaw": yaw, "pitch": pitch,
+                                               "onGround": True, "flags": {"onGround": True}})
+        self.tick_end()
         if self.has("player_loaded") and not self.loaded_sent:
             self.send_packet("player_loaded")
             self.loaded_sent = True
@@ -382,12 +386,19 @@ class Session(Client):
                                    f"(state {self.state}, {len(self.records)} packets)")
         self.step = "join"
 
+    def tick_end(self):
+        """End a client tick (1.21.2+). 26.3 allows one position per client
+        tick and resets that on this packet (handleClientTickEnd)."""
+        if self.has("tick_end"):
+            self.send_packet("tick_end")
+
     def move(self, dx=0.0, dy=0.0, dz=0.0):
         with self.lock:
             x, y, z, yaw, pitch = self.position
             self.position = [x + dx, y + dy, z + dz, yaw, pitch]
             self.send_packet("position", {"x": x + dx, "y": y + dy, "z": z + dz,
                                           "onGround": True, "flags": {"onGround": True}})
+            self.tick_end()
 
     def close(self):
         with self.lock:

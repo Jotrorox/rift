@@ -167,6 +167,12 @@ def _patch_26_3(schema):
         ("velocityX", "f32"), ("velocityY", "f32"), ("velocityZ", "f32"), ("amount", "varint"),
         ("randomization", ["mapper", {"type": "varint", "mappings": {
             "0": "default", "1": "alternative", "2": "alternative_with_speed"}}]))
+    # ByteBufCodecs.BIT_SET ($15) is now BitSet.toByteArray with a VarInt length
+    # (was a VarInt-counted long array): every light mask of chunk and light packets.
+    masks = ("skyLightMask", "blockLightMask", "emptySkyLightMask", "emptyBlockLightMask")
+    for name in ("packet_map_chunk", "packet_update_light"):
+        for mask in masks:
+            _field(play[name], mask)["type"] = ["buffer", {"countType": "varint"}]
     # SignTextSlot.STREAM_CODEC is an idMapper VarInt (was a boolean);
     # ServerboundSignUpdatePacket: position, four lines, then the slot.
     play["packet_open_sign_entity"] = _container(("location", "position"), ("slot", "varint"))
@@ -178,6 +184,13 @@ def _patch_26_3(schema):
     mappings = entry[1]["type"][1]["mappings"]
     mappings[str(len(mappings))] = "dye_color"
     entry[2]["type"][1]["fields"]["dye_color"] = "DyeColor"
+    # ClientboundExplodePacket.STREAM_CODEC appends ByteBufCodecs.BOOL (playSound).
+    play["packet_explosion"][1].append({"name": "playSound", "type": "bool"})
+    # The new argument types are all SingletonArgumentInfo (ArgumentTypeInfos):
+    # no properties on the wire.
+    for name in ("minecraft:context_float_provider", "minecraft:context_int_provider",
+                 "minecraft:slot_source", "minecraft:feature", "minecraft:swing_animation"):
+        _at(schema, PARSER_PROPERTIES)[name] = "void"
     # New packets.
     for state in ("configuration", "play"):
         # ClientboundPostEffectsPacket: list of Identifier.
@@ -185,9 +198,12 @@ def _patch_26_3(schema):
             ("effects", ["array", {"countType": "varint", "type": "string"}]))
     # ClientboundAddTransientBlockPacket: block position, block state (idMapper VarInt).
     play["packet_add_transient_block"] = _container(("location", "position"), ("type", "varint"))
-    # ClientboundSwingAnimationPacket: VAR_INT, InteractionHand, SwingAnimation.
+    # ClientboundSwingAnimationPacket: VAR_INT, InteractionHand (idMapper), and
+    # SwingAnimation.STREAM_CODEC: SwingAnimationType (idMapper) and a VAR_INT duration.
     play["packet_swing_animation"] = _container(
-        ("entityId", "varint"), ("hand", "varint"), ("animation", unverified("SwingAnimation.STREAM_CODEC")))
+        ("entityId", "varint"), ("hand", "varint"),
+        ("animation", ["mapper", {"type": "varint", "mappings": {"0": "none", "1": "whack", "2": "stab"}}]),
+        ("duration", "varint"))
     # ServerboundPunchPacket: StreamCodec.unit (no body).
     server["packet_punch"] = ["container", []]
 
@@ -262,8 +278,10 @@ def _repacket(schema, old_packets, new_packets):
                 if name is None:
                     name = mojang.removeprefix("minecraft:")
                 new_mapper[f"0x{index:02x}"] = name
-                new_switch[name] = f"packet_{name}"
-                section.setdefault(f"packet_{name}", unverified(f"{mojang} is new and not modelled"))
+                # Keep the schema's own type names (not always packet_<name>).
+                new_switch[name] = switch.get(name, f"packet_{name}")
+                if new_switch[name] not in section and new_switch[name] not in schema["types"]:
+                    section[new_switch[name]] = unverified(f"{mojang} is new and not modelled")
             packet[0]["type"][1]["mappings"] = new_mapper
             packet[1]["type"][1]["fields"] = new_switch
 

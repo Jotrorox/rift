@@ -410,26 +410,32 @@ def entity_types_seen(session, registries, since):
     return seen
 
 
+def block_updates(registries, name, value):
+    """{(x, y, z): block name} of one block_change or multi_block_change."""
+    if name == "block_change":
+        location = value["location"]
+        return {(location["x"], location["y"], location["z"]): registries.block(value["type"])}
+    seen = {}
+    if "chunkX" in value:  # Up to 1.16.1: per-record horizontal position and Y.
+        for entry in value["records"]:
+            x = value["chunkX"] * 16 + (entry["horizontalPos"] >> 4)
+            z = value["chunkZ"] * 16 + (entry["horizontalPos"] & 15)
+            seen[(x, entry["y"], z)] = registries.block(entry["blockId"])
+    else:  # 1.16.2+: a section position and packed VarLongs.
+        section = value["chunkCoordinates"]
+        for packed in value["records"]:
+            state, local = packed >> 12, packed & 0xFFF
+            x = section["x"] * 16 + (local >> 8 & 15)
+            z = section["z"] * 16 + (local >> 4 & 15)
+            y = section["y"] * 16 + (local & 15)
+            seen[(x, y, z)] = registries.block(state)
+    return seen
+
+
 def blocks_seen(session, registries, since):
     seen = {}
     for record in session.packets({"block_change", "multi_block_change"}, since):
-        value = record.value
-        if record.name == "block_change":
-            location = value["location"]
-            seen[(location["x"], location["y"], location["z"])] = registries.block(value["type"])
-        elif "chunkX" in value:
-            for entry in value["records"]:
-                x = value["chunkX"] * 16 + (entry["horizontalPos"] >> 4)
-                z = value["chunkZ"] * 16 + (entry["horizontalPos"] & 15)
-                seen[(x, entry["y"], z)] = registries.block(entry["blockId"])
-        else:
-            section = value["chunkCoordinates"]
-            for packed in value["records"]:
-                state, local = packed >> 12, packed & 0xFFF
-                x = section["x"] * 16 + (local >> 8 & 15)
-                z = section["z"] * 16 + (local >> 4 & 15)
-                y = section["y"] * 16 + (local & 15)
-                seen[(x, y, z)] = registries.block(state)
+        seen.update(block_updates(registries, record.name, record.value))
     return seen
 
 
@@ -585,8 +591,12 @@ class Context:
             try:
                 values.append(session.wait_packet(names, what, timeout, self.since(who), where).value)
             except SessionError:
+                session.check()
+                names_ = names if not isinstance(names, str) else {names}
+                if any(record.name in names_ and record.error and "unverified" in record.error
+                       for record in session.packets(None, self.since(who))):
+                    raise Skip(f"{what}: the layout is unverified for protocol {session.protocol}") from None
                 if who == "ref":
-                    session.check()
                     self.scenario(f"no {what}")
                 raise StepFailure(f"the translated client did not receive {what}")
         return values
@@ -600,22 +610,25 @@ PLAYER_SPAWNS = {"named_entity_spawn", "spawn_entity"}
 def reappear(cx, timeout=12):
     """After a respawn or dimension change the server re-adds the translated
     player to the reference's view only once it moves: nudge it until the
-    reference sees it spawn again."""
-    mark = cx.ref.mark()
+    reference has seen it spawn again (since this step began)."""
+    def visible():
+        state = False
+        for record in cx.ref.packets(PLAYER_SPAWNS | {"entity_destroy"}, cx.since("ref")):
+            if record.name == "entity_destroy":
+                if cx.via.entity_id in record.value.get("entityIds", []):
+                    state = False
+            elif record.value.get("entityId") == cx.via.entity_id:
+                state = True
+        return state
     deadline = time.monotonic() + timeout
-    while True:
+    while not visible():
+        cx.ref.check()
+        if time.monotonic() > deadline:
+            raise StepFailure("the reference client never saw the translated player again")
         cx.via.move(dx=0.0625)
-        time.sleep(0.1)
+        time.sleep(0.15)
         cx.via.move(dx=-0.0625)
-        try:
-            cx.ref.wait_packet(PLAYER_SPAWNS, "the translated player back in view", 1.0, mark,
-                               where=lambda value: value.get("entityId") == cx.via.entity_id)
-            return
-        except SessionError:
-            cx.ref.check()
-            if time.monotonic() > deadline:
-                raise StepFailure("the reference client never saw the translated player again") from None
-
+        time.sleep(0.6)
 
 
 @step(software=ALL)
@@ -675,7 +688,14 @@ def step_blocks(cx):
         cx.console(cx.cmd.setblock(x, y, z, block))
     cx.state["blocks"] = positions
     cx.sync()
-    time.sleep(0.5)
+    # Block updates go out at the end of the tick, chat at once: wait for them.
+    deadline = time.monotonic() + 8
+    while time.monotonic() < deadline:
+        ref = blocks_seen(cx.ref, cx.ref_reg, cx.since("ref"))
+        via = blocks_seen(cx.via, cx.via_reg, cx.since("via"))
+        if all(position in ref and position in via for position in positions.values()):
+            break
+        time.sleep(0.2)
     ref = blocks_seen(cx.ref, cx.ref_reg, cx.since("ref"))
     via = blocks_seen(cx.via, cx.via_reg, cx.since("via"))
     missing = [name for name, position in positions.items() if position not in ref]
@@ -1020,9 +1040,10 @@ def step_held_item_and_swing(cx):
                    == cx.ref_reg.name("item", sword) for entry in entries)
     cx.ref.wait_packet("entity_equipment", "the translated player's held sword", 8, mark, where=holds_sword)
     mark = cx.ref.mark()
-    swing = "arm_animation" if cx.via.has("arm_animation") else "swing"
+    # 26.3 replaced the swing packet with an empty punch packet.
+    swing = "arm_animation" if cx.via.has("arm_animation") else "punch"
     cx.via.send_packet(swing, {"hand": 0})
-    cx.ref.wait_packet("animation", "the translated player's arm swing", 8, mark,
+    cx.ref.wait_packet({"animation", "swing_animation"}, "the translated player's arm swing", 8, mark,
                        where=lambda value: value["entityId"] == cx.via.entity_id)
 
 
@@ -1032,7 +1053,7 @@ def step_movement(cx):
     mark = cx.ref.mark()
     for _ in range(6):
         cx.via.move(dx=0.25)
-        time.sleep(0.06)
+        time.sleep(0.12)  # One position per tick at most (26.3 kicks otherwise).
     moves = {"rel_entity_move", "entity_move_look", "entity_teleport", "sync_entity_position"}
     cx.ref.wait_packet(moves, "the translated player's movement", 8, mark,
                        where=lambda value: value.get("entityId") == cx.via.entity_id)
@@ -1072,13 +1093,7 @@ def step_break_and_place(cx):
 
 
 def blocks_seen_value(cx, value):
-    class One:
-        def packets(self, names, since):
-            record = type("R", (), {})()
-            record.name = "block_change" if "location" in value else "multi_block_change"
-            record.value = value
-            return [record]
-    return blocks_seen(One(), cx.ref_reg, 0)
+    return block_updates(cx.ref_reg, "block_change" if "location" in value else "multi_block_change", value)
 
 
 @step(software=JAVA)

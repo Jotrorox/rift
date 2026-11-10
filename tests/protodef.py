@@ -143,6 +143,12 @@ GLOBAL_POS = ["option", _container(("dimension", "string"), ("position", "positi
 METADATA_1_19 = ["types", "entityMetadataItem", 1, "fields"]
 
 CORRECTIONS = [
+    dict(protocols=(765, 765), path=["play", "toClient", "types", "packet_explosion", 1,
+                                     {"field": "sound"}, "type"],
+         value=_container(("soundName", "string"), ("range", ["option", "f32"])),
+         why="1.20.3/1.20.4 ClientboundExplodePacket writes the explosion sound with "
+             "SoundEvent.writeToNetwork (location and optional fixed range), not a registry holder; "
+             "holders came in 1.20.5. A real TNT explosion left 33 trailing bytes."),
     dict(protocols=(759, 759), path=METADATA_1_19 + ["19"], value="varint", add=True,
          why="1.19 added the cat variant serializer (EntityDataSerializers.CAT_VARIANT, ID 19); "
              "the schema stops at 18 (a summoned painting's metadata failed to decode)."),

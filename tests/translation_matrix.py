@@ -167,7 +167,6 @@ class Proxy:
             config = self.directory / "rift.lua"
             config.write_text(
                 'local config = require("rift.config")\n'
-                f'config.instance_database = "{self.directory / "rift.sqlite3"}"\n'
                 f'config.listeners.public = "127.0.0.1:{self.port}"\n'
                 f'config.backends.main = {{ address = "127.0.0.1:{self.server.port}", '
                 f'version = "{self.server.release}" }}\n'
