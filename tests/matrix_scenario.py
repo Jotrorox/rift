@@ -1237,6 +1237,26 @@ def step_chat(cx):
         cx.fail("the chat message is missing from the server log")
 
 
+def send_chat(session, text):
+    if session.has("chat"):
+        session.send_packet("chat", {"message": text})
+    else:
+        session.send_packet("chat_message", {"message": text, "timestamp": int(time.time() * 1000),
+                                             "salt": 1})
+
+
+@step(software=JAVA)
+def step_chat_received(cx):
+    """Player chat reaches the translated client: its own message echoed by
+    the server and a message of the reference player (signed-chat formats
+    the client's version cannot verify arrive as other chat packets)."""
+    for sender, what in ((cx.via, "its own chat message"), (cx.ref, "the reference player's chat message")):
+        text = f"rift heard {time.monotonic_ns() % 100000}"
+        mark = cx.via.mark()
+        send_chat(sender, text)
+        cx.via.wait(lambda record: record.name in CHAT and text.encode() in record.body, what, 8, mark)
+
+
 @step(software=ALL)
 def step_command(cx):
     """A command from the translated client runs on the server."""
