@@ -224,7 +224,7 @@ fn compare(source: i32, target: i32, from: &Column, to: &Column, tally: &mut Tal
             let expected = mapping.get(*old).unwrap_or(fallback);
             assert_eq!(*new, expected, "{pair}: block {index} of section {section}");
             if mapping.kind(*old) == Some(Kind::Identical) {
-                if !source_states.is_empty() {
+                if !source_states.is_empty() && !target_states.is_empty() {
                     assert_eq!(
                         source_states.describe(*old),
                         target_states.describe(*new),
@@ -334,24 +334,11 @@ fn convert_stream(client: i32, backend: i32) -> Option<(Vec<Column>, Vec<Column>
     Some((from, to, out))
 }
 
-/// Pairs whose chunks cannot convert yet; see the INTEGRATION notes.
-fn blocked(older: i32, newer: i32) -> bool {
-    // The flattening mapping (`crate::legacy`) is not written yet.
-    (older, newer) == (340, 393)
-}
-
 #[test]
 fn corpus_chunks_convert_between_every_adjacent_pair() {
     let mut report = Vec::new();
     for pair in PROTOCOLS.windows(2) {
         let (older, newer) = (pair[0].0, pair[1].0);
-        if blocked(older, newer) {
-            report.push(format!(
-                "{}/{}: blocked on the flattening mapping",
-                pair[0].1, pair[1].1
-            ));
-            continue;
-        }
         for (client, backend) in [(newer, older), (older, newer)] {
             let Some((from, to, out)) = convert_stream(client, backend) else {
                 report.push(format!(
@@ -961,19 +948,16 @@ mod flattening_packets {
                 .parse("lime_bed[facing=east,occupied=false,part=head]")
                 .unwrap(),
         );
-        // The block update itself needs the flattening mapping; the block
-        // entity that follows it does not.
-        match step.clientbound(State::Play, "block_update", &writer.buf) {
-            Err(error) => assert!(error.to_string().contains("mapping"), "{error}"),
-            Ok(out) => {
-                assert_eq!(out[1].name, "block_entity_data");
-                let mut reader = Reader::new(&out[1].data);
-                reader.position_legacy().unwrap();
-                assert_eq!(reader.u8().unwrap(), 11);
-                let tag = Nbt::read(&mut reader, true).unwrap().unwrap();
-                assert_eq!(tag.as_compound().unwrap().int("color"), Some(5));
-            }
-        }
+        let out = step
+            .clientbound(State::Play, "block_update", &writer.buf)
+            .unwrap();
+        assert_eq!(out[0].name, "block_update");
+        assert_eq!(out[1].name, "block_entity_data");
+        let mut reader = Reader::new(&out[1].data);
+        reader.position_legacy().unwrap();
+        assert_eq!(reader.u8().unwrap(), 11);
+        let tag = Nbt::read(&mut reader, true).unwrap().unwrap();
+        assert_eq!(tag.as_compound().unwrap().int("color"), Some(5));
         // A 1.13 banner's patterns get the 1.12 base and inverted colours
         // once its block is known.
         let mut step = Defaults::new(340, 393);
@@ -1056,9 +1040,6 @@ fn dump_converted() {
     std::fs::create_dir_all(&directory).unwrap();
     for pair in PROTOCOLS.windows(2) {
         let (older, newer) = (pair[0].0, pair[1].0);
-        if blocked(older, newer) {
-            continue;
-        }
         for (client, backend) in [(newer, older), (older, newer)] {
             let Some((_, _, out)) = convert_stream(client, backend) else {
                 continue;
@@ -1082,5 +1063,162 @@ fn dump_converted() {
             }
             std::fs::write(directory.join(format!("{backend}-{client}.jsonl")), text).unwrap();
         }
+    }
+}
+
+/// Small packets recorded from the official servers, so tests without the
+/// corpus still see real traffic.
+mod vectors {
+    use super::super::{blocks::read_changes, packets};
+    use crate::{
+        State,
+        codec::testing::Defaults,
+        data,
+        nbt::Nbt,
+        wire::{Position, Reader},
+    };
+
+    fn hex(text: &str) -> Vec<u8> {
+        (0..text.len())
+            .step_by(2)
+            .map(|index| u8::from_str_radix(&text[index..index + 2], 16).unwrap())
+            .collect()
+    }
+
+    /// 1.16.2: 18 blocks of one section; 1.20: 18 blocks of section
+    /// (-1, -4, -1) at y -64..-48; 1.16.1: 18 blocks of chunk (-2, -11).
+    const SECTION_751: &str = "0000040000e000000012e4e239e4e439e4e639e5e239e5e439e5e639f4e239f4e439f4e639f5e239f5e439f5e63984e33984e53984e73985e33985e53985e739";
+    const SECTION_763: &str = "fffffc00000ffffc12a4fa8101a5fe8101b4fc810195fc810194fa810195fa8101b5fe8101b4fe8101a5fc8101a4fc8101a5fa8101b5fc8101a4fe810194fc8101b5fa8101b4fa810195fe810194fe8101";
+    const CHUNK_736: &str = "fffffffefffffff5120a04e7011a04e7012a04e7010a05e7011a05e7012a05e7010b04e7011b04e7012b04e7010b05e7011b05e7012b05e7010c04e7011c04e7012c04e7010c05e7011c05e7012c05e701";
+    /// A sign saying "hello" (1.12.2, 1.18.1) and an empty one (1.21.5).
+    const SIGN_340: &str = "ffffa8c013fffe86090a000003000178fffffea3080005546578743400046e756c6c0300017900000004080005546578743300046e756c6c0300017afffffe86080005546578743200046e756c6c0800026964000e6d696e6563726166743a7369676e080005546578743100107b2274657874223a2268656c6c6f227d00";
+    const SIGN_757: &str = "0000010000009fc4070a000001000b476c6f77696e675465787400080005436f6c6f720005626c61636b0800055465787434000b7b2274657874223a22227d0800055465787433000b7b2274657874223a22227d0800055465787432000b7b2274657874223a22227d080005546578743100107b2274657874223a2268656c6c6f227d00";
+    const SIGN_770: &str = "000000c000001fc4070a0a00096261636b5f746578740100106861735f676c6f77696e675f7465787400080005636f6c6f720005626c61636b0900086d65737361676573080000000400000000000000000001000869735f7761786564000a000a66726f6e745f746578740100106861735f676c6f77696e675f7465787400080005636f6c6f720005626c61636b0900086d65737361676573080000000400000000000000000000";
+    const BLOCK_EVENT_760: &str = "000002c000007fc40100a001";
+    const LEVEL_EVENT_404: &str = "000007d4000032c013ffff3b0000000000";
+    const BLOCK_UPDATE_777: &str = "ffffffc000007fc479";
+
+    #[test]
+    fn real_section_updates_convert_both_ways() {
+        let source = read_changes(&hex(SECTION_751), 751).unwrap();
+        assert_eq!(source.len(), 18);
+        let out = Defaults::new(736, 751)
+            .clientbound(State::Play, "section_blocks_update", &hex(SECTION_751))
+            .unwrap();
+        let down = read_changes(&out[0].data, 736).unwrap();
+        let positions = |changes: &[super::super::blocks::Change]| -> Vec<(i32, i32, i32)> {
+            changes
+                .iter()
+                .map(|change| (change.x, change.y, change.z))
+                .collect()
+        };
+        assert_eq!(positions(&down), positions(&source));
+        let out = Defaults::new(762, 763)
+            .clientbound(State::Play, "section_blocks_update", &hex(SECTION_763))
+            .unwrap();
+        let changes = read_changes(&out[0].data, 762).unwrap();
+        assert_eq!(changes.len(), 18);
+        assert!(changes.iter().all(|change| (-64..-48).contains(&change.y)));
+        let out = Defaults::new(751, 736)
+            .clientbound(State::Play, "chunk_blocks_update", &hex(CHUNK_736))
+            .unwrap();
+        assert!(out.iter().all(|out| out.name == "section_blocks_update"));
+        let total: usize = out
+            .iter()
+            .map(|out| read_changes(&out.data, 751).unwrap().len())
+            .sum();
+        assert_eq!(total, 18);
+    }
+
+    fn entity(data: &[u8], protocol: i32) -> (i32, Nbt) {
+        let mut reader = Reader::new(data);
+        packets::read_position(&mut reader, protocol).unwrap();
+        let kind = if protocol >= 757 {
+            reader.varint().unwrap()
+        } else {
+            i32::from(reader.u8().unwrap())
+        };
+        let nbt = Nbt::read(&mut reader, protocol < 764).unwrap().unwrap();
+        reader.finish().unwrap();
+        (kind, nbt)
+    }
+
+    #[test]
+    fn real_signs_convert_across_their_boundaries() {
+        // 1.12.2 to 1.13: same action, same tag.
+        let out = Defaults::new(393, 340)
+            .clientbound(State::Play, "block_entity_data", &hex(SIGN_340))
+            .unwrap();
+        let (action, tag) = entity(&out[0].data, 393);
+        assert_eq!(action, 9);
+        assert_eq!(
+            tag.as_compound().unwrap().str("Text1"),
+            Some("{\"text\":\"hello\"}")
+        );
+        // 1.18.1 to 1.17.1: a type ID becomes an action, the tag gains its
+        // ID and position.
+        let out = Defaults::new(756, 757)
+            .clientbound(State::Play, "block_entity_data", &hex(SIGN_757))
+            .unwrap();
+        let (action, tag) = entity(&out[0].data, 756);
+        assert_eq!(action, 9);
+        let tag = tag.as_compound().unwrap();
+        assert_eq!(tag.str("id"), Some("minecraft:sign"));
+        let position =
+            Position::from_modern(i64::from_be_bytes(hex(SIGN_757)[..8].try_into().unwrap()));
+        assert_eq!(
+            (tag.int("x"), tag.int("y"), tag.int("z")),
+            (Some(position.x), Some(position.y), Some(position.z))
+        );
+        // 1.21.5 to 1.21.4: NBT lines become JSON strings.
+        let out = Defaults::new(769, 770)
+            .clientbound(State::Play, "block_entity_data", &hex(SIGN_770))
+            .unwrap();
+        let (kind, tag) = entity(&out[0].data, 769);
+        assert_eq!(
+            data::version(769)
+                .expect_registry("block_entity_type")
+                .name(kind),
+            Some("sign")
+        );
+        let messages = tag
+            .as_compound()
+            .unwrap()
+            .compound("front_text")
+            .unwrap()
+            .list("messages")
+            .unwrap()
+            .to_vec();
+        assert_eq!(messages, vec![Nbt::from("\"\""); 4]);
+    }
+
+    #[test]
+    fn real_block_packets_convert() {
+        let out = Defaults::new(759, 760)
+            .clientbound(State::Play, "block_event", &hex(BLOCK_EVENT_760))
+            .unwrap();
+        assert_eq!(out.len(), 1);
+        let out = Defaults::new(477, 404)
+            .clientbound(State::Play, "level_event", &hex(LEVEL_EVENT_404))
+            .unwrap();
+        let source = Position::from_legacy(i64::from_be_bytes(
+            hex(LEVEL_EVENT_404)[4..12].try_into().unwrap(),
+        ));
+        let target =
+            Position::from_modern(i64::from_be_bytes(out[0].data[4..12].try_into().unwrap()));
+        assert_eq!(source, target);
+        let out = Defaults::new(776, 777)
+            .clientbound(State::Play, "block_update", &hex(BLOCK_UPDATE_777))
+            .unwrap();
+        let mut reader = Reader::new(&out[0].data);
+        reader.position().unwrap();
+        let state = reader.varint().unwrap();
+        let body = hex(BLOCK_UPDATE_777);
+        let mut reader = Reader::new(&body[8..]);
+        let original = reader.varint().unwrap();
+        assert_eq!(
+            data::version(776).block_states.describe(state),
+            data::version(777).block_states.describe(original)
+        );
     }
 }
