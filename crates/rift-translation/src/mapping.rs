@@ -344,6 +344,19 @@ fn directed(rules: &RegistryRules, up: bool) -> Directed<'_> {
 }
 
 fn build(from: i32, to: i32, registry: &str) -> Option<Mapping> {
+    if from == to {
+        // A protocol maps onto itself unchanged; codecs rely on this when a
+        // structure is read and written in one protocol.
+        let version = data::try_version(from)?;
+        let size = if registry == "block_state" && version::flattened(from) {
+            version.block_states.len() as usize
+        } else if registry == "block_state" {
+            version.registry("block")?.len() * 16
+        } else {
+            version.registry(registry)?.len()
+        };
+        return Some(Mapping::new((0..size as i32).collect()));
+    }
     if !adjacent(from, to) {
         return None;
     }
