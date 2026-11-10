@@ -561,40 +561,90 @@ pub fn legacy_data_len(id: i32) -> usize {
     }
 }
 
-/// A 1.12 particle in 1.13 terms. `color` is the dust colour 1.12 sends in
-/// the offsets. `None` when 1.13 has no such particle, or it needs a block
-/// or item 1.12 numbers by legacy ID.
-// INTEGRATION: block and item particles across 1.13 need the data
-// engineer's legacy block and item tables; they are dropped until then.
-pub fn upgrade_legacy(id: i32, color: [f32; 3]) -> Option<Particle> {
-    let (_, name) = LEGACY_NAMES.get(usize::try_from(id).ok()?)?;
-    let name = (*name)?;
-    let options = match name {
+/// A 1.12 particle in the receiver's (1.13) terms, with the block or item
+/// its `data` names converted. `color` is the dust colour 1.12 sends in the
+/// offsets. `None` when 1.13 has no such particle.
+pub fn upgrade_legacy(
+    shared: &mut Shared,
+    direction: Direction,
+    id: i32,
+    data: &[i32],
+    color: [f32; 3],
+) -> io::Result<Option<Particle>> {
+    let Some((_, Some(name))) = usize::try_from(id)
+        .ok()
+        .and_then(|index| LEGACY_NAMES.get(index))
+    else {
+        return Ok(None);
+    };
+    let to = shared.target(direction);
+    let value = |index: usize| data.get(index).copied().unwrap_or(0);
+    let options = match *name {
         "dust" => Options::Dust {
             color: Color::Floats(color),
             scale: 1.0,
         },
-        "item" | "block" | "falling_dust" => return None,
+        "block" | "falling_dust" => Options::Block(block_state(shared, direction, value(0))),
+        "item" => {
+            let mut stack = Some(item::ItemStack {
+                id: value(0),
+                count: 1,
+                damage: value(1) as i16,
+                tag: None,
+                components: None,
+            });
+            item::convert(shared, direction, &mut stack)?;
+            let Some(stack) = stack else {
+                return Ok(None);
+            };
+            let mut writer = Writer::new();
+            item::write(to, Some(&stack), &mut writer)?;
+            Options::Item(writer.buf)
+        }
         _ => Options::None,
     };
-    let id = data::version(393)
+    Ok(data::version(to)
         .expect_registry("particle_type")
-        .id(name)?;
-    Some(Particle { id, options })
+        .id(name)
+        .map(|id| Particle { id, options }))
 }
 
-/// A 1.13 particle as a 1.12 particle ID, with the dust colour 1.12 takes
-/// from the offsets. `None` when 1.12 has no equivalent.
-pub fn downgrade_legacy(particle: &Particle) -> Option<(i32, Option<[f32; 3]>)> {
-    let name = data::version(393)
+/// A 1.13 particle as a 1.12 particle ID with its int data (a block as
+/// `id | metadata << 12`, an item and its damage) and the dust colour 1.12
+/// takes from the offsets. `None` when 1.12 has no equivalent.
+#[allow(clippy::type_complexity)]
+pub fn downgrade_legacy(
+    shared: &mut Shared,
+    direction: Direction,
+    particle: &Particle,
+) -> io::Result<Option<(i32, Vec<i32>, Option<[f32; 3]>)>> {
+    let from = shared.source(direction);
+    let Some(name) = data::version(from)
         .expect_registry("particle_type")
-        .name(particle.id)?;
-    let id = LEGACY_NAMES
+        .name(particle.id)
+    else {
+        return Ok(None);
+    };
+    let Some(id) = LEGACY_NAMES
         .iter()
-        .position(|(_, modern)| *modern == Some(name))?;
-    match (&particle.options, name) {
-        (Options::Dust { color, .. }, _) => Some((id as i32, Some(color.floats()))),
-        (_, "item" | "block" | "falling_dust") => None,
-        _ => Some((id as i32, None)),
-    }
+        .position(|(_, modern)| *modern == Some(name))
+    else {
+        return Ok(None);
+    };
+    let id = id as i32;
+    Ok(Some(match &particle.options {
+        Options::Dust { color, .. } => (id, Vec::new(), Some(color.floats())),
+        Options::Block(state) => (id, vec![block_state(shared, direction, *state)], None),
+        Options::Item(bytes) => {
+            let mut reader = Reader::new(bytes);
+            let mut stack = item::read(from, &mut reader)?;
+            reader.finish()?;
+            item::convert(shared, direction, &mut stack)?;
+            let Some(stack) = stack else {
+                return Ok(None);
+            };
+            (id, vec![stack.id, i32::from(stack.damage)], None)
+        }
+        _ => (id, Vec::new(), None),
+    }))
 }
