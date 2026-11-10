@@ -42,6 +42,8 @@ pub mod entity;
 pub mod item;
 pub mod misc;
 pub mod registries;
+#[cfg(test)]
+pub mod testing;
 pub mod text;
 
 use crate::{

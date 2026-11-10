@@ -1,4 +1,6 @@
 //! Entity data, entity types, particles, and the packets that carry them.
+pub mod particle;
+
 use super::HasShared;
 use crate::step::RouteBuilder;
 

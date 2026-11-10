@@ -21,7 +21,8 @@ pub trait Step: Send + Sync {
     fn serverbound(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()>;
 }
 
-pub(crate) struct Emitted {
+/// A packet a step sent on while handling another.
+pub struct Emitted {
     pub direction: Direction,
     pub state: State,
     pub packet: Packet,
@@ -29,7 +30,7 @@ pub(crate) struct Emitted {
 
 /// What a step may do while handling one packet.
 pub struct Cx<'a> {
-    pub(crate) emitted: &'a mut VecDeque<Emitted>,
+    pub emitted: &'a mut VecDeque<Emitted>,
     /// The protocol the player's client speaks.
     pub client_protocol: i32,
     /// The protocol the backend server speaks.
