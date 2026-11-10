@@ -72,7 +72,15 @@ pub(crate) fn show(version: ProtocolVersion, dialog: &Value) -> io::Result<Packe
     let ids = ids(version).ok_or_else(unsupported)?;
     let mut data = Vec::new();
     write_varint(0, &mut data);
-    super::nbt::component(dialog, &mut data)?;
+    let profile = crate::text::Profile::of(version);
+    if profile.objects() {
+        super::nbt::component(dialog, &mut data)?;
+    } else {
+        // Sprites and heads in text arrived in 1.21.9.
+        let mut dialog = dialog.clone();
+        crate::text::strip_objects(&mut dialog, profile, 0);
+        super::nbt::component(&dialog, &mut data)?;
+    }
     Ok(Packet::new(ids.play_show, data))
 }
 

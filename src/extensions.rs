@@ -7,6 +7,7 @@ use crate::{
     permissions::{self, Authority},
     protocol::Suggestion,
     script,
+    text::catalog::Notice,
 };
 use mlua::{Function, Table, Value};
 use rift_permissions::{Actor, ChangeEvent, ContextSet, Group, Node, SubjectRef, Tristate, Uuid};
@@ -97,6 +98,11 @@ const MAX_SUGGESTION_RESULTS: usize = 1024;
 
 fn invalid(message: impl ToString) -> io::Error {
     io::Error::other(message.to_string())
+}
+
+/// An error showing Rift's message `notice` to the player.
+fn notice(notice: Notice) -> io::Error {
+    crate::text::notice_error(io::ErrorKind::Other, notice)
 }
 pub(crate) fn fields(table: &Table, allowed: &[&str]) -> mlua::Result<()> {
     for pair in table.clone().pairs::<String, Value>() {
@@ -425,7 +431,7 @@ impl ExtensionScript {
             input,
             deadline,
             runtime,
-            || Action::Message("You do not have permission to use this command.".into()),
+            || Action::Message(crate::text::catalog::notice(Notice::CommandNoPermission)),
             parse_action,
         )
     }
@@ -730,9 +736,14 @@ pub(crate) fn parse_suggestions(_hook: &str, value: Value) -> mlua::Result<Vec<S
                 fields(&entry, &["text", "tooltip"])?;
                 Suggestion {
                     text: text(entry.raw_get("text")?, "text")?,
+                    // A string or a chat component table.
                     tooltip: match entry.raw_get::<Value>("tooltip")? {
                         Value::Nil => None,
-                        tooltip => Some(text(tooltip, "tooltip")?),
+                        tooltip @ Value::Table(_) => Some(
+                            crate::text::Text::lua(tooltip, "tooltip")
+                                .map_err(mlua::Error::runtime)?,
+                        ),
+                        tooltip => Some(crate::text::Text::Plain(text(tooltip, "tooltip")?)),
                     },
                 }
             }
@@ -1424,9 +1435,9 @@ impl ExtensionSession {
             CommandOwner::Plugin(_, command) => command.permission.clone(),
         };
         if !self.runtime.permits(&self.context.uuid, &permission) {
-            return Ok(Action::Message(
-                "You do not have permission to use this command.".into(),
-            ));
+            return Ok(Action::Message(crate::text::catalog::notice(
+                Notice::CommandNoPermission,
+            )));
         }
         let mut input = self.context.clone();
         input.command = Some(name.into());
@@ -1502,9 +1513,9 @@ impl ExtensionSession {
                 .and_then(|q| q.front())
                 .map(|(id, _)| *id);
             if used >= capacity || head.is_some_and(|id| id != self.context.id) {
-                return Err(io::Error::new(
+                return Err(crate::text::notice_error(
                     io::ErrorKind::WouldBlock,
-                    "Server is full; use the queue command.",
+                    Notice::QueueServerFull,
                 ));
             }
         }
@@ -1576,7 +1587,7 @@ impl ExtensionSession {
 
     pub fn enqueue(&self, target: &str) -> io::Result<usize> {
         if !self.queues().contains_key(target) {
-            return Err(invalid("No queue is configured for that server."));
+            return Err(notice(Notice::QueueNotConfigured));
         }
         if self.context.server.as_deref().is_some_and(|current| {
             current == target
@@ -1588,7 +1599,7 @@ impl ExtensionSession {
                     .get(target)
                     .is_some_and(|members| members.contains(current))
         }) {
-            return Err(invalid("You are already on that server."));
+            return Err(notice(Notice::QueueAlreadyOn));
         }
         let mut host = self.runtime.host.lock().unwrap();
         if let Some(queue) = host.queues.get(target)
@@ -1597,7 +1608,7 @@ impl ExtensionSession {
             return Ok(position + 1);
         }
         if host.queues.get(target).is_some_and(|q| q.len() >= 1024) {
-            return Err(invalid("Queue is full."));
+            return Err(notice(Notice::QueueFull));
         }
         for queue in host.queues.values_mut() {
             queue.retain(|(id, _)| *id != self.context.id);
@@ -1619,7 +1630,7 @@ impl ExtensionSession {
                 && entered.elapsed() >= Duration::from_secs(300)
             {
                 queue.retain(|(id, _)| *id != self.context.id);
-                return Err(invalid("Queue expired after five minutes."));
+                return Err(notice(Notice::QueueExpired));
             }
             if queue.front().is_some_and(|(id, _)| *id == self.context.id) {
                 head = Some(server.clone());

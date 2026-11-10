@@ -5,19 +5,27 @@
 //! See docs/network-protocol.md for the version matrix and source references.
 //! Add a pinned real-server switch AND recovery fixture in tests/servers.json
 //! before adding a version here. Do not infer support from a protocol range.
-use super::packets::{Text, boolean, disconnect_text, take};
+use super::packets::{Text, boolean, disconnect_text, take, with_text};
 use std::io;
 
-/// One Command Suggestions Response entry. Tooltips are plain text.
+/// One Command Suggestions Response entry. Tooltips are plain text or a
+/// component, rendered for the client.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Suggestion {
     pub text: String,
-    pub tooltip: Option<String>,
+    pub tooltip: Option<crate::text::Text>,
 }
 use super::{
-    Packet, ProtocolVersion, State, disconnect, invalid, read_string, read_varint, write_string,
-    write_varint,
+    Packet, ProtocolVersion, State, invalid, read_string, read_varint, write_string, write_varint,
 };
+
+/// Where a version's title packets live.
+enum TitleIds {
+    /// Before 1.17: one Title packet, and the action number of the times.
+    Combined(i32, i32),
+    /// Subtitle, title and times packets.
+    Separate(i32, i32, i32),
+}
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct SwitchingCapabilities {
@@ -631,7 +639,9 @@ impl SwitchingCapabilities {
                 Some(tooltip) => {
                     data.push(1);
                     // JSON text before 1.20.3, anonymous network NBT since.
-                    Text::Literal(tooltip).write(version.nbt_components(), &mut data)?;
+                    with_text(tooltip, Some(version), |text| {
+                        text.write(version.nbt_components(), &mut data)
+                    })?;
                 }
                 None => data.push(0),
             }
@@ -670,46 +680,85 @@ impl SwitchingCapabilities {
 
     /// Set Titles Animation, Set Subtitle Text and Set Title Text, in the order
     /// the client needs to display them. Times are ticks. An absent subtitle is
-    /// sent empty so that one from an earlier title cannot reappear.
+    /// sent empty so that one from an earlier title cannot reappear. Before
+    /// 1.17 the three are actions of one Title packet.
     pub(crate) fn title(
         self,
         version: ProtocolVersion,
-        title: &str,
-        subtitle: Option<&str>,
+        title: Option<&crate::text::Text>,
+        subtitle: Option<&crate::text::Text>,
         times: [i32; 3],
     ) -> io::Result<Vec<Packet>> {
-        // minecraft-data through 26.1; 26.2 and 26.3 GameProtocols via javap.
-        let (subtitle_id, title_id, times_id) = match self.protocol {
-            761 => (0x59, 0x5b, 0x5c),
-            762 | 763 => (0x5d, 0x5f, 0x60),
-            764 => (0x5f, 0x61, 0x62),
-            765 => (0x61, 0x63, 0x64),
-            766 | 767 => (0x63, 0x65, 0x66),
-            768 | 769 => (0x6a, 0x6c, 0x6d),
-            770..=772 => (0x69, 0x6b, 0x6c),
-            773 | 774 => (0x6e, 0x70, 0x71),
-            775 | 776 => (0x70, 0x72, 0x73),
-            777 => (0x72, 0x74, 0x75),
+        // minecraft-data protocol.json for 1.8 through 26.1; 26.2 and 26.3
+        // GameProtocols via javap.
+        let ids = match self.protocol {
+            // Title actions: 0 title, 1 subtitle, then times (2 before 1.11,
+            // 3 once 1.11 inserted the action bar).
+            47 | 107..=110 | 210 => TitleIds::Combined(0x45, 2),
+            315 | 316 => TitleIds::Combined(0x45, 3),
+            335 => TitleIds::Combined(0x47, 3),
+            338 | 340 => TitleIds::Combined(0x48, 3),
+            393 | 401 | 404 => TitleIds::Combined(0x4b, 3),
+            477..=498 | 735 | 736 | 751 | 753 | 754 => TitleIds::Combined(0x4f, 3),
+            573..=578 => TitleIds::Combined(0x50, 3),
+            755 | 756 => TitleIds::Separate(0x57, 0x59, 0x5a),
+            757..=759 => TitleIds::Separate(0x58, 0x5a, 0x5b),
+            760 => TitleIds::Separate(0x5b, 0x5d, 0x5e),
+            761 => TitleIds::Separate(0x59, 0x5b, 0x5c),
+            762 | 763 => TitleIds::Separate(0x5d, 0x5f, 0x60),
+            764 => TitleIds::Separate(0x5f, 0x61, 0x62),
+            765 => TitleIds::Separate(0x61, 0x63, 0x64),
+            766 | 767 => TitleIds::Separate(0x63, 0x65, 0x66),
+            768 | 769 => TitleIds::Separate(0x6a, 0x6c, 0x6d),
+            770..=772 => TitleIds::Separate(0x69, 0x6b, 0x6c),
+            773 | 774 => TitleIds::Separate(0x6e, 0x70, 0x71),
+            775 | 776 => TitleIds::Separate(0x70, 0x72, 0x73),
+            777 => TitleIds::Separate(0x72, 0x74, 0x75),
             _ => {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,
-                    "Titles require Minecraft 1.19.3–26.3.",
+                    "Titles require Minecraft 1.8.9–26.3.",
                 ));
             }
         };
-        let component = |id, text| {
-            let mut packet = disconnect(Some(version), State::Play, text)?;
-            packet.id = id;
-            Ok::<_, io::Error>(packet)
+        // Text as the client reads it; an absent one is empty.
+        let text = |text: Option<&crate::text::Text>, data: &mut Vec<u8>| match text {
+            Some(text) => with_text(text, Some(version), |text| {
+                text.write(version.nbt_components(), data)
+            }),
+            None => Text::Literal("").write(version.nbt_components(), data),
         };
-        Ok(vec![
-            Packet::new(
-                times_id,
-                times.iter().flat_map(|t| t.to_be_bytes()).collect(),
-            ),
-            component(subtitle_id, subtitle.unwrap_or(""))?,
-            component(title_id, title)?,
-        ])
+        let timing: Vec<u8> = times.iter().flat_map(|t| t.to_be_bytes()).collect();
+        match ids {
+            TitleIds::Separate(subtitle_id, title_id, times_id) => {
+                let packet = |id, value| {
+                    let mut data = Vec::new();
+                    text(value, &mut data)?;
+                    Ok::<_, io::Error>(Packet::new(id, data))
+                };
+                Ok(vec![
+                    Packet::new(times_id, timing),
+                    packet(subtitle_id, subtitle)?,
+                    packet(title_id, title)?,
+                ])
+            }
+            TitleIds::Combined(id, times_action) => {
+                let action = |action: i32, body: &dyn Fn(&mut Vec<u8>) -> io::Result<()>| {
+                    let mut data = Vec::new();
+                    write_varint(action, &mut data);
+                    body(&mut data)?;
+                    Ok::<_, io::Error>(Packet::new(id, data))
+                };
+                Ok(vec![
+                    action(times_action, &|data| {
+                        data.extend(&timing);
+                        Ok(())
+                    })?,
+                    action(1, &|data| text(subtitle, data))?,
+                    action(0, &|data| text(title, data))?,
+                ])
+            }
+        }
     }
 
     /// Append unsigned Brigadier proxy literals to the backend's command

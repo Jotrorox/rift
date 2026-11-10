@@ -343,7 +343,10 @@ fn header_packet(
 ) -> io::Result<Packet> {
     let mut data = Vec::new();
     for text in [header, footer] {
-        Text::Component(text).write(version.nbt_components(), &mut data)?;
+        // Rendered for the client like every component Rift sends.
+        let converted = crate::text::for_client(text, Some(version));
+        Text::Component(converted.as_ref().unwrap_or(text))
+            .write(version.nbt_components(), &mut data)?;
     }
     Ok(Packet::new(ids.header, data))
 }
