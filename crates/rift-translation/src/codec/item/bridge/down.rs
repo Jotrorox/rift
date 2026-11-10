@@ -153,7 +153,9 @@ pub(super) fn tag(cx: &mut Bridge, item: &str, components: &Components) -> io::R
             // 1.20.4 cannot hide the name; it hides everything else.
             "hide_tooltip" => hide |= 0xff,
             "enchantment_glint_override"
-                if value.as_bool() == Some(true) && components.get("enchantments").is_none() =>
+                if value.as_bool() == Some(true)
+                    && components.get("enchantments").is_none()
+                    && !tag.contains("Enchantments") =>
             {
                 // An entry that names no enchantment: 1.20.4 shows the
                 // glint and nothing in the tooltip.

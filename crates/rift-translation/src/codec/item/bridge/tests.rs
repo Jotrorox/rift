@@ -997,3 +997,55 @@ fn stacks_inside_entity_and_block_entity_data_change_format() {
         &jukebox
     ));
 }
+
+#[test]
+fn enchantments_1_20_5_cannot_hold_come_back() {
+    for snbt in [
+        "{Enchantments:[{id:\"plugin:soulbound\",lvl:1s},{id:\"minecraft:sharpness\",lvl:2s}]}",
+        "{Enchantments:[{id:\"minecraft:sharpness\",lvl:1000s}]}",
+        "{Enchantments:[{id:\"plugin:soulbound\",lvl:1s}],HideFlags:1}",
+        "{Enchantments:[{id:\"minecraft:sharpness\",lvl:2s},{id:\"minecraft:sharpness\",lvl:3s}]}",
+    ] {
+        let stack = old_stack("stick", snbt);
+        let there = up(&stack);
+        let patch = components_of(&there);
+        assert!(
+            patch.get("enchantments").is_some()
+                || patch.get("enchantment_glint_override").is_some(),
+            "{snbt}: {patch:?}"
+        );
+        let back = down_serverbound(&there.unwrap()).unwrap();
+        assert!(same_tag_meaning(&back, &stack), "{snbt}: {back:?}");
+    }
+}
+
+#[test]
+fn items_only_1_20_5_has_come_back_from_their_stand_ins() {
+    use crate::codec::item::convert::item_id;
+    for (item, damage) in [
+        ("mace", Some(5)),
+        ("wind_charge", None),
+        ("ominous_bottle", None),
+    ] {
+        let mut patch = Components::default();
+        if let Some(damage) = damage {
+            patch.insert("damage", Value::Int(damage));
+        }
+        let stack = ItemStack {
+            id: item_id(NEW, item).unwrap(),
+            count: 1,
+            damage: 0,
+            tag: None,
+            components: Some(patch),
+        };
+        let there = down(&stack).unwrap();
+        assert_ne!(name(OLD, &there), item);
+        let tag = there.tag.as_ref().unwrap().as_compound().unwrap();
+        assert!(
+            tag.compound("display").unwrap().str("Name").is_some(),
+            "{item}: {tag:?}"
+        );
+        let back = up_serverbound(&there).unwrap();
+        assert!(same_components(&back, &stack), "{item}: {back:?}");
+    }
+}

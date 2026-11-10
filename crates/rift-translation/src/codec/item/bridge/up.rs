@@ -41,8 +41,11 @@ pub(super) fn components(cx: &mut Bridge, item: &str, mut tag: Compound) -> io::
     if let Some(data) = take_int(&mut tag, "CustomModelData") {
         out.insert("custom_model_data", Value::Int(data));
     }
-    if let Some(Nbt::Compound(state)) = tag.remove("BlockStateTag") {
-        out.insert("block_state", block_state(&state));
+    if let Some(state) = take_compound(&mut tag, "BlockStateTag") {
+        match block_state(&state) {
+            Some(value) => out.insert("block_state", value),
+            None => drop(tag.insert("BlockStateTag", state)),
+        }
     }
     if let Some(mut entity) = take_compound(&mut tag, "EntityTag") {
         // A 1.20.5 server cannot save entity data without an ID; the client
@@ -274,18 +277,18 @@ fn property_value(name: &str, value: &Nbt) -> Option<String> {
     })
 }
 
-fn block_state(state: &Compound) -> Value {
-    Value::List(
-        state
-            .iter()
-            .filter_map(|(name, value)| {
-                Some(Value::Struct(vec![
-                    Value::String(name.to_owned()),
-                    Value::String(property_value(name, value)?),
-                ]))
-            })
-            .collect(),
-    )
+/// `None` when a property is not a string, number or boolean.
+fn block_state(state: &Compound) -> Option<Value> {
+    state
+        .iter()
+        .map(|(name, value)| {
+            Some(Value::Struct(vec![
+                Value::String(name.to_owned()),
+                Value::String(property_value(name, value)?),
+            ]))
+        })
+        .collect::<Option<_>>()
+        .map(Value::List)
 }
 
 /// Take the components a `BlockEntityTag` holds out of it; returns the
@@ -439,20 +442,37 @@ fn enchantments(
         }
         None => None,
     };
-    let mut levels: Vec<(i32, i32)> = Vec::new();
-    for entry in list.iter().flatten().filter_map(Nbt::as_compound) {
-        let (Some(name), Some(level)) = (entry.str("id"), entry.get("lvl").and_then(Nbt::as_i64))
+    // Entries 1.20.5 cannot hold (unknown enchantments, levels outside
+    // 0..=255, earlier repeats, which the last one overrides) stay in the
+    // tag, so they come back. Entries without ID or level mean nothing but
+    // the glint, as vanilla's fixer has it.
+    let mut levels: Vec<(i32, i32, &Nbt)> = Vec::new();
+    let mut rest = Vec::new();
+    for entry in list.iter().flatten() {
+        let Some((name, level)) = entry
+            .as_compound()
+            .and_then(|entry| Some((entry.str("id")?, entry.get("lvl").and_then(Nbt::as_i64)?)))
         else {
             continue;
         };
-        let Some(id) = cx.new_id("enchantment", name) else {
+        let level = i32::try_from(level)
+            .ok()
+            .filter(|level| (0..=255).contains(level));
+        let Some((id, level)) = cx.new_id("enchantment", name).zip(level) else {
+            rest.push(entry.clone());
             continue;
         };
-        let level = level.clamp(0, 255) as i32;
-        match levels.iter_mut().find(|(known, _)| *known == id) {
-            Some(slot) => slot.1 = level,
-            None => levels.push((id, level)),
+        if let Some(index) = levels.iter().position(|(known, _, _)| *known == id) {
+            rest.push(levels.remove(index).2.clone());
         }
+        levels.push((id, level, entry));
+    }
+    let levels: Vec<(i32, i32)> = levels
+        .into_iter()
+        .map(|(id, level, _)| (id, level))
+        .collect();
+    if !rest.is_empty() {
+        tag.insert(key, Nbt::List(rest));
     }
     if !levels.is_empty() || hidden {
         out.insert(
