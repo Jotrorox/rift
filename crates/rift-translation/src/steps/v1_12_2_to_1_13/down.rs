@@ -27,6 +27,7 @@ mod recipes;
 mod suggestions;
 #[cfg(test)]
 mod tests;
+pub(super) mod translations;
 
 use super::{NEWER, OLDER};
 use crate::{
