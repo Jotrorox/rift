@@ -142,6 +142,7 @@ impl ProcessBackend for Local {
             &server.config.command,
             &server.config.directory,
             &environment,
+            &server.config.isolation,
         )?);
         Ok(())
     }
@@ -239,6 +240,7 @@ pub(crate) fn spawn(
     command: &[String],
     directory: &std::path::Path,
     environment: &ProcessEnvironment,
+    isolation: &crate::config::Isolation,
 ) -> io::Result<Child> {
     let (program, arguments) = command.split_first().ok_or_else(|| {
         io::Error::new(
@@ -261,9 +263,13 @@ pub(crate) fn spawn(
     apply_environment(command.as_std_mut(), environment);
     #[cfg(unix)]
     command.process_group(0);
+    // Built before fork; it lives until this function returns, after the
+    // child has exec'd.
+    let _sandbox = sandbox(isolation, directory, &arguments_with(program, arguments))?;
     #[cfg(target_os = "linux")]
     {
         let parent = std::process::id() as libc::pid_t;
+        let ruleset = _sandbox.as_ref().map(super::landlock::Sandbox::raw);
         // SAFETY: runs in the forked child before exec and only makes
         // async-signal-safe calls, building errors without allocating.
         unsafe {
@@ -275,11 +281,74 @@ pub(crate) fn spawn(
                 if libc::getppid() != parent {
                     return Err(io::Error::from_raw_os_error(libc::ESRCH));
                 }
+                if let Some(ruleset) = ruleset {
+                    super::landlock::Sandbox::enter(ruleset)?;
+                }
                 Ok(())
             });
         }
     }
     spawner::spawn(command)
+}
+
+fn arguments_with(program: &str, arguments: &[String]) -> Vec<String> {
+    std::iter::once(program.to_owned())
+        .chain(arguments.iter().cloned())
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+type Sandbox = super::landlock::Sandbox;
+/// Nothing to hold where there is no Landlock.
+#[cfg(not(target_os = "linux"))]
+struct Sandbox;
+
+/// The confinement `isolation` asks for, where the kernel offers it.
+/// `"landlock"` without Landlock runs the server unconfined and says why;
+/// `"required"` refuses to start it.
+fn sandbox(
+    isolation: &crate::config::Isolation,
+    directory: &std::path::Path,
+    command: &[String],
+) -> io::Result<Option<Sandbox>> {
+    use crate::config::IsolationMode;
+    if isolation.mode == IsolationMode::Off {
+        return Ok(None);
+    }
+    #[cfg(target_os = "linux")]
+    let available = super::landlock::abi();
+    #[cfg(not(target_os = "linux"))]
+    let available: Result<u32, String> = {
+        let _ = command;
+        Err("Landlock exists only on Linux".to_owned())
+    };
+    match available {
+        #[cfg(target_os = "linux")]
+        Ok(abi) => {
+            let directory = std::path::absolute(directory)?;
+            super::landlock::Sandbox::new(
+                abi,
+                &directory,
+                command,
+                &isolation.read,
+                &isolation.write,
+            )
+            .map(Some)
+        }
+        #[cfg(not(target_os = "linux"))]
+        Ok(_) => Ok(None),
+        Err(reason) if isolation.mode == IsolationMode::Required => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("isolation = \"required\", but {reason}"),
+        )),
+        Err(reason) => {
+            eprintln!(
+                "rift: warning: starting {} unconfined: isolation = \"landlock\", but {reason}",
+                directory.display()
+            );
+            Ok(None)
+        }
+    }
 }
 
 /// Give a child Rift's environment minus Rift's secrets, or only the
@@ -517,6 +586,7 @@ impl ProcessBackend for Remote {
                     port,
                     environment: (&environment).into(),
                     bus_certificate,
+                    isolation: (&server.config.isolation).into(),
                 }),
                 COMMAND_WAIT,
             )
@@ -646,7 +716,12 @@ mod tests {
         let mut child = {
             let directory = directory.clone();
             tokio::task::spawn_blocking(move || {
-                spawn(&command, &directory, &ProcessEnvironment::default())
+                spawn(
+                    &command,
+                    &directory,
+                    &ProcessEnvironment::default(),
+                    &Default::default(),
+                )
             })
             .await
             .unwrap()
@@ -719,7 +794,8 @@ mod tests {
                     ("default", ProcessEnvironment::default()),
                     ("restricted", restricted),
                 ] {
-                    let mut child = spawn(&report(file), &directory, &environment).unwrap();
+                    let mut child =
+                        spawn(&report(file), &directory, &environment, &Default::default()).unwrap();
                     child.wait().await.unwrap();
                 }
             });
@@ -774,6 +850,42 @@ mod tests {
         let _ = std::fs::remove_dir_all(directory);
     }
 
+    /// Where Landlock is missing, `"landlock"` starts the server unconfined
+    /// and `"required"` refuses to start it.
+    #[cfg(not(target_os = "linux"))]
+    #[tokio::test]
+    async fn isolation_falls_back_or_refuses_without_landlock() {
+        use crate::config::{Isolation, IsolationMode};
+        let directory = std::env::temp_dir().join(format!("rift-isolation-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let command = ["true".to_owned()];
+        let isolation = |mode| Isolation {
+            mode,
+            ..Default::default()
+        };
+        let mut child = spawn(
+            &command,
+            &directory,
+            &ProcessEnvironment::default(),
+            &isolation(IsolationMode::Landlock),
+        )
+        .unwrap();
+        assert!(child.wait().await.unwrap().success());
+        let refused = spawn(
+            &command,
+            &directory,
+            &ProcessEnvironment::default(),
+            &isolation(IsolationMode::Required),
+        )
+        .unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::Unsupported);
+        assert!(
+            refused.to_string().contains("isolation = \"required\""),
+            "{refused}"
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
     /// A server outlives neither a SIGKILLed Rift nor an OOM kill. The test
     /// binary runs this test again as a stand-in for Rift, which spawns a
     /// server and waits; the outer run then kills it with SIGKILL.
@@ -797,6 +909,7 @@ mod tests {
                     &["sleep".into(), "60".into()],
                     &directory,
                     &ProcessEnvironment::default(),
+                    &Default::default(),
                 )
                 .unwrap();
                 let temporary = directory.join("child.pid.tmp");

@@ -401,6 +401,7 @@ async fn agents_refuse_unlisted_programs_and_paths_outside_their_root() {
             port: fixture.port,
             environment: Default::default(),
             bus_certificate: None,
+            isolation: Default::default(),
         })
     };
     let wait = Duration::from_secs(5);

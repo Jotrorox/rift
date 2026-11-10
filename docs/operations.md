@@ -457,9 +457,10 @@ cannot change it.
 This is hygiene, not isolation. Managed servers still run as Rift's user: they
 can read every file Rift can (the configuration, `rift.sqlite3`, the
 messaging private key and anything under `local/`), write Rift's plugins and
-templates, and signal Rift. Keep untrusted server plugins off the host, or run
-servers on [nodes](nodes.md) under a separate account, until instances get
-their own sandbox. macOS and Windows have no equivalent flag; there, a process
+templates, and signal Rift. On Linux, set
+[`isolation`](managed-servers.md#isolation) on groups and managed servers to
+confine them to their own directory; elsewhere, keep untrusted server plugins
+off the host, or run servers on [nodes](nodes.md) under a separate account. macOS and Windows have no equivalent flag; there, a process
 of the same user can read Rift's environment.
 
 ## Container example
