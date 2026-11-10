@@ -738,7 +738,6 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn group_source(definition: &str) -> String {
