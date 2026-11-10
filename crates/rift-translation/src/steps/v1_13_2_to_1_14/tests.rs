@@ -303,6 +303,17 @@ fn center(x: i32, z: i32) -> Out {
     out(Clientbound, "set_chunk_cache_center", &w.buf)
 }
 
+/// A whole 1.13.2 column without sections: only its biomes.
+fn empty_chunk(x: i32, z: i32) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.i32(x).i32(z).bool(true).varint(0).varint(256 * 4);
+    for _ in 0..256 {
+        w.i32(1);
+    }
+    w.varint(0);
+    w.buf
+}
+
 fn player_position(x: f64, y: f64, z: f64, relative: u8) -> Vec<u8> {
     let mut w = Writer::new();
     w.f64(x)
@@ -326,17 +337,13 @@ fn the_chunk_cache_centre_follows_the_player_going_up() {
     );
     // A 1.13 server sends chunks first: the first one sets a centre, the
     // rest are within the cache.
-    let mut chunk = Writer::new();
-    chunk.i32(9).i32(-16).bool(true);
-    let sent = up(&mut step, Clientbound, "level_chunk", &chunk.buf);
+    let sent = up(&mut step, Clientbound, "level_chunk", &empty_chunk(9, -16));
     assert_eq!(sent[0], center(9, -16));
-    assert_eq!(sent[1].name, "level_chunk");
-    let mut near = Writer::new();
-    near.i32(12).i32(-14).bool(true);
-    assert_eq!(
-        up(&mut step, Clientbound, "level_chunk", &near.buf).len(),
-        1
-    );
+    let names: Vec<&str> = sent[1..].iter().map(|out| out.name.as_str()).collect();
+    assert_eq!(names, ["light_update", "level_chunk"]);
+    let near = empty_chunk(12, -14);
+    let sent = up(&mut step, Clientbound, "level_chunk", &near);
+    assert!(sent.iter().all(|out| out.name != "set_chunk_cache_center"));
     // The teleport puts the player somewhere; walking across a chunk border
     // moves the centre, walking within a chunk does not.
     let teleport = player_position(150.5, 64.0, -250.5, 0);
@@ -375,15 +382,13 @@ fn the_chunk_cache_centre_follows_the_player_going_up() {
     );
     assert_eq!(sent[0], center(7, -16));
     // A chunk far outside the cache moves the centre to it.
-    let mut far = Writer::new();
-    far.i32(1000).i32(0).bool(true);
-    let sent = up(&mut step, Clientbound, "level_chunk", &far.buf);
+    let sent = up(&mut step, Clientbound, "level_chunk", &empty_chunk(1000, 0));
     assert_eq!(sent[0], center(1000, 0));
     // A respawn starts a new cache.
     let mut respawn = Writer::new();
     respawn.i32(-1).u8(1).u8(0).string("default");
     up(&mut step, Clientbound, "respawn", &respawn.buf);
-    let sent = up(&mut step, Clientbound, "level_chunk", &near.buf);
+    let sent = up(&mut step, Clientbound, "level_chunk", &near);
     assert_eq!(sent[0], center(12, -14));
 }
 
@@ -453,7 +458,9 @@ fn sleeping_moves_between_a_packet_and_entity_data() {
     );
 
     // Going down, a player's sleeping position in entity data becomes
-    // `player_sleep` after the data itself.
+    // `player_sleep` after the data itself. The entity codec drops the
+    // fields 1.13 lacks (the pose and the sleeping position) and moves the
+    // health from index 8 to 7; a list left empty is not sent at all.
     let mut step = Down::new();
     down(
         &mut step,
@@ -461,56 +468,73 @@ fn sleeping_moves_between_a_packet_and_entity_data() {
         "login",
         &hex("0000000701000000001404666c61740200"),
     );
-    let data = entity_data::sleep_data(7, Some(bed), None);
-    let sent = down(&mut step, Clientbound, "set_entity_data", &data);
+    let mut data = Writer::new();
+    data.varint(7).u8(8).varint(2).f32(20.0);
+    data.u8(12).varint(10).bool(true).position(bed).u8(0xff);
+    let sent = down(&mut step, Clientbound, "set_entity_data", &data.buf);
+    let mut health = Writer::new();
+    health.varint(7).u8(7).varint(2).f32(20.0).u8(0xff);
     let mut expected = Writer::new();
     expected.varint(7).position_legacy(bed);
-    assert_eq!(sent.len(), 2);
-    assert_eq!(sent[0].name, "set_entity_data");
-    assert_eq!(sent[1], out(Clientbound, "player_sleep", &expected.buf));
+    assert_eq!(
+        sent,
+        [
+            out(Clientbound, "set_entity_data", &health.buf),
+            out(Clientbound, "player_sleep", &expected.buf),
+        ]
+    );
+    let data = entity_data::sleep_data(7, Some(bed), None);
+    let sent = down(&mut step, Clientbound, "set_entity_data", &data);
+    assert_eq!(sent, [out(Clientbound, "player_sleep", &expected.buf)]);
     // Not for entities that are not players, nor when the bed is cleared.
     let data = entity_data::sleep_data(99, Some(bed), None);
-    assert_eq!(
-        down(&mut step, Clientbound, "set_entity_data", &data).len(),
-        1
-    );
+    assert_eq!(down(&mut step, Clientbound, "set_entity_data", &data), []);
     let data = entity_data::sleep_data(7, None, Some(0));
-    assert_eq!(
-        down(&mut step, Clientbound, "set_entity_data", &data).len(),
-        1
-    );
+    assert_eq!(down(&mut step, Clientbound, "set_entity_data", &data), []);
 }
 
-/// The official 1.14 server's `add_player` for the recording player, with
-/// entity data that includes an item stack and other values to skip.
+/// A 1.14 `add_player` whose entity data has fields 1.13 keeps (moved to
+/// their 1.13 indices by the entity codec) and the two it lacks.
 #[test]
 fn a_player_coming_into_view_asleep_lies_in_bed_going_down() {
     let bed = position(-5, 70, 12);
+    let spawn = |w: &mut Writer| {
+        w.varint(12)
+            .uuid(0x1234)
+            .f64(1.0)
+            .f64(2.0)
+            .f64(3.0)
+            .i8(0)
+            .i8(0);
+    };
     let mut body = Writer::new();
-    body.varint(12)
-        .uuid(0x1234)
-        .f64(1.0)
-        .f64(2.0)
-        .f64(3.0)
-        .i8(0)
-        .i8(0);
-    // Name (optional text), a float, a stack, the pose, then the bed.
-    body.u8(2)
-        .varint(5)
-        .bool(true)
-        .string("{\"text\":\"x\"}")
-        .u8(8)
-        .varint(2)
-        .f32(20.0);
-    body.u8(13).varint(6).bool(true).varint(1).i8(1).u8(0);
+    spawn(&mut body);
+    // Name (optional text), health, absorption, the pose, then the bed.
+    body.u8(2).varint(5).bool(true).string("{\"text\":\"x\"}");
+    body.u8(8).varint(2).f32(20.0);
+    body.u8(13).varint(2).f32(4.0);
     body.u8(6).varint(18).varint(2);
     body.u8(12).varint(10).bool(true).position(bed).u8(0xff);
     let mut step = Down::new();
     let sent = down(&mut step, Clientbound, "add_player", &body.buf);
+    let mut converted = Writer::new();
+    spawn(&mut converted);
+    converted
+        .u8(2)
+        .varint(5)
+        .bool(true)
+        .string("{\"text\":\"x\"}");
+    converted.u8(7).varint(2).f32(20.0);
+    converted.u8(11).varint(2).f32(4.0).u8(0xff);
     let mut expected = Writer::new();
     expected.varint(12).position_legacy(bed);
-    assert_eq!(sent[0], out(Clientbound, "add_player", &body.buf));
-    assert_eq!(sent[1], out(Clientbound, "player_sleep", &expected.buf));
+    assert_eq!(
+        sent,
+        [
+            out(Clientbound, "add_player", &converted.buf),
+            out(Clientbound, "player_sleep", &expected.buf),
+        ]
+    );
     // A later death clears their equipment for the 1.13 client.
     let sent = down(&mut step, Clientbound, "entity_event", &[0, 0, 0, 12, 3]);
     assert_eq!(sent.len(), 7);
