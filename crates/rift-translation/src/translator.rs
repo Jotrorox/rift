@@ -54,7 +54,7 @@ impl Edge {
         use Direction::*;
         use State::*;
         match (direction, state, name) {
-            (Clientbound, Login, "login_finished" | "game_profile") => {
+            (Clientbound, Login, "login_finished") => {
                 if version::has_configuration(self.data.protocol) {
                     self.clientbound = Configuration;
                 } else {
