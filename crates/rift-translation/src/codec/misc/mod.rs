@@ -1,8 +1,27 @@
 //! Tags, statistics, command trees, sounds and menus.
 //!
-//! Each packet's handler is installed only for the pairs whose two
-//! protocols lay it out differently or number a registry it refers to
-//! differently; elsewhere it passes through untouched.
+//! Default handlers, each installed only for the pairs whose two protocols
+//! lay the packet out differently or number a registry it refers to
+//! differently (elsewhere the packet passes through untouched):
+//!
+//! - clientbound `update_tags` (configuration and play), `award_stats`,
+//!   `commands`, `sound`, `custom_sound`, `sound_entity`, `stop_sound`,
+//!   `open_screen`, `mount_screen_open` and `container_set_data`;
+//! - serverbound `set_beacon`.
+//!
+//! What a step between 1.12.2 and 1.13 needs beyond the defaults, since
+//! 1.12 has no tags, command graph or `stop_sound`:
+//!
+//! - [`tags::vanilla_update_tags`] for a 1.13 client once it joins;
+//! - [`commands::catch_all`] for a graph that lets it type any command;
+//! - [`sound::stop_sound_from_legacy`] for 1.12's `MC|StopSound` plugin
+//!   message (going down, `stop_sound` and `set_beacon` already become the
+//!   plugin messages `MC|StopSound` and `MC|Beacon`).
+//!
+//! A step overrides a default by declaring its own rule for the packet;
+//! the conversion functions (`tags::convert`, `commands::convert`,
+//! `sound::convert`, `stats::convert`, `screen::convert_open_screen`, ...)
+//! stay available to its handler.
 pub mod commands;
 pub mod container;
 pub mod registry;

@@ -9,7 +9,7 @@
 //! behind an older backend misses the tags the older server never had. When
 //! upgrading, every vanilla tag of the receiver's version that the packet
 //! lacks is added, restricted to entries the sender's registry has.
-use super::registry::{self, Kind, VanillaTags};
+use super::registry::{self, VanillaTags};
 use crate::{
     Direction, Packet, State,
     codec::{HasShared, Shared},
@@ -216,16 +216,18 @@ fn add_missing(shared: &mut Shared, direction: Direction, vanilla: &VanillaTags,
             continue;
         };
         // Entries the sender's registry can produce, when it has the registry.
-        let image = registry::registry(source, name).and_then(|(kind, sender)| {
+        let image = registry::registry(source, name).and_then(|(_, sender)| {
             let mapping = registry::mapping(shared, direction, name)?;
             let mut image = vec![false; receiver.len()];
             for id in 0..sender.len() as i32 {
-                if let Some(mapped) = mapping.get(id) {
-                    image[mapped as usize] = true;
+                if let Some(slot) = mapping
+                    .get(id)
+                    .and_then(|mapped| image.get_mut(mapped as usize))
+                {
+                    *slot = true;
                 }
             }
-            // A data-driven registry the sender lacks entirely maps nothing.
-            (kind != Kind::Vanilla || !sender.is_empty()).then_some(image)
+            Some(image)
         });
         if set.registry_mut(name).is_none() {
             set.registries.push(RegistryTags {
