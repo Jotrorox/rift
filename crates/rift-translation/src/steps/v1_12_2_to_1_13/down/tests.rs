@@ -839,6 +839,117 @@ fn recipe_unlocks_carry_1_12_ids() {
     assert!(serverbound(&mut step, "recipe_book_update", &[2]).is_err());
 }
 
+/// A backend behind later steps names recipes as 1.13 never did (1.21.2
+/// carries no names; the 1.21.1 step makes up `rift:recipe/<n>`): a
+/// crafting recipe it declares stands for the 1.12.2 recipes making the
+/// same item, and the client's clicks go back under the backend's name.
+#[test]
+fn recipes_named_unlike_1_13_stand_for_those_making_the_same_item() {
+    let recipes = recipes::Recipes::get();
+    let items = data::version(NEWER).expect_registry("item");
+    let slot = |writer: &mut Writer, item: &str| {
+        writer.i16(items.id(item).unwrap() as i16).i8(1).u8(0);
+    };
+    let mut declare = Writer::new();
+    declare.varint(3);
+    // A shapeless crafting table from one oak plank, a smelting recipe
+    // making a crafting table (no furnace book in 1.12) and a vanilla name.
+    declare
+        .string("rift:recipe/7")
+        .string("crafting_shapeless")
+        .string("");
+    declare.varint(1).varint(1);
+    slot(&mut declare, "oak_planks");
+    slot(&mut declare, "crafting_table");
+    declare
+        .string("rift:recipe/8")
+        .string("smelting")
+        .string("");
+    declare.varint(1);
+    slot(&mut declare, "oak_planks");
+    slot(&mut declare, "crafting_table");
+    declare.f32(0.1).varint(200);
+    declare
+        .string("minecraft:red_bed")
+        .string("crafting_shapeless")
+        .string("");
+    declare.varint(1).varint(1);
+    slot(&mut declare, "red_wool");
+    slot(&mut declare, "red_bed");
+    let mut step = Down::new();
+    assert!(
+        clientbound(&mut step, "update_recipes", &declare.buf)
+            .unwrap()
+            .is_empty()
+    );
+    let table = recipes.id("crafting_table").unwrap();
+    let mut unlock = Writer::new();
+    unlock
+        .varint(1)
+        .bool(false)
+        .bool(false)
+        .bool(false)
+        .bool(false)
+        .varint(3);
+    unlock
+        .string("rift:recipe/7")
+        .string("rift:recipe/8")
+        .string("minecraft:red_bed");
+    let mut expected = Writer::new();
+    expected
+        .varint(1)
+        .bool(false)
+        .bool(false)
+        .varint(2)
+        .varint(table)
+        .varint(103);
+    assert_eq!(
+        one(
+            clientbound(&mut step, "recipe", &unlock.buf).unwrap(),
+            Direction::Clientbound,
+            "recipe"
+        ),
+        expected.buf
+    );
+    let mut place = Writer::new();
+    place.i8(1).varint(table).bool(false);
+    let mut expected = Writer::new();
+    expected.i8(1).string("rift:recipe/7").bool(false);
+    assert_eq!(
+        one(
+            serverbound(&mut step, "place_recipe", &place.buf).unwrap(),
+            Direction::Serverbound,
+            "place_recipe"
+        ),
+        expected.buf
+    );
+    let mut ghost = Writer::new();
+    ghost.i8(1).string("rift:recipe/7");
+    let mut expected = Writer::new();
+    expected.i8(1).varint(table);
+    assert_eq!(
+        one(
+            clientbound(&mut step, "place_ghost_recipe", &ghost.buf).unwrap(),
+            Direction::Clientbound,
+            "place_ghost_recipe"
+        ),
+        expected.buf
+    );
+    // A vanilla 1.13 backend keeps its names.
+    let mut place = Writer::new();
+    place.i8(1).varint(103).bool(false);
+    let mut expected = Writer::new();
+    expected.i8(1).string("minecraft:red_bed").bool(false);
+    assert_eq!(
+        one(
+            serverbound(&mut step, "place_recipe", &place.buf).unwrap(),
+            Direction::Serverbound,
+            "place_recipe"
+        ),
+        expected.buf
+    );
+}
+
 /// The official servers unlock the same recipes in the corpus scenario: the
 /// 1.13 unlocks, downgraded, are exactly the 1.12.2 server's.
 #[test]

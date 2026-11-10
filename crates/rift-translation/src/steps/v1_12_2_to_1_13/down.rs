@@ -17,7 +17,8 @@
 //!   trades, beacons, command and structure blocks and pick block become the
 //!   1.13 packets, and `stop_sound` becomes `MC|StopSound`;
 //! - the recipe book: 1.13 recipe names become 1.12's numeric recipe IDs and
-//!   back (`down/recipes.rs`); tags and recipe definitions are dropped;
+//!   back (`down/recipes.rs`); tags and recipe definitions are dropped
+//!   (recipes named unlike 1.13 are read first, to stand in for 1.12's);
 //! - `player_look_at` is emulated with a rotation-only teleport, and the
 //!   pufferfish sting game event with the sound it plays;
 //! - block entity and entity NBT queries, which a 1.12 client never makes,
@@ -89,6 +90,8 @@ pub struct Down {
     /// 1.12 channel names by the 1.13 identifier they were sent on, so the
     /// backend's answers go back on the name the client knows.
     channels: HashMap<String, String>,
+    /// Recipes the backend names differently from 1.13.
+    declared: recipes::Declared,
 }
 
 impl HasShared for Down {
@@ -108,6 +111,7 @@ impl Down {
             own_teleports: VecDeque::new(),
             next_teleport: FIRST_OWN_TELEPORT,
             channels: HashMap::new(),
+            declared: recipes::Declared::default(),
         }
     }
 
@@ -131,7 +135,7 @@ impl Down {
                 .clientbound(Play, "place_ghost_recipe", Self::place_ghost_recipe)
                 .serverbound(Play, "place_recipe", Self::place_recipe)
                 .serverbound(Play, "recipe_book_update", Self::recipe_book_update)
-                .drop_clientbound(Play, "update_recipes")
+                .clientbound(Play, "update_recipes", Self::update_recipes)
                 .drop_clientbound(Play, "update_tags")
                 // The answer to a block entity or entity NBT query, which only
                 // a 1.13 client's debug keys make.
