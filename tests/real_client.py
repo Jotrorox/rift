@@ -381,10 +381,10 @@ NARRATOR_PLACEHOLDER = "package com.mojang.text2speech;\npublic interface Narrat
 # found by its use of the Objective-C bridge) gets empty void methods: its
 # Dock icon call (1.19.4-1.20.x) registers the JVM as a GUI app with a Dock
 # tile, and the menu/fullscreen calls have no business in a headless run.
-# For 1.13 (-Drift.headless.monitor=true) the monitor list's lookup by
-# handle (in the class that registers the GLFW monitor callback) creates the
-# monitor it lacks: the stubbed glfwGetMonitors lists none, and 1.13's window
-# uses the primary monitor without the null check 1.14 added.
+# For 1.13 to 1.14.3 (-Drift.headless.monitor=true) the monitor list's
+# lookup by handle (in the class that registers the GLFW monitor callback)
+# creates the monitor it lacks: the stubbed glfwGetMonitors lists none, and
+# their window uses the primary monitor without the null check of 1.14.4.
 # It uses the ASM copy shaded into HeadlessMC's jar.
 HELPER_AGENT = """package rift.headless;
 
@@ -832,7 +832,7 @@ def command(prepared, game_dir, name, host, port, heap="1G"):
                 for key, value in (("proxyHost", "127.0.0.1"), ("proxyPort", "9"))]
     if prepared.java_major >= 9:
         options.append("-XX:+IgnoreUnrecognizedVMOptions")
-    if version_key(prepared.version)[:2] == (1, 13):
+    if (1, 13) <= version_key(prepared.version) < (1, 14, 4):
         options.append("-Drift.headless.monitor=true")
     (game_dir / "tmp").mkdir(exist_ok=True)
     (game_dir / "log4j2.xml").write_text(LOG4J_CONFIG.format(
