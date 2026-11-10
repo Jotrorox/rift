@@ -1,0 +1,31 @@
+{
+  "block": {
+    "renames": {
+      "sign": "oak_sign",
+      "stone_slab": "smooth_stone_slab",
+      "wall_sign": "oak_wall_sign"
+    }
+  },
+  "block_state": {
+    "renames": {
+      "sign": "oak_sign",
+      "stone_slab": "smooth_stone_slab",
+      "wall_sign": "oak_wall_sign"
+    }
+  },
+  "entity_type": {
+    "renames": {
+      "commandblock_minecart": "command_block_minecart",
+      "fireworks_rocket": "firework_rocket"
+    }
+  },
+  "item": {
+    "renames": {
+      "cactus_green": "green_dye",
+      "dandelion_yellow": "yellow_dye",
+      "rose_red": "red_dye",
+      "sign": "oak_sign",
+      "stone_slab": "smooth_stone_slab"
+    }
+  }
+}
