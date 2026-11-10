@@ -101,23 +101,10 @@ fn login_rejection(name: &str) -> Vec<u8> {
     response
 }
 
-/// The next player connection and its handshake. Rift asks a backend which
-/// version it runs (a status request) before a player's first login; those
-/// connections are passed over.
-async fn accept_player(listener: &TcpListener) -> (TcpStream, Vec<u8>) {
-    loop {
-        let (mut stream, _) = listener.accept().await.unwrap();
-        let handshake = read_frame(&mut stream).await;
-        // The handshake ends with the next state, 1 for status.
-        if handshake.last() != Some(&1) {
-            return (stream, handshake);
-        }
-    }
-}
-
 async fn login_server(listener: TcpListener, name: &'static str, hosts: Vec<&'static str>) {
     for host in hosts {
-        let (mut stream, received) = accept_player(&listener).await;
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let received = read_frame(&mut stream).await;
         assert_eq!(frame(&received), handshake(host, 2), "handshake changed");
         stream
             .write_all(&frame(&login_rejection(name)))
@@ -279,9 +266,12 @@ async fn login_and_transfer_handshakes_start_independent_backend_connections() {
             start.extend([7; 16]);
             payload.extend(frame(&start));
             client.write_all(&payload).await.unwrap();
-            let (mut upstream, received) = accept_player(&backend).await;
+            let (mut upstream, _) = backend.accept().await.unwrap();
             // Data after a NUL that is not a Forge marker never reaches backends.
-            assert_eq!(frame(&received), handshake("login.test", state));
+            assert_eq!(
+                frame(&read_frame(&mut upstream).await),
+                handshake("login.test", state)
+            );
             assert_eq!(read_frame(&mut upstream).await, start);
             upstream
                 .write_all(&frame(&login_rejection("maintenance")))
