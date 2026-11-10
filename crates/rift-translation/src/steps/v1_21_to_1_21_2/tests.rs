@@ -22,6 +22,16 @@ fn names(out: &[Out]) -> Vec<&str> {
     out.iter().map(|out| out.name.as_str()).collect()
 }
 
+/// A `recipe_book_add` for a 1.21 client: nothing until the next other
+/// packet (a keep-alive here), which the book's packets precede.
+fn add_to_book(down: &mut Harness, body: &[u8]) -> Vec<Out> {
+    let out = down.clientbound(Play, "recipe_book_add", body).unwrap();
+    assert_eq!(names(&out), [] as [&str; 0]);
+    let mut out = down.clientbound(Play, "keep_alive", &[0; 8]).unwrap();
+    assert_eq!(out.pop().map(|out| out.name), Some("keep_alive".into()));
+    out
+}
+
 #[test]
 fn every_packet_has_a_route() {
     assert_eq!(Up::routes().problems(), &[] as &[String]);
@@ -897,9 +907,7 @@ fn the_recipe_book_comes_down_as_recipes_the_client_knows() {
             .unwrap()
             .is_empty()
     );
-    let out = down
-        .clientbound(Play, "recipe_book_add", &book[1].data)
-        .unwrap();
+    let out = add_to_book(&mut down, &book[1].data);
     assert_eq!(names(&out), ["update_recipes", "recipe"]);
     let mut reader = Reader::new(&out[0].data);
     assert_eq!(reader.varint().unwrap(), 3);
@@ -1004,9 +1012,7 @@ fn the_recorded_1_21_recipes_go_up_and_down_again() {
     assert!(stonecutter > 200, "{stonecutter} stonecutter recipes");
     down.clientbound(Play, "recipe_book_settings", &book[0].data)
         .unwrap();
-    let out = down
-        .clientbound(Play, "recipe_book_add", &book[1].data)
-        .unwrap();
+    let out = add_to_book(&mut down, &book[1].data);
     assert_eq!(names(&out), ["update_recipes", "recipe"]);
 }
 
@@ -1026,12 +1032,61 @@ fn the_recorded_1_21_2_book_comes_down() {
             continue;
         }
         match down.send_id(packet.direction, packet.state, packet.id, &packet.data) {
-            Ok(out) => unlocked += out.iter().filter(|out| out.name == "recipe").count(),
+            Ok(out) => unlocked += unlocked_names(&out),
             Err(error) if codec_pending(&error) => {}
             Err(error) => panic!("{name}: {error}"),
         }
     }
+    unlocked += unlocked_names(&down.clientbound(Play, "keep_alive", &[0; 8]).unwrap());
     assert!(unlocked > 20, "{unlocked}");
+}
+
+/// How many recipes the 1.21 `recipe` packets among `out` unlock.
+fn unlocked_names(out: &[Out]) -> usize {
+    out.iter()
+        .filter(|out| out.name == "recipe")
+        .map(|out| {
+            let mut reader = Reader::new(&out.data);
+            reader.varint().unwrap();
+            reader.take(8).unwrap();
+            reader.count().unwrap()
+        })
+        .sum()
+}
+
+/// Granting every advancement unlocks recipes one packet at a time; the
+/// client gets its recipe list once for the burst, not once per recipe.
+#[test]
+fn a_burst_of_unlocks_sends_the_recipe_list_once() {
+    let mut up = up();
+    let sets = up.one_clientbound(Play, "update_recipes", &older_recipes());
+    let init = up
+        .clientbound(Play, "recipe", &recipe_packet(0, &[], &[]))
+        .unwrap();
+    let mut down = down();
+    down.clientbound(Play, "update_recipes", &sets.data)
+        .unwrap();
+    down.clientbound(Play, "recipe_book_settings", &init[0].data)
+        .unwrap();
+    add_to_book(&mut down, &init[1].data);
+    for name in ["minecraft:stick", "minecraft:glass"] {
+        let add = up
+            .clientbound(Play, "recipe", &recipe_packet(1, &[name], &[]))
+            .unwrap();
+        let out = down
+            .clientbound(Play, "recipe_book_add", &add[1].data)
+            .unwrap();
+        assert!(out.is_empty());
+    }
+    let out = down.clientbound(Play, "keep_alive", &[0; 8]).unwrap();
+    assert_eq!(names(&out), ["update_recipes", "recipe", "keep_alive"]);
+    assert_eq!(
+        out[1].data,
+        recipe_packet(1, &["rift:recipe/0", "rift:recipe/1"], &[])
+    );
+    // Told once.
+    let out = down.clientbound(Play, "keep_alive", &[0; 8]).unwrap();
+    assert_eq!(names(&out), ["keep_alive"]);
 }
 
 #[test]
@@ -1112,11 +1167,8 @@ fn recipes_unlocked_later_reach_a_1_21_client_with_the_whole_list() {
         .unwrap();
     down.clientbound(Play, "recipe_book_settings", &init[0].data)
         .unwrap();
-    down.clientbound(Play, "recipe_book_add", &init[1].data)
-        .unwrap();
-    let out = down
-        .clientbound(Play, "recipe_book_add", &add[1].data)
-        .unwrap();
+    add_to_book(&mut down, &init[1].data);
+    let out = add_to_book(&mut down, &add[1].data);
     assert_eq!(names(&out), ["update_recipes", "recipe"]);
     // The client keeps both book recipes and the stonecutter's.
     assert_eq!(Reader::new(&out[0].data).varint().unwrap(), 3);

@@ -8,8 +8,7 @@ use super::{
 use crate::{
     Direction, Packet, State,
     codec::{HasShared, Shared},
-    routed_step,
-    step::{Cx, RouteBuilder, Routes},
+    step::{Cx, RouteBuilder, Routes, Step},
     steps::Make,
     wire::{Reader, Rewriter, Writer, invalid},
 };
@@ -62,6 +61,8 @@ struct Ids {
     set_equipment: i32,
     update_recipes: i32,
     recipe: i32,
+    /// The backend's.
+    recipe_book_add: i32,
     client_tick_end: i32,
     explosion_particle: i32,
     empty_sound: i32,
@@ -81,6 +82,12 @@ fn ids() -> &'static Ids {
             set_equipment: client("set_equipment"),
             update_recipes: client("update_recipes"),
             recipe: client("recipe"),
+            recipe_book_add: packet_id(
+                NEWER,
+                State::Play,
+                Direction::Clientbound,
+                "recipe_book_add",
+            ),
             client_tick_end: packet_id(
                 NEWER,
                 State::Play,
@@ -519,10 +526,8 @@ impl Down {
         self.book.settings(&packet.data)
     }
 
-    fn recipe_book_add(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
-        let out = self.book.add(&mut self.shared, &packet.data)?;
-        Self::send_book(cx, state, out);
-        Ok(())
+    fn recipe_book_add(&mut self, _: &mut Cx<'_>, _: State, packet: Packet) -> io::Result<()> {
+        self.book.add(&mut self.shared, &packet.data)
     }
 
     fn recipe_book_remove(
@@ -845,4 +850,17 @@ impl Down {
     }
 }
 
-routed_step!(Down);
+impl Step for Down {
+    /// Book additions reach the client before the next other packet.
+    fn clientbound(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
+        if state == State::Play && packet.id != ids().recipe_book_add {
+            let out = self.book.flush();
+            Self::send_book(cx, state, out);
+        }
+        Self::routes().dispatch(self, cx, Direction::Clientbound, state, packet)
+    }
+
+    fn serverbound(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
+        Self::routes().dispatch(self, cx, Direction::Serverbound, state, packet)
+    }
+}
