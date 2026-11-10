@@ -482,8 +482,8 @@ pub struct Out {
     pub lost: Vec<Component>,
     /// Sender's removed types the receiver lacks.
     pub lost_removed: Vec<&'static str>,
-    /// Sender's types a rule's conversion back would add although the
-    /// sender's patch does not set them.
+    /// Sender's types a rule's conversion back would set or remove although
+    /// the sender's patch does neither.
     pub absent: Vec<&'static str>,
 }
 
@@ -571,6 +571,7 @@ pub fn patch(
     }
     for kind in restored.absent {
         out.components.take(kind);
+        out.components.removed.retain(|known| *known != kind);
     }
     for kind in restored.removed {
         out.components.take(kind);

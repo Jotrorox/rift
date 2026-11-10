@@ -606,7 +606,7 @@ fn food_merge(cx: &mut Conv<'_>, input: &mut Components, out: &mut Out) -> io::R
         return Ok(());
     };
     let consumable = input.take("consumable");
-    if consumable.is_none() {
+    if consumable.is_none() && !input.removes("consumable") {
         // Going back up, `food` always brings a `consumable` (as vanilla's
         // own data fixer does); this patch relied on the item's default.
         out.absent.push("consumable");
@@ -1187,18 +1187,26 @@ fn profile(cx: &mut Conv<'_>, value: &Value) -> Res<Value> {
 /// 26.3 split `swing_animation` into `attack_animation` and
 /// `interact_animation`; going back keeps the attack one.
 fn swing_merge(cx: &mut Conv<'_>, input: &mut Components, out: &mut Out) -> io::Result<()> {
+    let _ = cx;
+    if input.removes("attack_animation") && input.removes("interact_animation") {
+        // Both come from removing `swing_animation`.
+        input.removed.retain(|kind| *kind != "interact_animation");
+    } else if input.removes("attack_animation") && input.get("interact_animation").is_none() {
+        // Going back up removes both.
+        out.absent.push("interact_animation");
+    }
     let attack = input.take("attack_animation");
     let interact = input.take("interact_animation");
-    let _ = cx;
     match (attack, interact) {
         (Some(attack), interact) => {
-            if let Some(interact) = interact
-                && interact != attack
-            {
-                out.lost.push(Component {
+            match interact {
+                Some(interact) if interact != attack => out.lost.push(Component {
                     kind: "interact_animation",
                     value: interact,
-                });
+                }),
+                Some(_) => {}
+                // Going back up gives both.
+                None => out.absent.push("interact_animation"),
             }
             out.push("swing_animation", attack);
         }
@@ -1253,6 +1261,10 @@ fn pot_decorations(cx: &mut Conv<'_>, value: &Value) -> Res<Value> {
             .registry("item")
             .and_then(|registry| registry.id("brick"));
         let items = value.items()?;
+        if items.len() != 4 {
+            // Going back always lists four, bricks where there is none.
+            cx.lossy = true;
+        }
         let mut sides = Vec::with_capacity(4);
         for index in 0..4 {
             sides.push(match items.get(index) {

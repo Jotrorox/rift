@@ -85,14 +85,23 @@ fn layouts_name_known_registries() {
     }
 }
 
+/// Which shapes [`sample`] builds: holders inline or by reference, the
+/// right or left side of eithers, which variant of dispatches.
+#[derive(Clone, Copy)]
+struct Flavour {
+    inline: bool,
+    pick: usize,
+}
+
 /// A value of `node` that exercises it: every optional present, one element
-/// per list, the given variant of dispatches.
-fn sample(protocol: i32, node: &Node, depth: usize) -> Value {
+/// per list, the flavour's choices elsewhere.
+fn sample(protocol: i32, node: &Node, depth: usize, flavour: Flavour) -> Value {
     use Node::*;
     let item = |protocol: i32| {
         let registry = data::version(protocol).expect_registry("item");
         registry.id("stone").unwrap()
     };
+    let next = |node: &Node| sample(protocol, node, depth + 1, flavour);
     match node {
         Unit => Value::Unit,
         Bool => Value::Bool(false),
@@ -106,37 +115,35 @@ fn sample(protocol: i32, node: &Node, depth: usize) -> Value {
         Uuid => Value::Uuid(1),
         Tag | Compound => Value::nbt(&Nbt::Compound(Default::default())),
         Text => Value::nbt(&Nbt::String("text".into())),
+        Holder(_, inline) if flavour.inline && depth < 6 => Value::Direct(Box::new(next(inline))),
         Id(registry) | Holder(registry, _) => Value::Id(match *registry {
             "item" => item(protocol),
             _ => 0,
         }),
+        HolderSet(_) if flavour.inline => Value::Ids(vec![0]),
         HolderSet(_) => Value::Tag("minecraft:planks".into()),
-        Enum(names) => Value::Enum(names[0]),
-        Optional(inner) if depth < 6 => Value::some(sample(protocol, inner, depth + 1)),
+        Enum(names) => Value::Enum(names[flavour.pick % names.len()]),
+        Optional(inner) if depth < 6 => Value::some(next(inner)),
         Optional(_) => Value::none(),
-        List(element, _) if depth < 6 => Value::List(vec![sample(protocol, element, depth + 1)]),
+        List(element, _) if depth < 6 => Value::List(vec![next(element)]),
         List(_, _) => Value::List(Vec::new()),
-        Array(element, count) => Value::List(
-            (0..*count)
-                .map(|_| sample(protocol, element, depth + 1))
-                .collect(),
-        ),
-        Struct(fields) => Value::Struct(
-            fields
-                .iter()
-                .map(|(_, field)| sample(protocol, field, depth + 1))
-                .collect(),
-        ),
-        Either(left, _) => Value::Either(true, Box::new(sample(protocol, left, depth + 1))),
+        Array(element, count) => Value::List((0..*count).map(|_| next(element)).collect()),
+        Struct(fields) => Value::Struct(fields.iter().map(|(_, field)| next(field)).collect()),
+        Either(left, right) => {
+            let right_side = flavour.inline && depth < 6;
+            Value::Either(
+                !right_side,
+                Box::new(next(if right_side { right } else { left })),
+            )
+        }
         Dispatch(_, variants) | Union(variants) => {
             // The deepest variants nest displays; stop at a leaf one.
             let (name, variant) = if depth < 4 {
-                variants.last()
+                &variants[flavour.pick % variants.len()]
             } else {
-                variants.first()
-            }
-            .unwrap();
-            Value::Variant(name, Box::new(sample(protocol, variant, depth + 1)))
+                &variants[0]
+            };
+            Value::Variant(name, Box::new(next(variant)))
         }
         Stack | Template => Value::Stack(Some(Box::new(ItemStack {
             id: item(protocol),
@@ -150,7 +157,7 @@ fn sample(protocol: i32, node: &Node, depth: usize) -> Value {
             kind: "damage",
             value: Value::Int(3),
         })),
-        Ref(inner) => sample(protocol, inner, depth + 1),
+        Ref(inner) => sample(protocol, inner, depth + 1, flavour),
     }
 }
 
@@ -167,34 +174,54 @@ fn decode(protocol: i32, bytes: &[u8]) -> Components {
     components
 }
 
-/// A generated value of every component of every protocol survives its own
-/// writer and reader, converts to both neighbours, and what comes out
-/// writes and reads back in the neighbour's layout.
+/// Generated values of every component of every protocol, in several
+/// flavours, survive their own writer and reader, convert to both
+/// neighbours into something the neighbour's reader takes, and come back
+/// as they were (what the neighbour cannot express rides in the stash).
 #[test]
-fn every_layout_converts_to_both_neighbours() {
+fn every_layout_converts_to_both_neighbours_and_back() {
     passthrough_text();
     let all: Vec<i32> = protocols().collect();
-    for (index, &protocol) in all.iter().enumerate() {
-        let layout = Layout::of(protocol).unwrap();
-        let registry = data::version(protocol).expect_registry("data_component_type");
-        for id in 0..registry.len() as i32 {
-            let (kind, node) = layout.get(id).unwrap();
-            let mut components = Components::default();
-            components.insert(kind, sample(protocol, node, 0));
-            let bytes = encode(protocol, &components);
-            assert_eq!(decode(protocol, &bytes), components, "{kind} in {protocol}");
-            let neighbours = [index.checked_sub(1), Some(index + 1)];
-            for to in neighbours.into_iter().flatten().filter_map(|i| all.get(i)) {
-                let mut shared = step(protocol, *to);
-                let mut converted = components.clone();
-                convert(&mut shared, Direction::Clientbound, 1, &mut converted)
-                    .unwrap_or_else(|error| panic!("{kind} from {protocol} to {to}: {error}"));
-                let out = encode(*to, &converted);
-                assert_eq!(
-                    decode(*to, &out),
-                    converted,
-                    "{kind} from {protocol} to {to}"
-                );
+    for inline in [false, true] {
+        for pick in 0..12 {
+            let flavour = Flavour { inline, pick };
+            for (index, &protocol) in all.iter().enumerate() {
+                let layout = Layout::of(protocol).unwrap();
+                let registry = data::version(protocol).expect_registry("data_component_type");
+                for id in 0..registry.len() as i32 {
+                    let (kind, node) = layout.get(id).unwrap();
+                    let mut components = Components::default();
+                    components.insert(kind, sample(protocol, node, 0, flavour));
+                    let bytes = encode(protocol, &components);
+                    assert_eq!(decode(protocol, &bytes), components, "{kind} in {protocol}");
+                    let neighbours = [index.checked_sub(1), Some(index + 1)];
+                    for to in neighbours.into_iter().flatten().filter_map(|i| all.get(i)) {
+                        let what = format!("{kind} from {protocol} to {to} ({inline}, {pick})");
+                        let mut converted = components.clone();
+                        convert(
+                            &mut step(protocol, *to),
+                            Direction::Clientbound,
+                            1,
+                            &mut converted,
+                        )
+                        .unwrap_or_else(|error| panic!("{what}: {error}"));
+                        let out = encode(*to, &converted);
+                        assert_eq!(decode(*to, &out), converted, "{what}");
+                        let mut back = converted.clone();
+                        convert(
+                            &mut step(*to, protocol),
+                            Direction::Clientbound,
+                            1,
+                            &mut back,
+                        )
+                        .unwrap_or_else(|error| panic!("{what} and back: {error}"));
+                        assert_eq!(
+                            normalized_patch(back),
+                            normalized_patch(components.clone()),
+                            "{what} and back"
+                        );
+                    }
+                }
             }
         }
     }
@@ -818,4 +845,46 @@ fn hashes_match_the_official_server() {
         .map(|index| u8::from_str_radix(&nbt[index..index + 2], 16).unwrap())
         .collect();
     assert_eq!(hash("custom_data", Value::Nbt(bytes)), -2028272530);
+}
+
+/// A patch that removes one type, for every type of every protocol, goes to
+/// both neighbours and comes back the same.
+#[test]
+fn every_removed_type_converts_to_both_neighbours_and_back() {
+    let all: Vec<i32> = protocols().collect();
+    for (index, &protocol) in all.iter().enumerate() {
+        let layout = Layout::of(protocol).unwrap();
+        let registry = data::version(protocol).expect_registry("data_component_type");
+        for id in 0..registry.len() as i32 {
+            let (kind, _) = layout.get(id).unwrap();
+            let components = Components {
+                added: Vec::new(),
+                removed: vec![kind],
+            };
+            let neighbours = [index.checked_sub(1), Some(index + 1)];
+            for to in neighbours.into_iter().flatten().filter_map(|i| all.get(i)) {
+                let mut converted = components.clone();
+                convert(
+                    &mut step(protocol, *to),
+                    Direction::Clientbound,
+                    1,
+                    &mut converted,
+                )
+                .unwrap();
+                assert_eq!(decode(*to, &encode(*to, &converted)), converted);
+                let mut back = converted;
+                convert(
+                    &mut step(*to, protocol),
+                    Direction::Clientbound,
+                    1,
+                    &mut back,
+                )
+                .unwrap();
+                assert_eq!(
+                    back, components,
+                    "removing {kind} from {protocol} to {to} and back"
+                );
+            }
+        }
+    }
 }

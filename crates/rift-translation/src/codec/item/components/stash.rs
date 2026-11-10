@@ -34,8 +34,8 @@ pub struct Restored {
     pub components: Vec<Component>,
     /// Types the receiver's patch removes.
     pub removed: Vec<&'static str>,
-    /// Types the receiver's patch does not set, although converting it back
-    /// set them.
+    /// Types the receiver's patch neither sets nor removes, although
+    /// converting it back did.
     pub absent: Vec<&'static str>,
 }
 
@@ -98,7 +98,7 @@ enum Entry {
     Set(Component),
     /// The patch removed this type.
     Removed(&'static str),
-    /// The patch did not set this type.
+    /// The patch neither set nor removed this type.
     Absent(&'static str),
 }
 
