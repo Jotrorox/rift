@@ -84,7 +84,10 @@ Where a version lacks something, the player gets the closest thing it has:
   sides share one format and signatures are passed on as they are. A backend behind a
   proxy runs with `online-mode=false`, where `enforce-secure-profile` has no
   effect from 1.19.1 on; a 1.19 backend must keep its default
-  `enforce-secure-profile=false`, or it refuses translated players.
+  `enforce-secure-profile=false`, or it refuses translated players. Pumpkin
+  0.2.0 announces secure-chat enforcement whatever its configuration: it works
+  as a single backend, but Rift refuses it as a backend of an offline-mode
+  [network](network-protocol.md), with or without translation.
 - **Features one side lacks** are answered or emulated where a player would
   notice, and dropped otherwise. Examples: the configuration phase a 1.20.2+
   client needs is built from what an older backend sends at join, and answered
@@ -94,6 +97,13 @@ Where a version lacks something, the player gets the closest thing it has:
   1.20.5; dialogs, waypoints and server links are not shown to clients that
   have none; a 1.12 client completes commands through the server because it
   has no command tree; translation keys a client lacks show as their raw key.
+- **Recipes on a 1.12 client.** On a 1.21.2+ backend its recipe book is
+  unlocked by matching what a recipe makes, so it may show a few more 1.12
+  recipes than the server unlocked, and no smelting recipes.
+- **Entity 0.** 1.12 and 1.13 servers number entities from 0, which a 26.2+
+  client reads as "none". Rift renumbers that entity, but a reference to it
+  inside another entity's data (a firework's user, a fishing hook's catch, a
+  guardian's target) or as a leash holder is lost.
 
 Each pair's step lists what it converts, emulates and drops in its module
 documentation under `crates/rift-translation/src/steps/`.
@@ -124,6 +134,13 @@ translates nor rewrites are still forwarded in the frame they arrived in.
 
 A packet a step has to change is parsed completely. One it cannot parse fails
 the connection rather than reaching the peer corrupted.
+
+Cost grows with the distance between the two versions, because every step in
+between handles each packet. A release build replays a whole recorded join
+session through all 41 steps in about two seconds of CPU, and through one step
+in about 0.15 seconds including start-up. A 1.21.1 or older client on a
+1.21.2+ backend costs more at join: its recipe list is resent whenever the
+book grows.
 
 ## Where the data comes from
 
@@ -174,7 +191,10 @@ files are stale.
   backend's version declared and detected;
   [`tests/translation_minecraft.py`](../tests/translation_minecraft.py) and
   [`tests/translation_network.py`](../tests/translation_network.py) switch a
-  player between backends of different versions.
+  player between backends of different versions, and
+  [`tests/translation_real_client.py`](../tests/translation_real_client.py)
+  runs real vanilla clients behind Rift while the server's console plays a
+  scenario.
 
 ```sh
 python3 scripts/translation_crate.py --check
