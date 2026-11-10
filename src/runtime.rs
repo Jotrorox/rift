@@ -137,11 +137,12 @@ impl Snapshot {
         let control =
             previous.map_or_else(|| Arc::new(Control::default()), |old| old.control.clone());
         let health = Health::with_control(&config, control.clone());
-        let forwarding_secret = config.forwarding.as_ref().map(|settings| {
-            let secret = std::env::var(&settings.secret_env).map_err(|_| {
+        let forwarding_secret = config.forwarding.as_ref().and_then(|settings| {
+            Some((settings.secret_env.as_ref()?, settings.mode.secret_name()?))
+        }).map(|(secret_env, what)| {
+            let secret = std::env::var(secret_env).map_err(|_| {
                 io::Error::new(io::ErrorKind::InvalidInput, format!(
-                    "forwarding.secret_env: set {} to the Paper Velocity secret before starting Rift",
-                    settings.secret_env,
+                    "forwarding.secret_env: set {secret_env} to the backends' {what} before starting Rift",
                 ))
             })?;
             if secret.is_empty() || secret.len() > 1024 || secret.chars().any(char::is_control) {
@@ -616,8 +617,12 @@ pub async fn handle(
             .await;
             return Err(error);
         }
-        if snapshot.authenticator.is_some() && session.handshake.protocol < 761 {
-            let reason = catalog::notice(Notice::LoginOnlineModeVersion);
+        if let Some(forwarding) = &snapshot.config.forwarding
+            && session.handshake.protocol < forwarding.mode.minimum_protocol()
+        {
+            // Velocity forwarding answers a login plugin request, which
+            // arrived in 1.13; Velocity itself turns older clients away too.
+            let reason = catalog::notice(Notice::LoginForwardingVersion);
             let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect_text(&reason)).await;
             return Err(rift::text::error(io::ErrorKind::Unsupported, reason));
         }
@@ -686,7 +691,11 @@ pub async fn handle(
                 return Err(error);
             }
             login_name = session.authenticated_profile().unwrap().name.clone();
-            session.set_forwarding(snapshot.forwarding_secret.clone().unwrap(), peer_ip)?;
+            session.set_forwarding(
+                snapshot.config.forwarding.as_ref().unwrap().mode,
+                snapshot.forwarding_secret.clone(),
+                peer_ip,
+            )?;
             event.failure = "io_error";
         }
         let mut extension_selection = None;

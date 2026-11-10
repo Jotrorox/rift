@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::ForwardingMode;
 use crate::protocol::{read_string, write_string};
 use tokio::{
     io::DuplexStream,
@@ -1139,6 +1140,75 @@ async fn authenticated_session_for(
     CryptoStream<DuplexStream>,
     DuplexStream,
 ) {
+    let (session, client, backend, _) =
+        authenticated_session_with(number, ForwardingMode::Velocity, None).await;
+    (session, client, backend)
+}
+
+/// A backend handshake, keeping a BungeeCord-forwarded hostname whole
+/// (Spigot reads up to 32767 characters; a client's is cut at its first NUL).
+fn forwarded_handshake(packet: &Packet) -> Handshake {
+    assert_eq!(packet.id, 0);
+    let mut bytes = packet.data.as_slice();
+    let protocol = read_varint(&mut bytes).unwrap();
+    let address = read_string(&mut bytes, 32767).unwrap().to_owned();
+    let port = u16::from_be_bytes(bytes[..2].try_into().unwrap());
+    assert_eq!(&bytes[2..], &[2]);
+    Handshake {
+        protocol,
+        address,
+        port,
+        next_state: NextState::Login,
+    }
+}
+
+/// A client's Login Start for `number`, claiming `uuid` where the version
+/// carries one, with a 1.19–1.19.2 profile key if given.
+fn client_login_start(number: i32, uuid: [u8; 16], key: Option<&protocol::ProfileKey>) -> Packet {
+    let mut data = Vec::new();
+    write_string("Player", &mut data);
+    if matches!(number, 759..=760) {
+        data.push(u8::from(key.is_some()));
+        if let Some(key) = key {
+            key.write(&mut data);
+        }
+    }
+    if number >= 760 {
+        if number < 764 {
+            data.push(1); // optional UUID before 1.20.2
+        }
+        data.extend(uuid);
+    }
+    Packet::new(0, data)
+}
+
+/// A client logs in online on `number` and Rift attaches a backend with
+/// `mode` forwarding. With `signer`, a 1.19–1.19.2 client sends its profile
+/// key and signs the challenge. Returns the handshake the backend received.
+async fn authenticated_session_with(
+    number: i32,
+    mode: ForwardingMode,
+    signer: Option<&aws_lc_rs::rsa::KeyPair>,
+) -> (
+    Session<DuplexStream, DuplexStream>,
+    CryptoStream<DuplexStream>,
+    DuplexStream,
+    Handshake,
+) {
+    let key = signer.map(|signer| {
+        use aws_lc_rs::{
+            encoding::{AsDer, PublicKeyX509Der},
+            signature::KeyPair as _,
+        };
+        protocol::ProfileKey {
+            expiry: 1_800_000_000_000,
+            public_key: AsDer::<PublicKeyX509Der>::as_der(signer.public_key())
+                .unwrap()
+                .as_ref()
+                .to_vec(),
+            signature: vec![0x5a; 512],
+        }
+    });
     let (mut client, input) = tokio::io::duplex(65536);
     let handshake = Handshake {
         protocol: number,
@@ -1151,16 +1221,12 @@ async fn authenticated_session_for(
         .await
         .unwrap();
     // This client-supplied UUID must never reach Paper.
-    let mut claimed = login_start();
-    claimed.data[7..].fill(99);
-    if number < 764 {
-        claimed.data.insert(7, 1); // optional UUID before 1.20.2
-    }
+    let claimed = client_login_start(number, [99; 16], key.as_ref());
     Codec::default().write(&mut client, &claimed).await.unwrap();
     let mut session = Session::accept(input).await.unwrap();
     assert_eq!(
         session.read_login_start().await.unwrap().uuid,
-        Some([99; 16])
+        (number >= 760).then_some([99; 16])
     );
     let mut client = CryptoStream::new(client);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1209,12 +1275,36 @@ async fn authenticated_session_for(
         let size = read_varint(&mut data).unwrap() as usize;
         let token = &data[..size];
         assert_eq!(&data[size..], if number >= 766 { &[1][..] } else { &[] });
-        let mut response = Vec::new();
-        for plaintext in [&[42; 16][..], token] {
+        let encrypt = |plaintext: &[u8], response: &mut Vec<u8>| {
             let mut encrypted = vec![0; public.ciphertext_size()];
             let encrypted = public.encrypt(plaintext, &mut encrypted).unwrap();
-            write_varint(encrypted.len() as i32, &mut response);
+            write_varint(encrypted.len() as i32, response);
             response.extend_from_slice(encrypted);
+        };
+        let mut response = Vec::new();
+        encrypt(&[42; 16], &mut response);
+        if let Some(signer) = signer {
+            response.push(0);
+            let salt = 77_i64.to_be_bytes();
+            response.extend(salt);
+            let mut message = token.to_vec();
+            message.extend(salt);
+            let mut signature = vec![0; signer.public_modulus_len()];
+            signer
+                .sign(
+                    &aws_lc_rs::signature::RSA_PKCS1_SHA256,
+                    &aws_lc_rs::rand::SystemRandom::new(),
+                    &message,
+                    &mut signature,
+                )
+                .unwrap();
+            write_varint(signature.len() as i32, &mut response);
+            response.extend(signature);
+        } else {
+            if matches!(number, 759..=760) {
+                response.push(1);
+            }
+            encrypt(token, &mut response);
         }
         Codec::default()
             .write(&mut client, &Packet::new(1, response))
@@ -1225,28 +1315,31 @@ async fn authenticated_session_for(
     let (result, (), ()) = tokio::join!(session.authenticate(&authenticator), peer, verify);
     result.unwrap();
     assert_eq!(session.authenticated_profile(), Some(&verified_profile()));
+    let secret: &[u8] = if mode == ForwardingMode::BungeeGuard {
+        b"guard-token"
+    } else {
+        b"shared-secret"
+    };
     session
         .set_forwarding(
-            Arc::from(&b"shared-secret"[..]),
+            mode,
+            (mode != ForwardingMode::BungeeCord).then(|| Arc::from(secret)),
             "203.0.113.9".parse().unwrap(),
         )
         .unwrap();
     session.enable_network().unwrap();
     let (server, mut backend) = tokio::io::duplex(65536);
     session.connect_backend(server).await.unwrap();
-    assert_eq!(
-        receive(&mut backend, Codec::default()).await,
-        handshake.packet()
-    );
-    let mut expected_start = login_start();
-    if number < 764 {
-        expected_start.data.insert(7, 1);
+    let received = forwarded_handshake(&receive(&mut backend, Codec::default()).await);
+    if mode == ForwardingMode::Velocity {
+        assert_eq!(received, handshake);
     }
+    // The backend learns the Mojang UUID, never the claimed one.
     assert_eq!(
         receive(&mut backend, Codec::default()).await,
-        expected_start
+        client_login_start(number, [7; 16], key.as_ref())
     );
-    (session, client, backend)
+    (session, client, backend, received)
 }
 
 fn validate_velocity_response(packet: &Packet, id: i32, secret: &[u8]) -> bool {
@@ -2236,4 +2329,225 @@ async fn legacy_clients_receive_titles_rendered_for_them() {
     })
     .await
     .unwrap();
+}
+
+/// Every protocol before 1.19.3, where online mode used to be refused.
+const LEGACY_ONLINE: [i32; 33] = [
+    47, 107, 108, 109, 110, 210, 315, 316, 335, 338, 340, 393, 401, 404, 477, 480, 485, 490, 498,
+    573, 575, 578, 735, 736, 751, 753, 754, 755, 756, 757, 758, 759, 760,
+];
+
+fn velocity_request_for(id: i32, requested: u8) -> Packet {
+    let mut data = Vec::new();
+    write_varint(id, &mut data);
+    write_string(forwarding::CHANNEL, &mut data);
+    data.push(requested);
+    Packet::new(4, data)
+}
+
+/// Check the HMAC and the verified profile; return the forwarding version
+/// and whatever follows the profile properties (a 1.19 key).
+fn velocity_payload(packet: &Packet, id: i32) -> (i32, Vec<u8>) {
+    use hmac::{Hmac, KeyInit, Mac};
+    use sha2::Sha256;
+    assert_eq!(packet.id, 2);
+    let mut data = packet.data.as_slice();
+    assert_eq!(read_varint(&mut data).unwrap(), id);
+    assert_eq!(data[0], 1);
+    data = &data[1..];
+    let mut mac = Hmac::<Sha256>::new_from_slice(b"shared-secret").unwrap();
+    mac.update(&data[32..]);
+    mac.verify_slice(&data[..32]).unwrap();
+    data = &data[32..];
+    let version = read_varint(&mut data).unwrap();
+    assert_eq!(read_string(&mut data, 255).unwrap(), "203.0.113.9");
+    assert_eq!(&data[..16], &[7; 16]);
+    data = &data[16..];
+    assert_eq!(read_string(&mut data, 16).unwrap(), "Player");
+    assert_eq!(read_varint(&mut data).unwrap(), 1);
+    assert_eq!(read_string(&mut data, 32767).unwrap(), "textures");
+    assert_eq!(read_string(&mut data, 32767).unwrap(), "authenticated-skin");
+    assert_eq!(data[0], 1);
+    data = &data[1..];
+    assert_eq!(read_string(&mut data, 32767).unwrap(), "mojang-signature");
+    (version, data.to_vec())
+}
+
+/// A backend's Login Success for the verified player, as `number` encodes it.
+fn backend_login_success(number: i32) -> Packet {
+    if number >= 759 {
+        return verified_login_success(number);
+    }
+    let mut data = Vec::new();
+    if number < 735 {
+        write_string("07070707-0707-0707-0707-070707070707", &mut data);
+    } else {
+        data.extend([7; 16]);
+    }
+    write_string("Player", &mut data);
+    Packet::new(2, data)
+}
+
+fn assert_bungeecord_handshake(handshake: &Handshake, number: i32, mode: ForwardingMode) {
+    assert_eq!(handshake.protocol, number);
+    let parts: Vec<&str> = handshake.address.split('\0').collect();
+    assert_eq!(
+        parts[..3],
+        [
+            "play.test",
+            "203.0.113.9",
+            "07070707070707070707070707070707"
+        ]
+    );
+    let mut expected = vec![serde_json::json!({
+        "name": "textures", "value": "authenticated-skin", "signature": "mojang-signature",
+    })];
+    if mode == ForwardingMode::BungeeGuard {
+        expected.push(serde_json::json!({
+            "name": "bungeeguard-token", "value": "guard-token", "signature": "",
+        }));
+    }
+    let properties: serde_json::Value = serde_json::from_str(parts[3]).unwrap();
+    assert_eq!(properties, serde_json::Value::Array(expected));
+}
+
+#[tokio::test]
+async fn online_login_below_1_19_3_with_every_forwarding_mode() {
+    for number in LEGACY_ONLINE {
+        for mode in [
+            ForwardingMode::Velocity,
+            ForwardingMode::BungeeCord,
+            ForwardingMode::BungeeGuard,
+        ] {
+            if number < mode.minimum_protocol() {
+                continue;
+            }
+            timeout(Duration::from_secs(5), async {
+                let (mut session, mut client, mut backend, handshake) =
+                    authenticated_session_with(number, mode, None).await;
+                let codec = Codec::default();
+                if mode == ForwardingMode::Velocity {
+                    // Paper asks for the newest version it knows; before 1.19.3
+                    // and without a chat key the answer is version 1.
+                    codec
+                        .write(&mut backend, &velocity_request_for(-5, 4))
+                        .await
+                        .unwrap();
+                    session.forward().await.unwrap();
+                    assert_eq!(
+                        velocity_payload(&receive(&mut backend, codec).await, -5),
+                        (1, Vec::new())
+                    );
+                } else {
+                    assert_bungeecord_handshake(&handshake, number, mode);
+                }
+                codec
+                    .write(&mut backend, &backend_login_success(number))
+                    .await
+                    .unwrap();
+                session.forward().await.unwrap();
+                let success = receive(&mut client, codec).await;
+                if number >= 759 {
+                    assert_verified_login_success(number, &success);
+                } else {
+                    assert_eq!(success, backend_login_success(number));
+                }
+                assert_eq!(session.identity().unwrap().uuid, Some([7; 16]));
+                assert!(session.client.io.is_encrypted());
+            })
+            .await
+            .unwrap_or_else(|_| panic!("online login {number} with {mode:?} timed out"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn signed_1_19_logins_forward_the_chat_key() {
+    let signer = aws_lc_rs::rsa::KeyPair::generate(aws_lc_rs::rsa::KeySize::Rsa2048).unwrap();
+    for number in [759, 760] {
+        for mode in [ForwardingMode::Velocity, ForwardingMode::BungeeGuard] {
+            timeout(Duration::from_secs(5), async {
+                // The helper checks that Login Start carries the key (and on
+                // 1.19.1+ the Mojang UUID) to the backend.
+                let (mut session, mut client, mut backend, handshake) =
+                    authenticated_session_with(number, mode, Some(&signer)).await;
+                let codec = Codec::default();
+                if mode == ForwardingMode::Velocity {
+                    codec
+                        .write(&mut backend, &velocity_request_for(9, 3))
+                        .await
+                        .unwrap();
+                    session.forward().await.unwrap();
+                    let (version, tail) = velocity_payload(&receive(&mut backend, codec).await, 9);
+                    // The key exactly as the client sent it in Login Start.
+                    let mut key = Vec::new();
+                    session.profile_key.as_ref().unwrap().write(&mut key);
+                    assert_eq!(&key[8..10], &[0xa6, 0x02]); // a 294-byte X.509 key
+                    if number == 760 {
+                        key.push(1);
+                        key.extend([7; 16]);
+                    }
+                    assert_eq!((version, tail), (number - 757, key));
+                } else {
+                    assert_bungeecord_handshake(&handshake, number, mode);
+                }
+                codec
+                    .write(&mut backend, &backend_login_success(number))
+                    .await
+                    .unwrap();
+                session.forward().await.unwrap();
+                assert_verified_login_success(number, &receive(&mut client, codec).await);
+            })
+            .await
+            .unwrap_or_else(|_| panic!("signed login {number} with {mode:?} timed out"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn bungeecord_backend_that_ignores_forwarding_is_named() {
+    timeout(Duration::from_secs(5), async {
+        let (mut session, _client, mut backend, _) =
+            authenticated_session_with(47, ForwardingMode::BungeeCord, None).await;
+        // A backend without settings.bungeecord derives an offline UUID.
+        let mut data = Vec::new();
+        write_string("8c2b2a8e-4a0e-3d7c-9a59-0c3f3f6f3d43", &mut data);
+        write_string("Player", &mut data);
+        Codec::default()
+            .write(&mut backend, &Packet::new(2, data))
+            .await
+            .unwrap();
+        let error = session.forward().await.unwrap_err().to_string();
+        assert!(error.contains("spigot.yml"), "{error}");
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn velocity_forwarding_refuses_versions_before_1_13() {
+    for number in [47, 340] {
+        let (mut client, input) = tokio::io::duplex(4096);
+        let handshake = Handshake {
+            protocol: number,
+            address: "play.test".into(),
+            port: 25565,
+            next_state: NextState::Login,
+        };
+        Codec::default()
+            .write(&mut client, &handshake.packet())
+            .await
+            .unwrap();
+        let mut session: Session<DuplexStream, DuplexStream> =
+            Session::accept(input).await.unwrap();
+        let error = session
+            .set_forwarding(
+                ForwardingMode::Velocity,
+                Some(Arc::from(&b"shared-secret"[..])),
+                "203.0.113.9".parse().unwrap(),
+            )
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert!(error.to_string().contains("1.13"), "{error}");
+    }
 }

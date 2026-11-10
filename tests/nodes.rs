@@ -558,6 +558,7 @@ async fn agents_build_instances_from_fetched_templates_and_delete_only_disposabl
         map: Some("bedwars/map".into()),
         accept_eula: true,
         forwarding: Some(true),
+        forwarding_mode: None,
         properties: vec![("online-mode".into(), "false".into(), true)],
     };
     let wait = Duration::from_secs(20);

@@ -165,12 +165,12 @@ carries, such as a backend's ban screen.
 | `login.maintenance` | – | The network is under maintenance. Please try again later. |
 | `login.rate_limited` | – | Too many login attempts. Please wait before reconnecting. |
 | `login.unknown_host` | – | No server is configured for this hostname. |
-| `login.online_mode_version` | – | Online authentication with Velocity forwarding requires Minecraft 1.19.3 or newer. |
+| `login.forwarding_version` | – | This server requires Minecraft 1.13 or newer. (Velocity forwarding only.) |
 | `login.invalid_start` | – | Invalid or missing login start. |
 | `login.auth_denied` | – | Unable to verify your Minecraft account. Please sign in again. |
 | `login.auth_invalid` | – | Invalid authentication response. Please reconnect. |
 | `login.auth_unavailable` | – | Minecraft authentication is unavailable or timed out. Please try again later. |
-| `login.extensions_version` | – | Extensions v1 requires Minecraft 1.19.3–26.3. |
+| `login.extensions_version` | – | Player hooks are unavailable for this Minecraft version. |
 | `login.extension_failed` | – | Login extension failed. Please try again later. |
 | `login.no_access` | – | You do not have access to this server. |
 | `login.dev_mode` | – | This server is in development mode. |

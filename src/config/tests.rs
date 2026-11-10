@@ -14,7 +14,9 @@ fn online_authentication_and_velocity_are_validated_together() {
     ), "online.lua").unwrap();
     assert!(config.authentication.online_mode);
     assert_eq!(config.authentication.timeout, Duration::from_millis(2500));
-    assert_eq!(config.forwarding.unwrap().secret_env, "PAPER_SECRET");
+    let forwarding = config.forwarding.unwrap();
+    assert_eq!(forwarding.mode, ForwardingMode::Velocity);
+    assert_eq!(forwarding.secret_env.as_deref(), Some("PAPER_SECRET"));
     let defaults = Config::from_lua(VALID, "offline.lua").unwrap();
     assert!(!defaults.authentication.online_mode);
     assert!(defaults.forwarding.is_none());
@@ -27,8 +29,39 @@ fn online_authentication_and_velocity_are_validated_together() {
     )
     .unwrap();
     assert_eq!(
-        config.forwarding.unwrap().secret_env,
-        "RIFT_FORWARDING_SECRET"
+        config.forwarding.unwrap().secret_env.as_deref(),
+        Some("RIFT_FORWARDING_SECRET")
+    );
+    // BungeeCord forwarding has no secret; BungeeGuard's token has the same default.
+    for (mode, expected, secret_env) in [
+        ("bungeecord", ForwardingMode::BungeeCord, None),
+        (
+            "bungeeguard",
+            ForwardingMode::BungeeGuard,
+            Some("RIFT_FORWARDING_SECRET"),
+        ),
+    ] {
+        let config = Config::from_lua(
+            &with_security(&format!(
+                "authentication = {{ online_mode = true }}, forwarding = {{ mode = '{mode}' }}"
+            )),
+            "online.lua",
+        )
+        .unwrap();
+        let forwarding = config.forwarding.unwrap();
+        assert_eq!(forwarding.mode, expected);
+        assert_eq!(forwarding.secret_env.as_deref(), secret_env);
+    }
+    let config = Config::from_lua(
+        &with_security(
+            "authentication = { online_mode = true }, forwarding = { mode = 'bungeeguard', secret_env = 'GUARD_TOKEN' }",
+        ),
+        "online.lua",
+    )
+    .unwrap();
+    assert_eq!(
+        config.forwarding.unwrap().secret_env.as_deref(),
+        Some("GUARD_TOKEN")
     );
 }
 
@@ -64,6 +97,14 @@ fn insecure_or_misspelled_authentication_settings_are_rejected() {
             "unknown field",
         ),
         ("forwarding = { mode = 'legacy' }", "forwarding.mode"),
+        (
+            "authentication = { online_mode = true }, forwarding = { mode = 'bungeecord', secret_env = 'TOKEN' }",
+            "has no secret",
+        ),
+        (
+            "forwarding = { mode = 'bungeecord' }",
+            "must be enabled together",
+        ),
         (
             "forwarding = { mode = 'velocity', secret = 'literal' }",
             "unknown field",

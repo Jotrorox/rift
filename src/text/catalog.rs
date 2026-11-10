@@ -72,8 +72,8 @@ notices! {
         "Too many login attempts. Please wait before reconnecting.",
     LoginUnknownHost => "login.unknown_host" []
         "No server is configured for this hostname.",
-    LoginOnlineModeVersion => "login.online_mode_version" []
-        "Online authentication with Velocity forwarding requires Minecraft 1.19.3 or newer.",
+    LoginForwardingVersion => "login.forwarding_version" []
+        "This server requires Minecraft 1.13 or newer.",
     LoginInvalidStart => "login.invalid_start" []
         "Invalid or missing login start.",
     LoginAuthDenied => "login.auth_denied" []
@@ -83,7 +83,7 @@ notices! {
     LoginAuthUnavailable => "login.auth_unavailable" []
         "Minecraft authentication is unavailable or timed out. Please try again later.",
     LoginExtensionsVersion => "login.extensions_version" []
-        "Extensions v1 requires Minecraft 1.19.3–26.3.",
+        "Player hooks are unavailable for this Minecraft version.",
     LoginExtensionFailed => "login.extension_failed" []
         "Login extension failed. Please try again later.",
     LoginNoAccess => "login.no_access" []
