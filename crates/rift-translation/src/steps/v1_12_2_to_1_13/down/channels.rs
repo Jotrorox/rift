@@ -139,7 +139,6 @@ impl Down {
         let mut rw = Rewriter::new(data);
         rw.i32()?;
         for _ in 0..rw.u8()? {
-            // INTEGRATION: item stacks convert once the item codec lands.
             codec::item::transcode(&mut self.shared, Direction::Clientbound, &mut rw)?;
             codec::item::transcode(&mut self.shared, Direction::Clientbound, &mut rw)?;
             if rw.bool()? {
@@ -243,7 +242,6 @@ impl Down {
     /// `MC|BEdit` and `MC|BSign`: the edited book, signed or not.
     fn edit_book(&mut self, data: &[u8], signing: bool) -> io::Result<Packet> {
         let mut rw = Rewriter::new(data);
-        // INTEGRATION: item stacks convert once the item codec lands.
         codec::item::transcode(&mut self.shared, Direction::Serverbound, &mut rw)?;
         rw.w.bool(signing);
         Ok(play_packet("edit_book", rw.finish()?))
