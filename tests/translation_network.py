@@ -93,12 +93,24 @@ class Failure(AssertionError):
     pass
 
 
+MODES = {"survival": 0, "creative": 1, "adventure": 2, "spectator": 3}
+
+
+def mode_number(value):
+    """A game mode as a number: schemas give it as a number or a name."""
+    if isinstance(value, str):
+        return MODES.get(value)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return int(value) & 7
+    return None
+
+
 def gamemode_of(value):
     """The game mode a decoded Join Game or Respawn packet carries."""
     if isinstance(value, dict):
         for key in ("gameMode", "gamemode"):
-            if isinstance(value.get(key), int):
-                return value[key] & 7
+            if mode_number(value.get(key)) is not None:
+                return mode_number(value[key])
         for entry in value.values():
             found = gamemode_of(entry)
             if found is not None:
@@ -244,11 +256,12 @@ class Switching:
                          f"Rift's command tree on {role}", timeout, login.index)
         self.worlds += 1
         modes = [gamemode_of(record.value) for record in session.packets(("login", "respawn"), login.index)]
-        modes += [record.value.get("gameMode") for record in session.packets("game_state_change", login.index)
+        modes += [mode_number(record.value.get("gameMode"))
+                  for record in session.packets("game_state_change", login.index)
                   if record.value.get("reason") in (3, "change_game_mode")]
         modes = [mode for mode in modes if mode is not None]
         expected = GAMEMODE[role] if backend.software != "pumpkin" else 1
-        if not modes or int(modes[-1]) & 7 != expected:
+        if not modes or modes[-1] != expected:
             raise Failure(f"{role}: game mode {modes}, expected {expected} ({what})")
         if backend.software != "pumpkin":
             deadline = time.monotonic() + 10
