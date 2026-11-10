@@ -1,13 +1,14 @@
-//! Host bindings for `rift:plugin@0.1.3`: generated types and traits, the
+//! Host bindings for `rift:plugin@0.1.4`: generated types and traits, the
 //! trait implementations that forward every import to
 //! [`Services`](crate::plugins::services::Services), and conversions between
 //! the generated types and the engine-neutral [`api`] types. WASI is linked
 //! separately (see [`super::wasi`]).
 //!
 //! The host binds world `base` (every import and the `handler` export that
-//! every component has) and, separately, worlds `optional` (`dialogs`) and
-//! `optional-decisions` (`decisions`), whose exports a component built
-//! against an older 0.1 lacks; see [`Optional::load`].
+//! every component has) and, separately, worlds `optional` (`dialogs`),
+//! `optional-decisions` (`decisions`) and `optional-styled` (`styled`), whose
+//! exports a component built against an older 0.1 lacks; see
+//! [`Optional::load`].
 use super::State;
 use crate::plugins::api;
 
@@ -38,6 +39,17 @@ pub(super) mod optional_decisions {
     });
 }
 
+/// The optional `styled` export (since 0.1.4), sharing `base`'s types.
+pub(super) mod optional_styled {
+    wasmtime::component::bindgen!({
+        path: "wit",
+        world: "rift:plugin/optional-styled",
+        with: {
+            "rift:plugin/types": super::rift::plugin::types,
+        },
+    });
+}
+
 use self::rift::plugin::{bus, log, meta, permissions, players, servers, store, timers, types};
 
 /// Guest paths of the granted directories (`meta.data-dir`, `meta.config-dir`).
@@ -58,8 +70,8 @@ fn level(level: types::Level) -> api::Level {
 
 fn title(title: types::TitleSpec) -> api::TitleSpec {
     api::TitleSpec {
-        title: title.title,
-        subtitle: title.subtitle,
+        title: crate::text::Text::Plain(title.title),
+        subtitle: title.subtitle.map(crate::text::Text::Plain),
         fade_in: title.fade_in,
         stay: title.stay,
         fade_out: title.fade_out,
@@ -163,7 +175,7 @@ pub(super) fn suggestions(suggestions: Vec<types::Suggestion>) -> Vec<api::Sugge
         .into_iter()
         .map(|suggestion| api::Suggestion {
             text: suggestion.text,
-            tooltip: suggestion.tooltip,
+            tooltip: suggestion.tooltip.map(crate::text::Text::Plain),
         })
         .collect()
 }
@@ -171,13 +183,65 @@ pub(super) fn suggestions(suggestions: Vec<types::Suggestion>) -> Vec<api::Sugge
 pub(super) fn status_override(status: types::StatusOverride) -> api::StatusOverride {
     api::StatusOverride {
         motd_json: status.motd_json,
-        version: status.version,
+        version: status.version.map(crate::text::Text::Plain),
         protocol: status.protocol,
         online: status.online,
         max_players: status.max_players,
-        sample: status.sample,
+        sample: status
+            .sample
+            .map(|lines| lines.into_iter().map(crate::text::Text::Plain).collect()),
         favicon: status.favicon,
     }
+}
+
+/// The `styled` export's suggestions. An empty or blank `tooltip-json` is no
+/// tooltip; an invalid one fails the whole answer.
+pub(super) fn rich_suggestions(
+    suggestions: Vec<types::RichSuggestion>,
+) -> Result<Vec<api::Suggestion>, String> {
+    suggestions
+        .into_iter()
+        .map(|suggestion| {
+            let tooltip = match suggestion.tooltip_json {
+                Some(json) if !json.trim().is_empty() => {
+                    Some(crate::text::Text::json(&json, "suggestion tooltip")?)
+                }
+                _ => None,
+            };
+            Ok(api::Suggestion {
+                text: suggestion.text,
+                tooltip,
+            })
+        })
+        .collect()
+}
+
+/// The `styled` export's status override. Fails for a version or sample
+/// line that is not a valid text component.
+pub(super) fn rich_status_override(
+    status: types::RichStatusOverride,
+) -> Result<api::StatusOverride, String> {
+    use crate::text::Text;
+    Ok(api::StatusOverride {
+        motd_json: status.motd_json,
+        version: status
+            .version_json
+            .map(|version| Text::json(&version, "status version"))
+            .transpose()?,
+        protocol: status.protocol,
+        online: status.online,
+        max_players: status.max_players,
+        sample: status
+            .sample_json
+            .map(|lines| {
+                lines
+                    .iter()
+                    .map(|line| Text::json(line, "status sample line"))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?,
+        favicon: status.favicon,
+    })
 }
 
 pub(super) fn http_response(response: types::HttpResponse) -> api::HttpResponse {
@@ -328,6 +392,15 @@ impl players::Host for State {
 
     fn title(&mut self, target: String, spec: types::TitleSpec) -> Result<bool, String> {
         self.services.players().title(&target, &title(spec))
+    }
+
+    fn title_json(&mut self, target: String, spec: types::TitleJsonSpec) -> Result<bool, String> {
+        self.services.players().title_json(
+            &target,
+            &spec.title_json,
+            spec.subtitle_json.as_deref(),
+            [spec.fade_in, spec.stay, spec.fade_out],
+        )
     }
 
     fn tab_list(
@@ -626,5 +699,78 @@ mod tests {
         });
         assert_eq!(request.headers, [("a".to_owned(), "b".to_owned())]);
         assert_eq!(request.context_json, r#"{"scopes":[]}"#);
+    }
+
+    #[test]
+    fn styled_answers_convert_their_rich_text() {
+        use crate::text::Text;
+        let suggestions = rich_suggestions(vec![
+            types::RichSuggestion {
+                text: "a".into(),
+                tooltip_json: Some(r#"{"text":"Tip","color":"red"}"#.into()),
+            },
+            types::RichSuggestion {
+                text: "b".into(),
+                tooltip_json: Some("  ".into()),
+            },
+            types::RichSuggestion {
+                text: "c".into(),
+                tooltip_json: Some("as written".into()),
+            },
+            types::RichSuggestion {
+                text: "d".into(),
+                tooltip_json: None,
+            },
+        ])
+        .unwrap();
+        assert_eq!(
+            suggestions[0].tooltip,
+            Some(Text::Component(
+                serde_json::json!({"text": "Tip", "color": "red"})
+            ))
+        );
+        assert_eq!(suggestions[1].tooltip, None);
+        assert!(suggestions[2].tooltip.is_some());
+        assert_eq!(suggestions[3].tooltip, None);
+        let error = rich_suggestions(vec![types::RichSuggestion {
+            text: "x".into(),
+            tooltip_json: Some("{nope".into()),
+        }])
+        .unwrap_err();
+        assert!(error.contains("suggestion tooltip"), "{error}");
+
+        let status = rich_status_override(types::RichStatusOverride {
+            motd_json: Some("\"motd\"".into()),
+            version_json: Some(r#"{"text":"Rift","color":"gold"}"#.into()),
+            protocol: Some(774),
+            online: Some(1),
+            max_players: Some(2),
+            sample_json: Some(vec!["\"one\"".into(), "two".into()]),
+            favicon: None,
+        })
+        .unwrap();
+        assert_eq!(status.motd_json.as_deref(), Some("\"motd\""));
+        assert_eq!(
+            status.version,
+            Some(Text::Component(
+                serde_json::json!({"text": "Rift", "color": "gold"})
+            ))
+        );
+        assert_eq!(status.sample.as_ref().map(Vec::len), Some(2));
+        assert_eq!(
+            (status.protocol, status.online, status.max_players),
+            (Some(774), Some(1), Some(2))
+        );
+        let error = rich_status_override(types::RichStatusOverride {
+            motd_json: None,
+            version_json: None,
+            protocol: None,
+            online: None,
+            max_players: None,
+            sample_json: Some(vec!["[1,".into()]),
+            favicon: None,
+        })
+        .unwrap_err();
+        assert!(error.contains("status sample line"), "{error}");
     }
 }

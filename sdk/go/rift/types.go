@@ -215,6 +215,35 @@ type Suggestion struct {
 	Tooltip *string
 }
 
+// RichSuggestion is a Suggestion whose tooltip is a JSON text component
+// (rift:plugin 0.1.4), offered by an OnRichSuggest handler. Use a text
+// builder: TooltipJSON: rift.Ptr(rift.Mini("<gray>A server").JSON()).
+type RichSuggestion struct {
+	Text        string
+	TooltipJSON *string // nil or "" for no tooltip
+}
+
+func (s Suggestion) rich() RichSuggestion {
+	out := RichSuggestion{Text: s.Text}
+	if s.Tooltip != nil {
+		quoted := jsonQuote(*s.Tooltip)
+		out.TooltipJSON = &quoted
+	}
+	return out
+}
+
+// plain is the suggestion for a host before rift:plugin 0.1.4: the
+// tooltip's words.
+func (s RichSuggestion) plain() Suggestion {
+	out := Suggestion{Text: s.Text}
+	if s.TooltipJSON != nil {
+		if words := componentWords(*s.TooltipJSON); words != "" {
+			out.Tooltip = &words
+		}
+	}
+	return out
+}
+
 // SuggestKind says how a command's arguments are completed.
 type SuggestKind struct {
 	kind  uint8
@@ -297,6 +326,70 @@ type StatusOverride struct {
 	Favicon    *string  // a data:image/png;base64,... URI
 }
 
+// RichStatusOverride is a StatusOverride whose version and player-sample
+// lines are JSON text components (rift:plugin 0.1.4), returned by an
+// OnRichStatus handler. Clients show them as § codes.
+type RichStatusOverride struct {
+	MotdJSON    *string // a JSON text component or a JSON string
+	VersionJSON *string
+	Protocol    *int32
+	Online      *uint32
+	MaxPlayers  *uint32
+	SampleJSON  []string // nil keeps the sample; use an empty slice to clear it
+	Favicon     *string  // a data:image/png;base64,... URI
+}
+
+func (s StatusOverride) rich() RichStatusOverride {
+	out := RichStatusOverride{
+		MotdJSON: s.MotdJSON, Protocol: s.Protocol, Online: s.Online, MaxPlayers: s.MaxPlayers, Favicon: s.Favicon,
+	}
+	if s.Version != nil {
+		quoted := jsonQuote(*s.Version)
+		out.VersionJSON = &quoted
+	}
+	if s.Sample != nil {
+		out.SampleJSON = make([]string, len(s.Sample))
+		for i, line := range s.Sample {
+			out.SampleJSON[i] = jsonQuote(line)
+		}
+	}
+	return out
+}
+
+// plain is the override for a host before rift:plugin 0.1.4: the words of
+// the version and sample lines.
+func (s RichStatusOverride) plain() StatusOverride {
+	out := StatusOverride{
+		MotdJSON: s.MotdJSON, Protocol: s.Protocol, Online: s.Online, MaxPlayers: s.MaxPlayers, Favicon: s.Favicon,
+	}
+	if s.VersionJSON != nil {
+		words := componentWords(*s.VersionJSON)
+		out.Version = &words
+	}
+	if s.SampleJSON != nil {
+		out.Sample = make([]string, len(s.SampleJSON))
+		for i, line := range s.SampleJSON {
+			out.Sample[i] = componentWords(line)
+		}
+	}
+	return out
+}
+
+func (s RichStatusOverride) lower() types.RichStatusOverride {
+	out := types.RichStatusOverride{
+		MotdJSON:    lowerOptString(s.MotdJSON),
+		VersionJSON: lowerOptString(s.VersionJSON),
+		Protocol:    lowerOpt(s.Protocol),
+		Online:      lowerOpt(s.Online),
+		MaxPlayers:  lowerOpt(s.MaxPlayers),
+		Favicon:     lowerOptString(s.Favicon),
+	}
+	if s.SampleJSON != nil {
+		out.SampleJSON = cm.Some(cm.ToList(s.SampleJSON))
+	}
+	return out
+}
+
 func (s StatusOverride) lower() types.StatusOverride {
 	out := types.StatusOverride{
 		MotdJSON:   lowerOptString(s.MotdJSON),
@@ -364,6 +457,17 @@ type PlayerInfo struct {
 	Name         string
 	Server       string // the backend the player is connected to
 	Protocol     int32
+}
+
+// TitleJSON is a title with JSON text components (rift:plugin 0.1.4), shown
+// with SendTitleJSON; times are ticks. An empty TitleJSON shows only the
+// subtitle.
+type TitleJSON struct {
+	TitleJSON    string
+	SubtitleJSON *string
+	FadeIn       int32
+	Stay         int32
+	FadeOut      int32
 }
 
 // Title is a title shown to one player; times are ticks.

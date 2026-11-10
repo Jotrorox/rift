@@ -1158,12 +1158,18 @@ fn validate_suggestions(suggestions: Vec<Suggestion>) -> Result<Vec<Suggestion>,
     let valid =
         |text: &str| !text.is_empty() && text.len() <= 256 && !text.chars().any(char::is_control);
     if suggestions.iter().any(|suggestion| {
-        !valid(&suggestion.text) || suggestion.tooltip.as_deref().is_some_and(|tip| !valid(tip))
+        !valid(&suggestion.text)
+            || matches!(&suggestion.tooltip, Some(crate::text::Text::Plain(tip)) if !valid(tip))
     }) {
         return Err(
             "suggestion text and tooltip must contain 1..=256 bytes without control characters"
                 .into(),
         );
+    }
+    for suggestion in &suggestions {
+        if let Some(tooltip @ crate::text::Text::Component(_)) = &suggestion.tooltip {
+            tooltip.validate("suggestion tooltip")?;
+        }
     }
     Ok(suggestions)
 }

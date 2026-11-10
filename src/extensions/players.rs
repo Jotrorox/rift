@@ -39,9 +39,10 @@ pub enum PlayerAction {
     Message(Text),
     ActionBar(Text),
     /// Fade-in, stay and fade-out are ticks.
+    /// At least one of title and subtitle is set.
     Title {
-        title: String,
-        subtitle: Option<String>,
+        title: Option<Text>,
+        subtitle: Option<Text>,
         times: [i32; 3],
     },
     Kick(Text),
@@ -179,7 +180,7 @@ pub(crate) fn title(value: Value) -> mlua::Result<PlayerAction> {
     let options = match value {
         Value::String(title) => {
             return Ok(PlayerAction::Title {
-                title: text(title.to_str()?.to_owned(), "title")?,
+                title: Some(Text::Plain(text(title.to_str()?.to_owned(), "title")?)),
                 subtitle: None,
                 times: [10, 70, 20],
             });
@@ -191,18 +192,21 @@ pub(crate) fn title(value: Value) -> mlua::Result<PlayerAction> {
         &options,
         &["title", "subtitle", "fade_in_ms", "stay_ms", "fade_out_ms"],
     )?;
-    let optional = |field| -> mlua::Result<Option<String>> {
-        options
-            .raw_get::<Option<String>>(field)?
-            .map(|value| text(value, field))
-            .transpose()
+    // Each is a string or a chat component table, such as `{ mini = "..." }`.
+    let optional = |field| -> mlua::Result<Option<Text>> {
+        match options.raw_get::<Value>(field)? {
+            Value::Nil => Ok(None),
+            value => Text::lua(value, field)
+                .map(Some)
+                .map_err(mlua::Error::runtime),
+        }
     };
     let (title, subtitle) = (optional("title")?, optional("subtitle")?);
     if title.is_none() && subtitle.is_none() {
         return Err(error("title requires a title or subtitle"));
     }
     Ok(PlayerAction::Title {
-        title: title.unwrap_or_default(),
+        title,
         subtitle,
         times: [
             ticks(&options, "fade_in_ms", 500)?,

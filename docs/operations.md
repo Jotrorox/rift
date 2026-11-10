@@ -225,10 +225,10 @@ rift.config.server_list = {
     -- A string (section-sign codes such as "\u{00A7}6" work) or a chat component table.
     motd = { text = "My Network", color = "gold", extra = { { text = "\nNow on 1.21", color = "gray" } } },
     maintenance_motd = "Back soon. Follow @mynetwork for updates.",
-    version = "My Network 1.8-1.21", -- Shown when a client's version is incompatible.
+    version = { mini = "<gold>My Network</gold> <gray>1.8-1.21" }, -- Shown when a client's version is incompatible.
     max_players = 500,               -- Defaults to limits.max_connections.
     favicon = "icons/network.png",   -- 64x64 PNG up to 16 KiB, relative to rift.lua, or a data URL.
-    sample = { "Survival, Creative", "and Minigames" }, -- Hover text over the player count.
+    sample = { { mini = "<green>Survival</green>, <aqua>Creative" }, "and Minigames" }, -- Hover text over the player count.
     hosts = {
         ["survival.example.com"] = { motd = "Survival", favicon = "icons/survival.png" },
         ["*.minigames.example.com"] = { motd = "Minigames", max_players = 200 },
@@ -243,6 +243,13 @@ backends. Rift answers each ping directly and never contacts a backend, so
 then the longest `*.` suffix), and inherit any unset field from the top level.
 During maintenance, `maintenance_motd` replaces `motd`. Pings for a hostname
 with no route keep the reply "No server is configured for this hostname."
+Each text field is a string or a chat component table, including the
+`{ mini = ... }` and `{ legacy = ... }` forms of [styled text](text.md). Clients
+read `version` and `sample` as strings, so Rift writes components there as `§`
+codes, with hex colours as the nearest named colour; a plain string is sent as
+written. The MOTD is rewritten for each pinging client like any component.
+Rift's default MOTDs and version name are the `status.*` entries of its
+[message catalogue](text.md#rifts-own-messages).
 Rift reads favicon files when it loads or reloads the configuration, so replace
 the file and reload to change the icon. A favicon can also be the image itself
 as a `data:image/png;base64,...` URL. That is how the dashboard's Server list

@@ -44,7 +44,6 @@ const STORE_WAIT: Duration = Duration::from_secs(5);
 /// How long `servers.*` waits for the control service's reply.
 const CONTROL_WAIT: Duration = Duration::from_secs(60);
 const MAX_LOG: usize = 4096;
-const MAX_COMPONENT_BYTES: usize = 32 * 1024;
 
 /// What every instance shares: the process-wide directory, store,
 /// permissions and bus. Lives across reload generations.
@@ -222,21 +221,13 @@ impl Inner {
 }
 
 /// A JSON text component or plain text. Text starting with `{`, `[` or `"`
-/// must be valid JSON; anything else is shown as written.
+/// must be valid JSON (markup objects included); anything else is shown as
+/// written.
 fn component(text: &str, label: &str) -> Result<serde_json::Value, String> {
-    if text.len() > MAX_COMPONENT_BYTES {
-        return Err(format!("{label} exceeds 32 KiB"));
-    }
-    if !text.starts_with(['{', '[', '"']) {
-        if text.is_empty() {
-            return Err(format!("{label} must not be empty"));
-        }
-        return Ok(serde_json::Value::String(text.to_owned()));
-    }
-    let value: serde_json::Value =
-        serde_json::from_str(text).map_err(|error| format!("{label}: invalid JSON: {error}"))?;
-    crate::protocol::validate_component(&value).map_err(|error| format!("{label}: {error}"))?;
-    Ok(value)
+    Ok(match Text::json(text, label)? {
+        Text::Component(component) => component,
+        Text::Plain(text) => serde_json::Value::String(text),
+    })
 }
 
 /// `players`: the joined players. `target` is a lowercase UUID or a name.
@@ -293,8 +284,41 @@ impl PlayersApi<'_> {
         self.send(target, PlayerAction::ActionBar(message))
     }
 
+    /// `players.title`: plain or rich text; an empty plain title or
+    /// subtitle is left out.
     pub fn title(&self, target: &str, title: &TitleSpec) -> Result<bool, String> {
         self.send(target, crate::players_service::title_action(title)?)
+    }
+
+    /// `players.title-json`: like `title`, with JSON text components (or
+    /// markup objects); text that does not start with `{`, `[` or `"` is
+    /// shown as written, and an empty title or subtitle is left out.
+    pub fn title_json(
+        &self,
+        target: &str,
+        title_json: &str,
+        subtitle_json: Option<&str>,
+        times: [i32; 3],
+    ) -> Result<bool, String> {
+        let rich = |text: &str, label: &str| -> Result<Text, String> {
+            if text.is_empty() {
+                Ok(Text::Plain(String::new()))
+            } else {
+                Text::json(text, label)
+            }
+        };
+        self.title(
+            target,
+            &TitleSpec {
+                title: rich(title_json, "title")?,
+                subtitle: subtitle_json
+                    .map(|text| rich(text, "subtitle"))
+                    .transpose()?,
+                fade_in: times[0],
+                stay: times[1],
+                fade_out: times[2],
+            },
+        )
     }
 
     pub fn tab_list(

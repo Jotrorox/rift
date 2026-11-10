@@ -411,9 +411,9 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
     pub fn version(&self) -> io::Result<ProtocolVersion> {
         let version = ProtocolVersion::new(self.handshake.protocol)?;
         if self.handshake.next_state == NextState::Transfer && !version.has_transfer() {
-            return Err(io::Error::new(
+            return Err(crate::text::notice_error(
                 io::ErrorKind::Unsupported,
-                "Transfer requires Minecraft 1.20.5 or newer.",
+                crate::text::catalog::Notice::LoginTransferVersion,
             ));
         }
         Ok(version)
@@ -686,8 +686,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                             SessionEvent::BackendClosed | SessionEvent::BackendFailed => {}
                             SessionEvent::ClientClosed => return Err(io::Error::new(
                                 io::ErrorKind::UnexpectedEof, "client closed during replacement login")),
-                            SessionEvent::Disconnected => return Err(io::Error::new(
-                                io::ErrorKind::PermissionDenied, "The current backend disconnected the player.")),
+                            SessionEvent::Disconnected => return Err(crate::text::notice_error(io::ErrorKind::PermissionDenied, crate::text::catalog::Notice::ConnectionBackendClosed)),
                         }
                     }
                 }
@@ -879,9 +878,9 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                         };
                         self.client
                             .queue(client_version, Direction::Clientbound, &packet)?;
-                        return Err(io::Error::new(
+                        return Err(crate::text::notice_error(
                             io::ErrorKind::PermissionDenied,
-                            "The current backend disconnected the player.",
+                            crate::text::catalog::Notice::ConnectionBackendClosed,
                         ));
                     }
                     bytes += packet.data.len();
@@ -901,9 +900,9 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                 Poll::Pending => break,
             }
         }
-        Err(io::Error::new(
+        Err(crate::text::notice_error(
             io::ErrorKind::WouldBlock,
-            "The current server is busy. Please retry the switch.",
+            crate::text::catalog::Notice::SwitchBusy,
         ))
     }
 
@@ -939,9 +938,9 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                     return Ok(());
                 }
                 Poll::Ready(Ok(SessionEvent::Disconnected)) => {
-                    return Err(io::Error::new(
+                    return Err(crate::text::notice_error(
                         io::ErrorKind::PermissionDenied,
-                        "The current backend disconnected the player.",
+                        crate::text::catalog::Notice::ConnectionBackendClosed,
                     ));
                 }
                 Poll::Ready(Ok(SessionEvent::ClientClosed)) => {
@@ -960,9 +959,9 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                     {
                         // The decoded ban is authoritative even if delivering
                         // it is backpressured. The owner will flush it on close.
-                        return Err(io::Error::new(
+                        return Err(crate::text::notice_error(
                             io::ErrorKind::PermissionDenied,
-                            "The current backend disconnected the player.",
+                            crate::text::catalog::Notice::ConnectionBackendClosed,
                         ));
                     }
                     if self.client.pending.is_some() {
@@ -985,9 +984,9 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                 }
             }
         }
-        Err(io::Error::new(
+        Err(crate::text::notice_error(
             io::ErrorKind::WouldBlock,
-            "The current server is busy. Please retry the switch.",
+            crate::text::catalog::Notice::SwitchBusy,
         ))
     }
 
@@ -1050,10 +1049,15 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                 PacketKind::Disconnect => {
                     // A ban/whitelist rejection is authoritative. Preserve its
                     // text for the requesting player and do not try another hub.
-                    let reason = protocol::read_string(&mut packet.data.as_slice(), 32767)
-                        .unwrap_or("The destination server denied access.")
-                        .to_owned();
-                    return Err(io::Error::new(io::ErrorKind::PermissionDenied, reason));
+                    // Login disconnects carry a JSON text component; keep its
+                    // formatting instead of showing the JSON.
+                    let reason = match protocol::read_string(&mut packet.data.as_slice(), 32767) {
+                        Ok(raw) => crate::text::Text::from_backend_json(raw),
+                        Err(_) => crate::text::catalog::notice(
+                            crate::text::catalog::Notice::ConnectionDenied,
+                        ),
+                    };
+                    return Err(crate::text::error(io::ErrorKind::PermissionDenied, reason));
                 }
                 PacketKind::LoginPluginRequest => {
                     let response = if let Some(response) =
@@ -1187,8 +1191,8 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
     /// `times` are fade-in, stay and fade-out ticks.
     pub async fn send_title(
         &mut self,
-        title: &str,
-        subtitle: Option<&str>,
+        title: Option<&crate::text::Text>,
+        subtitle: Option<&crate::text::Text>,
         times: [i32; 3],
     ) -> io::Result<()> {
         self.client.flush_pending().await?;

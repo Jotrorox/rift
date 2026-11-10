@@ -803,11 +803,12 @@ async fn player_actions_reach_the_client_and_kick_closes_the_session() {
             rift::protocol::action_bar(version, "bar").unwrap()
         );
         assert!(send(PlayerAction::Title {
-            title: "Big".into(),
+            title: Some("Big".into()),
             subtitle: Some("small".into()),
             times: [1, 2, 3],
         }));
-        for packet in rift::protocol::title(version, "Big", Some("small"), [1, 2, 3]).unwrap() {
+        let (big, small) = ("Big".into(), "small".into());
+        for packet in rift::protocol::title(version, Some(&big), Some(&small), [1, 2, 3]).unwrap() {
             assert_eq!(receive(&mut fixture.client, fixture.codec).await, packet);
         }
         // An unavailable target leaves the player on the original backend.

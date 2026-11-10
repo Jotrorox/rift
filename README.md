@@ -151,6 +151,11 @@ checks, rate limits and metrics. Hostname routing also works from the CLI:
 Routes prefer exact names, then the longest wildcard suffix, then the default.
 Listeners require an IP and port; backends accept IPs or DNS names with ports.
 
+Every text a player sees can be styled with markup such as
+`<gradient:gold:red>Welcome</gradient>`, from Lua, plugins, the bus and the
+configuration, and Rift's own messages can be restyled or translated; see
+[styled text](docs/text.md).
+
 Rift can also own the server-list entry and the in-game tab list: set a
 network MOTD and favicon with `server_list`, and a tab list header, footer and
 network-wide player list with `tab_list`. See the

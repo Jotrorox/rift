@@ -496,6 +496,11 @@ fn failures_explain_themselves() {
     assert!(output.text().contains("settemp needs true or false"));
     assert!(output.lines.iter().any(|line| line.tone == Tone::Muted));
     assert_eq!(output.component()["extra"][0]["color"], "red");
+    let mut theme = crate::text::Styles::default();
+    theme.set("bad", "<#ff0000><bold>").unwrap();
+    let styled = output.component_with(&theme);
+    assert_eq!(styled["extra"][0]["color"], "#ff0000");
+    assert_eq!(styled["extra"][0]["bold"], true);
 }
 
 #[test]
