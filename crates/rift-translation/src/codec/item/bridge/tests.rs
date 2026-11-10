@@ -946,3 +946,54 @@ fn persistent_components_round_trip() {
     }
     eprintln!("{checked} stacks through the persistent form");
 }
+
+#[test]
+fn stacks_inside_entity_and_block_entity_data_change_format() {
+    let stand = old_stack(
+        "armor_stand",
+        "{EntityTag:{HandItems:[{id:\"minecraft:diamond_sword\",Count:1b,tag:{Damage:5}},{}]}}",
+    );
+    let there = up(&stand);
+    let data = components_of(&there)
+        .get("entity_data")
+        .unwrap()
+        .as_nbt()
+        .unwrap()
+        .unwrap();
+    let hands = data.as_compound().unwrap().list("HandItems").unwrap();
+    let sword = hands[0].as_compound().unwrap();
+    assert_eq!(sword.int("count"), Some(1));
+    assert_eq!(
+        sword
+            .compound("components")
+            .unwrap()
+            .int("minecraft:damage"),
+        Some(5)
+    );
+    assert!(hands[1].as_compound().unwrap().is_empty());
+    assert!(came_back(
+        &down_serverbound(&there.unwrap()).unwrap(),
+        &stand
+    ));
+
+    let jukebox = old_stack(
+        "jukebox",
+        "{BlockEntityTag:{RecordItem:{id:\"minecraft:music_disc_cat\",Count:1b}}}",
+    );
+    let there = up(&jukebox);
+    let data = components_of(&there)
+        .get("block_entity_data")
+        .unwrap()
+        .as_nbt()
+        .unwrap()
+        .unwrap();
+    let record = data.as_compound().unwrap().compound("RecordItem").unwrap();
+    assert_eq!(
+        (record.str("id"), record.int("count")),
+        (Some("minecraft:music_disc_cat"), Some(1))
+    );
+    assert!(came_back(
+        &down_serverbound(&there.unwrap()).unwrap(),
+        &jukebox
+    ));
+}

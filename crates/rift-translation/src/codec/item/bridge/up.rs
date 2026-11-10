@@ -53,10 +53,12 @@ pub(super) fn components(cx: &mut Bridge, item: &str, mut tag: Compound) -> io::
         {
             entity.insert("id", format!("minecraft:{id}"));
         }
+        cx.nested_stacks(&mut entity, true)?;
         out.insert("entity_data", Value::nbt(&Nbt::Compound(entity)));
     }
     if let Some(block_entity) = take_compound(&mut tag, "BlockEntityTag") {
-        let rest = block_entity_tag(cx, item, block_entity, &mut out)?;
+        let mut rest = block_entity_tag(cx, item, block_entity, &mut out)?;
+        cx.nested_stacks(&mut rest, true)?;
         if !rest.is_empty() {
             out.insert("block_entity_data", Value::nbt(&Nbt::Compound(rest)));
         }

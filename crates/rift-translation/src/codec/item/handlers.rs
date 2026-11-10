@@ -58,8 +58,7 @@ fn tags_change(low: i32, high: i32) -> bool {
 /// component types, layouts or built-in registry IDs (`identical`); text
 /// and synchronised registries inside are judged with the stacks' items.
 fn components_change(source: i32, target: i32) -> bool {
-    version::item_components(source.min(target))
-        && !super::components::identical(source, target)
+    version::item_components(source.min(target)) && !super::components::identical(source, target)
 }
 
 /// Whether stacks sent from `source` to `target` need converting.
