@@ -1,5 +1,59 @@
 {
+  "decorated_pot_pattern": {
+    "renames": {
+      "angler_pottery_pattern": "angler",
+      "archer_pottery_pattern": "archer",
+      "arms_up_pottery_pattern": "arms_up",
+      "blade_pottery_pattern": "blade",
+      "brewer_pottery_pattern": "brewer",
+      "burn_pottery_pattern": "burn",
+      "danger_pottery_pattern": "danger",
+      "decorated_pot_side": "blank",
+      "explorer_pottery_pattern": "explorer",
+      "flow_pottery_pattern": "flow",
+      "friend_pottery_pattern": "friend",
+      "guster_pottery_pattern": "guster",
+      "heart_pottery_pattern": "heart",
+      "heartbreak_pottery_pattern": "heartbreak",
+      "howl_pottery_pattern": "howl",
+      "miner_pottery_pattern": "miner",
+      "mourner_pottery_pattern": "mourner",
+      "plenty_pottery_pattern": "plenty",
+      "prize_pottery_pattern": "prize",
+      "scrape_pottery_pattern": "scrape",
+      "sheaf_pottery_pattern": "sheaf",
+      "shelter_pottery_pattern": "shelter",
+      "skull_pottery_pattern": "skull",
+      "snort_pottery_pattern": "snort"
+    },
+    "up": {
+      "decorated_pot_base": "blank"
+    }
+  },
+  "item": {
+    "down": {
+      "music_disc_creator": "music_disc_pigstep",
+      "music_disc_creator_music_box": "music_disc_otherside",
+      "music_disc_precipice": "music_disc_relic"
+    }
+  },
+  "loot_condition_type": {
+    "renames": {
+      "random_chance_with_looting": "random_chance_with_enchanted_bonus"
+    }
+  },
+  "loot_function_type": {
+    "renames": {
+      "looting_enchant": "enchanted_count_increase"
+    }
+  },
   "sound_event": {
+    "down": {
+      "block.vault.reject_rewarded_player": "block.vault.insert_item_fail",
+      "music_disc.creator": "music_disc.pigstep",
+      "music_disc.creator_music_box": "music_disc.otherside",
+      "music_disc.precipice": "music_disc.relic"
+    },
     "renames": {
       "block.trial_spawner.ambient_charged": "block.trial_spawner.ambient_ominous",
       "block.trial_spawner.charge_activate": "block.trial_spawner.ominous_activate"
