@@ -548,6 +548,15 @@ pub(super) fn encode(
         }
         _ => {}
     }
+    if from >= 768
+        && to < 768
+        && let Some((wood, _)) = super::boat_wood(spawn.kind)
+    {
+        // Before 1.21.2 a boat's wood is entity data.
+        synthesize(&mut entries, "AbstractBoat.DATA_ID_TYPE", &|w| {
+            w.varint(wood as i32);
+        });
+    }
     let data = convert_data(shared, direction, &spawn, target);
     if from < 771 && to >= 771 && packet == "add_entity" {
         // 1.21.6 sends a hanging entity's facing as entity data too.
@@ -691,6 +700,9 @@ pub(super) fn encode(
             },
         },
     );
+    if from < 768 && to >= 768 && matches!(spawn.kind, "boat" | "chest_boat") {
+        shared.entity.boats.insert(spawn.id, w.buf.clone());
+    }
     let mut packets = vec![(packet, w.buf)];
     let list = list.unwrap_or_default();
     if !list.is_empty() || !entries.is_empty() {

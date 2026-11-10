@@ -39,6 +39,9 @@ pub struct State {
     /// Paintings sent with `add_painting` from an `add_entity` (1.19+)
     /// whose variant arrives later in entity data: block and 3D facing.
     paintings: HashMap<i32, (crate::wire::Position, i32)>,
+    /// Boats sent to a 1.21.2+ client from a pre-1.21.2 spawn, whose wood
+    /// arrives later in entity data: the `add_entity` body sent.
+    boats: HashMap<i32, Vec<u8>>,
 }
 
 impl State {
@@ -69,12 +72,14 @@ impl State {
     pub fn untrack(&mut self, id: i32) {
         self.entities.remove(&id);
         self.paintings.remove(&id);
+        self.boats.remove(&id);
     }
 
     /// Forget every entity but the player, as a respawn or world change does.
     fn reset(&mut self) {
         self.entities.clear();
         self.paintings.clear();
+        self.boats.clear();
         if let Some(player) = self.player {
             self.entities.insert(
                 player,
@@ -134,8 +139,55 @@ pub fn map_type(shared: &mut Shared, direction: Direction, name: &str) -> Option
             .find(|(new, _)| *new == name)
             .map(|(_, old)| *old)
     };
-    let other = other?;
+    let other = other.or_else(|| merged(to, name))?;
     target.id(other).and_then(|id| target.name(id))
+}
+
+/// Woods of 1.21.1 boats by `Boat.Type` ordinal; pale oak (1.21.2) has none.
+pub const BOAT_WOODS: &[&str] = &[
+    "oak", "spruce", "birch", "jungle", "acacia", "cherry", "dark_oak", "mangrove", "bamboo",
+];
+
+/// The 1.21.2 boat type of a wood, chest or not.
+pub fn boat_type(wood: &str, chest: bool) -> String {
+    match (wood, chest) {
+        ("bamboo", false) => "bamboo_raft".to_owned(),
+        ("bamboo", true) => "bamboo_chest_raft".to_owned(),
+        (wood, false) => format!("{wood}_boat"),
+        (wood, true) => format!("{wood}_chest_boat"),
+    }
+}
+
+/// A 1.21.2 boat type's wood (pale oak as oak) and whether it has a chest.
+pub fn boat_wood(name: &str) -> Option<(usize, bool)> {
+    let (wood, chest) = if let Some(wood) = name.strip_suffix("_chest_boat") {
+        (wood, true)
+    } else if let Some(wood) = name.strip_suffix("_boat") {
+        (wood, false)
+    } else {
+        match name {
+            "bamboo_raft" => ("bamboo", false),
+            "bamboo_chest_raft" => ("bamboo", true),
+            _ => return None,
+        }
+    };
+    let index = BOAT_WOODS
+        .iter()
+        .position(|known| *known == wood)
+        .unwrap_or(0);
+    Some((index, chest))
+}
+
+/// Types newer versions split that an older receiver knows as one: every
+/// boat of 1.21.2 is a `boat` or `chest_boat` before, lingering potions of
+/// 1.21.5 are `potion`s.
+fn merged(to: i32, name: &str) -> Option<&'static str> {
+    if to < 768
+        && let Some((_, chest)) = boat_wood(name)
+    {
+        return Some(if chest { "chest_boat" } else { "boat" });
+    }
+    (to < 770 && name == "lingering_potion").then_some("potion")
 }
 
 /// Install this codec's default routes for the builder's pair.

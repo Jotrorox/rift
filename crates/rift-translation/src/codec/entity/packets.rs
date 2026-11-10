@@ -45,6 +45,10 @@ pub(super) fn set_entity_data<S: HasShared>(
     if shared.target(direction) < 759 && shared.source(direction) >= 759 {
         repaint(shared, cx, id, rw.r)?;
     }
+    if shared.target(direction) >= 768 && shared.source(direction) < 768 {
+        reboat(shared, cx, id, rw.r)?;
+    }
+    let tracked = shared.entity.get(id).or(tracked);
     metadata::transcode(
         shared,
         direction,
@@ -130,6 +134,98 @@ fn repaint(
         "add_painting",
         spawn.buf,
     )?;
+    Ok(())
+}
+
+/// The value of the entity data field `key` in a list of entity `kind`, if
+/// the list sets it with an Int serializer.
+fn find_int(
+    protocol: i32,
+    kind: &str,
+    key: &str,
+    mut reader: Reader<'_>,
+) -> io::Result<Option<i32>> {
+    let source = tables::tables(protocol);
+    let fields = source.fields(kind).unwrap_or_default();
+    let mut found = None;
+    loop {
+        let index = reader.u8()?;
+        if index == 0xff {
+            return Ok(found);
+        }
+        let serializer = source
+            .serializer(reader.varint()?)
+            .ok_or_else(|| invalid("unknown entity data serializer"))?;
+        let field = fields.get(usize::from(index));
+        if serializer == tables::Kind::Int
+            && field.is_some_and(|field| field.key == key && field.kind == serializer)
+        {
+            found = Some(reader.varint()?);
+        } else {
+            metadata::skip_value(protocol, serializer, &mut reader)?;
+        }
+    }
+}
+
+/// From 1.21.2 each wood's boat is its own entity type. When pre-1.21.2
+/// entity data names a boat's wood, spawn it again as the right type.
+fn reboat(shared: &mut Shared, cx: &mut Cx<'_>, id: i32, reader: Reader<'_>) -> io::Result<()> {
+    let Some(tracked) = shared.entity.get(id) else {
+        return Ok(());
+    };
+    if !shared.entity.boats.contains_key(&id) {
+        return Ok(());
+    }
+    let (from, to) = (shared.backend, shared.client);
+    let Some(wood) = find_int(from, tracked.backend, "AbstractBoat.DATA_ID_TYPE", reader)? else {
+        return Ok(());
+    };
+    let wood = super::BOAT_WOODS
+        .get(usize::try_from(wood).unwrap_or(0))
+        .copied()
+        .unwrap_or("oak");
+    let name = super::boat_type(wood, tracked.backend == "chest_boat");
+    let registry = data::version(to).expect_registry("entity_type");
+    let Some((kind, client)) = registry
+        .id(&name)
+        .and_then(|kind| Some((kind, registry.name(kind)?)))
+    else {
+        return Ok(());
+    };
+    if client == tracked.client {
+        return Ok(());
+    }
+    let body = shared.entity.boats.get(&id).expect("checked above");
+    let mut reader = Reader::new(body);
+    let mut spawn = Writer::new();
+    spawn.varint(reader.varint()?).uuid(reader.uuid()?);
+    reader.varint()?;
+    spawn.varint(kind).bytes(reader.rest());
+    let spawn = spawn.buf;
+    let mut remove = Writer::new();
+    remove.varint(1).varint(id);
+    emit(
+        cx,
+        shared,
+        Direction::Clientbound,
+        "remove_entities",
+        remove.buf,
+    )?;
+    emit(
+        cx,
+        shared,
+        Direction::Clientbound,
+        "add_entity",
+        spawn.clone(),
+    )?;
+    shared.entity.boats.insert(id, spawn);
+    shared.entity.track(
+        id,
+        super::Tracked {
+            backend: tracked.backend,
+            client,
+        },
+    );
     Ok(())
 }
 

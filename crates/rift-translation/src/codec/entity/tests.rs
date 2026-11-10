@@ -553,3 +553,365 @@ fn particle_names_cross_1_13() {
     );
     let _ = unhex("00");
 }
+
+// Boundaries, with hand-made and recorded packets, so that they are covered
+// without the corpus.
+
+fn names(out: &[crate::codec::testing::Out]) -> Vec<&str> {
+    out.iter().map(|out| out.name.as_str()).collect()
+}
+
+fn login(step: &mut Defaults, protocol: i32) {
+    // Only the leading entity ID matters to this codec; the rest of a
+    // `login` passes through untouched.
+    let _ = protocol;
+    let mut body = Writer::new();
+    body.i32(1).bytes(&[0; 8]);
+    step.clientbound(Phase::Play, "login", &body.buf).unwrap();
+}
+
+#[test]
+fn custom_names_become_components_in_1_13() {
+    let mut body = Writer::new();
+    body.varint(5).u8(2).varint(3).string("Bob").u8(0xff);
+    let out = Defaults::new(393, 340)
+        .clientbound(Phase::Play, "set_entity_data", &body.buf)
+        .unwrap();
+    let mut expected = Writer::new();
+    expected
+        .varint(5)
+        .u8(2)
+        .varint(5)
+        .bool(true)
+        .string(r#"{"text":"Bob"}"#)
+        .u8(0xff);
+    assert_eq!(names(&out), ["set_entity_data"]);
+    assert_eq!(out[0].data, expected.buf);
+    // And back: the component's text becomes the name.
+    let back = Defaults::new(340, 393)
+        .clientbound(Phase::Play, "set_entity_data", &expected.buf)
+        .unwrap();
+    assert_eq!(back[0].data, body.buf);
+}
+
+#[test]
+fn spawn_data_moves_out_of_spawn_packets_in_1_15() {
+    // A recorded 1.14.4 villager spawn with its entity data.
+    let recorded = unhex(
+        "1270e7c5ac39794046b514b283624381c65440659000000000004010000000000000c064d0000000000000000000000000000000000001010002050003070004070005070006120007000008\
+         0241a000000901000a07000b01000c0a000d00010e07000f01001010020001ff",
+    );
+    let mut step = Defaults::new(573, 498);
+    let out = step.clientbound(Phase::Play, "add_mob", &recorded).unwrap();
+    assert_eq!(names(&out), ["add_mob", "set_entity_data"]);
+    let mut types = Types::default();
+    types.observe(573, "add_mob", &out[0].data);
+    assert_eq!(types.0.values().next(), Some(&"villager"));
+    // Every entry fits 1.15's villager, which gained the stinger count.
+    assert!(
+        check_data(573, &types, "set_entity_data", &out[1].data)
+            .unwrap()
+            .unwrap()
+            > 10
+    );
+    // Back to 1.14.4: the spawn carries an empty list, data follows apart.
+    let back = Defaults::new(498, 573)
+        .clientbound(Phase::Play, "add_mob", &out[0].data)
+        .unwrap();
+    assert_eq!(names(&back), ["add_mob"]);
+    assert_eq!(back[0].data.last(), Some(&0xff));
+}
+
+#[test]
+fn mobs_and_paintings_merge_into_add_entity_in_1_19() {
+    let recorded = unhex(
+        "0e6b0e8ff560e243e496518f25e20c6e1d6bc016000000000000c04e000000000000401e000000000000000000000000000000",
+    );
+    let out = Defaults::new(759, 758)
+        .clientbound(Phase::Play, "add_mob", &recorded)
+        .unwrap();
+    assert_eq!(names(&out), ["add_entity"]);
+    let spawn = spawn::read(759, "add_entity", &out[0].data).unwrap();
+    assert_eq!(spawn.id, 14);
+    // A painting's motive moves to entity data.
+    let painting = unhex("1c978547e80bf04eb89ffdfa2eb85f2aac00fffffd4000004fc500");
+    let mut step = Defaults::new(759, 758);
+    let out = step
+        .clientbound(Phase::Play, "add_painting", &painting)
+        .unwrap();
+    assert_eq!(names(&out), ["add_entity", "set_entity_data"]);
+    // Down again: a placeholder motive, then the real one from the data.
+    let mut down = Defaults::new(758, 759);
+    let first = down
+        .clientbound(Phase::Play, "add_entity", &out[0].data)
+        .unwrap();
+    assert_eq!(names(&first), ["add_painting"]);
+    let second = down
+        .clientbound(Phase::Play, "set_entity_data", &out[1].data)
+        .unwrap();
+    assert_eq!(names(&second), ["remove_entities", "add_painting"]);
+    assert_eq!(second[1].data[..1], painting[..1]);
+    let original = spawn::read(758, "add_painting", &painting).unwrap();
+    let repainted = spawn::read(758, "add_painting", &second[1].data).unwrap();
+    assert_eq!(original.id, repainted.id);
+}
+
+#[test]
+fn players_and_experience_orbs_merge_into_add_entity() {
+    let mut body = Writer::new();
+    body.varint(7)
+        .uuid(42)
+        .f64(1.0)
+        .f64(64.0)
+        .f64(-3.5)
+        .i8(10)
+        .i8(-5);
+    let out = Defaults::new(764, 763)
+        .clientbound(Phase::Play, "add_player", &body.buf)
+        .unwrap();
+    assert_eq!(names(&out), ["add_entity"]);
+    assert_eq!(
+        spawn::read(764, "add_entity", &out[0].data).unwrap().kind,
+        "player"
+    );
+    let back = Defaults::new(763, 764)
+        .clientbound(Phase::Play, "add_entity", &out[0].data)
+        .unwrap();
+    assert_eq!(names(&back), ["add_player"]);
+    assert_eq!(back[0].data, body.buf);
+
+    let orb = unhex("1cc012000000000000c04e00000000000040160000000000000005");
+    let out = Defaults::new(770, 769)
+        .clientbound(Phase::Play, "add_experience_orb", &orb)
+        .unwrap();
+    assert_eq!(names(&out), ["add_entity", "set_entity_data"]);
+    let mut types = Types::default();
+    types.observe(770, "add_entity", &out[0].data);
+    assert_eq!(
+        check_data(770, &types, "set_entity_data", &out[1].data).unwrap(),
+        Some(1)
+    );
+}
+
+#[test]
+fn velocity_becomes_a_low_precision_vector_in_1_21_9() {
+    let mut body = Writer::new();
+    let zombie = data::version(772)
+        .expect_registry("entity_type")
+        .id("zombie")
+        .unwrap();
+    body.varint(3)
+        .uuid(9)
+        .varint(zombie)
+        .f64(0.5)
+        .f64(70.0)
+        .f64(0.5);
+    body.i8(0)
+        .i8(64)
+        .i8(64)
+        .varint(0)
+        .i16(800)
+        .i16(-1600)
+        .i16(0);
+    let out = Defaults::new(773, 772)
+        .clientbound(Phase::Play, "add_entity", &body.buf)
+        .unwrap();
+    let mut reader = Reader::new(&out[0].data);
+    reader.varint().unwrap();
+    reader.uuid().unwrap();
+    reader.varint().unwrap();
+    reader.take(24).unwrap();
+    let velocity = spawn::read_lp_vec3(&mut reader).unwrap();
+    assert!((velocity[0] - 0.1).abs() < 1e-3 && (velocity[1] + 0.2).abs() < 1e-3);
+    let back = Defaults::new(772, 773)
+        .clientbound(Phase::Play, "add_entity", &out[0].data)
+        .unwrap();
+    assert_eq!(back[0].data, body.buf);
+    // A recorded 1.21.9 spawn reads and writes back.
+    let recorded = unhex(
+        "028e0bf2b591cc492ea23f29b20f366a9146400c000000000000c04d570a3d8000004025000000000000e900a6eb10ea00a20000",
+    );
+    let read = round_trip(773, &Types::default(), "add_entity", &recorded).unwrap();
+    assert_eq!(read, [("add_entity".to_owned(), recorded)]);
+}
+
+#[test]
+fn poses_follow_their_names() {
+    // 1.19.3 inserted SITTING before ROARING.
+    let roaring = |protocol: i32| {
+        tables::tables(protocol)
+            .constants(tables::Kind::Pose)
+            .iter()
+            .position(|name| *name == "ROARING")
+            .unwrap() as i32
+    };
+    let (pose, serializer) = (
+        6,
+        tables::tables(760)
+            .serializer_id(tables::Kind::Pose)
+            .unwrap(),
+    );
+    let mut body = Writer::new();
+    body.varint(5)
+        .u8(pose)
+        .varint(serializer)
+        .varint(roaring(760))
+        .u8(0xff);
+    let out = Defaults::new(761, 760)
+        .clientbound(Phase::Play, "set_entity_data", &body.buf)
+        .unwrap();
+    let mut expected = Writer::new();
+    expected
+        .varint(5)
+        .u8(pose)
+        .varint(
+            tables::tables(761)
+                .serializer_id(tables::Kind::Pose)
+                .unwrap(),
+        )
+        .varint(roaring(761))
+        .u8(0xff);
+    assert_eq!(out[0].data, expected.buf);
+    assert_ne!(roaring(760), roaring(761));
+}
+
+#[test]
+fn dust_colours_become_ints_in_1_21_2() {
+    let dust = |protocol: i32| {
+        data::version(protocol)
+            .expect_registry("particle_type")
+            .id("dust")
+            .unwrap()
+    };
+    let mut body = Writer::new();
+    body.bool(false).f64(0.0).f64(64.0).f64(0.0);
+    body.f32(0.0).f32(0.0).f32(0.0).f32(0.0).i32(1);
+    body.varint(dust(767)).f32(1.0).f32(0.0).f32(0.0).f32(2.0);
+    let out = Defaults::new(768, 767)
+        .clientbound(Phase::Play, "level_particles", &body.buf)
+        .unwrap();
+    let mut expected = Writer::new();
+    expected.bool(false).f64(0.0).f64(64.0).f64(0.0);
+    expected.f32(0.0).f32(0.0).f32(0.0).f32(0.0).i32(1);
+    expected.varint(dust(768)).i32(0xff0000).f32(2.0);
+    assert_eq!(out[0].data, expected.buf);
+    // A recorded 26.3 packet (particle first, speeds per axis) reads back.
+    let recorded = unhex(
+        "15ffff00003f8000000000bfe0000000000000c04d800000000000400c0000000000000000000000000000000000003f8000003f8000003f8000000500",
+    );
+    assert_eq!(
+        round_trip(777, &Types::default(), "level_particles", &recorded).unwrap(),
+        [("level_particles".to_owned(), recorded.clone())]
+    );
+    let down = Defaults::new(776, 777)
+        .clientbound(Phase::Play, "level_particles", &recorded)
+        .unwrap();
+    assert_eq!(names(&down), ["level_particles"]);
+}
+
+#[test]
+fn attributes_and_effects_follow_their_layouts() {
+    // 1.16 namespaced and renamed attribute keys.
+    let mut body = Writer::new();
+    body.varint(1)
+        .i32(1)
+        .string("generic.maxHealth")
+        .f64(20.0)
+        .varint(0);
+    let out = Defaults::new(735, 578)
+        .clientbound(Phase::Play, "update_attributes", &body.buf)
+        .unwrap();
+    let mut expected = Writer::new();
+    expected
+        .varint(1)
+        .i32(1)
+        .string("minecraft:generic.max_health")
+        .f64(20.0)
+        .varint(0);
+    assert_eq!(out[0].data, expected.buf);
+    // 1.21 identified modifiers; a recorded 1.20.5 packet converts.
+    let recorded = unhex(
+        "0103113fb99999a0000000000740080000000000000198491ef697b14584ae8271a8cc85cf7340000000000000000006401200000000000001736565d2e1a7403da3f81aeb3e3025423fe000000000000000",
+    );
+    let out = Defaults::new(767, 766)
+        .clientbound(Phase::Play, "update_attributes", &recorded)
+        .unwrap();
+    let back = Defaults::new(766, 767)
+        .clientbound(Phase::Play, "update_attributes", &out[0].data)
+        .unwrap();
+    assert_eq!(back[0].data, recorded);
+    // 1.20.5 widened the amplifier and dropped the factor data.
+    let mut effect = Writer::new();
+    effect
+        .varint(1)
+        .varint(0)
+        .u8(1)
+        .varint(600)
+        .u8(6)
+        .bool(false);
+    let out = Defaults::new(766, 765)
+        .clientbound(Phase::Play, "update_mob_effect", &effect.buf)
+        .unwrap();
+    let mut expected = Writer::new();
+    expected.varint(1).varint(0).varint(1).varint(600).u8(6);
+    assert_eq!(out[0].data, expected.buf);
+}
+
+#[test]
+fn boats_split_by_wood_in_1_21_2() {
+    let registry = |protocol: i32, name: &str| {
+        data::version(protocol)
+            .expect_registry("entity_type")
+            .id(name)
+            .unwrap()
+    };
+    let mut birch = Writer::new();
+    birch.varint(8).uuid(1).varint(registry(768, "birch_boat"));
+    birch
+        .f64(0.0)
+        .f64(63.0)
+        .f64(0.0)
+        .i8(0)
+        .i8(0)
+        .i8(0)
+        .varint(0);
+    birch.i16(0).i16(0).i16(0);
+    let mut down = Defaults::new(767, 768);
+    let out = down
+        .clientbound(Phase::Play, "add_entity", &birch.buf)
+        .unwrap();
+    assert_eq!(names(&out), ["add_entity", "set_entity_data"]);
+    assert_eq!(
+        spawn::read(767, "add_entity", &out[0].data).unwrap().kind,
+        "boat"
+    );
+    // Up again: the spawn is an oak boat until the wood arrives.
+    let mut up = Defaults::new(768, 767);
+    login(&mut up, 767);
+    let first = up
+        .clientbound(Phase::Play, "add_entity", &out[0].data)
+        .unwrap();
+    assert_eq!(
+        spawn::read(768, "add_entity", &first[0].data).unwrap().kind,
+        "oak_boat"
+    );
+    let second = up
+        .clientbound(Phase::Play, "set_entity_data", &out[1].data)
+        .unwrap();
+    assert_eq!(names(&second), ["remove_entities", "add_entity"]);
+    assert_eq!(second[1].data, birch.buf);
+}
+
+#[test]
+fn removals_split_for_1_17() {
+    let mut body = Writer::new();
+    body.varint(2).varint(4).varint(5);
+    let out = Defaults::new(755, 754)
+        .clientbound(Phase::Play, "remove_entities", &body.buf)
+        .unwrap();
+    assert_eq!(names(&out), ["remove_entity", "remove_entity"]);
+    let back = Defaults::new(754, 755)
+        .clientbound(Phase::Play, "remove_entity", &out[1].data)
+        .unwrap();
+    assert_eq!(back[0].data, [1, 5]);
+}
