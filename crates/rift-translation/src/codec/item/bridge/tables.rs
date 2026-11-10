@@ -12,10 +12,6 @@ pub const HIDE_ADDITIONAL: i32 = 32;
 pub const HIDE_DYE: i32 = 64;
 pub const HIDE_UPGRADES: i32 = 128;
 
-/// The default colour of leather armour, which a hidden dye without colour
-/// stands for.
-pub const DEFAULT_LEATHER: i32 = 10_511_680;
-
 /// Banner pattern short codes of 1.20.4 tags and their 1.20.5 names.
 pub const BANNER_PATTERNS: &[(&str, &str)] = &[
     ("b", "base"),
@@ -295,6 +291,30 @@ pub fn max_damage(item: &str) -> Option<i32> {
         .map(|value| value as i32)
 }
 
+/// The prototype attribute modifiers of a 1.20.5 item, as data rows
+/// `[attribute, uuid, name, amount, operation, slot]`; empty for items whose
+/// prototype sets none.
+pub fn default_modifiers(item: &str) -> &'static [serde_json::Value] {
+    data::file("items/766")
+        .and_then(|file| {
+            file.get("attribute_modifiers")?
+                .get(data::strip(item))?
+                .as_array()
+        })
+        .map_or(&[], Vec::as_slice)
+}
+
+/// The entity an item places when its `EntityTag` names none.
+pub fn entity_of(item: &str) -> Option<&'static str> {
+    let item = data::strip(item);
+    let name = match item {
+        "armor_stand" | "item_frame" | "glow_item_frame" | "painting" => item,
+        _ => item.strip_suffix("_spawn_egg")?,
+    };
+    let registry = data::version(super::NEW).registry("entity_type")?;
+    registry.id(name).and_then(|id| registry.name(id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -317,5 +337,10 @@ mod tests {
         assert_eq!(block_entity_of("stone"), None);
         assert_eq!(max_damage("diamond_sword"), Some(1561));
         assert_eq!(max_damage("stone"), None);
+        assert_eq!(default_modifiers("diamond_sword").len(), 2);
+        assert!(default_modifiers("diamond_chestplate").is_empty());
+        assert_eq!(entity_of("mooshroom_spawn_egg"), Some("mooshroom"));
+        assert_eq!(entity_of("armor_stand"), Some("armor_stand"));
+        assert_eq!(entity_of("stick"), None);
     }
 }

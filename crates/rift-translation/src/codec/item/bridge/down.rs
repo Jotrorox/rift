@@ -107,16 +107,23 @@ pub(super) fn tag(cx: &mut Bridge, item: &str, components: &Components) -> io::R
                 }
             }
             "attribute_modifiers" => {
+                // See `up::attribute_modifiers`: hidden defaults are just the
+                // bit, an empty list is the defaults where the prototype has
+                // none and no modifiers where it has some.
                 let fields = value.fields()?;
-                let modifiers = fields[0]
-                    .items()?
-                    .iter()
-                    .filter_map(|modifier| attribute_modifier(cx, modifier).transpose())
-                    .collect::<io::Result<Vec<_>>>()?;
-                if !modifiers.is_empty() {
+                let show = fields[1].as_bool() != Some(false);
+                let list = fields[0].items()?;
+                let defaults = cx.default_modifiers(item);
+                if !(list.is_empty() && defaults.is_empty())
+                    && !(!show && super::same(&fields[0], &Value::List(defaults)))
+                {
+                    let modifiers = list
+                        .iter()
+                        .filter_map(|modifier| attribute_modifier(cx, modifier).transpose())
+                        .collect::<io::Result<Vec<_>>>()?;
                     out.insert("AttributeModifiers", Nbt::List(modifiers));
                 }
-                if fields[1].as_bool() == Some(false) {
+                if !show {
                     hide |= tables::HIDE_MODIFIERS;
                 }
             }
@@ -321,7 +328,10 @@ pub(super) fn tag(cx: &mut Bridge, item: &str, components: &Components) -> io::R
             _ => {}
         }
     }
-    if components.get("damage").is_none() && tables::max_damage(item).is_some() {
+    if components.get("damage").is_none()
+        && !tag.contains("Damage")
+        && tables::max_damage(item).is_some()
+    {
         // 1.20.4 stacks that wear out always carry their damage.
         out.insert("Damage", Nbt::Int(0));
     }
@@ -335,6 +345,11 @@ pub(super) fn tag(cx: &mut Bridge, item: &str, components: &Components) -> io::R
     }
     if !display.is_empty() {
         out.insert("display", display);
+    }
+    // Bits that hid nothing came in `custom_data`.
+    if let Some(&Nbt::Int(rest)) = tag.get("HideFlags") {
+        tag.remove("HideFlags");
+        hide |= rest;
     }
     if hide != 0 {
         out.insert("HideFlags", Nbt::Int(hide));
