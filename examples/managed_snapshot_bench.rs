@@ -33,6 +33,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         restart_retries: 0,
         node: None,
         environment: Default::default(),
+        messaging: None,
     };
     let names: Vec<_> = (0..SERVERS)
         .map(|index| format!("server_{index:03}"))
