@@ -5,7 +5,7 @@ use crate::{
     codec::{HasShared, Shared},
     routed_step,
     step::{RouteBuilder, Routes},
-    steps::Make,
+    steps::{Make, v1_16_4_to_1_17::common},
 };
 use std::sync::OnceLock;
 
@@ -26,12 +26,8 @@ impl Down {
             use crate::State::Play;
             RouteBuilder::new(OLDER, NEWER)
                 .defaults()
-                .clientbound(Play, "login", |_, cx, state, packet| {
-                    super::login(cx, state, packet, false)
-                })
-                .clientbound(Play, "respawn", |_, cx, state, packet| {
-                    super::respawn(cx, state, packet, false)
-                })
+                .clientbound(Play, "login", common::login::<Self>)
+                .clientbound(Play, "respawn", common::respawn::<Self>)
                 .build()
         })
     }

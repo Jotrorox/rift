@@ -424,6 +424,16 @@ fn biome(step: Boundary, element: &mut Compound) {
             element.insert("scale", 0.05f32);
         }
     }
+    // A category the client's version lacks fails its whole codec: 1.18's
+    // mountains were extreme hills before, 1.17's underground had none.
+    if !up && let Some(Nbt::String(category)) = element.get_mut("category") {
+        if step.crosses(757) && category == "mountain" {
+            *category = "extreme_hills".to_owned();
+        }
+        if step.crosses(755) && category == "underground" {
+            *category = "none".to_owned();
+        }
+    }
     if step.crosses(759) {
         if up {
             element.remove("category");

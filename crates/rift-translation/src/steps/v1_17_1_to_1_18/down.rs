@@ -1,16 +1,13 @@
 //! A 1.17.1 client on a 1.18 backend: backend packets are downgraded for the
 //! client and client packets upgraded for the backend.
-use super::{NEWER, OLDER, chunk};
+use super::{NEWER, OLDER};
 use crate::{
-    Direction, Packet, State,
+    Packet, State,
     codec::{HasShared, Shared},
     routed_step,
     step::{Cx, RouteBuilder, Routes},
-    steps::{
-        Make,
-        v1_16_4_to_1_17::common::{self, Login},
-    },
-    wire::{Reader, Rewriter, Writer},
+    steps::{Make, v1_16_4_to_1_17::common},
+    wire::{Reader, Rewriter, Writer, invalid},
 };
 use std::{io, sync::OnceLock};
 
@@ -24,32 +21,24 @@ impl HasShared for Down {
     }
 }
 
-/// 1.17.1 clients read objective names of at most 16 characters.
-const MAX_OBJECTIVE: usize = 16;
+/// The longest objective and team names a 1.17.1 client reads.
+const MAX_NAME: usize = 16;
+/// The longest score holder a 1.17.1 client reads in `set_score`.
+const MAX_HOLDER: usize = 40;
 
 impl Down {
-    pub(super) fn new() -> Self {
-        Self {
-            shared: Shared::new(OLDER, NEWER),
-        }
-    }
-
     pub fn routes() -> &'static Routes<Self> {
         static ROUTES: OnceLock<Routes<Down>> = OnceLock::new();
         ROUTES.get_or_init(|| {
-            use Direction::Clientbound;
             use State::Play;
             RouteBuilder::new(OLDER, NEWER)
-                // The chunk codec's own handling replaces this once it lands.
-                .default_handler(
-                    Clientbound,
-                    Play,
-                    "level_chunk_with_light",
-                    Self::level_chunk,
-                )
                 .defaults()
-                .clientbound(Play, "login", Self::login)
+                .clientbound(Play, "login", common::login::<Self>)
+                .clientbound(Play, "respawn", common::respawn::<Self>)
+                .clientbound(Play, "set_objective", Self::set_objective)
                 .clientbound(Play, "set_display_objective", Self::display_objective)
+                .clientbound(Play, "set_score", Self::set_score)
+                .clientbound(Play, "set_player_team", Self::set_player_team)
                 // A 1.17.1 client neither knows nor needs it.
                 .drop_clientbound(Play, "set_simulation_distance")
                 .serverbound(Play, "client_information", Self::client_information)
@@ -57,36 +46,24 @@ impl Down {
         })
     }
 
-    fn login(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
-        let mut login = Login::read(NEWER, &packet.data)?;
-        // INTEGRATION: the registries codec's conversion of the dimension codec.
-        login.edit_biomes(|biome| {
-            common::add_terrain_shape(biome)?;
-            common::known_category(biome, common::CATEGORIES_1_17)
-        })?;
-        cx.to_client(state, Packet::new(packet.id, login.write(OLDER)));
+    /// 1.18 lifted the length limits of scoreboard names; a 1.17.1 client
+    /// fails on a longer one. Names are cut the same way in every packet,
+    /// so they still refer to each other.
+    fn set_objective(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
+        let mut rw = Rewriter::new(&packet.data);
+        rw.w.string(&truncate(rw.r.str()?, MAX_NAME));
+        match rw.i8()? {
+            0 | 2 => {
+                rw.str()?;
+                rw.varint()?;
+            }
+            1 => {}
+            _ => return Err(invalid("unknown objective action")),
+        }
+        cx.to_client(state, Packet::new(packet.id, rw.finish()?));
         Ok(())
     }
 
-    /// The light goes first, as 1.17.1 servers send it.
-    fn level_chunk(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
-        let mut r = Reader::new(&packet.data);
-        let (x, z) = (r.i32()?, r.i32()?);
-        let column = chunk::column_1_18(&mut r)?;
-        let light = chunk::light(&mut r)?;
-        r.finish()?;
-        let column = chunk::column(&mut self.shared, Direction::Clientbound, x, z, column)?;
-        let mut update = Writer::with_capacity(light.len() + 10);
-        update.varint(x).varint(z).bytes(light);
-        common::to_client(cx, OLDER, state, "light_update", update.into_inner());
-        let mut w = Writer::with_capacity(column.len() + 8);
-        w.i32(x).i32(z).bytes(&column);
-        common::to_client(cx, OLDER, state, "level_chunk", w.into_inner());
-        Ok(())
-    }
-
-    /// Longer names are cut: the name only has to match the objective's,
-    /// which the scoreboard packets cut the same way.
     fn display_objective(
         &mut self,
         cx: &mut Cx<'_>,
@@ -98,8 +75,49 @@ impl Down {
         let name = r.str()?;
         r.finish()?;
         let mut w = Writer::new();
-        w.i8(position).string(&truncate(name, MAX_OBJECTIVE));
+        w.i8(position).string(&truncate(name, MAX_NAME));
         cx.to_client(state, Packet::new(packet.id, w.into_inner()));
+        Ok(())
+    }
+
+    fn set_score(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
+        let mut rw = Rewriter::new(&packet.data);
+        rw.w.string(&truncate(rw.r.str()?, MAX_HOLDER));
+        let action = rw.varint()?;
+        rw.w.string(&truncate(rw.r.str()?, MAX_NAME));
+        match action {
+            0 => {
+                rw.varint()?;
+            }
+            1 => {}
+            _ => return Err(invalid("unknown score action")),
+        }
+        cx.to_client(state, Packet::new(packet.id, rw.finish()?));
+        Ok(())
+    }
+
+    /// Only the team's name is limited; members' names never were.
+    fn set_player_team(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
+        let mut rw = Rewriter::new(&packet.data);
+        rw.w.string(&truncate(rw.r.str()?, MAX_NAME));
+        let mode = rw.i8()?;
+        if matches!(mode, 0 | 2) {
+            // Display name, options, name tag visibility, collision rule,
+            // colour, prefix and suffix.
+            rw.str()?;
+            rw.i8()?;
+            rw.string(40)?;
+            rw.string(40)?;
+            rw.varint()?;
+            rw.str()?;
+            rw.str()?;
+        }
+        match mode {
+            0 | 3 | 4 => rw.list(|rw| rw.str().map(drop))?,
+            1 | 2 => {}
+            _ => return Err(invalid("unknown team action")),
+        }
+        cx.to_client(state, Packet::new(packet.id, rw.finish()?));
         Ok(())
     }
 
@@ -136,4 +154,8 @@ pub(super) fn truncate(text: &str, max: usize) -> String {
         .collect()
 }
 
-pub const STEP: Option<Make> = Some(|| Box::new(Down::new()));
+pub const STEP: Option<Make> = Some(|| {
+    Box::new(Down {
+        shared: Shared::new(OLDER, NEWER),
+    })
+});

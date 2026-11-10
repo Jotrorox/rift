@@ -189,6 +189,25 @@ fn check_receiver(registry: &str, to: i32, name: &str, element: &Nbt, context: &
     );
 }
 
+/// A dimension type keeps the extent the sender gave it, since the
+/// sender's chunks span exactly that: a 1.18 client of a 1.17.1 server
+/// gets an overworld from 0 to 256.
+fn keep_sent_extent(sent: &[Registry], name: &str, expected: &mut Nbt) {
+    let sent = sent
+        .iter()
+        .find(|registry| registry.name == "dimension_type")
+        .and_then(|registry| registry.entry(name))
+        .and_then(|entry| entry.element.as_ref()?.as_compound());
+    let (Some(sent), Some(expected)) = (sent, expected.as_compound_mut()) else {
+        return;
+    };
+    for key in ["min_y", "height", "logical_height"] {
+        if let Some(value) = sent.get(key) {
+            expected.insert(key, value.clone());
+        }
+    }
+}
+
 #[test]
 fn every_vanilla_registry_converts_to_each_neighbour_in_both_directions() {
     for (older, newer) in pairs() {
@@ -202,7 +221,11 @@ fn every_vanilla_registry_converts_to_each_neighbour_in_both_directions() {
                 for entry in &registry.entries {
                     let element = entry.element.as_ref().unwrap();
                     if let Some(expected) = vanilla.get(&entry.name) {
-                        assert_eq!(element, &*expected.element, "{from}->{to} {}", entry.name);
+                        let mut expected = (*expected.element).clone();
+                        if registry.name == "dimension_type" && to >= 755 {
+                            keep_sent_extent(&sent, &entry.name, &mut expected);
+                        }
+                        assert_eq!(element, &expected, "{from}->{to} {}", entry.name);
                     }
                     check_receiver(&registry.name, to, &entry.name, element, "converted");
                 }

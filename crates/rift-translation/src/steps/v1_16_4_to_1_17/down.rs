@@ -1,11 +1,8 @@
 //! A 1.16.4 client on a 1.17 backend: backend packets are downgraded for the
 //! client and client packets upgraded for the backend.
-use super::{
-    BORDER, COMBAT, HIDE_TITLES, NEWER, OLDER, RESET_TITLES, TITLES, check_border,
-    common::{self, EMPTY_ITEM, Login, Respawn},
-};
+use super::{BORDER, NEWER, OLDER, check_border, common};
 use crate::{
-    Direction, Packet, State,
+    Packet, State,
     codec::{HasShared, Shared},
     routed_step,
     step::{Cx, Handler, RouteBuilder, Routes},
@@ -47,19 +44,15 @@ impl Down {
             use State::Play;
             let mut builder = RouteBuilder::new(OLDER, NEWER)
                 .defaults()
-                .clientbound(Play, "login", Self::login)
-                .clientbound(Play, "respawn", Self::respawn)
+                .clientbound(Play, "login", common::login::<Self>)
+                .clientbound(Play, "respawn", common::respawn::<Self>)
                 .clientbound(Play, "player_position", Self::player_position)
                 .clientbound(Play, "set_default_spawn_position", Self::spawn_position)
                 .clientbound(Play, "ping", Self::ping)
-                .clientbound(Play, "remove_entity", Self::remove_entity)
-                .clientbound(Play, "clear_titles", Self::clear_titles)
-                .clientbound(Play, "set_titles_animation", Self::titles_animation)
                 // Sculk sensor vibrations: a 1.16 client has nothing to show.
                 .drop_clientbound(Play, "add_vibration_signal")
                 .serverbound(Play, "container_ack", Self::container_ack)
-                .serverbound(Play, "client_information", Self::client_information)
-                .serverbound(Play, "container_click", Self::container_click);
+                .serverbound(Play, "client_information", Self::client_information);
             let borders: [Handler<Self>; 6] = [
                 |step, cx, state, packet| step.border(cx, state, packet, 0),
                 |step, cx, state, packet| step.border(cx, state, packet, 1),
@@ -71,41 +64,8 @@ impl Down {
             for (name, handler) in BORDER.into_iter().zip(borders) {
                 builder = builder.clientbound(Play, name, handler);
             }
-            let combat: [Handler<Self>; 3] = [
-                |step, cx, state, packet| step.combat(cx, state, packet, 0),
-                |step, cx, state, packet| step.combat(cx, state, packet, 1),
-                |step, cx, state, packet| step.combat(cx, state, packet, 2),
-            ];
-            for (name, handler) in COMBAT.into_iter().zip(combat) {
-                builder = builder.clientbound(Play, name, handler);
-            }
-            let titles: [Handler<Self>; 3] = [
-                |step, cx, state, packet| step.title(cx, state, packet, 0),
-                |step, cx, state, packet| step.title(cx, state, packet, 1),
-                |step, cx, state, packet| step.title(cx, state, packet, 2),
-            ];
-            for (name, handler) in TITLES.into_iter().zip(titles) {
-                builder = builder.clientbound(Play, name, handler);
-            }
             builder.build()
         })
-    }
-
-    fn login(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
-        let mut login = Login::read(NEWER, &packet.data)?;
-        // INTEGRATION: the registries codec's conversion of the dimension codec.
-        login.edit_dimension_types(common::remove_world_height)?;
-        login.edit_biomes(|biome| common::known_category(biome, common::CATEGORIES_1_16))?;
-        cx.to_client(state, Packet::new(packet.id, login.write(OLDER)));
-        Ok(())
-    }
-
-    fn respawn(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
-        let mut respawn = Respawn::read(&packet.data)?;
-        // INTEGRATION: the registries codec's conversion of the dimension type.
-        common::remove_world_height(respawn.dimension_type()?)?;
-        cx.to_client(state, Packet::new(packet.id, respawn.write()));
-        Ok(())
     }
 
     fn player_position(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
@@ -178,14 +138,6 @@ impl Down {
         Ok(())
     }
 
-    fn remove_entity(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
-        let mut rw = Rewriter::new(&packet.data);
-        rw.w.varint(1);
-        rw.varint()?;
-        common::to_client(cx, OLDER, state, "remove_entities", rw.finish()?);
-        Ok(())
-    }
-
     fn border(
         &mut self,
         cx: &mut Cx<'_>,
@@ -197,70 +149,6 @@ impl Down {
         let mut w = Writer::with_capacity(packet.data.len() + 1);
         w.varint(action as i32).bytes(&packet.data);
         common::to_client(cx, OLDER, state, "set_border", w.into_inner());
-        Ok(())
-    }
-
-    fn combat(
-        &mut self,
-        cx: &mut Cx<'_>,
-        state: State,
-        packet: Packet,
-        action: i32,
-    ) -> io::Result<()> {
-        let mut rw = Rewriter::new(&packet.data);
-        rw.w.varint(action);
-        match action {
-            1 => {
-                rw.varint()?;
-                rw.i32()?;
-            }
-            2 => {
-                rw.varint()?;
-                rw.i32()?;
-                common::text(&mut self.shared, Direction::Clientbound, &mut rw)?;
-            }
-            _ => {}
-        }
-        common::to_client(cx, OLDER, state, "player_combat", rw.finish()?);
-        Ok(())
-    }
-
-    fn title(
-        &mut self,
-        cx: &mut Cx<'_>,
-        state: State,
-        packet: Packet,
-        action: i32,
-    ) -> io::Result<()> {
-        let mut rw = Rewriter::new(&packet.data);
-        rw.w.varint(action);
-        common::text(&mut self.shared, Direction::Clientbound, &mut rw)?;
-        common::to_client(cx, OLDER, state, "set_titles", rw.finish()?);
-        Ok(())
-    }
-
-    fn titles_animation(
-        &mut self,
-        cx: &mut Cx<'_>,
-        state: State,
-        packet: Packet,
-    ) -> io::Result<()> {
-        let mut rw = Rewriter::new(&packet.data);
-        rw.w.varint(3);
-        for _ in 0..3 {
-            rw.i32()?;
-        }
-        common::to_client(cx, OLDER, state, "set_titles", rw.finish()?);
-        Ok(())
-    }
-
-    fn clear_titles(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
-        let mut r = Reader::new(&packet.data);
-        let reset = r.bool()?;
-        r.finish()?;
-        let mut w = Writer::new();
-        w.varint(if reset { RESET_TITLES } else { HIDE_TITLES });
-        common::to_client(cx, OLDER, state, "set_titles", w.into_inner());
         Ok(())
     }
 
@@ -279,30 +167,6 @@ impl Down {
         rw.varint()?;
         // A 1.16 client cannot ask for its chat to be filtered.
         rw.w.bool(false);
-        cx.to_backend(state, Packet::new(packet.id, rw.finish()?));
-        Ok(())
-    }
-
-    /// A 1.16 click names the stack it picked up; a 1.17 click names what
-    /// the client now sees in the slots it changed and on the cursor, and
-    /// the backend corrects every slot where that differs from the truth.
-    /// Without replaying the click the step reports the clicked slot as
-    /// emptied and the picked-up stack as carried, which is exactly right
-    /// for a plain pick-up; for any other outcome the backend's corrections
-    /// bring the client in line.
-    fn container_click(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
-        let mut rw = Rewriter::new(&packet.data);
-        rw.u8()?;
-        let slot = rw.i16()?;
-        rw.i8()?;
-        rw.r.i16()?;
-        rw.varint()?;
-        if slot >= 0 {
-            rw.w.varint(1).i16(slot).bytes(EMPTY_ITEM);
-        } else {
-            rw.w.varint(0);
-        }
-        common::item(&mut self.shared, Direction::Serverbound, &mut rw)?;
         cx.to_backend(state, Packet::new(packet.id, rw.finish()?));
         Ok(())
     }

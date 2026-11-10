@@ -33,24 +33,6 @@ const BORDER: [&str; 6] = [
     "set_border_warning_distance",
 ];
 
-/// 1.16 combat actions and their 1.17 packets.
-const COMBAT: [&str; 3] = [
-    "player_combat_enter",
-    "player_combat_end",
-    "player_combat_kill",
-];
-
-/// 1.16 title actions 0 to 3 and their 1.17 packets; 4 (hide) and 5 (reset)
-/// are both `clear_titles`, told apart by its reset flag.
-const TITLES: [&str; 4] = [
-    "set_title_text",
-    "set_subtitle_text",
-    "set_action_bar_text",
-    "set_titles_animation",
-];
-const HIDE_TITLES: i32 = 4;
-const RESET_TITLES: i32 = 5;
-
 /// Check a world border body of the 1.16 `action` (or the matching 1.17
 /// packet) field by field: the steps move it between packets unchanged.
 fn check_border(action: usize, data: &[u8]) -> std::io::Result<()> {
