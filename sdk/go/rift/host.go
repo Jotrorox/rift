@@ -65,6 +65,19 @@ func Player(target string) (*PlayerInfo, error) {
 	return nil, nil
 }
 
+// VisibleTo returns the permission node a viewer needs to see the player,
+// and false when everyone sees them (rift:plugin 0.1.3).
+func VisibleTo(target string) (string, bool, error) {
+	node, err := unwrap(players.VisibleTo(target))
+	if err != nil {
+		return "", false, err
+	}
+	if value := node.Some(); value != nil {
+		return *value, true, nil
+	}
+	return "", false, nil
+}
+
 // PlayerNames lists joined player names starting with prefix, sorted.
 func PlayerNames(prefix string) []string {
 	return players.Names(optional(prefix)).Slice()
@@ -220,6 +233,36 @@ func Groups(uuid string) []string { return permissions.Groups(uuid).Slice() }
 // ListGroupsJSON returns the configured groups and their permissions as a
 // JSON object.
 func ListGroupsJSON() string { return permissions.ListGroups() }
+
+// VisibleToKey is the meta key that makes a player visible only to viewers
+// holding the node in its value.
+const VisibleToKey = "rift.visible-to"
+
+// Meta returns one meta value in the player's current contexts, and false
+// when it is unset (rift:plugin 0.1.3).
+func Meta(uuid, key string) (string, bool) {
+	value := permissions.Meta(uuid, key)
+	if found := value.Some(); found != nil {
+		return *found, true
+	}
+	return "", false
+}
+
+// SetMeta sets the user's meta node key to value in the contexts of
+// contextsJSON ("" for global), expiring at expiresAt Unix seconds (0 for
+// never); remove deletes the node in those contexts instead. It reports
+// whether anything changed (rift:plugin 0.1.3).
+func SetMeta(uuid, key, value string, remove bool, contextsJSON string, expiresAt uint64) (bool, error) {
+	v := cm.Some(value)
+	if remove {
+		v = cm.None[string]()
+	}
+	expiry := cm.None[uint64]()
+	if expiresAt != 0 {
+		expiry = cm.Some(expiresAt)
+	}
+	return unwrap(permissions.SetMeta(uuid, key, v, optional(contextsJSON), expiry))
+}
 
 // Bus
 

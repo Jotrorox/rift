@@ -1,0 +1,14 @@
+# A persistent Lua plugin implementing /vanish with Rift's visibility rule:
+# copy this folder to plugins/vanish-lua next to rift.lua and enable it with
+# rift.plugin("vanish-lua", { see = "rift.vanish.see" }).
+name = "vanish-lua"
+version = "0.1.0"
+api = "0.1"
+mode = "persistent"
+engine = "lua"
+entry = "init.lua"
+
+[capabilities]
+filesystem = ["data"]
+network = false
+env = []
