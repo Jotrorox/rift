@@ -332,7 +332,17 @@ pub fn update_tags<S: HasShared>(
     }
     let set = read(source, &packet.data)?;
     let set = convert(shared, direction, set);
-    cx.to_client(state, Packet::new(packet.id, write(target, &set)?));
+    let body = write(target, &set)?;
+    if state == State::Configuration && !version::has_configuration(target) {
+        // Before 1.20.2 tags arrive in play; the step that replaces the
+        // configuration phase decides when the client gets them.
+        let id = shared
+            .target_data(direction)
+            .expect_packet(State::Play, direction, "update_tags");
+        cx.to_client(State::Play, Packet::new(id, body));
+    } else {
+        cx.to_client(state, Packet::new(packet.id, body));
+    }
     Ok(())
 }
 
@@ -472,9 +482,10 @@ mod tests {
     fn corpus_tags_round_trip() {
         let mut checked = 0;
         for &(protocol, _) in crate::version::PROTOCOLS {
-            let Some(packets) = corpus(protocol) else {
-                continue;
-            };
+            let packets: Vec<_> = crate::codec::misc::sessions(protocol)
+                .into_iter()
+                .flatten()
+                .collect();
             for packet in packets
                 .iter()
                 .filter(|packet| packet.name(protocol) == "update_tags")

@@ -509,7 +509,7 @@ pub fn needed(source: i32, target: i32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codec::testing::{Defaults, corpus};
+    use crate::codec::testing::Defaults;
 
     fn argument(name: &str, parser: &str, properties: Properties) -> Node {
         Node {
@@ -693,9 +693,10 @@ mod tests {
         use crate::version::PROTOCOLS;
         let (mut checked, mut converted, mut fallbacks) = (0, 0, 0);
         for (index, &(protocol, _)) in PROTOCOLS.iter().enumerate() {
-            let Some(packets) = corpus(protocol) else {
-                continue;
-            };
+            let packets: Vec<_> = crate::codec::misc::sessions(protocol)
+                .into_iter()
+                .flatten()
+                .collect();
             for packet in packets
                 .iter()
                 .filter(|packet| packet.name(protocol) == "commands")

@@ -332,7 +332,6 @@ pub fn mount_needed(source: i32, target: i32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codec::testing::corpus;
 
     /// Titles copied as they are: the text codec's conversions are its own.
     fn raw_title(
@@ -469,9 +468,10 @@ mod tests {
         use crate::version::PROTOCOLS;
         let mut checked = 0;
         for (index, &(protocol, _)) in PROTOCOLS.iter().enumerate() {
-            let Some(packets) = corpus(protocol) else {
-                continue;
-            };
+            let packets: Vec<_> = crate::codec::misc::sessions(protocol)
+                .into_iter()
+                .flatten()
+                .collect();
             for packet in packets.iter().filter(|packet| {
                 matches!(packet.name(protocol), "open_screen" | "mount_screen_open")
             }) {

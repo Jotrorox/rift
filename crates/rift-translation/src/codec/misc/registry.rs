@@ -217,7 +217,8 @@ fn by_name(source: i32, target: i32, name: &str) -> &'static Mapping {
 }
 
 /// Whether IDs of `name` need no rewriting from `source` to `target`:
-/// both sides have it and number every shared entry the same.
+/// both sides have it and the receiver numbers every entry of the sender
+/// the same.
 pub fn unchanged(source: i32, target: i32, name: &str) -> bool {
     let (Some((source_kind, from)), Some((target_kind, _))) =
         (registry(source, name), registry(target, name))
@@ -232,7 +233,8 @@ pub fn unchanged(source: i32, target: i32, name: &str) -> bool {
     } else {
         by_name(source, target, strip(name))
     };
-    mapping.len() == from.len() && mapping.is_identity()
+    // Gaps in a legacy registry's numbering map nowhere; they are not changes.
+    from.names().all(|(id, _)| mapping.get(id) == Some(id))
 }
 
 #[cfg(test)]
