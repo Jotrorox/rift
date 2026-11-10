@@ -291,9 +291,9 @@ mod tests {
                 "{protocol}"
             );
         }
-        // 18 sections fit a VarInt mask before 1.17.
+        // Up to 18 sections fit a VarInt mask before 1.17.
         let mut light = sample();
-        light.sky.truncate(18);
+        light.sky.truncate(4); // Trailing absent sections are not sent.
         let update = LightUpdate { x: 1, z: 2, light };
         let bytes = update.write(735).unwrap();
         assert_eq!(LightUpdate::read(&bytes, 735).unwrap(), update);

@@ -617,9 +617,9 @@ fn read_modern(data: &[u8], protocol: i32, world: &World) -> io::Result<Chunk> {
         let kind = reader.varint()?;
         let nbt = Nbt::read(&mut reader, named(protocol))?;
         block_entities.push(BlockEntity {
-            x: x * 16 + i32::from(packed >> 4),
+            x: x.wrapping_mul(16) + i32::from(packed >> 4),
             y,
-            z: z * 16 + i32::from(packed & 15),
+            z: z.wrapping_mul(16) + i32::from(packed & 15),
             kind,
             nbt,
         });
@@ -717,4 +717,252 @@ pub fn heightmap_format(protocol: i32, sections: usize) -> (u8, Packing) {
         super::storage::ceil_log2(sections * 16 + 1),
         Packing::of(protocol),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codec::chunk::{
+        container::Format,
+        convert::{self, Plan, Scratch},
+    };
+
+    /// A column of `protocol` with a mix of palette kinds: an indirect
+    /// section, a direct one, an empty one and (before 1.18) a gap.
+    pub fn sample(protocol: i32) -> Chunk {
+        let mut scratch = Vec::new();
+        let format = Format::blocks(protocol);
+        let limit: i32 = if version::flattened(protocol) {
+            data::version(protocol).block_states.len()
+        } else {
+            4096
+        };
+        let count = if protocol >= 755 { 24 } else { 16 };
+        let min_section = if protocol >= 755 { -4 } else { 0 };
+        let mut sections = Vec::new();
+        for index in 0..count {
+            let values: Vec<i32> = match index % 4 {
+                0 => (0..4096).map(|entry| (entry % 7) * 16).collect(),
+                1 => (0..4096).map(|entry| (entry * 5) % limit).collect(),
+                2 if protocol < 757 => {
+                    sections.push(None);
+                    continue;
+                }
+                _ => vec![0; 4096],
+            };
+            let blocks = Container::from_values(&values, &format, &mut scratch);
+            let biomes = (protocol >= 757).then(|| {
+                let cells: Vec<i32> = (0..64).map(|cell| cell % (1 + index as i32 % 3)).collect();
+                Container::from_values(&cells, &Format::biomes(protocol, 6), &mut scratch)
+            });
+            let block_count = values.iter().filter(|value| **value != 0).count() as i16;
+            sections.push(Some(Section {
+                block_count: if protocol >= 477 { block_count } else { 0 },
+                fluid_count: 0,
+                blocks,
+                biomes,
+            }));
+        }
+        let biomes = match protocol {
+            ..573 => Biomes::Columns((0..256).map(|column| column % 40).collect()),
+            573..757 => Biomes::Cells((0..count * 64).map(|cell| (cell % 23) as i32).collect()),
+            _ => Biomes::Sections,
+        };
+        let (bits, packing) = heightmap_format(protocol, count);
+        let heights: Vec<u32> = (0..256).map(|column| column as u32 % 300).collect();
+        let mut packed = Vec::new();
+        super::super::storage::pack(&heights, bits, packing, &mut packed);
+        let heightmaps = if protocol >= 477 {
+            vec![Heightmap {
+                kind: 4,
+                data: packed.into_iter().map(|long| long as i64).collect(),
+            }]
+        } else {
+            Vec::new()
+        };
+        let mut tag = Compound::new();
+        tag.insert("Text1", "{\"text\":\"hi\"}");
+        let entity = if protocol >= 757 {
+            BlockEntity {
+                x: -31,
+                y: 60,
+                z: 17,
+                kind: data::version(protocol)
+                    .expect_registry("block_entity_type")
+                    .id("sign")
+                    .unwrap(),
+                nbt: Some(Nbt::Compound(tag)),
+            }
+        } else {
+            BlockEntity {
+                x: -31,
+                y: 60,
+                z: 17,
+                kind: -1,
+                nbt: Some(Nbt::Compound(convert::with_metadata(
+                    Some(Nbt::Compound(tag)),
+                    "sign",
+                    -31,
+                    60,
+                    17,
+                ))),
+            }
+        };
+        let light = (!(477..757).contains(&protocol)).then(|| {
+            let mut light = Light::default();
+            for (index, section) in std::iter::once(&None)
+                .chain(&sections)
+                .chain(std::iter::once(&None))
+                .enumerate()
+            {
+                let present = section.is_some();
+                light.block.push(if present || protocol >= 757 {
+                    LightArray::Data((0..ARRAY).map(|byte| (byte + index) as u8).collect())
+                } else {
+                    LightArray::Absent
+                });
+                light.sky.push(if present || protocol >= 757 {
+                    LightArray::filled(15)
+                } else {
+                    LightArray::Absent
+                });
+            }
+            light.trust_edges = Light::has_trust_edges(protocol);
+            light
+        });
+        Chunk {
+            x: -2,
+            z: 1,
+            full: true,
+            ignore_old_data: (735..751).contains(&protocol),
+            min_section,
+            sections,
+            sky_light: true,
+            biomes,
+            heightmaps,
+            block_entities: vec![entity],
+            light,
+        }
+    }
+
+    fn world(protocol: i32) -> World {
+        World {
+            sky_light: Some(true),
+            min_section: (protocol >= 755).then_some(-4),
+            biome_bits: None,
+        }
+    }
+
+    #[test]
+    fn synthetic_columns_round_trip_in_every_layout() {
+        for &(protocol, release) in crate::version::PROTOCOLS {
+            let chunk = sample(protocol);
+            let bytes = chunk
+                .write(protocol)
+                .unwrap_or_else(|error| panic!("{release}: {error}"));
+            let back = Chunk::read(&bytes, protocol, &world(protocol))
+                .unwrap_or_else(|error| panic!("{release}: {error}"));
+            assert_eq!(back, chunk, "{release}");
+            // Inferring sky light works too before 1.14.
+            if protocol < 477 {
+                let inferred = Chunk::read(&bytes, protocol, &World::default()).unwrap();
+                assert!(inferred.sky_light);
+                let mut dark = chunk.clone();
+                dark.sky_light = false;
+                let bytes = dark.write(protocol).unwrap();
+                assert!(
+                    !Chunk::read(&bytes, protocol, &World::default())
+                        .unwrap()
+                        .sky_light
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn synthetic_columns_convert_through_the_whole_chain() {
+        // Up from 1.13 to 26.3 and back down, checking each step parses.
+        let protocols: Vec<i32> = crate::version::PROTOCOLS
+            .iter()
+            .map(|(protocol, _)| *protocol)
+            .filter(|protocol| *protocol >= 393)
+            .collect();
+        let mut scratch = Scratch::default();
+        for direction in [false, true] {
+            let order: Vec<i32> = if direction {
+                protocols.iter().rev().copied().collect()
+            } else {
+                protocols.clone()
+            };
+            let mut chunk = sample(order[0]);
+            for pair in order.windows(2) {
+                let (source, target) = (pair[0], pair[1]);
+                let blocks = crate::mapping::try_mapping(source, target, "block_state");
+                let plan = Plan {
+                    source,
+                    target,
+                    blocks,
+                    block_fallback: 1,
+                    biomes: None,
+                    block_entity_types: crate::mapping::try_mapping(
+                        source,
+                        target,
+                        "block_entity_type",
+                    )
+                    .filter(|_| source >= 757 && target >= 757),
+                    world: World {
+                        sky_light: Some(true),
+                        min_section: None,
+                        biome_bits: None,
+                    },
+                };
+                convert::convert(&mut chunk, &plan, &mut scratch)
+                    .unwrap_or_else(|error| panic!("{source} -> {target}: {error}"));
+                if (477..757).contains(&target) {
+                    chunk.light = None; // The handler sends it on its own.
+                }
+                let bytes = chunk
+                    .write(target)
+                    .unwrap_or_else(|error| panic!("{source} -> {target}: {error}"));
+                let world = World {
+                    sky_light: Some(true),
+                    min_section: Some(chunk.min_section),
+                    biome_bits: None,
+                };
+                let back = Chunk::read(&bytes, target, &world)
+                    .unwrap_or_else(|error| panic!("{source} -> {target}: {error}"));
+                assert_eq!(back.write(target).unwrap(), bytes, "{source} -> {target}");
+                assert_eq!(back.block_entities.len(), 1, "{source} -> {target}");
+                chunk = back;
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_columns_fail_without_panicking() {
+        for protocol in [340, 404, 498, 578, 736, 754, 756, 757, 763, 770, 777] {
+            let bytes = sample(protocol).write(protocol).unwrap();
+            for cut in (0..bytes.len()).step_by(97).chain([bytes.len() - 1]) {
+                assert!(
+                    Chunk::read(&bytes[..cut], protocol, &world(protocol)).is_err(),
+                    "{protocol} cut at {cut}"
+                );
+            }
+            let mut extended = bytes.clone();
+            extended.push(0);
+            assert!(
+                Chunk::read(&extended, protocol, &world(protocol)).is_err(),
+                "{protocol} trailing byte"
+            );
+            // Flip bytes everywhere: errors are fine, panics are not.
+            for index in (0..bytes.len()).step_by(13) {
+                let mut corrupt = bytes.clone();
+                corrupt[index] ^= 0xa5;
+                let _ = Chunk::read(&corrupt, protocol, &world(protocol));
+            }
+        }
+        // A section count VarInt claiming a huge buffer.
+        let huge = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0xff, 0xff, 0xff, 0xff, 0x07];
+        assert!(Chunk::read(&huge, 340, &World::default()).is_err());
+    }
 }
