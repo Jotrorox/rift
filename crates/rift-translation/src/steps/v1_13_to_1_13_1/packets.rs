@@ -196,8 +196,8 @@ pub(super) fn edit_book<S: HasShared>(
     let shared = step.shared();
     let from_newer = shared.client >= NEWER;
     let mut rw = Rewriter::new(&packet.data);
-    // INTEGRATION: the item codec renumbers the book's item ID (1.13.1
-    // inserted five items before it) and converts its tag.
+    // The item codec renumbers the book's item ID (1.13.1 inserted five
+    // items before it) and converts its tag.
     item::transcode(shared, Direction::Serverbound, &mut rw)?;
     rw.bool()?; // Signing.
     if !from_newer {
@@ -258,8 +258,8 @@ pub(in crate::steps) fn custom_payload<S: HasShared>(
     rw.str()?; // Channel.
     rw.i32()?; // Window.
     for _ in 0..rw.u8()? {
-        // INTEGRATION: the item codec converts each stack (IDs from 1.13.1,
-        // the stack layout from 1.13.2).
+        // The item codec converts each stack (IDs from 1.13.1, the stack
+        // layout from 1.13.2).
         item::transcode(shared, Direction::Clientbound, &mut rw)?; // First cost.
         item::transcode(shared, Direction::Clientbound, &mut rw)?; // Result.
         if rw.bool()? {

@@ -1301,15 +1301,21 @@ fn malformed_packets_fail_without_panicking() {
             assert!(result.is_err(), "{name} accepted a trailing byte");
         }
     }
-    // Books carry an item stack, which only the item codec can read.
-    // INTEGRATION: expect an `edit_book` here once the item codec lands.
+    // Books carry an item stack, which the item codec converts: an empty
+    // one is -1 in both protocols.
     let mut step = Down::new();
-    let _ = send(
+    let out = send(
         &mut step,
         Direction::Serverbound,
         State::Play,
         "custom_payload",
         &payload("MC|BEdit", &[0xff, 0xff]),
+    )
+    .unwrap();
+    assert_eq!(out.len(), 1);
+    assert_eq!(
+        (out[0].name.as_str(), &out[0].data[..]),
+        ("edit_book", &[0xff, 0xff, 0][..])
     );
 }
 
@@ -1347,5 +1353,160 @@ fn translation_keys_1_12_lacks_become_its_keys_or_english_text() {
     assert_eq!(
         component.plain_text(),
         "[Server] tile.stone.stone.nameTube Coral"
+    );
+}
+
+fn block_update(x: i32, y: i32, z: i32, state: &str) -> Vec<u8> {
+    let mut body = Writer::new();
+    body.position_legacy(Position { x, y, z })
+        .varint(data::version(NEWER).block_states.parse(state).unwrap());
+    body.into_inner()
+}
+
+fn block_entity(x: i32, y: i32, z: i32, action: u8, tag: crate::nbt::Compound) -> Vec<u8> {
+    let mut body = Writer::new();
+    body.position_legacy(Position { x, y, z }).u8(action);
+    crate::nbt::Nbt::Compound(tag).write(&mut body, true);
+    body.into_inner()
+}
+
+/// The tag of a 1.12 `block_entity_data` with its action.
+fn block_entity_tag(out: &Out) -> (u8, crate::nbt::Compound) {
+    assert_eq!(out.name, "block_entity_data");
+    let mut reader = Reader::new(&out.data);
+    reader.position_legacy().unwrap();
+    let action = reader.u8().unwrap();
+    let tag = crate::nbt::Nbt::read(&mut reader, true).unwrap().unwrap();
+    reader.finish().unwrap();
+    (action, tag.as_compound().unwrap().clone())
+}
+
+#[test]
+fn placed_beds_banners_skulls_and_pots_get_their_block_entity_fields() {
+    use crate::nbt::{Compound, Nbt};
+    let mut step = Down::new();
+    let update = |step: &mut Down, x: i32, state: &str| {
+        send(
+            step,
+            Direction::Clientbound,
+            State::Play,
+            "block_update",
+            &block_update(x, 4, 3, state),
+        )
+        .unwrap()
+    };
+    type Case = (&'static str, u8, Vec<(&'static str, Nbt)>);
+    let cases: Vec<Case> = vec![
+        (
+            "lime_bed[facing=south,occupied=false,part=foot]",
+            11,
+            vec![("color", Nbt::Int(5))],
+        ),
+        ("red_banner[rotation=0]", 6, vec![("Base", Nbt::Int(1))]),
+        (
+            "wither_skeleton_skull[rotation=4]",
+            4,
+            vec![("SkullType", Nbt::Byte(1)), ("Rot", Nbt::Byte(4))],
+        ),
+        (
+            "potted_poppy",
+            5,
+            vec![
+                ("Item", Nbt::String("minecraft:red_flower".into())),
+                ("Data", Nbt::Int(0)),
+            ],
+        ),
+    ];
+    for (x, (state, action, fields)) in cases.iter().enumerate() {
+        let out = update(&mut step, x as i32, state);
+        assert_eq!(out.len(), 2, "{state}");
+        assert_eq!(out[0].name, "block_update");
+        let (sent, tag) = block_entity_tag(&out[1]);
+        assert_eq!(sent, *action, "{state}");
+        assert_eq!(tag.int("x"), Some(x as i32));
+        for (key, value) in fields.iter() {
+            assert_eq!(tag.get(key), Some(value), "{state} {key}");
+        }
+    }
+    // The backend's own data for the banner lacks the base colour and counts
+    // pattern colours from white: 15 is black, which 1.12 calls 0.
+    let mut pattern = Compound::new();
+    pattern.insert("Pattern", "cre");
+    pattern.insert("Color", 15);
+    let mut tag = Compound::new();
+    tag.insert("x", 1);
+    tag.insert("y", 4);
+    tag.insert("z", 3);
+    tag.insert("id", "minecraft:banner");
+    tag.insert("Patterns", Nbt::List(vec![Nbt::Compound(pattern)]));
+    let out = send(
+        &mut step,
+        Direction::Clientbound,
+        State::Play,
+        "block_entity_data",
+        &block_entity(1, 4, 3, 6, tag.clone()),
+    )
+    .unwrap();
+    assert_eq!(out.len(), 1);
+    let (_, sent) = block_entity_tag(&out[0]);
+    assert_eq!(sent.int("Base"), Some(1));
+    let patterns = sent.list("Patterns").unwrap();
+    assert_eq!(patterns[0].as_compound().unwrap().int("Color"), Some(0));
+    // Once the banner is gone its data is the backend's alone.
+    let out = update(&mut step, 1, "stone");
+    assert_eq!(out.len(), 1);
+    let out = send(
+        &mut step,
+        Direction::Clientbound,
+        State::Play,
+        "block_entity_data",
+        &block_entity(1, 4, 3, 6, tag),
+    )
+    .unwrap();
+    assert_eq!(block_entity_tag(&out[0]).1.get("Base"), None);
+}
+
+#[test]
+fn beds_and_pots_in_section_updates_get_their_block_entities() {
+    // A 1.13 `chunk_blocks_update` for column (8, 0) placing a lime bed at
+    // (141, 4, 3) and a potted fern at (142, 4, 3), as /setblock in one tick
+    // sends them.
+    let states = &data::version(NEWER).block_states;
+    let mut body = Writer::new();
+    body.i32(8).i32(0).varint(2);
+    body.u8(13 << 4 | 3).u8(4).varint(
+        states
+            .parse("lime_bed[facing=south,occupied=false,part=foot]")
+            .unwrap(),
+    );
+    body.u8(14 << 4 | 3)
+        .u8(4)
+        .varint(states.parse("potted_fern").unwrap());
+    let out = send(
+        &mut Down::new(),
+        Direction::Clientbound,
+        State::Play,
+        "chunk_blocks_update",
+        &body.buf,
+    )
+    .unwrap();
+    let names: Vec<&str> = out.iter().map(|out| out.name.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "chunk_blocks_update",
+            "block_entity_data",
+            "block_entity_data"
+        ]
+    );
+    let (action, bed) = block_entity_tag(&out[1]);
+    assert_eq!(
+        (action, bed.int("x"), bed.int("color")),
+        (11, Some(141), Some(5))
+    );
+    let (action, pot) = block_entity_tag(&out[2]);
+    assert_eq!(
+        (action, pot.str("Item"), pot.int("Data")),
+        (5, Some("minecraft:tallgrass"), Some(2))
     );
 }

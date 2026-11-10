@@ -61,7 +61,7 @@ pub fn registry(from: i32, to: i32, sent: &Registry) -> io::Result<Option<Regist
         entry
             .element
             .as_ref()
-            .is_none_or(|element| items_exist(&sent.name, to, element))
+            .is_none_or(|element| !names_unknown_item(&sent.name, to, element))
     });
     let mut registry = Registry {
         name: sent.name.clone(),
@@ -72,24 +72,6 @@ pub fn registry(from: i32, to: i32, sent: &Registry) -> io::Result<Option<Regist
         registry.renumber();
     }
     Ok(Some(registry))
-}
-
-/// Whether the items an element of `registry` names exist in `to`: the
-/// game decodes them as item references and fails on an unknown one, so an
-/// entry naming an item the receiver lacks (a 1.20 trim pattern whose
-/// template 1.19.4 has not got) cannot be sent.
-fn items_exist(registry: &str, to: i32, element: &Nbt) -> bool {
-    let field = match registry {
-        "trim_pattern" => "template_item",
-        "trim_material" => "ingredient",
-        _ => return true,
-    };
-    let Some(item) = element.as_compound().and_then(|element| element.str(field)) else {
-        return true;
-    };
-    crate::data::version(to)
-        .registry("item")
-        .is_none_or(|items| items.id(crate::data::strip(item)).is_some())
 }
 
 /// The receiver's vanilla registries that the sender's version does not
@@ -183,6 +165,26 @@ pub fn element_for(
         conform(registry, to, name, compound);
     }
     Ok(element)
+}
+
+/// Fields of registry elements that name an item, by registry.
+const ITEM_FIELDS: &[(&str, &str)] = &[
+    ("trim_material", "ingredient"),
+    ("trim_pattern", "template_item"),
+];
+
+/// Whether `element` names an item `protocol` lacks (the 1.21.4 resin trim
+/// for older clients): a client rejects the whole registry over one, so
+/// such entries are left out.
+fn names_unknown_item(registry: &str, protocol: i32, element: &Nbt) -> bool {
+    let Some(items) = crate::data::version(protocol).registry("item") else {
+        return false;
+    };
+    ITEM_FIELDS
+        .iter()
+        .filter(|(name, _)| *name == registry)
+        .filter_map(|(_, key)| element.as_compound()?.get(key)?.as_str())
+        .any(|item| items.id(crate::data::strip(item)).is_none())
 }
 
 /// Fields of a registry's elements as the vanilla entries of one protocol

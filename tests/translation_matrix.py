@@ -34,6 +34,8 @@ mandatory teleport and idle steps); --keep keeps the server directory;
 --trace passes --trace to the proxy (packet names on its stderr); --json FILE
 writes machine-readable results; --direct also runs the reference scenario
 with the "translated" client connected directly (validates the decoder).
+RIFT_VIA_PROPERTIES="key=value,..." overrides the fixtures' server.properties
+(for example enforce-secure-profile=true).
 
 Result levels: FAIL (a translation or schema problem: the cell fails), INFO
 (e.g. a registry name the client's version lacks arrived as a stand-in),

@@ -4,8 +4,17 @@
 //!
 //! Message signatures cannot survive any of the era's format changes, so the
 //! steps deliver translated player chat as decorated system chat and send
-//! backends unsigned messages; such backends need
-//! `enforce-secure-profile=false`.
+//! backends unsigned messages, and never forward a profile key (see
+//! [`super::login`]). What `enforce-secure-profile` then does, by backend:
+//!
+//! - 1.19 checks it at login whatever `online-mode` says (its default is
+//!   `false`): with `true` every translated client is refused, the client
+//!   seeing "invalid public key signature" and the server logging "Missing
+//!   profile public key".
+//! - 1.19.1 to 1.20.1 apply it only with `online-mode=true` (1.20.1 also
+//!   needs Mojang's services reachable). A backend behind a proxy runs in
+//!   offline mode, so the default `true` changes nothing: unsigned chat and
+//!   commands are accepted.
 use crate::{
     codec::{
         Shared,

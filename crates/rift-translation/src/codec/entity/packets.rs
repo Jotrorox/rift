@@ -456,10 +456,10 @@ pub(super) fn level_particles<S: HasShared>(
     let mut sent = read_level_particles(from, &packet.data)?;
     let particle = match std::mem::replace(&mut sent.particle, Sent::Legacy(0, Vec::new())) {
         Sent::Legacy(id, data) if to < 393 => Some(Sent::Legacy(id, data)),
-        Sent::Legacy(id, _) => {
+        Sent::Legacy(id, data) => {
             // 1.12 colours redstone dust with the offsets.
             let color = sent.offset;
-            let upgraded = particle::upgrade_legacy(id, color);
+            let upgraded = particle::upgrade_legacy(shared, direction, id, &data, color)?;
             if matches!(
                 upgraded,
                 Some(Particle {
@@ -473,13 +473,13 @@ pub(super) fn level_particles<S: HasShared>(
             upgraded.map(Sent::Modern)
         }
         Sent::Modern(particle) if to < 393 => {
-            particle::downgrade_legacy(&particle).map(|(id, color)| {
+            particle::downgrade_legacy(shared, direction, &particle)?.map(|(id, data, color)| {
                 if let Some(color) = color {
                     sent.offset = color;
                     sent.count = 0;
                     sent.speed = [1.0; 3];
                 }
-                Sent::Legacy(id, Vec::new())
+                Sent::Legacy(id, data)
             })
         }
         Sent::Modern(particle) => {

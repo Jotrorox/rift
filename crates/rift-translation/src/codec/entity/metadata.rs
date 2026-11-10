@@ -278,6 +278,15 @@ fn convert_value(
 ) -> io::Result<bool> {
     use Kind::*;
     let (from, to) = (shared.source(direction), shared.target(direction));
+    if target.key == "AbstractMinecart.DATA_ID_CUSTOM_DISPLAY_BLOCK"
+        && (target.from, target.to) == (Int, Int)
+        && !common::block_states_identity(from, to)
+    {
+        // A block state sent as a plain int until 1.21.5.
+        let state = rw.r.varint()?;
+        rw.w.varint(block_state(shared, direction, state));
+        return Ok(true);
+    }
     if target.from == target.to && unchanged(from, to, target.from) {
         copy_value(from, target.from, rw)?;
         return Ok(true);

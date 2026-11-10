@@ -765,9 +765,11 @@ fn chat_type(step: Boundary, element: &mut Compound) {
             }
             decoration
         };
-        let chat = decoration(element.remove("chat"));
+        let mut chat = decoration(element.remove("chat"));
         let mut narration = decoration(element.remove("narration"));
         narration.remove("style");
+        rename_parameter(&mut chat, "team_name", "target");
+        rename_parameter(&mut narration, "team_name", "target");
         element.0.clear();
         element.insert("chat", chat);
         element.insert("narration", narration);
@@ -777,6 +779,7 @@ fn chat_type(step: Boundary, element: &mut Compound) {
                 Some(Nbt::Compound(part)) => part,
                 _ => Compound::new(),
             };
+            rename_parameter(&mut decoration, "target", "team_name");
             if !decoration.contains("style") {
                 decoration.insert("style", Compound::new());
             }
@@ -792,6 +795,19 @@ fn chat_type(step: Boundary, element: &mut Compound) {
         element.0.clear();
         element.insert("chat", chat);
         element.insert("narration", narration);
+    }
+}
+
+/// Rename a chat decoration parameter: 1.19 calls the target of team and
+/// private messages `team_name`, 1.19.1 and later `target`, and each
+/// rejects the other's name.
+fn rename_parameter(decoration: &mut Compound, from: &str, to: &str) {
+    if let Some(Nbt::List(parameters)) = decoration.get_mut("parameters") {
+        for parameter in parameters {
+            if parameter.as_str() == Some(from) {
+                *parameter = Nbt::from(to);
+            }
+        }
     }
 }
 

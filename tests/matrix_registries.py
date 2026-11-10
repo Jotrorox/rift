@@ -93,6 +93,23 @@ def snake(name):
     return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
 
 
+# minecraft-data names spawn_entity object types of 1.13 descriptively
+# ("item_stack", "armorstand", "falling_objects") and gets two of 1.12's
+# wrong (73 and 75 are thrown potions and experience bottles, not eggs and
+# snowballs). These are the entity registry names vanilla uses for the
+# entity class each object ID spawns (1.12's EntityList, 1.13's
+# EntityType).
+OBJECT_NAMES_1_12 = {73: "potion", 75: "xp_bottle"}
+OBJECT_NAMES_1_13 = {
+    1: "boat", 2: "item", 3: "area_effect_cloud", 10: "minecart", 50: "tnt", 51: "end_crystal",
+    60: "arrow", 61: "snowball", 62: "egg", 63: "fireball", 64: "small_fireball", 65: "ender_pearl",
+    66: "wither_skull", 67: "shulker_bullet", 68: "llama_spit", 70: "falling_block", 71: "item_frame",
+    72: "eye_of_ender", 73: "potion", 75: "experience_bottle", 76: "firework_rocket", 77: "leash_knot",
+    78: "armor_stand", 79: "evoker_fangs", 90: "fishing_bobber", 91: "spectral_arrow",
+    93: "dragon_fireball", 94: "trident",
+}
+
+
 class Registries:
     """Names by ID for one protocol."""
 
@@ -149,6 +166,8 @@ class Registries:
         objects = [entry for entry in entities if entry.get("type") == "object"]
         if self.protocol < 477:
             self.objects = {entry["id"]: f"minecraft:{entry['name']}" for entry in objects}
+            fixes = OBJECT_NAMES_1_13 if self.protocol >= 393 else OBJECT_NAMES_1_12
+            self.objects.update({id: f"minecraft:{name}" for id, name in fixes.items()})
         effects = minecraft_data(version, "effects")
         # Packets carry these IDs as they are (1-based).
         self.names["mob_effect"] = _dense([(entry["id"], f"minecraft:{snake(entry['name'])}")
@@ -194,6 +213,34 @@ def _dense(pairs):
         if 0 <= index < size:
             names[index] = name
     return names
+
+
+RULES = Path(__file__).resolve().parents[1] / "crates" / "rift-translation" / "data" / "rules"
+
+
+def renamed(registry, name, source, target):
+    """What the protocol `target` calls the entry `source` calls `name`,
+    following the `renames` of the translation rules of every pair between
+    them (a name both versions have can mean different things: 1.13's
+    stone_slab is 1.14's smooth_stone_slab), or None when `target` has no
+    entry of that meaning (1.14's new stone_slab in 1.13)."""
+    if not name.startswith("minecraft:"):
+        return name  # Raw IDs and invalid markers.
+    registry = "block" if registry == "block_state" else registry
+    pairs = []
+    for path in RULES.glob("*-*.json"):
+        older, newer = map(int, path.stem.split("-"))
+        if min(source, target) <= older and newer <= max(source, target):
+            pairs.append((older, json.loads(path.read_text()).get(registry, {}).get("renames", {})))
+    short = name.removeprefix("minecraft:")
+    for _, renames in sorted(pairs, reverse=source > target):
+        if source > target:
+            renames = {new: old for old, new in renames.items()}
+        if short in renames:
+            short = renames[short]
+        elif short in renames.values():
+            return None
+    return f"minecraft:{short}"
 
 
 _cache = {}

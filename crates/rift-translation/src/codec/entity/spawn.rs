@@ -19,7 +19,6 @@ use crate::{
     codec::{HasShared, Shared},
     data,
     step::{Cx, RouteBuilder},
-    version,
     wire::{Position, Reader, Rewriter, Writer, invalid},
 };
 use std::io;
@@ -463,15 +462,6 @@ fn convert_data(shared: &Shared, direction: Direction, spawn: &Spawn, target: &s
                 horizontal_to_3d(spawn.data)
             } else {
                 facing_to_2d(spawn.data)
-            }
-        }
-        "falling_block" if version::flattened(from) != version::flattened(to) => {
-            // INTEGRATION: 1.12 numeric blocks need the legacy tables; stone
-            // stands in meanwhile.
-            if version::flattened(to) {
-                data::version(to).block_states.parse("stone").unwrap_or(1)
-            } else {
-                1
             }
         }
         "falling_block" => common::block_state(shared, direction, spawn.data),

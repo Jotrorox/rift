@@ -15,6 +15,7 @@
 //! the receiver lacks are named after the original and the original's ID is
 //! stashed the same way (`rift:766` in tags, `rift:765` in `custom_data`).
 mod down;
+mod persistent;
 mod tables;
 mod up;
 
@@ -64,6 +65,31 @@ pub(super) fn convert(
         bridge.down(item)?
     };
     Ok(())
+}
+
+/// Convert the stack of a `show_item` hover event across the bridge: the
+/// 1.20.4 tag and 1.20.5 persistent components (see `persistent`).
+/// `Ok(false)` when the item does not exist on the sender's side.
+pub(super) fn hover(
+    shared: &mut Shared,
+    direction: Direction,
+    id: &mut String,
+    count: &mut i32,
+    tag: &mut Option<Compound>,
+    components: &mut Option<Compound>,
+) -> io::Result<bool> {
+    let upward = shared.target(direction) == NEW;
+    let mut bridge = Bridge::new(shared, direction);
+    let converted = persistent::hover(&mut bridge, upward, id, count, tag, components)?;
+    // Nothing comes back from a hover: no stash. And a 1.20.4 hover holds
+    // the tag as given, without the `Damage` stacks always carry.
+    if let Some(tag) = tag {
+        tag.remove(&stash_key(NEW));
+        if tag.get("Damage").and_then(Nbt::as_i64) == Some(0) {
+            tag.remove("Damage");
+        }
+    }
+    Ok(converted)
 }
 
 /// One conversion across the bridge, in either direction.
@@ -139,6 +165,26 @@ impl<'a> Bridge<'a> {
         let mapped = self.shared.mapping(self.downward(), registry).get(id)?;
         let name = data::version(OLD).registry(registry)?.name(mapped)?;
         Some(format!("minecraft:{name}"))
+    }
+
+    /// The 1.20.5 name (without namespace) of the 1.20.5 entry `id`.
+    fn new_name(&mut self, registry: &'static str, id: i32) -> Option<String> {
+        if self.builtin(registry) {
+            return data::version(NEW)
+                .registry(registry)?
+                .name(id)
+                .map(str::to_owned);
+        }
+        registries::name_of(self.shared, self.new_side(), registry, id).map(str::to_owned)
+    }
+
+    /// The 1.20.5 ID of the 1.20.5 entry `name`.
+    fn new_id_by_name(&mut self, registry: &'static str, name: &str) -> Option<i32> {
+        let name = data::strip(name);
+        if self.builtin(registry) {
+            return data::version(NEW).registry(registry)?.id(name);
+        }
+        registries::id_of(self.shared, self.new_side(), registry, name)
     }
 
     fn builtin(&self, registry: &str) -> bool {
@@ -406,6 +452,102 @@ impl<'a> Bridge<'a> {
             nbt.insert("tag", tag);
         }
         Ok(Some(nbt))
+    }
+}
+
+/// Keys of entity and block entity data that hold item stacks, which both
+/// versions store in their own item NBT format (vanilla's fixer converts
+/// them along with the stack holding the data).
+const NESTED_STACKS: &[&str] = &[
+    "HandItems",
+    "ArmorItems",
+    "Item",
+    "SaddleItem",
+    "ArmorItem",
+    "DecorItem",
+    "Inventory",
+    "RecordItem",
+    "Book",
+    "item",
+    "Items",
+    "Trident",
+    "body_armor_item",
+];
+
+impl Bridge<'_> {
+    /// Convert the item stacks inside entity or block entity data, in the
+    /// item NBT of the direction's target: `{id, Count, tag}` in 1.20.4,
+    /// `{id, count, components}` in 1.20.5. Other keys stay as they are.
+    fn nested_stacks(&mut self, data: &mut Compound, upward: bool) -> io::Result<()> {
+        for (key, value) in data.0.iter_mut() {
+            if !NESTED_STACKS.contains(&key.as_str()) {
+                continue;
+            }
+            match value {
+                Nbt::Compound(stack) => self.nested_stack(stack, upward)?,
+                Nbt::List(stacks) => {
+                    for stack in stacks.iter_mut() {
+                        if let Nbt::Compound(stack) = stack {
+                            self.nested_stack(stack, upward)?;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// One stack of [`Self::nested_stacks`]; an empty compound (an empty
+    /// slot) or a stack of an unknown item stays as it is.
+    fn nested_stack(&mut self, stack: &mut Compound, upward: bool) -> io::Result<()> {
+        if !stack.contains("id") {
+            return Ok(());
+        }
+        let converted = if upward {
+            self.nbt_stack_up(stack)?.map(|stack| {
+                let mut nbt = Compound::new();
+                nbt.insert(
+                    "id",
+                    format!("minecraft:{}", item_name(NEW, stack.id).unwrap_or("air")),
+                );
+                nbt.insert("count", Nbt::Int(stack.count));
+                if let Some(patch) = stack.components.as_ref().filter(|patch| !patch.is_empty()) {
+                    nbt.insert("components", persistent::encode(self, patch));
+                }
+                nbt
+            })
+        } else {
+            let Some(id) = stack
+                .str("id")
+                .and_then(|name| item_id(NEW, data::strip(name)))
+            else {
+                return Ok(());
+            };
+            let components = match stack.compound("components") {
+                Some(components) => persistent::decode(self, components),
+                None => Components::default(),
+            };
+            let item = ItemStack {
+                id,
+                count: stack.int("count").unwrap_or(1),
+                damage: 0,
+                tag: None,
+                components: Some(components),
+            };
+            self.nbt_stack_down(&item)?
+        };
+        let Some(mut converted) = converted else {
+            return Ok(());
+        };
+        // Keys around the stack (a slot) stay.
+        for (key, value) in stack.iter() {
+            if !matches!(key, "id" | "Count" | "count" | "tag" | "components") {
+                converted.insert(key, value.clone());
+            }
+        }
+        *stack = converted;
+        Ok(())
     }
 }
 

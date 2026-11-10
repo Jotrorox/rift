@@ -54,12 +54,11 @@ fn tags_change(low: i32, high: i32) -> bool {
     )
 }
 
-/// INTEGRATION: the component codec should say which pairs change
-/// component layouts or IDs; until it does, a pair is assumed to when its
-/// component type registries differ or its items do.
+/// Whether the component codec has anything to convert between the pair:
+/// component types, layouts or built-in registry IDs (`identical`); text
+/// and synchronised registries inside are judged with the stacks' items.
 fn components_change(source: i32, target: i32) -> bool {
-    version::item_components(source.min(target))
-        && registry_changes(source, target, "data_component_type")
+    version::item_components(source.min(target)) && !super::components::identical(source, target)
 }
 
 /// Whether stacks sent from `source` to `target` need converting.

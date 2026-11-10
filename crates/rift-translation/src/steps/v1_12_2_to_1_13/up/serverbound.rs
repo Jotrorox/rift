@@ -55,8 +55,6 @@ fn name(names: &'static [&'static str], index: i32) -> io::Result<&'static str> 
 /// Book and quill contents: the stack and whether it is being signed.
 fn edit_book(step: &mut Up, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
     let mut rw = Rewriter::new(&packet.data);
-    // INTEGRATION: the item codec converts 1.13 stacks to 1.12 ones; a stub
-    // that fails until it lands.
     item::transcode(&mut step.shared, Direction::Serverbound, &mut rw)?;
     let signing = rw.r.bool()?;
     let stack = rw.finish()?;

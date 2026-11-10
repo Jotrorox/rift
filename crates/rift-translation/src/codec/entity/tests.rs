@@ -556,22 +556,115 @@ fn unhex(text: &str) -> Vec<u8> {
 
 #[test]
 fn particle_names_cross_1_13() {
+    let mut up = Shared::new(393, 340);
     let reddust = data::version(340)
         .expect_registry("particle_type")
         .id("reddust")
         .unwrap();
-    let dust = particle::upgrade_legacy(reddust, [1.0, 0.0, 0.5]).unwrap();
+    let dust = particle::upgrade_legacy(
+        &mut up,
+        Direction::Clientbound,
+        reddust,
+        &[],
+        [1.0, 0.0, 0.5],
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(
         data::version(393)
             .expect_registry("particle_type")
             .name(dust.id),
         Some("dust")
     );
+    let mut down = Shared::new(340, 393);
     assert_eq!(
-        particle::downgrade_legacy(&dust),
-        Some((reddust, Some([1.0, 0.0, 0.5])))
+        particle::downgrade_legacy(&mut down, Direction::Clientbound, &dust).unwrap(),
+        Some((reddust, Vec::new(), Some([1.0, 0.0, 0.5])))
     );
-    let _ = unhex("00");
+}
+
+/// A 1.12 `level_particles` as `/particle <name> 130.5 5.5 2.5 0 0 0 0 1
+/// force @a <data>` sends it, with the particle's int data.
+fn legacy_particles(name: &str, data: &[i32]) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.i32(
+        data::version(340)
+            .expect_registry("particle_type")
+            .id(name)
+            .unwrap(),
+    )
+    .bool(true)
+    .f32(130.5)
+    .f32(5.5)
+    .f32(2.5)
+    .f32(0.0)
+    .f32(0.0)
+    .f32(0.0)
+    .f32(0.0)
+    .i32(1);
+    for value in data {
+        w.varint(*value);
+    }
+    w.buf
+}
+
+#[test]
+fn block_and_item_particles_cross_the_flattening() {
+    let flat = data::version(393);
+    let stone = flat.block_states.parse("stone").unwrap();
+    let granite = flat.block_states.parse("granite").unwrap();
+    let diamond = flat.expect_registry("item").id("diamond").unwrap();
+    let cases: &[(&str, &[i32], &str)] = &[
+        // Stone, and granite (stone with metadata 1).
+        ("blockcrack", &[1], "block"),
+        ("blockdust", &[1 | 1 << 12], "block"),
+        ("fallingdust", &[1 | 1 << 12], "falling_dust"),
+        ("iconcrack", &[264, 0], "item"),
+    ];
+    for (name, legacy, modern) in cases {
+        let mut up = Defaults::new(393, 340);
+        let out = up
+            .clientbound(
+                Phase::Play,
+                "level_particles",
+                &legacy_particles(name, legacy),
+            )
+            .unwrap();
+        assert_eq!(names(&out), ["level_particles"], "{name}");
+        let mut r = Reader::new(&out[0].data);
+        let id = r.i32().unwrap();
+        assert_eq!(
+            flat.expect_registry("particle_type").name(id),
+            Some(*modern),
+            "{name}"
+        );
+        // Long distance, position, offset, speed and count.
+        r.take(1 + 4 * 7 + 4).unwrap();
+        let options = particle::read_options(393, id, &mut r).unwrap();
+        r.finish().unwrap();
+        let expected = match *modern {
+            "item" => {
+                let mut w = Writer::new();
+                w.i16(diamond as i16).u8(1).u8(0);
+                particle::Options::Item(w.buf)
+            }
+            _ if legacy[0] == 1 => particle::Options::Block(stone),
+            _ => particle::Options::Block(granite),
+        };
+        assert_eq!(options, expected, "{name}");
+
+        let mut down = Defaults::new(340, 393);
+        let back = down
+            .clientbound(Phase::Play, "level_particles", &out[0].data)
+            .unwrap();
+        // 1.13 has one block particle where 1.12 had two.
+        let name = if *name == "blockdust" {
+            "blockcrack"
+        } else {
+            name
+        };
+        assert_eq!(back[0].data, legacy_particles(name, legacy), "{name}");
+    }
 }
 
 // Boundaries, with hand-made and recorded packets, so that they are covered
@@ -618,6 +711,140 @@ fn custom_names_become_components_in_1_13() {
         .clientbound(Phase::Play, "set_entity_data", &expected.buf)
         .unwrap();
     assert_eq!(back[0].data, body.buf);
+}
+
+#[test]
+fn carried_blocks_cross_the_flattening() {
+    // A 1.12 enderman (entity 5) spawned without data, then carrying granite
+    // (stone, metadata 1: `id | metadata << 12` in entity data).
+    let mut spawn = Writer::new();
+    spawn
+        .varint(5)
+        .uuid(1)
+        .varint(
+            data::version(340)
+                .expect_registry("entity_type")
+                .id("enderman")
+                .unwrap(),
+        )
+        .f64(0.0)
+        .f64(4.0)
+        .f64(0.0)
+        .u8(0)
+        .u8(0)
+        .u8(0)
+        .i16(0)
+        .i16(0)
+        .i16(0)
+        .u8(0xff);
+    let mut carried = Writer::new();
+    carried
+        .varint(5)
+        .u8(12)
+        .varint(12)
+        .varint(1 | 1 << 12)
+        .u8(0xff);
+    let mut up = Defaults::new(393, 340);
+    up.clientbound(Phase::Play, "add_mob", &spawn.buf).unwrap();
+    let out = up
+        .clientbound(Phase::Play, "set_entity_data", &carried.buf)
+        .unwrap();
+    let granite = data::version(393).block_states.parse("granite").unwrap();
+    let mut expected = Writer::new();
+    expected
+        .varint(5)
+        .u8(12)
+        .varint(13)
+        .varint(granite)
+        .u8(0xff);
+    assert_eq!(out[0].data, expected.buf);
+
+    let mut down = Defaults::new(340, 393);
+    let spawned = Defaults::new(393, 340)
+        .clientbound(Phase::Play, "add_mob", &spawn.buf)
+        .unwrap();
+    down.clientbound(Phase::Play, "add_mob", &spawned[0].data)
+        .unwrap();
+    let back = down
+        .clientbound(Phase::Play, "set_entity_data", &out[0].data)
+        .unwrap();
+    assert_eq!(back[0].data, carried.buf);
+}
+
+#[test]
+fn minecart_display_blocks_cross_the_flattening() {
+    // A 1.12 minecart (object 10, data 0: rideable) showing granite.
+    let mut spawn = Writer::new();
+    spawn
+        .varint(6)
+        .uuid(2)
+        .u8(10)
+        .f64(0.0)
+        .f64(4.0)
+        .f64(0.0)
+        .u8(0)
+        .u8(0)
+        .i32(0)
+        .i16(0)
+        .i16(0)
+        .i16(0);
+    let mut display = Writer::new();
+    display
+        .varint(6)
+        .u8(9)
+        .varint(1)
+        .varint(1 | 1 << 12)
+        .u8(0xff);
+    let mut up = Defaults::new(393, 340);
+    let spawned = up
+        .clientbound(Phase::Play, "add_entity", &spawn.buf)
+        .unwrap();
+    let out = up
+        .clientbound(Phase::Play, "set_entity_data", &display.buf)
+        .unwrap();
+    let granite = data::version(393).block_states.parse("granite").unwrap();
+    let mut expected = Writer::new();
+    expected.varint(6).u8(9).varint(1).varint(granite).u8(0xff);
+    assert_eq!(out[0].data, expected.buf);
+
+    let mut down = Defaults::new(340, 393);
+    down.clientbound(Phase::Play, "add_entity", &spawned[0].data)
+        .unwrap();
+    let back = down
+        .clientbound(Phase::Play, "set_entity_data", &out[0].data)
+        .unwrap();
+    assert_eq!(back[0].data, display.buf);
+}
+
+#[test]
+fn falling_blocks_keep_their_block_across_the_flattening() {
+    // 1.12 spawns falling granite as object 70 with `id | metadata << 12`.
+    let spawn = |data: i32| {
+        let mut spawn = Writer::new();
+        spawn
+            .varint(7)
+            .uuid(3)
+            .u8(70)
+            .f64(0.0)
+            .f64(4.0)
+            .f64(0.0)
+            .u8(0)
+            .u8(0)
+            .i32(data)
+            .i16(0)
+            .i16(0)
+            .i16(0);
+        spawn.buf
+    };
+    let granite = data::version(393).block_states.parse("granite").unwrap();
+    let out = Defaults::new(393, 340)
+        .clientbound(Phase::Play, "add_entity", &spawn(1 | 1 << 12))
+        .unwrap();
+    assert_eq!(out[0].data, spawn(granite));
+    let back = Defaults::new(340, 393)
+        .clientbound(Phase::Play, "add_entity", &out[0].data)
+        .unwrap();
+    assert_eq!(back[0].data, spawn(1 | 1 << 12));
 }
 
 #[test]
