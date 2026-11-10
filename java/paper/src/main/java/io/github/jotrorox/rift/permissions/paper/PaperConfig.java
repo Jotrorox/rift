@@ -3,10 +3,18 @@ package io.github.jotrorox.rift.permissions.paper;
 import io.github.jotrorox.rift.permissions.client.OfflinePolicy;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.Objects;
+import java.util.function.Function;
 import org.bukkit.configuration.ConfigurationSection;
 
 /**
  * {@code plugins/RiftPerms/config.yml}.
+ *
+ * <p>On a server Rift manages with a {@code messaging} block, {@code server}, {@code group} and the
+ * {@code bus} settings may be left out: they fall back to {@code RIFT_SERVER_NAME}, {@code
+ * RIFT_SERVER_GROUP}, {@code RIFT_BUS_ADDRESS}, {@code RIFT_BUS_SERVER_NAME}, {@code RIFT_BUS_CERT}
+ * and the token in {@code RIFT_BUS_TOKEN}, which Rift sets for each instance, so one template
+ * configuration serves a whole group.
  *
  * @param server this backend's name, the {@code server} context
  * @param group this backend's service group, the {@code group} context; null outside a group
@@ -41,7 +49,17 @@ record PaperConfig(
      * @throws IllegalArgumentException for a missing or malformed setting
      */
     static PaperConfig load(ConfigurationSection config, Path folder) {
-        String address = require(config, "bus.address");
+        return load(config, folder, System::getenv);
+    }
+
+    /**
+     * @param config the loaded configuration
+     * @param folder the plugin's data folder, which relative paths resolve against
+     * @param variables an environment variable's value, or null
+     * @throws IllegalArgumentException for a missing or malformed setting
+     */
+    static PaperConfig load(ConfigurationSection config, Path folder, Function<String, String> variables) {
+        String address = setting(config, "bus.address", variables, "RIFT_BUS_ADDRESS");
         int colon = address.lastIndexOf(':');
         if (colon <= 0) {
             throw new IllegalArgumentException("bus.address must be host:port, got \"" + address + "\"");
@@ -59,14 +77,20 @@ record PaperConfig(
             case "fallback_file" -> OfflinePolicy.fallbackFile(folder.resolve(config.getString("fallback_file", "fallback.json")));
             default -> throw new IllegalArgumentException("offline_policy must be deny, last_snapshot or fallback_file");
         };
+        String serverName = optional(config, "bus.server_name");
+        if (serverName == null) {
+            serverName = Objects.requireNonNullElse(variable(variables, "RIFT_BUS_SERVER_NAME"), host);
+        }
+        String group = optional(config, "group");
+        String tokenEnv = optional(config, "bus.token_env");
         return new PaperConfig(
-                require(config, "server"),
-                optional(config, "group"),
+                setting(config, "server", variables, "RIFT_SERVER_NAME"),
+                group != null ? group : variable(variables, "RIFT_SERVER_GROUP"),
                 host,
                 port,
-                config.getString("bus.server_name", host),
-                folder.resolve(require(config, "bus.certificate")),
-                require(config, "bus.token_env"),
+                serverName,
+                folder.resolve(setting(config, "bus.certificate", variables, "RIFT_BUS_CERT")),
+                tokenEnv != null ? tokenEnv : "RIFT_BUS_TOKEN",
                 Duration.ofMillis(config.getLong("join_timeout_ms", 2000)),
                 Duration.ofMillis(config.getLong("request_timeout_ms", 5000)),
                 policy,
@@ -74,16 +98,27 @@ record PaperConfig(
                 config.getBoolean("placeholders", true));
     }
 
-    private static String optional(ConfigurationSection config, String path) {
-        String value = config.getString(path);
+    /** The setting, or the variable Rift sets for managed servers when the setting is absent. */
+    private static String setting(
+            ConfigurationSection config, String path, Function<String, String> variables, String variable) {
+        String value = optional(config, path);
+        if (value == null) {
+            value = variable(variables, variable);
+        }
+        if (value == null) {
+            throw new IllegalArgumentException(path + " is required in config.yml (or " + variable
+                    + ", which Rift sets for managed servers with a messaging block)");
+        }
+        return value;
+    }
+
+    private static String variable(Function<String, String> variables, String name) {
+        String value = variables.apply(name);
         return value == null || value.isBlank() ? null : value;
     }
 
-    private static String require(ConfigurationSection config, String path) {
+    private static String optional(ConfigurationSection config, String path) {
         String value = config.getString(path);
-        if (value == null || value.isBlank()) {
-            throw new IllegalArgumentException(path + " is required in config.yml");
-        }
-        return value;
+        return value == null || value.isBlank() ? null : value;
     }
 }

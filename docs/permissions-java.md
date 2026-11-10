@@ -376,6 +376,24 @@ Tab completion offers online players, the group table and registered
 permissions. On enable, RiftPerms sends every plugin's `plugin.yml`
 permissions to the proxy for the dashboard and tab completion.
 
+### One configuration for every instance
+
+When the server is an instance of a group (or a managed server) whose
+definition has a `messaging` block, Rift gives it its own bus login and sets
+`RIFT_SERVER_NAME`, `RIFT_SERVER_GROUP` and the `RIFT_BUS_*` variables (see
+[bus logins for instances](managed-servers.md#bus-logins-for-instances)).
+RiftPerms falls back to them for every setting the file leaves out, so the
+group's template can ship this `config.yml` for all instances:
+
+```yaml
+offline_policy: last_snapshot
+```
+
+`server` comes from `RIFT_SERVER_NAME`, `group` from `RIFT_SERVER_GROUP`,
+`bus.address`, `bus.server_name` and `bus.certificate` from `RIFT_BUS_ADDRESS`,
+`RIFT_BUS_SERVER_NAME` and `RIFT_BUS_CERT`, and the token from
+`RIFT_BUS_TOKEN` when `bus.token_env` is unset. Settings in the file win.
+
 ## Standalone Java services
 
 A lobby bot or a web service can follow permissions without Bukkit:
@@ -400,7 +418,10 @@ and `playerLeft` mirror the Rust client's `join` and `leave`; `register`,
 `reportContexts`, `command` and `fetchGroup` cover the rest of the protocol,
 and `isAvailable` tells whether the proxy answered `hello`. `rift-messaging` alone is a
 general client for the bus: `publish`, `request`, `subscribe` (re-established
-after every reconnect) and a pipelined `Publisher`.
+after every reconnect) and a pipelined `Publisher`. On a managed server with a
+bus login, `MessagingClient.builder().fromEnvironment().build()` takes the
+address, certificate name, certificate and token from Rift's `RIFT_BUS_*`
+variables and names the first missing one otherwise.
 
 ## What a LuckPerms user loses
 
