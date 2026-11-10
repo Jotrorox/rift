@@ -150,7 +150,7 @@ rift.on("route", function(connection)
     end
 end)
 
--- Requires online authentication, Velocity forwarding and a permission grant.
+-- Requires online authentication, forwarding and a permission grant.
 rift.config.extensions = {
     api_version = 2,
     groups = { default = { permissions = { ["greeting.hello"] = true } } },

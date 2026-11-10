@@ -97,6 +97,21 @@ Restart Paper after changing these settings. Rift verifies accounts with Mojang,
 handles client encryption, and forwards player identities to Paper. Failed
 verification never falls back to offline authentication.
 
+Online mode works on every supported version, 1.8.9 through 26.3. Velocity
+forwarding needs 1.13 or newer backends, so a network with older versions uses
+BungeeCord forwarding instead, which every Spigot derivative reads:
+
+```lua
+rift.config.forwarding = { mode = "bungeeguard", secret_env = "RIFT_FORWARDING_SECRET" }
+```
+
+Set `settings.bungeecord: true` in each backend's `spigot.yml` and install the
+[BungeeGuard](https://github.com/lucko/BungeeGuard) plugin with the same token
+in `allowed-tokens`. `mode = "bungeecord"` sends the same data without a token;
+anyone who can reach such a backend can join as any player, so use it only
+when backends accept connections from Rift alone. With `velocity`, clients
+older than 1.13 are turned away at login.
+
 ## Routing and configuration
 
 Write an ordinary Lua script using `rift.config`; no outer return table is needed:
@@ -183,8 +198,7 @@ and [Go](docs/plugins-go.md). [`examples/plugins`](examples/plugins) has the sam
 plugin in all four languages, and [`examples/extensions.lua`](examples/extensions.lua)
 a survival queue and staff-only server in `rift.lua`. `rift admin plugins`, the
 dashboard and Prometheus metrics show each plugin's state, restarts and log.
-Player hooks require online authentication and Java 1.19.3–26.3 (the online
-authentication range).
+Player hooks require online authentication.
 
 ## Compatibility
 
@@ -206,10 +220,10 @@ Backends can run a different version than their players: Rift translates between
 backends of different versions. Declare a backend's version with
 `config.backends.survival = { address = "127.0.0.1:25567", version = "1.21.6" }`.
 Other pairs still need matching versions. See [protocol translation](docs/translation.md).
-Online authentication, Velocity modern forwarding and
-plugin player hooks require **1.19.3 or newer**; earlier versions use offline
-backends with forwarding disabled. Bedrock/UDP, unlisted snapshots and legacy
-pre-1.7 pings are unsupported.
+Online authentication and plugin player hooks work on every listed version.
+Velocity modern forwarding needs **1.13 or newer**; BungeeCord and BungeeGuard
+forwarding cover all of them (see [Authentication](#authentication)).
+Bedrock/UDP, unlisted snapshots and legacy pre-1.7 pings are unsupported.
 
 Set `rift.config.network = { bungeecord = true }` for existing backend plugins to
 request transfers, query players/servers, forward plugin messages between servers,

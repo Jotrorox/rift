@@ -15,7 +15,8 @@ recurring jobs, permission groups and optional HTTP permission refresh.
 It uses the existing Paper/Velocity forwarding setup in
 [`examples/online.lua`](../examples/online.lua). Run `rift --check
 examples/extensions.lua`, then start with `RIFT_FORWARDING_SECRET` set. Clients
-must use Java 1.19.3–26.3, which supports both switching and online authentication.
+may use any supported version, 1.8.9–26.3; Velocity forwarding needs 1.13 or
+newer, so use BungeeGuard forwarding for older ones (see the README).
 
 Set `rift.config.plugins = { api_version = 3, ... }` for the current API
 (`api_version = 2` is the same without `rift.permissions`, and `api_version = 1`

@@ -586,22 +586,67 @@ pub struct PlayerIdentity {
     pub uuid: Option<[u8; 16]>,
 }
 
+/// The chat signing key a 1.19–1.19.2 client sends in Login Start: its
+/// expiry in epoch milliseconds, an X.509 RSA public key and Mojang's
+/// signature over them. Rift checks only that the client holds the private
+/// key; backends that enforce secure profiles check Mojang's signature.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ProfileKey {
+    pub expiry: i64,
+    pub public_key: Vec<u8>,
+    pub signature: Vec<u8>,
+}
+
+impl ProfileKey {
+    pub(crate) fn write(&self, data: &mut Vec<u8>) {
+        data.extend_from_slice(&self.expiry.to_be_bytes());
+        for bytes in [&self.public_key, &self.signature] {
+            write_varint(bytes.len() as i32, data);
+            data.extend_from_slice(bytes);
+        }
+    }
+}
+
 pub(crate) fn start_identity(
     version: ProtocolVersion,
     packet: &Packet,
 ) -> io::Result<PlayerIdentity> {
+    start(version, packet).map(|(identity, _)| identity)
+}
+
+/// The profile key of a 1.19–1.19.2 Login Start, if the client sent one.
+pub(crate) fn start_profile_key(
+    version: ProtocolVersion,
+    packet: &Packet,
+) -> io::Result<Option<ProfileKey>> {
+    start(version, packet).map(|(_, key)| key)
+}
+
+fn start(
+    version: ProtocolVersion,
+    packet: &Packet,
+) -> io::Result<(PlayerIdentity, Option<ProfileKey>)> {
     let mut bytes = packet.data.as_slice();
     let name = read_string(&mut bytes, 16)?.to_owned();
-    if matches!(version.number(), 759..=760) && boolean(&mut bytes)? {
-        take(&mut bytes, 8)?; // Expiry of the client's optional profile key.
-        for _ in 0..2 {
+    let key = if matches!(version.number(), 759..=760) && boolean(&mut bytes)? {
+        let expiry = i64::from_be_bytes(take(&mut bytes, 8)?.try_into().unwrap());
+        let mut field = || -> io::Result<Vec<u8>> {
             let length = read_varint(&mut bytes)?;
             if !(0..=8192).contains(&length) {
                 return Err(invalid("invalid profile key length"));
             }
-            take(&mut bytes, length as usize)?;
-        }
-    }
+            Ok(take(&mut bytes, length as usize)?.to_vec())
+        };
+        let public_key = field()?;
+        let signature = field()?;
+        Some(ProfileKey {
+            expiry,
+            public_key,
+            signature,
+        })
+    } else {
+        None
+    };
     let uuid = if version.number() >= 764 || (version.number() >= 760 && boolean(&mut bytes)?) {
         Some(take(&mut bytes, 16)?.try_into().unwrap())
     } else {
@@ -610,7 +655,7 @@ pub(crate) fn start_identity(
     if name.is_empty() || !bytes.is_empty() {
         return Err(invalid("invalid login identity"));
     }
-    Ok(PlayerIdentity { name, uuid })
+    Ok((PlayerIdentity { name, uuid }, key))
 }
 
 pub(crate) fn success_identity(

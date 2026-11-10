@@ -96,11 +96,14 @@ Pumpkin then takes the player's UUID, name, skin properties and address from
 the proxy, and ignores `[networking.java] online_mode` and `encryption` for
 logins (Rift has already verified the account). Direct connections that
 bypass the proxy are kicked, as they cannot sign the forwarded data. Vine
-takes precedence over Velocity in Pumpkin's login and Rift does not speak it;
-BungeeCord forwarding is not sent by Rift, so Pumpkin would fall back to its
-own UUIDs.
+takes precedence over Velocity in Pumpkin's login and Rift does not speak it.
 
-Without Velocity forwarding Pumpkin derives an offline UUID from the name
+Pumpkin also reads BungeeCord forwarding: enable
+`[networking.proxy.bungeecord]` instead and set Rift's `forwarding.mode =
+"bungeecord"`. BungeeCord forwarding is unsigned, so Pumpkin must then accept
+connections from Rift alone; prefer Velocity.
+
+Without forwarding Pumpkin derives an offline UUID from the name
 (the first 16 bytes of its SHA-256, not vanilla's `OfflinePlayer:` MD5 that an
 offline-mode Rift uses), so the pushed snapshot goes unused and each login
 waits to fetch one (up to `join_timeout_ms`). Permissions still work, keyed by

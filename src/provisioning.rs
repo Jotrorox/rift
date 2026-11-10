@@ -137,15 +137,25 @@ pub fn provision_planned(config: &Config, name: &str, plan: &Plan) -> io::Result
         ));
     }
     let forwarding = match (&template.software, &config.forwarding) {
-        (Some(software), Some(forwarding)) if software.kind.paper_family() => Some((
-            std::env::var(&forwarding.secret_env).map_err(|_| {
-                invalid(format!(
-                    "set {} so new instances can be configured for Velocity forwarding",
-                    forwarding.secret_env
-                ))
-            })?,
-            config.authentication.online_mode,
-        )),
+        (Some(software), Some(forwarding)) if software.kind.paper_family() => {
+            let secret = forwarding
+                .secret_env
+                .as_ref()
+                .map(|variable| {
+                    std::env::var(variable).map_err(|_| {
+                        invalid(format!(
+                            "set {variable} so new instances can be configured for {} forwarding",
+                            forwarding.mode.as_str()
+                        ))
+                    })
+                })
+                .transpose()?;
+            Some(InstanceForwarding::new(
+                forwarding.mode,
+                secret,
+                config.authentication.online_mode,
+            )?)
+        }
         _ => None,
     };
     let assets = Assets {
@@ -191,9 +201,38 @@ pub(crate) struct Assets {
     pub plugins: Vec<PathBuf>,
     pub map: Option<PathBuf>,
     pub accept_eula: bool,
-    /// Velocity secret and whether players are authenticated online.
-    pub forwarding: Option<(String, bool)>,
+    pub forwarding: Option<InstanceForwarding>,
     pub properties: Vec<Property>,
+}
+
+/// How a new Paper-family instance accepts Rift's player forwarding.
+#[derive(Debug, Clone)]
+pub(crate) enum InstanceForwarding {
+    /// The secret, and whether players are authenticated online.
+    Velocity(String, bool),
+    BungeeCord,
+    /// The token the BungeeGuard plugin accepts.
+    BungeeGuard(String),
+}
+
+impl InstanceForwarding {
+    pub(crate) fn new(
+        mode: crate::config::ForwardingMode,
+        secret: Option<String>,
+        online_mode: bool,
+    ) -> io::Result<Self> {
+        use crate::config::ForwardingMode;
+        let secret = || {
+            secret
+                .clone()
+                .ok_or_else(|| invalid("missing forwarding secret"))
+        };
+        Ok(match mode {
+            ForwardingMode::Velocity => Self::Velocity(secret()?, online_mode),
+            ForwardingMode::BungeeCord => Self::BungeeCord,
+            ForwardingMode::BungeeGuard => Self::BungeeGuard(secret()?),
+        })
+    }
 }
 
 /// Build a new instance in `stage`, then publish it as `directory`. Fails
@@ -260,8 +299,8 @@ pub(crate) fn materialize(
                 b"# Accepted in Rift's template configuration.\neula=true\n",
             )?;
         }
-        if let Some((secret, online_mode)) = &assets.forwarding {
-            write_forwarding(stage, secret, *online_mode)?;
+        if let Some(forwarding) = &assets.forwarding {
+            write_forwarding(stage, forwarding)?;
         }
         write_properties(stage, port, bind, &assets.properties)?;
         sync_tree(stage)?;
@@ -342,6 +381,7 @@ pub fn remote_prepare(config: &Config, name: &str) -> io::Result<crate::node::pr
         map: None,
         accept_eula: false,
         forwarding: None,
+        forwarding_mode: None,
         properties: managed_properties(config, template)
             .into_iter()
             .map(|property| match property {
@@ -359,8 +399,14 @@ pub fn remote_prepare(config: &Config, name: &str) -> io::Result<crate::node::pr
     match &template.software {
         Some(software) => {
             prepare.software = Some(software.into());
-            if config.forwarding.is_some() && software.kind.paper_family() {
+            if let Some(forwarding) = &config.forwarding
+                && software.kind.paper_family()
+            {
                 prepare.forwarding = Some(config.authentication.online_mode);
+                // Older agents know only Velocity and ignore this field.
+                prepare.forwarding_mode = (forwarding.mode
+                    != crate::config::ForwardingMode::Velocity)
+                    .then(|| forwarding.mode.as_str().to_owned());
             }
         }
         None => prepare.server_jar = Some(relative(&template.server_jar)?),
@@ -876,26 +922,62 @@ fn write_file(path: &Path, contents: &[u8]) -> io::Result<()> {
     fs::write(path, contents)
 }
 
-/// Paper reads modern forwarding from `config/paper-global.yml` and merges
-/// its defaults into a partial file. A file supplied by a config layer wins.
-fn write_forwarding(directory: &Path, secret: &str, online_mode: bool) -> io::Result<()> {
-    let path = directory.join("config").join("paper-global.yml");
+/// Paper reads modern forwarding from `config/paper-global.yml`, and every
+/// Spigot derivative reads BungeeCord forwarding from `spigot.yml`; both merge
+/// their defaults into a partial file. BungeeGuard is a backend plugin that
+/// the template must install; its `config.yml` gets Rift's token. A file
+/// supplied by a config layer wins.
+fn write_forwarding(directory: &Path, forwarding: &InstanceForwarding) -> io::Result<()> {
+    match forwarding {
+        InstanceForwarding::Velocity(secret, online_mode) => {
+            let secret = serde_json::to_string(secret)?;
+            write_secret_config(
+                &directory.join("config").join("paper-global.yml"),
+                &format!(
+                    "# Written by Rift for Velocity modern forwarding.\nproxies:\n  velocity:\n    enabled: true\n    online-mode: {online_mode}\n    secret: {secret}\n"
+                ),
+            )
+        }
+        InstanceForwarding::BungeeCord => write_bungeecord(directory),
+        InstanceForwarding::BungeeGuard(token) => {
+            write_bungeecord(directory)?;
+            let token = serde_json::to_string(token)?;
+            write_secret_config(
+                &directory
+                    .join("plugins")
+                    .join("BungeeGuard")
+                    .join("config.yml"),
+                &format!(
+                    "# Written by Rift for BungeeGuard forwarding.\nallowed-tokens:\n  - {token}\n"
+                ),
+            )
+        }
+    }
+}
+
+fn write_bungeecord(directory: &Path) -> io::Result<()> {
+    let path = directory.join("spigot.yml");
     if exists(&path)? {
         return Ok(());
     }
-    fs::create_dir_all(directory.join("config"))?;
-    let secret = serde_json::to_string(secret)?;
     write_file(
         &path,
-        format!(
-            "# Written by Rift for Velocity modern forwarding.\nproxies:\n  velocity:\n    enabled: true\n    online-mode: {online_mode}\n    secret: {secret}\n"
-        )
-        .as_bytes(),
-    )?;
+        b"# Written by Rift for BungeeCord forwarding.\nsettings:\n  bungeecord: true\n",
+    )
+}
+
+/// Write `contents` to `path`, readable by the owner only, unless a config
+/// layer already supplied the file.
+fn write_secret_config(path: &Path, contents: &str) -> io::Result<()> {
+    if exists(path)? {
+        return Ok(());
+    }
+    fs::create_dir_all(path.parent().unwrap())?;
+    write_file(path, contents.as_bytes())?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     }
     Ok(())
 }
@@ -1523,6 +1605,63 @@ rift.config.service_groups.lobby={{template='lobby',storage='disposable',port_ra
         );
         unsafe { std::env::remove_var(&variable) };
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bungeecord_forwarding_configures_spigot_and_bungeeguard() {
+        for (mode, token) in [
+            ("bungeecord", None),
+            ("bungeeguard", Some("guard \"token\"")),
+        ] {
+            let root = std::env::temp_dir().join(format!("rift-provision-{mode}-{}", generation()));
+            fs::create_dir_all(&root).unwrap();
+            let root = fs::canonicalize(root).unwrap();
+            let variable = format!("RIFT_PROVISION_TOKEN_{}", generation().replace('-', "_"));
+            let secret_env = if token.is_some() {
+                format!(",secret_env='{variable}'")
+            } else {
+                String::new()
+            };
+            let source = format!(
+                "rift.config.listeners.public='127.0.0.1:25565'
+rift.config.routes.public='lobby'
+rift.config.authentication={{online_mode=true}}
+rift.config.forwarding={{mode='{mode}'{secret_env}}}
+rift.config.templates.lobby={{software={{type='paper',version='1.8.8'}},accept_eula=true}}
+rift.config.service_groups.lobby={{template='lobby',storage='disposable',port_range={{25600,25609}}}}"
+            );
+            let mut config = Config::from_lua_at(&source, &root.join("rift.lua")).unwrap();
+            config.add_instance("lobby", "lobby-1", 25600).unwrap();
+            let jar = &config.templates["lobby"].server_jar;
+            fs::create_dir_all(jar.parent().unwrap()).unwrap();
+            fs::write(jar, b"downloaded paper").unwrap();
+            if let Some(token) = token {
+                let error = provision(&config, "lobby-1").unwrap_err();
+                assert!(error.to_string().contains(&variable), "{error}");
+                // SAFETY: the variable name is unique to this test.
+                unsafe { std::env::set_var(&variable, token) };
+            }
+            provision(&config, "lobby-1").unwrap();
+            let directory = config.managed_servers["lobby-1"].directory.clone();
+            let spigot = fs::read_to_string(directory.join("spigot.yml")).unwrap();
+            assert!(
+                spigot.contains("settings:\n  bungeecord: true\n"),
+                "{spigot}"
+            );
+            assert!(!directory.join("config/paper-global.yml").exists());
+            let guard = directory.join("plugins/BungeeGuard/config.yml");
+            if token.is_some() {
+                let guard = fs::read_to_string(guard).unwrap();
+                assert!(
+                    guard.contains("allowed-tokens:\n  - \"guard \\\"token\\\"\"\n"),
+                    "{guard}"
+                );
+                unsafe { std::env::remove_var(&variable) };
+            } else {
+                assert!(!guard.exists());
+            }
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]

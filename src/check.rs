@@ -191,8 +191,12 @@ fn secret(field: &str, variable: &str, min: usize) -> Result<(), String> {
 }
 
 fn environment(config: &Config, report: &mut Report) {
-    if let Some(forwarding) = &config.forwarding {
-        report.check(secret("forwarding.secret_env", &forwarding.secret_env, 1));
+    if let Some(secret_env) = config
+        .forwarding
+        .as_ref()
+        .and_then(|forwarding| forwarding.secret_env.as_ref())
+    {
+        report.check(secret("forwarding.secret_env", secret_env, 1));
     }
     if let Some(admin) = &config.admin {
         report.check(secret("admin.token_env", &admin.token_env, 32));

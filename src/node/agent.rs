@@ -45,7 +45,7 @@ pub const USAGE: &str = "Usage: rift node --controller <host:port> --name <node>
     --token-env <variable>    environment variable with this node's token (default RIFT_NODE_TOKEN)\n\
     --server-name <name>      TLS name of the controller certificate (default: the controller host)\n\
     --web <url>               the controller's web API over https://, e.g. https://rift.example:8443, for templates\n\
-    --forwarding-secret-env <variable>  environment variable with the Velocity forwarding secret (default RIFT_FORWARDING_SECRET)\n\
+    --forwarding-secret-env <variable>  environment variable with the Velocity forwarding secret or BungeeGuard token (default RIFT_FORWARDING_SECRET)\n\
     --allow-program <name>    a program servers may run; repeatable (default: java)";
 
 /// Parsed `rift node` arguments.
@@ -155,7 +155,7 @@ impl Options {
             Ok(secret) => Some(secret),
             Err(_) if explicit_secret_env.is_some() => {
                 return Err(invalid(format!(
-                    "set {forwarding_secret_env} to the controller's Velocity forwarding secret"
+                    "set {forwarding_secret_env} to the controller's forwarding secret"
                 )));
             }
             Err(_) => None,
@@ -763,13 +763,23 @@ impl Agent {
         let forwarding = prepare
             .forwarding
             .map(|online_mode| {
-                let secret = self.options.forwarding_secret.clone().ok_or_else(|| {
-                    invalid(format!(
-                        "set {} on node {} to the controller's Velocity forwarding secret",
-                        self.options.forwarding_secret_env, self.options.name
-                    ))
-                })?;
-                Ok::<_, io::Error>((secret, online_mode))
+                let mode = match prepare.forwarding_mode.as_deref() {
+                    None => crate::config::ForwardingMode::Velocity,
+                    Some(mode) => crate::config::ForwardingMode::parse(mode)
+                        .ok_or_else(|| invalid(format!("unknown forwarding mode {mode}")))?,
+                };
+                let secret = match mode.secret_name() {
+                    Some(what) => {
+                        Some(self.options.forwarding_secret.clone().ok_or_else(|| {
+                            invalid(format!(
+                                "set {} on node {} to the controller's {what}",
+                                self.options.forwarding_secret_env, self.options.name
+                            ))
+                        })?)
+                    }
+                    None => None,
+                };
+                provisioning::InstanceForwarding::new(mode, secret, online_mode)
             })
             .transpose()?;
         let jar = match (&prepare.software, &prepare.server_jar) {
