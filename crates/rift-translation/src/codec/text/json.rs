@@ -71,7 +71,8 @@ impl Json {
     pub fn primitive_string(&self) -> Option<String> {
         match self {
             Json::String(value) => Some(value.clone()),
-            Json::Number(text) => Some(java_number_text(text)),
+            // Gson parses numbers lazily: their text is kept as written.
+            Json::Number(text) => Some(text.clone()),
             Json::Bool(value) => Some(value.to_string()),
             _ => None,
         }
@@ -157,12 +158,6 @@ impl Json {
             }
         }
     }
-}
-
-/// How Java prints a number Gson parsed lazily: `getAsString` returns the
-/// source text unchanged.
-fn java_number_text(text: &str) -> String {
-    text.to_owned()
 }
 
 fn parse_number(text: &str) -> Option<f64> {

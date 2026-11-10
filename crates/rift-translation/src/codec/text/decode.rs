@@ -143,7 +143,9 @@ pub fn decode(protocol: i32, node: Node<'_>) -> io::Result<Component> {
 }
 
 fn component(protocol: i32, node: Node<'_>, depth: usize) -> io::Result<Component> {
-    if depth > MAX_DEPTH * 4 {
+    // Each level becomes up to two NBT levels (compound and list); vanilla
+    // reads at most 512.
+    if depth > MAX_DEPTH * 2 {
         return Err(invalid("text component nesting limit exceeded"));
     }
     if let Some(list) = node.list() {

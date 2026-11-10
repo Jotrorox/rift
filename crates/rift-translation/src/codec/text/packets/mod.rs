@@ -259,13 +259,12 @@ pub(super) fn convert_forced(
         rule.name == name && rule.direction == direction && rule.phases.contains(&phase)
     })?;
     let (from, to) = (shared.source(direction), shared.target(direction));
+    // Within one protocol, a rule that converts that protocol's packet for
+    // any other protocol reads and writes its layout.
     let applies = if from == to {
-        let index = crate::version::index(from)?;
-        [index.checked_sub(1), Some(index + 1)]
-            .into_iter()
-            .flatten()
-            .filter_map(|index| crate::version::PROTOCOLS.get(index))
-            .any(|(other, _)| rule.applies(phase, from, *other))
+        crate::version::PROTOCOLS
+            .iter()
+            .any(|(other, _)| *other != from && rule.applies(phase, from, *other))
     } else {
         rule.applies(phase, from, to)
     };
