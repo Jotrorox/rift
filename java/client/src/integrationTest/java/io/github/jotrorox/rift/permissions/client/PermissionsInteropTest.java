@@ -108,11 +108,17 @@ class PermissionsInteropTest {
     }
 
     private PermissionsClient client(String server, String token, Logs logs, OfflinePolicy policy) throws Exception {
+        return client(server, null, token, logs, policy);
+    }
+
+    private PermissionsClient client(String server, String group, String token, Logs logs, OfflinePolicy policy)
+            throws Exception {
         MessagingClient bus = rift.connect(token);
         resources.add(bus);
         PermissionsClient client = PermissionsClient.builder()
                 .messaging(bus)
                 .server(server)
+                .group(group)
                 .requestTimeout(Duration.ofSeconds(5))
                 .joinTimeout(Duration.ofSeconds(2))
                 .offlinePolicy(policy)
@@ -183,7 +189,9 @@ class PermissionsInteropTest {
         rift = RiftProcess.start();
         Logs survivalLogs = new Logs();
         Logs lobbyLogs = new Logs();
-        PermissionsClient survival = client("survival-1", RiftProcess.SURVIVAL_TOKEN, survivalLogs);
+        // survival-1 as an instance of a "survival" service group, for the group context.
+        PermissionsClient survival =
+                client("survival-1", "survival", RiftProcess.SURVIVAL_TOKEN, survivalLogs, OfflinePolicy.deny());
         PermissionsClient lobby = client("lobby", RiftProcess.LOBBY_TOKEN, lobbyLogs);
 
         // hello: both backends come online at the store's revision; the proxy saw each one.
@@ -251,6 +259,8 @@ class PermissionsInteropTest {
         assertEquals(1, joined.revision());
         ContextSet here = survival.contexts().of(ALICE);
         assertEquals("survival-1", here.get(ContextSet.SERVER).orElseThrow());
+        assertEquals("survival", here.get(ContextSet.GROUP).orElseThrow());
+        assertEquals("survival", survival.group().orElseThrow());
         assertEquals(Tristate.TRUE, survival.check(ALICE, "essentials.fly", here));
         assertTrue(survival.inGroup(ALICE, "default", here));
         await("Alice online on survival-1", () -> {

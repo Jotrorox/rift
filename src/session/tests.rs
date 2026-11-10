@@ -2079,7 +2079,7 @@ async fn relayed_play_packets_keep_the_proxy_dimension_and_game_mode_contexts() 
                 gamemode: Some(protocol::GameMode::Survival),
             }
         );
-        authority.join(player, "Player", "lobby");
+        authority.join(player, "Player", "lobby", None);
         assert_eq!(authority.contexts(player).to_string(), "server=lobby");
         session.sync_permission_contexts();
         assert_eq!(
@@ -2139,7 +2139,7 @@ async fn relayed_play_packets_keep_the_proxy_dimension_and_game_mode_contexts() 
             "dimension=minecraft:the_nether;gamemode=spectator;server=lobby"
         );
         // A switch restarts from the server; the runtime syncs again after it.
-        authority.switch_server(player, "survival");
+        authority.switch_server(player, "survival", None);
         assert_eq!(authority.contexts(player).to_string(), "server=survival");
         session.sync_permission_contexts();
         assert_eq!(

@@ -398,7 +398,7 @@ fn group_changes_invalidate_dependent_users_transitively() {
 fn committed_changes_notify_with_fresh_subjects_for_online_players() {
     let authority = Arc::new(authority());
     let mut notifications = authority.subscribe();
-    authority.join(ALICE, "Alice", "lobby");
+    authority.join(ALICE, "Alice", "lobby", None);
     let Ok(Notification::Joined(joined)) = notifications.try_recv() else {
         panic!("a join pushes the subject")
     };
@@ -481,7 +481,7 @@ fn committed_changes_notify_with_fresh_subjects_for_online_players() {
         )
         .unwrap();
     assert_eq!(authority.check_active(ALICE, "build"), Tristate::True);
-    authority.switch_server(ALICE, "survival");
+    authority.switch_server(ALICE, "survival", None);
     assert_eq!(authority.contexts(ALICE).to_string(), "server=survival");
     assert_eq!(authority.check_active(ALICE, "build"), Tristate::Undefined);
     assert_eq!(authority.user_by_name("ALICE").unwrap(), Some(ALICE));
@@ -1205,7 +1205,7 @@ fn proxy_contexts_follow_the_session_dimension_and_game_mode_until_a_switch() {
     authority.set_session_contexts(ALICE, Some("minecraft:the_nether"), Some("creative"));
     assert!(authority.contexts(ALICE).is_empty());
 
-    authority.join(ALICE, "Alice", "lobby");
+    authority.join(ALICE, "Alice", "lobby", None);
     assert_eq!(
         checks(&authority),
         (Tristate::Undefined, Tristate::Undefined)
@@ -1234,7 +1234,7 @@ fn proxy_contexts_follow_the_session_dimension_and_game_mode_until_a_switch() {
 
     // A switch restarts from the server; the new world's packets refill them.
     authority.set_session_contexts(ALICE, Some("minecraft:the_nether"), Some("creative"));
-    authority.switch_server(ALICE, "survival");
+    authority.switch_server(ALICE, "survival", None);
     assert_eq!(authority.contexts(ALICE).to_string(), "server=survival");
     assert_eq!(
         checks(&authority),
@@ -1245,4 +1245,110 @@ fn proxy_contexts_follow_the_session_dimension_and_game_mode_until_a_switch() {
     assert_eq!(authority.server_of(ALICE).as_deref(), Some("survival"));
     authority.leave(ALICE);
     assert!(authority.contexts(ALICE).is_empty());
+}
+
+#[test]
+fn the_group_context_applies_on_every_instance_of_a_service_group() {
+    let authority = Arc::new(authority());
+    let scoped = |key: &str, value: &str| ContextSet::of(key, value).unwrap();
+    for (node, contexts) in [
+        ("lobby.fly", scoped("group", "lobby")),
+        ("lobby.old", scoped("server", "lobby")),
+    ] {
+        authority
+            .apply(
+                Actor::Cli,
+                set(
+                    user(ALICE),
+                    perm(node, true).with_contexts(contexts).unwrap(),
+                ),
+            )
+            .unwrap();
+    }
+    authority.join(ALICE, "Alice", "lobby-2", Some("lobby"));
+    assert_eq!(
+        authority.contexts(ALICE).to_string(),
+        "group=lobby;server=lobby-2"
+    );
+    assert_eq!(authority.check_active(ALICE, "lobby.fly"), Tristate::True);
+    // The instance is not called `lobby`, so `server=lobby` never matches.
+    assert_eq!(
+        authority.check_active(ALICE, "lobby.old"),
+        Tristate::Undefined
+    );
+    // The group follows the server and goes away on a backend outside groups.
+    authority.switch_server(ALICE, "lobby-7", Some("lobby"));
+    assert_eq!(authority.check_active(ALICE, "lobby.fly"), Tristate::True);
+    authority.switch_server(ALICE, "survival", None);
+    assert_eq!(authority.contexts(ALICE).to_string(), "server=survival");
+    assert_eq!(
+        authority.check_active(ALICE, "lobby.fly"),
+        Tristate::Undefined
+    );
+    // Like `server`, it is filled by Rift: it cannot be reported or provided.
+    assert!(
+        authority
+            .set_proxy_context(ALICE, "group", Some("lobby"))
+            .is_ok()
+    );
+    assert!(
+        crate::config::Config::from_lua(
+            "rift.config.listeners.p='127.0.0.1:0' rift.config.backends.b='127.0.0.1:1' rift.config.routes.p='b' rift.config.permissions={contexts={external={'group'}}}",
+            "external.lua",
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("\"group\" is filled by Rift")
+    );
+}
+
+#[test]
+fn luckperms_server_contexts_naming_a_service_group_become_group_contexts() {
+    let authority = authority();
+    authority.set_service_groups(&["Lobby".to_owned(), "bedwars".to_owned()]);
+    let export = serde_json::json!({
+        "metadata": {},
+        "groups": {"vip": {"nodes": [
+            {"key": "lobby.fly", "value": true, "context": {"server": ["lobby", "survival"]}},
+            {"key": "bedwars.kit", "value": true, "context": {"server": "bedwars", "world": "arena"}},
+        ]}},
+        "users": {},
+        "tracks": {},
+    });
+    authority
+        .import_luckperms(Actor::Import, export.to_string().as_bytes(), false)
+        .unwrap();
+    let nodes: Vec<String> = authority
+        .group("vip")
+        .unwrap()
+        .nodes
+        .iter()
+        .map(|node| format!("{} {}", node.payload.key(), node.contexts))
+        .collect();
+    assert!(
+        nodes.contains(&"lobby.fly group=lobby".to_owned()),
+        "{nodes:?}"
+    );
+    // `survival` is a fixed server, not a group.
+    assert!(
+        nodes.contains(&"lobby.fly server=survival".to_owned()),
+        "{nodes:?}"
+    );
+    assert!(
+        nodes.contains(&"bedwars.kit group=bedwars;world=arena".to_owned()),
+        "{nodes:?}"
+    );
+    // Exported, `group=lobby` reads back in LuckPerms as `server=lobby`.
+    let exported = serde_json::to_value(authority.export_luckperms().unwrap()).unwrap();
+    let contexts: Vec<&serde_json::Value> = exported["groups"]["vip"]["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|node| node["key"] == "lobby.fly")
+        .map(|node| &node["context"])
+        .collect();
+    assert!(
+        contexts.contains(&&serde_json::json!({"server": "lobby"})),
+        "{contexts:?}"
+    );
 }

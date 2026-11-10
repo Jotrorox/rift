@@ -273,7 +273,13 @@ fn wire_fixture(fixture: &Value) -> Result<(), String> {
 fn luckperms_fixture(fixture: &Value) -> Result<(), String> {
     let node: luckperms::ExportNode =
         serde_json::from_value(fixture["node"].clone()).map_err(|e| e.to_string())?;
-    let result = luckperms::parse_node(&node);
+    // Optional: the network's service groups, for `server` → `group`.
+    let service_groups = fixture
+        .get("service_groups")
+        .map(|groups| serde_json::from_value(groups.clone()).map_err(|e| e.to_string()))
+        .transpose()?
+        .unwrap_or_default();
+    let result = luckperms::parse_node_in(&node, &service_groups);
     match (fixture["error"].as_str(), result) {
         (Some("regex"), Err(Error::RegexNode { .. })) => Ok(()),
         (Some("invalid"), Err(error)) if !matches!(error, Error::RegexNode { .. }) => Ok(()),

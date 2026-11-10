@@ -31,6 +31,11 @@ pub struct Config {
     /// This backend's name: sent in `hello` and filled in as the `server`
     /// context when a check does not name one.
     pub server: String,
+    /// This backend's service group, when it is an instance of one (`lobby`
+    /// for `lobby-2`): filled in as the `group` context together with
+    /// `server`. `None` outside a group.
+    #[serde(default)]
+    pub group: Option<String>,
     /// How long [`Client::join`](crate::Client::join) waits for a snapshot.
     #[serde(
         rename = "join_timeout_ms",
@@ -65,10 +70,17 @@ impl Config {
             ca: ca.into(),
             token_env: token_env.into(),
             server: server.into(),
+            group: None,
             join_timeout: default_join_timeout(),
             request_timeout: default_request_timeout(),
             offline_policy: OfflinePolicy::Deny,
         }
+    }
+
+    /// The same configuration for an instance of service group `group`.
+    pub fn with_group(mut self, group: impl Into<String>) -> Self {
+        self.group = Some(group.into());
+        self
     }
 }
 
@@ -181,6 +193,12 @@ mod tests {
             config,
             Config::new("127.0.0.1:7443", "localhost", "ca.pem", "TOKEN", "lobby")
         );
+        let instance: Config = serde_json::from_str(
+            r#"{"address": "127.0.0.1:7443", "server_name": "localhost", "ca": "ca.pem",
+                "token_env": "TOKEN", "server": "lobby-2", "group": "lobby"}"#,
+        )
+        .unwrap();
+        assert_eq!(instance.group.as_deref(), Some("lobby"));
         let policy: OfflinePolicy =
             serde_json::from_str(r#"{"mode": "fallback_file", "path": "f.json"}"#).unwrap();
         assert_eq!(policy, OfflinePolicy::FallbackFile("f.json".into()));

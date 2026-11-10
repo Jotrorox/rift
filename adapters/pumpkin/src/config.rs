@@ -24,6 +24,9 @@ ca = "ca.pem"
 token_env = "RIFT_PERMISSIONS_TOKEN"
 # This backend's name on the proxy, and the `server` context.
 server = "pumpkin"
+# This backend's service group, when it is an instance of one (lobby for
+# lobby-2): the `group` context.
+# group = "lobby"
 # How long a login waits for the player's snapshot.
 join_timeout_ms = 2000
 # How long /perms, writes and group requests wait for the proxy.
