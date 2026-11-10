@@ -111,6 +111,25 @@ pub fn convert(
     convert::stack(shared, direction, stack)
 }
 
+/// Convert the stack of a `show_item` hover event between 1.20.4 (its NBT
+/// `tag`) and 1.20.5 (its data components in persistent form), for the text
+/// codec. `Ok(false)` for any other pair, or when the sender's item is
+/// unknown; the caller degrades the event then.
+pub fn convert_hover_stack(
+    shared: &mut Shared,
+    direction: Direction,
+    id: &mut String,
+    count: &mut i32,
+    tag: &mut Option<crate::nbt::Compound>,
+    components: &mut Option<crate::nbt::Compound>,
+) -> io::Result<bool> {
+    let pair = (shared.source(direction), shared.target(direction));
+    if pair != (765, 766) && pair != (766, 765) {
+        return Ok(false);
+    }
+    bridge::hover(shared, direction, id, count, tag, components)
+}
+
 /// Copy one item stack from `rw.r` to `rw.w`, converting it between the two
 /// protocols of the step. For other codecs whose structures contain stacks.
 pub fn transcode(

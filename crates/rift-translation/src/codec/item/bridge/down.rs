@@ -37,9 +37,16 @@ pub(super) fn tag(cx: &mut Bridge, item: &str, components: &Components) -> io::R
             "repair_cost" => drop(out.insert("RepairCost", int(value)?)),
             "custom_model_data" => drop(out.insert("CustomModelData", int(value)?)),
             "block_state" => drop(out.insert("BlockStateTag", block_state(value)?)),
-            "entity_data" => drop(out.insert("EntityTag", nbt(value)?)),
+            "entity_data" => {
+                let mut entity = nbt(value)?;
+                if let Nbt::Compound(data) = &mut entity {
+                    cx.nested_stacks(data, false)?;
+                }
+                out.insert("EntityTag", entity);
+            }
             "block_entity_data" => {
-                if let Nbt::Compound(data) = nbt(value)? {
+                if let Nbt::Compound(mut data) = nbt(value)? {
+                    cx.nested_stacks(&mut data, false)?;
                     merge(&mut block_entity, data);
                 }
             }

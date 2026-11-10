@@ -209,13 +209,18 @@ fn through_item_codec(shared: &mut Shared, direction: Direction, info: &mut Item
     true
 }
 
-// INTEGRATION: the item codec should provide a conversion of a stack in its
-// NBT/codec form (item ID, count, and the NBT form of its data component
-// patch; across 1.20.5 the old `tag` to components and back), for example
-// `item::convert_nbt_stack(shared, direction, &mut id, &mut count, &mut tag,
-// &mut components) -> io::Result<()>`. Until then `show_item` events that
-// cross a protocol pair needing a rewrite keep only their item and count
-// from 1.20.5 on.
-fn convert_components(_shared: &mut Shared, _direction: Direction, _item: &mut ItemInfo) -> bool {
-    false
+/// Convert a `show_item` stack with data components through the item
+/// codec. Across 1.20.5 it converts the tag to persistent components and
+/// back. Between two component protocols the persistent forms are not
+/// converted yet: the event degrades to item and count (see `convert_item`).
+fn convert_components(shared: &mut Shared, direction: Direction, item: &mut ItemInfo) -> bool {
+    item::convert_hover_stack(
+        shared,
+        direction,
+        &mut item.id,
+        &mut item.count,
+        &mut item.tag,
+        &mut item.components,
+    )
+    .unwrap_or(false)
 }
