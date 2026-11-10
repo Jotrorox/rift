@@ -143,6 +143,12 @@ GLOBAL_POS = ["option", _container(("dimension", "string"), ("position", "positi
 METADATA_1_19 = ["types", "entityMetadataItem", 1, "fields"]
 
 CORRECTIONS = [
+    dict(protocols=(751, 756), path=["play", "toClient", "types", "packet_multi_block_change", 1,
+                                     {"field": "chunkCoordinates"}, "type", 1, {"field": "y"}, "signed"],
+         value=True,
+         why="SectionPos.y(long) sign-extends the low 20 bits ((int) (packed << 44 >> 44)) in every "
+             "version since 1.16.2; the schema reads them unsigned until 1.17.1, so a 1.17 world "
+             "below 0 (a 1.18 backend's floor at y -60) decoded at section 1048572."),
     dict(protocols=(755, 758), path=["play", "toClient", "types", "packet_sculk_vibration_signal", 1,
                                      {"field": "destination"}, "type", 1, "fields"],
          value={"minecraft:block": "position", "minecraft:entity": "varint"},
