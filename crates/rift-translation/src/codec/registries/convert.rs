@@ -63,6 +63,12 @@ pub fn registry(from: i32, to: i32, sent: &Registry) -> io::Result<Option<Regist
             .as_ref()
             .is_none_or(|element| items_exist(&sent.name, to, element))
     });
+    entries.retain(|entry| {
+        entry
+            .element
+            .as_ref()
+            .is_none_or(|element| !names_unknown_item(&sent.name, to, element))
+    });
     let mut registry = Registry {
         name: sent.name.clone(),
         entries,
@@ -180,7 +186,6 @@ pub fn element_for(
     // `&mut Shared`, which this pure function does not have).
     if let Nbt::Compound(compound) = &mut element {
         transform::apply(registry, from, to, name, compound)?;
-        items(registry, from, to, compound);
         conform(registry, to, name, compound);
     }
     Ok(element)
@@ -192,34 +197,18 @@ const ITEM_FIELDS: &[(&str, &str)] = &[
     ("trim_pattern", "template_item"),
 ];
 
-/// Items the receiver lacks (resin trims for clients before 1.21.4) become
-/// their stand-in, or without one are left out for [`conform`] to fill
-/// from the most similar vanilla entry: a client fails to load the whole
-/// registry over one unknown item.
-fn items(registry: &str, from: i32, to: i32, element: &mut Compound) {
-    let (Some(source), Some(target)) = (
-        crate::data::version(from).registry("item"),
-        crate::data::version(to).registry("item"),
-    ) else {
-        return;
+/// Whether `element` names an item `protocol` lacks (the 1.21.4 resin trim
+/// for older clients): a client rejects the whole registry over one, so
+/// such entries are left out.
+fn names_unknown_item(registry: &str, protocol: i32, element: &Nbt) -> bool {
+    let Some(items) = crate::data::version(protocol).registry("item") else {
+        return false;
     };
-    for (_, key) in ITEM_FIELDS.iter().filter(|(name, _)| *name == registry) {
-        let Some(item) = element.get(key).and_then(Nbt::as_str) else {
-            continue;
-        };
-        let item = crate::data::strip(item);
-        if target.id(item).is_some() {
-            continue;
-        }
-        let stand_in = source
-            .id(item)
-            .and_then(|id| crate::mapping::mapping(from, to, "item").get(id))
-            .and_then(|id| target.name(id));
-        match stand_in {
-            Some(name) => drop(element.insert(*key, format!("minecraft:{name}"))),
-            None => drop(element.remove(key)),
-        }
-    }
+    ITEM_FIELDS
+        .iter()
+        .filter(|(name, _)| *name == registry)
+        .filter_map(|(_, key)| element.as_compound()?.get(key)?.as_str())
+        .any(|item| items.id(crate::data::strip(item)).is_none())
 }
 
 /// Fields of a registry's elements as the vanilla entries of one protocol
