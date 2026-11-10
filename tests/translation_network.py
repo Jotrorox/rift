@@ -59,8 +59,13 @@ BORDER = {"lobby": 128.0, "survival": 256.0, "third": 384.0}
 
 CELLS = {
     "1.21.4-26.3-1.16.5": dict(client="1.21.4", lobby="paper-26.3", survival="vanilla-1.16.5"),
+    # Pumpkin 0.2.0 always announces secure chat enforcement, which Rift
+    # refuses for offline network sessions: it runs with --client and a
+    # Pumpkin backend only behind an authenticating Rift.
     "26.3-pumpkin-1.20.1-1.12.2": dict(client="26.3", lobby="pumpkin", survival="vanilla-1.20.1",
                                        third="vanilla-1.12.2"),
+    "26.3-paper-1.20.1-1.12.2": dict(client="26.3", lobby="paper-26.3", survival="vanilla-1.20.1",
+                                     third="vanilla-1.12.2"),
     "1.16.5-26.3-1.12.2": dict(client="1.16.5", lobby="vanilla-26.3", survival="vanilla-1.12.2"),
     "1.12.2-26.3-1.16.5": dict(client="1.12.2", lobby="vanilla-26.3", survival="vanilla-1.16.5"),
     "1.20.1-1.20.4-1.19.4": dict(client="1.20.1", lobby="vanilla-1.20.4", survival="vanilla-1.19.4"),
