@@ -676,3 +676,63 @@ fn garbage_never_panics() {
         }
     }
 }
+
+#[test]
+fn block_stand_ins_keep_shape_and_water() {
+    let state = |from: i32, to: i32, state: &str| {
+        let (source, target) = (crate::data::version(from), crate::data::version(to));
+        let id = source
+            .block_states
+            .parse(state)
+            .unwrap_or_else(|| panic!("{state}"));
+        let mapped = crate::mapping::mapping(from, to, "block_state")
+            .get(id)
+            .unwrap();
+        target.block_states.describe(mapped).unwrap()
+    };
+    for (newer, older) in [
+        (
+            "waxed_oxidized_cut_copper_stairs[facing=east,half=top,shape=outer_left,waterlogged=true]",
+            "prismarine_brick_stairs[facing=east,half=top,shape=outer_left,waterlogged=true]",
+        ),
+        (
+            "cut_copper_slab[type=double,waterlogged=false]",
+            "polished_granite_slab[type=double,waterlogged=false]",
+        ),
+        (
+            "amethyst_cluster[facing=north,waterlogged=true]",
+            "bubble_coral_wall_fan[facing=north,waterlogged=true]",
+        ),
+        (
+            "small_amethyst_bud[facing=up,waterlogged=false]",
+            "bubble_coral[waterlogged=false]",
+        ),
+        (
+            "red_candle[candles=3,lit=true,waterlogged=true]",
+            "sea_pickle[pickles=3,waterlogged=true]",
+        ),
+        ("water_cauldron[level=2]", "cauldron[level=2]"),
+        ("powder_snow_cauldron[level=3]", "cauldron[level=0]"),
+        ("light[level=15,waterlogged=true]", "water[level=0]"),
+        ("light[level=15,waterlogged=false]", "air"),
+        ("deepslate[axis=x]", "basalt[axis=x]"),
+        ("deepslate_redstone_ore[lit=true]", "redstone_ore[lit=true]"),
+        (
+            "small_dripleaf[facing=north,half=upper,waterlogged=true]",
+            "tall_seagrass[half=upper]",
+        ),
+        ("cave_vines[age=7,berries=true]", "weeping_vines[age=7]"),
+        (
+            "rail[shape=north_east,waterlogged=true]",
+            "rail[shape=north_east]",
+        ),
+    ] {
+        assert_eq!(state(NEWER, OLDER, newer), older, "{newer}");
+    }
+    assert_eq!(
+        state(OLDER, NEWER, "cauldron[level=1]"),
+        "water_cauldron[level=1]"
+    );
+    assert_eq!(state(OLDER, NEWER, "cauldron[level=0]"), "cauldron");
+    assert_eq!(state(OLDER, NEWER, "grass_path"), "dirt_path");
+}
