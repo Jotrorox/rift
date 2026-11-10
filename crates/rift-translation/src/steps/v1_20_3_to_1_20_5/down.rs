@@ -3,7 +3,7 @@
 use super::{NEWER, OLDER, dimension_name, login_head, packet_dimension_types, spawn_tail, text};
 use crate::{
     Direction, Packet, State,
-    codec::{HasShared, Shared},
+    codec::{HasShared, Shared, registries},
     nbt::Nbt,
     routed_step,
     step::{Cx, RouteBuilder, Routes},
@@ -289,14 +289,20 @@ impl Down {
 routed_step!(Down);
 
 /// The registries a 1.20.5 backend sent so far, as a 1.20.3 codec, when the
-/// registries codec still holds them because the backend's version has
-/// registries it did not send.
-// INTEGRATION: `codec::registries::take_pending`, assembled for the client
-// (`registries::convert::assemble`) and written as a codec packet
-// (`registries::form::write_codec_packet`). Nothing is held until then.
+/// registries codec still holds them because the backend did not send every
+/// registry its version has (it sends the codec itself once all arrived).
+/// What the backend left out comes from the client version's vanilla
+/// registries, as a 1.20.4 client needs a complete codec.
 fn pending_registry_codec(shared: &mut Shared) -> io::Result<Option<Vec<u8>>> {
-    let _ = shared;
-    Ok(None)
+    let pending = registries::take_pending(shared);
+    if pending.is_empty() {
+        return Ok(None);
+    }
+    let assembled = registries::convert::assemble(OLDER, pending);
+    for registry in &assembled {
+        registries::record(shared, registries::Side::Client, registry);
+    }
+    registries::form::write_codec_packet(OLDER, &assembled).map(Some)
 }
 
 pub const STEP: Option<Make> = Some(|| Box::new(Down::new()));
