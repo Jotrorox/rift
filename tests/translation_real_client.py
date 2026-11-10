@@ -45,6 +45,22 @@ import real_client  # noqa: E402
 from translation_matrix import RUNS, Proxy, client_protocol  # noqa: E402
 
 
+class Direct:
+    """Stands in for Rift with --direct: the client joins the server itself."""
+
+    def __init__(self, server):
+        self.port = server.port
+
+    def offset(self):
+        return 0
+
+    def text(self):
+        return ""
+
+    def stop(self):
+        pass
+
+
 def scenario(server, client, name):
     """Console commands for one real client, in the server's syntax."""
     cmd = Commands(server.protocol, server.software)
@@ -150,7 +166,7 @@ def run(server, proxy, client, stay, directory):
                   client_logs=result.log_dir, logs=str(directory), commands=len(issued))
     (directory / "result.json").write_text(json.dumps(report, indent=2, default=str) + "\n")
     text = result.report().replace("PASS" if result.ok else "FAIL", "PASS" if ok else "FAIL", 1)
-    text += f"\n  via rift, server {server.name}, {len(issued)} console commands; logs {directory}"
+    text += f"\n  {'direct' if isinstance(proxy, Direct) else 'via rift'}, server {server.name}, {len(issued)} console commands; logs {directory}"
     text += "".join(f"\n  PROBLEM: {problem}" for problem in problems[:10])
     return ok, report, text
 
@@ -163,6 +179,8 @@ def main():
     parser.add_argument("--client", required=True, help="real client versions, comma-separated")
     parser.add_argument("--stay", type=float, default=60)
     parser.add_argument("--detect", action="store_true", help="leave the backend's version out of Rift's config")
+    parser.add_argument("--direct", action="store_true",
+                        help="no Rift: the client joins the server itself (the untranslated reference)")
     parser.add_argument("--binary", type=Path, default=fixtures.ROOT / "target" / "release" / "rift")
     parser.add_argument("--json", type=Path)
     args = parser.parse_args()
@@ -180,10 +198,12 @@ def main():
     try:
         server.start()
         env.log(f"{server.name} ({server.release}, protocol {server.protocol}) on port {server.port}")
-        proxy = Proxy("rift-detect" if args.detect else "rift", server, workdir, binary=binary).start()
+        proxy = (Direct(server) if args.direct
+                 else Proxy("rift-detect" if args.detect else "rift", server, workdir, binary=binary).start())
         stamp = time.strftime("%Y%m%d-%H%M%S")
         for client in clients:
-            directory = RUNS / f"{stamp}-real-{server.name}-{client}{'-detect' if args.detect else ''}"
+            suffix = "-direct" if args.direct else "-detect" if args.detect else ""
+            directory = RUNS / f"{stamp}-real-{server.name}-{client}{suffix}"
             ok, report, text = run(server, proxy, client, args.stay, directory)
             reports.append(report)
             passed += ok
