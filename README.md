@@ -223,14 +223,17 @@ plus pinned LuckPerms/EssentialsX and ViaVersion/ViaBackwards combinations.
 CI runs their startup and rejection preflights; full acceptance requires a signed-in
 1.21.11 client and records Paper observations alongside operator confirmations.
 
-Backends can run a different version than their players: Rift translates between
-1.21.6 and 1.21.7/1.21.8 in both directions, including `/server` switches between
-backends of different versions. Declare a backend's version with
-`config.backends.survival = { address = "127.0.0.1:25567", version = "1.21.6" }`.
-Other pairs still need matching versions. See [protocol translation](docs/translation.md).
+Backends can run a different version than their players. Like ViaVersion and
+ViaBackwards on other proxies, but built in, Rift translates between any two
+releases from 1.12 to 26.3 in both directions, including `/server` switches
+between backends of different versions. It is on by default and asks each
+backend for its version; `config.backends.survival = { address = "127.0.0.1:25567",
+version = "1.12.2" }` declares one, and `config.translation = false` turns it
+off. See [protocol translation](docs/translation.md) for what players on other
+versions see.
 Online authentication and plugin player hooks work on every listed version.
-Velocity modern forwarding needs **1.13 or newer**; BungeeCord and BungeeGuard
-forwarding cover all of them (see [Authentication](#authentication)).
+Velocity modern forwarding needs a backend on **1.13 or newer**; BungeeCord and
+BungeeGuard forwarding cover all of them (see [Authentication](#authentication)).
 Bedrock/UDP, unlisted snapshots and legacy pre-1.7 pings are unsupported.
 
 Set `rift.config.network = { bungeecord = true }` for existing backend plugins to
