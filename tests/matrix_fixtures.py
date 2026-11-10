@@ -192,6 +192,11 @@ def properties(protocol, port, compression=True):
         "log-ips": "false", "enable-status": "true", "player-idle-timeout": 0,
         "allow-nether": "true", "enable-rcon": "false", "enable-query": "false",
     }
+    # RIFT_VIA_PROPERTIES="key=value,key=value" overrides these, to check how
+    # translation fares with other settings (enforce-secure-profile=true...).
+    for item in filter(None, os.environ.get("RIFT_VIA_PROPERTIES", "").split(",")):
+        key, _, value = item.partition("=")
+        values[key.strip()] = value.strip()
     return "".join(f"{key}={value}\n" for key, value in values.items())
 
 
