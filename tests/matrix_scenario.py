@@ -666,6 +666,12 @@ def step_teleport(cx):
     # whose confirmation arrives after a newer teleport ("Wrong teleport id").
     time.sleep(1)
     x, y, z = cx.base
+    if y < 0 and cx.via.protocol < 755:
+        # Before 1.17 a client's world starts at 0 and the translator cuts
+        # off what lies below: build on a platform that client can see.
+        cx.console(f"fill {x - 4} 0 {z - 4} {x + 24} 0 {z + 12} minecraft:stone")
+        y = 1
+        cx.base = (x, y, z)
     marks = (cx.ref.mark(), cx.via.mark())
     cx.console(f"tp {cx.ref.name} {x + 0.5} {y} {z + 0.5}", f"tp {cx.via.name} {x + 2.5} {y} {z + 0.5}")
     for session, mark, expected in zip((cx.ref, cx.via), marks, (x + 0.5, x + 2.5)):
