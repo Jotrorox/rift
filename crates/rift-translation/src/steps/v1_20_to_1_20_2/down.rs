@@ -24,7 +24,10 @@
 use super::{Held, NEWER, OLDER, convert, layout};
 use crate::{
     Direction, Packet, State,
-    codec::{HasShared, Shared},
+    codec::{
+        HasShared, Shared,
+        registries::{self, form},
+    },
     data,
     nbt::Nbt,
     step::{Cx, RouteBuilder, Routes, Step},
@@ -130,7 +133,7 @@ fn ids() -> &'static Ids {
 pub struct Down {
     shared: Shared,
     phase: Phase,
-    /// The registries of the last configuration, in 1.20.1 form.
+    /// The registries of the last configuration as a 1.20.1 codec.
     registries: Option<Nbt>,
     /// Feature flags of the current configuration, for after Join Game.
     features: Option<Vec<u8>>,
@@ -167,7 +170,6 @@ impl Down {
                 .defaults()
                 .clientbound(Login, "login_finished", Self::login_finished)
                 .serverbound(Login, "hello", Self::hello)
-                .clientbound(Configuration, "registry_data", Self::registry_data)
                 .clientbound(Configuration, "update_enabled_features", Self::features)
                 .clientbound(Configuration, "update_tags", Self::hold_as_play)
                 .clientbound(Configuration, "custom_payload", Self::hold_as_play)
@@ -213,17 +215,6 @@ impl Down {
             state,
             Packet::new(packet.id, layout::hello(&packet.data, true)?),
         );
-        Ok(())
-    }
-
-    fn registry_data(&mut self, _: &mut Cx<'_>, _: State, packet: Packet) -> io::Result<()> {
-        let mut registries = Nbt::from_bytes(&packet.data, false)?
-            .ok_or_else(|| invalid("registry data without registries"))?;
-        if registries.as_compound().is_none() {
-            return Err(invalid("registry data is not a compound"));
-        }
-        layout::convert_registries(&mut registries, false);
-        self.registries = Some(registries);
         Ok(())
     }
 
@@ -342,6 +333,12 @@ impl Down {
     /// back follows the Join Game, as from a 1.20.1 server.
     fn login(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
         let join = layout::Join::read_newer(&packet.data)?;
+        // The registries codec converted this configuration's registry data
+        // and holds it for here.
+        let pending = registries::take_pending(&mut self.shared);
+        if !pending.is_empty() {
+            self.registries = Some(form::write_codec(OLDER, &pending)?);
+        }
         let registries = self
             .registries
             .as_ref()

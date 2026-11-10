@@ -437,17 +437,59 @@ fn button_clicks_and_horse_inventories_change_shape() {
     assert_eq!(out[0].data, hex("01 11 00000009"));
 }
 
+/// The text codec converts item hover events across the pair: the item and
+/// its count always arrive, in the receiver's form.
 #[test]
 fn item_hover_text_is_left_to_the_text_codec() {
-    // A component with an item hover event cannot be copied as it is.
-    let mut hover = crate::nbt::Compound::new();
-    hover.insert("action", "show_item");
-    let mut motd = crate::nbt::Compound::new();
-    motd.insert("text", "x");
-    motd.insert("hoverEvent", Nbt::Compound(hover));
-    let mut body = Nbt::Compound(motd).to_bytes(false);
+    let motd = |contents: crate::nbt::Compound| {
+        let mut hover = crate::nbt::Compound::new();
+        hover.insert("action", "show_item");
+        hover.insert("contents", Nbt::Compound(contents));
+        let mut motd = crate::nbt::Compound::new();
+        motd.insert("text", "x");
+        motd.insert("hoverEvent", Nbt::Compound(hover));
+        Nbt::Compound(motd).to_bytes(false)
+    };
+    let shown = |out: &[crate::codec::testing::Out]| {
+        let mut reader = crate::wire::Reader::new(&out[0].data);
+        let motd = Nbt::read(&mut reader, false).unwrap().unwrap();
+        let contents = motd
+            .as_compound()
+            .and_then(|motd| motd.compound("hoverEvent"))
+            .and_then(|hover| hover.compound("contents"))
+            .cloned()
+            .unwrap();
+        (
+            contents.str("id").map(str::to_owned),
+            contents.get("count").and_then(Nbt::as_i64),
+        )
+    };
+    let mut older = crate::nbt::Compound::new();
+    older.insert("id", "minecraft:diamond_sword");
+    older.insert("count", Nbt::Int(1));
+    older.insert("tag", "{Damage:5}");
+    let mut body = motd(older);
     body.extend([0, 0]);
-    assert!(up().clientbound(State::Play, "server_data", &body).is_err());
+    let out = up().clientbound(State::Play, "server_data", &body).unwrap();
+    assert_eq!(names(&out), ["server_data"]);
+    assert_eq!(
+        shown(&out),
+        (Some("minecraft:diamond_sword".to_owned()), Some(1))
+    );
+
+    let mut newer = crate::nbt::Compound::new();
+    newer.insert("id", "minecraft:diamond_sword");
+    newer.insert("count", Nbt::Int(1));
+    let mut body = motd(newer);
+    body.push(0);
+    let out = down()
+        .clientbound(State::Play, "server_data", &body)
+        .unwrap();
+    // 1.20.4 leaves out a count of one, its default.
+    assert_eq!(
+        shown(&out),
+        (Some("minecraft:diamond_sword".to_owned()), None)
+    );
 }
 
 /// Every packet of both recorded sessions goes through both steps.

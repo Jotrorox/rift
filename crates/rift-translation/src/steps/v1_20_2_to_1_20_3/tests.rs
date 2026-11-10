@@ -89,13 +89,23 @@ fn scores_change_layout_and_removal_becomes_its_own_packet() {
     );
 }
 
+// The official 1.20.2 server's Join Game, and a Respawn into the same
+// world in its layout (overworld, survival, nothing kept).
+const OLDER_LOGIN: &str = "00000001 00 03 136d696e6563726166743a6f766572776f726c64 \
+    116d696e6563726166743a7468655f656e64 146d696e6563726166743a7468655f6e6574686572 \
+    14 02 02 00 01 00 136d696e6563726166743a6f766572776f726c64 \
+    136d696e6563726166743a6f766572776f726c64 ec1aa6535db52fd3 01 ff 00 01 00 00";
+const OLDER_RESPAWN: &str = "136d696e6563726166743a6f766572776f726c64 \
+    136d696e6563726166743a6f766572776f726c64 ec1aa6535db52fd3 00 01 00 00 00 00 00";
+
 #[test]
 fn level_loading_starts_after_login_and_respawn_going_up() {
     let mut up = up();
-    for name in ["login", "respawn"] {
-        let out = up.clientbound(State::Play, name, &[1, 2, 3]).unwrap();
+    for (name, body) in [("login", OLDER_LOGIN), ("respawn", OLDER_RESPAWN)] {
+        let body = hex(body);
+        let out = up.clientbound(State::Play, name, &body).unwrap();
         assert_eq!(names(&out), [name, "game_event"]);
-        assert_eq!(out[0].data, [1, 2, 3]);
+        assert_eq!(out[0].data, body);
         // What the 1.20.3 server itself sends: event 13, value 0.
         assert_eq!(out[1].data, hex("0d00000000"));
     }

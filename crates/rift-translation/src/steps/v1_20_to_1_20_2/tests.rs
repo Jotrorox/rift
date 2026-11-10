@@ -4,7 +4,10 @@
 use super::{NEWER, OLDER, down::Down, layout, up::Up};
 use crate::{
     Direction, Output, Packet, State, Translator,
-    codec::testing::{Recorded, corpus},
+    codec::{
+        registries::{defaults, form},
+        testing::{Recorded, corpus},
+    },
     data,
     nbt::Nbt,
     wire::{Reader, Writer},
@@ -267,38 +270,82 @@ fn join(entity: i32) -> layout::Join {
     }
 }
 
-/// A small registry codec with a trim pattern, enough for the bridges.
+/// The 1.20.2 server's vanilla registry codec, as its `registry_data`.
 fn codec() -> Nbt {
-    let element: crate::nbt::Compound = [
-        ("asset_id".to_owned(), Nbt::from("minecraft:coast")),
-        ("decal".to_owned(), Nbt::Byte(0)),
-    ]
-    .into_iter()
-    .collect();
-    let entry: crate::nbt::Compound = [
-        ("name".to_owned(), Nbt::from("minecraft:coast")),
-        ("id".to_owned(), Nbt::Int(0)),
-        ("element".to_owned(), Nbt::Compound(element)),
-    ]
-    .into_iter()
-    .collect();
-    let registry: crate::nbt::Compound = [
-        ("type".to_owned(), Nbt::from("minecraft:trim_pattern")),
-        ("value".to_owned(), Nbt::List(vec![Nbt::Compound(entry)])),
-    ]
-    .into_iter()
-    .collect();
-    Nbt::Compound(
-        [("minecraft:trim_pattern".to_owned(), Nbt::Compound(registry))]
-            .into_iter()
-            .collect(),
-    )
+    form::write_codec(NEWER, &defaults::registries(NEWER)).unwrap()
 }
 
+/// The 1.20.1 server's vanilla registry codec, as its Join Game has it.
 fn older_codec() -> Nbt {
-    let mut codec = codec();
-    layout::convert_registries(&mut codec, false);
+    form::write_codec(OLDER, &defaults::registries(OLDER)).unwrap()
+}
+
+/// `codec` with one more trim pattern, `rift:custom`, as a datapack adds.
+fn with_custom_trim(codec: &Nbt, decal: Option<bool>) -> Nbt {
+    let mut codec = codec.clone();
+    let mut element = crate::nbt::Compound::new();
+    element.insert("asset_id", "rift:custom");
+    element.insert("template_item", "minecraft:stick");
+    let mut description = crate::nbt::Compound::new();
+    description.insert("text", "Custom");
+    element.insert("description", Nbt::Compound(description));
+    if let Some(decal) = decal {
+        element.insert("decal", Nbt::Byte(i8::from(decal)));
+    }
+    let entries = codec
+        .as_compound_mut()
+        .and_then(|codec| codec.compound_mut("minecraft:trim_pattern"))
+        .and_then(|registry| registry.get_mut("value"))
+        .and_then(Nbt::as_list_mut)
+        .unwrap();
+    let mut entry = crate::nbt::Compound::new();
+    entry.insert("name", "rift:custom");
+    entry.insert("id", Nbt::Int(entries.len() as i32));
+    entry.insert("element", Nbt::Compound(element));
+    entries.push(Nbt::Compound(entry));
     codec
+}
+
+/// The element of trim pattern `name` in a codec.
+fn trim(codec: &Nbt, name: &str) -> crate::nbt::Compound {
+    codec
+        .as_compound()
+        .unwrap()
+        .compound("minecraft:trim_pattern")
+        .unwrap()
+        .list("value")
+        .unwrap()
+        .iter()
+        .filter_map(Nbt::as_compound)
+        .find(|entry| entry.str("name") == Some(name))
+        .unwrap()
+        .compound("element")
+        .unwrap()
+        .clone()
+}
+
+/// A 1.20.1 chunk of air in the overworld at (`x`, `z`): 24 sections with
+/// single-valued palettes, no block entities and no light.
+fn empty_chunk(x: i32, z: i32) -> Vec<u8> {
+    let mut sections = Writer::new();
+    for _ in 0..24 {
+        sections
+            .i16(0)
+            .u8(0)
+            .varint(0)
+            .varint(0)
+            .u8(0)
+            .varint(0)
+            .varint(0);
+    }
+    let mut w = Writer::new();
+    w.i32(x).i32(z);
+    Nbt::Compound(crate::nbt::Compound::new()).write(&mut w, true);
+    w.byte_array(&sections.buf).varint(0);
+    for _ in 0..6 {
+        w.varint(0);
+    }
+    w.buf
 }
 
 const LOGIN_FINISHED: &str = "888b6130823b387bb012d6dc24e47d5906436f7270757300";
@@ -519,26 +566,39 @@ fn brand_payloads_are_trimmed_for_newer_clients() {
 
 #[test]
 fn trim_patterns_gain_and_lose_their_decal_flag() {
-    let mut codec = codec();
-    layout::convert_registries(&mut codec, false);
-    let entry = |codec: &Nbt| {
-        codec
-            .as_compound()
-            .unwrap()
-            .compound("minecraft:trim_pattern")
-            .unwrap()
-            .list("value")
-            .unwrap()[0]
-            .as_compound()
-            .unwrap()
-            .compound("element")
-            .unwrap()
-            .clone()
-    };
-    assert!(!entry(&codec).contains("decal"));
-    layout::convert_registries(&mut codec, true);
-    assert_eq!(entry(&codec).get("decal"), Some(&Nbt::Byte(0)));
-    assert_eq!(codec, self::codec());
+    // Up: a datapack's pattern in the 1.20.1 Join Game reaches the 1.20.2
+    // client's registry data with the flag 1.20.2 requires.
+    let mut s = Session::up();
+    s.client(
+        "hello",
+        &hex("06436f72707573888b6130823b387bb012d6dc24e47d59"),
+    )
+    .unwrap();
+    s.backend("login_finished", &hex(LOGIN_FINISHED)).unwrap();
+    s.backend(
+        "login",
+        &join_older(1, &with_custom_trim(&older_codec(), None)),
+    )
+    .unwrap();
+    let (client, _) = s.client("login_acknowledged", &[]).unwrap();
+    assert_eq!(Session::names(&client), ["registry_data"]);
+    let sent = Nbt::from_bytes(&client[0].data, false).unwrap().unwrap();
+    assert_eq!(trim(&sent, "rift:custom").get("decal"), Some(&Nbt::Byte(0)));
+    assert_eq!(sent, with_custom_trim(&codec(), Some(false)));
+
+    // Down: the flag goes away for the 1.20.1 client.
+    let mut s = Session::down();
+    down_configuring(&mut s);
+    s.backend(
+        "registry_data",
+        &with_custom_trim(&codec(), Some(true)).to_bytes(false),
+    )
+    .unwrap();
+    s.backend("finish_configuration", &[]).unwrap();
+    let (client, _) = s.backend("login", &join(1).write_newer()).unwrap();
+    let (_, registries) = layout::Join::read_older(&client[0].data).unwrap();
+    assert!(!trim(&registries, "rift:custom").contains("decal"));
+    assert_eq!(registries, with_custom_trim(&older_codec(), None));
 }
 
 /// Run one packet straight through a step, without a translator.
@@ -620,6 +680,34 @@ fn up_joined(session: &mut Session) {
     session
         .backend("login", &join_older(1, &older_codec()))
         .unwrap();
+}
+
+/// A 1.20.1 server decodes login packets until it sends Join Game; the
+/// 1.20.2 client's settings, sent as soon as it has Login Success, wait.
+#[test]
+fn up_holds_client_packets_until_the_backend_is_in_play() {
+    let mut s = Session::up();
+    s.client(
+        "hello",
+        &hex("06436f72707573888b6130823b387bb012d6dc24e47d59"),
+    )
+    .unwrap();
+    s.backend("login_finished", &hex(LOGIN_FINISHED)).unwrap();
+    s.client("login_acknowledged", &[]).unwrap();
+    let (_, backend) = s
+        .client("client_information", &hex(CLIENT_INFORMATION))
+        .unwrap();
+    assert!(backend.is_empty());
+    let (_, backend) = s.client("custom_payload", &hex(BRAND)).unwrap();
+    assert!(backend.is_empty());
+    let (_, backend) = s.backend("login", &join_older(1, &older_codec())).unwrap();
+    assert_eq!(
+        Session::names(&backend),
+        ["client_information", "custom_payload"]
+    );
+    assert!(backend.iter().all(|packet| packet.state == State::Play));
+    let (_, backend) = s.client("custom_payload", &hex(BRAND)).unwrap();
+    assert_eq!(Session::names(&backend), ["custom_payload"]);
 }
 
 #[test]
@@ -716,7 +804,20 @@ fn up_finishes_configuration_on_the_first_packet_after_the_preamble() {
         Session::names(&client),
         ["update_tags", "finish_configuration"]
     );
-    assert_eq!(client[0].data, [0]);
+    // No tags came: a vanilla 1.20.1 server's stand in, which the client's
+    // game logic needs.
+    let tags = crate::codec::misc::tags::read(NEWER, &client[0].data).unwrap();
+    let blocks = tags
+        .registries
+        .iter()
+        .find(|registry| registry.registry == "minecraft:block")
+        .unwrap();
+    assert!(
+        blocks
+            .tags
+            .iter()
+            .any(|(name, ids)| name == "minecraft:mineable/pickaxe" && !ids.is_empty())
+    );
     let (client, _) = s.client("finish_configuration", &[]).unwrap();
     assert_eq!(
         Session::names(&client),
@@ -724,14 +825,8 @@ fn up_finishes_configuration_on_the_first_packet_after_the_preamble() {
     );
     // Tags sent later go out in play.
     let (client, _) = s.backend("update_tags", &varint(0)).unwrap();
-    assert_eq!(
-        client,
-        [Out {
-            state: State::Play,
-            name: "update_tags".into(),
-            data: vec![0]
-        }]
-    );
+    assert_eq!(Session::names(&client), ["update_tags"]);
+    assert_eq!(client[0].state, State::Play);
 }
 
 #[test]
@@ -833,10 +928,13 @@ fn up_reconfigures_for_a_second_join_game() {
     s.client("login_acknowledged", &[]).unwrap();
     s.backend("update_enabled_features", &hex(FEATURES))
         .unwrap();
-    s.backend("update_tags", &hex("010e6d696e6563726166743a6974656d00"))
+    let (sent, _) = s
+        .backend("update_tags", &hex("010e6d696e6563726166743a6974656d00"))
         .unwrap();
+    let tags = sent[0].data.clone();
     s.client("finish_configuration", &[]).unwrap();
-    s.backend("level_chunk_with_light", &[1]).unwrap();
+    s.backend("level_chunk_with_light", &empty_chunk(0, 0))
+        .unwrap();
     // A proxy behind the backend switches servers.
     let (client, _) = s.backend("login", &join_older(2, &older_codec())).unwrap();
     assert_eq!(
@@ -861,7 +959,8 @@ fn up_reconfigures_for_a_second_join_game() {
         ]
     );
     assert_eq!(client[1].data, hex(FEATURES));
-    assert_eq!(client[2].data, hex("010e6d696e6563726166743a6974656d00"));
+    // The backend does not repeat its tags: the last ones go out again.
+    assert_eq!(client[2].data, tags);
     let (client, _) = s.client("finish_configuration", &[]).unwrap();
     assert_eq!(Session::names(&client), ["login", "set_time"]);
     assert_eq!(
@@ -929,7 +1028,7 @@ fn up_wraps_chunks_in_batches_and_answers_pings() {
         let body = if name == "set_time" {
             hex("00000000000000020000000000000002")
         } else {
-            vec![7]
+            empty_chunk(0, 0)
         };
         let (client, _) = s.backend(name, &body).unwrap();
         names.extend(client);
