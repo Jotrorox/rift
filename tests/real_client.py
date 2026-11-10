@@ -824,6 +824,12 @@ def command(prepared, game_dir, name, host, port, heap="1G"):
         "-Dio.netty.transport.noNative=true", "-Dfml.earlyprogresswindow=false",
         f"-Djava.io.tmpdir={game_dir / 'tmp'}",
     ] + [f"-Dminecraft.api.{service}.host={DEAD_HOST}" for service in ("auth", "account", "session", "services")]
+    # Plain URL connections ignore --proxyHost: patchy's blocked server list
+    # (fetched on the first connect, 1.13-1.16) once hung for 20 minutes on a
+    # stalled read from Mojang. A dead default proxy fails it at once, which
+    # patchy tolerates; loopback hosts bypass it.
+    options += [f"-D{scheme}.{key}={value}" for scheme in ("http", "https")
+                for key, value in (("proxyHost", "127.0.0.1"), ("proxyPort", "9"))]
     if prepared.java_major >= 9:
         options.append("-XX:+IgnoreUnrecognizedVMOptions")
     if version_key(prepared.version)[:2] == (1, 13):
