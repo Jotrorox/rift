@@ -153,3 +153,44 @@ pub fn single<'a>(out: &'a [Out], name: &str) -> &'a [u8] {
     assert_eq!(out[0].name, name, "{out:?}");
     &out[0].data
 }
+
+/// Send every recorded packet of a whole session through the step: the
+/// backend protocol's clientbound packets and the client protocol's
+/// serverbound ones, each in the phase it was recorded in. Returns how many
+/// went through, or `None` (and a note) without the corpus. Panics with the
+/// first packet the step rejects.
+pub fn cross_sessions(mut harness: Harness) -> Option<usize> {
+    let (client, backend) = (harness.client, harness.backend);
+    let (Some(from_backend), Some(from_client)) = (corpus(backend), corpus(client)) else {
+        eprintln!("no corpus for protocol {backend} or {client}: skipped");
+        return None;
+    };
+    let packets = from_backend
+        .iter()
+        .filter(|packet| packet.direction == Direction::Clientbound)
+        .map(|packet| (backend, packet))
+        .chain(
+            from_client
+                .iter()
+                .filter(|packet| packet.direction == Direction::Serverbound)
+                .map(|packet| (client, packet)),
+        );
+    let mut count = 0;
+    for (protocol, packet) in packets {
+        if let Err(error) = harness.replay(packet) {
+            panic!(
+                "{} {:?} {:?} {} of {protocol}: {error}",
+                version_name(protocol),
+                packet.state,
+                packet.direction,
+                packet.name(protocol)
+            );
+        }
+        count += 1;
+    }
+    Some(count)
+}
+
+fn version_name(protocol: i32) -> &'static str {
+    crate::version::release(protocol)
+}

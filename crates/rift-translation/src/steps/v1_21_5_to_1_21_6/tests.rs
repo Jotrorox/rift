@@ -276,3 +276,16 @@ fn recorded_difficulty_converts_to_what_the_other_server_sends() {
         assert_eq!(single(&out, "change_difficulty"), expected[0].data);
     }
 }
+
+/// Whole recorded sessions of both versions cross the step in both
+/// orientations. Packets the shared codecs own pass through unconverted
+/// until the codecs convert them; nothing may fail.
+#[test]
+fn recorded_sessions_cross_the_step_both_ways() {
+    use crate::steps::v1_21_2_to_1_21_4::harness::cross_sessions;
+    for harness in [up(), down()] {
+        if let Some(count) = cross_sessions(harness) {
+            assert!(count > 500, "{count} packets");
+        }
+    }
+}
