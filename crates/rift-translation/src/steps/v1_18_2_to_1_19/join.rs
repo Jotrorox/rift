@@ -217,3 +217,14 @@ impl Respawn {
         Ok(w.buf)
     }
 }
+
+/// Whether two compounds hold the same entries, in any order.
+pub fn same_compound(a: &Compound, b: &Compound) -> bool {
+    a.len() == b.len()
+        && a.iter().all(|(key, value)| {
+            b.get(key).is_some_and(|other| match (value, other) {
+                (Nbt::Compound(value), Nbt::Compound(other)) => same_compound(value, other),
+                _ => value == other,
+            })
+        })
+}

@@ -8,6 +8,7 @@
 //! `enforce-secure-profile=false`.
 use crate::nbt::{Compound, Nbt};
 use serde_json::{Map, Value, json};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// How one chat type displays a message in chat: a translation of its
 /// parameters with a style.
@@ -434,6 +435,23 @@ fn registry(kind: &str, entries: Vec<Nbt>) -> Compound {
     ])
 }
 
+/// Message timestamps for clients that send none: the wall clock in
+/// milliseconds, never going backwards (backends reject chat out of order).
+#[derive(Debug, Default)]
+pub struct Clock {
+    last: i64,
+}
+
+impl Clock {
+    pub fn now(&mut self) -> i64 {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_millis() as i64);
+        self.last = self.last.max(now);
+        self.last
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -476,5 +494,14 @@ mod tests {
                         "with": [target, content], "color": "gray", "italic": true}))
         );
         assert!(!types.is_overlay(0));
+    }
+
+    #[test]
+    fn clock_never_goes_backwards() {
+        let mut clock = Clock { last: i64::MAX - 1 };
+        assert_eq!(clock.now(), i64::MAX - 1);
+        let mut clock = Clock::default();
+        let first = clock.now();
+        assert!(first > 1_600_000_000_000 && clock.now() >= first);
     }
 }

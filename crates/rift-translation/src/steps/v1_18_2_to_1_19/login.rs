@@ -111,6 +111,54 @@ impl Key {
     }
 }
 
+/// A clientbound `login_finished` (login success).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Finished {
+    pub uuid: u128,
+    pub name: String,
+    /// The profile's properties as on the wire (1.19 and later), without
+    /// their count; empty for 1.18.2.
+    pub properties: Vec<u8>,
+    pub property_count: usize,
+}
+
+impl Finished {
+    pub fn read(protocol: i32, data: &[u8]) -> io::Result<Self> {
+        let mut r = Reader::new(data);
+        let uuid = r.uuid()?;
+        let name = r.string(MAX_NAME)?.to_owned();
+        let (mut properties, mut property_count) = (Vec::new(), 0);
+        if protocol >= 759 {
+            property_count = r.count()?;
+            let start = r.peek();
+            for _ in 0..property_count {
+                r.str()?; // Name.
+                r.str()?; // Value.
+                if r.bool()? {
+                    r.str()?; // Signature.
+                }
+            }
+            properties = start[..start.len() - r.remaining()].to_vec();
+        }
+        r.finish()?;
+        Ok(Self {
+            uuid,
+            name,
+            properties,
+            property_count,
+        })
+    }
+
+    pub fn write(&self, protocol: i32) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.uuid(self.uuid).string(&self.name);
+        if protocol >= 759 {
+            w.varint(self.property_count as i32).bytes(&self.properties);
+        }
+        w.buf
+    }
+}
+
 /// Velocity's modern forwarding answers the version a backend asks for;
 /// versions 2 and 3 carry a 1.19 or 1.19.1 chat profile key, which cannot
 /// survive translation across those versions. Ask for version 1 instead.

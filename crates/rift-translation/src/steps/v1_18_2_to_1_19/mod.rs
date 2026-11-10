@@ -12,8 +12,14 @@ pub(super) mod players;
 #[cfg(test)]
 pub(super) mod testing;
 
+mod blocks;
 mod down;
+mod entities;
 mod up;
+mod world;
+
+#[cfg(test)]
+mod tests;
 
 use super::Make;
 use crate::{Direction, State, data};
