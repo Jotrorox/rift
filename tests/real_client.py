@@ -1123,7 +1123,23 @@ class ClientProcess:
             self.output.close()
 
 
+RUN_RETENTION_DAYS = 7
+
+
+def expire_runs():
+    """Remove default-location run directories older than RUN_RETENTION_DAYS."""
+    cutoff = time.time() - RUN_RETENTION_DAYS * 86400
+    for directory in (CACHE / "runs").glob("*"):
+        try:
+            if directory.is_dir() and directory.stat().st_mtime < cutoff:
+                shutil.rmtree(directory, ignore_errors=True)
+        except OSError:
+            pass
+
+
 def run_dir(version, log_dir=None):
+    if log_dir is None:
+        expire_runs()
     base = Path(log_dir) if log_dir else CACHE / "runs"
     stamp = time.strftime("%Y%m%d-%H%M%S")
     directory = base / f"{version}-{stamp}-{os.getpid()}-{random.randrange(1 << 16):04x}"
@@ -1431,6 +1447,10 @@ class Server:
                 self.proc.stdin.close()
             except OSError:
                 pass
+            # Worlds and the jar's extracted libraries are large and say nothing
+            # about the run; logs and properties stay.
+            for name in ("world", "libraries", "versions", "bundler", "cache"):
+                shutil.rmtree(self.directory / name, ignore_errors=True)
 
 
 def free_port():
