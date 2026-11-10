@@ -99,7 +99,8 @@
     },
     "up": {
       "blockdust": "block",
-      "depthsuspend": "underwater"
+      "depthsuspend": "underwater",
+      "snowshovel": "item_snowball"
     }
   },
   "sound_event": {
