@@ -286,3 +286,38 @@ fn chains_across_1_21_7_to_1_21_11_convert_what_each_pair_changed() {
         }
     }
 }
+
+/// Registries whose IDs travel in packets; every entry of either version
+/// needs a counterpart or a stand-in in the other.
+const WIRE_REGISTRIES: &[&str] = &[
+    "block_state",
+    "block",
+    "item",
+    "entity_type",
+    "particle_type",
+    "sound_event",
+    "mob_effect",
+    "menu",
+    "attribute",
+    "potion",
+    "custom_stat",
+    "villager_profession",
+    "villager_type",
+    "game_event",
+    "stat_type",
+    "recipe_serializer",
+    "command_argument_type",
+    "debug_subscription",
+];
+
+#[test]
+fn rules_leave_nothing_on_the_wire_unmapped() {
+    // Data component types are converted by the component codec, which
+    // drops the ones 1.21.10 lacks: they have no stand-ins.
+    for (from, to) in [(OLDER, NEWER), (NEWER, OLDER)] {
+        for registry in WIRE_REGISTRIES {
+            let unmapped = crate::mapping::unmapped(from, to, registry);
+            assert!(unmapped.is_empty(), "{registry} {from}->{to}: {unmapped:?}");
+        }
+    }
+}

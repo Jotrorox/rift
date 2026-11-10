@@ -585,3 +585,47 @@ fn tick_time_subscriptions_convert_and_keep_their_lifetimes() {
             .is_err()
     );
 }
+
+/// Registries whose IDs travel in packets; every entry of either version
+/// needs a counterpart or a stand-in in the other. Block entity types of
+/// shelves and copper golem statues stay unmapped on purpose: their
+/// stand-in blocks have no block entity, so codecs drop that data.
+const WIRE_REGISTRIES: &[&str] = &[
+    "block_state",
+    "block",
+    "item",
+    "entity_type",
+    "particle_type",
+    "sound_event",
+    "mob_effect",
+    "menu",
+    "attribute",
+    "potion",
+    "custom_stat",
+    "villager_profession",
+    "villager_type",
+    "game_event",
+    "stat_type",
+    "recipe_serializer",
+    "command_argument_type",
+    "data_component_type",
+    "debug_subscription",
+];
+
+#[test]
+fn rules_leave_nothing_on_the_wire_unmapped() {
+    for (from, to) in [(OLDER, NEWER), (NEWER, OLDER)] {
+        for registry in WIRE_REGISTRIES {
+            let unmapped = crate::mapping::unmapped(from, to, registry);
+            assert!(unmapped.is_empty(), "{registry} {from}->{to}: {unmapped:?}");
+        }
+        let unmapped = crate::mapping::unmapped(from, to, "block_entity_type");
+        let names: Vec<&str> = unmapped.iter().map(|(_, name)| name.as_str()).collect();
+        let expected: &[&str] = if from == NEWER {
+            &["shelf", "copper_golem_statue"]
+        } else {
+            &[]
+        };
+        assert_eq!(names, expected);
+    }
+}
