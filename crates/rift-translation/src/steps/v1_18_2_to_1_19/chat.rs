@@ -6,7 +6,13 @@
 //! steps deliver translated player chat as decorated system chat and send
 //! backends unsigned messages; such backends need
 //! `enforce-secure-profile=false`.
-use crate::nbt::{Compound, Nbt};
+use crate::{
+    codec::{
+        Shared,
+        registries::{self, Side},
+    },
+    nbt::{Compound, Nbt},
+};
 use serde_json::{Map, Value, json};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -38,33 +44,50 @@ pub struct ChatTypes {
     types: Vec<(i32, ChatType)>,
 }
 
+impl ChatType {
+    /// One `minecraft:chat_type` element. 1.19 nests each display's
+    /// decoration under `decoration` and may show a type as an `overlay`;
+    /// 1.19.1 and later put the decoration directly under `chat`.
+    pub fn from_element(element: &Compound) -> Self {
+        let display = element.compound("chat");
+        let overlay = element.compound("overlay");
+        let decoration = display
+            .or(overlay)
+            .and_then(|display| display.compound("decoration").or(Some(display)))
+            .and_then(decoration);
+        ChatType {
+            chat: decoration,
+            shows_in_chat: display.is_some() || overlay.is_some(),
+            overlay: display.is_none() && overlay.is_some(),
+        }
+    }
+}
+
 impl ChatTypes {
-    /// Read the `minecraft:chat_type` registry of a `login` registry codec.
-    /// 1.19 nests each display's decoration under `decoration` and may show
-    /// a type as an `overlay`; 1.19.1 and later put the decoration directly
-    /// under `chat`. Entries that do not parse are skipped.
-    pub fn from_codec(codec: &Compound) -> Self {
-        let entries = registry_entries(codec, "minecraft:chat_type").unwrap_or_default();
-        let types = entries
+    /// The chat types `side` of a step was last sent, as the registries
+    /// codec recorded them (the side's vanilla types before any `login`).
+    pub fn from_shared(shared: &Shared, side: Side) -> Self {
+        let Some(synced) = registries::synced(shared, side, "chat_type") else {
+            let protocol = registries::protocol(shared, side);
+            let types = registries::defaults::get(protocol, "chat_type")
+                .map(|vanilla| {
+                    vanilla
+                        .entries
+                        .iter()
+                        .filter_map(|entry| {
+                            let element = entry.element.as_compound()?;
+                            Some((entry.id, ChatType::from_element(element)))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            return Self { types };
+        };
+        let types = synced
             .iter()
-            .filter_map(|entry| {
-                let entry = entry.as_compound()?;
-                let id = entry.int("id")?;
-                let element = entry.compound("element")?;
-                let display = element.compound("chat");
-                let overlay = element.compound("overlay");
-                let decoration = display
-                    .or(overlay)
-                    .and_then(|display| display.compound("decoration").or(Some(display)))
-                    .and_then(decoration);
-                Some((
-                    id,
-                    ChatType {
-                        chat: decoration,
-                        shows_in_chat: display.is_some() || overlay.is_some(),
-                        overlay: display.is_none() && overlay.is_some(),
-                    },
-                ))
+            .filter_map(|(id, name)| {
+                let element = registries::element(shared, side, "chat_type", name)?;
+                Some((id, ChatType::from_element(element)))
             })
             .collect();
         Self { types }
@@ -202,237 +225,21 @@ pub fn literal(text: &str) -> Value {
     json!({"text": text})
 }
 
-/// The registry entry of one chat type in the layout `protocol` uses.
-fn entry(name: &str, id: i32, element: Compound) -> Nbt {
-    Nbt::Compound(Compound(vec![
-        ("name".into(), Nbt::String(format!("minecraft:{name}"))),
-        ("id".into(), Nbt::Int(id)),
-        ("element".into(), Nbt::Compound(element)),
-    ]))
-}
-
-fn decoration_tag(key: &str, parameters: &[&str], style: Option<Compound>) -> Compound {
-    let mut tag = Compound::new();
-    tag.insert("translation_key", key);
-    if let Some(style) = style {
-        tag.insert("style", style);
-    }
-    tag.insert(
-        "parameters",
-        Nbt::List(parameters.iter().map(|name| Nbt::from(*name)).collect()),
-    );
-    tag
-}
-
-fn gray_italic() -> Compound {
-    Compound(vec![
-        ("color".into(), Nbt::from("gray")),
-        ("italic".into(), Nbt::Byte(1)),
-    ])
-}
-
-/// The chat type registry a vanilla 1.19 server sends, for 1.19 clients
-/// whose backend speaks another format. IDs: `system` is 1, `game_info` 2.
-pub fn vanilla_1_19() -> Compound {
-    let display = |key: &str, parameters: &[&str], style: Option<Compound>| {
-        let mut style = style;
-        Compound(vec![(
-            "decoration".into(),
-            Nbt::Compound(decoration_tag(
-                key,
-                parameters,
-                Some(style.take().unwrap_or_default()),
-            )),
-        )])
-    };
-    let narration = |priority: &str, decoration: Option<Compound>| {
-        let mut tag = Compound::new();
-        tag.insert("priority", priority);
-        if let Some(decoration) = decoration {
-            tag.insert("decoration", decoration);
-        }
-        tag
-    };
-    let narrate = || {
-        Some(decoration_tag(
-            "chat.type.text.narrate",
-            &["sender", "content"],
-            Some(Compound::new()),
-        ))
-    };
-    let chat_entry = |key: &str, parameters: &[&str], style: Option<Compound>| {
-        Compound(vec![
-            (
-                "chat".into(),
-                Nbt::Compound(display(key, parameters, style)),
-            ),
-            (
-                "narration".into(),
-                Nbt::Compound(narration("chat", narrate())),
-            ),
-        ])
-    };
-    let mut emote = chat_entry("chat.type.emote", &["sender", "content"], None);
-    emote.insert(
-        "narration",
-        narration(
-            "chat",
-            Some(decoration_tag(
-                "chat.type.emote",
-                &["sender", "content"],
-                Some(Compound::new()),
-            )),
-        ),
-    );
-    let entries = vec![
-        entry(
-            "chat",
-            0,
-            chat_entry("chat.type.text", &["sender", "content"], None),
-        ),
-        entry(
-            "system",
-            1,
-            Compound(vec![
-                ("chat".into(), Nbt::Compound(Compound::new())),
-                ("narration".into(), Nbt::Compound(narration("system", None))),
-            ]),
-        ),
-        entry(
-            "game_info",
-            2,
-            Compound(vec![("overlay".into(), Nbt::Compound(Compound::new()))]),
-        ),
-        entry(
-            "say_command",
-            3,
-            chat_entry("chat.type.announcement", &["sender", "content"], None),
-        ),
-        entry(
-            "msg_command",
-            4,
-            chat_entry(
-                "commands.message.display.incoming",
-                &["sender", "content"],
-                Some(gray_italic()),
-            ),
-        ),
-        entry(
-            "team_msg_command",
-            5,
-            chat_entry(
-                "chat.type.team.text",
-                &["team_name", "sender", "content"],
-                None,
-            ),
-        ),
-        entry("emote_command", 6, emote),
-        entry(
-            "tellraw_command",
-            7,
-            Compound(vec![
-                ("chat".into(), Nbt::Compound(Compound::new())),
-                ("narration".into(), Nbt::Compound(narration("chat", None))),
-            ]),
-        ),
-    ];
-    registry("minecraft:chat_type", entries)
-}
-
-/// The 1.19 chat type IDs of [`vanilla_1_19`] that steps write.
+/// The 1.19 chat type IDs of vanilla's `system` and `game_info` types.
 pub const SYSTEM_1_19: i32 = 1;
 pub const GAME_INFO_1_19: i32 = 2;
 
-/// The chat type registry a vanilla 1.19.1/1.19.2 server sends.
-pub fn vanilla_1_19_1() -> Compound {
-    let element = |key: &str, parameters: &[&str], style: Option<Compound>, narration: &str| {
-        Compound(vec![
-            (
-                "chat".into(),
-                Nbt::Compound(decoration_tag(key, parameters, style)),
-            ),
-            (
-                "narration".into(),
-                Nbt::Compound(decoration_tag(narration, &["sender", "content"], None)),
-            ),
-        ])
+/// The network ID of the `system` or (`overlay`) `game_info` chat type on
+/// `side`, which system chat to a 1.19 client names: the registries codec
+/// gives a 1.19 client these vanilla types even where its backend lacks
+/// them.
+pub fn system_type(shared: &Shared, side: Side, overlay: bool) -> i32 {
+    let (name, vanilla) = if overlay {
+        ("game_info", GAME_INFO_1_19)
+    } else {
+        ("system", SYSTEM_1_19)
     };
-    let narrate = "chat.type.text.narrate";
-    let entries = vec![
-        entry(
-            "chat",
-            0,
-            element("chat.type.text", &["sender", "content"], None, narrate),
-        ),
-        entry(
-            "say_command",
-            1,
-            element(
-                "chat.type.announcement",
-                &["sender", "content"],
-                None,
-                narrate,
-            ),
-        ),
-        entry(
-            "msg_command_incoming",
-            2,
-            element(
-                "commands.message.display.incoming",
-                &["sender", "content"],
-                Some(gray_italic()),
-                narrate,
-            ),
-        ),
-        entry(
-            "msg_command_outgoing",
-            3,
-            element(
-                "commands.message.display.outgoing",
-                &["target", "content"],
-                Some(gray_italic()),
-                narrate,
-            ),
-        ),
-        entry(
-            "team_msg_command_incoming",
-            4,
-            element(
-                "chat.type.team.text",
-                &["target", "sender", "content"],
-                None,
-                narrate,
-            ),
-        ),
-        entry(
-            "team_msg_command_outgoing",
-            5,
-            element(
-                "chat.type.team.sent",
-                &["target", "sender", "content"],
-                None,
-                narrate,
-            ),
-        ),
-        entry(
-            "emote_command",
-            6,
-            element(
-                "chat.type.emote",
-                &["sender", "content"],
-                None,
-                "chat.type.emote",
-            ),
-        ),
-    ];
-    registry("minecraft:chat_type", entries)
-}
-
-fn registry(kind: &str, entries: Vec<Nbt>) -> Compound {
-    Compound(vec![
-        ("type".into(), Nbt::from(kind)),
-        ("value".into(), Nbt::List(entries)),
-    ])
+    registries::id_of(shared, side, "chat_type", name).unwrap_or(vanilla)
 }
 
 /// Message timestamps for clients that send none: the wall clock in

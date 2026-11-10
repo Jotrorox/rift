@@ -3,15 +3,14 @@
 use super::{NEWER, OLDER};
 use crate::{
     Direction, Packet, State,
-    codec::{HasShared, Shared},
+    codec::{HasShared, Shared, registries::Side},
     routed_step,
     step::{Cx, RouteBuilder, Routes},
     steps::{
         Make,
         v1_18_2_to_1_19::{
-            chat::{self, ChatTypes},
-            id,
-            join::Login,
+            chat::ChatTypes,
+            id, join,
             login::{Hello, clamp_velocity_forwarding},
             messages::{Placement, PlayerChat, Sent, ServerData, SystemChat},
         },
@@ -71,17 +70,12 @@ impl Up {
         Ok(())
     }
 
-    /// Keep the backend's chat types for decoration and give the client
-    /// 1.19.1's own.
-    // INTEGRATION: the registries codec's helpers for the registry parts of
-    // `login` should replace the chat type handling here once they exist.
+    /// The registries codec converts the chat types for the client; the
+    /// backend's are kept for decoration.
     fn login(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
-        let mut login = Login::read(OLDER, &packet.data)?;
-        self.chat_types = ChatTypes::from_codec(&login.codec);
-        login
-            .codec
-            .insert("minecraft:chat_type", chat::vanilla_1_19_1());
-        cx.to_client(state, Packet::new(packet.id, login.write(NEWER)?));
+        let data = join::convert_login(&mut self.shared, Direction::Clientbound, &packet.data)?;
+        self.chat_types = ChatTypes::from_shared(&self.shared, Side::Backend);
+        cx.to_client(state, Packet::new(packet.id, data));
         Ok(())
     }
 

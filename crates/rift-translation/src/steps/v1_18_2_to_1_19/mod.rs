@@ -17,7 +17,6 @@ mod blocks;
 mod down;
 mod entities;
 mod up;
-mod world;
 
 #[cfg(test)]
 mod tests;
