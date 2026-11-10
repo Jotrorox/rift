@@ -514,3 +514,38 @@ fn converted_logins_match_what_the_other_server_sends() {
     assert_eq!(seed(&out[0].data, at), seed(&newer_login, at));
     assert_eq!(out[0].data[at + 8..], newer_login[at + 8..]);
 }
+
+/// The pair's stand-ins keep a block's shape and waterlogging, and the new
+/// attributes stay unmapped so the entity codec drops them rather than
+/// setting an unrelated attribute.
+#[test]
+fn new_registry_entries_stand_in_sensibly() {
+    let (newer, older) = (crate::data::version(NEWER), crate::data::version(OLDER));
+    let mapping = crate::mapping::mapping(NEWER, OLDER, "block_state");
+    for (from, to) in [
+        (
+            "heavy_core[waterlogged=true]",
+            "polished_deepslate_wall[east=none,north=none,south=none,up=true,waterlogged=true,west=none]",
+        ),
+        (
+            "vault[facing=north,ominous=false,vault_state=active]",
+            "trial_spawner[trial_spawner_state=inactive]",
+        ),
+    ] {
+        let id = newer
+            .block_states
+            .parse(from)
+            .unwrap_or_else(|| panic!("{from}"));
+        let mapped = mapping
+            .get(id)
+            .unwrap_or_else(|| panic!("{from} is unmapped"));
+        assert_eq!(older.block_states.describe(mapped).unwrap(), to);
+    }
+    let attribute = |name| newer.expect_registry("attribute").id(name).unwrap();
+    let attributes = crate::mapping::mapping(NEWER, OLDER, "attribute");
+    assert_eq!(attributes.get(attribute("generic.scale")), None);
+    let items = crate::mapping::mapping(NEWER, OLDER, "item");
+    let item = newer.expect_registry("item").id("armadillo_scute").unwrap();
+    let scute = older.expect_registry("item").id("scute").unwrap();
+    assert_eq!(items.get(item), Some(scute));
+}
