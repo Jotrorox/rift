@@ -15,6 +15,14 @@ every version uses the newest name (PACKET_RENAMES). The tables are also
 checked against minecraft-data's protocol.json and against the packet IDs
 Rift's proxy hard-codes in src/protocol.
 
+Registries are every registry of the server's reports/registries.json from
+1.14 on (renamed registries under their newest name, REGISTRY_RENAMES); 1.13
+reports only blocks and items, so 1.12 and 1.13 fill item, block, entity_type,
+particle_type, sound_event, mob_effect, enchantment and biome from
+minecraft-data, each name checked against that version's server jar. Block
+states come from reports/blocks.json, verified state by state. data/SOURCES.md
+says which version got which registry from where.
+
 Usage (Python 3.11+, stdlib only):
 
     python3 scripts/translation_crate.py            # regenerate data/
@@ -867,6 +875,305 @@ def check_mcdata_packets(tables):
     return compared
 
 
+# Registries Mojang renamed, by their newest name. Each rename is checked:
+# the new name exists and some entries carry over.
+REGISTRY_RENAMES = {
+    "motive": "painting_variant",  # 1.19
+    "biome_source_type": "worldgen/biome_source",  # 1.16, then worldgen/ in 1.16.2
+    "biome_source": "worldgen/biome_source",
+    "chunk_generator_type": "worldgen/chunk_generator",
+    "chunk_generator": "worldgen/chunk_generator",
+    "block_placer_type": "worldgen/block_placer_type",
+    "block_state_provider_type": "worldgen/block_state_provider_type",
+    "carver": "worldgen/carver_type",  # worldgen/ in 1.16.2, _type in 26.3
+    "worldgen/carver": "worldgen/carver_type",
+    "decorator": "worldgen/decorator",
+    "feature": "worldgen/feature_type",
+    "worldgen/feature": "worldgen/feature_type",
+    "feature_size_type": "worldgen/feature_size_type",
+    "foliage_placer_type": "worldgen/foliage_placer_type",
+    "structure_feature": "worldgen/structure_feature",
+    "structure_piece": "worldgen/structure_piece",
+    "structure_pool_element": "worldgen/structure_pool_element",
+    "structure_processor": "worldgen/structure_processor",
+    "surface_builder": "worldgen/surface_builder",
+    "tree_decorator_type": "worldgen/tree_decorator_type",
+    "trunk_placer_type": "worldgen/trunk_placer_type",
+    "worldgen/material_condition": "worldgen/material_condition_type",  # 26.3
+    "worldgen/material_rule": "worldgen/material_rule_type",  # 26.3
+    "decorated_pot_patterns": "decorated_pot_pattern",  # 1.21
+    "item_sub_predicate_type": "data_component_predicate_type",  # 1.21.5
+}
+
+
+# Renamed registries whose entries were all renamed along with them.
+RENAMED_ENTRIES = {
+    ("decorated_pot_pattern", 767),  # angler_pottery_pattern became angler
+}
+
+
+def dense(entries, label):
+    """Names by network ID with None in gaps; IDs must be unique."""
+    names = []
+    for name, packet_id in entries:
+        if packet_id < 0:
+            raise ValueError(f"{label}: negative ID for {name}")
+        if packet_id >= len(names):
+            names.extend([None] * (packet_id + 1 - len(names)))
+        if names[packet_id] is not None:
+            raise ValueError(f"{label}: ID {packet_id} is both {names[packet_id]} and {name}")
+        names[packet_id] = name
+    return names
+
+
+def strip(name):
+    return name.removeprefix("minecraft:")
+
+
+def report_registries(version):
+    """Every registry the data generator reports, or None before 1.14."""
+    registries = report(version, "registries.json")
+    if registries is None:
+        return None
+    result = {}
+    for key, registry in registries.items():
+        name = REGISTRY_RENAMES.get(strip(key), strip(key))
+        if name in result:
+            raise ValueError(f"{version}: two registries are named {name}")
+        names = dense(((strip(entry), body["protocol_id"])
+                       for entry, body in registry["entries"].items()), f"{version} {key}")
+        source = "registries report" + (f" as {strip(key)}" if name != strip(key) else "")
+        result[name] = names, source
+    return result
+
+
+def snake(name):
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+
+
+# minecraft-data names effects by display name; the registry says unluck.
+MCDATA_EFFECTS = {"bad_luck": "unluck"}
+
+
+def mcdata_registry(version, kind):
+    """A registry filled from minecraft-data, as (names, source) or None.
+    Its IDs are minecraft-data's `id` fields."""
+    if kind == "sounds" and mcdata_path(version, kind) is None:
+        # minecraft-data lists sounds only for the last release of 1.12 and
+        # 1.13; ViaVersion remaps no sound within either, so they share it.
+        fallback = {"1.12": "1.12.2", "1.12.1": "1.12.2", "1.13": "1.13.2", "1.13.1": "1.13.2"}
+        version = fallback.get(version, version)
+    folder = mcdata_path(version, kind)
+    if folder is None:
+        return None
+    entries = mcdata(f"{folder}/{kind}.json")
+    if kind == "entities":
+        # Objects repeat entities under their Spawn Object type IDs.
+        entries = [entry for entry in entries if entry["type"] == "mob"]
+    fixes = MCDATA_FIXES.get((folder.removeprefix("pc/"), kind), {})
+    unused = set(fixes) - {entry["name"] for entry in entries}
+    if unused:
+        raise ValueError(f"MCDATA_FIXES for {folder} {kind} name no entry: {sorted(unused)}")
+    if kind == "effects":
+        rename = lambda name: MCDATA_EFFECTS.get(snake(name), snake(name))
+    else:
+        rename = lambda name: fixes.get(name, name)
+    names = dense(((rename(entry["name"]), entry["id"]) for entry in entries),
+                  f"minecraft-data {folder}/{kind}.json")
+    return names, f"minecraft-data {folder}/{kind}.json"
+
+
+# Corrections to minecraft-data names, by the release the folder is for:
+# every name filled from minecraft-data must occur in that version's server
+# jar (see check_jar_names), which these restore.
+MCDATA_FIXES = {
+    # minecraft-data gives 1.12 the biome names of 1.13 and later.
+    ("1.12", "biomes"): dict(zip(
+        ["ocean", "plains", "desert", "mountains", "forest", "taiga", "swamp", "river",
+         "nether_wastes", "the_end", "frozen_ocean", "frozen_river", "snowy_tundra",
+         "snowy_mountains", "mushroom_fields", "mushroom_field_shore", "beach", "desert_hills",
+         "wooded_hills", "taiga_hills", "mountain_edge", "jungle", "jungle_hills", "jungle_edge",
+         "deep_ocean", "stone_shore", "snowy_beach", "birch_forest", "birch_forest_hills",
+         "dark_forest", "snowy_taiga", "snowy_taiga_hills", "giant_tree_taiga",
+         "giant_tree_taiga_hills", "wooded_mountains", "savanna", "savanna_plateau", "badlands",
+         "wooded_badlands_plateau", "badlands_plateau", "the_void", "sunflower_plains",
+         "desert_lakes", "gravelly_mountains", "flower_forest", "taiga_mountains", "swamp_hills",
+         "ice_spikes", "modified_jungle", "modified_jungle_edge", "tall_birch_forest",
+         "tall_birch_hills", "dark_forest_hills", "snowy_taiga_mountains", "giant_spruce_taiga",
+         "giant_spruce_taiga_hills", "modified_gravelly_mountains", "shattered_savanna",
+         "shattered_savanna_plateau", "eroded_badlands", "modified_wooded_badlands_plateau",
+         "modified_badlands_plateau"],
+        ["ocean", "plains", "desert", "extreme_hills", "forest", "taiga", "swampland", "river",
+         "hell", "sky", "frozen_ocean", "frozen_river", "ice_flats", "ice_mountains",
+         "mushroom_island", "mushroom_island_shore", "beaches", "desert_hills", "forest_hills",
+         "taiga_hills", "smaller_extreme_hills", "jungle", "jungle_hills", "jungle_edge",
+         "deep_ocean", "stone_beach", "cold_beach", "birch_forest", "birch_forest_hills",
+         "roofed_forest", "taiga_cold", "taiga_cold_hills", "redwood_taiga",
+         "redwood_taiga_hills", "extreme_hills_with_trees", "savanna", "savanna_rock", "mesa",
+         "mesa_rock", "mesa_clear_rock", "void", "mutated_plains", "mutated_desert",
+         "mutated_extreme_hills", "mutated_forest", "mutated_taiga", "mutated_swampland",
+         "mutated_ice_flats", "mutated_jungle", "mutated_jungle_edge", "mutated_birch_forest",
+         "mutated_birch_forest_hills", "mutated_roofed_forest", "mutated_taiga_cold",
+         "mutated_redwood_taiga", "mutated_redwood_taiga_hills",
+         "mutated_extreme_hills_with_trees", "mutated_savanna", "mutated_savanna_rock",
+         "mutated_mesa", "mutated_mesa_rock", "mutated_mesa_clear_rock"])),
+    # 1.12 called light gray "silver" in block names.
+    ("1.12", "blocks"): {"light_gray_shulker_box": "silver_shulker_box",
+                         "light_gray_glazed_terracotta": "silver_glazed_terracotta"},
+    # The nether biome was renamed in 1.16; iron_golem has a stray brace.
+    ("1.13", "biomes"): {"nether_wastes": "nether"},
+    ("1.13.2", "biomes"): {"nether_wastes": "nether"},
+    ("1.13", "entities"): {"iron_golem}": "iron_golem"},
+    ("1.13.2", "entities"): {"iron_golem}": "iron_golem"},
+}
+
+# Registries filled from minecraft-data where the reports lack them.
+MCDATA_REGISTRIES = {
+    "item": "items", "block": "blocks", "entity_type": "entities",
+    "particle_type": "particles", "sound_event": "sounds", "mob_effect": "effects",
+    "enchantment": "enchantments", "biome": "biomes",
+}
+
+
+def block_states(version):
+    """Blocks as [name, [[property, [values]]...], default offset], in state
+    order, from the blocks report.
+
+    The game numbers a block's states as the cartesian product of its
+    properties sorted by name, the last varying fastest, each property's
+    values in their declared order. Reports before 1.19 list properties in
+    that order, later ones in declaration order, so the order is chosen as
+    whichever of the two reproduces every state ID of the report (and the
+    files store properties in numbering order)."""
+    blocks = report(version, "blocks.json")
+    result, expected_first = [], 0
+    # Some versions (1.19) sort the report by name: go by state ID instead.
+    for name, block in sorted(blocks.items(),
+                              key=lambda item: min(state["id"] for state in item[1]["states"])):
+        states = block["states"]
+        first = min(state["id"] for state in states)
+        if first != expected_first:
+            raise ValueError(f"{version} {name}: states start at {first}, not {expected_first}")
+        listed = list(block.get("properties", {}).items())
+        for properties in (listed, sorted(listed)):
+            default = numbered(properties, states, first)
+            if default is not None:
+                break
+        else:
+            raise ValueError(f"{version} {name}: no property order reproduces the state IDs")
+        result.append([strip(name), [[key, values] for key, values in properties], default])
+        expected_first += len(states)
+    return result
+
+
+def numbered(properties, states, first):
+    """The default state's offset if numbering `properties` reproduces
+    every state ID, else None."""
+    count = 1
+    for _, values in properties:
+        count *= len(values)
+    if len(states) != count:
+        return None
+    default = None
+    for state in states:
+        offset = 0
+        for property_name, values in properties:
+            offset = offset * len(values) + values.index(state["properties"][property_name])
+        if state["id"] != first + offset:
+            return None
+        if state.get("default"):
+            default = offset
+    return default
+
+
+def registries_of(protocol, version):
+    """A version's registries and where each came from."""
+    registries, sources = {}, {}
+    reported = report_registries(version) if version_at_least(version, "1.13") else None
+    if reported is not None:
+        for name, (names, source) in reported.items():
+            registries[name], sources[name] = names, source
+    elif version_at_least(version, "1.13"):
+        blocks = report(version, "blocks.json")
+        registries["block"] = [strip(name) for name in blocks]
+        sources["block"] = "blocks report"
+        items = report(version, "items.json")
+        registries["item"] = dense(((strip(name), body["protocol_id"])
+                                    for name, body in items.items()), f"{version} items")
+        sources["item"] = "items report"
+    for name, kind in MCDATA_REGISTRIES.items():
+        # From 1.14 on a registry the report lacks is data-driven (synced
+        # by the server), not missing.
+        if name in registries or reported is not None:
+            continue
+        filled = mcdata_registry(version, kind)
+        if filled is not None:
+            registries[name], sources[name] = filled
+    return dict(sorted(registries.items())), dict(sorted(sources.items()))
+
+
+def jar_strings(version):
+    """Every identifier-like string in a server jar's classes."""
+    found = set()
+    with zipfile.ZipFile(jar(version)) as archive:
+        for name in archive.namelist():
+            if name.endswith(".class"):
+                found.update(match.decode() for match in
+                             re.findall(rb"[A-Za-z0-9_.\-]{2,}", archive.read(name)))
+    return found
+
+
+def check_jar_names(all_registries, all_sources):
+    """Every registry entry filled from minecraft-data must be a string in
+    that version's server jar, which catches names from other versions."""
+    problems = []
+    for protocol, version in PROTOCOLS:
+        names = {(registry, name) for registry, entries in all_registries[protocol].items()
+                 if all_sources[protocol][registry].startswith("minecraft-data")
+                 for name in entries if name}
+        if not names:
+            continue
+        strings = jar_strings(version)
+        problems += [f"{version} {registry} {name}" for registry, name in sorted(names)
+                     if name not in strings]
+    if problems:
+        raise ValueError("minecraft-data names missing from their server jar (add "
+                         "MCDATA_FIXES):\n  " + "\n  ".join(problems))
+
+
+def check_mcdata_effects(all_registries):
+    """minecraft-data's effect names, converted, must match the 1.14
+    registry at the same IDs."""
+    modern = all_registries[477]["mob_effect"]
+    for protocol, registries in all_registries.items():
+        if protocol >= 477:
+            continue
+        for packet_id, name in enumerate(registries.get("mob_effect", [])):
+            if name is not None and name != modern[packet_id]:
+                raise ValueError(f"{protocol} mob_effect {packet_id}: {name}, "
+                                 f"1.14 has {modern[packet_id]}")
+
+
+def check_registry_renames(all_registries, all_sources):
+    for old, new in REGISTRY_RENAMES.items():
+        holders = [protocol for protocol, registries in all_registries.items() if new in registries]
+        if not holders:
+            raise ValueError(f"registry rename {old} -> {new}: no version has {new}")
+    # Adjacent versions: a renamed registry must keep some of its entries
+    # (worldgen registries were reworked along with their renames).
+    renamed_registries = set(REGISTRY_RENAMES.values())
+    ordered_protocols = sorted(all_registries)
+    for older, newer in zip(ordered_protocols, ordered_protocols[1:]):
+        for name in set(all_registries[older]) & set(all_registries[newer]) & renamed_registries:
+            if all_sources[older][name] == all_sources[newer][name]:
+                continue
+            before = {entry for entry in all_registries[older][name] if entry}
+            after = {entry for entry in all_registries[newer][name] if entry}
+            if before and after and not before & after and (name, newer) not in RENAMED_ENTRIES:
+                raise ValueError(f"{name} changed beyond recognition from {older} to {newer}; "
+                                 "check REGISTRY_RENAMES")
+
+
 def render(value):
     """Compact JSON with one top-level section per line, so diffs stay
     readable without bloating the files."""
@@ -875,22 +1182,93 @@ def render(value):
     return "{" + ",\n".join(lines) + "}\n"
 
 
-def version_file(protocol, version, packets):
-    return {
+def version_file(protocol, version, packets, registries):
+    value = {
         "protocol": protocol,
         "name": version,
         "packets": dict(sorted(packets.items())),
+        "registries": registries,
     }
+    if version_at_least(version, "1.13"):
+        value["blocks"] = block_states(version)
+    return value
 
 
 def outputs():
     tables = packet_tables()
     check_mcdata_packets(tables)
     check_rift_ids(tables)
+    all_registries, all_sources = {}, {}
+    for protocol, version in PROTOCOLS:
+        all_registries[protocol], all_sources[protocol] = registries_of(protocol, version)
+    check_mcdata_effects(all_registries)
+    check_jar_names(all_registries, all_sources)
+    check_registry_renames(all_registries, all_sources)
     files = {}
     for protocol, version in PROTOCOLS:
-        files[f"{protocol}.json"] = render(version_file(protocol, version, tables[protocol]))
+        files[f"{protocol}.json"] = render(
+            version_file(protocol, version, tables[protocol], all_registries[protocol]))
+    files["SOURCES.md"] = sources_summary(tables, all_sources)
     return files
+
+
+def sources_summary(tables, all_sources):
+    release = dict(PROTOCOLS)
+    lines = [
+        "# Where the translation data comes from",
+        "",
+        "Generated by `scripts/translation_crate.py`; do not edit. Inputs: the vanilla",
+        "server jars pinned in `tests/servers.json` (their data generator reports),",
+        f"PrismarineJS minecraft-data (MIT) at `{MCDATA_COMMIT}` and, for packet order",
+        f"only, ViaVersion's packet-type enums at `{VIA_COMMIT}`.",
+        "",
+        "## Packets",
+        "",
+        "| Versions | Source |",
+        "| --- | --- |",
+        f"| {PROTOCOLS[0][1]} to {[name for protocol, name in PROTOCOLS if protocol < PACKET_REPORTS][-1]}"
+        " | ViaVersion packet-type enums, Mojang names |",
+        f"| {release[PACKET_REPORTS]} to {PROTOCOLS[-1][1]} | `reports/packets.json` |",
+        "",
+        "Renamed packets use their newest name in every version:",
+        "",
+    ]
+    for key, renames in PACKET_RENAMES.items():
+        for old, new in renames.items():
+            lines.append(f"- `{key}` `{old}` is `{new}`")
+    lines += [
+        "",
+        "## Registries",
+        "",
+        "Registries Mojang renamed use their newest name in every version:",
+        "",
+    ]
+    for old, new in REGISTRY_RENAMES.items():
+        lines.append(f"- `{old}` is `{new}`")
+    lines += ["", "| Registry | Versions | Source |", "| --- | --- | --- |"]
+    names = sorted({name for sources in all_sources.values() for name in sources})
+    for name in names:
+        runs = []
+        for protocol, version in PROTOCOLS:
+            source = all_sources[protocol].get(name)
+            if runs and runs[-1][2] == source:
+                runs[-1][1] = version
+            else:
+                runs.append([version, version, source])
+        for first, last, source in runs:
+            if source is None:
+                continue
+            versions = first if first == last else f"{first} to {last}"
+            lines.append(f"| `{name}` | {versions} | {source} |")
+    lines += [
+        "",
+        "## Block states",
+        "",
+        "From `reports/blocks.json` for 1.13 and later, verified state by state.",
+        "1.12.x blocks and items are numeric IDs with metadata; see `legacy.json`.",
+        "",
+    ]
+    return "\n".join(lines)
 
 
 def fill_cache(jobs):
@@ -913,8 +1291,9 @@ def main():
     files = outputs()
     stale = sorted(name for name, text in files.items()
                    if not (OUTPUT / name).exists() or (OUTPUT / name).read_text() != text)
-    generated = {str(path.relative_to(OUTPUT)) for path in OUTPUT.rglob("*.json")
-                 if not path.relative_to(OUTPUT).parts[0] in HAND_WRITTEN} if OUTPUT.exists() else set()
+    generated = {str(path.relative_to(OUTPUT)) for path in OUTPUT.rglob("*")
+                 if path.is_file()
+                 and path.relative_to(OUTPUT).parts[0] not in HAND_WRITTEN} if OUTPUT.exists() else set()
     unknown = sorted(generated - set(files))
     if args.check:
         if stale or unknown:
