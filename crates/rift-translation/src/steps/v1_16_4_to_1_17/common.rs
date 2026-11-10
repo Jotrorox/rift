@@ -367,6 +367,20 @@ pub fn remove_terrain_shape(biome: &mut Compound) -> io::Result<()> {
     Ok(())
 }
 
+/// 1.18.2 names the blocks that burn forever in a dimension by a tag
+/// reference (`#minecraft:infiniburn_overworld`), 1.18 by the tag's bare ID.
+pub fn tag_infiniburn(dimension_type: &mut Compound, hashed: bool) -> io::Result<()> {
+    let Some(Nbt::String(infiniburn)) = dimension_type.get_mut("infiniburn") else {
+        return Err(invalid("dimension type without infiniburn"));
+    };
+    match (hashed, infiniburn.strip_prefix('#')) {
+        (true, None) => infiniburn.insert(0, '#'),
+        (false, Some(bare)) => *infiniburn = bare.to_owned(),
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Running a step on single packets and on recorded sessions, for the
 /// tests of the steps from 1.16.4 to 1.18.2.
 #[cfg(test)]
@@ -624,6 +638,28 @@ mod tests {
         })
         .unwrap();
         assert!(seen > 70);
+    }
+
+    #[test]
+    fn infiniburn_gains_and_loses_its_hash() {
+        let mut dimension = Compound::new();
+        dimension.insert("infiniburn", "minecraft:infiniburn_end");
+        tag_infiniburn(&mut dimension, true).unwrap();
+        assert_eq!(
+            dimension.str("infiniburn"),
+            Some("#minecraft:infiniburn_end")
+        );
+        tag_infiniburn(&mut dimension, true).unwrap();
+        assert_eq!(
+            dimension.str("infiniburn"),
+            Some("#minecraft:infiniburn_end")
+        );
+        tag_infiniburn(&mut dimension, false).unwrap();
+        assert_eq!(
+            dimension.str("infiniburn"),
+            Some("minecraft:infiniburn_end")
+        );
+        assert!(tag_infiniburn(&mut Compound::new(), true).is_err());
     }
 
     #[test]
