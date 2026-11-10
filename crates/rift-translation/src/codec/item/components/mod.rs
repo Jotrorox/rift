@@ -3,15 +3,33 @@
 //! adjacent protocols.
 //!
 //! Layouts are declarative ([`layouts`], built from [`schema::Node`]s), so
-//! reading, writing and registry ID remapping all follow one description.
-//! [`convert`] carries a patch from the sender's protocol to the receiver's:
-//! component types by name, registry IDs inside values, and explicit
-//! conversions where a component was split, merged, renamed or restructured
-//! (see [`convert`]'s module). What the receiver cannot express is dropped,
-//! and when that would lose data the client or server sends back (creative
-//! mode, container clicks), the dropped component is stashed in the stack's
-//! `custom_data` and restored on the way back (see [`stash`]).
-mod convert;
+//! reading, writing and registry ID remapping all follow one description;
+//! a new protocol adds table rows. [`convert()`] carries a patch from the
+//! sender's protocol to the receiver's: component types by name, registry
+//! IDs inside values, coercions between equivalent encodings, and explicit
+//! rules where a component was split, merged, renamed or restructured. What
+//! the receiver cannot express is dropped, and the original is stashed in
+//! the stack's `custom_data` and restored when the stack comes back (see
+//! `stash`), so creative clients and container clicks lose nothing.
+//!
+//! # API for packet code
+//!
+//! - [`read`], [`write()`], [`convert()`], [`transcode`]: the patch after a
+//!   stack's count and item ID; [`read_delimited`] and friends for the
+//!   length-prefixed patches of `set_creative_mode_slot`.
+//! - [`schema::read_stack`], [`schema::write_stack`] and the template
+//!   variants: whole 1.20.5+ stacks.
+//! - [`hashed`]: hashed stacks of 1.21.5+ `container_click`, and
+//!   [`hashed::from_stack`] for older clients on newer servers.
+//! - [`display`]: slot and recipe displays, trade costs, component matchers
+//!   and consume effects, each as a `transcode_*` function.
+//! - [`identical`]: whether a pair needs no component conversion at all.
+//!
+//! A step that must treat a component differently converts the patch with
+//! [`convert()`] and then edits the resulting [`Components`]; for values
+//! outside a patch, [`convert::with`] gives a conversion context for
+//! [`convert_value`].
+pub mod convert;
 #[cfg(test)]
 mod crosscheck;
 pub mod display;

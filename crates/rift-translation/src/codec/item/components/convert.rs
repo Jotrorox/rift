@@ -1,13 +1,13 @@
 //! Conversion of component patches between two adjacent protocols.
 //!
-//! A patch goes through three passes: the pair's explicit rules ([`rules`])
+//! A patch goes through three passes: the pair's explicit rules (`rules`)
 //! take the components that were split, merged, renamed or restructured;
 //! every other component keeps its name (through the
 //! `data_component_type` mapping) and is converted node by node by
 //! [`convert_value`], which remaps registry IDs and enum values and applies
 //! the coercions vanilla made between equivalent encodings (an either-holder
 //! and a holder, a tag key and a holder set, a stack and a template); what
-//! the receiver cannot express is dropped and stashed ([`super::stash`]).
+//! the receiver cannot express is dropped and stashed (`stash`).
 use super::{
     Component, Components,
     layouts::{FIRST, Layout},
