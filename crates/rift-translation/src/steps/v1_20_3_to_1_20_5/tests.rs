@@ -549,3 +549,212 @@ fn new_registry_entries_stand_in_sensibly() {
     let scute = older.expect_registry("item").id("scute").unwrap();
     assert_eq!(items.get(item), Some(scute));
 }
+
+/// Write what the steps of both pairs produce from hand-made inputs to
+/// `$RIFT_S10_PRODUCED`, for `schema_check.py` to decode with minecraft-data.
+#[test]
+#[ignore = "run by schema_check.py"]
+fn dump_produced_packets() {
+    use crate::steps::v1_20_2_to_1_20_3 as older_pair;
+    let path = std::env::var("RIFT_S10_PRODUCED").expect("RIFT_S10_PRODUCED names the output");
+    let string = |text: &str| {
+        let mut writer = Writer::new();
+        writer.string(text);
+        writer.buf
+    };
+    let mut push_old = string("https://example.com/p.zip");
+    push_old.extend(string("0123456789abcdef0123456789abcdef01234567"));
+    push_old.extend([1, 0]);
+    let mut push_new = vec![9; 16];
+    push_new.extend(&push_old);
+    let mut jigsaw = vec![0; 8];
+    for text in [
+        "minecraft:a",
+        "minecraft:b",
+        "minecraft:c",
+        "minecraft:stone",
+        "rollable",
+    ] {
+        jigsaw.extend(string(text));
+    }
+    let mut jigsaw_new = jigsaw.clone();
+    jigsaw_new.extend([1, 2]);
+    let mut status = vec![9; 16];
+    status.push(6);
+    let mut transfer = string("example.com");
+    transfer.push(1);
+    let mut store = string("rift:a");
+    store.extend([1, 7]);
+    let signed = signed_command("msg a hi", 1, 0, [0; 3]);
+    let mut chat = Writer::new();
+    chat.string("hi")
+        .i64(1)
+        .i64(1)
+        .bool(false)
+        .bytes(&last_seen(0, [0; 3]));
+    let survival = older_login();
+    let older_up = (
+        older_pair::UP.unwrap(),
+        older_pair::NEWER,
+        older_pair::OLDER,
+    );
+    let older_down = (
+        older_pair::DOWN.unwrap(),
+        older_pair::OLDER,
+        older_pair::NEWER,
+    );
+    let newer_up = (up::STEP.unwrap(), NEWER, OLDER);
+    let newer_down = (down::STEP.unwrap(), OLDER, NEWER);
+    use Direction::{Clientbound as C, Serverbound as S};
+    use State::{Configuration, Login, Play};
+    let cases: Vec<(_, Direction, State, &str, Vec<u8>)> = vec![
+        (
+            older_up,
+            C,
+            Configuration,
+            "resource_pack_push",
+            push_old.clone(),
+        ),
+        (older_up, C, Play, "resource_pack_push", push_old),
+        (older_up, S, Play, "resource_pack", status.clone()),
+        (older_up, S, Configuration, "resource_pack", status),
+        (older_up, C, Play, "set_score", hex("01 61 01 01 62")),
+        (older_up, C, Play, "set_score", hex("01 61 00 01 62 05")),
+        (
+            older_up,
+            C,
+            Play,
+            "respawn",
+            hex(&format!("{OVERWORLD} {SPAWN_TAIL} 00")),
+        ),
+        (older_up, S, Play, "set_jigsaw_block", jigsaw_new),
+        (older_down, C, Play, "resource_pack_push", push_new),
+        (older_down, S, Play, "resource_pack", vec![1]),
+        (older_down, C, Play, "reset_score", hex("01 61 01 01 62")),
+        (
+            older_down,
+            C,
+            Play,
+            "set_score",
+            hex("01 61 01 62 05 01 08 0001 78 01 00"),
+        ),
+        (
+            older_down,
+            C,
+            Play,
+            "set_default_spawn_position",
+            vec![0; 12],
+        ),
+        (older_down, C, Play, "game_event", hex("0d 00000000")),
+        (older_down, S, Play, "set_jigsaw_block", jigsaw),
+        (newer_up, C, Login, "hello", hex("00 01 01 01 02")),
+        (
+            newer_up,
+            C,
+            Login,
+            "login_finished",
+            hex("888b6130823b387bb012d6dc24e47d59 01 61 00"),
+        ),
+        (newer_up, C, Play, "login", survival),
+        (
+            newer_up,
+            C,
+            Play,
+            "respawn",
+            hex(&format!("{OVERWORLD} {SPAWN_TAIL} 01")),
+        ),
+        (newer_up, C, Play, "game_event", hex("03 3f800000")),
+        (newer_up, C, Play, "server_data", hex("08 0001 41 00 01")),
+        (
+            newer_up,
+            C,
+            Play,
+            "mount_screen_open",
+            hex("01 03 00000001"),
+        ),
+        (newer_up, S, Play, "chat", chat.buf),
+        (newer_up, S, Play, "chat_command_signed", signed.clone()),
+        (newer_up, S, Play, "chat_command", string("time set day")),
+        (newer_up, S, Play, "container_button_click", hex("01 02")),
+        (newer_down, C, Login, "hello", hex("00 01 01 01 02 01")),
+        (
+            newer_down,
+            C,
+            Login,
+            "login_finished",
+            hex("888b6130823b387bb012d6dc24e47d59 01 61 00 01"),
+        ),
+        (newer_down, C, Login, "cookie_request", string("rift:a")),
+        (newer_down, C, Configuration, "store_cookie", store),
+        (
+            newer_down,
+            C,
+            Configuration,
+            "cookie_request",
+            string("rift:a"),
+        ),
+        (
+            newer_down,
+            C,
+            Configuration,
+            "select_known_packs",
+            hex("00"),
+        ),
+        (newer_down, C, Configuration, "transfer", transfer.clone()),
+        (newer_down, C, Play, "transfer", transfer),
+        (newer_down, C, Play, "login", newer_login(true)),
+        (
+            newer_down,
+            C,
+            Play,
+            "respawn",
+            hex(&format!("00 {SPAWN_TAIL} 01")),
+        ),
+        (newer_down, C, Play, "server_data", hex("08 0001 41 00")),
+        (
+            newer_down,
+            C,
+            Play,
+            "mount_screen_open",
+            hex("01 02 00000001"),
+        ),
+        (newer_down, S, Play, "chat_command", signed),
+        (newer_down, S, Play, "container_button_click", hex("01 02")),
+    ];
+    let mut lines = String::new();
+    let mut harnesses: Vec<(crate::steps::Make, Harness)> = Vec::new();
+    for ((make, client, backend), direction, state, name, body) in cases {
+        let index = match harnesses
+            .iter()
+            .position(|(known, _)| *known as usize == make as usize)
+        {
+            Some(index) => index,
+            None => {
+                harnesses.push((make, Harness::new(make, client, backend)));
+                harnesses.len() - 1
+            }
+        };
+        let out = harnesses[index]
+            .1
+            .send(direction, state, name, &body)
+            .unwrap();
+        for out in out {
+            let protocol = match out.direction {
+                Direction::Clientbound => client,
+                Direction::Serverbound => backend,
+            };
+            let id =
+                crate::data::version(protocol).expect_packet(out.state, out.direction, &out.name);
+            let line = serde_json::json!({
+                "protocol": protocol,
+                "d": if out.direction == Direction::Clientbound { "c" } else { "s" },
+                "s": match out.state { Login => "login", Configuration => "configuration", _ => "play" },
+                "id": id,
+                "name": out.name,
+                "hex": out.data.iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
+            });
+            lines.push_str(&format!("{line}\n"));
+        }
+    }
+    std::fs::write(path, lines).unwrap();
+}
