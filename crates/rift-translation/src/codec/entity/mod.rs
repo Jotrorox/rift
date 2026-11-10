@@ -143,6 +143,29 @@ pub fn map_type(shared: &mut Shared, direction: Direction, name: &str) -> Option
     target.id(other).and_then(|id| target.name(id))
 }
 
+/// Follow an entity spawned by a backend packet that a step converts
+/// itself instead of leaving to this codec: entity data is converted by
+/// its type. `kind` is the backend's entity type ID.
+pub fn track_spawn(shared: &mut Shared, id: i32, kind: i32) {
+    let Some(backend) = type_name(shared.source(Direction::Clientbound), kind) else {
+        return;
+    };
+    if let Some(client) = map_type(shared, Direction::Clientbound, backend) {
+        shared.entity.track(id, Tracked { backend, client });
+    }
+}
+
+/// [`track_spawn`] for an `add_entity` or `add_mob` body, which start with
+/// the entity ID, its UUID and its type in every protocol since 1.9.
+pub fn track_spawn_packet(shared: &mut Shared, body: &[u8]) -> io::Result<()> {
+    let mut reader = Reader::new(body);
+    let id = reader.varint()?;
+    reader.take(16)?;
+    let kind = reader.varint()?;
+    track_spawn(shared, id, kind);
+    Ok(())
+}
+
 /// Woods of 1.21.1 boats by `Boat.Type` ordinal; pale oak (1.21.2) has none.
 pub const BOAT_WOODS: &[&str] = &[
     "oak", "spruce", "birch", "jungle", "acacia", "cherry", "dark_oak", "mangrove", "bamboo",

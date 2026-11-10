@@ -11,7 +11,7 @@ use super::{
 };
 use crate::{
     Direction, Packet, State,
-    codec::{HasShared, Shared, registries::Side},
+    codec::{HasShared, Shared, entity, registries::Side},
     data,
     step::{Cx, RouteBuilder, Routes, Step},
     steps::Make,
@@ -135,6 +135,7 @@ impl Down {
     /// Mobs spawn with `add_mob`, paintings with `add_painting` once their
     /// variant is known; the rest stays `add_entity`.
     fn add_entity(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
+        entity::track_spawn_packet(&mut self.shared, &packet.data)?;
         let entities = self.shared.mapping(Direction::Clientbound, "entity_type");
         let blocks = self.shared.mapping(Direction::Clientbound, "block_state");
         match entities::add_entity_down(&packet.data, entities, blocks)? {

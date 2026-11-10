@@ -9,7 +9,7 @@ use super::{
 };
 use crate::{
     Direction, Packet, State,
-    codec::{HasShared, Shared, registries::Side},
+    codec::{HasShared, Shared, entity, registries::Side},
     data,
     step::{Cx, RouteBuilder, Routes, Step},
     steps::Make,
@@ -134,6 +134,7 @@ impl Up {
     // its own taps; these handlers own the spawn packets because 1.19 merged
     // them.
     fn add_entity(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
+        entity::track_spawn_packet(&mut self.shared, &packet.data)?;
         let entities = self.shared.mapping(Direction::Clientbound, "entity_type");
         let blocks = self.shared.mapping(Direction::Clientbound, "block_state");
         if let Some(data) = entities::add_entity_up(&packet.data, entities, blocks)? {
@@ -143,6 +144,7 @@ impl Up {
     }
 
     fn add_mob(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
+        entity::track_spawn_packet(&mut self.shared, &packet.data)?;
         let entities = self.shared.mapping(Direction::Clientbound, "entity_type");
         if let Some(data) = entities::add_mob_up(&packet.data, entities)? {
             let id = id(NEWER, state, Direction::Clientbound, "add_entity");
@@ -152,6 +154,13 @@ impl Up {
     }
 
     fn add_painting(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
+        let painting = data::version(OLDER)
+            .expect_registry("entity_type")
+            .id("painting");
+        if let Some(kind) = painting {
+            let id = Reader::new(&packet.data).varint()?;
+            entity::track_spawn(&mut self.shared, id, kind);
+        }
         let variants = self
             .shared
             .mapping(Direction::Clientbound, "painting_variant");
