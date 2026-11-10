@@ -8,7 +8,6 @@ use super::{
     id,
     login::{Finished, Hello, Key},
     messages::{Placement, PlayerChat, Sent, SystemChat},
-    players,
     world::{self, DimensionTypes},
 };
 use crate::{
@@ -64,7 +63,6 @@ impl Down {
             use Direction::*;
             use State::*;
             RouteBuilder::new(OLDER, NEWER)
-                .default_handler(Clientbound, Play, "player_info", Self::player_info)
                 .defaults()
                 .serverbound(Login, "hello", Self::hello)
                 .serverbound(Login, "key", Self::key)
@@ -377,15 +375,6 @@ impl Down {
         }
         r.finish()?;
         cx.to_backend(state, Packet::new(packet.id, w.buf));
-        Ok(())
-    }
-
-    fn player_info(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
-        let (action, entries) = players::read_legacy(NEWER, &packet.data)?;
-        cx.to_client(
-            state,
-            Packet::new(packet.id, players::write_legacy(OLDER, action, &entries)),
-        );
         Ok(())
     }
 }

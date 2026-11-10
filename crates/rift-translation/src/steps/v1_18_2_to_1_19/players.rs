@@ -3,10 +3,8 @@
 //! to added players), then 1.19.3's `player_info_update`, which combines
 //! several actions per packet, and `player_info_remove`.
 //!
-//! The text codec owns these packets; the era's steps install these
-//! conversions as fallbacks that a codec default replaces.
-// INTEGRATION: drop the fallbacks once the text codec converts `player_info`
-// between 758/759 and splits it for 760/761.
+//! The text codec owns these packets and converts them; this independent
+//! reading of the layouts is what the steps' tests check its output with.
 use crate::wire::{Reader, Writer, invalid};
 use std::io;
 
@@ -232,31 +230,6 @@ pub fn write_update(actions: u8, entries: &[Entry]) -> Vec<u8> {
     w.buf
 }
 
-/// A 1.19.3 `player_info_remove`.
-pub fn read_remove(data: &[u8]) -> io::Result<Vec<Entry>> {
-    let mut r = Reader::new(data);
-    let count = r.count()?;
-    let entries = (0..count)
-        .map(|_| {
-            Ok(Entry {
-                uuid: r.uuid()?,
-                ..Entry::default()
-            })
-        })
-        .collect::<io::Result<_>>()?;
-    r.finish()?;
-    Ok(entries)
-}
-
-pub fn write_remove(entries: &[Entry]) -> Vec<u8> {
-    let mut w = Writer::new();
-    w.varint(entries.len() as i32);
-    for entry in entries {
-        w.uuid(entry.uuid);
-    }
-    w.buf
-}
-
 /// The 1.19.3 action bits that carry what a legacy action carries.
 pub fn update_actions(action: Action) -> u8 {
     match action {
@@ -266,21 +239,4 @@ pub fn update_actions(action: Action) -> u8 {
         Action::DisplayName => DISPLAY_NAME,
         Action::Remove => 0,
     }
-}
-
-/// The legacy actions that carry what a 1.19.3 update carries: adding a
-/// player carries every field at once, otherwise one packet per field.
-pub fn legacy_actions(actions: u8) -> Vec<Action> {
-    if actions & ADD != 0 {
-        return vec![Action::Add];
-    }
-    [
-        (GAME_MODE, Action::GameMode),
-        (LATENCY, Action::Latency),
-        (DISPLAY_NAME, Action::DisplayName),
-    ]
-    .into_iter()
-    .filter(|(bit, _)| actions & bit != 0)
-    .map(|(_, action)| action)
-    .collect()
 }

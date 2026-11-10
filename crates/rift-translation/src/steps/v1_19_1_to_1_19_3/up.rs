@@ -13,7 +13,6 @@ use crate::{
             join::Respawn,
             login::{Hello, Key, clamp_velocity_forwarding},
             messages::{PlayerChat, Sent, ServerData, write_disguised_chat},
-            players::{self, Action},
         },
     },
     wire::{Reader, Writer},
@@ -46,7 +45,6 @@ impl Up {
             use Direction::Clientbound;
             use State::*;
             RouteBuilder::new(NEWER, OLDER)
-                .default_handler(Clientbound, Play, "player_info", Self::player_info)
                 .defaults()
                 .serverbound(Login, "hello", Self::hello)
                 .serverbound(Login, "key", Self::key)
@@ -157,20 +155,6 @@ impl Up {
         r.finish()?;
         let id = id(NEWER, state, Direction::Clientbound, "sound");
         cx.to_client(state, Packet::new(id, w.buf));
-        Ok(())
-    }
-
-    fn player_info(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
-        let (action, entries) = players::read_legacy(OLDER, &packet.data)?;
-        let (name, data) = match action {
-            Action::Remove => ("player_info_remove", players::write_remove(&entries)),
-            _ => (
-                "player_info_update",
-                players::write_update(players::update_actions(action), &entries),
-            ),
-        };
-        let id = id(NEWER, state, Direction::Clientbound, name);
-        cx.to_client(state, Packet::new(id, data));
         Ok(())
     }
 
