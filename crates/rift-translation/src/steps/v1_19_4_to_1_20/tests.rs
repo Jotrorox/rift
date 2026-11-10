@@ -161,9 +161,9 @@ fn downgraded_login_names_only_what_1_19_4_knows() {
     let items = data::version(OLDER).expect_registry("item");
     let sounds = data::version(OLDER).expect_registry("sound_event");
     // Patterns whose template 1.19.4 lacks (wayfinder, host, raiser,
-    // shaper, silence) are left out: its decoder rejects unknown items.
+    // shaper, silence) name a stand-in: its decoder rejects unknown items.
     let patterns = entries(&after, "trim_pattern");
-    assert_eq!(patterns.len(), 11);
+    assert_eq!(patterns.len(), 16);
     for (name, entry) in &patterns {
         let template = entry
             .compound("element")
@@ -171,7 +171,9 @@ fn downgraded_login_names_only_what_1_19_4_knows() {
             .str("template_item")
             .unwrap();
         assert!(items.id(template).is_some(), "{name}: {template}");
-        assert_ne!(*name, "minecraft:wayfinder");
+        if *name == "minecraft:wayfinder" {
+            assert_eq!(template, "minecraft:wild_armor_trim_smithing_template");
+        }
     }
     for (name, entry) in entries(&after, "trim_material") {
         let ingredient = entry
