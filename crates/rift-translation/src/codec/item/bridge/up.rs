@@ -41,8 +41,11 @@ pub(super) fn components(cx: &mut Bridge, item: &str, mut tag: Compound) -> io::
     if let Some(data) = take_int(&mut tag, "CustomModelData") {
         out.insert("custom_model_data", Value::Int(data));
     }
-    if let Some(Nbt::Compound(state)) = tag.remove("BlockStateTag") {
-        out.insert("block_state", block_state(&state));
+    if let Some(state) = take_compound(&mut tag, "BlockStateTag") {
+        match block_state(&state) {
+            Some(value) => out.insert("block_state", value),
+            None => drop(tag.insert("BlockStateTag", state)),
+        }
     }
     if let Some(mut entity) = take_compound(&mut tag, "EntityTag") {
         // A 1.20.5 server cannot save entity data without an ID; the client
@@ -274,18 +277,18 @@ fn property_value(name: &str, value: &Nbt) -> Option<String> {
     })
 }
 
-fn block_state(state: &Compound) -> Value {
-    Value::List(
-        state
-            .iter()
-            .filter_map(|(name, value)| {
-                Some(Value::Struct(vec![
-                    Value::String(name.to_owned()),
-                    Value::String(property_value(name, value)?),
-                ]))
-            })
-            .collect(),
-    )
+/// `None` when a property is not a string, number or boolean.
+fn block_state(state: &Compound) -> Option<Value> {
+    state
+        .iter()
+        .map(|(name, value)| {
+            Some(Value::Struct(vec![
+                Value::String(name.to_owned()),
+                Value::String(property_value(name, value)?),
+            ]))
+        })
+        .collect::<Option<_>>()
+        .map(Value::List)
 }
 
 /// Take the components a `BlockEntityTag` holds out of it; returns the
