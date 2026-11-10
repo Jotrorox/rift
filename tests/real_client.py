@@ -42,6 +42,7 @@ import time
 import urllib.request
 import uuid
 import zipfile
+import zlib
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
@@ -241,8 +242,12 @@ def supports_quick_play(version_json):
 
 
 def wanted_asset(name):
-    """Sounds and music (~370 MB) and translations are never needed by a muted English client."""
-    if name.endswith(".ogg"):
+    """Sounds and music (~370 MB) and translations are never needed by a muted English client.
+
+    sounds.json is left out too: without it the client registers no sound
+    files, instead of warning about each of thousands of missing ones.
+    """
+    if name.endswith(".ogg") or name in ("minecraft/sounds.json", "sounds.json"):
         return False
     if name.startswith(("minecraft/lang/", "lang/")) and not re.search(r"/en_us\.(json|lang)$", name.lower()):
         return False
@@ -251,6 +256,9 @@ def wanted_asset(name):
 
 # --------------------------------------------------------------------------
 # Setup
+
+
+SETUP_VERSION = 2  # bump when the set of prepared files changes
 
 
 @dataclass
@@ -292,8 +300,11 @@ def setup(version, quiet=False):
     """Download and verify everything needed to run `version`. Idempotent and lock-guarded."""
     data = version_json(version)
     with file_lock(f"clients-setup-{version}"):
-        stamp = CACHE / "meta" / "ready" / version
+        stamp = CACHE / "meta" / "ready" / f"{version}-v{SETUP_VERSION}"
         client = data["downloads"]["client"]
+        index = data["assetIndex"]
+        # The client gets an index of exactly the objects downloaded here.
+        headless_index = f"{index['id']}-headless"
         client_jar = CACHE / "versions" / version / f"{version}.jar"
         libs = libraries(data)
         if not stamp.exists():
@@ -302,24 +313,27 @@ def setup(version, quiet=False):
             jobs = [(client["url"], client_jar, "sha1", client["sha1"], client["size"])]
             jobs += [(url, CACHE / "libraries" / path, "sha1" if sha1 else None, sha1, size)
                      for path, url, sha1, size in libs]
-            index = data["assetIndex"]
             index_json = fetch_json(index["url"], CACHE / "assets" / "indexes" / f"{index['id']}.json",
                                     index["sha1"])
-            for name, entry in index_json["objects"].items():
-                if wanted_asset(name):
-                    sha1 = entry["hash"]
-                    jobs.append((f"https://resources.download.minecraft.net/{sha1[:2]}/{sha1}",
-                                 CACHE / "assets" / "objects" / sha1[:2] / sha1, "sha1", sha1, entry["size"]))
+            kept = {name: entry for name, entry in index_json["objects"].items() if wanted_asset(name)}
+            for entry in kept.values():
+                sha1 = entry["hash"]
+                jobs.append((f"https://resources.download.minecraft.net/{sha1[:2]}/{sha1}",
+                             CACHE / "assets" / "objects" / sha1[:2] / sha1, "sha1", sha1, entry["size"]))
             with ThreadPoolExecutor(12) as pool:
                 for future in [pool.submit(fetch, *job) for job in jobs]:
                     future.result()
+            filtered = dict(index_json, objects=kept)
+            target = CACHE / "assets" / "indexes" / f"{headless_index}.json"
+            target.with_suffix(".tmp").write_text(json.dumps(filtered))
+            os.replace(target.with_suffix(".tmp"), target)
             stamp.parent.mkdir(parents=True, exist_ok=True)
             stamp.write_text(json.dumps({"files": len(jobs), "time": time.time()}))
         tool("headlessmc-lwjgl")
         find_java(java_major(data))
     return Prepared(version, java_major(data), data["mainClass"], client_jar,
                     [CACHE / "libraries" / path for path, *_ in libs] + [client_jar],
-                    data["assetIndex"]["id"], data)
+                    headless_index, data)
 
 
 def find_java(major):
@@ -356,50 +370,185 @@ public class {name} implements Narrator {{
 # Only the stubs are packaged; this placeholder exists for javac and is
 # replaced at runtime by the real interface (extra methods are harmless).
 NARRATOR_PLACEHOLDER = "package com.mojang.text2speech;\npublic interface Narrator {}\n"
-HELPERS_VERSION = 1
+# Second agent, loaded after HeadlessMC's. It chains HeadlessMC's
+# MacosMenuAgent (not its jar's Premain-Class; SDL-era clients crash in the
+# native menu bar code without it) and fixes texture loading for 1.13-1.16:
+# those read PNG sizes with stbi_info_from_callbacks, which the stubbed STB
+# cannot answer, so every texture would be missing and block models null
+# (chunk meshing then crashes). The class doing that (found by its error
+# message, the name is obfuscated) gets a constructor that parses the IHDR
+# chunk in Java instead. It uses the ASM copy shaded into HeadlessMC's jar.
+HELPER_AGENT = """package rift.headless;
+
+import io.github.headlesshq.headlessmc.lwjgl.agent.MacosMenuAgent;
+import io.github.headlesshq.headlessmc.lwjgl.shadow.asm.ClassReader;
+import io.github.headlesshq.headlessmc.lwjgl.shadow.asm.ClassWriter;
+import io.github.headlesshq.headlessmc.lwjgl.shadow.asm.Opcodes;
+import io.github.headlesshq.headlessmc.lwjgl.shadow.asm.tree.ClassNode;
+import io.github.headlesshq.headlessmc.lwjgl.shadow.asm.tree.FieldInsnNode;
+import io.github.headlesshq.headlessmc.lwjgl.shadow.asm.tree.FieldNode;
+import io.github.headlesshq.headlessmc.lwjgl.shadow.asm.tree.InsnList;
+import io.github.headlesshq.headlessmc.lwjgl.shadow.asm.tree.InsnNode;
+import io.github.headlesshq.headlessmc.lwjgl.shadow.asm.tree.MethodInsnNode;
+import io.github.headlesshq.headlessmc.lwjgl.shadow.asm.tree.MethodNode;
+import io.github.headlesshq.headlessmc.lwjgl.shadow.asm.tree.VarInsnNode;
+import java.io.IOException;
+import java.io.InputStream;
+import java.lang.instrument.ClassFileTransformer;
+import java.lang.instrument.Instrumentation;
+import java.nio.charset.StandardCharsets;
+import java.security.ProtectionDomain;
+import java.util.ArrayList;
+import java.util.List;
+
+public final class HeadlessAgent implements ClassFileTransformer {
+    private static final byte[] MARKER = "Could not read info from the PNG file".getBytes(StandardCharsets.UTF_8);
+    private static final String CONSTRUCTOR = "(Ljava/lang/String;Ljava/io/InputStream;)V";
+
+    public static void premain(String arguments, Instrumentation instrumentation) {
+        MacosMenuAgent.premain(arguments, instrumentation);
+        instrumentation.addTransformer(new HeadlessAgent());
+    }
+
+    /** Width and height from a PNG's IHDR chunk. */
+    public static int[] pngSize(InputStream in) throws IOException {
+        byte[] header = new byte[24];
+        int read = 0;
+        while (read < header.length) {
+            int count = in.read(header, read, header.length - read);
+            if (count < 0) {
+                throw new IOException("Could not read info from the PNG file: truncated");
+            }
+            read += count;
+        }
+        if ((header[0] & 0xFF) != 0x89 || header[1] != 'P' || header[2] != 'N' || header[3] != 'G') {
+            throw new IOException("Could not read info from the PNG file: not a PNG");
+        }
+        return new int[] {integer(header, 16), integer(header, 20)};
+    }
+
+    private static int integer(byte[] data, int offset) {
+        return (data[offset] & 0xFF) << 24 | (data[offset + 1] & 0xFF) << 16
+            | (data[offset + 2] & 0xFF) << 8 | data[offset + 3] & 0xFF;
+    }
+
+    @Override
+    public byte[] transform(ClassLoader loader, String name, Class<?> redefined, ProtectionDomain domain,
+                            byte[] bytes) {
+        if (name == null || loader == null || name.startsWith("org/lwjgl/") || name.startsWith("java")
+                || name.startsWith("io/github/headlesshq/") || !contains(bytes, MARKER)) {
+            return null;
+        }
+        try {
+            ClassNode node = new ClassNode();
+            new ClassReader(bytes).accept(node, 0);
+            List<FieldNode> ints = new ArrayList<>();
+            for (FieldNode field : node.fields) {
+                if ("I".equals(field.desc) && (field.access & Opcodes.ACC_STATIC) == 0) {
+                    ints.add(field);
+                }
+            }
+            boolean changed = false;
+            for (MethodNode method : node.methods) {
+                if (!"<init>".equals(method.name) || !CONSTRUCTOR.equals(method.desc) || ints.size() != 2) {
+                    continue;
+                }
+                InsnList code = new InsnList();
+                code.add(new VarInsnNode(Opcodes.ALOAD, 0));
+                code.add(new MethodInsnNode(Opcodes.INVOKESPECIAL, node.superName, "<init>", "()V", false));
+                code.add(new VarInsnNode(Opcodes.ALOAD, 2));
+                code.add(new MethodInsnNode(Opcodes.INVOKESTATIC, "rift/headless/HeadlessAgent", "pngSize",
+                                            "(Ljava/io/InputStream;)[I", false));
+                code.add(new VarInsnNode(Opcodes.ASTORE, 3));
+                for (int index = 0; index < 2; index++) {
+                    code.add(new VarInsnNode(Opcodes.ALOAD, 0));
+                    code.add(new VarInsnNode(Opcodes.ALOAD, 3));
+                    code.add(new InsnNode(index == 0 ? Opcodes.ICONST_0 : Opcodes.ICONST_1));
+                    code.add(new InsnNode(Opcodes.IALOAD));
+                    code.add(new FieldInsnNode(Opcodes.PUTFIELD, node.name, ints.get(index).name, "I"));
+                }
+                code.add(new InsnNode(Opcodes.RETURN));
+                method.instructions = code;
+                method.tryCatchBlocks.clear();
+                method.localVariables = null;
+                method.visibleLocalVariableAnnotations = null;
+                method.invisibleLocalVariableAnnotations = null;
+                method.maxLocals = 4;
+                method.maxStack = 4;
+                changed = true;
+            }
+            if (!changed) {
+                return null;
+            }
+            ClassWriter writer = new ClassWriter(ClassWriter.COMPUTE_MAXS);
+            node.accept(writer);
+            System.out.println("[rift-headless] PNG sizes are read in Java by " + name);
+            return writer.toByteArray();
+        } catch (Throwable error) {
+            System.out.println("[rift-headless] could not patch " + name + ": " + error);
+            return null;
+        }
+    }
+
+    private static boolean contains(byte[] haystack, byte[] needle) {
+        outer:
+        for (int start = 0; start <= haystack.length - needle.length; start++) {
+            for (int index = 0; index < needle.length; index++) {
+                if (haystack[start + index] != needle[index]) {
+                    continue outer;
+                }
+            }
+            return true;
+        }
+        return false;
+    }
+}
+"""
+HELPERS_VERSION = 3
 
 
 def helpers():
-    """Agent jars and the silent narrator. Returns (lwjgl agent, macos agent, narrator jar)."""
+    """(HeadlessMC agent, helper agent, silent narrator jar), built once into the cache."""
     agent = tool("headlessmc-lwjgl")
     directory = CACHE / "tools" / f"helpers-{HELPERS_VERSION}"
-    macos = directory / "macos-menu-agent.jar"
-    narrator = directory / "silent-narrator.jar"
-    if macos.exists() and narrator.exists():
-        return agent, macos, narrator
+    helper, narrator = directory / "rift-headless-agent.jar", directory / "silent-narrator.jar"
+    if helper.exists() and narrator.exists():
+        return agent, helper, narrator
     with file_lock("clients-helpers"):
-        if macos.exists() and narrator.exists():
-            return agent, macos, narrator
+        if helper.exists() and narrator.exists():
+            return agent, helper, narrator
         directory.mkdir(parents=True, exist_ok=True)
-        # HeadlessMC's MacosMenuAgent (removes the native menu bar access that
-        # SDL-era clients crash in) is not its jar's Premain-Class, so a
-        # manifest-only jar names it and puts the real jar on its class path.
         with tempfile.TemporaryDirectory(dir=directory) as temporary:
-            pending = Path(temporary) / "agent.jar"
-            with zipfile.ZipFile(pending, "w") as jar:
-                jar.writestr("META-INF/MANIFEST.MF", (
-                    "Manifest-Version: 1.0\r\n"
-                    "Premain-Class: io.github.headlesshq.headlessmc.lwjgl.agent.MacosMenuAgent\r\n"
-                    f"Class-Path: {os.path.relpath(agent, directory)}\r\n\r\n"))
-            os.replace(pending, macos)
-            sources = Path(temporary) / "src"
-            package = sources / "com" / "mojang" / "text2speech"
-            package.mkdir(parents=True)
-            (package / "Narrator.java").write_text(NARRATOR_PLACEHOLDER)
-            for name in ("NarratorOSX", "NarratorMac"):
-                (package / f"{name}.java").write_text(SILENT_NARRATOR.format(name=name))
-            classes = Path(temporary) / "classes"
+            temporary = Path(temporary)
+            sources = {
+                "rift/headless/HeadlessAgent.java": HELPER_AGENT,
+                "com/mojang/text2speech/Narrator.java": NARRATOR_PLACEHOLDER,
+                "com/mojang/text2speech/NarratorOSX.java": SILENT_NARRATOR.format(name="NarratorOSX"),
+                "com/mojang/text2speech/NarratorMac.java": SILENT_NARRATOR.format(name="NarratorMac"),
+            }
+            for path, text in sources.items():
+                (temporary / "src" / path).parent.mkdir(parents=True, exist_ok=True)
+                (temporary / "src" / path).write_text(text)
+            classes = temporary / "classes"
             javac = find_javac()
             release = ["-source", "8", "-target", "8"] if "jdk8" in javac else ["--release", "8"]
-            subprocess.run([javac, *release, "-nowarn", "-d", str(classes),
-                            *map(str, package.glob("*.java"))], check=True, capture_output=True)
-            pending = Path(temporary) / "narrator.jar"
-            with zipfile.ZipFile(pending, "w") as jar:
+            compiled = subprocess.run([javac, *release, "-nowarn", "-cp", str(agent), "-d", str(classes),
+                                       *(str(temporary / "src" / path) for path in sources)],
+                                      capture_output=True, text=True)
+            if compiled.returncode:
+                raise RuntimeError(f"javac failed:\n{compiled.stdout}{compiled.stderr}")
+            with zipfile.ZipFile(temporary / "helper.jar", "w") as jar:
+                jar.writestr("META-INF/MANIFEST.MF", (
+                    "Manifest-Version: 1.0\r\nPremain-Class: rift.headless.HeadlessAgent\r\n"
+                    f"Class-Path: {os.path.relpath(agent, directory)}\r\n\r\n"))
+                jar.write(classes / "rift/headless/HeadlessAgent.class", "rift/headless/HeadlessAgent.class")
+            with zipfile.ZipFile(temporary / "narrator.jar", "w") as jar:
                 for name in ("NarratorOSX", "NarratorMac"):
-                    jar.write(classes / "com/mojang/text2speech" / f"{name}.class",
+                    jar.write(classes / f"com/mojang/text2speech/{name}.class",
                               f"com/mojang/text2speech/{name}.class")
-            os.replace(pending, narrator)
-    return agent, macos, narrator
+            os.replace(temporary / "helper.jar", helper)
+            os.replace(temporary / "narrator.jar", narrator)
+    return agent, helper, narrator
 
 
 def find_javac():
@@ -502,7 +651,7 @@ def default_name():
 def command(prepared, game_dir, name, host, port, heap="1G"):
     """The java command line for one headless client run."""
     data = prepared.version_json
-    agent, macos, narrator = helpers()
+    agent, helper, narrator = helpers()
     natives = game_dir / "natives"  # deliberately empty: every native library is stubbed
     natives.mkdir(exist_ok=True)
     quick_play = supports_quick_play(data)
@@ -536,7 +685,7 @@ def command(prepared, game_dir, name, host, port, heap="1G"):
     java = find_java(prepared.java_major)
     options = [
         f"-Xmx{heap}", "-Xms256M", "-Xss2M", "-XX:+UseSerialGC",
-        f"-javaagent:{agent}", f"-javaagent:{macos}",
+        f"-javaagent:{agent}", f"-javaagent:{helper}",
         "-Djava.awt.headless=true", "-Dapple.awt.UIElement=true",
         f"-Dlog4j.configurationFile={game_dir / 'log4j2.xml'}", "-Dlog4j2.formatMsgNoLookups=true",
         "-Dio.netty.transport.noNative=true", "-Dfml.earlyprogresswindow=false",
@@ -574,6 +723,10 @@ class Entry:
         return "\n".join([self.message, *self.trace])
 
 
+# "com.example.FooException: message" right after a log entry is its trace.
+EXCEPTION_HEADER = re.compile(r"^(?:[a-z_$][\w$]*\.)+[\w$]*(?:Exception|Error|Throwable)\b")
+
+
 def parse_log(lines):
     """Group log lines into entries; stack traces and stray stderr lines attach to the entry before."""
     entries = []
@@ -585,7 +738,8 @@ def parse_log(lines):
         if match:
             entries.append(Entry(match["level"], match["thread"], match["logger"], match["message"],
                                  time=match["time"]))
-        elif line.startswith(("\tat ", "\t... ", "Caused by:", "\t", "    at ")) and entries:
+        elif entries and (line.startswith(("\tat ", "\t... ", "Caused by:", "\t", "    at "))
+                          or EXCEPTION_HEADER.match(line)):
             entries[-1].trace.append(line.strip())
         elif line.startswith(("WARNING: ", "SLF4J")):
             continue  # JVM deprecation notices (sun.misc.Unsafe, native access) and logger bootstrap
@@ -614,7 +768,9 @@ NOISE = [
      r"|Received chat packet without valid signature|Failed to validate profile key"
      r"|Couldn't fetch (profile|session)|Failed to connect$|Failed to read from https?://"
      r"|Unable to (fetch|look up) (profile|user)|Error looking up profile|Failed to look up"
-     r"|Ignoring chat session from .* due to missing Services public key",
+     r"|Ignoring chat session from .* due to missing Services public key"
+     r"|AuthenticationUnavailableException|Cannot contact authentication server|InvalidCredentialsException"
+     r"|MinecraftClientException|authlib",
      None, "offline account / Mojang services blocked"),
     # Audio and narrator are stubbed.
     (r"OpenAL|SoundSystem|sound system|Sound engine|SoundEngine|soundDevice|Error starting SoundSystem"
@@ -636,7 +792,7 @@ NOISE = [
      r"|Vulkan|vulkan|SDL|graphics device|GPU|gpu|Tracy|tracy|TracyClient|Failed to load native"
      r"|VSync|vsync|Unable to (load|read) (splash|panorama)|panorama|Minecraft\.getInstance\(\)\.window"
      r"|\[HeadlessMC\]|Unable to resize|Couldn't resize|Failed to (switch|change) (to )?fullscreen"
-     r"|Requested post effect does not exist|Fullscreen|fullscreen|Failed to (initialize|init) (the )?clipboard|Clipboard|clipboard"
+     r"|Requested post effect does not exist|Not setting icon|Fullscreen|fullscreen|Failed to (initialize|init) (the )?clipboard|Clipboard|clipboard"
      r"|Could not find (a )?(suitable )?(pixel|context)|Mipmap|mipmap|Unable to load (pack )?icon"
      r"|Couldn't (get|find) (display|screen)|Screen size|screen resolution",
      None, "rendering, window and input are stubbed"),
@@ -659,7 +815,7 @@ NOISE = [
      r"|Failed to save (options|servers|hotbar|profile|cache)|Couldn't (save|write) (options|servers)"
      r"|Failed to (load|read) (options|servers\.dat|hotbar|realms persistence)|Unknown option|Skipping bad option"
      r"|Failed to parse option|Could not parse option|Unable to parse option|option .* (invalid|unknown)"
-     r"|Unknown (key|setting) .*options|DataFixer|datafixer|Datafixer|optimizations took"
+     r"|Error parsing option value|Unknown (key|setting) .*options|DataFixer|datafixer|Datafixer|optimizations took"
      r"|Unable to (load|save) (user|realms|quick ?play)|quick ?[Pp]lay log|QuickPlay|quickPlay"
      r"|Mojang Studios|Failed to (open|lock) (file|session)|session\.lock|Failed to (check|read) (latest|update)"
      r"|Exception in thread \"Timer hack thread\"|Reflections|Failed to load the (player )?(heads|skin) cache"
@@ -683,7 +839,7 @@ FAILURE = re.compile(
     r"Timed out|timed out|registr|Registry|Unknown (registry|dimension|biome|block|item|entity|tag)|"
     r"Missing (registry|key|element)|Failed to (load|parse|sync) (registries|registry|tags|recipes|advancements|"
     r"commands|dimension)|Codec|codec|Failed to (parse|read|load) (chunk|level|world|nbt|NBT|component|text)|"
-    r"chunk|Chunk|ReportedException|Crash Report|crash report|Unreported exception|Exception in server tick loop|"
+    r"chunk|Chunk|ReportedException|Reported exception|Game crashed|Crash Report|crash report|Unreported exception|Exception in server tick loop|"
     r"Failed to (read|parse) (json|JSON|text component)|JsonParseException|JsonSyntaxException|"
     r"NullPointerException|IndexOutOfBounds|ArrayIndexOutOfBounds|IllegalStateException|"
     r"IllegalArgumentException|ClassCastException|BufferUnderflow|NegativeArraySize|EOFException|"
@@ -757,6 +913,8 @@ class Result:
     log_dir: str = ""
     client_log: str = ""
     exit_code: int | None = None
+    keepalives: list = field(default_factory=list)
+    corrupted: str | None = None
 
     def report(self):
         lines = [f"{'PASS' if self.ok else 'FAIL'} {self.version} -> {self.host}:{self.port} as {self.name}: "
@@ -822,6 +980,14 @@ if alive(group):
 """
 
 
+def keep_awake(pid):
+    """macOS idle sleep freezes clients and servers mid-test (seen on battery):
+    hold a user-level no-idle-sleep assertion until `pid` exits."""
+    if sys.platform == "darwin" and shutil.which("caffeinate"):
+        subprocess.Popen(["caffeinate", "-i", "-w", str(pid)], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+
 class ClientProcess:
     def __init__(self, cmd, game_dir):
         self.game_dir = game_dir
@@ -832,6 +998,7 @@ class ClientProcess:
         self.watchdog = subprocess.Popen([sys.executable, "-I", "-c", WATCHDOG, str(os.getpid()),
                                           str(self.proc.pid)], stdin=subprocess.DEVNULL,
                                          start_new_session=True)
+        keep_awake(self.proc.pid)
         self.reader = open(self.log_path, errors="replace")
         self.buffer = ""
         self.started = time.monotonic()
@@ -860,6 +1027,17 @@ class ClientProcess:
         except (OSError, subprocess.SubprocessError):
             return None
         return any(f":{port} (ESTABLISHED)" in line for line in out.splitlines())
+
+    def gui_presence(self):
+        """macOS: the LaunchServices entry of the client, if it registered as an app (it must not)."""
+        if sys.platform != "darwin" or not shutil.which("lsappinfo"):
+            return None
+        try:
+            out = subprocess.run(["lsappinfo", "find", f"pid={self.proc.pid}"], capture_output=True,
+                                 text=True, timeout=10).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return out
 
     def stop(self):
         try:
@@ -894,102 +1072,160 @@ def run_dir(version, log_dir=None):
     return directory
 
 
+# Old clients started with --server connect while the first resource reload
+# is still running and then mesh chunks without baked models (1.16.5 crashes
+# with "Tesselating block in world"). The relay holds such connections until
+# the reload has created its texture atlases and gone quiet.
+RELOAD_ATLAS = re.compile(r"Created: \d+x\d+\S* .*atlas")
+
+
+def needs_gate(prepared):
+    return not supports_quick_play(prepared.version_json) and version_key(prepared.version) >= (1, 13)
+
+
 def join(version, host, port, name=None, stay=20, log_dir=None, join_timeout=240, on_joined=None,
-         expect_chat=(), heap="1G", strict=False, keep_game_dir=False, before_stop=None):
+         expect_chat=(), heap="1G", strict=False, keep_game_dir=False, before_stop=None, relay=True,
+         corrupt=None, corrupt_after=3.0):
     """Start a headless vanilla `version` client, join host:port, stay `stay` seconds.
 
+    The client connects through a local observing Relay (see there; pass
+    relay=False to connect directly, which loses packet-level evidence).
     on_joined(result) runs once the client is in the world (e.g. to issue
-    server commands); expect_chat lists substrings that must appear in [CHAT]
-    lines before the stay ends. Returns a Result; result.ok is True only when
-    the client joined, stayed connected for the whole time, saw every expected
-    chat line and logged no network/packet/registry errors (with strict=True,
-    also no unknown warnings). Logs are kept under result.log_dir.
+    server commands); expect_chat lists substrings that must appear in
+    [CHAT] lines before the stay ends; corrupt ("badid" or "flip") corrupts
+    one clientbound play packet corrupt_after seconds after joining (negative
+    tests). Returns a Result: ok only when the client joined, stayed
+    connected for the whole time, saw every expected chat line and logged no
+    network/packet/registry errors (strict=True: no unknown warnings either).
+    Logs are kept under result.log_dir.
     """
     name = name or default_name()
     prepared = setup(version)
     game_dir = run_dir(version, log_dir)
     result = Result(version, host, int(port), name, log_dir=str(game_dir),
                     client_log=str(game_dir / "client.log"))
+    observer = Relay(host, port, corrupt=corrupt) if relay or corrupt else None
+    gate = observer is not None and needs_gate(prepared)
+    if observer is not None and not gate:
+        observer.ready.set()
+    connect = ("127.0.0.1", observer.port) if observer else (host, int(port))
     write_options(game_dir, data_version(prepared))
-    cmd = command(prepared, game_dir, name, host, port, heap)
+    cmd = command(prepared, game_dir, name, *connect, heap)
     (game_dir / "command.txt").write_text(" ".join(cmd) + "\n")
     expected = list(expect_chat)
-    entries, joined_at, deadline = [], None, None
-    # The server's join broadcast reaches the joining client too; the
-    # advancements packet is sent right after login by every vanilla server.
+    entries, joined_at, deadline, last_atlas = [], None, None, None
+    # Fallbacks without a relay: the server's join broadcast (1.13+ clients
+    # receive their own) and the advancements packet right after login.
     join_marker = re.compile(rf"\[CHAT\] (?:\S+ )?{re.escape(name)} joined the game|Loaded \d+ advancements")
-    with client_slot():
-        client = ClientProcess(cmd, game_dir)
-        missed_connection = 0
-        last_probe = 0.0
-        try:
-            while True:
-                now = time.monotonic()
-                fresh = parse_log(client.new_lines())
-                entries.extend(fresh)
-                for entry in fresh:
-                    kind = classify(entry)
-                    if kind == "noise":
-                        note = noise_note(entry)
-                        result.noise[note] = result.noise.get(note, 0) + 1
-                    elif kind == "failure":
-                        result.failures.append(entry.text())
-                    elif kind == "unknown":
-                        result.unknown.append(entry.text())
-                    if "[CHAT]" in entry.message:
-                        chat = entry.message.split("[CHAT]", 1)[1].strip()
-                        result.chat.append(chat)
-                        expected = [text for text in expected if text not in chat]
-                    if (match := DISCONNECT.search(entry.message)) and result.disconnect is None and (
-                            entry.level != "INFO" or "disconnect" in entry.message.lower()):
-                        result.disconnect = next(group for group in match.groups() if group) \
-                            if any(match.groups()) else entry.message
-                    if joined_at is None and join_marker.search(entry.message):
-                        joined_at = now
-                        result.joined = True
-                        result.seconds_to_join = round(now - client.started, 1)
-                        result.evidence.append(f"client: {entry.message.strip()}")
-                        deadline = now + stay
-                        if on_joined:
-                            on_joined(result)
-                if now - last_probe > 2:
-                    last_probe = now
-                    result.peak_rss_mb = max(result.peak_rss_mb, client.rss_mb())
-                    if joined_at is not None:
-                        state = client.connected(host, port)
-                        missed_connection = missed_connection + 1 if state is False else 0
-                        if missed_connection >= 2 and result.disconnect is None:
-                            result.disconnect = "TCP connection closed"
-                if not client.alive():
-                    result.exit_code = client.proc.returncode
-                    result.reason = f"client exited with code {result.exit_code}"
-                    break
-                if result.failures or result.disconnect or (strict and result.unknown):
-                    # Give the client a moment to log the rest of the story.
-                    time.sleep(2)
-                    for entry in parse_log(client.new_lines()):
-                        if classify(entry) == "failure":
-                            result.failures.append(entry.text())
-                        if result.disconnect is None and (match := DISCONNECT.search(entry.message)):
-                            result.disconnect = entry.message
-                    break
-                if joined_at is None and now - client.started > join_timeout:
-                    result.reason = f"did not join within {join_timeout}s"
-                    break
-                if deadline is not None and now >= deadline:
-                    result.stayed = round(now - joined_at, 1)
-                    break
-                time.sleep(0.25)
-            if joined_at is not None:
-                result.stayed = round(time.monotonic() - joined_at, 1)
-            if before_stop:
-                before_stop(result)
-        finally:
-            client.stop()
+
+    def joined(now, evidence):
+        nonlocal joined_at, deadline
+        joined_at = now
+        result.joined = True
+        result.seconds_to_join = round(now - client.started, 1)
+        result.evidence.append(evidence)
+        deadline = now + stay
+        if on_joined:
+            on_joined(result)
+
+    try:
+        with client_slot():
+            client = ClientProcess(cmd, game_dir)
+            missed_connection, last_probe = 0, 0.0
+            try:
+                while True:
+                    now = time.monotonic()
+                    fresh = parse_log(client.new_lines())
+                    entries.extend(fresh)
+                    for entry in fresh:
+                        record(result, entry)
+                        if "[CHAT]" in entry.message:
+                            chat = entry.message.split("[CHAT]", 1)[1].strip()
+                            expected = [text for text in expected if text not in chat]
+                        if RELOAD_ATLAS.search(entry.message):
+                            last_atlas = now
+                        if joined_at is None and observer is None and join_marker.search(entry.message):
+                            joined(now, f"client log: {entry.message.strip()}")
+                    if gate and not observer.ready.is_set() and (
+                            (last_atlas and now - last_atlas > 2) or now - client.started > 120):
+                        observer.ready.set()
+                        result.evidence.append(f"relay held the connection until resources were loaded "
+                                               f"({now - client.started:.1f}s)")
+                    if observer is not None:
+                        if joined_at is None and observer.joined_at is not None:
+                            joined(now, f"relay: Join Game packet (protocol {observer.protocol}) "
+                                        f"{observer.joined_at - client.started:.1f}s after start")
+                        if corrupt and joined_at is not None and now - joined_at >= corrupt_after:
+                            observer.armed.set()
+                        if observer.disconnect and result.disconnect is None:
+                            result.disconnect = observer.disconnect
+                        if observer.closed_at is not None and result.disconnect is None:
+                            result.disconnect = (f"connection closed by the {observer.closed_by}"
+                                                 + ("" if joined_at else " before joining"))
+                    if now - last_probe > 2:
+                        last_probe = now
+                        result.peak_rss_mb = max(result.peak_rss_mb, client.rss_mb())
+                        if observer is None and joined_at is not None:
+                            state = client.connected(host, port)
+                            missed_connection = missed_connection + 1 if state is False else 0
+                            if missed_connection >= 2 and result.disconnect is None:
+                                result.disconnect = "TCP connection closed"
+                    if not client.alive():
+                        result.exit_code = client.proc.returncode
+                        result.reason = f"client exited with code {result.exit_code}"
+                        break
+                    if result.failures or result.disconnect or (strict and result.unknown):
+                        time.sleep(2)  # let the client log the rest of the story
+                        for entry in parse_log(client.new_lines()):
+                            entries.append(entry)
+                            record(result, entry)
+                        break
+                    if joined_at is None and now - client.started > join_timeout:
+                        result.reason = f"did not join within {join_timeout:.0f}s"
+                        break
+                    if deadline is not None and now >= deadline:
+                        break
+                    time.sleep(0.25)
+                if joined_at is not None:
+                    result.stayed = round(time.monotonic() - joined_at, 1)
+                presence = client.gui_presence() if client.alive() else None
+                if presence:
+                    result.failures.append(f"[harness/ERROR] the client registered as a GUI app: {presence}")
+                elif presence == "":
+                    result.evidence.append("macOS: the client never registered as a GUI app (lsappinfo)")
+                if before_stop:
+                    before_stop(result)
+            finally:
+                client.stop()
+    finally:
+        if observer is not None:
+            observer.close()
+    if observer is not None:
+        if observer.keepalives:
+            result.evidence.append(f"relay: client echoed {observer.answered} of {observer.keepalives} "
+                                   f"keep-alives while in the world")
+        result.keepalives = [observer.keepalives, observer.answered]
+        result.corrupted = observer.corrupted
+        result.evidence += [f"relay: {error}" for error in observer.errors]
     finish(result, entries, stay, expected, strict)
     if result.ok and not keep_game_dir:
         prune(game_dir)
     return result
+
+
+def record(result, entry):
+    kind = classify(entry)
+    if kind == "noise":
+        note = noise_note(entry)
+        result.noise[note] = result.noise.get(note, 0) + 1
+    elif kind == "failure":
+        result.failures.append(entry.text())
+    elif kind == "unknown":
+        result.unknown.append(entry.text())
+    if "[CHAT]" in entry.message:
+        result.chat.append(entry.message.split("[CHAT]", 1)[1].strip())
+    if result.disconnect is None and entry.level != "INFO" and (match := DISCONNECT.search(entry.message)):
+        result.disconnect = "client: " + next((group for group in match.groups() if group), entry.message)
 
 
 def finish(result, entries, stay, expected, strict):
@@ -1001,18 +1237,19 @@ def finish(result, entries, stay, expected, strict):
         result.reason = "unknown warning (strict): " + result.unknown[0].splitlines()[0]
     elif not result.joined:
         result.reason = result.reason or "never joined"
-        connecting = [entry.message for entry in entries if CONNECTING.search(entry.message)]
-        if not connecting:
+        if not any(CONNECTING.search(entry.message) for entry in entries):
             result.reason += " (no 'Connecting to' line: the client did not reach the connect step)"
     elif result.stayed + 0.5 < stay:
         result.reason = result.reason or f"left after {result.stayed}s"
     elif expected:
         result.reason = f"missing expected chat lines: {expected}"
+    elif result.keepalives and result.keepalives[0] and result.keepalives[1] + 1 < result.keepalives[0]:
+        result.reason = f"client echoed only {result.keepalives[1]} of {result.keepalives[0]} keep-alives"
     else:
         result.ok = True
         result.reason = f"joined and stayed {result.stayed:.0f}s without errors"
-    if not result.ok and result.failures and "failure" not in result.reason:
-        result.reason += " | first error: " + result.failures[0].splitlines()[0]
+    if not result.ok and result.failures and "network/packet error" not in result.reason:
+        result.reason += " | first client error: " + result.failures[0].splitlines()[0]
 
 
 def prune(game_dir):
@@ -1077,7 +1314,8 @@ class Server:
             start_new_session=True)
         self.watchdog = subprocess.Popen([sys.executable, "-I", "-c", WATCHDOG, str(os.getpid()),
                                           str(self.proc.pid)], stdin=subprocess.DEVNULL, start_new_session=True)
-        deadline = time.monotonic() + 240
+        keep_awake(self.proc.pid)
+        deadline = time.monotonic() + 600  # generous: shared machines can be heavily loaded
         while "Done (" not in self.log():
             if self.proc.poll() is not None or time.monotonic() > deadline:
                 self.stop()
@@ -1088,8 +1326,11 @@ class Server:
         return self.log_path.read_text(errors="replace")
 
     def command(self, line):
-        self.proc.stdin.write(line + "\n")
-        self.proc.stdin.flush()
+        try:
+            self.proc.stdin.write(line + "\n")
+            self.proc.stdin.flush()
+        except (BrokenPipeError, OSError, ValueError):
+            pass  # the server is gone; the outcome checks report why
 
     def wait_for(self, pattern, timeout=30):
         deadline = time.monotonic() + timeout
@@ -1113,6 +1354,10 @@ class Server:
                 self.watchdog.kill()
             self.watchdog.wait()
             self.output.close()
+            try:
+                self.proc.stdin.close()
+            except OSError:
+                pass
 
 
 def free_port():
@@ -1186,14 +1431,16 @@ def selftest_one(version, stay, root, name=None):
 
 
 # --------------------------------------------------------------------------
-# Negative test helper: a relay that can corrupt one clientbound play frame
+# The observing relay between client and target
 
 
 def read_varint_from(buffer, offset):
+    """(value, next offset), or (None, offset) when the buffer ends inside the varint."""
+    start = offset
     value = shift = 0
     while True:
         if offset >= len(buffer):
-            return None, offset
+            return None, start
         byte = buffer[offset]
         offset += 1
         value |= (byte & 0x7F) << shift
@@ -1215,12 +1462,101 @@ def encode_varint(value):
             return bytes(out)
 
 
-def corrupt_frame(payload, mode):
-    """Corrupt one uncompressed frame payload (packet id + body)."""
+def encode_string(text):
+    raw = text.encode()
+    return encode_varint(len(raw)) + raw
+
+
+def read_nbt(data, offset, tag):
+    """Network NBT payload of `tag` -> (python value, next offset)."""
+    def take(count):
+        nonlocal offset
+        chunk = data[offset:offset + count]
+        offset += count
+        return chunk
+    if tag == 1:
+        return int.from_bytes(take(1), "big", signed=True), offset
+    if tag == 2:
+        return int.from_bytes(take(2), "big", signed=True), offset
+    if tag == 3:
+        return int.from_bytes(take(4), "big", signed=True), offset
+    if tag == 4:
+        return int.from_bytes(take(8), "big", signed=True), offset
+    if tag in (5, 6):
+        take(4 if tag == 5 else 8)
+        return 0, offset
+    if tag in (7, 11, 12):
+        count = int.from_bytes(take(4), "big", signed=True)
+        take(count * {7: 1, 11: 4, 12: 8}[tag])
+        return [], offset
+    if tag == 8:
+        length = int.from_bytes(take(2), "big")
+        return take(length).decode("utf-8", "replace"), offset
+    if tag == 9:
+        kind = take(1)[0]
+        count = int.from_bytes(take(4), "big", signed=True)
+        items = []
+        for _ in range(max(count, 0)):
+            item, offset = read_nbt(data, offset, kind)
+            items.append(item)
+        return items, offset
+    if tag == 10:
+        result = {}
+        while (kind := take(1)[0]) != 0:
+            name_length = int.from_bytes(take(2), "big")
+            name = take(name_length).decode("utf-8", "replace")
+            result[name], offset = read_nbt(data, offset, kind)
+        return result, offset
+    raise ValueError(f"bad NBT tag {tag}")
+
+
+def component_text(value):
+    """Flatten a chat component (JSON-decoded or NBT-decoded) to plain text."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "".join(component_text(item) for item in value)
+    if not isinstance(value, dict):
+        return str(value)
+    text = value.get("text", "")
+    if "translate" in value:
+        arguments = [component_text(item) for item in value.get("with", [])]
+        text += value["translate"] + (f" {arguments}" if arguments else "")
+    return text + "".join(component_text(item) for item in value.get("extra", []))
+
+
+def decode_reason(body, protocol, nbt):
+    """Disconnect packet body -> readable reason (JSON string or, since 1.20.3, NBT)."""
+    try:
+        if nbt:
+            value, _ = read_nbt(body, 1, body[0])
+            return component_text(value)
+        length, offset = read_varint_from(body, 0)
+        raw = body[offset:offset + length].decode("utf-8", "replace")
+        try:
+            return component_text(json.loads(raw))
+        except ValueError:
+            return raw
+    except (ValueError, IndexError, TypeError):
+        return body[:200].hex()
+
+
+def protocol_table(protocol):
+    """Play packet IDs for `protocol` from tests/minecraft.py, or None for unknown protocols."""
+    try:
+        sys.path.insert(0, str(HERE))
+        from minecraft import PROTOCOLS
+    except Exception:
+        return None
+    return PROTOCOLS.get(protocol)
+
+
+def corrupt_payload(payload, mode):
+    """Corrupt one decoded packet (id + body)."""
     packet_id, offset = read_varint_from(payload, 0)
     body = payload[offset:]
     if mode == "badid":
-        return encode_varint(0x3FFF) + body  # no protocol has this many packets
+        return encode_varint(0x3FFF) + body  # no protocol has that many packets
     flipped = bytearray(body)
     for index in range(min(len(flipped), 48)):
         flipped[index] ^= 0xFF
@@ -1228,68 +1564,196 @@ def corrupt_frame(payload, mode):
 
 
 class Relay:
-    """TCP relay for one client; after arm() it corrupts the next suitable clientbound frame.
+    """Loopback relay between the client and the target that watches the protocol.
 
-    Frames are parsed by their length prefix only, so the server must run
-    without compression (network-compression-threshold=-1); offline mode
-    means there is no encryption.
+    Bytes pass through unchanged except: the handshake's server address and
+    port are rewritten to the real target (so the backend sees exactly what a
+    direct connection would send), and, in negative tests, one clientbound
+    play packet is corrupted after arm(). It follows compression and login
+    state to report the Join Game packet, keep-alives echoed by the client and
+    disconnect reasons. Online-mode (encrypted) sessions cannot be observed.
+    The connection is accepted at once but only forwarded once `ready` is
+    set, which lets old clients finish loading resources before they join.
     """
 
-    def __init__(self, target_port, mode="badid", min_size=64):
-        self.target_port = target_port
-        self.mode = mode
-        self.min_size = min_size
+    def __init__(self, host, port, rewrite_handshake=True, corrupt=None, min_corrupt_size=64):
+        self.target = (host, int(port))
+        self.rewrite_handshake = rewrite_handshake
+        self.corrupt = corrupt
+        self.min_corrupt_size = min_corrupt_size
+        self.ready = threading.Event()
         self.armed = threading.Event()
+        self.lock = threading.Lock()
+        self.protocol = None
+        self.state = None
+        self.joined_at = None
+        self.closed_at = None
+        self.closed_by = None
+        self.disconnect = None
         self.corrupted = None
+        self.keepalives = 0
+        self.answered = 0
+        self.pending = []
+        self.errors = []
+        self.connections = 0
         self.listener = socket.create_server(("127.0.0.1", 0))
         self.port = self.listener.getsockname()[1]
         self.sockets = []
         threading.Thread(target=self.accept, daemon=True).start()
 
+    # -- plumbing
+
     def accept(self):
         try:
             while True:
                 client, _ = self.listener.accept()
-                upstream = socket.create_connection(("127.0.0.1", self.target_port))
-                self.sockets += [client, upstream]
-                threading.Thread(target=self.pipe, args=(client, upstream, False), daemon=True).start()
-                threading.Thread(target=self.pipe, args=(upstream, client, True), daemon=True).start()
+                self.sockets.append(client)
+                threading.Thread(target=self.serve, args=(client,), daemon=True).start()
         except OSError:
             return
 
-    def pipe(self, source, destination, clientbound):
+    def serve(self, client):
+        self.ready.wait(300)
+        try:
+            upstream = socket.create_connection(self.target, timeout=15)
+        except OSError as exc:
+            self.disconnect = self.disconnect or f"relay could not reach {self.target[0]}:{self.target[1]}: {exc}"
+            client.close()
+            return
+        upstream.settimeout(None)
+        self.sockets.append(upstream)
+        self.connections += 1
+        session = {"compression": -1, "state": "handshake", "raw": False}
+        threading.Thread(target=self.pump, args=(client, upstream, False, session), daemon=True).start()
+        self.pump(upstream, client, True, session)
+
+    def pump(self, source, destination, clientbound, session):
         pending = b""
         try:
             while data := source.recv(65536):
-                if not clientbound:
+                if session["raw"]:
                     destination.sendall(data)
                     continue
                 pending += data
                 out = bytearray()
-                while True:
+                while pending:
+                    if not clientbound and session["state"] == "handshake" and pending[0] == 0xFE:
+                        session["raw"] = True  # legacy server list ping
+                        break
                     length, offset = read_varint_from(pending, 0)
                     if length is None or len(pending) < offset + length:
                         break
-                    frame, pending = pending[offset:offset + length], pending[offset + length:]
-                    if self.armed.is_set() and self.corrupted is None and length >= self.min_size:
-                        packet_id, _ = read_varint_from(frame, 0)
-                        frame = corrupt_frame(frame, self.mode)
-                        self.corrupted = f"clientbound packet id 0x{packet_id:02x}, {length} bytes ({self.mode})"
-                    out += encode_varint(len(frame)) + frame
+                    raw, frame = pending[:offset + length], pending[offset:offset + length]
+                    pending = pending[offset + length:]
+                    try:
+                        out += self.frame(frame, raw, clientbound, session)
+                    except Exception as exc:  # never let observation break the stream
+                        self.errors.append(f"observer lost sync: {type(exc).__name__}: {exc}")
+                        session["raw"] = True
+                        out += raw
+                if session["raw"]:
+                    out += pending
+                    pending = b""
                 destination.sendall(bytes(out))
         except OSError:
             pass
         finally:
+            with self.lock:
+                if self.closed_at is None and self.state is not None:
+                    self.closed_at = time.monotonic()
+                    self.closed_by = "server" if clientbound else "client"
             for sock in (source, destination):
                 try:
                     sock.shutdown(socket.SHUT_RDWR)
                 except OSError:
                     pass
 
+    # -- protocol
+
+    def decode(self, frame, session):
+        if session["compression"] < 0:
+            return frame
+        size, offset = read_varint_from(frame, 0)
+        return frame[offset:] if size == 0 else zlib.decompress(frame[offset:])
+
+    def encode(self, payload, session):
+        if session["compression"] < 0:
+            body = payload
+        elif len(payload) >= session["compression"]:
+            body = encode_varint(len(payload)) + zlib.compress(payload)
+        else:
+            body = encode_varint(0) + payload
+        return encode_varint(len(body)) + body
+
+    def frame(self, frame, raw, clientbound, session):
+        state = session["state"]
+        if state == "encrypted":
+            session["raw"] = True
+            return raw
+        payload = self.decode(frame, session)
+        packet_id, offset = read_varint_from(payload, 0)
+        body = payload[offset:]
+        if not clientbound:
+            if state == "handshake":
+                return self.handshake(body, raw, session)
+            if self.joined_at is not None and body in self.pending:
+                self.pending.remove(body)
+                self.answered += 1
+            return raw
+        if state == "login":
+            if packet_id == 0x03:
+                session["compression"], _ = read_varint_from(body, 0)
+            elif packet_id == 0x02:
+                session["state"] = self.state = "configuration" if self.protocol >= 764 else "play"
+            elif packet_id == 0x01:
+                session["state"] = self.state = "encrypted"
+            elif packet_id == 0x00:
+                self.disconnect = self.disconnect or "login: " + decode_reason(body, self.protocol, False)
+            return raw
+        table = protocol_table(self.protocol) or {}
+        if packet_id == table.get("join") and self.joined_at is None:
+            session["state"] = self.state = "play"
+            self.joined_at = time.monotonic()
+        elif state == "configuration" and packet_id == (0x01 if self.protocol < 766 else 0x02):
+            self.disconnect = self.disconnect or "configuration: " + decode_reason(body, self.protocol, True)
+        elif self.state == "play" and packet_id == table.get("disconnect"):
+            self.disconnect = self.disconnect or "play: " + decode_reason(body, self.protocol, self.protocol >= 765)
+        elif self.state == "play" and packet_id == table.get("keepalive"):
+            self.keepalives += 1
+            self.pending = (self.pending + [body])[-16:]
+        if (self.corrupt and self.armed.is_set() and self.corrupted is None and self.state == "play"
+                and len(payload) >= self.min_corrupt_size):
+            self.corrupted = f"clientbound play packet 0x{packet_id:02x}, {len(payload)} bytes ({self.corrupt})"
+            return self.encode(corrupt_payload(payload, self.corrupt), session)
+        return raw
+
+    def handshake(self, body, raw, session):
+        protocol, offset = read_varint_from(body, 0)
+        length, offset = read_varint_from(body, offset)
+        host = body[offset:offset + length].decode("utf-8", "replace")
+        offset += length + 2
+        intent, _ = read_varint_from(body, offset)
+        self.protocol = protocol
+        session["state"] = "status" if intent == 1 else "login"
+        if session["state"] == "login":
+            self.state = "login"
+        if session["state"] == "status":
+            session["raw"] = True
+        if not self.rewrite_handshake:
+            return raw
+        # Keep anything after a NUL (e.g. forwarding data) as the client sent it.
+        suffix = host[host.index("\0"):] if "\0" in host else ""
+        payload = (encode_varint(0x00) + encode_varint(protocol) + encode_string(self.target[0] + suffix)
+                   + self.target[1].to_bytes(2, "big") + encode_varint(intent))
+        return encode_varint(len(payload)) + payload
+
     def close(self):
         self.listener.close()
         for sock in self.sockets:
-            sock.close()
+            try:
+                sock.close()
+            except OSError:
+                pass
 
 
 def negative_mismatch(client_version, server_version, root):
@@ -1303,23 +1767,22 @@ def negative_mismatch(client_version, server_version, root):
 
 
 def negative_corrupt(version, root, mode="badid"):
-    """Corrupt one clientbound play frame after join: the client must report a decoder error."""
-    server = Server(version, root / f"server-{version}-corrupt", compression=False)
-    relay = Relay(server.port, mode=mode)
+    """Corrupt one clientbound play packet after join: the client must notice."""
+    server = Server(version, root / f"server-{version}-corrupt-{mode}")
 
     def on_joined(_result):
-        def arm():
-            time.sleep(3)
-            relay.armed.set()
-            server.command("say corrupt-me-" + "x" * 80)  # guarantees a large frame soon
-        threading.Thread(target=arm, daemon=True).start()
+        def chat():
+            for _ in range(6):  # large frames to corrupt, whatever else is quiet
+                time.sleep(1)
+                server.command("say corrupt-me-" + "x" * 120)
+        threading.Thread(target=chat, daemon=True).start()
 
     try:
-        result = join(version, "127.0.0.1", relay.port, stay=25, log_dir=root, on_joined=on_joined)
+        result = join(version, "127.0.0.1", server.port, stay=25, log_dir=root, on_joined=on_joined,
+                      corrupt=mode, corrupt_after=2.0)
     finally:
-        relay.close()
         server.stop()
-    return result, relay
+    return result
 
 
 # --------------------------------------------------------------------------
@@ -1400,13 +1863,13 @@ def main(argv=None):
             print(f"NEGATIVE version mismatch {modern} -> {other}: "
                   f"{'detected' if passed else 'NOT DETECTED'}\n" + result.report(), flush=True)
         for version in args.versions:
-            result, relay = negative_corrupt(version, root)
-            passed = not result.ok and relay.corrupted is not None and bool(result.failures or result.disconnect)
+            result = negative_corrupt(version, root)
+            passed = not result.ok and result.corrupted is not None and bool(result.failures or result.disconnect)
             failed += not passed
-            outcomes.append({"negative": f"corrupted frame {version}", "detected": passed,
-                             "corrupted": relay.corrupted, "result": asdict(result)})
+            outcomes.append({"negative": f"corrupted packet {version}", "detected": passed,
+                             "corrupted": result.corrupted, "result": asdict(result)})
             if not args.json:
-                print(f"NEGATIVE corrupted frame {version} ({relay.corrupted}): "
+                print(f"NEGATIVE corrupted packet {version} ({result.corrupted}): "
                       f"{'detected' if passed else 'NOT DETECTED'}\n" + result.report(), flush=True)
     if args.json:
         print(json.dumps(outcomes, indent=2))
