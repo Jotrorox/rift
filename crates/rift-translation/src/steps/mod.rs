@@ -8,18 +8,38 @@
 //! [`Step`](crate::step::Step), usually through a routing table:
 //!
 //! ```ignore
-//! use crate::{Packet, State, routed_step, step::{Cx, RouteBuilder, Routes}, wire::Rewriter};
+//! use crate::{
+//!     Packet, State, routed_step,
+//!     codec::{HasShared, Shared},
+//!     step::{Cx, RouteBuilder, Routes},
+//!     wire::Rewriter,
+//! };
 //! use std::{io, sync::OnceLock};
 //!
-//! #[derive(Default)]
-//! pub struct Up { /* per-connection state */ }
+//! pub struct Up {
+//!     shared: Shared,
+//!     // ... whatever else the step tracks per connection ...
+//! }
+//!
+//! impl HasShared for Up {
+//!     fn shared(&mut self) -> &mut Shared {
+//!         &mut self.shared
+//!     }
+//! }
 //!
 //! impl Up {
+//!     fn new() -> Self {
+//!         // Client side first: for `up` that is the newer protocol.
+//!         Self { shared: Shared::new(super::NEWER, super::OLDER) }
+//!     }
+//!
 //!     pub fn routes() -> &'static Routes<Self> {
 //!         static ROUTES: OnceLock<Routes<Up>> = OnceLock::new();
 //!         ROUTES.get_or_init(|| {
-//!             // Client side first: for `up` that is the newer protocol.
 //!             RouteBuilder::new(super::NEWER, super::OLDER)
+//!                 // Items, entities, chunks, text, tags... of this pair.
+//!                 .defaults()
+//!                 // What is specific to the pair. Names are the sender's.
 //!                 .clientbound(State::Play, "set_health", Self::set_health)
 //!                 .drop_serverbound(State::Play, "only_the_newer_client_sends_this")
 //!                 .build()
@@ -37,12 +57,23 @@
 //! }
 //! routed_step!(Up);
 //!
-//! pub const STEP: Option<Make> = Some(|| Box::new(Up::default()));
+//! pub const STEP: Option<Make> = Some(|| Box::new(Up::new()));
+//!
+//! #[cfg(test)]
+//! mod tests {
+//!     #[test]
+//!     fn every_packet_has_a_route() {
+//!         assert_eq!(super::Up::routes().problems(), &[] as &[String]);
+//!     }
+//! }
 //! ```
 //!
 //! Packets named the same on both sides pass through with only their ID
-//! changed. Every other packet needs a rule; `Routes::problems()` lists what
-//! is missing and each step's tests assert that it is empty.
+//! changed, unless a shared codec (see [`crate::codec`]) or the step handles
+//! them. A packet the receiving side lacks needs a rule;
+//! `Routes::problems()` lists what is missing and each step's tests assert
+//! that it is empty. A handler gets the packet with its ID already replaced
+//! by the same-named packet's ID on the receiving side.
 use crate::step::Step;
 
 mod v1_12_1_to_1_12_2;

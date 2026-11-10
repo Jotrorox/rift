@@ -62,6 +62,12 @@ impl Cx<'_> {
 /// by the same-named packet's ID on the receiving side, when there is one.
 pub type Handler<S> = fn(&mut S, &mut Cx<'_>, State, Packet) -> io::Result<()>;
 
+/// Looks at one packet kind before its route runs, without changing it. The
+/// packet is in the sender's format with the sender's ID. Several parts of a
+/// step may tap the same packet, for example to follow the world a `login`
+/// or `respawn` puts the player in.
+pub type Tap<S> = fn(&mut S, State, &Packet) -> io::Result<()>;
+
 enum Route<S> {
     /// The source protocol has no packet with this ID.
     Unknown,
@@ -93,10 +99,15 @@ pub struct Routes<S> {
     client: &'static VersionData,
     backend: &'static VersionData,
     /// Indexed by state, then by backend-side packet ID.
-    clientbound: [Vec<Route<S>>; 3],
+    clientbound: [Vec<Entry<S>>; 3],
     /// Indexed by state, then by client-side packet ID.
-    serverbound: [Vec<Route<S>>; 3],
+    serverbound: [Vec<Entry<S>>; 3],
     problems: Vec<String>,
+}
+
+struct Entry<S> {
+    route: Route<S>,
+    taps: Box<[Tap<S>]>,
 }
 
 impl<S> Routes<S> {
@@ -116,15 +127,12 @@ impl<S> Routes<S> {
         &self.problems
     }
 
-    fn route(&self, direction: Direction, state: State, id: i32) -> Route<S> {
+    fn entry(&self, direction: Direction, state: State, id: i32) -> Option<&Entry<S>> {
         let tables = match direction {
             Direction::Clientbound => &self.clientbound,
             Direction::Serverbound => &self.serverbound,
         };
-        state_index(state)
-            .and_then(|index| tables[index].get(usize::try_from(id).ok()?))
-            .copied()
-            .unwrap_or(Route::Unknown)
+        tables[state_index(state)?].get(usize::try_from(id).ok()?)
     }
 
     /// Apply the table to one packet. Steps built on routes call this from
@@ -137,7 +145,11 @@ impl<S> Routes<S> {
         state: State,
         mut packet: Packet,
     ) -> io::Result<()> {
-        match self.route(direction, state, packet.id) {
+        let entry = self.entry(direction, state, packet.id);
+        for tap in entry.map_or(&[][..], |entry| &entry.taps) {
+            tap(step, state, &packet)?;
+        }
+        match entry.map_or(Route::Unknown, |entry| entry.route) {
             Route::Pass(id) => {
                 packet.id = id;
                 match direction {
@@ -181,6 +193,10 @@ pub struct RouteBuilder<S> {
     client: &'static VersionData,
     backend: &'static VersionData,
     rules: Vec<(Direction, State, &'static str, Rule<S>)>,
+    /// Rules shared codecs install; a step's own rule for the same packet
+    /// replaces them, and one naming a packet the pair lacks is ignored.
+    defaults: Vec<(Direction, State, &'static str, Rule<S>)>,
+    taps: Vec<(Direction, State, &'static str, Tap<S>)>,
 }
 
 enum Rule<S> {
@@ -195,7 +211,63 @@ impl<S> RouteBuilder<S> {
             client: data::version(client_protocol),
             backend: data::version(backend_protocol),
             rules: Vec::new(),
+            defaults: Vec::new(),
+            taps: Vec::new(),
         }
+    }
+
+    /// The client-side protocol's data.
+    pub fn client(&self) -> &'static VersionData {
+        self.client
+    }
+
+    /// The backend-side protocol's data.
+    pub fn backend(&self) -> &'static VersionData {
+        self.backend
+    }
+
+    /// The protocol packets travelling in `direction` arrive in.
+    pub fn source(&self, direction: Direction) -> &'static VersionData {
+        match direction {
+            Direction::Clientbound => self.backend,
+            Direction::Serverbound => self.client,
+        }
+    }
+
+    /// The protocol packets travelling in `direction` leave in.
+    pub fn target(&self, direction: Direction) -> &'static VersionData {
+        match direction {
+            Direction::Clientbound => self.client,
+            Direction::Serverbound => self.backend,
+        }
+    }
+
+    /// Handle the packet `name` (in the sender's protocol) with `handler`
+    /// unless the step declares its own rule for it. For shared codecs: no
+    /// problem is reported when the sender's protocol has no such packet.
+    pub fn default_handler(
+        mut self,
+        direction: Direction,
+        state: State,
+        name: &'static str,
+        handler: Handler<S>,
+    ) -> Self {
+        self.defaults
+            .push((direction, state, name, Rule::Handle(handler)));
+        self
+    }
+
+    /// Run `tap` on the packet `name` (in the sender's protocol) before its
+    /// route. Ignored when the sender's protocol has no such packet.
+    pub fn tap(
+        mut self,
+        direction: Direction,
+        state: State,
+        name: &'static str,
+        tap: Tap<S>,
+    ) -> Self {
+        self.taps.push((direction, state, name, tap));
+        self
     }
 
     /// Handle the backend-side packet `name` with `handler`.
@@ -255,7 +327,7 @@ impl<S> RouteBuilder<S> {
     pub fn build(self) -> Routes<S> {
         let mut problems = Vec::new();
         let mut used = vec![false; self.rules.len()];
-        let mut table = |direction: Direction| -> [Vec<Route<S>>; 3] {
+        let mut table = |direction: Direction| -> [Vec<Entry<S>>; 3] {
             let (source, target) = match direction {
                 Direction::Clientbound => (self.backend, self.client),
                 Direction::Serverbound => (self.client, self.backend),
@@ -266,12 +338,40 @@ impl<S> RouteBuilder<S> {
                     .names()
                     .iter()
                     .map(|name| {
-                        let same = target.packet_id(state, direction, name);
-                        let rule = self.rules.iter().position(|(d, s, n, _)| {
+                        let matches = |(d, s, n, _): &(Direction, State, &str, _)| {
                             *d == direction && *s == state && *n == &**name
-                        });
-                        let Some(rule) = rule else {
-                            return same.map_or_else(
+                        };
+                        let taps = self
+                            .taps
+                            .iter()
+                            .filter(|(d, s, n, _)| *d == direction && *s == state && *n == &**name)
+                            .map(|(_, _, _, tap)| *tap)
+                            .collect();
+                        let same = target.packet_id(state, direction, name);
+                        let own: Vec<usize> = (0..self.rules.len())
+                            .filter(|index| matches(&self.rules[*index]))
+                            .collect();
+                        if own.len() > 1 {
+                            problems.push(format!(
+                                "{state:?} {direction:?} {name} has {} rules",
+                                own.len()
+                            ));
+                        }
+                        let rule = match own.first() {
+                            Some(index) => {
+                                own.iter().for_each(|index| used[*index] = true);
+                                Some(&self.rules[*index].3)
+                            }
+                            // The codec installed last wins: later installs refine.
+                            None => self
+                                .defaults
+                                .iter()
+                                .rev()
+                                .find(|rule| matches(rule))
+                                .map(|rule| &rule.3),
+                        };
+                        let route = match rule {
+                            None => same.map_or_else(
                                 || {
                                     problems.push(format!(
                                         "{state:?} {direction:?} {name} ({}) has no counterpart in {} and no rule",
@@ -280,23 +380,25 @@ impl<S> RouteBuilder<S> {
                                     Route::Unmapped
                                 },
                                 Route::Pass,
-                            );
-                        };
-                        used[rule] = true;
-                        match &self.rules[rule].3 {
-                            Rule::Handle(handler) => Route::Handle(*handler, same.unwrap_or(-1)),
-                            Rule::Drop => Route::Drop,
-                            Rule::Rename(to) => match target.packet_id(state, direction, to) {
-                                Some(id) => Route::Pass(id),
-                                None => {
-                                    problems.push(format!(
-                                        "{state:?} {direction:?} {name} is renamed to {to}, which {} lacks",
-                                        target.name
-                                    ));
-                                    Route::Unmapped
+                            ),
+                            Some(Rule::Handle(handler)) => {
+                                Route::Handle(*handler, same.unwrap_or(-1))
+                            }
+                            Some(Rule::Drop) => Route::Drop,
+                            Some(Rule::Rename(to)) => {
+                                match target.packet_id(state, direction, to) {
+                                    Some(id) => Route::Pass(id),
+                                    None => {
+                                        problems.push(format!(
+                                            "{state:?} {direction:?} {name} is renamed to {to}, which {} lacks",
+                                            target.name
+                                        ));
+                                        Route::Unmapped
+                                    }
                                 }
-                            },
-                        }
+                            }
+                        };
+                        Entry { route, taps }
                     })
                     .collect()
             })
@@ -365,4 +467,114 @@ impl Step for Identity {
 
 pub fn identity() -> Box<dyn Step> {
     Box::new(Identity)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    #[derive(Default)]
+    struct Probe {
+        seen: Vec<&'static str>,
+    }
+
+    impl Probe {
+        fn tap(&mut self, _: State, _: &Packet) -> io::Result<()> {
+            self.seen.push("tap");
+            Ok(())
+        }
+
+        fn fallback(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
+            self.seen.push("fallback");
+            cx.to_client(state, packet);
+            Ok(())
+        }
+
+        fn own(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
+            self.seen.push("own");
+            cx.to_client(state, packet);
+            cx.to_backend(state, Packet::empty(0));
+            Ok(())
+        }
+    }
+
+    fn run(routes: &Routes<Probe>, name: &str) -> (Vec<&'static str>, usize, usize) {
+        let mut probe = Probe::default();
+        let mut emitted = VecDeque::new();
+        let mut cx = Cx {
+            emitted: &mut emitted,
+            client_protocol: 772,
+            backend_protocol: 771,
+        };
+        let id = routes
+            .backend()
+            .expect_packet(State::Play, Direction::Clientbound, name);
+        routes
+            .dispatch(
+                &mut probe,
+                &mut cx,
+                Direction::Clientbound,
+                State::Play,
+                Packet::empty(id),
+            )
+            .unwrap();
+        let to_client = emitted
+            .iter()
+            .filter(|emitted| emitted.direction == Direction::Clientbound)
+            .count();
+        (probe.seen, to_client, emitted.len() - to_client)
+    }
+
+    #[test]
+    fn own_rules_replace_defaults_and_taps_run_first() {
+        use Direction::Clientbound;
+        let routes = RouteBuilder::<Probe>::new(772, 771)
+            .default_handler(Clientbound, State::Play, "sound", Probe::fallback)
+            .default_handler(Clientbound, State::Play, "explode", Probe::fallback)
+            .default_handler(Clientbound, State::Play, "not_a_packet", Probe::fallback)
+            .tap(Clientbound, State::Play, "sound", Probe::tap)
+            .tap(Clientbound, State::Play, "sound", Probe::tap)
+            .clientbound(State::Play, "sound", Probe::own)
+            .drop_clientbound(State::Play, "set_health")
+            .build();
+        assert_eq!(routes.problems(), &[] as &[String]);
+        assert_eq!(run(&routes, "sound"), (vec!["tap", "tap", "own"], 1, 1));
+        assert_eq!(run(&routes, "explode"), (vec!["fallback"], 1, 0));
+        assert_eq!(run(&routes, "set_health"), (vec![], 0, 0));
+        assert_eq!(run(&routes, "keep_alive"), (vec![], 1, 0));
+    }
+
+    #[test]
+    fn unknown_names_duplicates_and_unknown_ids_are_reported() {
+        let routes = RouteBuilder::<Probe>::new(772, 771)
+            .clientbound(State::Play, "sound", Probe::own)
+            .clientbound(State::Play, "sound", Probe::own)
+            .drop_serverbound(State::Play, "no_such_packet")
+            .rename_clientbound(State::Play, "explode", "no_such_target")
+            .build();
+        let problems = routes.problems().join("\n");
+        assert!(problems.contains("sound has 2 rules"), "{problems}");
+        assert!(
+            problems.contains("no_such_packet matches no packet"),
+            "{problems}"
+        );
+        assert!(problems.contains("no_such_target"), "{problems}");
+        let mut emitted = VecDeque::new();
+        let mut cx = Cx {
+            emitted: &mut emitted,
+            client_protocol: 772,
+            backend_protocol: 771,
+        };
+        let error = routes
+            .dispatch(
+                &mut Probe::default(),
+                &mut cx,
+                Direction::Clientbound,
+                State::Play,
+                Packet::empty(9999),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("no translation from"), "{error}");
+    }
 }
