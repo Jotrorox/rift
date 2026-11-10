@@ -23,7 +23,7 @@ pub const STEP: Option<Make> = Some(|| Box::new(Down::new()));
 const LOOK_DISTANCE: f64 = 1.0e5;
 
 /// A player's eye height while standing.
-const EYE_HEIGHT: f64 = 1.62;
+pub(super) const EYE_HEIGHT: f64 = 1.62;
 
 pub struct Down {
     shared: Shared,
