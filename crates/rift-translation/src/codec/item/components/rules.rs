@@ -762,6 +762,10 @@ fn trim(cx: &mut Conv<'_>, kind: &str, value: &Value) -> Res<Value> {
     Ok(Value::Struct(converted))
 }
 
+/// An inline trim material in any protocol's layout: an asset name (the
+/// 26.3 palette's path), the ingredient item, a model index, overrides by
+/// armor material or equipment asset, and a description. Fields one side
+/// lacks make the conversion lossy, so the original rides in the stash.
 fn trim_material(
     cx: &mut Conv<'_>,
     source: &'static Node,
@@ -776,97 +780,82 @@ fn trim_material(
     let (Node::Holder(_, source), Node::Holder(_, target)) = (deref(source), deref(target)) else {
         return Err(invalid("trim material layout is not a holder").into());
     };
-    let s = struct_fields(source)?;
-    let t = struct_fields(target)?;
+    let (s, t) = (struct_fields(source)?, struct_fields(target)?);
+    let names =
+        |fields: &[(&'static str, Node)]| fields.iter().map(|(name, _)| *name).collect::<Vec<_>>();
+    if names(s) != names(t) {
+        cx.lossy = true;
+    }
     let values = inner.fields()?;
     let get = |name: &str| {
         s.iter()
             .position(|(known, _)| *known == name)
             .map(|index| &values[index])
     };
-    let description = convert_value(
-        cx,
-        &Node::Text,
-        &Node::Text,
-        get("description").ok_or(Fail::Lost)?,
-    )?;
-    let base = get("asset_name")
-        .or_else(|| get("base"))
-        .cloned()
-        .or_else(|| {
-            get("palette")
-                .and_then(Value::as_str)
-                .map(|palette| Value::String(data::strip(palette).to_owned()))
-        })
-        .ok_or(Fail::Lost)?;
-    let overrides = get("override_armor_materials")
+    let base = match (get("asset_name").or_else(|| get("base")), get("palette")) {
+        (Some(base), _) => base.as_str().unwrap_or_default().to_owned(),
+        (None, Some(palette)) => data::strip(palette.as_str().unwrap_or_default()).to_owned(),
+        (None, None) => return Err(Fail::Lost),
+    };
+    // Overrides keyed by name, whatever the sender keyed them by.
+    let mut overrides = Vec::new();
+    let source_overrides = get("override_armor_materials")
         .or_else(|| get("override_armor_assets"))
         .or_else(|| get("overrides"));
+    for entry in source_overrides
+        .map(Value::items)
+        .transpose()?
+        .unwrap_or_default()
+    {
+        let e = entry.fields()?;
+        let key = match &e[0] {
+            Value::Id(id) => data::version(cx.source)
+                .registry("armor_material")
+                .and_then(|registry| registry.name(*id))
+                .map(|name| format!("minecraft:{name}")),
+            Value::String(name) => Some(name.clone()),
+            _ => None,
+        };
+        match key {
+            Some(key) => overrides.push((key, e[1].clone())),
+            None => cx.lossy = true,
+        }
+    }
     let mut fields = Vec::with_capacity(t.len());
-    for (name, _) in t {
+    for (name, node) in t {
         fields.push(match *name {
-            "asset_name" | "base" => base.clone(),
-            "palette" => {
-                cx.lossy = true;
-                Value::String(format!("minecraft:{}", base.as_str().unwrap_or("")))
-            }
+            "asset_name" | "base" => Value::String(base.clone()),
+            "palette" => Value::String(format!("minecraft:{base}")),
             "ingredient" => match get("ingredient") {
                 Some(Value::Id(id)) => Value::Id(cx.map_id("item", *id).ok_or(Fail::Lost)?),
-                _ => {
-                    cx.lossy = true;
-                    Value::Id(cx.target_id("item", "air").unwrap_or(0))
-                }
+                _ => Value::Id(cx.target_id("item", "air").unwrap_or(0)),
             },
-            "item_model_index" => get("item_model_index").cloned().unwrap_or_else(|| {
-                cx.lossy = true;
-                Value::Float(0.0)
-            }),
+            "item_model_index" => get("item_model_index")
+                .cloned()
+                .unwrap_or(Value::Float(0.0)),
             "override_armor_materials" | "override_armor_assets" | "overrides" => {
-                let materials = *name == "override_armor_materials"
-                    && matches!(sub(target, name).and_then(element), Ok(element) if matches!(sub(element, "material"), Ok(Node::Id(_))));
-                let mut entries = Vec::new();
-                for entry in overrides.map(Value::items).transpose()?.unwrap_or_default() {
-                    let e = entry.fields()?;
-                    let key = match &e[0] {
-                        Value::Id(id) => data::version(cx.source)
-                            .registry("armor_material")
-                            .and_then(|registry| registry.name(*id))
-                            .map(|name| format!("minecraft:{name}")),
-                        Value::String(name) => Some(name.clone()),
-                        _ => None,
-                    };
-                    let key = match (key, materials) {
-                        (Some(key), true) => cx.target_id("armor_material", &key).map(Value::Id),
-                        (Some(key), false) => Some(Value::String(key)),
-                        (None, _) => None,
+                // Before 1.21.2 overrides name an armor material by ID.
+                let by_id = matches!(sub(element(node)?, "material"), Ok(Node::Id(_)));
+                let mut entries = Vec::with_capacity(overrides.len());
+                for (key, suffix) in &overrides {
+                    let key = if by_id {
+                        cx.target_id("armor_material", key).map(Value::Id)
+                    } else {
+                        Some(Value::String(key.clone()))
                     };
                     match key {
-                        Some(key) => entries.push(Value::Struct(vec![key, e[1].clone()])),
+                        Some(key) => entries.push(Value::Struct(vec![key, suffix.clone()])),
                         None => cx.lossy = true,
                     }
                 }
-                if overrides.is_none() {
-                    cx.lossy = true;
-                }
                 Value::List(entries)
             }
-            "description" => description.clone(),
+            "description" => {
+                let description = get("description").ok_or(Fail::Lost)?;
+                convert_value(cx, &Node::Text, &Node::Text, description)?
+            }
             _ => return Err(invalid(&format!("unknown trim material field {name}")).into()),
         });
-    }
-    for (name, _) in s {
-        if matches!(*name, "ingredient" | "item_model_index")
-            && !t.iter().any(|(known, _)| known == name)
-        {
-            cx.lossy = true;
-        }
-        if *name == "overrides"
-            && t.iter().all(|(known, _)| *known != "overrides")
-            && t.iter().all(|(known, _)| !known.starts_with("override"))
-            && overrides.is_some_and(|value| value.items().is_ok_and(|items| !items.is_empty()))
-        {
-            cx.lossy = true;
-        }
     }
     Ok(Value::Direct(Box::new(Value::Struct(fields))))
 }

@@ -22,6 +22,8 @@ pub mod schema;
 mod stash;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod vectors;
 
 pub use convert::{compatible, convert_value, identical};
 pub use schema::{Node, Value};

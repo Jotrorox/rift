@@ -649,24 +649,101 @@ fn delimited_patches_round_trip() {
     reader.finish().unwrap();
 }
 
-/// Stacks from the corpus, embedded so these checks run without it.
+fn unhex(hex: &str) -> Vec<u8> {
+    (0..hex.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&hex[index..index + 2], 16).unwrap())
+        .collect()
+}
+
+/// Recorded stacks embedded in the source (see [`super::vectors`]), so CI
+/// checks round trips and conversions of real data without the corpus.
 #[test]
-fn recorded_stacks_round_trip() {
-    for (protocol, hex) in VECTORS {
-        let bytes: Vec<u8> = (0..hex.len())
-            .step_by(2)
-            .map(|index| u8::from_str_radix(&hex[index..index + 2], 16).unwrap())
-            .collect();
-        let stack = read_stack(*protocol, &bytes);
+fn recorded_stacks_round_trip_and_convert() {
+    passthrough_text();
+    let all: Vec<i32> = protocols().collect();
+    for (protocol, hex) in super::vectors::STACKS {
+        let bytes = unhex(hex);
+        let stack = read_stack(*protocol, &bytes).unwrap();
         assert_eq!(
-            write_stack(*protocol, stack.as_ref()),
+            write_stack(*protocol, Some(&stack)),
             bytes,
             "vector in {protocol}"
         );
+        let index = all.iter().position(|known| known == protocol).unwrap();
+        let neighbours = [index.checked_sub(1), Some(index + 1)];
+        for to in neighbours.into_iter().flatten().filter_map(|i| all.get(i)) {
+            let Some(there) = convert_stack(*protocol, *to, &stack) else {
+                continue;
+            };
+            let out = write_stack(*to, Some(&there));
+            assert_eq!(read_stack(*to, &out).as_ref(), Some(&there));
+            let back = convert_stack(*to, *protocol, &there).unwrap();
+            assert_eq!(
+                normalized(&back),
+                normalized(&stack),
+                "vector from {protocol} to {to} and back"
+            );
+        }
     }
 }
 
-const VECTORS: &[(i32, &str)] = &[];
+/// Write `vectors.rs` from the corpus: per protocol, recorded stacks that
+/// together hold every component type the corpus has (greedy cover).
+/// `RIFT_COMPONENT_VECTORS=path cargo test -- --ignored write_vectors`.
+#[test]
+#[ignore]
+fn write_vectors() {
+    let path = std::env::var("RIFT_COMPONENT_VECTORS").expect("RIFT_COMPONENT_VECTORS");
+    let mut out = String::from(
+        "//! Recorded item stacks from official servers, one set per protocol that\n\
+         //! together holds every component type the capture produced. Generated\n\
+         //! by the `write_vectors` test from a corpus captured with extra\n\
+         //! `/give` commands; do not edit.\n\n\
+         /// (protocol, stack as hex) in `ItemStack.OPTIONAL_STREAM_CODEC`.\n\
+         pub const STACKS: &[(i32, &str)] = &[\n",
+    );
+    for protocol in protocols() {
+        let Some(stacks) = corpus_stacks(protocol) else {
+            continue;
+        };
+        let kinds = |bytes: &Vec<u8>| -> Vec<&'static str> {
+            let stack = read_stack(protocol, bytes).unwrap();
+            stack
+                .components
+                .unwrap()
+                .added
+                .iter()
+                .map(|c| c.kind)
+                .collect()
+        };
+        let mut covered: Vec<&str> = Vec::new();
+        let mut candidates: Vec<(Vec<u8>, Vec<&str>)> = stacks
+            .iter()
+            .map(|bytes| (bytes.clone(), kinds(bytes)))
+            .collect();
+        loop {
+            let best = candidates
+                .iter()
+                .enumerate()
+                .map(|(index, (bytes, kinds))| {
+                    let new = kinds.iter().filter(|kind| !covered.contains(kind)).count();
+                    (new, std::cmp::Reverse(bytes.len()), index)
+                })
+                .max();
+            let Some((new, _, index)) = best.filter(|(new, _, _)| *new > 0) else {
+                break;
+            };
+            let _ = new;
+            let (bytes, kinds) = candidates.remove(index);
+            covered.extend(kinds);
+            let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+            out.push_str(&format!("    ({protocol}, \"{hex}\"),\n"));
+        }
+    }
+    out.push_str("];\n");
+    std::fs::write(path, out).unwrap();
+}
 
 /// `recipe_book_add` and `update_recipes` (1.21.2+) around one protocol's
 /// displays: the packets are the same in every protocol that has them.
