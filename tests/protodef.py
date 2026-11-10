@@ -188,6 +188,18 @@ CORRECTIONS = [
                           ("customEffects", ["array", {"countType": "varint", "type": "ItemPotionEffect"}])),
          why="PotionContents.STREAM_CODEC gained the optional custom name in 1.21.2; 1.20.5-1.21.1 "
              "end after the effects (ViaVersion PotionContents.TYPE1_20_5)."),
+    dict(protocols=(766, 766), path=SLOT_COMPONENT + ["food"],
+         value=_container(("nutrition", "varint"), ("saturationModifier", "f32"), ("canAlwaysEat", "bool"),
+                          ("secondsToEat", "f32"),
+                          ("effects", ["array", {"countType": "varint", "type": _container(
+                              ("effect", "ItemPotionEffect"), ("probability", "f32"))}])),
+         why="1.20.5 FoodProperties.STREAM_CODEC has no usingConvertsTo (1.21 added it), and each "
+             "possible effect is a whole MobEffectInstance (ID and details) before its probability; "
+             "the official 1.20.6 server's golden apple failed to decode."),
+    dict(protocols=(767, 767), path=SLOT_COMPONENT + ["food", 1, {"field": "effects"}, "type", 1, "type"],
+         value=_container(("effect", "ItemPotionEffect"), ("probability", "f32")),
+         why="FoodProperties.PossibleEffect.STREAM_CODEC writes a whole MobEffectInstance (ID and "
+             "details) before the probability, not just the effect ID."),
     dict(protocols=(771, 772),
          path=["types", "entityMetadataEntry", 1, 2, "type", 1, "fields", "optional_global_pos"],
          value=["option", _container(("dimension", "string"), ("position", "position"))],
