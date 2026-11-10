@@ -19,6 +19,9 @@ pub struct Harness {
     pub step: Box<dyn Step>,
     pub client: i32,
     pub backend: i32,
+    /// The protocols of the real client and backend at the ends of the
+    /// chain; the step's own by default.
+    pub ends: Option<(i32, i32)>,
 }
 
 impl Harness {
@@ -27,6 +30,7 @@ impl Harness {
             step: make.expect("the step exists")(),
             client,
             backend,
+            ends: None,
         }
     }
 
@@ -56,8 +60,8 @@ impl Harness {
         let mut emitted = VecDeque::new();
         let mut cx = Cx {
             emitted: &mut emitted,
-            client_protocol: self.client,
-            backend_protocol: self.backend,
+            client_protocol: self.ends.map_or(self.client, |ends| ends.0),
+            backend_protocol: self.ends.map_or(self.backend, |ends| ends.1),
         };
         let packet = Packet::new(id, body.to_vec());
         match direction {
