@@ -52,8 +52,11 @@
 //! target block matching the most source properties, ties broken towards
 //! the default state, so stairs keep their facing, half and waterlogging.
 //!
-//! Before 1.13 block states are numeric (`id << 4 | metadata`); see
-//! [`crate::legacy`] for the flattening.
+//! Before 1.13 block states are numeric (`id << 4 | metadata`) and stay
+//! put within 1.12.x. Between 1.12.2 and 1.13 `block_state`, `block` and
+//! `item` go through [`crate::legacy`]; their rules there name 1.12 states
+//! `name:metadata` and items `name` or `name:damage`, and renames do not
+//! apply.
 use crate::{
     data::{self, Block, BlockStates, Registry},
     version,
@@ -113,7 +116,7 @@ impl Mapping {
         Self { table, kinds }
     }
 
-    fn with_kinds(table: Vec<i32>, kinds: Vec<Kind>) -> Self {
+    pub(crate) fn from_parts(table: Vec<i32>, kinds: Vec<Kind>) -> Self {
         debug_assert_eq!(table.len(), kinds.len());
         Self { table, kinds }
     }
@@ -371,8 +374,12 @@ fn build(from: i32, to: i32, registry: &str) -> Option<Mapping> {
             _ => crate::legacy::block_state_mapping(from, to),
         };
     }
-    if registry == "item" && version::flattened(from) != version::flattened(to) {
-        return crate::legacy::item_mapping(from, to);
+    if version::flattened(from) != version::flattened(to) {
+        match registry {
+            "item" => return crate::legacy::item_mapping(from, to),
+            "block" => return crate::legacy::block_mapping(from, to),
+            _ => {}
+        }
     }
     Some(by_name(
         source.registry(registry)?,
@@ -412,7 +419,7 @@ fn by_name(source: &Registry, target: &Registry, rules: &Directed<'_>) -> Mappin
             }
         }
     }
-    Mapping::with_kinds(table, kinds)
+    Mapping::from_parts(table, kinds)
 }
 
 /// `name` or `name[property=value,...]`, split; `None` when malformed.
@@ -526,7 +533,7 @@ fn block_states(source: &BlockStates, target: &BlockStates, rules: &Directed<'_>
             }
         }
     }
-    Mapping::with_kinds(table, kinds)
+    Mapping::from_parts(table, kinds)
 }
 
 /// The offset in `block` of the state with the `explicit` values, else the
@@ -604,13 +611,18 @@ fn exists(protocol: i32, registry: &str, name: &str) -> bool {
     let Some(data) = data::try_version(protocol) else {
         return false;
     };
+    if !version::flattened(protocol) {
+        // 1.12 names states `name:metadata` and item variants `name:damage`.
+        match registry {
+            "block_state" => return crate::legacy::parse_block(protocol, name).is_some(),
+            "item" => return crate::legacy::parse_item(protocol, name).is_some(),
+            _ => {}
+        }
+    }
     if registry == "block_state" {
         let Some((block, properties)) = parse_pattern(name) else {
             return false;
         };
-        if !version::flattened(protocol) {
-            return false;
-        }
         let Some(block) = data.block_states.block(block) else {
             return false;
         };
@@ -633,7 +645,7 @@ fn check_registry_rules(
 ) {
     let file = format!("data/rules/{older}-{newer}.json {registry}");
     let pair_has = |protocol: i32| {
-        registry == "block_state" && version::flattened(protocol)
+        registry == "block_state"
             || data::try_version(protocol).is_some_and(|data| data.registry(registry).is_some())
     };
     if !pair_has(older) || !pair_has(newer) {
@@ -645,6 +657,19 @@ fn check_registry_rules(
         return;
     }
     let (old, new) = (version::release(older), version::release(newer));
+    let flattening = version::flattened(older) != version::flattened(newer);
+    if flattening && ["block_state", "block", "item"].contains(&registry) {
+        if !rules.renames.is_empty() {
+            problems.push(format!(
+                "{file}: renames do not apply across the flattening; use `up` and `down`"
+            ));
+        }
+        if registry == "block" {
+            problems.push(format!(
+                "{file}: the block registry follows the block_state rules across the flattening"
+            ));
+        }
+    }
     let check = |section: &str, name: &str, protocol: i32, release: &str| {
         (!exists(protocol, registry, name))
             .then(|| format!("{file} {section}: {name} does not exist in {release}"))
@@ -716,7 +741,7 @@ mod tests {
                 for (from, to) in [(older, newer), (newer, older)] {
                     let mapping = try_mapping(from, to, &registry);
                     assert!(
-                        mapping.is_some() || older == 340,
+                        mapping.is_some(),
                         "no {registry} mapping from {from} to {to}"
                     );
                 }
