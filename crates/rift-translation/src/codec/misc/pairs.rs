@@ -288,7 +288,11 @@ fn malformed_input_fails_without_panicking() {
             let body = commands::write(backend, &every_parser(backend)).unwrap();
             samples.extend((0..body.len()).step_by(61).map(|end| body[..end].to_vec()));
             let tags = tags::vanilla_update_tags(backend).unwrap();
-            samples.extend((0..tags.len()).step_by(4093).map(|end| tags[..end].to_vec()));
+            samples.extend(
+                (0..tags.len())
+                    .step_by(4093)
+                    .map(|end| tags[..end].to_vec()),
+            );
         }
         for name in names {
             if source

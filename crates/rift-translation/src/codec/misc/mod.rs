@@ -35,7 +35,10 @@ pub mod tags;
 mod vectors;
 
 use super::HasShared;
-use crate::{Direction, State as Phase, step::RouteBuilder};
+use crate::{
+    Direction, State as Phase,
+    step::{Handler, RouteBuilder},
+};
 
 /// What this codec keeps for one step of one connection.
 #[derive(Default)]
@@ -59,96 +62,87 @@ impl State {
 
 /// Install this codec's default routes for the builder's pair.
 pub fn install<S: HasShared + 'static>(builder: RouteBuilder<S>) -> RouteBuilder<S> {
-    use Direction::{Clientbound, Serverbound};
+    use Phase::{Configuration, Play};
     let (source, target) = (builder.backend().protocol, builder.client().protocol);
-    let mut builder = builder;
-    if tags::needed(source, target) {
-        for phase in [Phase::Configuration, Phase::Play] {
-            builder =
-                builder.default_handler(Clientbound, phase, "update_tags", tags::update_tags::<S>);
-        }
-    }
-    if commands::needed(source, target) {
-        builder = builder.default_handler(
-            Clientbound,
-            Phase::Play,
+    let tags = tags::needed(source, target);
+    let clientbound: [(bool, Phase, &'static str, Handler<S>); 11] = [
+        (tags, Configuration, "update_tags", tags::update_tags::<S>),
+        (tags, Play, "update_tags", tags::update_tags::<S>),
+        (
+            commands::needed(source, target),
+            Play,
             "commands",
             commands::commands::<S>,
-        );
-    }
-    if stats::needed(source, target) {
-        builder = builder.default_handler(
-            Clientbound,
-            Phase::Play,
-            "award_stats",
-            stats::award_stats::<S>,
-        );
-    }
-    for (kind, name, handler) in [
-        (
-            sound::Kind::Sound,
-            "sound",
-            sound::sound::<S> as crate::step::Handler<S>,
         ),
         (
-            sound::Kind::CustomSound,
+            stats::needed(source, target),
+            Play,
+            "award_stats",
+            stats::award_stats::<S>,
+        ),
+        (
+            sound::needed(sound::Kind::Sound, source, target),
+            Play,
+            "sound",
+            sound::sound::<S>,
+        ),
+        (
+            sound::needed(sound::Kind::CustomSound, source, target),
+            Play,
             "custom_sound",
             sound::custom_sound::<S>,
         ),
         (
-            sound::Kind::SoundEntity,
+            sound::needed(sound::Kind::SoundEntity, source, target),
+            Play,
             "sound_entity",
             sound::sound_entity::<S>,
         ),
-    ] {
-        if sound::needed(kind, source, target) {
-            builder = builder.default_handler(Clientbound, Phase::Play, name, handler);
-        }
-    }
-    if source >= 393 && sound::stop_needed(source, target) {
-        builder = builder.default_handler(
-            Clientbound,
-            Phase::Play,
+        (
+            sound::stop_needed(source, target),
+            Play,
             "stop_sound",
             sound::stop_sound::<S>,
-        );
-    }
-    if screen::open_needed(source, target) {
-        builder = builder.default_handler(
-            Clientbound,
-            Phase::Play,
+        ),
+        (
+            screen::open_needed(source, target),
+            Play,
             "open_screen",
             screen::open_screen::<S>,
-        );
-    }
-    if source >= 477 && screen::mount_needed(source, target) {
-        builder = builder.default_handler(
-            Clientbound,
-            Phase::Play,
+        ),
+        (
+            screen::mount_needed(source, target),
+            Play,
             "mount_screen_open",
             screen::mount_screen_open::<S>,
-        );
+        ),
+        (
+            container::data_needed(source, target),
+            Play,
+            "container_set_data",
+            container::container_set_data::<S>,
+        ),
+    ];
+    let mut builder = builder;
+    for (needed, phase, name, handler) in clientbound {
+        if needed {
+            builder = builder.default_handler(Direction::Clientbound, phase, name, handler);
+        }
     }
     if container::data_needed(source, target) {
-        builder = builder
-            .tap(
-                Clientbound,
-                Phase::Play,
-                "open_screen",
-                container::track_open_screen::<S>,
-            )
-            .default_handler(
-                Clientbound,
-                Phase::Play,
-                "container_set_data",
-                container::container_set_data::<S>,
-            );
+        // A data property's meaning depends on the window's menu.
+        builder = builder.tap(
+            Direction::Clientbound,
+            Play,
+            "open_screen",
+            container::track_open_screen::<S>,
+        );
     }
     // Serverbound packets travel from the client's protocol to the backend's.
-    if target >= 393 && container::beacon_needed(target, source) {
+    if container::beacon_needed(target, source) {
         builder = builder.default_handler(
-            Serverbound,
-            Phase::Play,
+            Direction::Serverbound,
+            Play,
             "set_beacon",
             container::set_beacon::<S>,
         );
