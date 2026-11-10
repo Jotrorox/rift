@@ -14,7 +14,7 @@ use tokio::sync::Semaphore;
 pub use crate::message_script::MessageScript;
 pub use crate::server_list::{ServerList, StatusScript};
 pub use crate::{http_script::HttpScript, script::RouteScript};
-pub use managed::{InstanceMessaging, ManagedServer, ProcessEnvironment};
+pub use managed::{InstanceMessaging, Isolation, IsolationMode, ManagedServer, ProcessEnvironment};
 pub use messaging::{MessagingConfig, MessagingPrincipal, MessagingStream, MessagingSubscription};
 pub use nodes::{LOCAL_NODE, NodeConfig, NodeSelector, Placement, valid_node_directory};
 pub use permissions::PermissionsConfig;

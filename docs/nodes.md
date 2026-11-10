@@ -248,6 +248,10 @@ address.
   instance and dies with it; the key that derives tokens stays on the
   controller. The start command also carries the bus certificate, which the
   agent writes to `rift-bus.pem` in the server directory.
+- A server's [`isolation`](managed-servers.md#isolation) is applied by the
+  agent on the node's kernel; `rift check` on the controller cannot tell what
+  that kernel offers. Agents older than the controller start every server
+  unconfined.
 - Servers on a node do not inherit the agent's secrets: the variables named by
   `--token-env` and `--forwarding-secret-env` are removed from every server's
   environment. A server's `env` and `inherit_env` travel with its start

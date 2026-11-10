@@ -645,7 +645,9 @@ impl Agent {
                 .set
                 .insert("RIFT_BUS_CERT".into(), path.to_string_lossy().into_owned());
         }
-        let child = crate::managed::spawn_process(&start.command, &directory, &environment)?;
+        let isolation = crate::config::Isolation::try_from(&start.isolation)?;
+        let child =
+            crate::managed::spawn_process(&start.command, &directory, &environment, &isolation)?;
         let pid = child.id();
         processes.insert(
             start.server.clone(),

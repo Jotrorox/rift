@@ -232,6 +232,7 @@ impl Fixture {
                 node: None,
                 environment: Default::default(),
                 messaging: None,
+                isolation: Default::default(),
             },
         );
         Self {

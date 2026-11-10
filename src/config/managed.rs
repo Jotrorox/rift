@@ -31,6 +31,102 @@ pub struct ManagedServer {
     /// The bus login Rift issues this server (see [`crate::instance_login`]);
     /// `None` issues none.
     pub messaging: Option<InstanceMessaging>,
+    /// Whether the process is confined to its own directory.
+    pub isolation: Isolation,
+}
+
+/// How a managed server's process is confined; see
+/// [`crate::managed::landlock`] for what a confined server may use.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum IsolationMode {
+    /// Unconfined, as Rift's user, with Rift's view of the filesystem.
+    #[default]
+    Off,
+    /// Confined with Landlock where the kernel offers it; elsewhere the
+    /// server runs unconfined and Rift logs why.
+    Landlock,
+    /// Confined with Landlock, or not started at all.
+    Required,
+}
+
+impl IsolationMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Landlock => "landlock",
+            Self::Required => "required",
+        }
+    }
+}
+
+/// `isolation = "landlock"`, or `{ mode = "landlock", read = {...}, write = {...} }`
+/// with extra paths a confined server may read or write.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Isolation {
+    pub mode: IsolationMode,
+    pub read: Vec<PathBuf>,
+    pub write: Vec<PathBuf>,
+}
+
+impl Isolation {
+    fn parse(values: &Table, path: &str, base: &Path, remote: bool) -> Result<Self, String> {
+        let path = format!("{path}.isolation");
+        let mode = |value: &str| match value {
+            "off" => Ok(IsolationMode::Off),
+            "landlock" => Ok(IsolationMode::Landlock),
+            "required" => Ok(IsolationMode::Required),
+            _ => Err(format!(
+                "{path}: expected \"off\", \"landlock\" or \"required\""
+            )),
+        };
+        match values
+            .raw_get::<Value>("isolation")
+            .map_err(|e| e.to_string())?
+        {
+            Value::Nil => Ok(Self::default()),
+            Value::String(value) => Ok(Self {
+                mode: mode(&value.to_str().map_err(|e| e.to_string())?)?,
+                ..Self::default()
+            }),
+            Value::Table(table) => {
+                fields(&table, &["mode", "read", "write"], &path)?;
+                let mode = match table.raw_get::<Value>("mode").map_err(|e| e.to_string())? {
+                    Value::Nil => IsolationMode::Landlock,
+                    value => mode(&string(value, &format!("{path}.mode"))?)?,
+                };
+                let paths = |key: &str| -> Result<Vec<PathBuf>, String> {
+                    let list = match table.raw_get::<Value>(key).map_err(|e| e.to_string())? {
+                        Value::Nil => Vec::new(),
+                        value => string_list(value, &format!("{path}.{key}"), 64)?,
+                    };
+                    list.into_iter()
+                        .map(|entry| {
+                            let entry = PathBuf::from(entry);
+                            // Paths on a node are the node's, so they must be absolute.
+                            if remote && !entry.is_absolute() {
+                                return Err(format!(
+                                    "{path}.{key}: paths on a node must be absolute"
+                                ));
+                            }
+                            let entry = if entry.is_absolute() {
+                                entry
+                            } else {
+                                base.join(entry)
+                            };
+                            std::path::absolute(&entry)
+                                .map_err(|error| format!("{path}.{key}: {error}"))
+                        })
+                        .collect()
+                };
+                Ok(Self {
+                    mode,
+                    read: paths("read")?,
+                    write: paths("write")?,
+                })
+            }
+            _ => Err(format!("{path}: expected a mode or a table")),
+        }
+    }
 }
 
 /// `messaging = { preset = "backend", publish = {...}, subscribe = {...} }`
@@ -217,6 +313,7 @@ pub(super) fn parse(root: &Table, base: &Path) -> Result<BTreeMap<String, Manage
                 "env",
                 "inherit_env",
                 "messaging",
+                "isolation",
             ],
             &path,
         )?;
@@ -258,6 +355,7 @@ pub(super) fn parse(root: &Table, base: &Path) -> Result<BTreeMap<String, Manage
                 MAX_TIMEOUT_MS,
             )? as u64)),
         };
+        let remote = node.is_some();
         servers.insert(
             name,
             ManagedServer {
@@ -291,6 +389,7 @@ pub(super) fn parse(root: &Table, base: &Path) -> Result<BTreeMap<String, Manage
                 node,
                 environment: ProcessEnvironment::parse(&values, &path)?,
                 messaging: InstanceMessaging::parse(&values, &path)?,
+                isolation: Isolation::parse(&values, &path, base, remote)?,
             },
         );
     }
