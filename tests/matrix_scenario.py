@@ -590,18 +590,19 @@ class Context:
 
     # Comparisons
 
-    def compare_names(self, what, registry, reference, translated, rename=True):
+    def compare_names(self, what, registry, reference, translated, source=None, rename=True):
         """Every name the reference saw must reach the translated client: the
         same name if the client's version knows it, else any stand-in (INFO).
-        IDs outside the client's registry fail."""
+        IDs outside the client's registry fail. `source` is the protocol
+        that names the reference entries (the server's by default)."""
         translated = list(translated)
         invalid = sorted({name for name in translated if name.startswith("<invalid")})
         if invalid:
             self.fail(f"{what}: IDs outside the client's registries: {invalid[:5]}")
         remaining = list(translated)
         for name in reference:
-            target = (matrix_registries.renamed(registry, name, self.ref.protocol, self.via.protocol)
-                      if rename else name)
+            target = (matrix_registries.renamed(registry, name, source or self.ref.protocol,
+                                                self.via.protocol) if rename else name)
             if target in remaining:
                 remaining.remove(target)
             elif name.startswith("<"):
@@ -738,14 +739,16 @@ def step_blocks(cx):
     # kind or plant from block entity data): expect what a server of the
     # client's own version places for the same block.
     crosses = (cx.server.protocol < 393) != (cx.via.protocol < 393)
-    client_cmd = Commands(cx.via.protocol, cx.server.software)
+    named = flattened_names(cx.via.protocol)
+    client_cmd = Commands(named, cx.server.software)
     specs = {name: block for name, _, _, _, block in BLOCKS}
     for name, position in positions.items():
         if position not in via:
             cx.fail(f"no block update for {name} at {position}")
             continue
         expected = client_cmd.block_name(specs[name]) if crosses else ref[position]
-        cx.compare_names(f"block {name}", "block_state", [expected], [via[position]], rename=not crosses)
+        cx.compare_names(f"block {name}", "block_state", [expected], [via[position]],
+                         source=named if crosses else None)
     entities = {"tile_entity_data", "block_entity_data"}
     ref_entities = cx.ref.packets(entities, cx.since("ref"))
     if not ref_entities:
@@ -770,6 +773,14 @@ def step_blocks(cx):
         cx.fail("the translated client received fewer block entity updates than the reference")
 
 
+def flattened_names(protocol):
+    """The protocol whose names stand for 1.12's blocks and items in a
+    client of `protocol` across the flattening: 1.13.2's from 1.13 on (the
+    rules' renames carry them further: 1.12's stone_slab is 1.14's
+    smooth_stone_slab, not its new stone_slab), the client's own before."""
+    return min(protocol, 404) if protocol >= 393 else protocol
+
+
 @step(software=ALL)
 def step_items(cx):
     """Many kinds of items via /give; the inventory updates must name them."""
@@ -786,15 +797,15 @@ def step_items(cx):
     absent = sorted(name for name in wanted if name not in ref)
     if absent:
         cx.scenario(f"/give produced no inventory update for {absent}")
+    source = None
     if (cx.server.protocol < 393) != (cx.via.protocol < 393):
         # Across the flattening expect the item a server of the client's own
         # version gives for the same spec (banner 1 is red_banner).
-        client_cmd = Commands(cx.via.protocol, cx.server.software)
+        source = flattened_names(cx.via.protocol)
+        client_cmd = Commands(source, cx.server.software)
         names = {cx.cmd.item_name(item): client_cmd.item_name(item) for item in given}
         ref = [names.get(name) or name for name in ref]
-        cx.compare_names("inventory", "item", sorted(set(ref)), via, rename=False)
-        return
-    cx.compare_names("inventory", "item", sorted(set(ref)), via)
+    cx.compare_names("inventory", "item", sorted(set(ref)), via, source=source)
 
 
 @step(software=ALL)
