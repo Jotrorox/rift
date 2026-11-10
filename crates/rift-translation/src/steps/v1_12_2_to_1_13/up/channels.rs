@@ -197,8 +197,6 @@ fn trades(step: &mut Up, payload: &[u8], writer: &mut Writer) -> io::Result<()> 
     rw.i32()?; // Window ID.
     let count = rw.u8()?;
     for _ in 0..count {
-        // INTEGRATION: the item codec converts 1.12 stacks to 1.13 ones; a
-        // stub that fails until it lands.
         item::transcode(&mut step.shared, Direction::Clientbound, &mut rw)?; // First input.
         item::transcode(&mut step.shared, Direction::Clientbound, &mut rw)?; // Result.
         if rw.bool()? {

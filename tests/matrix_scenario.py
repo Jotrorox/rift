@@ -23,6 +23,7 @@ import struct
 import time
 
 from matrix_client import SessionError, text_of
+import matrix_registries
 
 
 class StepFailure(AssertionError):
@@ -115,6 +116,25 @@ class Commands:
             return self.nbt(f"give {target} minecraft:{name}{nbt} {item.get('n', 1)}")
         name, comps = item["snbt"] if self.snbt_text and "snbt" in item else item["components"]
         return f"give {target} minecraft:{name}{'[' + comps + ']' if comps else ''} {item.get('n', 1)}"
+
+    def item_name(self, item):
+        """The item `give` names in this protocol, or None without a spec."""
+        if self.legacy:
+            return "minecraft:" + item["legacy"][0] if "legacy" in item else None
+        if item["min"] > self.p:
+            return None
+        if not self.components:
+            name = item["nbt13"][0] if self.p < 477 and "nbt13" in item else item["nbt"][0]
+        else:
+            name = (item["snbt"] if self.snbt_text and "snbt" in item else item["components"])[0]
+        return "minecraft:" + name
+
+    def block_name(self, block):
+        """The block `setblock` places in this protocol."""
+        spec = block["legacy"] if self.legacy else block["flat"]
+        if callable(spec):
+            spec = spec(self)
+        return re.split(r"[\[{ ]", spec, maxsplit=1)[0]
 
     def setblock(self, x, y, z, block):
         """`block`: dict with legacy=spec and flat=spec (or a function of self)."""
@@ -580,11 +600,12 @@ class Context:
             self.fail(f"{what}: IDs outside the client's registries: {invalid[:5]}")
         remaining = list(translated)
         for name in reference:
-            if name in remaining:
-                remaining.remove(name)
+            target = matrix_registries.renamed(registry, name, self.ref.protocol, self.via.protocol)
+            if target in remaining:
+                remaining.remove(target)
             elif name.startswith("<"):
                 continue
-            elif not self.via_reg.knows(registry, name):
+            elif target is None or not self.via_reg.knows(registry, target):
                 self.info(f"{what}: {name} does not exist in the client's version; a stand-in is expected")
             else:
                 self.fail(f"{what}: the translated client did not receive {name} "
@@ -711,15 +732,18 @@ def step_blocks(cx):
     if missing:
         cx.scenario(f"no block updates for {missing}")
     flattens = cx.server.protocol < 393 <= cx.via.protocol
+    # Across the flattening names differ legitimately (wooden_door is
+    # oak_door; a 1.12 bed, banner, skull or flower pot takes its colour,
+    # kind or plant from block entity data): expect what a server of the
+    # client's own version places for the same block.
+    crosses = (cx.server.protocol < 393) != (cx.via.protocol < 393)
+    client_cmd = Commands(cx.via.protocol, cx.server.software)
+    specs = {name: block for name, _, _, _, block in BLOCKS}
     for name, position in positions.items():
         if position not in via:
             cx.fail(f"no block update for {name} at {position}")
             continue
-        expected = ref[position]
-        # 1.13 made the plant part of the block: a 1.12 pot with a poppy is a
-        # potted_poppy, and has no block entity any more.
-        if flattens and expected == "minecraft:flower_pot" and via[position].startswith("minecraft:potted_"):
-            expected = via[position]
+        expected = client_cmd.block_name(specs[name]) if crosses else ref[position]
         cx.compare_names(f"block {name}", "block_state", [expected], [via[position]])
     entities = {"tile_entity_data", "block_entity_data"}
     ref_entities = cx.ref.packets(entities, cx.since("ref"))
@@ -736,6 +760,8 @@ def step_blocks(cx):
             cx.info(f"{len(lacking)} block entity updates of types the client's version lacks")
         ref_entities = [record for record in ref_entities if known(record)]
     if flattens:
+        # 1.13 made the plant part of the block: a 1.12 pot with a poppy is a
+        # potted_poppy, and has no block entity any more.
         pot = positions["flower_pot"]
         ref_entities = [record for record in ref_entities
                         if (record.value or {}).get("location") != dict(zip("xyz", pot))]
@@ -759,6 +785,12 @@ def step_items(cx):
     absent = sorted(name for name in wanted if name not in ref)
     if absent:
         cx.scenario(f"/give produced no inventory update for {absent}")
+    if (cx.server.protocol < 393) != (cx.via.protocol < 393):
+        # Across the flattening expect the item a server of the client's own
+        # version gives for the same spec (banner 1 is red_banner).
+        client_cmd = Commands(cx.via.protocol, cx.server.software)
+        names = {cx.cmd.item_name(item): client_cmd.item_name(item) for item in given}
+        ref = [names.get(name) or name for name in ref]
     cx.compare_names("inventory", "item", sorted(set(ref)), via)
 
 
@@ -806,6 +838,11 @@ def step_particles_and_sounds(cx):
     via = sounds_seen(cx.via, cx.via_reg, cx.since("via"))
     if not ref:
         cx.scenario("no sounds")
+    if (cx.server.protocol < 393) != (cx.via.protocol < 393):
+        # 1.13 renamed the note block sounds.
+        harp = {"minecraft:block.note.harp": "minecraft:block.note_block.harp",
+                "minecraft:block.note_block.harp": "minecraft:block.note.harp"}
+        ref = [harp.get(name, name) for name in ref]
     cx.compare_names("sounds", "sound_event", ref, via)
     count = lambda session, who: len(session.packets("world_particles", cx.since(who)))
     if count(cx.via, "via") < count(cx.ref, "ref"):
@@ -957,7 +994,10 @@ def step_tab_complete(cx):
         if session.protocol < 393:
             session.send_packet("tab_complete", {"text": "/gamemo", "assumeCommand": False})
         else:
-            session.send_packet("tab_complete", {"transactionId": 7, "text": "/gamemo"})
+            # A 1.13 client leaves the slash out (its server would parse it
+            # as part of the command); 1.13.1 servers skip one.
+            text = "gamemo" if session.protocol == 393 else "/gamemo"
+            session.send_packet("tab_complete", {"transactionId": 7, "text": text})
         record = session.wait_packet("tab_complete", "suggestions", 8, mark)
         return sorted(entry if isinstance(entry, str) else entry["match"] for entry in record.value["matches"])
     cx.console(f"op {cx.ref.name}")

@@ -279,10 +279,30 @@ pub fn section_blocks_update<S: HasShared>(
     let mut changes = read_changes(&packet.data, source)?;
     let mapping = ids(source, target, "block_state")?;
     let fallback = block_fallback(target);
+    let flattening = (source < 393) != (target < 393);
+    let mut modern = Vec::new();
     for change in &mut changes {
+        let sent = change.state;
         change.state = map_state(mapping, change.state, fallback);
+        if flattening {
+            let position = Position {
+                x: change.x,
+                y: change.y,
+                z: change.z,
+            };
+            modern.push((position, if source >= 393 { sent } else { change.state }));
+        }
     }
-    send_changes(cx, state, target, changes)
+    send_changes(cx, state, target, changes)?;
+    // As for a single block update: follow the flattened blocks, and give a
+    // 1.12 client the block entities it draws them from.
+    for (position, block) in modern {
+        track(shared, position, block);
+        if source >= 393 {
+            send_legacy_entity(shared, cx, state, position, block, None)?;
+        }
+    }
+    Ok(())
 }
 
 /// The sections of a partial column (before 1.17), already in the client's

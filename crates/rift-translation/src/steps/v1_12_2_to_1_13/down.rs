@@ -24,11 +24,10 @@
 //!   have their answers dropped;
 //! - named sounds take 1.12 names (`custom_sound`).
 //!
-//! Two parts belong in shared codecs' conversions for this pair and are
-//! provided for them: [`translations`] (1.13 translation keys a 1.12.2
-//! client lacks, for the text codec) and [`block_entities`] (block entity
-//! data 1.13 moved into block states, for the chunk codec).
-pub(super) mod block_entities;
+//! [`translations`] (1.13 translation keys a 1.12.2 client lacks) is
+//! provided for the text codec. The block entity data 1.13 moved into block
+//! states (bed colours, banner bases, skull kinds, potted plants) is the
+//! chunk codec's (`codec::chunk::flattening`).
 mod channels;
 mod recipes;
 mod suggestions;
