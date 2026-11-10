@@ -882,3 +882,42 @@ fn loot_conditions_change_their_kind_key_in_26_3() {
     transform::apply("enchantment", 776, 777, "thorns", &mut up).unwrap();
     assert_eq!(Nbt::Compound(up), Nbt::Compound(element(newer)));
 }
+
+/// `value` with every compound's keys sorted, to compare elements.
+fn sorted(value: &Nbt) -> Nbt {
+    match value {
+        Nbt::Compound(compound) => {
+            let mut entries: Vec<(String, Nbt)> = compound
+                .0
+                .iter()
+                .map(|(key, value)| (key.clone(), sorted(value)))
+                .collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            Nbt::Compound(crate::nbt::Compound(entries))
+        }
+        Nbt::List(list) => Nbt::List(list.iter().map(sorted).collect()),
+        other => other.clone(),
+    }
+}
+
+#[test]
+fn vanilla_enchantments_cross_26_3_structurally() {
+    // Servers that send enchantments in full (Pumpkin) need the format
+    // changes; vanilla's own entries of both versions show them.
+    let older = defaults::get(776, "enchantment").unwrap();
+    let newer = defaults::get(777, "enchantment").unwrap();
+    let mut differ = Vec::new();
+    for entry in &newer.entries {
+        let Some(other) = older.entries.iter().find(|other| other.name == entry.name) else {
+            continue;
+        };
+        let down = structurally("enchantment", 777, 776, &entry.name, &entry.element);
+        let up = structurally("enchantment", 776, 777, &other.name, &other.element);
+        if sorted(&down) != sorted(&other.element) || sorted(&up) != sorted(&entry.element) {
+            differ.push(entry.name.to_string());
+        }
+    }
+    // 26.3 changed fire protection's data itself: a minimum cost, and its
+    // one-term all_of became the term.
+    assert_eq!(differ, ["minecraft:fire_protection"]);
+}

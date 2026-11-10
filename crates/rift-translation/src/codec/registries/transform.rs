@@ -1021,6 +1021,7 @@ fn enchantment(step: Boundary, element: &mut Compound) {
         && let Some(effects) = element.get_mut("effects")
     {
         effect_requirements(effects, step.up());
+        effects_26_3(effects, step.up());
     }
     let known = enchantment_effects(step.to);
     if let Some(effects) = element.compound_mut("effects") {
@@ -1044,6 +1045,75 @@ fn effect_requirements(value: &mut Nbt, up: bool) {
             .iter_mut()
             .for_each(|value| effect_requirements(value, up)),
         _ => {}
+    }
+}
+
+/// 26.3's other changes inside enchantment effects: tag predicates name a
+/// holder set (`#` before a tag), and a block state provider may be a bare
+/// block state, whose keys became `id` and `properties`.
+fn effects_26_3(value: &mut Nbt, up: bool) {
+    match value {
+        Nbt::Compound(compound) => {
+            for (key, value) in compound.0.iter_mut() {
+                match (key.as_str(), value) {
+                    ("tags", Nbt::List(tags)) => {
+                        for tag in tags {
+                            if let Nbt::Compound(tag) = tag
+                                && tag.contains("expected")
+                                && let Some(Nbt::String(id)) = tag.get_mut("id")
+                            {
+                                match (up, id.strip_prefix('#')) {
+                                    (true, None) => *id = format!("#{id}"),
+                                    (false, Some(bare)) => *id = bare.to_owned(),
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    ("block_state", Nbt::Compound(provider)) => state_provider(provider, up),
+                    (_, value) => effects_26_3(value, up),
+                }
+            }
+        }
+        Nbt::List(list) => list.iter_mut().for_each(|value| effects_26_3(value, up)),
+        _ => {}
+    }
+}
+
+fn state_provider(provider: &mut Compound, up: bool) {
+    const SIMPLE: &str = "minecraft:simple_state_provider";
+    if up {
+        if provider.str("type").map(data::strip) == Some("simple_state_provider")
+            && let Some(Nbt::Compound(mut state)) = provider.remove("state")
+        {
+            state_keys(&mut state, true);
+            *provider = state;
+        } else if let Some(state) = provider.compound_mut("state") {
+            state_keys(state, true);
+        }
+    } else if provider.contains("type") {
+        if let Some(state) = provider.compound_mut("state") {
+            state_keys(state, false);
+        }
+    } else {
+        let mut state = std::mem::take(provider);
+        state_keys(&mut state, false);
+        provider.insert("type", SIMPLE);
+        provider.insert("state", state);
+    }
+}
+
+/// A block state's keys: `Name` and `Properties` before 26.3.
+fn state_keys(state: &mut Compound, up: bool) {
+    for (key, _) in state.0.iter_mut() {
+        let renamed = match (up, key.as_str()) {
+            (true, "Name") => "id",
+            (true, "Properties") => "properties",
+            (false, "id") => "Name",
+            (false, "properties") => "Properties",
+            _ => continue,
+        };
+        *key = renamed.to_owned();
     }
 }
 
