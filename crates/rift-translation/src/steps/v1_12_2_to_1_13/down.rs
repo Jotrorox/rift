@@ -22,6 +22,7 @@
 //!   pufferfish sting game event with the sound it plays;
 //! - block entity and entity NBT queries, which a 1.12 client never makes,
 //!   have their answers dropped.
+pub(super) mod block_entities;
 mod channels;
 mod recipes;
 mod suggestions;
