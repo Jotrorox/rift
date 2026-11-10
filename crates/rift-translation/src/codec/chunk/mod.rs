@@ -1,4 +1,11 @@
 //! Chunks, light, block updates and block entities.
+pub mod container;
+pub mod light;
+pub mod model;
+pub mod storage;
+#[cfg(test)]
+mod tests;
+
 use super::HasShared;
 use crate::step::RouteBuilder;
 
