@@ -23,6 +23,18 @@ minecraft-data, each name checked against that version's server jar. Block
 states come from reports/blocks.json, verified state by state. data/SOURCES.md
 says which version got which registry from where.
 
+data/legacy.json maps 1.12 numeric blocks and items to 1.13 names and back
+(minecraft-data's common/legacy.json, validated against both versions, plus a
+reverse chosen for every 1.13 state and item). data/rules/ is written by hand
+and only checked by the crate's tests.
+
+Cache layout under ~/.cache/rift-via:
+
+    servers/<jar>                checksum-verified vanilla server jars
+    reports/<version>/           data generator reports and vanilla datapack
+    ref/minecraft-data, ref/ViaVersion   git clones, read at pinned commits
+    jdks/jdk<N>/                 Java runtimes (not downloaded by this script)
+
 Usage (Python 3.11+, stdlib only):
 
     python3 scripts/translation_crate.py            # regenerate data/
@@ -35,6 +47,7 @@ found as ~/.cache/rift-via/jdks/jdk<N>/bin/java (or $RIFT_JDK_<N>).
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+import functools
 import hashlib
 import json
 import os
@@ -126,14 +139,16 @@ def reports(version):
     vanilla datapack, generating both on first use:
 
         reports/<version>/reports/{registries,blocks,packets,...}.json
-        reports/<version>/datapack/   (the jar's data/minecraft/ folder)
+        reports/<version>/datapack/         (the jar's data/minecraft/ folder)
+        reports/<version>/server.checksum   (the jar they came from)
     """
     directory = CACHE / "reports" / version
-    done = directory / "reports" / "blocks.json"
-    if done.exists():
+    fixture = server(version)
+    # The jar the reports came from: a different pinned jar regenerates them.
+    marker = directory / "server.checksum"
+    if marker.exists() and marker.read_text().strip() == fixture["checksum"]:
         return directory
     path = jar(version)
-    fixture = server(version)
     if not version_at_least(version, "1.13"):
         raise ValueError(f"{version} has no data generator")
     log(f"Generating reports for {version}...")
@@ -159,6 +174,7 @@ def reports(version):
                     target = staged / "datapack" / name.removeprefix("data/minecraft/")
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_bytes(game.read(name))
+        (staged / "server.checksum").write_text(fixture["checksum"] + "\n")
         if directory.exists():
             shutil.rmtree(directory)
         staged.replace(directory)
@@ -209,6 +225,7 @@ def git_files(name, repository, commit, prefix):
     return listing.split()
 
 
+@functools.cache
 def git_read(name, repository, commit, path):
     directory = checkout(name, repository, commit)
     return subprocess.run(["git", "-C", str(directory), "show", f"{commit}:{path}"],
@@ -219,8 +236,10 @@ def via_read(path):
     return git_read("ViaVersion", VIA_REPOSITORY, VIA_COMMIT, path)
 
 
+@functools.cache
 def mcdata(path):
-    """A minecraft-data file under data/, parsed, or None when absent."""
+    """A minecraft-data file under data/, parsed, or None when absent.
+    Cached: callers must not change what it returns."""
     files = mcdata_files()
     if f"data/{path}" not in files:
         return None
@@ -494,6 +513,10 @@ class RustTables:
         negative = self.peek() == "-"
         if negative:
             self.take()
+        token = self.peek() or ""
+        if not token[:1].isdigit():
+            context = " ".join(self.tokens[max(0, self.position - 8):self.position + 8])
+            raise ValueError(f"expected a number, found {token!r} near: {context}")
         value = int(self.take().replace("_", ""), 0)
         return -value if negative else value
 
@@ -1035,6 +1058,7 @@ MCDATA_REGISTRIES = {
 }
 
 
+@functools.cache
 def block_states(version):
     """Blocks as [name, [[property, [values]]...], default offset], in state
     order, from the blocks report.
