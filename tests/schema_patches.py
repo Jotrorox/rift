@@ -215,6 +215,17 @@ def _patch_26_3(schema):
     display = _field(_field(added["type"], "value")["type"], "displayData")["type"][1]
     display[1] = [field for field in display[1] if field["name"] not in ("xCord", "yCord")]
     added["type"][1] += [{"name": "x", "type": "f32"}, {"name": "y", "type": "f32"}]
+    # PotDecorations.STREAM_CODEC: four optional ItemStackTemplates (back, left,
+    # right, front) instead of a list of item IDs.
+    template = ["option", ITEM_STACK_TEMPLATE]
+    _at(schema, SLOT_COMPONENTS)["pot_decorations"] = _container(
+        ("back", template), ("left", template), ("right", template), ("front", template))
+    # Instrument.DIRECT_STREAM_CODEC: sound, FLOAT use duration, FLOAT range,
+    # VAR_INT durability damage (new), description.
+    _insert_before(types["InstrumentData"], "description", {"name": "durabilityDamage", "type": "varint"})
+    # TrimMaterial.DIRECT_STREAM_CODEC: Identifier palette ID and description
+    # (MaterialAssetGroup is gone).
+    types["ArmorTrimMaterial"] = _container(("paletteId", "string"), ("description", "anonymousNbt"))
     # SlotDisplay$TagSlotDisplay: ByteBufCodecs.holderSet(ITEM) (was
     # TagKey.streamCodec): a tag name or a list of item IDs, like IDSet.
     play["SlotDisplay"][1][1]["type"][1]["fields"]["tag"] = "IDSet"
@@ -237,10 +248,6 @@ UNVERIFIED = {
     "26.3": [
         (["configuration", "toClient", "types", "packet_show_dialog"], "Dialog changed"),
         (["play", "toClient", "types", "packet_show_dialog"], "Dialog changed"),
-        (SLOT_COMPONENTS + ["pot_decorations"], "PotDecorations changed (DecoratedPotPatterns)"),
-        (SLOT_COMPONENTS + ["instrument"], "Instrument changed"),
-        (SLOT_COMPONENTS + ["trim"], "TrimMaterial changed"),
-        (SLOT_COMPONENTS + ["provides_trim_material"], "TrimMaterial changed"),
         (["play", "toServer", "types", "packet_chat_session_update"], "not compared in detail"),
         (["play", "toServer", "types", "packet_vehicle_move"], "PositionAndRotation not compared in detail"),
         (["play", "toServer", "types", "packet_update_structure_block"], "ServerboundSetStructureBlockPacket changed"),
