@@ -4,11 +4,10 @@ use crate::{
     State::{Login as LoginState, Play},
     nbt::Nbt,
     steps::v1_18_2_to_1_19::{
-        chat::registry_entries,
-        join::{Dimension, Login, Respawn},
+        layout::{Dimension, Login, Respawn, registry_entries},
         messages::{Placement, SystemChat, read_disguised_chat},
         players::{self, Action, Entry},
-        testing::{Harness, first, hex, recorded, truncations_fail},
+        testing::{Harness, assert_same_registries, codec, first, hex, recorded, truncations_fail},
     },
     wire::Writer,
 };
@@ -262,7 +261,13 @@ fn login_is_followed_by_feature_flags_and_biome_sounds_are_named() {
     };
     let out = up().clientbound(Play, "login", &older).unwrap();
     assert_eq!(out.len(), 2);
-    assert_eq!(out[0].data, older);
+    // Vanilla registries become what the 1.19.3 server sends (biome sounds
+    // inline, its own dimension types); nothing else changes.
+    assert_same_registries(&codec(NEWER, &out[0].data), &codec(NEWER, &newer));
+    let mut rest = Login::read(NEWER, &out[0].data).unwrap();
+    let original = Login::read(OLDER, &older).unwrap();
+    rest.codec = original.codec.clone();
+    assert_eq!(rest, original);
     assert_eq!(out[1].name, "update_enabled_features");
     // What the 1.19.3 server sends after its login.
     let features = first(NEWER, Clientbound, Play, "update_enabled_features").unwrap();
@@ -271,6 +276,7 @@ fn login_is_followed_by_feature_flags_and_biome_sounds_are_named() {
     let original = Login::read(NEWER, &newer).unwrap();
     assert_eq!(original.write(NEWER).unwrap(), newer);
     let out = down().one(Clientbound, Play, "login", &newer);
+    assert_same_registries(&codec(OLDER, &out.data), &codec(OLDER, &older));
     let translated = Login::read(OLDER, &out.data).unwrap();
     let biomes = registry_entries(&translated.codec, "minecraft:worldgen/biome").unwrap();
     let jungle = biomes[1]
@@ -287,7 +293,6 @@ fn login_is_followed_by_feature_flags_and_biome_sounds_are_named() {
         effects.compound("mood_sound").unwrap().get("sound"),
         Some(&Nbt::from("minecraft:ambient.cave"))
     );
-    // Nothing but sounds changed.
     let mut expected = original.clone();
     expected.codec = translated.codec.clone();
     assert_eq!(translated, expected);

@@ -592,7 +592,7 @@ fn dimensions_convert_between_every_form() {
         .clone();
     let converted =
         login::convert_dimension(shared, Direction::Clientbound, Dimension::Element(end)).unwrap();
-    assert_eq!(converted, Dimension::Name("the_end".into()));
+    assert_eq!(converted, Dimension::Name("minecraft:the_end".into()));
     // Legacy numbers both ways across 1.16.
     let shared = &Shared::new(735, 578);
     let converted =

@@ -3,15 +3,14 @@
 use super::{NEWER, OLDER};
 use crate::{
     Direction, Packet, State,
-    codec::{HasShared, Shared},
+    codec::{HasShared, Shared, registries::Side},
     routed_step,
     step::{Cx, RouteBuilder, Routes},
     steps::{
         Make,
         v1_18_2_to_1_19::{
-            chat::{self, ChatTypes, GAME_INFO_1_19, SYSTEM_1_19},
-            id,
-            join::Login,
+            chat::{self, ChatTypes},
+            id, join,
             login::{Hello, clamp_velocity_forwarding},
             messages::{Placement, PlayerChat, Sent, ServerData, SystemChat},
         },
@@ -75,17 +74,13 @@ impl Down {
         Ok(())
     }
 
-    /// Keep the backend's chat types for decoration and give the client
-    /// 1.19's own, whose `system` and `game_info` types system chat uses.
-    // INTEGRATION: the registries codec's helpers for the registry parts of
-    // `login` should replace the chat type handling here once they exist.
+    /// The registries codec converts the chat types for the client, adding
+    /// the `system` and `game_info` types system chat uses; the backend's
+    /// are kept for decoration.
     fn login(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
-        let mut login = Login::read(NEWER, &packet.data)?;
-        self.chat_types = ChatTypes::from_codec(&login.codec);
-        login
-            .codec
-            .insert("minecraft:chat_type", chat::vanilla_1_19());
-        cx.to_client(state, Packet::new(packet.id, login.write(OLDER)?));
+        let data = join::convert_login(&mut self.shared, Direction::Clientbound, &packet.data)?;
+        self.chat_types = ChatTypes::from_shared(&self.shared, Side::Backend);
+        cx.to_client(state, Packet::new(packet.id, data));
         Ok(())
     }
 
@@ -101,7 +96,7 @@ impl Down {
         };
         let system = SystemChat {
             json: display.to_string(),
-            placement: Placement::ChatType(SYSTEM_1_19),
+            placement: Placement::ChatType(chat::system_type(&self.shared, Side::Client, false)),
             sender: 0,
         };
         let id = id(OLDER, state, Direction::Clientbound, "system_chat");
@@ -113,7 +108,7 @@ impl Down {
         let mut message = SystemChat::read(NEWER, &packet.data)?;
         if let Placement::Overlay(overlay) = message.placement {
             message.placement =
-                Placement::ChatType(if overlay { GAME_INFO_1_19 } else { SYSTEM_1_19 });
+                Placement::ChatType(chat::system_type(&self.shared, Side::Client, overlay));
         }
         cx.to_client(state, Packet::new(packet.id, message.write(OLDER)?));
         Ok(())

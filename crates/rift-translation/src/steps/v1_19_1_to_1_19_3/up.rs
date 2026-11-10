@@ -9,8 +9,7 @@ use crate::{
     steps::{
         Make,
         v1_18_2_to_1_19::{
-            id,
-            join::Respawn,
+            id, join,
             login::{Hello, Key, clamp_velocity_forwarding},
             messages::{PlayerChat, Sent, ServerData, write_disguised_chat},
         },
@@ -91,7 +90,8 @@ impl Up {
     /// vanilla server follows `login` with the enabled feature flags.
     fn login(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
         self.health = None;
-        cx.to_client(state, packet);
+        let data = join::convert_login(&mut self.shared, Direction::Clientbound, &packet.data)?;
+        cx.to_client(state, Packet::new(packet.id, data));
         let mut features = Writer::new();
         features.varint(1).string("minecraft:vanilla");
         let id = id(
@@ -109,8 +109,8 @@ impl Up {
     /// of zero would reopen the death screen at once, so a dead player
     /// respawns with full health until the backend says otherwise.
     fn respawn(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
-        let respawn = Respawn::read(OLDER, &packet.data)?;
-        cx.to_client(state, Packet::new(packet.id, respawn.write(NEWER)?));
+        let data = join::convert_respawn(&mut self.shared, Direction::Clientbound, &packet.data)?;
+        cx.to_client(state, Packet::new(packet.id, data));
         if let Some((health, food, saturation)) = self.health
             && health <= 0.0
         {

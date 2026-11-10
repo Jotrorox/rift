@@ -35,7 +35,7 @@ fn recorded_logins_round_trip_through_their_own_layout() {
             return;
         };
         let same = play::rewrite_login(&login, protocol, protocol, |_| Ok(())).unwrap();
-        assert_eq!(same.body, login, "protocol {protocol}");
+        assert_eq!(same, login, "protocol {protocol}");
     }
 }
 

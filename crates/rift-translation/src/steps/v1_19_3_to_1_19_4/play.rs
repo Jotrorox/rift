@@ -1,22 +1,27 @@
-//! Layouts of the play packets the 1.19.3 to 1.20 steps rewrite whole: join
-//! game and respawn, whose trailing fields change in 1.20, and the player
-//! position packet that loses its dismount flag in 1.19.4.
+//! Layouts of the play packets the 1.19.3 to 1.20 steps rewrite whole: the
+//! player position packet that loses its dismount flag in 1.19.4, and (for
+//! tests) join game parsed field by field.
+use crate::wire::{Reader, Rewriter, Writer};
+#[cfg(test)]
 use crate::{
     nbt::{Compound, Nbt},
-    wire::{Reader, Rewriter, Writer, invalid},
+    wire::invalid,
 };
 use std::io;
 
+#[cfg(test)]
 /// Protocols from 1.20 on end join game and respawn with a portal cooldown.
 fn has_portal_cooldown(protocol: i32) -> bool {
     protocol >= 763
 }
 
+#[cfg(test)]
 /// A resource location such as a dimension name.
 fn identifier(rw: &mut Rewriter<'_>) -> io::Result<()> {
     rw.string(32767).map(drop)
 }
 
+#[cfg(test)]
 /// The optional death location both packets end with (before 1.20): a
 /// dimension and a block position.
 fn death_location(rw: &mut Rewriter<'_>) -> io::Result<()> {
@@ -26,6 +31,7 @@ fn death_location(rw: &mut Rewriter<'_>) -> io::Result<()> {
     })
 }
 
+#[cfg(test)]
 /// Copy the portal cooldown from `source` to `target`, dropping it or
 /// adding a zero (no cooldown) where only one side has it.
 fn portal_cooldown(rw: &mut Rewriter<'_>, source: i32, target: i32) -> io::Result<()> {
@@ -40,12 +46,7 @@ fn portal_cooldown(rw: &mut Rewriter<'_>, source: i32, target: i32) -> io::Resul
     Ok(())
 }
 
-/// What a join game packet says that the steps keep.
-pub struct Login {
-    pub player_id: i32,
-    pub body: Vec<u8>,
-}
-
+#[cfg(test)]
 /// Rewrite a join game packet of `source` (1.19.3 to 1.20) for `target`,
 /// handing its registry codec to `codec` to change. Every field is parsed.
 pub fn rewrite_login(
@@ -53,9 +54,9 @@ pub fn rewrite_login(
     source: i32,
     target: i32,
     codec: impl FnOnce(&mut Compound) -> io::Result<()>,
-) -> io::Result<Login> {
+) -> io::Result<Vec<u8>> {
     let mut rw = Rewriter::new(body);
-    let player_id = rw.i32()?;
+    rw.i32()?; // player
     rw.bool()?; // hardcore
     rw.u8()?; // game mode
     rw.i8()?; // previous game mode
@@ -76,25 +77,6 @@ pub fn rewrite_login(
     rw.bool()?; // respawn screen
     rw.bool()?; // debug world
     rw.bool()?; // flat world
-    death_location(&mut rw)?;
-    portal_cooldown(&mut rw, source, target)?;
-    Ok(Login {
-        player_id,
-        body: rw.finish()?,
-    })
-}
-
-/// Rewrite a respawn packet of `source` (1.19.3 to 1.20) for `target`.
-pub fn rewrite_respawn(body: &[u8], source: i32, target: i32) -> io::Result<Vec<u8>> {
-    let mut rw = Rewriter::new(body);
-    identifier(&mut rw)?; // dimension type
-    identifier(&mut rw)?; // dimension
-    rw.i64()?; // hashed seed
-    rw.u8()?; // game mode
-    rw.i8()?; // previous game mode
-    rw.bool()?; // debug world
-    rw.bool()?; // flat world
-    rw.i8()?; // data to keep
     death_location(&mut rw)?;
     portal_cooldown(&mut rw, source, target)?;
     rw.finish()

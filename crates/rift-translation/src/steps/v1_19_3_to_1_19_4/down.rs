@@ -3,22 +3,22 @@
 use super::{
     ANIMATE_HURT, NEWER, OLDER, hurt_event,
     play::{self, PlayerPosition},
-    registries,
 };
 use crate::{
     Direction, Packet, State,
-    codec::{HasShared, Shared},
+    codec::{
+        HasShared, Shared,
+        registries::{self, Side},
+    },
     routed_step,
     step::{Cx, RouteBuilder, Routes},
-    steps::Make,
+    steps::{Make, v1_18_2_to_1_19::join},
     wire::{Reader, Writer},
 };
 use std::{io, sync::OnceLock};
 
 pub struct Down {
     shared: Shared,
-    /// The backend's damage type names by ID, from join game.
-    damage_types: Vec<(i32, String)>,
 }
 
 impl HasShared for Down {
@@ -31,7 +31,6 @@ impl Down {
     pub(super) fn new() -> Self {
         Self {
             shared: Shared::new(OLDER, NEWER),
-            damage_types: Vec::new(),
         }
     }
 
@@ -51,19 +50,11 @@ impl Down {
         })
     }
 
+    /// The registries codec drops the registries 1.19.3 does not
+    /// synchronise; the rest of the layout is the same.
     fn login(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
-        let direction = Direction::Clientbound;
-        let mut damage_types = Vec::new();
-        let login = play::rewrite_login(&packet.data, NEWER, OLDER, |codec| {
-            // INTEGRATION: registry codec conversion (see `registries`).
-            damage_types = registries::damage_type_names(codec);
-            for registry in ["damage_type", "trim_pattern", "trim_material"] {
-                codec.remove(&format!("minecraft:{registry}"));
-            }
-            registries::convert_biomes(&mut self.shared, direction, codec)
-        })?;
-        self.damage_types = damage_types;
-        cx.to_client(state, Packet::new(packet.id, login.body));
+        let data = join::convert_login(&mut self.shared, Direction::Clientbound, &packet.data)?;
+        cx.to_client(state, Packet::new(packet.id, data));
         Ok(())
     }
 
@@ -94,11 +85,8 @@ impl Down {
             }
         }
         reader.finish()?;
-        let event = self
-            .damage_types
-            .iter()
-            .find(|(id, _)| *id == damage_type)
-            .map_or(2, |(_, name)| hurt_event(name));
+        let event = registries::name_of(&self.shared, Side::Backend, "damage_type", damage_type)
+            .map_or(2, hurt_event);
         let mut writer = Writer::with_capacity(5);
         writer.i32(entity).i8(event);
         let id =

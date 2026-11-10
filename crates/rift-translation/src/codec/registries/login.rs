@@ -173,7 +173,8 @@ pub fn convert_dimension(
             };
             Dimension::Legacy(legacy_id(Some(&name), element.as_ref()))
         }
-        DimensionForm::Name => Dimension::Name(name),
+        // Registry entries are kept without the namespace the game writes.
+        DimensionForm::Name => Dimension::Name(form::namespaced(&name)),
         DimensionForm::Element => match dimension {
             // A type in the packet need not be in the codec: convert it.
             Dimension::Element(element) if dimension_form(from) == DimensionForm::Element => {

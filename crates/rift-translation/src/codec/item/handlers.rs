@@ -909,7 +909,11 @@ fn convert_recipe_display(
     direction: Direction,
     display: &mut recipes::RecipeDisplay,
 ) -> io::Result<()> {
-    display.visit(&mut |slot| convert_display(shared, direction, slot))
+    // `convert_display` visits what each slot nests.
+    display
+        .slots()
+        .into_iter()
+        .try_for_each(|slot| convert_display(shared, direction, slot))
 }
 
 fn recipe_book_add<S: HasShared>(

@@ -267,12 +267,28 @@ fn typed_content(
             None => None,
             Some(key) => {
                 let mut args = Vec::new();
-                if let Some(with) = node.get("with") {
-                    for arg in with
-                        .list()
-                        .ok_or_else(|| invalid("translation arguments are not a list"))?
-                    {
-                        args.push(argument(protocol, arg, depth)?);
+                match node.get("with") {
+                    None => {}
+                    // Vanilla's NbtOps writes a list of only numbers of one
+                    // type as an array (a message about coordinates).
+                    Some(Node::Nbt(Nbt::ByteArray(values))) => args.extend(
+                        values
+                            .iter()
+                            .map(|value| Arg::Primitive(Nbt::Byte(*value as i8))),
+                    ),
+                    Some(Node::Nbt(Nbt::IntArray(values))) => {
+                        args.extend(values.iter().map(|value| Arg::Primitive(Nbt::Int(*value))))
+                    }
+                    Some(Node::Nbt(Nbt::LongArray(values))) => {
+                        args.extend(values.iter().map(|value| Arg::Primitive(Nbt::Long(*value))))
+                    }
+                    Some(with) => {
+                        for arg in with
+                            .list()
+                            .ok_or_else(|| invalid("translation arguments are not a list"))?
+                        {
+                            args.push(argument(protocol, arg, depth)?);
+                        }
                     }
                 }
                 Some(Content::Translate {

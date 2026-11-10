@@ -2,14 +2,14 @@ use super::{DOWN, NEWER, OLDER, UP};
 use crate::{
     Direction::{Clientbound, Serverbound},
     State::{Login as LoginState, Play},
-    nbt::Nbt,
+    codec::registries::{self, Registry},
     steps::v1_18_2_to_1_19::{
         chat,
-        join::Login,
+        layout::Login,
         messages::{Placement, ServerData, SystemChat},
         testing::{Harness, first, hex, truncations_fail},
     },
-    wire::Writer,
+    wire::{Reader, Writer},
 };
 use serde_json::{Value, json};
 
@@ -66,15 +66,20 @@ fn player_chat_becomes_decorated_system_chat_both_ways() {
         (say_display(), Placement::Overlay(false))
     );
 
+    // System chat names the `system` type wherever the client's registry
+    // has it: after the backend's own types once a login converted them.
     let mut down = down();
+    let mut system_type = chat::SYSTEM_1_19;
     if let Some(login) = first(NEWER, Clientbound, Play, "login") {
-        down.clientbound(Play, "login", &login).unwrap();
+        let out = down.one(Clientbound, Play, "login", &login);
+        system_type = chat_types(OLDER, &out.data).entry("system").unwrap().id;
+        assert_eq!(system_type, 7);
     }
     let out = down.one(Clientbound, Play, "player_chat", &hex(SAY_1_19_1));
     assert_eq!(out.name, "system_chat");
     assert_eq!(
         system(OLDER, &out.data),
-        (say_display(), Placement::ChatType(chat::SYSTEM_1_19))
+        (say_display(), Placement::ChatType(system_type))
     );
     for (make, client, backend, data) in [
         (UP.unwrap(), NEWER, OLDER, hex(SAY_1_19)),
@@ -102,9 +107,8 @@ fn system_chat_placement_follows_the_chat_type() {
         data
     };
     let mut up = up();
-    let mut codec = crate::nbt::Compound::new();
-    codec.insert("minecraft:chat_type", chat::vanilla_1_19());
-    // Without a login the vanilla types are unknown: nothing is overlay.
+    // Before any login the client's vanilla types apply: `tellraw_command`
+    // shows in chat.
     let out = up.one(Clientbound, Play, "system_chat", &tellraw(&[7]));
     assert_eq!(out.data, tellraw(&[0]));
     if let Some(login) = first(OLDER, Clientbound, Play, "login") {
@@ -134,8 +138,19 @@ fn system_chat_placement_follows_the_chat_type() {
     );
 }
 
+/// The `chat_type` registry of a `login` body.
+fn chat_types(protocol: i32, login: &[u8]) -> Registry {
+    registries::login::read_login(protocol, &mut Reader::new(login))
+        .unwrap()
+        .codec
+        .unwrap()
+        .into_iter()
+        .find(|registry| registry.name == "chat_type")
+        .unwrap()
+}
+
 #[test]
-fn login_swaps_the_chat_type_registry_and_keeps_the_rest() {
+fn login_gives_the_client_its_chat_types_and_keeps_the_rest() {
     for (make, client, backend) in [(UP.unwrap(), NEWER, OLDER), (DOWN.unwrap(), OLDER, NEWER)] {
         let (Some(sent), Some(native)) = (
             first(backend, Clientbound, Play, "login"),
@@ -143,29 +158,31 @@ fn login_swaps_the_chat_type_registry_and_keeps_the_rest() {
         ) else {
             return;
         };
-        // Each version's own registry is what its vanilla server sends.
-        let native = Login::read(client, &native).unwrap();
-        let vanilla = if client == NEWER {
-            chat::vanilla_1_19_1()
-        } else {
-            chat::vanilla_1_19()
-        };
-        assert_eq!(
-            native.codec.get("minecraft:chat_type"),
-            Some(&Nbt::Compound(vanilla))
-        );
-
         let original = Login::read(backend, &sent).unwrap();
         assert_eq!(original.write(backend).unwrap(), sent, "login round trip");
         let out = Harness::new(make, client, backend).one(Clientbound, Play, "login", &sent);
-        let translated = Login::read(client, &out.data).unwrap();
-        assert_eq!(
-            translated.codec.get("minecraft:chat_type"),
-            native.codec.get("minecraft:chat_type")
-        );
-        let mut expected = original.clone();
-        expected.codec = translated.codec.clone();
-        assert_eq!(translated, expected);
+        // The backend's types come first, under their IDs, so player chat
+        // keeps its meaning; every type the client's own server sends is
+        // there as that server sends it.
+        let translated = chat_types(client, &out.data);
+        for (sent, converted) in chat_types(backend, &sent)
+            .entries
+            .iter()
+            .zip(&translated.entries)
+        {
+            assert_eq!((&sent.name, sent.id), (&converted.name, converted.id));
+        }
+        for vanilla in &chat_types(client, &native).entries {
+            assert_eq!(
+                translated.entry(&vanilla.name).unwrap().element,
+                vanilla.element,
+                "{}",
+                vanilla.name
+            );
+        }
+        let mut rest = Login::read(client, &out.data).unwrap();
+        rest.codec = original.codec.clone();
+        assert_eq!(rest, original);
         truncations_fail(
             make,
             client,

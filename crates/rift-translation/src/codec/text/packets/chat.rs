@@ -6,6 +6,7 @@
 //! [`super::Cv`] are what they can reuse.
 use super::{Cv, crosses, text_changes};
 use crate::{
+    codec::registries::{self, Side},
     nbt::Nbt,
     wire::{Rewriter, invalid},
 };
@@ -22,7 +23,8 @@ const CHAT_TYPE_HOLDER: i32 = 767;
 /// 1.21.5 added the global message index.
 const GLOBAL_INDEX: i32 = 770;
 
-/// The built-in 1.19 chat type IDs of system messages and the action bar.
+/// The vanilla 1.19 chat type IDs of system messages and the action bar,
+/// for a side whose registry lacks them.
 const SYSTEM: i32 = 1;
 const GAME_INFO: i32 = 2;
 
@@ -61,12 +63,22 @@ pub fn system_chat(cv: &mut Cv<'_>, data: &[u8]) -> io::Result<()> {
     let overlay = if cv.from >= SYSTEM_OVERLAY {
         rw.r.bool()?
     } else {
-        rw.r.varint()? == GAME_INFO
+        let id = rw.r.varint()?;
+        let sender = Side::sender(cv.direction);
+        registries::name_of(cv.shared, sender, "chat_type", id)
+            .map_or(id == GAME_INFO, |name| name == "game_info")
     };
     if cv.to >= SYSTEM_OVERLAY {
         rw.w.bool(overlay);
     } else {
-        rw.w.varint(if overlay { GAME_INFO } else { SYSTEM });
+        let (name, vanilla) = if overlay {
+            ("game_info", GAME_INFO)
+        } else {
+            ("system", SYSTEM)
+        };
+        let receiver = Side::receiver(cv.direction);
+        let id = registries::id_of(cv.shared, receiver, "chat_type", name).unwrap_or(vanilla);
+        rw.w.varint(id);
     }
     cv.emit("system_chat", rw.finish()?);
     Ok(())
@@ -148,13 +160,9 @@ fn bound(cv: &mut Cv<'_>, rw: &mut Rewriter<'_>) -> io::Result<()> {
 }
 
 /// Copy a chat type reference: a registry ID before 1.21, a holder (ID + 1,
-/// or 0 and an inline definition) from then on. An inline type has no ID
-/// an older client knows; it becomes the first chat type (`chat`).
-// INTEGRATION: chat types are a synchronised registry. If the registries
-// codec renumbers `chat_type` entries between the two sides of a pair, map
-// the ID here through its per-connection state (for example a
-// `registries::State::map(direction, "chat_type", id)`); today IDs pass
-// through unchanged.
+/// or 0 and an inline definition) from then on. IDs go by entry name from
+/// the sender's registry to the receiver's; an inline type or one the
+/// receiver lacks becomes its `chat` type.
 pub fn chat_type(cv: &mut Cv<'_>, rw: &mut Rewriter<'_>) -> io::Result<()> {
     let (id, inline) = if cv.from >= CHAT_TYPE_HOLDER {
         match rw.r.varint()? {
@@ -164,6 +172,10 @@ pub fn chat_type(cv: &mut Cv<'_>, rw: &mut Rewriter<'_>) -> io::Result<()> {
     } else {
         (Some(rw.r.varint()?), None)
     };
+    let id = id.map(|id| {
+        registries::map(cv.shared, cv.direction, "chat_type", id)
+            .unwrap_or_else(|| default_chat_type(cv))
+    });
     if cv.to >= CHAT_TYPE_HOLDER {
         match (id, inline) {
             (Some(id), _) => drop(rw.w.varint(id + 1)),
@@ -174,9 +186,14 @@ pub fn chat_type(cv: &mut Cv<'_>, rw: &mut Rewriter<'_>) -> io::Result<()> {
             (None, None) => unreachable!("a chat type is an ID or inline"),
         }
     } else {
-        rw.w.varint(id.unwrap_or(0));
+        rw.w.varint(id.unwrap_or_else(|| default_chat_type(cv)));
     }
     Ok(())
+}
+
+/// The receiver's plain `chat` type, for references it cannot follow.
+fn default_chat_type(cv: &Cv<'_>) -> i32 {
+    registries::id_of(cv.shared, Side::receiver(cv.direction), "chat_type", "chat").unwrap_or(0)
 }
 
 /// One chat type decoration: translation key, parameters, style.

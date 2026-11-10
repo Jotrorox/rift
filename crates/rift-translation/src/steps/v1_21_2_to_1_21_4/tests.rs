@@ -112,8 +112,12 @@ fn vehicle_moves_gain_and_lose_the_on_ground_flag() {
 #[test]
 fn a_1_21_2_client_reports_loading_after_join_and_respawn() {
     let mut step = down();
-    // The start of a real 1.21.4 `login`; the step does not parse it.
-    let login = hex("000000010003136d696e6563726166743a6f766572776f726c64");
+    // The real 1.21.4 server's `login`.
+    let login = hex(concat!(
+        "000000010003136d696e6563726166743a6f766572776f726c64146d696e6563726166743a7468655f6e6574",
+        "686572116d696e6563726166743a7468655f656e6414020200010000136d696e6563726166743a6f76657277",
+        "6f726c64f6785071858e05aa01ff00010000c1ffffff0f00",
+    ));
     let out = step.clientbound(State::Play, "login", &login).unwrap();
     assert_eq!(out.len(), 2);
     assert_eq!((out[0].name.as_str(), &out[0].data), ("login", &login));
@@ -122,9 +126,13 @@ fn a_1_21_2_client_reports_loading_after_join_and_respawn() {
         (out[1].name.as_str(), out[1].data.len()),
         ("player_loaded", 0)
     );
-    let out = step
-        .clientbound(State::Play, "respawn", &[1, 2, 3])
-        .unwrap();
+    // Back to the overworld with the login's spawn details, keeping nothing.
+    let respawn = hex(concat!(
+        "00136d696e6563726166743a6f766572776f726c64f6785071858e05aa01ff00010000c1ffffff0f",
+        "00"
+    ));
+    let out = step.clientbound(State::Play, "respawn", &respawn).unwrap();
+    assert_eq!((out[0].name.as_str(), &out[0].data), ("respawn", &respawn));
     assert_eq!(out[1].name, "player_loaded");
     // A 1.21.4 client says so itself; a 1.21.2 server has no such packet.
     assert!(
@@ -140,7 +148,7 @@ fn picking_from_the_inventory_swaps_into_the_selected_hotbar_slot() {
     // Inventory menu at state 7 (container 0), then another menu at state 9.
     step.clientbound(State::Play, "container_set_slot", &hex("0007000a00"))
         .unwrap();
-    step.clientbound(State::Play, "container_set_slot", &hex("02090001"))
+    step.clientbound(State::Play, "container_set_slot", &hex("0209000100"))
         .unwrap();
     step.serverbound(State::Play, "set_carried_item", &hex("0003"))
         .unwrap();

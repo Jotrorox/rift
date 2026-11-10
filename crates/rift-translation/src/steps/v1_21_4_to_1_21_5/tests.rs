@@ -85,13 +85,15 @@ fn orb_entities_go_back_to_their_own_packet() {
         (out[1].name.as_str(), out[1].data.clone()),
         ("set_entity_motion", hex("1c000000000009"))
     );
-    // Other entities are left to the entity codec.
-    let mut zombie = spawn.clone();
-    zombie[17] = 0x7c;
+    // Other entities are the entity codec's, which maps their type: a
+    // tadpole is 124 in 1.21.5 and 123 in 1.21.4.
+    let mut tadpole = spawn.clone();
+    tadpole[17] = 124;
     let out = down()
-        .clientbound(State::Play, "add_entity", &zombie)
+        .clientbound(State::Play, "add_entity", &tadpole)
         .unwrap();
-    assert_eq!(single(&out, "add_entity"), zombie);
+    tadpole[17] = 123;
+    assert_eq!(single(&out, "add_entity"), tadpole);
     assert!(
         down()
             .clientbound(State::Play, "add_entity", &spawn[..30])
@@ -285,10 +287,30 @@ fn recorded_orbs_convert_to_what_the_other_server_sends() {
         if out[0].name == "add_experience_orb" {
             orbs += 1;
         } else {
-            assert_eq!(single(&out, "add_entity"), spawn.data);
+            // The same entity, with its type in 1.21.4's terms.
+            let converted = single(&out, "add_entity");
+            assert_eq!(
+                spawned_kind(OLDER, converted),
+                spawned_kind(NEWER, &spawn.data)
+            );
         }
     }
     assert_eq!(orbs, 1);
+}
+
+/// The entity type name and the rest of an `add_entity` body.
+fn spawned_kind(protocol: i32, body: &[u8]) -> (&'static str, Vec<u8>) {
+    let mut reader = crate::wire::Reader::new(body);
+    let id = reader.varint().unwrap();
+    let uuid = reader.take(16).unwrap().to_vec();
+    let kind = reader.varint().unwrap();
+    let name = crate::data::version(protocol)
+        .expect_registry("entity_type")
+        .name(kind)
+        .unwrap();
+    let mut rest = Writer::new();
+    rest.varint(id).bytes(&uuid).bytes(reader.rest());
+    (name, rest.buf)
 }
 
 /// Whole recorded sessions of both versions cross the step in both

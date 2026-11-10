@@ -3,16 +3,14 @@
 use super::{NEWER, OLDER};
 use crate::{
     Direction, Packet, State,
-    codec::{HasShared, Shared},
-    nbt::{Compound, Nbt},
+    codec::{HasShared, Shared, registries::Side},
     routed_step,
     step::{Cx, RouteBuilder, Routes},
     steps::{
         Make,
         v1_18_2_to_1_19::{
-            chat::{ChatTypes, registry_entries_mut},
-            id,
-            join::{Login, Respawn},
+            chat::ChatTypes,
+            id, join,
             login::{Hello, Key, clamp_velocity_forwarding},
             messages::{Placement, PlayerChat, Sent, ServerData, SystemChat, read_disguised_chat},
         },
@@ -93,32 +91,20 @@ impl Down {
         Ok(())
     }
 
-    /// Keep the backend's chat types for decoration; name biome sounds by
-    /// their ID, the only form 1.19.1 reads.
-    // INTEGRATION: the registries codec's helpers for the registry parts of
-    // `login` should take over the biome conversion once they exist.
+    /// The registries codec converts the registries (biome sounds become
+    /// names, the only form 1.19.1 reads); the backend's chat types are
+    /// kept for decoration.
     fn login(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
-        let mut login = Login::read(NEWER, &packet.data)?;
-        self.chat_types = ChatTypes::from_codec(&login.codec);
+        let data = join::convert_login(&mut self.shared, Direction::Clientbound, &packet.data)?;
+        self.chat_types = ChatTypes::from_shared(&self.shared, Side::Backend);
         self.unacknowledged = 0;
-        if let Some(biomes) = registry_entries_mut(&mut login.codec, "minecraft:worldgen/biome") {
-            for biome in biomes {
-                if let Some(effects) = biome
-                    .as_compound_mut()
-                    .and_then(|biome| biome.compound_mut("element"))
-                    .and_then(|element| element.compound_mut("effects"))
-                {
-                    name_sounds(effects);
-                }
-            }
-        }
-        cx.to_client(state, Packet::new(packet.id, login.write(OLDER)?));
+        cx.to_client(state, Packet::new(packet.id, data));
         Ok(())
     }
 
     fn respawn(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
-        let respawn = Respawn::read(NEWER, &packet.data)?;
-        cx.to_client(state, Packet::new(packet.id, respawn.write(OLDER)?));
+        let data = join::convert_respawn(&mut self.shared, Direction::Clientbound, &packet.data)?;
+        cx.to_client(state, Packet::new(packet.id, data));
         Ok(())
     }
 
@@ -215,24 +201,5 @@ impl Down {
     }
 }
 routed_step!(Down);
-
-/// Replace `{sound_id, range}` sound events in biome effects by their ID.
-fn name_sounds(effects: &mut Compound) {
-    let flatten = |slot: Option<&mut Nbt>| {
-        if let Some(slot) = slot
-            && let Some(id) = slot.as_compound().and_then(|sound| sound.str("sound_id"))
-        {
-            *slot = Nbt::String(id.to_owned());
-        }
-    };
-    flatten(effects.get_mut("ambient_sound"));
-    for nested in ["mood_sound", "additions_sound", "music"] {
-        flatten(
-            effects
-                .compound_mut(nested)
-                .and_then(|tag| tag.get_mut("sound")),
-        );
-    }
-}
 
 pub const STEP: Option<Make> = Some(|| Box::new(Down::new()));
