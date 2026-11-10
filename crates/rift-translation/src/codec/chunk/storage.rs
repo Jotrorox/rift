@@ -130,14 +130,35 @@ pub fn max_entry(data: &[u64], bits: u8, packing: Packing, count: usize) -> io::
     match packing {
         Packing::Padded => {
             let per_long = 64 / width;
-            let mut left = count;
-            for long in data {
+            let full = count / per_long;
+            max = match bits {
+                1 => max_padded::<1>(&data[..full]),
+                2 => max_padded::<2>(&data[..full]),
+                3 => max_padded::<3>(&data[..full]),
+                4 => max_padded::<4>(&data[..full]),
+                5 => max_padded::<5>(&data[..full]),
+                6 => max_padded::<6>(&data[..full]),
+                7 => max_padded::<7>(&data[..full]),
+                8 => max_padded::<8>(&data[..full]),
+                _ => {
+                    let mut max = 0;
+                    for long in &data[..full] {
+                        let mut long = *long;
+                        for _ in 0..per_long {
+                            max = max.max(long & mask);
+                            long >>= width;
+                        }
+                    }
+                    max
+                }
+            };
+            // A last, partly used long.
+            if let Some(long) = data.get(full) {
                 let mut long = *long;
-                for _ in 0..per_long.min(left) {
+                for _ in 0..count - full * per_long {
                     max = max.max(long & mask);
                     long >>= width;
                 }
-                left = left.saturating_sub(per_long);
             }
         }
         Packing::Spanning => {
@@ -153,6 +174,19 @@ pub fn max_entry(data: &[u64], bits: u8, packing: Packing, count: usize) -> io::
         }
     }
     Ok(max as u32)
+}
+
+/// The largest entry of whole longs of `BITS`-bit padded entries; a
+/// constant width lets the compiler unroll the slots.
+fn max_padded<const BITS: usize>(data: &[u64]) -> u64 {
+    let mask = (1u64 << BITS) - 1;
+    let mut max = 0;
+    for long in data {
+        for slot in 0..64 / BITS {
+            max = max.max(long >> (slot * BITS) & mask);
+        }
+    }
+    max
 }
 
 /// The fewest bits that hold every value below `count` (at least one).

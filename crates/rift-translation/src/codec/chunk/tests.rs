@@ -459,3 +459,484 @@ fn check_block_packets(source: i32, target: i32, out: &[Out]) {
         }
     }
 }
+
+mod handlers {
+    use super::super::{
+        blocks::read_changes,
+        light::{Light, LightArray, LightUpdate},
+        model::{Chunk, World, tests::sample},
+    };
+    use crate::{
+        State,
+        codec::testing::{Defaults, Out},
+        data,
+        nbt::{Compound, Nbt},
+        wire::{Position, Reader, Writer},
+    };
+
+    fn names(out: &[Out]) -> Vec<&str> {
+        out.iter().map(|out| out.name.as_str()).collect()
+    }
+
+    fn column(protocol: i32, x: i32, z: i32) -> Vec<u8> {
+        let mut chunk = sample(protocol);
+        chunk.x = x;
+        chunk.z = z;
+        for entity in &mut chunk.block_entities {
+            entity.x = x * 16 + (entity.x & 15);
+            entity.z = z * 16 + (entity.z & 15);
+            if let Some(Nbt::Compound(tag)) = &mut entity.nbt
+                && tag.contains("x")
+            {
+                tag.insert("x", entity.x);
+                tag.insert("z", entity.z);
+            }
+        }
+        if (477..757).contains(&protocol) {
+            chunk.light = None;
+        }
+        chunk.write(protocol).unwrap()
+    }
+
+    fn light(x: i32, z: i32, level: u8) -> LightUpdate {
+        let light = Light {
+            block: vec![LightArray::Absent, LightArray::filled(level)],
+            sky: vec![LightArray::Empty, LightArray::filled(15)],
+            ..Light::default()
+        };
+        LightUpdate { x, z, light }
+    }
+
+    fn forget(protocol: i32, x: i32, z: i32) -> Vec<u8> {
+        let mut writer = Writer::new();
+        if protocol >= 764 {
+            writer.i32(z).i32(x);
+        } else {
+            writer.i32(x).i32(z);
+        }
+        writer.buf
+    }
+
+    #[test]
+    fn a_1_17_columns_light_is_held_until_the_column_and_merged_into_it() {
+        let mut step = Defaults::new(757, 756);
+        let update = light(1, 2, 7);
+        let out = step
+            .clientbound(State::Play, "light_update", &update.write(756).unwrap())
+            .unwrap();
+        assert!(out.is_empty(), "held");
+        let out = step
+            .clientbound(State::Play, "level_chunk", &column(756, 1, 2))
+            .unwrap();
+        assert_eq!(names(&out), ["level_chunk_with_light"]);
+        let world = World {
+            min_section: Some(-4),
+            ..World::default()
+        };
+        let chunk = Chunk::read(&out[0].data, 757, &world).unwrap();
+        assert_eq!(chunk.light.unwrap().block[1], LightArray::filled(7));
+        // Once the column is there, updates pass through.
+        let out = step
+            .clientbound(State::Play, "light_update", &update.write(756).unwrap())
+            .unwrap();
+        assert_eq!(names(&out), ["light_update"]);
+        // After it is forgotten they are held again.
+        step.clientbound(State::Play, "forget_level_chunk", &forget(756, 1, 2))
+            .unwrap();
+        let out = step
+            .clientbound(State::Play, "light_update", &update.write(756).unwrap())
+            .unwrap();
+        assert!(out.is_empty());
+        // A column whose light never came still carries (empty) light data.
+        let out = step
+            .clientbound(State::Play, "level_chunk", &column(756, 5, 5))
+            .unwrap();
+        assert!(
+            Chunk::read(&out[0].data, 757, &world)
+                .unwrap()
+                .light
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn a_1_18_column_is_split_into_its_light_and_the_column() {
+        let mut step = Defaults::new(756, 757);
+        let out = step
+            .clientbound(State::Play, "level_chunk_with_light", &column(757, 3, -4))
+            .unwrap();
+        assert_eq!(names(&out), ["light_update", "level_chunk"]);
+        let update = LightUpdate::read(&out[0].data, 756).unwrap();
+        assert_eq!((update.x, update.z), (3, -4));
+        assert!(update.light.trust_edges);
+        let world = World {
+            min_section: Some(-4),
+            ..World::default()
+        };
+        Chunk::read(&out[1].data, 756, &world).unwrap();
+    }
+
+    #[test]
+    fn light_for_a_1_13_client_goes_inside_its_column() {
+        let mut step = Defaults::new(404, 477);
+        let mut login = Writer::new();
+        login
+            .i32(1)
+            .u8(0)
+            .i32(0)
+            .u8(20)
+            .string("flat")
+            .varint(10)
+            .bool(false);
+        step.clientbound(State::Play, "login", &login.buf).unwrap();
+        let out = step
+            .clientbound(
+                State::Play,
+                "light_update",
+                &light(0, 0, 9).write(477).unwrap(),
+            )
+            .unwrap();
+        assert!(out.is_empty());
+        let out = step
+            .clientbound(State::Play, "level_chunk", &column(477, 0, 0))
+            .unwrap();
+        assert_eq!(names(&out), ["level_chunk"]);
+        let chunk = Chunk::read(
+            &out[0].data,
+            404,
+            &World {
+                sky_light: Some(true),
+                ..World::default()
+            },
+        )
+        .unwrap();
+        let light = chunk.light.unwrap();
+        assert_eq!(light.block[1], LightArray::filled(9));
+        // Sections without light data: dark blocks, lit sky.
+        let present = chunk
+            .sections
+            .iter()
+            .position(|section| section.is_some())
+            .unwrap();
+        assert_eq!(present, 0);
+        assert_eq!(light.sky[2], LightArray::Data(vec![0xff; 2048].into()));
+        // And a 1.13 column going up brings its light first.
+        let mut up = Defaults::new(477, 404);
+        let out = up
+            .clientbound(State::Play, "level_chunk", &column(404, 0, 0))
+            .unwrap();
+        assert_eq!(names(&out), ["light_update", "level_chunk"]);
+        let update = LightUpdate::read(&out[0].data, 477).unwrap();
+        assert_eq!(update.light.sky.len(), 18);
+    }
+
+    #[test]
+    fn replaced_columns_are_forgotten_first_for_1_21_2_clients() {
+        let mut step = Defaults::new(768, 767);
+        let body = column(767, 0, 0);
+        let out = step
+            .clientbound(State::Play, "level_chunk_with_light", &body)
+            .unwrap();
+        assert_eq!(names(&out), ["level_chunk_with_light"]);
+        let out = step
+            .clientbound(State::Play, "level_chunk_with_light", &body)
+            .unwrap();
+        assert_eq!(
+            names(&out),
+            ["forget_level_chunk", "level_chunk_with_light"]
+        );
+        step.clientbound(State::Play, "forget_level_chunk", &forget(767, 0, 0))
+            .unwrap();
+        let out = step
+            .clientbound(State::Play, "level_chunk_with_light", &body)
+            .unwrap();
+        assert_eq!(names(&out), ["level_chunk_with_light"]);
+    }
+
+    #[test]
+    fn forgetting_swaps_coordinates_across_1_20_2() {
+        let mut step = Defaults::new(764, 763);
+        let out = step
+            .clientbound(State::Play, "forget_level_chunk", &forget(763, 7, -9))
+            .unwrap();
+        assert_eq!(out[0].data, forget(764, 7, -9));
+        let mut step = Defaults::new(763, 764);
+        let out = step
+            .clientbound(State::Play, "forget_level_chunk", &forget(764, 7, -9))
+            .unwrap();
+        assert_eq!(out[0].data, forget(763, 7, -9));
+    }
+
+    #[test]
+    fn partial_columns_become_section_updates_for_1_17() {
+        let mut chunk = sample(754);
+        chunk.full = false;
+        chunk.biomes = super::super::model::Biomes::Absent;
+        chunk.heightmaps.clear();
+        chunk
+            .sections
+            .iter_mut()
+            .skip(1)
+            .for_each(|section| *section = None);
+        let mut step = Defaults::new(755, 754);
+        let out = step
+            .clientbound(State::Play, "level_chunk", &chunk.write(754).unwrap())
+            .unwrap();
+        assert_eq!(names(&out), ["section_blocks_update", "block_entity_data"]);
+        let changes = read_changes(&out[0].data, 755).unwrap();
+        assert_eq!(changes.len(), 4096);
+        assert!(changes.iter().all(|change| (0..16).contains(&change.y)));
+    }
+
+    #[test]
+    fn section_updates_split_by_section_and_merge_back() {
+        let mut writer = Writer::new();
+        writer.i32(2).i32(-1).varint(2);
+        writer.u8(0x12).u8(5).varint(1); // y 5
+        writer.u8(0x34).u8(200).varint(9); // y 200
+        let mut step = Defaults::new(751, 736);
+        let out = step
+            .clientbound(State::Play, "chunk_blocks_update", &writer.buf)
+            .unwrap();
+        assert_eq!(
+            names(&out),
+            ["section_blocks_update", "section_blocks_update"]
+        );
+        let ys: Vec<i32> = out
+            .iter()
+            .map(|out| read_changes(&out.data, 751).unwrap()[0].y)
+            .collect();
+        assert_eq!(ys, [5, 200]);
+        let mut down = Defaults::new(736, 751);
+        let out = down
+            .clientbound(State::Play, "section_blocks_update", &out[1].data)
+            .unwrap();
+        let changes = read_changes(&out[0].data, 736).unwrap();
+        assert_eq!((changes[0].x, changes[0].y, changes[0].z), (35, 200, -12));
+    }
+
+    #[test]
+    fn block_entity_data_switches_between_actions_and_types() {
+        let mut tag = Compound::new();
+        tag.insert("id", "minecraft:sign");
+        tag.insert("x", 10);
+        tag.insert("y", 64);
+        tag.insert("z", -3);
+        tag.insert("Text1", "{\"text\":\"a\"}");
+        let position = Position {
+            x: 10,
+            y: 64,
+            z: -3,
+        };
+        let mut writer = Writer::new();
+        writer.position(position).u8(9);
+        Nbt::Compound(tag).write(&mut writer, true);
+        let mut up = Defaults::new(757, 756);
+        let out = up
+            .clientbound(State::Play, "block_entity_data", &writer.buf)
+            .unwrap();
+        let mut reader = Reader::new(&out[0].data);
+        assert_eq!(reader.position().unwrap(), position);
+        let kind = reader.varint().unwrap();
+        assert_eq!(
+            data::version(757)
+                .expect_registry("block_entity_type")
+                .name(kind),
+            Some("sign")
+        );
+        let nbt = Nbt::read(&mut reader, true).unwrap().unwrap();
+        let tag = nbt.as_compound().unwrap();
+        assert!(!tag.contains("id") && tag.contains("Text1"));
+        let mut down = Defaults::new(756, 757);
+        let back = down
+            .clientbound(State::Play, "block_entity_data", &out[0].data)
+            .unwrap();
+        let mut reader = Reader::new(&back[0].data);
+        reader.position().unwrap();
+        assert_eq!(reader.u8().unwrap(), 9);
+        let nbt = Nbt::read(&mut reader, true).unwrap().unwrap();
+        assert_eq!(nbt.as_compound().unwrap().str("id"), Some("minecraft:sign"));
+        // Across 1.20 the sign gains sides.
+        let mut writer = Writer::new();
+        writer.position(position).varint(
+            data::version(762)
+                .expect_registry("block_entity_type")
+                .id("sign")
+                .unwrap(),
+        );
+        nbt.as_compound()
+            .map(|tag| Nbt::Compound(tag.clone()))
+            .unwrap()
+            .write(&mut writer, true);
+        let mut step = Defaults::new(763, 762);
+        let out = step
+            .clientbound(State::Play, "block_entity_data", &writer.buf)
+            .unwrap();
+        let mut reader = Reader::new(&out[0].data);
+        reader.position().unwrap();
+        reader.varint().unwrap();
+        let nbt = Nbt::read(&mut reader, true).unwrap().unwrap();
+        assert!(nbt.as_compound().unwrap().contains("front_text"));
+    }
+
+    #[test]
+    fn removed_level_events_become_sounds_for_1_19_3() {
+        let mut writer = Writer::new();
+        writer
+            .i32(1006)
+            .position(Position { x: 1, y: 2, z: 3 })
+            .i32(0)
+            .bool(false);
+        let mut step = Defaults::new(761, 760);
+        let out = step
+            .clientbound(State::Play, "level_event", &writer.buf)
+            .unwrap();
+        assert_eq!(names(&out), ["sound"]);
+        // Smoke directions change meaning at 1.13.1.
+        let mut writer = Writer::new();
+        writer
+            .i32(2000)
+            .position_legacy(Position { x: 1, y: 2, z: 3 })
+            .i32(7)
+            .bool(false);
+        let mut step = Defaults::new(401, 393);
+        let out = step
+            .clientbound(State::Play, "level_event", &writer.buf)
+            .unwrap();
+        assert_eq!(&out[0].data[12..16], &3i32.to_be_bytes());
+    }
+
+    #[test]
+    fn explosions_change_layout_without_particles_on_the_way_up() {
+        let mut writer = Writer::new();
+        writer
+            .f32(1.0)
+            .f32(2.0)
+            .f32(3.0)
+            .f32(4.0)
+            .i32(1)
+            .i8(1)
+            .i8(0)
+            .i8(-1);
+        writer.f32(0.0).f32(0.5).f32(0.0);
+        let mut step = Defaults::new(755, 754);
+        let out = step
+            .clientbound(State::Play, "explode", &writer.buf)
+            .unwrap();
+        let mut reader = Reader::new(&out[0].data);
+        for _ in 0..4 {
+            reader.f32().unwrap();
+        }
+        assert_eq!(reader.varint().unwrap(), 1);
+        // 1.20.2 to 1.20.3 adds particles and a sound of the receiver's.
+        let mut writer = Writer::new();
+        writer.f64(1.0).f64(2.0).f64(3.0).f32(4.0).varint(0);
+        writer.f32(0.0).f32(0.5).f32(0.0);
+        let mut step = Defaults::new(765, 764);
+        let out = step
+            .clientbound(State::Play, "explode", &writer.buf)
+            .unwrap();
+        let mut reader = Reader::new(&out[0].data);
+        for _ in 0..3 {
+            reader.f64().unwrap();
+        }
+        reader.f32().unwrap();
+        assert_eq!(reader.varint().unwrap(), 0);
+        for _ in 0..3 {
+            reader.f32().unwrap();
+        }
+        assert_eq!(reader.varint().unwrap(), 1); // Destroy.
+        let particles = data::version(765).expect_registry("particle_type");
+        assert_eq!(particles.name(reader.varint().unwrap()), Some("explosion"));
+        assert_eq!(
+            particles.name(reader.varint().unwrap()),
+            Some("explosion_emitter")
+        );
+        let sound = reader.varint().unwrap() - 1;
+        assert_eq!(
+            data::version(765)
+                .expect_registry("sound_event")
+                .name(sound),
+            Some("entity.generic.explode")
+        );
+        reader.finish().unwrap();
+    }
+
+    #[test]
+    fn every_handler_is_installed_only_where_needed() {
+        // Identical layouts and IDs leave chunk packets alone.
+        let mut skipped = Vec::new();
+        for pair in crate::version::PROTOCOLS.windows(2) {
+            let (older, newer) = (pair[0].0, pair[1].0);
+            for (client, backend) in [(newer, older), (older, newer)] {
+                let mut step = Defaults::new(client, backend);
+                // A malformed chunk fails only where a handler parses it.
+                let name = if backend >= 757 {
+                    "level_chunk_with_light"
+                } else {
+                    "level_chunk"
+                };
+                let parsed = step.clientbound(State::Play, name, &[1, 2, 3]).is_err();
+                let expected = super::super::install_needs_chunk(backend, client);
+                assert_eq!(parsed, expected, "{backend} -> {client}");
+                if !parsed {
+                    skipped.push(format!("{backend} -> {client}"));
+                }
+            }
+        }
+        eprintln!("chunks pass untouched: {}", skipped.join(", "));
+        assert!(!skipped.is_empty());
+    }
+}
+
+/// Conversions per second of real chunks through the handlers, for a few
+/// kinds of pair. Run with
+/// `cargo test --release -p rift-translation chunk_throughput -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn chunk_throughput() {
+    for (client, backend) in [
+        (771, 770),
+        (770, 771),
+        (757, 756),
+        (756, 757),
+        (477, 404),
+        (404, 477),
+        (764, 763),
+        (776, 777),
+    ] {
+        let packets: Vec<_> = recorded(backend, &["level_chunk", "level_chunk_with_light"])
+            .into_iter()
+            .map(|(_, packet)| packet)
+            .collect();
+        if packets.is_empty() {
+            eprintln!("{backend} -> {client}: no corpus");
+            continue;
+        }
+        let mut step = Defaults::new(client, backend);
+        let rounds = std::env::var("CHUNK_ROUNDS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(40);
+        let start = std::time::Instant::now();
+        let mut bytes = 0;
+        for _ in 0..rounds {
+            for packet in &packets {
+                let out = step
+                    .send_id(Direction::Clientbound, State::Play, packet.id, &packet.data)
+                    .unwrap();
+                bytes += out.iter().map(|out| out.data.len()).sum::<usize>();
+            }
+        }
+        let elapsed = start.elapsed().as_secs_f64();
+        let count = rounds * packets.len();
+        eprintln!(
+            "{} -> {}: {:.0} chunks/s ({:.1} µs each, {:.0} MB/s out)",
+            version::release(backend),
+            version::release(client),
+            count as f64 / elapsed,
+            elapsed * 1e6 / count as f64,
+            bytes as f64 / elapsed / 1e6
+        );
+    }
+}

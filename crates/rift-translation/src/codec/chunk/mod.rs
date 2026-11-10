@@ -94,27 +94,31 @@ const CHUNK_LAYOUTS: &[i32] = &[393, 477, 573, 735, 751, 755, 757, 763, 764, 770
 /// light moves between packets).
 const LIGHT_LAYOUTS: &[i32] = &[477, 735, 755, 757, 763, 777];
 
+/// Whether chunks from `source` need converting for `target`: their
+/// layout, block state, biome or block entity IDs or block entity contents
+/// differ, or the receiver needs columns tracked.
+fn install_needs_chunk(source: i32, target: i32) -> bool {
+    crosses(source, target, CHUNK_LAYOUTS)
+        || changed(source, target, "block_state")
+        || packets::biome_ids(source, target).is_some()
+        || (source >= 757 && target >= 757 && changed(source, target, "block_entity_type"))
+        || block_entity::changes_content(source, target)
+        || container::block_global_bits(source) != container::block_global_bits(target)
+        || (source < 768 && target >= 768)
+}
+
 /// Install this codec's default routes for the builder's pair.
 pub fn install<S: HasShared + 'static>(mut builder: RouteBuilder<S>) -> RouteBuilder<S> {
     use Direction::Clientbound;
     use Phase::Play;
     let (source, target) = (builder.backend().protocol, builder.client().protocol);
     let blocks = changed(source, target, "block_state");
-    let biomes = packets::biome_ids(source, target).is_some();
     let entity_types =
         source >= 757 && target >= 757 && changed(source, target, "block_entity_type");
     let contents = block_entity::changes_content(source, target);
     let positions = crosses(source, target, &[477]);
-    let global_bits = container::block_global_bits(source) != container::block_global_bits(target);
 
-    let chunk = crosses(source, target, CHUNK_LAYOUTS)
-        || blocks
-        || biomes
-        || entity_types
-        || contents
-        || global_bits
-        || (source < 768 && target >= 768);
-    if chunk {
+    if install_needs_chunk(source, target) {
         builder = builder
             .default_handler(Clientbound, Play, "level_chunk", packets::level_chunk::<S>)
             .default_handler(

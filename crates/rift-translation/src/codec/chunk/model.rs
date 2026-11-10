@@ -720,7 +720,7 @@ pub fn heightmap_format(protocol: i32, sections: usize) -> (u8, Packing) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::codec::chunk::{
         container::Format,
