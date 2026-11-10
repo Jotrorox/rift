@@ -430,7 +430,7 @@ def entity_types_seen(session, registries, since):
         elif name == "spawn_entity_painting":
             seen[value["entityId"]] = "minecraft:painting"
         elif name == "spawn_entity_experience_orb":
-            seen[value["entityId"]] = "minecraft:experience_orb"
+            seen[value["entityId"]] = "minecraft:xp_orb" if registries.protocol < 393 else "minecraft:experience_orb"
         elif name == "named_entity_spawn":
             seen[value["entityId"]] = "minecraft:player"
     return seen
@@ -590,7 +590,7 @@ class Context:
 
     # Comparisons
 
-    def compare_names(self, what, registry, reference, translated):
+    def compare_names(self, what, registry, reference, translated, rename=True):
         """Every name the reference saw must reach the translated client: the
         same name if the client's version knows it, else any stand-in (INFO).
         IDs outside the client's registry fail."""
@@ -600,7 +600,8 @@ class Context:
             self.fail(f"{what}: IDs outside the client's registries: {invalid[:5]}")
         remaining = list(translated)
         for name in reference:
-            target = matrix_registries.renamed(registry, name, self.ref.protocol, self.via.protocol)
+            target = (matrix_registries.renamed(registry, name, self.ref.protocol, self.via.protocol)
+                      if rename else name)
             if target in remaining:
                 remaining.remove(target)
             elif name.startswith("<"):
@@ -744,7 +745,7 @@ def step_blocks(cx):
             cx.fail(f"no block update for {name} at {position}")
             continue
         expected = client_cmd.block_name(specs[name]) if crosses else ref[position]
-        cx.compare_names(f"block {name}", "block_state", [expected], [via[position]])
+        cx.compare_names(f"block {name}", "block_state", [expected], [via[position]], rename=not crosses)
     entities = {"tile_entity_data", "block_entity_data"}
     ref_entities = cx.ref.packets(entities, cx.since("ref"))
     if not ref_entities:
@@ -791,6 +792,8 @@ def step_items(cx):
         client_cmd = Commands(cx.via.protocol, cx.server.software)
         names = {cx.cmd.item_name(item): client_cmd.item_name(item) for item in given}
         ref = [names.get(name) or name for name in ref]
+        cx.compare_names("inventory", "item", sorted(set(ref)), via, rename=False)
+        return
     cx.compare_names("inventory", "item", sorted(set(ref)), via)
 
 
@@ -838,11 +841,6 @@ def step_particles_and_sounds(cx):
     via = sounds_seen(cx.via, cx.via_reg, cx.since("via"))
     if not ref:
         cx.scenario("no sounds")
-    if (cx.server.protocol < 393) != (cx.via.protocol < 393):
-        # 1.13 renamed the note block sounds.
-        harp = {"minecraft:block.note.harp": "minecraft:block.note_block.harp",
-                "minecraft:block.note_block.harp": "minecraft:block.note.harp"}
-        ref = [harp.get(name, name) for name in ref]
     cx.compare_names("sounds", "sound_event", ref, via)
     count = lambda session, who: len(session.packets("world_particles", cx.since(who)))
     if count(cx.via, "via") < count(cx.ref, "ref"):
