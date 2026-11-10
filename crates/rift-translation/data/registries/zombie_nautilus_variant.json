@@ -1,0 +1,9 @@
+{
+  "entries": [
+    "{asset_id:\"minecraft:entity/nautilus/zombie_nautilus\"}",
+    "{model:\"warm\",asset_id:\"minecraft:entity/nautilus/zombie_nautilus_coral\"}"
+  ],
+  "versions": [
+    {"protocols":[774,775,776,777],"names":["minecraft:temperate","minecraft:warm"],"elements":[0,1]}
+  ]
+}

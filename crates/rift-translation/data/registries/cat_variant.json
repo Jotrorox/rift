@@ -1,0 +1,30 @@
+{
+  "entries": [
+    "{asset_id:\"minecraft:entity/cat/all_black\"}",
+    "{asset_id:\"minecraft:entity/cat/black\"}",
+    "{asset_id:\"minecraft:entity/cat/british_shorthair\"}",
+    "{asset_id:\"minecraft:entity/cat/calico\"}",
+    "{asset_id:\"minecraft:entity/cat/jellie\"}",
+    "{asset_id:\"minecraft:entity/cat/persian\"}",
+    "{asset_id:\"minecraft:entity/cat/ragdoll\"}",
+    "{asset_id:\"minecraft:entity/cat/red\"}",
+    "{asset_id:\"minecraft:entity/cat/siamese\"}",
+    "{asset_id:\"minecraft:entity/cat/tabby\"}",
+    "{asset_id:\"minecraft:entity/cat/white\"}",
+    "{baby_asset_id:\"minecraft:entity/cat/cat_all_black_baby\",asset_id:\"minecraft:entity/cat/cat_all_black\"}",
+    "{baby_asset_id:\"minecraft:entity/cat/cat_black_baby\",asset_id:\"minecraft:entity/cat/cat_black\"}",
+    "{baby_asset_id:\"minecraft:entity/cat/cat_british_shorthair_baby\",asset_id:\"minecraft:entity/cat/cat_british_shorthair\"}",
+    "{baby_asset_id:\"minecraft:entity/cat/cat_calico_baby\",asset_id:\"minecraft:entity/cat/cat_calico\"}",
+    "{baby_asset_id:\"minecraft:entity/cat/cat_jellie_baby\",asset_id:\"minecraft:entity/cat/cat_jellie\"}",
+    "{baby_asset_id:\"minecraft:entity/cat/cat_persian_baby\",asset_id:\"minecraft:entity/cat/cat_persian\"}",
+    "{baby_asset_id:\"minecraft:entity/cat/cat_ragdoll_baby\",asset_id:\"minecraft:entity/cat/cat_ragdoll\"}",
+    "{baby_asset_id:\"minecraft:entity/cat/cat_red_baby\",asset_id:\"minecraft:entity/cat/cat_red\"}",
+    "{baby_asset_id:\"minecraft:entity/cat/cat_siamese_baby\",asset_id:\"minecraft:entity/cat/cat_siamese\"}",
+    "{baby_asset_id:\"minecraft:entity/cat/cat_tabby_baby\",asset_id:\"minecraft:entity/cat/cat_tabby\"}",
+    "{baby_asset_id:\"minecraft:entity/cat/cat_white_baby\",asset_id:\"minecraft:entity/cat/cat_white\"}"
+  ],
+  "versions": [
+    {"protocols":[770,771,772,773,774],"names":["minecraft:all_black","minecraft:black","minecraft:british_shorthair","minecraft:calico","minecraft:jellie","minecraft:persian","minecraft:ragdoll","minecraft:red","minecraft:siamese","minecraft:tabby","minecraft:white"],"elements":[0,1,2,3,4,5,6,7,8,9,10]},
+    {"protocols":[775,776,777],"names":["minecraft:all_black","minecraft:black","minecraft:british_shorthair","minecraft:calico","minecraft:jellie","minecraft:persian","minecraft:ragdoll","minecraft:red","minecraft:siamese","minecraft:tabby","minecraft:white"],"elements":[11,12,13,14,15,16,17,18,19,20,21]}
+  ]
+}

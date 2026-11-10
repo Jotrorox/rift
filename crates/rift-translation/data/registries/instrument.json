@@ -1,0 +1,15 @@
+{
+  "entries": [
+    "{sound_event:\"minecraft:item.goat_horn.sound.4\",range:256.0f,description:{translate:\"instrument.minecraft.admire_goat_horn\"},use_duration:7.0f}",
+    "{sound_event:\"minecraft:item.goat_horn.sound.5\",range:256.0f,description:{translate:\"instrument.minecraft.call_goat_horn\"},use_duration:7.0f}",
+    "{sound_event:\"minecraft:item.goat_horn.sound.7\",range:256.0f,description:{translate:\"instrument.minecraft.dream_goat_horn\"},use_duration:7.0f}",
+    "{sound_event:\"minecraft:item.goat_horn.sound.3\",range:256.0f,description:{translate:\"instrument.minecraft.feel_goat_horn\"},use_duration:7.0f}",
+    "{sound_event:\"minecraft:item.goat_horn.sound.0\",range:256.0f,description:{translate:\"instrument.minecraft.ponder_goat_horn\"},use_duration:7.0f}",
+    "{sound_event:\"minecraft:item.goat_horn.sound.2\",range:256.0f,description:{translate:\"instrument.minecraft.seek_goat_horn\"},use_duration:7.0f}",
+    "{sound_event:\"minecraft:item.goat_horn.sound.1\",range:256.0f,description:{translate:\"instrument.minecraft.sing_goat_horn\"},use_duration:7.0f}",
+    "{sound_event:\"minecraft:item.goat_horn.sound.6\",range:256.0f,description:{translate:\"instrument.minecraft.yearn_goat_horn\"},use_duration:7.0f}"
+  ],
+  "versions": [
+    {"protocols":[768,769,770,771,772,773,774,775,776,777],"names":["minecraft:admire_goat_horn","minecraft:call_goat_horn","minecraft:dream_goat_horn","minecraft:feel_goat_horn","minecraft:ponder_goat_horn","minecraft:seek_goat_horn","minecraft:sing_goat_horn","minecraft:yearn_goat_horn"],"elements":[0,1,2,3,4,5,6,7]}
+  ]
+}
