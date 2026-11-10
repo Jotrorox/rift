@@ -1,0 +1,12 @@
+{
+  "item": {
+    "down": {
+      "music_disc_lava_chicken": "music_disc_creator"
+    }
+  },
+  "sound_event": {
+    "down": {
+      "music_disc.lava_chicken": "music_disc.creator"
+    }
+  }
+}
