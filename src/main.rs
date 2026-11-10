@@ -165,6 +165,9 @@ async fn start(args: Vec<String>) -> io::Result<()> {
                     "rift: warning: configuration evaluation is heavy; move expensive work into callbacks that need it, or callbacks may miss their 50 ms deadline"
                 );
             }
+            for warning in check::instance_logins(&config) {
+                eprintln!("rift: warning: {warning}");
+            }
             let (plugins, warnings) = check::plugins(&config);
             for line in &plugins {
                 println!("rift: {line}");

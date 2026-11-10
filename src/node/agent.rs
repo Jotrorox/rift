@@ -637,7 +637,14 @@ impl Agent {
             }
             Err(error) => return Err(error),
         }
-        let environment = crate::config::ProcessEnvironment::try_from(&start.environment)?;
+        let mut environment = crate::config::ProcessEnvironment::try_from(&start.environment)?;
+        if let Some(certificate) = &start.bus_certificate {
+            let path = directory.join(crate::instance_login::CERTIFICATE_FILE);
+            std::fs::write(&path, certificate)?;
+            environment
+                .set
+                .insert("RIFT_BUS_CERT".into(), path.to_string_lossy().into_owned());
+        }
         let child = crate::managed::spawn_process(&start.command, &directory, &environment)?;
         let pid = child.id();
         processes.insert(
