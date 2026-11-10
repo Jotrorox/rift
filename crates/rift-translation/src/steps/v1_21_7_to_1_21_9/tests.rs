@@ -339,6 +339,25 @@ fn player_rotation_gains_and_loses_relative_flags() {
         )
         .unwrap();
     assert_eq!(sent, [to_client("player_rotation", rotation(-90.0, -50.0))]);
+    // A teleport turns the player before the client reports back.
+    let mut teleport = Writer::new();
+    teleport.varint(7);
+    for _ in 0..6 {
+        teleport.f64(0.0);
+    }
+    teleport.f32(10.0).f32(80.0).i32(1 << 3);
+    let sent = down
+        .clientbound(State::Play, "player_position", &teleport.buf)
+        .unwrap();
+    assert_eq!(sent, [to_client("player_position", teleport.buf.clone())]);
+    let sent = down
+        .clientbound(
+            State::Play,
+            "player_rotation",
+            &flagged(5.0, true, 1.0, true),
+        )
+        .unwrap();
+    assert_eq!(sent, [to_client("player_rotation", rotation(-75.0, 81.0))]);
 
     assert!(
         down.clientbound(State::Play, "player_rotation", &hex("00000000020000000000"))

@@ -43,7 +43,7 @@ impl Down {
     pub fn routes() -> &'static Routes<Self> {
         static ROUTES: OnceLock<Routes<Down>> = OnceLock::new();
         ROUTES.get_or_init(|| {
-            use Direction::Serverbound;
+            use Direction::{Clientbound, Serverbound};
             use State::{Configuration, Play};
             RouteBuilder::new(OLDER, NEWER)
                 .defaults()
@@ -57,6 +57,7 @@ impl Down {
                 .drop_clientbound(Play, "debug/entity_value")
                 .drop_clientbound(Play, "debug/event")
                 .drop_clientbound(Play, "game_test_highlight_pos")
+                .tap(Clientbound, Play, "player_position", Self::follow_teleport)
                 .tap(Serverbound, Play, "move_player_rot", Self::follow_rotation)
                 .tap(
                     Serverbound,
@@ -124,6 +125,27 @@ impl Down {
     fn spawn_position(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
         let data = super::respawn_data_to_spawn(&packet.data)?;
         cx.to_client(state, Packet::new(packet.id, data));
+        Ok(())
+    }
+
+    /// A teleport sets the rotation before the client confirms it, and may
+    /// itself be relative (`Relative.Y_ROT` and `X_ROT`).
+    fn follow_teleport(&mut self, _: State, packet: &Packet) -> io::Result<()> {
+        let mut r = Reader::new(&packet.data);
+        r.varint()?; // Teleport ID.
+        r.take(48)?; // Position and movement.
+        let (yaw, pitch) = (r.f32()?, r.f32()?);
+        let relative = r.i32()?;
+        self.yaw = if relative & 1 << 3 != 0 {
+            self.yaw + yaw
+        } else {
+            yaw
+        };
+        self.pitch = if relative & 1 << 4 != 0 {
+            self.pitch + pitch
+        } else {
+            pitch
+        };
         Ok(())
     }
 
