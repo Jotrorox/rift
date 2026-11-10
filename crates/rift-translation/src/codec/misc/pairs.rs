@@ -189,7 +189,7 @@ fn every_sound_converts_across_every_pair() {
         let registry = data::version(backend).expect_registry("sound_event");
         let mut step = Defaults::new(client, backend);
         let seed = (backend >= 759).then_some(1);
-        for (id, _) in registry.names() {
+        for (id, name) in registry.names() {
             let sound = sound::Sound {
                 holder: sound::Holder::Id(id),
                 category: 0,
@@ -197,19 +197,37 @@ fn every_sound_converts_across_every_pair() {
                 pitch: 1.0,
                 seed,
             };
-            let (_, body) = sound::write(backend, &sound, sound::Emitter::Position([0, 0, 0]))
-                .unwrap()
-                .unwrap();
-            for out in step
-                .clientbound(State::Play, "sound", &body)
-                .unwrap_or_else(|error| panic!("{backend} -> {client} sound {id}: {error}"))
-            {
-                let kind = if out.name == "custom_sound" {
-                    sound::Kind::CustomSound
+            let mut emitters = vec![("sound", sound::Emitter::Position([0, 0, 0]))];
+            if backend >= 477 {
+                emitters.push(("sound_entity", sound::Emitter::Entity(7)));
+            }
+            for (packet, emitter) in emitters {
+                let (_, body) = sound::write(backend, &sound, emitter).unwrap().unwrap();
+                for out in step
+                    .clientbound(State::Play, packet, &body)
+                    .unwrap_or_else(|error| panic!("{backend} -> {client} {packet} {id}: {error}"))
+                {
+                    let kind = match out.name.as_str() {
+                        "custom_sound" => sound::Kind::CustomSound,
+                        "sound_entity" => sound::Kind::SoundEntity,
+                        _ => sound::Kind::Sound,
+                    };
+                    sound::read(client, kind, &out.data).unwrap();
+                }
+            }
+            if backend >= 393 {
+                let stop = sound::write_stop(&sound::StopSound {
+                    category: Some(1),
+                    name: Some(format!("minecraft:{name}")),
+                });
+                let out = step
+                    .clientbound(State::Play, "stop_sound", &stop)
+                    .unwrap_or_else(|error| panic!("{backend} -> {client} stop {name}: {error}"));
+                if client >= 393 {
+                    sound::read_stop(client, &out[0].data).unwrap();
                 } else {
-                    sound::Kind::Sound
-                };
-                sound::read(client, kind, &out.data).unwrap();
+                    assert_eq!(out[0].name, "custom_payload");
+                }
             }
         }
     }
