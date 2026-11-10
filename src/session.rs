@@ -43,6 +43,10 @@ struct Translation {
     translator: Translator,
     /// The backend's own protocol.
     version: ProtocolVersion,
+    /// Velocity forwarding is answered here, in the backend's protocol: the
+    /// request is a login plugin message, which a client older than 1.13 has
+    /// no packet for, and it is never the client's to answer anyway.
+    forwarding: Option<Forwarding>,
     /// Translated backend packets not yet handed to the session.
     translated: VecDeque<Packet>,
     /// Frames the translator answered the backend with on its own, such as
@@ -108,16 +112,26 @@ impl<S> Connection<S> {
     /// Run a packet read from a translated backend through its translator.
     fn translate_received(&mut self, packet: Packet) -> io::Result<()> {
         let translation = self.translation.as_mut().unwrap();
-        // The backend compresses from its own Set Compression on, whatever
-        // the session later does with the translated packet.
-        if translation.translator.backend_phase() == rift_translation::State::Login
-            && translation
+        if translation.translator.backend_phase() == rift_translation::State::Login {
+            match translation
                 .version
                 .kind(State::Login, Direction::Clientbound, packet.id)
-                == PacketKind::SetCompression
-        {
-            self.codec
-                .set_compression(read_varint(&mut packet.data.as_slice())?);
+            {
+                // The backend compresses from its own Set Compression on,
+                // whatever the session later does with the translated packet.
+                PacketKind::SetCompression => self
+                    .codec
+                    .set_compression(read_varint(&mut packet.data.as_slice())?),
+                PacketKind::LoginPluginRequest if forwarding::velocity_request(&packet) => {
+                    let response = self
+                        .login_plugins
+                        .request(&packet, translation.forwarding.as_ref())?
+                        .ok_or_else(|| protocol::invalid("unanswered Velocity forwarding"))?;
+                    translation.replies.extend(self.codec.encode(&response)?);
+                    return Ok(());
+                }
+                _ => {}
+            }
         }
         let mut out = rift_translation::Output::default();
         translation
@@ -645,9 +659,6 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             ));
         }
         let version = self.version()?;
-        if version.number() < mode.minimum_protocol() {
-            return Err(velocity_needs_1_13());
-        }
         let profile = self.authenticated_profile.clone().ok_or_else(|| {
             protocol::invalid("player forwarding requires an authenticated profile")
         })?;
@@ -784,6 +795,10 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         backend.translation = translator.map(|translator| Translation {
             translator,
             version: backend_version,
+            forwarding: self
+                .forwarding
+                .as_ref()
+                .map(|forwarding| forwarding.for_backend(backend_version)),
             translated: VecDeque::new(),
             replies: Vec::new(),
             replies_offset: 0,

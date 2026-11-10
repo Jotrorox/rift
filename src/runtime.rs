@@ -588,7 +588,13 @@ pub async fn handle(
             }
             .await;
             match cached {
-                Ok(cached) => response = status::response_packet(&cached)?,
+                Ok(cached) => {
+                    response = rift::backend_version::status_for_client(
+                        &snapshot.config,
+                        session.handshake.protocol,
+                        status::response_packet(&cached)?,
+                    )
+                }
                 Err(error) if error.kind() != io::ErrorKind::InvalidData => {
                     response = Document::new(
                         session.handshake.protocol,
@@ -619,9 +625,12 @@ pub async fn handle(
         }
         if let Some(forwarding) = &snapshot.config.forwarding
             && session.handshake.protocol < forwarding.mode.minimum_protocol()
+            && !snapshot.config.translation.enabled
         {
             // Velocity forwarding answers a login plugin request, which
             // arrived in 1.13; Velocity itself turns older clients away too.
+            // With translation an older client can still join a backend that
+            // is new enough, so the backend's version decides when it attaches.
             let reason = catalog::notice(Notice::LoginForwardingVersion);
             let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect_text(&reason)).await;
             return Err(rift::text::error(io::ErrorKind::Unsupported, reason));

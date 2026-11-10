@@ -149,6 +149,32 @@ pub fn serves(config: &Config, name: &str, client: ProtocolVersion) -> bool {
         })
 }
 
+/// A backend's own status response as a player on `client` should see it in
+/// the server list: where Rift translates between the two versions, the
+/// backend's protocol number is replaced by the player's, so the client does
+/// not show a server it can join as incompatible. Anything else, including a
+/// response that does not parse, is returned unchanged.
+pub fn status_for_client(config: &Config, client: i32, response: Packet) -> Packet {
+    let rewritten = || {
+        if !config.translation.enabled {
+            return None;
+        }
+        let client = ProtocolVersion::new(client).ok()?;
+        let document = read_string(&mut response.data.as_slice(), MAX_STATUS).ok()?;
+        let mut document: serde_json::Value = serde_json::from_str(document).ok()?;
+        let reported = document.get("version")?.get("protocol")?.as_i64()?;
+        let backend = ProtocolVersion::new(i32::try_from(reported).ok()?).ok()?;
+        if backend == client || !crate::protocol::translatable(client, backend) {
+            return None;
+        }
+        document["version"]["protocol"] = client.number().into();
+        let mut data = Vec::new();
+        crate::protocol::write_string(&document.to_string(), &mut data);
+        Some(Packet::new(response.id, data))
+    };
+    rewritten().unwrap_or(response)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,6 +250,42 @@ mod tests {
             protocol(&config(address), "lobby", version(772), &[]).await,
             None
         );
+    }
+
+    #[test]
+    fn a_translatable_backend_status_shows_the_players_protocol() {
+        let status = |protocol| crate::protocol::status_response(protocol, 3, 20, "hello");
+        let protocol_of = |packet: &Packet| {
+            let text = read_string(&mut packet.data.as_slice(), MAX_STATUS).unwrap();
+            let document: serde_json::Value = serde_json::from_str(text).unwrap();
+            assert_eq!(document["players"]["online"], 3);
+            document["version"]["protocol"].as_i64().unwrap()
+        };
+        let mut config = Config::default();
+        assert_eq!(
+            protocol_of(&status_for_client(&config, 772, status(771))),
+            772
+        );
+        assert_eq!(
+            protocol_of(&status_for_client(&config, 772, status(772))),
+            772
+        );
+        // Not translatable, an unknown client, or translation off: unchanged.
+        assert_eq!(
+            protocol_of(&status_for_client(&config, 772, status(47))),
+            47
+        );
+        assert_eq!(
+            protocol_of(&status_for_client(&config, 5, status(771))),
+            771
+        );
+        config.translation.enabled = false;
+        assert_eq!(
+            protocol_of(&status_for_client(&config, 772, status(771))),
+            771
+        );
+        let garbage = Packet::new(0, vec![1, 2, 3]);
+        assert_eq!(status_for_client(&config, 772, garbage.clone()), garbage);
     }
 
     #[tokio::test]

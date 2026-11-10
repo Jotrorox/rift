@@ -77,6 +77,17 @@ impl Forwarding {
         matches!(self.method, Method::Velocity { .. })
     }
 
+    /// The same forwarding for a backend on another protocol than the
+    /// player's. The player's 1.19 chat key is signed for the player's own
+    /// protocol and message format, so a translated backend gets none.
+    pub(crate) fn for_backend(&self, version: ProtocolVersion) -> Self {
+        Self {
+            key: None,
+            version,
+            ..self.clone()
+        }
+    }
+
     /// The oldest backend protocol this forwarding reaches.
     pub(crate) fn minimum_protocol(&self) -> i32 {
         if self.velocity() { 393 } else { 0 }
@@ -202,6 +213,14 @@ impl Forwarding {
             _ => 1,
         }
     }
+}
+
+/// Whether a Login Plugin Request asks for Velocity forwarding. The layout is
+/// the same in every protocol that has the packet.
+pub(crate) fn velocity_request(packet: &Packet) -> bool {
+    let mut bytes = packet.data.as_slice();
+    read_varint(&mut bytes).is_ok()
+        && read_string(&mut bytes, 32767).is_ok_and(|channel| channel == CHANNEL)
 }
 
 /// Query state belongs to one backend attachment, including across retries.
