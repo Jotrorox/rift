@@ -19,6 +19,8 @@ pub(super) const TEXT: usize = 262_144;
 const MUSIC: u8 = 0x02;
 const FOG: u8 = 0x04;
 
+/// Only the flags change. This step owns the packet instead of the text
+/// codec because of them; the titles are JSON text both versions read alike.
 pub(super) fn boss_event<S: HasShared>(
     step: &mut S,
     cx: &mut Cx<'_>,
@@ -98,6 +100,8 @@ const SOUTH: i32 = 3;
 const WEST: i32 = 4;
 const EAST: i32 = 5;
 
+/// This step owns the packet instead of the chunk codec because of the
+/// smoke; the item and block state IDs it carries map like everywhere else.
 pub(super) fn level_event<S: HasShared>(
     step: &mut S,
     cx: &mut Cx<'_>,
@@ -181,6 +185,8 @@ const OFF_HAND: i32 = 1;
 /// The `player_action` that swaps the items in the two hands.
 const SWAP_HANDS: i32 = 6;
 
+/// This step owns the packet instead of the item codec because of the
+/// hand; the book's stack still goes through the item codec.
 pub(super) fn edit_book<S: HasShared>(
     step: &mut S,
     cx: &mut Cx<'_>,
@@ -203,8 +209,9 @@ pub(super) fn edit_book<S: HasShared>(
     let edit = Packet::new(packet.id, rw.finish()?);
     match hand {
         MAIN_HAND => cx.to_backend(state, edit),
-        // A 1.13 server writes into the main hand's book, or the main hand's
-        // other book. Swap the hands around the edit, as the player could.
+        // A 1.13 server applies every edit to the main hand: an off-hand
+        // edit would be lost, or overwrite a book held in the main hand.
+        // Swap the hands around the edit, as the player could.
         OFF_HAND => {
             let swap = Packet::new(
                 shared.target_data(Direction::Serverbound).expect_packet(

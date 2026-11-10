@@ -74,7 +74,9 @@ impl Up {
     }
 
     /// The backend's range starts within the command it saw; the client's
-    /// counts the slash that was taken off.
+    /// counts the slash that was taken off. Owned here instead of by the
+    /// text codec because of that; the tooltips are JSON text both versions
+    /// read alike.
     fn command_suggestions(
         &mut self,
         cx: &mut Cx<'_>,
