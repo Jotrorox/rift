@@ -2,7 +2,7 @@
 //! older `chunk_blocks_update`), `block_event`, `level_event` and
 //! `block_entity_data`.
 use super::{
-    block_entity,
+    block_entity, flattening,
     model::Chunk,
     packets::{block_fallback, ids, read_position, write_position},
 };
@@ -11,7 +11,7 @@ use crate::{
     codec::{HasShared, Shared},
     data,
     mapping::Mapping,
-    nbt::Nbt,
+    nbt::{Compound, Nbt},
     step::Cx,
     version,
     wire::{Position, Reader, Writer, invalid},
@@ -42,10 +42,98 @@ pub fn block_update<S: HasShared>(
     let block = reader.varint()?;
     reader.finish()?;
     let mapping = ids(source, target, "block_state")?;
+    let mapped = map_state(mapping, block, block_fallback(target));
     let mut writer = Writer::with_capacity(12);
     write_position(&mut writer, target, position);
-    writer.varint(map_state(mapping, block, block_fallback(target)));
+    writer.varint(mapped);
     cx.to_client(state, Packet::new(packet.id, writer.buf));
+    if (source < 393) != (target < 393) {
+        let modern = if source >= 393 { block } else { mapped };
+        track(shared, position, modern);
+        if source >= 393 {
+            // A 1.12 client sees the colour, kind or plant only through the
+            // block entity.
+            send_legacy_entity(shared, cx, state, position, block, None)?;
+        }
+    }
+    Ok(())
+}
+
+/// At most this many flattened blocks are followed per connection.
+const TRACKED: usize = 1 << 16;
+
+/// Remember (or forget) the 1.13 state at `position` for the flattening.
+pub fn track(shared: &mut Shared, position: Position, modern: i32) {
+    let states = &data::version(393).block_states;
+    let key = (position.x, position.y, position.z);
+    let tracked = &mut shared.chunk.flattened;
+    if flattening::relevant(states, modern) {
+        if tracked.len() >= TRACKED && !tracked.contains_key(&key) {
+            tracked.clear();
+        }
+        tracked.insert(key, modern);
+    } else {
+        tracked.remove(&key);
+    }
+}
+
+/// A 1.12 `block_entity_data` for the block entity 1.13 block `modern`
+/// needs, merged into `tag` when the server sent one.
+fn send_legacy_entity(
+    shared: &mut Shared,
+    cx: &mut Cx<'_>,
+    state: Phase,
+    position: Position,
+    modern: i32,
+    tag: Option<Compound>,
+) -> io::Result<()> {
+    let target = shared.client;
+    let states = &data::version(shared.backend).block_states;
+    let Some((id, fields)) = flattening::fields_down(states, modern) else {
+        if let Some(tag) = tag {
+            return send_entity(cx, state, target, position, &tag);
+        }
+        return Ok(());
+    };
+    let mut tag = tag.unwrap_or_else(|| {
+        super::convert::with_metadata(None, id, position.x, position.y, position.z)
+    });
+    if id == "banner"
+        && let Some(Nbt::List(patterns)) = tag.get_mut("Patterns")
+    {
+        for pattern in patterns.iter_mut() {
+            if let Some(pattern) = pattern.as_compound_mut()
+                && let Some(color) = pattern.int("Color")
+            {
+                pattern.insert("Color", 15 - color.clamp(0, 15));
+            }
+        }
+    }
+    for (key, value) in fields.0 {
+        tag.insert(key, value);
+    }
+    send_entity(cx, state, target, position, &tag)
+}
+
+fn send_entity(
+    cx: &mut Cx<'_>,
+    state: Phase,
+    target: i32,
+    position: Position,
+    tag: &Compound,
+) -> io::Result<()> {
+    let name = data::strip(tag.str("id").unwrap_or(""));
+    let Some(action) = block_entity::action(target, name) else {
+        return Ok(());
+    };
+    let id = data::version(target)
+        .packet_id(Phase::Play, Direction::Clientbound, "block_entity_data")
+        .ok_or_else(|| invalid("no block entity packet"))?;
+    let mut writer = Writer::new();
+    write_position(&mut writer, target, position);
+    writer.u8(action as u8);
+    Nbt::Compound(tag.clone()).write(&mut writer, true);
+    cx.to_client(state, Packet::new(id, writer.buf));
     Ok(())
 }
 
@@ -460,8 +548,42 @@ pub fn block_entity_data<S: HasShared>(
     } else {
         i32::from(reader.u8()?)
     };
-    let nbt = Nbt::read(&mut reader, !version::nameless_nbt(source))?;
+    let mut nbt = Nbt::read(&mut reader, !version::nameless_nbt(source))?;
     reader.finish()?;
+    let key = (position.x, position.y, position.z);
+    if source < 393 && target >= 393 {
+        // The block entity decides which 1.13 block this is.
+        if let (Some(&modern), Some(Nbt::Compound(tag))) =
+            (shared.chunk.flattened.get(&key), &mut nbt)
+        {
+            let states = &data::version(target).block_states;
+            let id = data::strip(tag.str("id").unwrap_or("")).to_owned();
+            let (new, keep) = flattening::fix_up(states, modern, &id, tag);
+            if let Some(new) = new {
+                shared.chunk.flattened.insert(key, new);
+                let id = data::version(target)
+                    .packet_id(Phase::Play, Direction::Clientbound, "block_update")
+                    .ok_or_else(|| invalid("no block update packet"))?;
+                let mut writer = Writer::with_capacity(12);
+                write_position(&mut writer, target, position);
+                writer.varint(new);
+                cx.to_client(state, Packet::new(id, writer.buf));
+            }
+            if !keep {
+                return Ok(());
+            }
+        }
+    }
+    if source >= 393
+        && target < 393
+        && let Some(&modern) = shared.chunk.flattened.get(&key)
+    {
+        let tag = match nbt {
+            Some(Nbt::Compound(tag)) => Some(tag),
+            _ => None,
+        };
+        return send_legacy_entity(shared, cx, state, position, modern, tag);
+    }
     let Some((kind, nbt)) =
         block_entity::convert_packet(shared, Direction::Clientbound, position, kind, nbt)?
     else {

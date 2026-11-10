@@ -99,7 +99,13 @@ pub fn convert(chunk: &mut Chunk, plan: &Plan<'_>, scratch: &mut Scratch) -> io:
     if (min_section, count) != (chunk.min_section, chunk.sections.len()) {
         rebase(chunk, min_section, count, target, scratch)?;
     }
+    if source >= 393 && target < 393 {
+        super::flattening::down(chunk, source, scratch)?;
+    }
     convert_sections(chunk, plan, scratch)?;
+    if source < 393 && target >= 393 {
+        super::flattening::up(chunk, target, scratch)?;
+    }
     convert_biomes(chunk, plan, scratch)?;
     if target < 757 && source >= 757 {
         // Before 1.18 a section without blocks is left out.

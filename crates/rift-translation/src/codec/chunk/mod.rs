@@ -33,6 +33,7 @@ pub mod container;
 pub mod convert;
 pub mod explode;
 mod flags;
+pub mod flattening;
 pub mod light;
 pub mod model;
 pub mod packets;
@@ -64,6 +65,10 @@ pub struct State {
     held_light: HashMap<(i32, i32), Light>,
     /// Columns the client has (for steps that need to know).
     loaded: HashSet<(i32, i32)>,
+    /// Across 1.12.2 / 1.13: the 1.13 states of beds, banners, skulls and
+    /// flower pots by position, for block entity packets that arrive on
+    /// their own.
+    flattened: HashMap<(i32, i32, i32), i32>,
     scratch: Scratch,
 }
 

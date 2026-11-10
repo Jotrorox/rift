@@ -940,3 +940,102 @@ fn chunk_throughput() {
         );
     }
 }
+
+mod flattening_packets {
+    use crate::{
+        State,
+        codec::testing::Defaults,
+        data,
+        nbt::{Compound, Nbt},
+        wire::{Position, Reader, Writer},
+    };
+
+    #[test]
+    fn placed_blocks_get_their_block_entity_for_1_12_clients() {
+        let states = &data::version(393).block_states;
+        let at = Position { x: 5, y: 70, z: -2 };
+        let mut step = Defaults::new(340, 393);
+        let mut writer = Writer::new();
+        writer.position_legacy(at).varint(
+            states
+                .parse("lime_bed[facing=east,occupied=false,part=head]")
+                .unwrap(),
+        );
+        // The block update itself needs the flattening mapping; the block
+        // entity that follows it does not.
+        match step.clientbound(State::Play, "block_update", &writer.buf) {
+            Err(error) => assert!(error.to_string().contains("mapping"), "{error}"),
+            Ok(out) => {
+                assert_eq!(out[1].name, "block_entity_data");
+                let mut reader = Reader::new(&out[1].data);
+                reader.position_legacy().unwrap();
+                assert_eq!(reader.u8().unwrap(), 11);
+                let tag = Nbt::read(&mut reader, true).unwrap().unwrap();
+                assert_eq!(tag.as_compound().unwrap().int("color"), Some(5));
+            }
+        }
+        // A 1.13 banner's patterns get the 1.12 base and inverted colours
+        // once its block is known.
+        let mut step = Defaults::new(340, 393);
+        super::super::blocks::track(
+            crate::codec::HasShared::shared(&mut step),
+            at,
+            states.parse("blue_banner[rotation=0]").unwrap(),
+        );
+        let mut pattern = Compound::new();
+        pattern.insert("Color", 1);
+        pattern.insert("Pattern", "cre");
+        let mut tag = Compound::new();
+        tag.insert("id", "minecraft:banner");
+        tag.insert("Patterns", vec![Nbt::Compound(pattern)]);
+        let mut writer = Writer::new();
+        writer.position_legacy(at).u8(6);
+        Nbt::Compound(tag).write(&mut writer, true);
+        let out = step
+            .clientbound(State::Play, "block_entity_data", &writer.buf)
+            .unwrap();
+        let mut reader = Reader::new(&out[0].data);
+        reader.position_legacy().unwrap();
+        assert_eq!(reader.u8().unwrap(), 6);
+        let tag = Nbt::read(&mut reader, true).unwrap().unwrap();
+        let tag = tag.as_compound().unwrap();
+        assert_eq!(tag.int("Base"), Some(15 - 11));
+        assert_eq!(
+            tag.list("Patterns").unwrap()[0]
+                .as_compound()
+                .unwrap()
+                .int("Color"),
+            Some(14)
+        );
+    }
+
+    #[test]
+    fn a_1_12_block_entity_picks_the_1_13_block() {
+        let states = &data::version(393).block_states;
+        let at = Position { x: 1, y: 64, z: 1 };
+        let mut step = Defaults::new(393, 340);
+        super::super::blocks::track(
+            crate::codec::HasShared::shared(&mut step),
+            at,
+            states.parse("flower_pot").unwrap(),
+        );
+        let mut tag = Compound::new();
+        tag.insert("id", "minecraft:flower_pot");
+        tag.insert("Item", "minecraft:red_flower");
+        tag.insert("Data", 2);
+        let mut writer = Writer::new();
+        writer.position_legacy(at).u8(5);
+        Nbt::Compound(tag).write(&mut writer, true);
+        let out = step
+            .clientbound(State::Play, "block_entity_data", &writer.buf)
+            .unwrap();
+        assert_eq!(out.len(), 1, "the pot's block entity is gone");
+        assert_eq!(out[0].name, "block_update");
+        let mut reader = Reader::new(&out[0].data);
+        reader.position_legacy().unwrap();
+        assert_eq!(
+            states.describe(reader.varint().unwrap()).unwrap(),
+            "potted_allium"
+        );
+    }
+}

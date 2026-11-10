@@ -184,7 +184,13 @@ pub fn level_chunk<S: HasShared>(
         );
         shared.chunk.loaded.insert(position);
     }
+    if (source < 393) != (target < 393) {
+        track_column(shared, &mut chunk, source >= 393, true)?;
+    }
     convert_chunk(shared, &mut chunk)?;
+    if source < 393 && target >= 393 {
+        track_column(shared, &mut chunk, true, false)?;
+    }
     if (477..757).contains(&target)
         && let Some(light) = chunk.light.take()
     {
@@ -232,6 +238,35 @@ fn rebase_light(light: &mut Light, shift: i32, count: usize) {
         }
         *arrays = new;
     }
+}
+
+/// Follow the flattened blocks of a column (1.12.2 / 1.13): before
+/// conversion when the column is in 1.13 terms (`modern`), after when it
+/// came from 1.12. `forget` first drops what was known for the column.
+fn track_column(
+    shared: &mut Shared,
+    chunk: &mut Chunk,
+    modern: bool,
+    forget: bool,
+) -> io::Result<()> {
+    if forget {
+        let (x, z) = (chunk.x, chunk.z);
+        shared
+            .chunk
+            .flattened
+            .retain(|(bx, _, bz), _| (bx >> 4, bz >> 4) != (x, z));
+    }
+    if !modern {
+        return Ok(());
+    }
+    let states = &data::version(393).block_states;
+    let mut scratch = std::mem::take(&mut shared.chunk.scratch);
+    let found = super::flattening::find(chunk, states, &mut scratch);
+    shared.chunk.scratch = scratch;
+    for (x, y, z, state) in found? {
+        super::blocks::track(shared, Position { x, y, z }, state);
+    }
+    Ok(())
 }
 
 /// `light_update`.
@@ -326,6 +361,7 @@ pub fn tap_world<S: HasShared>(step: &mut S, _: Phase, packet: &Packet) -> io::R
     let login = name == "login";
     shared.chunk.held_light.clear();
     shared.chunk.loaded.clear();
+    shared.chunk.flattened.clear();
     let mut reader = Reader::new(&packet.data);
     if protocol < 735 {
         if login {
