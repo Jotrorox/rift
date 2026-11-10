@@ -1,0 +1,112 @@
+{
+  "custom_stat": {
+    "down": {
+      "nautilus_one_cm": "horse_one_cm"
+    }
+  },
+  "entity_type": {
+    "down": {
+      "camel_husk": "camel",
+      "nautilus": "squid",
+      "parched": "skeleton",
+      "zombie_nautilus": "glow_squid"
+    }
+  },
+  "item": {
+    "down": {
+      "camel_husk_spawn_egg": "camel_spawn_egg",
+      "copper_nautilus_armor": "copper_horse_armor",
+      "copper_spear": "copper_sword",
+      "diamond_nautilus_armor": "diamond_horse_armor",
+      "diamond_spear": "diamond_sword",
+      "golden_nautilus_armor": "golden_horse_armor",
+      "golden_spear": "golden_sword",
+      "iron_nautilus_armor": "iron_horse_armor",
+      "iron_spear": "iron_sword",
+      "nautilus_spawn_egg": "squid_spawn_egg",
+      "netherite_horse_armor": "diamond_horse_armor",
+      "netherite_nautilus_armor": "diamond_horse_armor",
+      "netherite_spear": "netherite_sword",
+      "parched_spawn_egg": "skeleton_spawn_egg",
+      "stone_spear": "stone_sword",
+      "wooden_spear": "wooden_sword",
+      "zombie_nautilus_spawn_egg": "glow_squid_spawn_egg"
+    }
+  },
+  "mob_effect": {
+    "down": {
+      "breath_of_the_nautilus": "water_breathing"
+    }
+  },
+  "sound_event": {
+    "down": {
+      "entity.baby_nautilus.ambient": "entity.squid.ambient",
+      "entity.baby_nautilus.ambient_land": "entity.squid.ambient",
+      "entity.baby_nautilus.death": "entity.squid.death",
+      "entity.baby_nautilus.death_land": "entity.squid.death",
+      "entity.baby_nautilus.eat": "entity.dolphin.eat",
+      "entity.baby_nautilus.hurt": "entity.squid.hurt",
+      "entity.baby_nautilus.hurt_land": "entity.squid.hurt",
+      "entity.baby_nautilus.swim": "entity.dolphin.swim",
+      "entity.camel_husk.ambient": "entity.camel.ambient",
+      "entity.camel_husk.dash": "entity.camel.dash",
+      "entity.camel_husk.dash_ready": "entity.camel.dash_ready",
+      "entity.camel_husk.death": "entity.camel.death",
+      "entity.camel_husk.eat": "entity.camel.eat",
+      "entity.camel_husk.hurt": "entity.camel.hurt",
+      "entity.camel_husk.saddle": "entity.camel.saddle",
+      "entity.camel_husk.sit": "entity.camel.sit",
+      "entity.camel_husk.stand": "entity.camel.stand",
+      "entity.camel_husk.step": "entity.camel.step",
+      "entity.camel_husk.step_sand": "entity.camel.step_sand",
+      "entity.nautilus.ambient": "entity.squid.ambient",
+      "entity.nautilus.ambient_land": "entity.squid.ambient",
+      "entity.nautilus.dash": "entity.dolphin.jump",
+      "entity.nautilus.dash_land": "entity.dolphin.jump",
+      "entity.nautilus.dash_ready": "entity.camel.dash_ready",
+      "entity.nautilus.dash_ready_land": "entity.camel.dash_ready",
+      "entity.nautilus.death": "entity.squid.death",
+      "entity.nautilus.death_land": "entity.squid.death",
+      "entity.nautilus.eat": "entity.dolphin.eat",
+      "entity.nautilus.hurt": "entity.squid.hurt",
+      "entity.nautilus.hurt_land": "entity.squid.hurt",
+      "entity.nautilus.riding": "entity.dolphin.swim",
+      "entity.nautilus.swim": "entity.dolphin.swim",
+      "entity.parched.ambient": "entity.skeleton.ambient",
+      "entity.parched.death": "entity.skeleton.death",
+      "entity.parched.hurt": "entity.skeleton.hurt",
+      "entity.parched.step": "entity.skeleton.step",
+      "entity.parrot.imitate.camel_husk": "entity.parrot.ambient",
+      "entity.parrot.imitate.parched": "entity.parrot.imitate.skeleton",
+      "entity.parrot.imitate.zombie_horse": "entity.parrot.ambient",
+      "entity.parrot.imitate.zombie_nautilus": "entity.parrot.imitate.drowned",
+      "entity.zombie_horse.angry": "entity.horse.angry",
+      "entity.zombie_horse.eat": "entity.horse.eat",
+      "entity.zombie_nautilus.ambient": "entity.glow_squid.ambient",
+      "entity.zombie_nautilus.ambient_land": "entity.glow_squid.ambient",
+      "entity.zombie_nautilus.dash": "entity.dolphin.jump",
+      "entity.zombie_nautilus.dash_land": "entity.dolphin.jump",
+      "entity.zombie_nautilus.dash_ready": "entity.camel.dash_ready",
+      "entity.zombie_nautilus.dash_ready_land": "entity.camel.dash_ready",
+      "entity.zombie_nautilus.death": "entity.glow_squid.death",
+      "entity.zombie_nautilus.death_land": "entity.glow_squid.death",
+      "entity.zombie_nautilus.eat": "entity.dolphin.eat",
+      "entity.zombie_nautilus.hurt": "entity.glow_squid.hurt",
+      "entity.zombie_nautilus.hurt_land": "entity.glow_squid.hurt",
+      "entity.zombie_nautilus.swim": "entity.dolphin.swim",
+      "item.armor.equip_nautilus": "entity.horse.armor",
+      "item.armor.unequip_nautilus": "item.horse_armor.unequip",
+      "item.nautilus_saddle_equip": "entity.horse.saddle",
+      "item.nautilus_saddle_underwater_equip": "entity.horse.saddle",
+      "item.spear.attack": "entity.player.attack.strong",
+      "item.spear.hit": "item.trident.hit",
+      "item.spear.lunge_1": "item.trident.riptide_1",
+      "item.spear.lunge_2": "item.trident.riptide_2",
+      "item.spear.lunge_3": "item.trident.riptide_3",
+      "item.spear.use": "item.trident.throw",
+      "item.spear_wood.attack": "entity.player.attack.strong",
+      "item.spear_wood.hit": "item.trident.hit",
+      "item.spear_wood.use": "item.trident.throw"
+    }
+  }
+}
