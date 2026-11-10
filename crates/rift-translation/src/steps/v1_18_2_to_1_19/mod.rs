@@ -6,6 +6,8 @@
 //! ([`join`]) and the login phase ([`login`]).
 pub(super) mod chat;
 pub(super) mod join;
+#[cfg(test)]
+pub(super) mod layout;
 pub(super) mod login;
 pub(super) mod messages;
 #[cfg(test)]
@@ -17,7 +19,6 @@ mod blocks;
 mod down;
 mod entities;
 mod up;
-mod world;
 
 #[cfg(test)]
 mod tests;

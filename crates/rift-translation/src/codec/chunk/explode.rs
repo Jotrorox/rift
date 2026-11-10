@@ -5,7 +5,9 @@
 //! - 1.17: the count is a VarInt;
 //! - 1.19.3: the position is double;
 //! - 1.20.3: then the block interaction (keep, destroy, destroy with decay,
-//!   trigger), small and large particles and a sound;
+//!   trigger), small and large particles and a sound (written out: a
+//!   sound event name and an optional fixed range);
+//! - 1.20.5: the sound is a registry holder;
 //! - 1.21.2: position, optional double knockback, one particle, sound;
 //! - 1.21.9: radius and block count are back (an int count, not a list),
 //!   followed by a weighted list of block particles;
@@ -52,42 +54,61 @@ fn particle(shared: &mut Shared, reader: &mut Reader<'_>) -> io::Result<Option<V
     Ok(known.then_some(rw.w.buf))
 }
 
-/// A sound holder (registry ID + 1, or 0 and an inline sound event) in the
-/// receiver's terms. A sound the receiver lacks is sent inline by name.
+/// The explosion sound in the receiver's terms: inline (a sound event name
+/// and an optional fixed range) in 1.20.3/1.20.4, whose packet writes the
+/// sound event itself; a holder (registry ID + 1, or 0 and an inline sound
+/// event) from 1.20.5. A sound the receiver lacks is sent inline by name.
 fn sound(shared: &mut Shared, reader: &mut Reader<'_>) -> io::Result<Vec<u8>> {
     let (source, target) = (shared.backend, shared.client);
-    let mut writer = Writer::new();
-    let id = reader.varint()?;
+    let id = if source == 765 { 0 } else { reader.varint()? };
     if id == 0 {
-        writer.varint(0).string(reader.str()?);
-        if reader.bool()? {
-            writer.bool(true).f32(reader.f32()?);
+        let name = reader.string(32767)?;
+        let range = if reader.bool()? {
+            Some(reader.f32()?)
         } else {
-            writer.bool(false);
+            None
+        };
+        return Ok(inline_sound(target, name, range));
+    }
+    let id = id - 1;
+    if target != 765
+        && let Some(mapped) = match super::packets::ids(source, target, "sound_event")? {
+            None => Some(id),
+            Some(mapping) => mapping.get(id),
         }
+    {
+        let mut writer = Writer::new();
+        writer.varint(mapped + 1);
         return Ok(writer.buf);
     }
-    match super::packets::ids(source, target, "sound_event")? {
-        None => {
-            writer.varint(id);
+    let name = data::version(source)
+        .registry("sound_event")
+        .and_then(|registry| registry.name(id))
+        .ok_or_else(|| invalid("unknown sound event"))?;
+    Ok(inline_sound(target, &format!("minecraft:{name}"), None))
+}
+
+/// A sound event in `protocol`'s explosion layout: by registry ID when
+/// the layout has holders and the registry has it without a fixed range,
+/// as a server of that version sends a vanilla sound, else written out.
+fn inline_sound(protocol: i32, name: &str, range: Option<f32>) -> Vec<u8> {
+    let mut writer = Writer::new();
+    if protocol != 765 {
+        let id = data::version(protocol)
+            .registry("sound_event")
+            .and_then(|registry| registry.id(crate::data::strip(name)));
+        if let (Some(id), None) = (id, range) {
+            writer.varint(id + 1);
+            return writer.buf;
         }
-        Some(mapping) => match mapping.get(id - 1) {
-            Some(mapped) => {
-                writer.varint(mapped + 1);
-            }
-            None => {
-                let name = data::version(source)
-                    .registry("sound_event")
-                    .and_then(|registry| registry.name(id - 1))
-                    .ok_or_else(|| invalid("unknown sound event"))?;
-                writer
-                    .varint(0)
-                    .string(&format!("minecraft:{name}"))
-                    .bool(false);
-            }
-        },
+        writer.varint(0);
     }
-    Ok(writer.buf)
+    writer.string(name);
+    match range {
+        Some(range) => writer.bool(true).f32(range),
+        None => writer.bool(false),
+    };
+    writer.buf
 }
 
 fn read(shared: &mut Shared, data: &[u8]) -> io::Result<Explosion> {
@@ -180,6 +201,13 @@ fn named_particle(protocol: i32, name: &str) -> Option<Vec<u8>> {
 }
 
 fn explode_sound(protocol: i32) -> io::Result<Vec<u8>> {
+    if protocol == 765 {
+        return Ok(inline_sound(
+            protocol,
+            "minecraft:entity.generic.explode",
+            None,
+        ));
+    }
     let id = data::version(protocol)
         .registry("sound_event")
         .and_then(|registry| registry.id("entity.generic.explode"))
@@ -335,5 +363,53 @@ mod tests {
             let mut shared = Shared::new(protocol, protocol);
             assert_eq!(read(&mut shared, &bytes).unwrap(), explosion, "{protocol}");
         }
+    }
+
+    /// 1.20.3/1.20.4 write the sound event itself; 1.20.2 has none and
+    /// 1.20.5 a holder.
+    #[test]
+    fn the_1_20_3_sound_is_written_out() {
+        use crate::codec::testing::Defaults;
+        let mut body = Writer::new();
+        body.f64(0.5).f64(64.0).f64(0.5).f32(4.0).varint(0);
+        body.f32(0.0).f32(0.0).f32(0.0);
+        let older = body.buf.clone();
+        let mut up = Defaults::new(765, 764);
+        let out = up.clientbound(Phase::Play, "explode", &older).unwrap();
+        let mut r = Reader::new(&out[0].data);
+        r.take(older.len()).unwrap();
+        assert_eq!(r.varint().unwrap(), 1); // Destroy.
+        let particles = data::version(765).expect_registry("particle_type");
+        assert_eq!(r.varint().unwrap(), particles.id("explosion").unwrap());
+        assert_eq!(
+            r.varint().unwrap(),
+            particles.id("explosion_emitter").unwrap()
+        );
+        assert_eq!(r.str().unwrap(), "minecraft:entity.generic.explode");
+        assert!(!r.bool().unwrap());
+        r.finish().unwrap();
+
+        let mut up = Defaults::new(766, 765);
+        let out = up
+            .clientbound(Phase::Play, "explode", &out[0].data)
+            .unwrap();
+        let mut r = Reader::new(&out[0].data);
+        r.take(older.len() + 3).unwrap();
+        let sounds = data::version(766).expect_registry("sound_event");
+        assert_eq!(
+            r.varint().unwrap(),
+            sounds.id("entity.generic.explode").unwrap() + 1
+        );
+        r.finish().unwrap();
+
+        let mut down = Defaults::new(765, 766);
+        let back = down
+            .clientbound(Phase::Play, "explode", &out[0].data)
+            .unwrap();
+        let mut r = Reader::new(&back[0].data);
+        r.take(older.len() + 3).unwrap();
+        assert_eq!(r.str().unwrap(), "minecraft:entity.generic.explode");
+        assert!(!r.bool().unwrap());
+        r.finish().unwrap();
     }
 }

@@ -712,9 +712,20 @@ def step_blocks(cx):
             continue
         cx.compare_names(f"block {name}", "block_state", [ref[position]], [via[position]])
     entities = {"tile_entity_data", "block_entity_data"}
-    if not cx.ref.packets(entities, cx.since("ref")):
+    ref_entities = cx.ref.packets(entities, cx.since("ref"))
+    if not ref_entities:
         cx.scenario("no block entity data (sign, chest, banner, skull)")
-    if len(cx.via.packets(entities, cx.since("via"))) < len(cx.ref.packets(entities, cx.since("ref"))):
+    if cx.ref.protocol >= 757 and cx.via.protocol >= 757:
+        # From 1.18 the packet names a block entity type; one the client's
+        # version lacks (26.2 dropped beds') has nothing to arrive as.
+        def known(record):
+            name = cx.ref_reg.name("block_entity_type", record.value.get("action"))
+            return name.startswith("<") or cx.via_reg.knows("block_entity_type", name)
+        lacking = [record for record in ref_entities if not known(record)]
+        if lacking:
+            cx.info(f"{len(lacking)} block entity updates of types the client's version lacks")
+        ref_entities = [record for record in ref_entities if known(record)]
+    if len(cx.via.packets(entities, cx.since("via"))) < len(ref_entities):
         cx.fail("the translated client received fewer block entity updates than the reference")
 
 
@@ -1224,6 +1235,26 @@ def step_chat(cx):
                 "the translated player's chat message", 8, mark)
     if cx.server.wait_log(re.escape(text), 5, cx.since("log")) is None:
         cx.fail("the chat message is missing from the server log")
+
+
+def send_chat(session, text):
+    if session.has("chat"):
+        session.send_packet("chat", {"message": text})
+    else:
+        session.send_packet("chat_message", {"message": text, "timestamp": int(time.time() * 1000),
+                                             "salt": 1})
+
+
+@step(software=JAVA)
+def step_chat_received(cx):
+    """Player chat reaches the translated client: its own message echoed by
+    the server and a message of the reference player (signed-chat formats
+    the client's version cannot verify arrive as other chat packets)."""
+    for sender, what in ((cx.via, "its own chat message"), (cx.ref, "the reference player's chat message")):
+        text = f"rift heard {time.monotonic_ns() % 100000}"
+        mark = cx.via.mark()
+        send_chat(sender, text)
+        cx.via.wait(lambda record: record.name in CHAT and text.encode() in record.body, what, 8, mark)
 
 
 @step(software=ALL)

@@ -228,7 +228,7 @@ pub fn install<S: HasShared + 'static>(mut builder: RouteBuilder<S>) -> RouteBui
     }
     let sounds = source >= 765 && changed(source, target, "sound_event");
     let particles = source >= 765 && changed(source, target, "particle_type");
-    if crosses(source, target, &[755, 761, 765, 768, 773, 777]) || sounds || particles {
+    if crosses(source, target, &[755, 761, 765, 766, 768, 773, 777]) || sounds || particles {
         builder = builder.default_handler(Clientbound, Play, "explode", explode::explode::<S>);
     }
     if crosses(source, target, &[770]) {

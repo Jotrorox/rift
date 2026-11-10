@@ -320,19 +320,14 @@ fn write_stack(protocol: i32, stack: Option<&ItemStack>) -> Vec<u8> {
 
 /// Convert a top-level stack as the item codec will: map the item, then
 /// the patch.
+/// A stack through the item codec, which also names and stashes stand-ins
+/// for items the receiver lacks.
 fn convert_stack(from: i32, to: i32, stack: &ItemStack) -> Option<ItemStack> {
     let mut shared = step(from, to);
-    let id = shared
-        .mapping(Direction::Clientbound, "item")
-        .get(stack.id)?;
-    let mut components = stack.components.clone().unwrap();
-    convert(&mut shared, Direction::Clientbound, id, &mut components)
+    let mut converted = Some(stack.clone());
+    crate::codec::item::convert(&mut shared, Direction::Clientbound, &mut converted)
         .unwrap_or_else(|error| panic!("stack from {from} to {to}: {error}"));
-    Some(ItemStack {
-        id,
-        components: Some(components),
-        ..stack.clone()
-    })
+    converted
 }
 
 #[test]
@@ -678,7 +673,16 @@ fn recorded_stacks_round_trip_and_convert() {
             };
             let out = write_stack(*to, Some(&there));
             assert_eq!(read_stack(*to, &out).as_ref(), Some(&there));
-            let back = convert_stack(*to, *protocol, &there).unwrap();
+            let mut back = convert_stack(*to, *protocol, &there).unwrap();
+            // An item the neighbour lacks went there as a stand-in, which
+            // stays itself on the way back.
+            let stand_in = step(*protocol, *to)
+                .mapping(Direction::Clientbound, "item")
+                .kind(stack.id)
+                == Some(crate::mapping::Kind::StandIn);
+            if stand_in {
+                back.id = stack.id;
+            }
             assert_eq!(
                 normalized(&back),
                 normalized(&stack),

@@ -1,18 +1,12 @@
 //! A 1.19.4 client on a 1.20 backend: backend packets are downgraded for the
 //! client and client packets upgraded for the backend.
-use super::{DAMAGE_TYPES, NEWER, OLDER, UPDATE_1_20};
+use super::{NEWER, OLDER, UPDATE_1_20};
 use crate::{
     Direction, Packet, State,
     codec::{HasShared, Shared},
     routed_step,
     step::{Cx, RouteBuilder, Routes},
-    steps::{
-        Make,
-        v1_19_3_to_1_19_4::{
-            play,
-            registries::{self, DamageType},
-        },
-    },
+    steps::{Make, v1_18_2_to_1_19::join, v1_19_3_to_1_19_4::play},
     wire::Rewriter,
 };
 use std::{io, sync::OnceLock};
@@ -28,18 +22,6 @@ impl HasShared for Down {
     fn shared(&mut self) -> &mut Shared {
         &mut self.shared
     }
-}
-
-/// The damage types a 1.19.4 client needs are those of 1.20 minus the two
-/// 1.20 added; a 1.20 server sends them all, but an older one in the chain
-/// may not.
-fn damage_types() -> &'static [DamageType] {
-    static TYPES: OnceLock<Vec<DamageType>> = OnceLock::new();
-    TYPES.get_or_init(|| {
-        let mut types = registries::parse_damage_types(DAMAGE_TYPES);
-        types.retain(|kind| kind.name != "generic_kill" && kind.name != "outside_border");
-        types
-    })
 }
 
 impl Down {
@@ -65,25 +47,19 @@ impl Down {
         })
     }
 
+    /// The registries codec converts the registries (damage types, trim
+    /// patterns whose template the receiver has); the portal cooldown comes
+    /// or goes.
     fn login(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
-        let direction = Direction::Clientbound;
-        let login = play::rewrite_login(&packet.data, NEWER, OLDER, |codec| {
-            // INTEGRATION: registry codec conversion (see `registries`).
-            registries::convert_biomes(&mut self.shared, direction, codec)?;
-            registries::ensure_damage_types(codec, damage_types())?;
-            // A 1.19.4 client fails to join without the trim registries.
-            registries::ensure_registry(codec, "trim_pattern");
-            registries::ensure_registry(codec, "trim_material");
-            registries::convert_trims(&mut self.shared, direction, codec)
-        })?;
+        let data = join::convert_login(&mut self.shared, Direction::Clientbound, &packet.data)?;
         self.back_sign = None;
-        cx.to_client(state, Packet::new(packet.id, login.body));
+        cx.to_client(state, Packet::new(packet.id, data));
         Ok(())
     }
 
     fn respawn(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
-        let body = play::rewrite_respawn(&packet.data, NEWER, OLDER)?;
-        cx.to_client(state, Packet::new(packet.id, body));
+        let data = join::convert_respawn(&mut self.shared, Direction::Clientbound, &packet.data)?;
+        cx.to_client(state, Packet::new(packet.id, data));
         Ok(())
     }
 

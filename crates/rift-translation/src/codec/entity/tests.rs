@@ -836,6 +836,23 @@ fn dust_colours_become_ints_in_1_21_2() {
 }
 
 #[test]
+fn item_particles_cross_the_26_1_item_template() {
+    // Recorded diamond particles: 1.21.11 sends a stack (count, item 893,
+    // empty patch), 26.1 a template (item 894, count, empty patch).
+    let head = "00003ff8000000000000c04d80000000000040250000000000000000000000000000000000003f80000000000005";
+    let older = unhex(&format!("{head}2f01fd060000"));
+    let newer = unhex(&format!("{head}2ffe06010000"));
+    let down = Defaults::new(774, 775)
+        .clientbound(Phase::Play, "level_particles", &newer)
+        .unwrap();
+    assert_eq!(hex(&down[0].data), hex(&older));
+    let up = Defaults::new(775, 774)
+        .clientbound(Phase::Play, "level_particles", &older)
+        .unwrap();
+    assert_eq!(hex(&up[0].data), hex(&newer));
+}
+
+#[test]
 fn attributes_and_effects_follow_their_layouts() {
     // 1.16 namespaced and renamed attribute keys.
     let mut body = Writer::new();

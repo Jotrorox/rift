@@ -4,7 +4,8 @@
 //!
 //! - Join game: 1.19.4 synchronises damage types, trim patterns and trim
 //!   materials, biomes say whether they have precipitation instead of naming
-//!   it, and biome sounds become registry references ([`registries`]).
+//!   it, and biome sounds become registry references; the registries codec
+//!   converts all of it.
 //! - Hurting: 1.19.3 announces a hurt entity with entity events 2, 33, 36,
 //!   37, 44 and 57 (generic, thorns, drowning, burning, berry bush,
 //!   freezing); 1.19.4 replaces them with `damage_event`, naming a damage
@@ -26,7 +27,6 @@ mod down;
 #[cfg(test)]
 pub(super) mod harness;
 pub(super) mod play;
-pub(super) mod registries;
 mod up;
 
 use super::Make;
@@ -38,9 +38,6 @@ pub const NEWER: i32 = 762;
 pub const UP: Option<Make> = up::STEP;
 /// A 1.19.3 client on a 1.19.4 backend.
 pub const DOWN: Option<Make> = down::STEP;
-
-/// Damage types of the official 1.19.4 server, in ID order.
-const DAMAGE_TYPES: &str = include_str!("data/damage_types.json");
 
 /// The hurt entity events of 1.19.3 and the damage type each stands for.
 const HURT_EVENTS: [(i8, &str); 6] = [

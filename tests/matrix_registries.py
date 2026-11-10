@@ -21,7 +21,8 @@ import matrix_env as env
 from matrix_fixtures import SERVERS, jar, vanilla_for
 import protodef
 
-REGISTRIES = ("item", "entity_type", "mob_effect", "sound_event", "particle_type", "menu", "block")
+REGISTRIES = ("item", "entity_type", "mob_effect", "sound_event", "particle_type", "menu", "block",
+              "block_entity_type")
 
 
 def reports(name):

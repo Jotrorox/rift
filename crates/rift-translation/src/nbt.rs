@@ -262,13 +262,29 @@ impl Nbt {
             }
             Nbt::String(value) => write_string(value, writer),
             Nbt::List(values) => {
-                // A list has one element type; mixed lists are a caller bug
-                // that would corrupt the stream, so the first element decides.
                 let kind = values.first().map_or(0, Nbt::kind);
-                debug_assert!(values.iter().all(|value| value.kind() == kind));
-                writer.u8(kind).i32(values.len() as i32);
-                for value in values {
-                    value.write_payload(writer);
+                if values.iter().all(|value| value.kind() == kind) {
+                    writer.u8(kind).i32(values.len() as i32);
+                    for value in values {
+                        value.write_payload(writer);
+                    }
+                } else {
+                    // A list has one element type on the wire. Vanilla writes
+                    // a mixed list as compounds, wrapping every other element
+                    // under an empty key, and unwraps it when reading; text
+                    // components mixing plain strings and objects rely on it.
+                    writer.u8(10).i32(values.len() as i32);
+                    for value in values {
+                        match value {
+                            Nbt::Compound(_) => value.write_payload(writer),
+                            other => {
+                                writer.u8(other.kind());
+                                write_string("", writer);
+                                other.write_payload(writer);
+                                writer.u8(0);
+                            }
+                        }
+                    }
                 }
             }
             Nbt::Compound(compound) => {
@@ -467,6 +483,27 @@ mod tests {
             assert_eq!(reader.nbt_bytes(named).unwrap(), bytes);
         }
         assert_eq!(Nbt::from_bytes(&[0], true).unwrap(), None);
+    }
+
+    #[test]
+    fn mixed_lists_are_written_as_wrapped_compounds() {
+        let mut object = Compound::new();
+        object.insert("text", "b");
+        let mixed = Nbt::List(vec!["a".into(), Nbt::Compound(object.clone()), Nbt::Int(3)]);
+        let mut wrapped_string = Compound::new();
+        wrapped_string.insert("", "a");
+        let mut wrapped_int = Compound::new();
+        wrapped_int.insert("", 3i32);
+        let wrapped = Nbt::List(vec![
+            Nbt::Compound(wrapped_string),
+            Nbt::Compound(object),
+            Nbt::Compound(wrapped_int),
+        ]);
+        assert_eq!(mixed.to_bytes(false), wrapped.to_bytes(false));
+        assert_eq!(
+            Nbt::from_bytes(&mixed.to_bytes(false), false).unwrap(),
+            Some(wrapped)
+        );
     }
 
     #[test]

@@ -203,6 +203,12 @@ impl Legacy {
         })
     }
 
+    /// The 1.13 item minecraft-data lists for exactly this 1.12 item and
+    /// damage value, without the fallbacks of [`Self::flatten_item`].
+    pub fn flatten_item_exact(&self, id: i32, damage: i16) -> Option<i32> {
+        self.items.get(&(id, damage)).copied()
+    }
+
     /// The best 1.12 item and damage value for a 1.13 item; see the module
     /// docs. Durability goes back into the damage value: the step adds it.
     pub fn unflatten_item(&self, item: i32) -> Option<(i32, i16)> {

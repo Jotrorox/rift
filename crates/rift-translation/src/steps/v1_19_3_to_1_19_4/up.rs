@@ -1,16 +1,18 @@
 //! A 1.19.4 client on a 1.19.3 backend: backend packets are upgraded for the
 //! client and client packets downgraded for the backend.
 use super::{
-    ANIMATE_HURT, DAMAGE_TYPES, HURT_EVENTS, NEWER, OLDER,
+    ANIMATE_HURT, HURT_EVENTS, NEWER, OLDER,
     play::{self, PlayerPosition},
-    registries::{self, DamageType},
 };
 use crate::{
     Direction, Packet, State,
-    codec::{HasShared, Shared},
+    codec::{
+        HasShared, Shared,
+        registries::{self, Side},
+    },
     routed_step,
     step::{Cx, RouteBuilder, Routes},
-    steps::Make,
+    steps::{Make, v1_18_2_to_1_19::join},
     wire::{Reader, Writer},
 };
 use std::{io, sync::OnceLock};
@@ -22,8 +24,6 @@ pub struct Up {
     /// The vehicle the player rides and all its passengers, to dismount
     /// the player when a teleport asks for it.
     vehicle: Option<(i32, Vec<i32>)>,
-    /// The client's damage type ID for each 1.19.3 hurt event.
-    hurt_types: Vec<(i8, i32)>,
 }
 
 impl HasShared for Up {
@@ -32,18 +32,12 @@ impl HasShared for Up {
     }
 }
 
-fn damage_types() -> &'static [DamageType] {
-    static TYPES: OnceLock<Vec<DamageType>> = OnceLock::new();
-    TYPES.get_or_init(|| registries::parse_damage_types(DAMAGE_TYPES))
-}
-
 impl Up {
     pub(super) fn new() -> Self {
         Self {
             shared: Shared::new(NEWER, OLDER),
             player: None,
             vehicle: None,
-            hurt_types: Vec::new(),
         }
     }
 
@@ -78,27 +72,14 @@ impl Up {
         })
     }
 
+    /// The registries codec adds the damage types and trim registries
+    /// 1.19.4 synchronises; the rest of the layout is the same.
     fn login(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
-        let direction = Direction::Clientbound;
-        let mut hurt_types = Vec::new();
-        let login = play::rewrite_login(&packet.data, OLDER, NEWER, |codec| {
-            // INTEGRATION: registry codec conversion (see `registries`).
-            registries::convert_biomes(&mut self.shared, direction, codec)?;
-            registries::ensure_damage_types(codec, damage_types())?;
-            registries::ensure_registry(codec, "trim_pattern");
-            registries::ensure_registry(codec, "trim_material");
-            let names = registries::damage_type_names(codec);
-            for (event, kind) in HURT_EVENTS {
-                if let Some((id, _)) = names.iter().find(|(_, name)| name == kind) {
-                    hurt_types.push((event, *id));
-                }
-            }
-            Ok(())
-        })?;
-        self.player = Some(login.player_id);
+        let player = Reader::new(&packet.data).i32()?;
+        let data = join::convert_login(&mut self.shared, Direction::Clientbound, &packet.data)?;
+        self.player = Some(player);
         self.vehicle = None;
-        self.hurt_types = hurt_types;
-        cx.to_client(state, Packet::new(packet.id, login.body));
+        cx.to_client(state, Packet::new(packet.id, data));
         Ok(())
     }
 
@@ -141,14 +122,20 @@ impl Up {
         let entity = reader.i32()?;
         let event = reader.i8()?;
         reader.finish()?;
-        let Some((_, damage_type)) = self.hurt_types.iter().find(|(hurt, _)| *hurt == event) else {
+        let damage_type = HURT_EVENTS
+            .iter()
+            .find(|(hurt, _)| *hurt == event)
+            .and_then(|(_, kind)| {
+                registries::id_of(&self.shared, Side::Client, "damage_type", kind)
+            });
+        let Some(damage_type) = damage_type else {
             cx.to_client(state, packet);
             return Ok(());
         };
         let mut writer = Writer::with_capacity(8);
         writer
             .varint(entity)
-            .varint(*damage_type)
+            .varint(damage_type)
             .varint(0) // no cause entity (IDs are sent plus one)
             .varint(0) // no direct entity
             .bool(false); // no source position

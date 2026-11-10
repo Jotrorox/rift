@@ -640,34 +640,65 @@ mod tests {
     #[test]
     fn missing_sounds_go_by_name_or_are_dropped() {
         let at = Emitter::Position([0, 0, 0]);
-        // 1.21.7 inserted a sound event 1.21.6 lacks.
-        let older = data::version(771).expect_registry("sound_event");
-        let newer = data::version(772).expect_registry("sound_event");
-        let (id, name) = newer
-            .names()
-            .find(|(_, name)| older.id(name).is_none())
+        // 1.21.7's new music disc plays as the stand-in its rules name.
+        let creator = data::version(771)
+            .expect_registry("sound_event")
+            .id("music_disc.creator")
             .unwrap();
-        let mut down = Defaults::new(771, 772);
-        let out = down
+        let lava_chicken = data::version(772)
+            .expect_registry("sound_event")
+            .id("music_disc.lava_chicken")
+            .unwrap();
+        let out = Defaults::new(771, 772)
             .clientbound(
                 State::Play,
                 "sound",
-                &body(772, &sound(Holder::Id(id), Some(0)), at),
+                &body(772, &sound(Holder::Id(lava_chicken), Some(0)), at),
             )
             .unwrap();
         assert_eq!(
             read(771, Kind::Sound, &out[0].data).unwrap().0.holder,
+            Holder::Id(creator)
+        );
+        // A sound the older side lacks and no rule covers goes by name.
+        let (older, newer, id, name) = crate::version::PROTOCOLS
+            .windows(2)
+            .map(|pair| (pair[0].0, pair[1].0))
+            .filter(|(older, _)| *older >= 761)
+            .find_map(|(older, newer)| {
+                let mapping = crate::mapping::mapping(newer, older, "sound_event");
+                let known = data::version(older).expect_registry("sound_event");
+                data::version(newer)
+                    .expect_registry("sound_event")
+                    .names()
+                    .find(|(id, name)| known.id(name).is_none() && mapping.get(*id).is_none())
+                    .map(|(id, name)| (older, newer, id, name))
+            })
+            .unwrap();
+        let mut down = Defaults::new(older, newer);
+        let out = down
+            .clientbound(
+                State::Play,
+                "sound",
+                &body(newer, &sound(Holder::Id(id), Some(0)), at),
+            )
+            .unwrap();
+        assert_eq!(
+            read(older, Kind::Sound, &out[0].data).unwrap().0.holder,
             named(&format!("minecraft:{name}"))
         );
         let out = down
             .clientbound(
                 State::Play,
                 "sound_entity",
-                &body(772, &sound(Holder::Id(id), Some(0)), Emitter::Entity(5)),
+                &body(newer, &sound(Holder::Id(id), Some(0)), Emitter::Entity(5)),
             )
             .unwrap();
         assert_eq!(
-            read(771, Kind::SoundEntity, &out[0].data).unwrap().0.holder,
+            read(older, Kind::SoundEntity, &out[0].data)
+                .unwrap()
+                .0
+                .holder,
             named(&format!("minecraft:{name}"))
         );
         // Before 1.19.3 an entity's unknown sound cannot be sent at all.

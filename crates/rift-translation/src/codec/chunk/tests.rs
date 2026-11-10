@@ -877,13 +877,9 @@ mod handlers {
             particles.name(reader.varint().unwrap()),
             Some("explosion_emitter")
         );
-        let sound = reader.varint().unwrap() - 1;
-        assert_eq!(
-            data::version(765)
-                .expect_registry("sound_event")
-                .name(sound),
-            Some("entity.generic.explode")
-        );
+        // 1.20.3 writes the sound event itself, not a registry holder.
+        assert_eq!(reader.str().unwrap(), "minecraft:entity.generic.explode");
+        assert!(!reader.bool().unwrap());
         reader.finish().unwrap();
     }
 

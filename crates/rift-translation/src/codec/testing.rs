@@ -154,6 +154,12 @@ pub fn corpus(protocol: i32) -> Option<Vec<Recorded>> {
         .or_else(|| {
             Some(std::path::PathBuf::from(std::env::var_os("HOME")?).join(".cache/rift-via/corpus"))
         })?;
+    corpus_in(&directory, protocol)
+}
+
+/// A session recorded in the corpus format in another directory, such as
+/// a codec's private corpus; `None` when it is absent.
+pub fn corpus_in(directory: &std::path::Path, protocol: i32) -> Option<Vec<Recorded>> {
     let text = std::fs::read_to_string(directory.join(format!("{protocol}.jsonl"))).ok()?;
     let mut packets = Vec::new();
     for line in text.lines().filter(|line| !line.is_empty()) {

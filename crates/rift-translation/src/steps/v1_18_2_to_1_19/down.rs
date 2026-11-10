@@ -5,14 +5,13 @@ use super::{
     blocks::{self, Digging},
     chat::{ChatTypes, Clock},
     entities::{self, Painting, Spawned},
-    id,
+    id, join,
     login::{Finished, Hello, Key},
     messages::{Placement, PlayerChat, Sent, SystemChat},
-    world::{self, DimensionTypes},
 };
 use crate::{
     Direction, Packet, State,
-    codec::{HasShared, Shared},
+    codec::{HasShared, Shared, registries::Side},
     data,
     step::{Cx, RouteBuilder, Routes, Step},
     steps::Make,
@@ -24,7 +23,6 @@ const LOOM: &str = "loom";
 
 pub(super) struct Down {
     shared: Shared,
-    dimension_types: DimensionTypes,
     /// The backend's chat types, from its `login`.
     chat_types: ChatTypes,
     digging: Digging,
@@ -47,7 +45,6 @@ impl Down {
     fn new() -> Self {
         Self {
             shared: Shared::new(OLDER, NEWER),
-            dimension_types: DimensionTypes::default(),
             chat_types: ChatTypes::default(),
             digging: Digging::default(),
             loom: None,
@@ -120,11 +117,8 @@ impl Down {
     }
 
     fn login(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
-        let data = world::login_down(
-            &packet.data,
-            &mut self.dimension_types,
-            &mut self.chat_types,
-        )?;
+        let data = join::convert_login(&mut self.shared, Direction::Clientbound, &packet.data)?;
+        self.chat_types = ChatTypes::from_shared(&self.shared, Side::Backend);
         self.digging = Digging::default();
         self.loom = None;
         self.painting = None;
@@ -133,7 +127,7 @@ impl Down {
     }
 
     fn respawn(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
-        let data = world::respawn_down(&packet.data, &self.dimension_types)?;
+        let data = join::convert_respawn(&mut self.shared, Direction::Clientbound, &packet.data)?;
         cx.to_client(state, Packet::new(packet.id, data));
         Ok(())
     }

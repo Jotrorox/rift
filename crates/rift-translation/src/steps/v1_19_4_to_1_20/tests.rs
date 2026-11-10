@@ -110,47 +110,40 @@ fn upgraded_login_has_a_cooldown_and_every_1_20_damage_type() {
         };
         assert_eq!(element(&after), element(&official));
     }
-    for registry in ["chat_type", "dimension_type", "trim_pattern"] {
+    for registry in ["chat_type", "dimension_type"] {
         let key = format!("minecraft:{registry}");
         assert_eq!(after.get(&key), before.get(&key), "{registry}");
     }
-    // Biomes keep everything but music 1.20 renamed.
-    let music = |codec: &Compound| -> Vec<(String, String)> {
-        entries(codec, "worldgen/biome")
-            .into_iter()
-            .filter_map(|(name, biome)| {
-                let element = biome.compound("element")?;
-                let sound = element
-                    .compound("effects")?
-                    .compound("music")?
-                    .str("sound")?;
-                Some((name.to_owned(), sound.to_owned()))
-            })
-            .collect()
-    };
-    let renamed: Vec<_> = music(&before)
-        .into_iter()
-        .zip(music(&after))
-        .filter(|(before, after)| before != after)
-        .map(|(before, after)| (before.1, after.1))
-        .collect();
-    assert!(!renamed.is_empty());
-    for (before, after) in renamed {
-        assert_eq!(
-            (before.as_str(), after.as_str()),
-            (
-                "minecraft:music.overworld.jungle_and_forest",
-                "minecraft:music.overworld.jungle"
-            )
-        );
-    }
+    // The 1.19.4 server leaves trims to the 1.20 experiment; a 1.20 client
+    // gets them as the 1.20 server sends them.
     assert_eq!(
-        names(&after, "worldgen/biome"),
-        names(&before, "worldgen/biome")
+        after.get("minecraft:trim_pattern").map(canonical),
+        official.get("minecraft:trim_pattern").map(canonical)
+    );
+    // Vanilla biomes are the 1.20 server's own (new music included): the
+    // backend's under their IDs, then the cherry grove 1.19.4 only has
+    // with the 1.20 experiment.
+    let elements = |codec: &Compound| -> Vec<(String, Nbt)> {
+        let mut elements: Vec<_> = entries(codec, "worldgen/biome")
+            .into_iter()
+            .map(|(name, biome)| (name.to_owned(), canonical(biome.get("element").unwrap())))
+            .collect();
+        elements.sort_by(|a, b| a.0.cmp(&b.0));
+        elements
+    };
+    assert_eq!(elements(&after), elements(&official));
+    let (before_ids, after_ids) = (
+        ids(&before, "worldgen/biome"),
+        ids(&after, "worldgen/biome"),
+    );
+    assert_eq!(after_ids[..before_ids.len()], before_ids[..]);
+    assert_eq!(
+        after_ids[before_ids.len()..],
+        [("minecraft:cherry_grove".to_owned(), before_ids.len() as i32)]
     );
     // The rest round-trips through the 1.20 layout.
     let again = play::rewrite_login(&body, NEWER, NEWER, |_| Ok(()));
-    assert_eq!(again.unwrap().body, body);
+    assert_eq!(again.unwrap(), body);
 }
 
 /// A 1.19.4 client loses the cooldown and gets only trim templates and
@@ -164,11 +157,13 @@ fn downgraded_login_names_only_what_1_19_4_knows() {
     let (official, after) = (codec_of(OLDER, &old), codec_of(OLDER, &body));
     // Exactly the 1.19.4 layout: nothing after the death location.
     let again = play::rewrite_login(&body, OLDER, OLDER, |_| Ok(()));
-    assert_eq!(again.unwrap().body, body);
+    assert_eq!(again.unwrap(), body);
     let items = data::version(OLDER).expect_registry("item");
     let sounds = data::version(OLDER).expect_registry("sound_event");
+    // Patterns whose template 1.19.4 lacks (wayfinder, host, raiser,
+    // shaper, silence) are left out: its decoder rejects unknown items.
     let patterns = entries(&after, "trim_pattern");
-    assert_eq!(patterns.len(), 16);
+    assert_eq!(patterns.len(), 11);
     for (name, entry) in &patterns {
         let template = entry
             .compound("element")
@@ -176,9 +171,7 @@ fn downgraded_login_names_only_what_1_19_4_knows() {
             .str("template_item")
             .unwrap();
         assert!(items.id(template).is_some(), "{name}: {template}");
-        if *name == "minecraft:wayfinder" {
-            assert_eq!(template, "minecraft:wild_armor_trim_smithing_template");
-        }
+        assert_ne!(*name, "minecraft:wayfinder");
     }
     for (name, entry) in entries(&after, "trim_material") {
         let ingredient = entry

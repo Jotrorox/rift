@@ -3,15 +3,13 @@
 use super::{
     NEWER, OLDER,
     blocks::{self, Sequences},
-    chat::{GAME_INFO_1_19, SYSTEM_1_19},
-    entities, id,
+    chat, entities, id, join,
     login::{Finished, Hello, Key},
     messages::{MAX_MESSAGE, Placement, Sent, SystemChat},
-    world::{self, DimensionTypes},
 };
 use crate::{
     Direction, Packet, State,
-    codec::{HasShared, Shared},
+    codec::{HasShared, Shared, registries::Side},
     data,
     step::{Cx, RouteBuilder, Routes, Step},
     steps::Make,
@@ -27,7 +25,6 @@ const SELECTABLE_PATTERNS: i32 = 34;
 
 pub(super) struct Up {
     shared: Shared,
-    dimension_types: DimensionTypes,
     sequences: Sequences,
     /// The open loom's container ID.
     loom: Option<i32>,
@@ -50,7 +47,6 @@ impl Up {
             .map_or(1, |elapsed| elapsed.as_nanos() as u64);
         Self {
             shared: Shared::new(NEWER, OLDER),
-            dimension_types: DimensionTypes::default(),
             sequences: Sequences::default(),
             loom: None,
             after: Vec::new(),
@@ -122,7 +118,7 @@ impl Up {
     }
 
     fn login(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
-        let data = world::login_up(&packet.data, &mut self.dimension_types)?;
+        let data = join::convert_login(&mut self.shared, Direction::Clientbound, &packet.data)?;
         self.sequences = Sequences::default();
         self.loom = None;
         cx.to_client(state, Packet::new(packet.id, data));
@@ -130,7 +126,7 @@ impl Up {
     }
 
     fn respawn(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
-        let data = world::respawn_up(&packet.data, &self.dimension_types)?;
+        let data = join::convert_respawn(&mut self.shared, Direction::Clientbound, &packet.data)?;
         cx.to_client(state, Packet::new(packet.id, data));
         Ok(())
     }
@@ -224,11 +220,7 @@ impl Up {
     ) -> io::Result<()> {
         let mut message = SystemChat::read(OLDER, &packet.data)?;
         if let Placement::Position(position) = message.placement {
-            let chat_type = if position == 2 {
-                GAME_INFO_1_19
-            } else {
-                SYSTEM_1_19
-            };
+            let chat_type = chat::system_type(&self.shared, Side::Client, position == 2);
             message.placement = Placement::ChatType(chat_type);
         }
         let id = id(NEWER, state, Direction::Clientbound, "system_chat");

@@ -267,29 +267,28 @@ fn typed_content(
             None => None,
             Some(key) => {
                 let mut args = Vec::new();
-                // NBT writes a list of numbers of one type as an array tag.
-                let numbers: Option<Vec<Nbt>> = match node.get("with") {
-                    Some(Node::Nbt(Nbt::ByteArray(values))) => {
-                        Some(values.iter().map(|v| Nbt::Byte(*v as i8)).collect())
-                    }
+                match node.get("with") {
+                    None => {}
+                    // Vanilla's NbtOps writes a list of only numbers of one
+                    // type as an array (a message about coordinates).
+                    Some(Node::Nbt(Nbt::ByteArray(values))) => args.extend(
+                        values
+                            .iter()
+                            .map(|value| Arg::Primitive(Nbt::Byte(*value as i8))),
+                    ),
                     Some(Node::Nbt(Nbt::IntArray(values))) => {
-                        Some(values.iter().copied().map(Nbt::Int).collect())
+                        args.extend(values.iter().map(|value| Arg::Primitive(Nbt::Int(*value))))
                     }
                     Some(Node::Nbt(Nbt::LongArray(values))) => {
-                        Some(values.iter().copied().map(Nbt::Long).collect())
+                        args.extend(values.iter().map(|value| Arg::Primitive(Nbt::Long(*value))))
                     }
-                    _ => None,
-                };
-                if let Some(numbers) = numbers {
-                    for number in &numbers {
-                        args.push(argument(protocol, Node::Nbt(number), depth)?);
-                    }
-                } else if let Some(with) = node.get("with") {
-                    for arg in with
-                        .list()
-                        .ok_or_else(|| invalid("translation arguments are not a list"))?
-                    {
-                        args.push(argument(protocol, arg, depth)?);
+                    Some(with) => {
+                        for arg in with
+                            .list()
+                            .ok_or_else(|| invalid("translation arguments are not a list"))?
+                        {
+                            args.push(argument(protocol, arg, depth)?);
+                        }
                     }
                 }
                 Some(Content::Translate {

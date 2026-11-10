@@ -152,6 +152,53 @@ impl<'a> Bridge<'a> {
             .then(|| registries::id_of(self.shared, self.new_side(), registry, name))
     }
 
+    /// The prototype attribute modifiers of a 1.20.5 item, as values of the
+    /// `attribute_modifiers` list.
+    fn default_modifiers(&mut self, item: &str) -> Vec<Value> {
+        let mut modifiers = Vec::new();
+        for row in tables::default_modifiers(item) {
+            let Some(
+                [
+                    serde_json::Value::String(attribute),
+                    serde_json::Value::Array(uuid),
+                    serde_json::Value::String(name),
+                    amount,
+                    operation,
+                    serde_json::Value::String(slot),
+                ],
+            ) = row.as_array().map(Vec::as_slice)
+            else {
+                continue;
+            };
+            let ints: Vec<i32> = uuid
+                .iter()
+                .filter_map(|int| Some(int.as_i64()? as i32))
+                .collect();
+            let (Some(id), Some(slot), [_, _, _, _]) = (
+                data::version(NEW)
+                    .registry("attribute")
+                    .and_then(|r| r.id(attribute)),
+                tables::MODIFIER_SLOTS
+                    .iter()
+                    .chain(&["any"])
+                    .find(|known| **known == slot.as_str())
+                    .copied(),
+                ints.as_slice(),
+            ) else {
+                continue;
+            };
+            modifiers.push(Value::Struct(vec![
+                Value::Id(id),
+                Value::Uuid(text::uuid_from_ints(&ints)),
+                Value::String(name.clone()),
+                Value::Double(amount.as_f64().unwrap_or(0.0)),
+                Value::Int(operation.as_i64().unwrap_or(0) as i32),
+                Value::Enum(slot),
+            ]));
+        }
+        modifiers
+    }
+
     /// A 1.20.4 JSON text component as 1.20.5 network NBT.
     fn json_to_text(&mut self, json: &str) -> io::Result<Vec<u8>> {
         let mut component = text::from_json_str(OLD, json)?;
@@ -386,7 +433,10 @@ fn restore(components: &mut Components, entries: &[Nbt]) -> io::Result<()> {
 
 /// Remove `key` from the patch's `custom_data`, dropping the component
 /// when nothing else is left in it.
-fn take_custom_data(components: &mut Components, key: &str) -> io::Result<Option<Compound>> {
+pub(super) fn take_custom_data(
+    components: &mut Components,
+    key: &str,
+) -> io::Result<Option<Compound>> {
     let Some(value) = components.get("custom_data") else {
         return Ok(None);
     };
@@ -418,7 +468,11 @@ fn take_custom_data(components: &mut Components, key: &str) -> io::Result<Option
     Ok(Some(taken))
 }
 
-fn put_custom_data(components: &mut Components, key: &str, value: Nbt) -> io::Result<()> {
+pub(super) fn put_custom_data(
+    components: &mut Components,
+    key: &str,
+    value: Nbt,
+) -> io::Result<()> {
     let mut data = match components
         .get("custom_data")
         .map(Value::as_nbt)

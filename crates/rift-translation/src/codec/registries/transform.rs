@@ -384,6 +384,35 @@ pub fn sound_reference(protocol: i32, sound: &mut Nbt) {
     }
 }
 
+/// A built-in sound the receiver lacks becomes its stand-in from the pair's
+/// mapping, where there is one, so the receiver plays something it knows.
+fn stand_in_sound(step: Boundary, sound: &mut Nbt) {
+    let name = match sound {
+        Nbt::String(name) => name,
+        Nbt::Compound(direct) => match direct.get_mut("sound_id") {
+            Some(Nbt::String(name)) => name,
+            _ => return,
+        },
+        _ => return,
+    };
+    let (Some(sender), Some(receiver)) = (
+        data::version(step.from).registry("sound_event"),
+        data::version(step.to).registry("sound_event"),
+    ) else {
+        return;
+    };
+    if receiver.id(name).is_some() {
+        return;
+    }
+    let stand_in = sender
+        .id(name)
+        .and_then(|id| crate::mapping::mapping(step.from, step.to, "sound_event").get(id))
+        .and_then(|id| receiver.name(id));
+    if let Some(stand_in) = stand_in {
+        *name = super::form::namespaced(stand_in);
+    }
+}
+
 fn biome(step: Boundary, element: &mut Compound) {
     let up = step.up();
     if step.crosses(757) {
@@ -460,6 +489,7 @@ fn biome(step: Boundary, element: &mut Compound) {
         if let Some(effects) = element.compound_mut("effects") {
             for path in BIOME_SOUNDS {
                 if let Some(sound) = nested_mut(effects, path) {
+                    stand_in_sound(step, sound);
                     sound_reference(step.to, sound);
                 }
             }

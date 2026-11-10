@@ -193,3 +193,44 @@ pub fn truncations_fail(
         );
     }
 }
+
+/// The registries of a 1.16–1.20.1 `login` body.
+pub fn codec(protocol: i32, login: &[u8]) -> Vec<crate::codec::registries::Registry> {
+    crate::codec::registries::login::read_login(protocol, &mut crate::wire::Reader::new(login))
+        .unwrap()
+        .codec
+        .unwrap()
+}
+
+/// Two sets of registries hold the same entries with the same elements,
+/// whatever their order and IDs (converted registries keep the sender's
+/// order, so that its IDs keep their meaning).
+pub fn assert_same_registries(
+    actual: &[crate::codec::registries::Registry],
+    expected: &[crate::codec::registries::Registry],
+) {
+    let names = |registries: &[crate::codec::registries::Registry]| {
+        let mut names: Vec<String> = registries.iter().map(|r| r.name.clone()).collect();
+        names.sort();
+        names
+    };
+    assert_eq!(names(actual), names(expected));
+    for expected in expected {
+        let actual = actual.iter().find(|r| r.name == expected.name).unwrap();
+        assert_eq!(
+            actual.entries.len(),
+            expected.entries.len(),
+            "{}",
+            expected.name
+        );
+        for entry in &expected.entries {
+            assert_eq!(
+                actual.entry(&entry.name).map(|e| &e.element),
+                Some(&entry.element),
+                "{} {}",
+                expected.name,
+                entry.name
+            );
+        }
+    }
+}

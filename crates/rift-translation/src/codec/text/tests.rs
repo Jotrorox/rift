@@ -640,3 +640,23 @@ fn corpus_flows_through_default_routes() {
     }
     eprintln!("text corpus: {routed} packets routed through neighbouring steps");
 }
+
+/// Vanilla writes a translation's arguments as an int array when they are
+/// all ints, as in the feedback of `/setblock` to a 1.20.3+ operator.
+#[test]
+fn numeric_translation_arguments_may_be_an_array() {
+    let mut tag = crate::nbt::Compound::new();
+    tag.insert("translate", "commands.setblock.success");
+    tag.insert("with", Nbt::IntArray(vec![3, 64, -7]));
+    let component = from_nbt(765, &Nbt::Compound(tag)).unwrap();
+    let Content::Translate { args, .. } = &component.content else {
+        panic!("{component:?}");
+    };
+    assert_eq!(args.len(), 3);
+    assert_eq!(
+        to_json_string(764, &component),
+        r#"{"translate":"commands.setblock.success","with":["3","64","-7"]}"#
+    );
+    // A list of ints reads the same in vanilla's list codec.
+    assert_eq!(from_nbt(766, &to_nbt(766, &component)).unwrap(), component);
+}

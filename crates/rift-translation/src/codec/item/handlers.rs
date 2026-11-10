@@ -862,6 +862,29 @@ fn convert_display(
             .registry("slot_display")
             .is_some_and(|registry| registry.id(display.kind()).is_some())
     };
+    // 26.3 names a tag or lists the items where 26.2 named a tag. The tag
+    // reaches the client under its name through the tag codec; a list
+    // becomes item displays, mapped below like any other.
+    display.visit(&mut |display| {
+        let replace = match display {
+            SlotDisplay::Tag(tag) if target >= 777 => {
+                Some(SlotDisplay::Items(recipes::IdSet::Tag(std::mem::take(tag))))
+            }
+            SlotDisplay::Items(recipes::IdSet::Tag(tag)) if target < 777 => {
+                Some(SlotDisplay::Tag(std::mem::take(tag)))
+            }
+            SlotDisplay::Items(recipes::IdSet::Ids(ids)) if target < 777 => Some(match &ids[..] {
+                [] => SlotDisplay::Empty,
+                [id] => SlotDisplay::Item(*id),
+                _ => SlotDisplay::Composite(ids.iter().map(|id| SlotDisplay::Item(*id)).collect()),
+            }),
+            _ => None,
+        };
+        if let Some(replace) = replace {
+            *display = replace;
+        }
+        Ok(())
+    })?;
     display.visit(&mut |display| {
         let replace = match display {
             _ if !has_kind(display) => Some(SlotDisplay::Empty),
@@ -878,7 +901,6 @@ fn convert_display(
                 map_id_set(shared, direction, set);
                 None
             }
-            SlotDisplay::Tag(_) if target >= 777 => Some(SlotDisplay::Empty),
             SlotDisplay::SmithingTrim { pattern, .. } => {
                 // The pattern changed from a display to a trim pattern in
                 // 1.21.5; neither tells the other.
@@ -1095,9 +1117,8 @@ fn unhash(
 }
 
 /// A whole stack for a backend that wants hashes (1.21.5 on): converted,
-/// then hashed the way the receiver's client hashes; components the
-/// component codec cannot hash get a wrong hash and the backend corrects
-/// the client.
+/// then hashed by the component codec. Components it cannot hash exactly
+/// cost a resend of the slot by the backend.
 fn hash(
     shared: &mut Shared,
     direction: Direction,

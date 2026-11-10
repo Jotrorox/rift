@@ -8,6 +8,7 @@ use super::{
     tables::{self, BlockEntity},
 };
 use crate::{
+    Direction,
     codec::{
         item::components::{Components, schema::Value},
         text,
@@ -24,6 +25,9 @@ pub(super) fn components(cx: &mut Bridge, item: &str, mut tag: Compound) -> io::
         None => 0,
     };
     let hidden = |bit: i32| hide & bit != 0;
+    // Bits with nothing to hide stay in `custom_data`, so the tag comes back
+    // as it was.
+    let mut shown = tables::HIDE_ENCHANTMENTS | tables::HIDE_ADDITIONAL;
     if let Some(damage) = take_int(&mut tag, "Damage")
         && damage != 0
     {
@@ -40,7 +44,15 @@ pub(super) fn components(cx: &mut Bridge, item: &str, mut tag: Compound) -> io::
     if let Some(Nbt::Compound(state)) = tag.remove("BlockStateTag") {
         out.insert("block_state", block_state(&state));
     }
-    if let Some(entity) = take_compound(&mut tag, "EntityTag") {
+    if let Some(mut entity) = take_compound(&mut tag, "EntityTag") {
+        // A 1.20.5 server cannot save entity data without an ID; the client
+        // does not need one, and the stack converts back unchanged without.
+        if cx.upward == Direction::Serverbound
+            && !entity.contains("id")
+            && let Some(id) = tables::entity_of(item)
+        {
+            entity.insert("id", format!("minecraft:{id}"));
+        }
         out.insert("entity_data", Value::nbt(&Nbt::Compound(entity)));
     }
     if let Some(block_entity) = take_compound(&mut tag, "BlockEntityTag") {
@@ -56,6 +68,7 @@ pub(super) fn components(cx: &mut Bridge, item: &str, mut tag: Compound) -> io::
             "unbreakable",
             Value::Bool(!hidden(tables::HIDE_UNBREAKABLE)),
         );
+        shown |= tables::HIDE_UNBREAKABLE;
     }
     enchantments(
         cx,
@@ -75,40 +88,46 @@ pub(super) fn components(cx: &mut Bridge, item: &str, mut tag: Compound) -> io::
             &mut out,
         );
     }
+    // Vanilla's fixer gives a hidden dye without colour the default
+    // leather colour; that colour would come back as a tag `color`, so the
+    // bit stays in `custom_data` instead (it hides nothing either way).
     if let Some(mut display) = take_compound(&mut tag, "display") {
-        self::display(cx, item, &mut display, hide, &mut out)?;
+        if self::display(cx, item, &mut display, hide, &mut out)? {
+            shown |= tables::HIDE_DYE;
+        }
         if !display.is_empty() {
             tag.insert("display", display);
         }
-    } else if hidden(tables::HIDE_DYE) {
-        out.insert(
-            "dyed_color",
-            Value::Struct(vec![
-                Value::Int(tables::DEFAULT_LEATHER),
-                Value::Bool(false),
-            ]),
-        );
     }
-    predicates(
+    if predicates(
         cx,
         &mut tag,
         "CanDestroy",
         "can_break",
         hidden(tables::HIDE_CAN_DESTROY),
         &mut out,
-    );
-    predicates(
+    ) {
+        shown |= tables::HIDE_CAN_DESTROY;
+    }
+    if predicates(
         cx,
         &mut tag,
         "CanPlaceOn",
         "can_place_on",
         hidden(tables::HIDE_CAN_PLACE),
         &mut out,
-    );
-    attribute_modifiers(cx, &mut tag, hidden(tables::HIDE_MODIFIERS), &mut out);
+    ) {
+        shown |= tables::HIDE_CAN_PLACE;
+    }
+    if attribute_modifiers(cx, item, &mut tag, hidden(tables::HIDE_MODIFIERS), &mut out) {
+        shown |= tables::HIDE_MODIFIERS;
+    }
     if let Some(trim) = take_compound(&mut tag, "Trim") {
         match self::trim(cx, &trim, !hidden(tables::HIDE_UPGRADES)) {
-            Some(value) => out.insert("trim", value),
+            Some(value) => {
+                out.insert("trim", value);
+                shown |= tables::HIDE_UPGRADES;
+            }
             None => {
                 tag.insert("Trim", trim);
             }
@@ -209,6 +228,9 @@ pub(super) fn components(cx: &mut Bridge, item: &str, mut tag: Compound) -> io::
         if !data.is_empty() {
             out.insert("bucket_entity_data", Value::nbt(&Nbt::Compound(data)));
         }
+    }
+    if hide & !shown != 0 {
+        tag.insert("HideFlags", Nbt::Int(hide & !shown));
     }
     if !tag.is_empty() {
         out.insert("custom_data", Value::nbt(&Nbt::Compound(tag)));
@@ -476,13 +498,14 @@ fn names_the_item(item: &str, name: &text::Component) -> bool {
     }
 }
 
+/// Returns whether the display held a dye colour.
 fn display(
     cx: &mut Bridge,
     item: &str,
     display: &mut Compound,
     hide: i32,
     out: &mut Components,
-) -> io::Result<()> {
+) -> io::Result<bool> {
     if let Some(Nbt::String(name)) = display.get("Name")
         && let Ok(component) = text::from_json_str(OLD, name)
     {
@@ -515,13 +538,12 @@ fn display(
         }
         None => None,
     };
-    let hidden = hide & tables::HIDE_DYE != 0;
-    if color.is_some() || hidden {
+    if let Some(color) = color {
         out.insert(
             "dyed_color",
             Value::Struct(vec![
-                Value::Int(color.unwrap_or(tables::DEFAULT_LEATHER)),
-                Value::Bool(!hidden),
+                Value::Int(color),
+                Value::Bool(hide & tables::HIDE_DYE == 0),
             ]),
         );
     }
@@ -536,10 +558,11 @@ fn display(
         display.remove("MapColor");
         out.insert("map_color", Value::Int(color as i32));
     }
-    Ok(())
+    Ok(color.is_some())
 }
 
-/// `CanDestroy` and `CanPlaceOn`: block predicate strings.
+/// `CanDestroy` and `CanPlaceOn`: block predicate strings. Returns whether
+/// they were converted.
 fn predicates(
     cx: &mut Bridge,
     tag: &mut Compound,
@@ -547,22 +570,23 @@ fn predicates(
     kind: &'static str,
     hidden: bool,
     out: &mut Components,
-) {
+) -> bool {
     let Some(Nbt::List(list)) = tag.get(key) else {
-        return;
+        return false;
     };
     let predicates: Option<Vec<Value>> = list
         .iter()
         .map(|predicate| block_predicate(cx, predicate.as_str()?))
         .collect();
     let Some(predicates) = predicates else {
-        return;
+        return false;
     };
     tag.remove(key);
     out.insert(
         kind,
         Value::Struct(vec![Value::List(predicates), Value::Bool(!hidden)]),
     );
+    true
 }
 
 /// One `block[state]{nbt}` predicate string of 1.20.4 as a 1.20.5 block
@@ -620,7 +644,18 @@ fn namespaced(name: &str) -> String {
     }
 }
 
-fn attribute_modifiers(cx: &mut Bridge, tag: &mut Compound, hidden: bool, out: &mut Components) {
+/// `AttributeModifiers` replace the item's defaults in both versions, but
+/// an empty 1.20.5 list stands for the defaults of armour, whose prototype
+/// sets none, and for no modifiers on weapons and tools, whose prototype
+/// sets theirs. Hidden defaults are the prototype's, hidden. Returns
+/// whether a component was set; what is not converted stays in the tag.
+fn attribute_modifiers(
+    cx: &mut Bridge,
+    item: &str,
+    tag: &mut Compound,
+    hidden: bool,
+    out: &mut Components,
+) -> bool {
     let modifiers = match tag.get("AttributeModifiers") {
         Some(Nbt::List(list)) => {
             let converted: Option<Vec<Value>> = list
@@ -628,20 +663,28 @@ fn attribute_modifiers(cx: &mut Bridge, tag: &mut Compound, hidden: bool, out: &
                 .map(|modifier| attribute_modifier(cx, modifier.as_compound()?))
                 .collect();
             match converted {
-                Some(converted) => converted,
-                None => return,
+                Some(converted) => Some(converted),
+                None => return false,
             }
         }
-        Some(_) => return,
-        None => Vec::new(),
+        Some(_) => return false,
+        None => None,
+    };
+    let defaults = cx.default_modifiers(item);
+    let modifiers = match modifiers {
+        Some(modifiers) if !modifiers.is_empty() || !defaults.is_empty() || hidden => modifiers,
+        // No modifiers on armour: 1.20.5 cannot say that, the defaults stay
+        // and the list travels in `custom_data`.
+        Some(_) => return false,
+        None if hidden => defaults,
+        None => return false,
     };
     tag.remove("AttributeModifiers");
-    if !modifiers.is_empty() || hidden {
-        out.insert(
-            "attribute_modifiers",
-            Value::Struct(vec![Value::List(modifiers), Value::Bool(!hidden)]),
-        );
-    }
+    out.insert(
+        "attribute_modifiers",
+        Value::Struct(vec![Value::List(modifiers), Value::Bool(!hidden)]),
+    );
+    true
 }
 
 fn attribute_modifier(cx: &mut Bridge, modifier: &Compound) -> Option<Value> {

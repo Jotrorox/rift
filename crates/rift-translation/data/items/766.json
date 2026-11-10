@@ -1,4 +1,902 @@
 {
+ "attribute_modifiers": {
+  "diamond_axe": [
+   [
+    "generic.attack_damage",
+    [
+     -885041709,
+     1683771192,
+     -1533567981,
+     -1556236849
+    ],
+    "Tool modifier",
+    8.0,
+    0,
+    "mainhand"
+   ],
+   [
+    "generic.attack_speed",
+    [
+     -98353636,
+     1098926181,
+     -1340359474,
+     -1752847197
+    ],
+    "Tool modifier",
+    -3.0,
+    0,
+    "mainhand"
+   ]
+  ],
+  "diamond_hoe": [
+   [
+    "generic.attack_damage",
+    [
+     -885041709,
+     1683771192,
+     -1533567981,
+     -1556236849
+    ],
+    "Tool modifier",
+    0.0,
+    0,
+    "mainhand"
+   ],
+   [
+    "generic.attack_speed",
+    [
+     -98353636,
+     1098926181,
+     -1340359474,
+     -1752847197
+    ],
+    "Tool modifier",
+    0.0,
+    0,
+    "mainhand"
+   ]
+  ],
+  "diamond_pickaxe": [
+   [
+    "generic.attack_damage",
+    [
+     -885041709,
+     1683771192,
+     -1533567981,
+     -1556236849
+    ],
+    "Tool modifier",
+    4.0,
+    0,
+    "mainhand"
+   ],
+   [
+    "generic.attack_speed",
+    [
+     -98353636,
+     1098926181,
+     -1340359474,
+     -1752847197
+    ],
+    "Tool modifier",
+    -2.799999952316284,
+    0,
+    "mainhand"
+   ]
+  ],
+  "diamond_shovel": [
+   [
+    "generic.attack_damage",
+    [
+     -885041709,
+     1683771192,
+     -1533567981,
+     -1556236849
+    ],
+    "Tool modifier",
+    4.5,
+    0,
+    "mainhand"
+   ],
+   [
+    "generic.attack_speed",
+    [
+     -98353636,
+     1098926181,
+     -1340359474,
+     -1752847197
+    ],
+    "Tool modifier",
+    -3.0,
+    0,
+    "mainhand"
+   ]
+  ],
+  "diamond_sword": [
+   [
+    "generic.attack_damage",
+    [
+     -885041709,
+     1683771192,
+     -1533567981,
+     -1556236849
+    ],
+    "Weapon modifier",
+    6.0,
+    0,
+    "mainhand"
+   ],
+   [
+    "generic.attack_speed",
+    [
+     -98353636,
+     1098926181,
+     -1340359474,
+     -1752847197
+    ],
+    "Weapon modifier",
+    -2.4000000953674316,
+    0,
+    "mainhand"
+   ]
+  ],
+  "golden_axe": [
+   [
+    "generic.attack_damage",
+    [
+     -885041709,
+     1683771192,
+     -1533567981,
+     -1556236849
+    ],
+    "Tool modifier",
+    6.0,
+    0,
+    "mainhand"
+   ],
+   [
+    "generic.attack_speed",
+    [
+     -98353636,
+     1098926181,
+     -1340359474,
+     -1752847197
+    ],
+    "Tool modifier",
+    -3.0,
+    0,
+    "mainhand"
+   ]
+  ],
+  "golden_hoe": [
+   [
+    "generic.attack_damage",
+    [
+     -885041709,
+     1683771192,
+     -1533567981,
+     -1556236849
+    ],
+    "Tool modifier",
+    0.0,
+    0,
+    "mainhand"
+   ],
+   [
+    "generic.attack_speed",
+    [
+     -98353636,
+     1098926181,
+     -1340359474,
+     -1752847197
+    ],
+    "Tool modifier",
+    -3.0,
+    0,
+    "mainhand"
+   ]
+  ],
+  "golden_pickaxe": [
+   [
+    "generic.attack_damage",
+    [
+     -885041709,
+     1683771192,
+     -1533567981,
+     -1556236849
+    ],
+    "Tool modifier",
+    1.0,
+    0,
+    "mainhand"
+   ],
+   [
+    "generic.attack_speed",
+    [
+     -98353636,
+     1098926181,
+     -1340359474,
+     -1752847197
+    ],
+    "Tool modifier",
+    -2.799999952316284,
+    0,
+    "mainhand"
+   ]
+  ],
+  "golden_shovel": [
+   [
+    "generic.attack_damage",
+    [
+     -885041709,
+     1683771192,
+     -1533567981,
+     -1556236849
+    ],
+    "Tool modifier",
+    1.5,
+    0,
+    "mainhand"
+   ],
+   [
+    "generic.attack_speed",
+    [
+     -98353636,
+     1098926181,
+     -1340359474,
+     -1752847197
+    ],
+    "Tool modifier",
+    -3.0,
+    0,
+    "mainhand"
+   ]
+  ],
+  "golden_sword": [
+   [
+    "generic.attack_damage",
+    [
+     -885041709,
+     1683771192,
+     -1533567981,
+     -1556236849
+    ],
+    "Weapon modifier",
+    3.0,
+    0,
+    "mainhand"
+   ],
+   [
+    "generic.attack_speed",
+    [
+     -98353636,
+     1098926181,
+     -1340359474,
+     -1752847197
+    ],
+    "Weapon modifier",
+    -2.4000000953674316,
+    0,
+    "mainhand"
+   ]
+  ],
+  "iron_axe": [
+   [
+    "generic.attack_damage",
+    [
+     -885041709,
+     1683771192,
+     -1533567981,
+     -1556236849
+    ],
+    "Tool modifier",
+    8.0,
+    0,
+    "mainhand"
+   ],
+   [
+    "generic.attack_speed",
+    [
+     -98353636,
+     1098926181,
+     -1340359474,
+     -1752847197
+    ],
+    "Tool modifier",
+    -3.0999999046325684,
+    0,
+    "mainhand"
+   ]
+  ],
+  "iron_hoe": [
+   [
+    "generic.attack_damage",
+    [
+     -885041709,
+     1683771192,
+     -1533567981,
+     -1556236849
+    ],
+    "Tool modifier",
+    0.0,
+    0,
+    "mainhand"
+   ],
+   [
+    "generic.attack_speed",
+    [
+     -98353636,
+     1098926181,
+     -1340359474,
+     -1752847197
+    ],
+    "Tool modifier",
+    -1.0,
+    0,
+    "mainhand"
+   ]
+  ],
+  "iron_pickaxe": [
+   [
+    "generic.attack_damage",
+    [
+     -885041709,
+     1683771192,
+     -1533567981,
+     -1556236849
+    ],
+    "Tool modifier",
+    3.0,
+    0,
+    "mainhand"
+   ],
+   [
+    "generic.attack_speed",
+    [
+     -98353636,
+     1098926181,
+     -1340359474,
+     -1752847197
+    ],
+    "Tool modifier",
+    -2.799999952316284,
+    0,
+    "mainhand"
+   ]
+  ],
+  "iron_shovel": [
+   [
+    "generic.attack_damage",
+    [
+     -885041709,
+     1683771192,
+     -1533567981,
+     -1556236849
+    ],
+    "Tool modifier",
+    3.5,
+    0,
+    "mainhand"
+   ],
+   [
+    "generic.attack_speed",
+    [
+     -98353636,
+     1098926181,
+     -1340359474,
+     -1752847197
+    ],
+    "Tool modifier",
+    -3.0,
+    0,
+    "mainhand"
+   ]
+  ],
+  "iron_sword": [
+   [
+    "generic.attack_damage",
+    [
+     -885041709,
+     1683771192,
+     -1533567981,
+     -1556236849
+    ],
+    "Weapon modifier",
+    5.0,
+    0,
+    "mainhand"
+   ],
+   [
+    "generic.attack_speed",
+    [
+     -98353636,
+     1098926181,
+     -1340359474,
+     -1752847197
+    ],
+    "Weapon modifier",
+    -2.4000000953674316,
+    0,
+    "mainhand"
+   ]
+  ],
+  "mace": [
+   [
+    "generic.attack_damage",
+    [
+     -885041709,
+     1683771192,
+     -1533567981,
+     -1556236849
+    ],
+    "Weapon modifier",
+    6.0,
+    0,
+    "mainhand"
+   ],
+   [
+    "generic.attack_speed",
+    [
+     -98353636,
+     1098926181,
+     -1340359474,
+     -1752847197
+    ],
+    "Weapon modifier",
+    -2.4000000953674316,
+    0,
+    "mainhand"
+   ]
+  ],
+  "netherite_axe": [
+   [
+    "generic.attack_damage",
+    [
+     -885041709,
+     1683771192,
+     -1533567981,
+     -1556236849
+    ],
+    "Tool modifier",
+    9.0,
+    0,
+    "mainhand"
+   ],
+   [
+    "generic.attack_speed",
+    [
+     -98353636,
+     1098926181,
+     -1340359474,
+     -1752847197
+    ],
+    "Tool modifier",
+    -3.0,
+    0,
+    "mainhand"
+   ]
+  ],
+  "netherite_hoe": [
+   [
+    "generic.attack_damage",
+    [
+     -885041709,
+     1683771192,
+     -1533567981,
+     -1556236849
+    ],
+    "Tool modifier",
+    0.0,
+    0,
+    "mainhand"
+   ],
+   [
+    "generic.attack_speed",
+    [
+     -98353636,
+     1098926181,
+     -1340359474,
+     -1752847197
+    ],
+    "Tool modifier",
+    0.0,
+    0,
+    "mainhand"
+   ]
+  ],
+  "netherite_pickaxe": [
+   [
+    "generic.attack_damage",
+    [
+     -885041709,
+     1683771192,
+     -1533567981,
+     -1556236849
+    ],
+    "Tool modifier",
+    5.0,
+    0,
+    "mainhand"
+   ],
+   [
+    "generic.attack_speed",
+    [
+     -98353636,
+     1098926181,
+     -1340359474,
+     -1752847197
+    ],
+    "Tool modifier",
+    -2.799999952316284,
+    0,
+    "mainhand"
+   ]
+  ],
+  "netherite_shovel": [
+   [
+    "generic.attack_damage",
+    [
+     -885041709,
+     1683771192,
+     -1533567981,
+     -1556236849
+    ],
+    "Tool modifier",
+    5.5,
+    0,
+    "mainhand"
+   ],
+   [
+    "generic.attack_speed",
+    [
+     -98353636,
+     1098926181,
+     -1340359474,
+     -1752847197
+    ],
+    "Tool modifier",
+    -3.0,
+    0,
+    "mainhand"
+   ]
+  ],
+  "netherite_sword": [
+   [
+    "generic.attack_damage",
+    [
+     -885041709,
+     1683771192,
+     -1533567981,
+     -1556236849
+    ],
+    "Weapon modifier",
+    7.0,
+    0,
+    "mainhand"
+   ],
+   [
+    "generic.attack_speed",
+    [
+     -98353636,
+     1098926181,
+     -1340359474,
+     -1752847197
+    ],
+    "Weapon modifier",
+    -2.4000000953674316,
+    0,
+    "mainhand"
+   ]
+  ],
+  "stone_axe": [
+   [
+    "generic.attack_damage",
+    [
+     -885041709,
+     1683771192,
+     -1533567981,
+     -1556236849
+    ],
+    "Tool modifier",
+    8.0,
+    0,
+    "mainhand"
+   ],
+   [
+    "generic.attack_speed",
+    [
+     -98353636,
+     1098926181,
+     -1340359474,
+     -1752847197
+    ],
+    "Tool modifier",
+    -3.200000047683716,
+    0,
+    "mainhand"
+   ]
+  ],
+  "stone_hoe": [
+   [
+    "generic.attack_damage",
+    [
+     -885041709,
+     1683771192,
+     -1533567981,
+     -1556236849
+    ],
+    "Tool modifier",
+    0.0,
+    0,
+    "mainhand"
+   ],
+   [
+    "generic.attack_speed",
+    [
+     -98353636,
+     1098926181,
+     -1340359474,
+     -1752847197
+    ],
+    "Tool modifier",
+    -2.0,
+    0,
+    "mainhand"
+   ]
+  ],
+  "stone_pickaxe": [
+   [
+    "generic.attack_damage",
+    [
+     -885041709,
+     1683771192,
+     -1533567981,
+     -1556236849
+    ],
+    "Tool modifier",
+    2.0,
+    0,
+    "mainhand"
+   ],
+   [
+    "generic.attack_speed",
+    [
+     -98353636,
+     1098926181,
+     -1340359474,
+     -1752847197
+    ],
+    "Tool modifier",
+    -2.799999952316284,
+    0,
+    "mainhand"
+   ]
+  ],
+  "stone_shovel": [
+   [
+    "generic.attack_damage",
+    [
+     -885041709,
+     1683771192,
+     -1533567981,
+     -1556236849
+    ],
+    "Tool modifier",
+    2.5,
+    0,
+    "mainhand"
+   ],
+   [
+    "generic.attack_speed",
+    [
+     -98353636,
+     1098926181,
+     -1340359474,
+     -1752847197
+    ],
+    "Tool modifier",
+    -3.0,
+    0,
+    "mainhand"
+   ]
+  ],
+  "stone_sword": [
+   [
+    "generic.attack_damage",
+    [
+     -885041709,
+     1683771192,
+     -1533567981,
+     -1556236849
+    ],
+    "Weapon modifier",
+    4.0,
+    0,
+    "mainhand"
+   ],
+   [
+    "generic.attack_speed",
+    [
+     -98353636,
+     1098926181,
+     -1340359474,
+     -1752847197
+    ],
+    "Weapon modifier",
+    -2.4000000953674316,
+    0,
+    "mainhand"
+   ]
+  ],
+  "trident": [
+   [
+    "generic.attack_damage",
+    [
+     -885041709,
+     1683771192,
+     -1533567981,
+     -1556236849
+    ],
+    "Tool modifier",
+    8.0,
+    0,
+    "mainhand"
+   ],
+   [
+    "generic.attack_speed",
+    [
+     -98353636,
+     1098926181,
+     -1340359474,
+     -1752847197
+    ],
+    "Tool modifier",
+    -2.9000000953674316,
+    0,
+    "mainhand"
+   ]
+  ],
+  "wooden_axe": [
+   [
+    "generic.attack_damage",
+    [
+     -885041709,
+     1683771192,
+     -1533567981,
+     -1556236849
+    ],
+    "Tool modifier",
+    6.0,
+    0,
+    "mainhand"
+   ],
+   [
+    "generic.attack_speed",
+    [
+     -98353636,
+     1098926181,
+     -1340359474,
+     -1752847197
+    ],
+    "Tool modifier",
+    -3.200000047683716,
+    0,
+    "mainhand"
+   ]
+  ],
+  "wooden_hoe": [
+   [
+    "generic.attack_damage",
+    [
+     -885041709,
+     1683771192,
+     -1533567981,
+     -1556236849
+    ],
+    "Tool modifier",
+    0.0,
+    0,
+    "mainhand"
+   ],
+   [
+    "generic.attack_speed",
+    [
+     -98353636,
+     1098926181,
+     -1340359474,
+     -1752847197
+    ],
+    "Tool modifier",
+    -3.0,
+    0,
+    "mainhand"
+   ]
+  ],
+  "wooden_pickaxe": [
+   [
+    "generic.attack_damage",
+    [
+     -885041709,
+     1683771192,
+     -1533567981,
+     -1556236849
+    ],
+    "Tool modifier",
+    1.0,
+    0,
+    "mainhand"
+   ],
+   [
+    "generic.attack_speed",
+    [
+     -98353636,
+     1098926181,
+     -1340359474,
+     -1752847197
+    ],
+    "Tool modifier",
+    -2.799999952316284,
+    0,
+    "mainhand"
+   ]
+  ],
+  "wooden_shovel": [
+   [
+    "generic.attack_damage",
+    [
+     -885041709,
+     1683771192,
+     -1533567981,
+     -1556236849
+    ],
+    "Tool modifier",
+    1.5,
+    0,
+    "mainhand"
+   ],
+   [
+    "generic.attack_speed",
+    [
+     -98353636,
+     1098926181,
+     -1340359474,
+     -1752847197
+    ],
+    "Tool modifier",
+    -3.0,
+    0,
+    "mainhand"
+   ]
+  ],
+  "wooden_sword": [
+   [
+    "generic.attack_damage",
+    [
+     -885041709,
+     1683771192,
+     -1533567981,
+     -1556236849
+    ],
+    "Weapon modifier",
+    3.0,
+    0,
+    "mainhand"
+   ],
+   [
+    "generic.attack_speed",
+    [
+     -98353636,
+     1098926181,
+     -1340359474,
+     -1752847197
+    ],
+    "Weapon modifier",
+    -2.4000000953674316,
+    0,
+    "mainhand"
+   ]
+  ]
+ },
  "max_damage": {
   "bow": 384,
   "brush": 64,
