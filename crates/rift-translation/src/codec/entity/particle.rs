@@ -422,33 +422,24 @@ pub fn convert(
     match &mut options {
         Options::Block(state) => *state = block_state(shared, direction, *state),
         Options::Item(stack) if items_change(from, to) => {
-            let mut converted = Writer::new();
-            if from >= 775 || to >= 775 {
-                if !(from >= 775 && to >= 775) {
-                    return Ok(None);
-                }
-                // INTEGRATION: item templates (26.1+) need the item codec's
-                // component conversion; the item ID is mapped here.
-                let mut reader = Reader::new(stack);
-                let item_id = reader.varint()?;
-                let count = reader.varint()?;
-                let mut components = item::components::read(from, &mut reader)?;
-                reader.finish()?;
-                let Some(item_id) = shared.mapping(direction, "item").get(item_id) else {
-                    return Ok(None);
-                };
-                item::components::convert(shared, direction, item_id, &mut components)?;
-                converted.varint(item_id).varint(count);
-                item::components::write(to, &components, &mut converted)?;
+            // 26.1 sends an item template (item, count, components) where
+            // older protocols send a stack (count first).
+            let mut reader = Reader::new(stack);
+            let mut value = if from >= 775 {
+                Some(item::read_template(from, &mut reader)?)
             } else {
-                let mut reader = Reader::new(stack);
-                let mut value = item::read(from, &mut reader)?;
-                reader.finish()?;
-                item::convert(shared, direction, &mut value)?;
-                if value.is_none() {
-                    return Ok(None);
-                }
-                item::write(to, value.as_ref(), &mut converted)?;
+                item::read(from, &mut reader)?
+            };
+            reader.finish()?;
+            item::convert(shared, direction, &mut value)?;
+            let Some(value) = value else {
+                return Ok(None);
+            };
+            let mut converted = Writer::new();
+            if to >= 775 {
+                item::write_template(to, &value, &mut converted)?;
+            } else {
+                item::write(to, Some(&value), &mut converted)?;
             }
             *stack = converted.buf;
         }

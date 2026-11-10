@@ -232,6 +232,16 @@ CORRECTIONS = [
                                      ("maxValue", ["option", "string"]))}}])),
          why="StatePropertiesPredicate.ValueMatcher is ByteBufCodecs.either(exact, range), "
              "and a range's bounds are each optional."),
+    dict(protocols=(775, 775), path=SLOT_COMPONENT + ["instrument"],
+         value=["registryEntryHolder", {"baseName": "instrumentId",
+                                        "otherwise": {"name": "data", "type": "InstrumentData"}}],
+         why="26.1 InstrumentComponent.STREAM_CODEC is Instrument.STREAM_CODEC, a plain registry "
+             "holder; the EitherHolder (boolean, then holder or key) was 1.21.5 to 1.21.11."),
+    dict(protocols=(775, 775), path=SLOT_COMPONENT + ["provides_trim_material"],
+         value=["registryEntryHolder", {"baseName": "materialId",
+                                        "otherwise": {"name": "data", "type": "ArmorTrimMaterial"}}],
+         why="26.1 ProvidesTrimMaterial.STREAM_CODEC is TrimMaterial.STREAM_CODEC, a plain registry "
+             "holder, no longer an EitherHolder."),
 ]
 
 

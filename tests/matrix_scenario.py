@@ -712,9 +712,20 @@ def step_blocks(cx):
             continue
         cx.compare_names(f"block {name}", "block_state", [ref[position]], [via[position]])
     entities = {"tile_entity_data", "block_entity_data"}
-    if not cx.ref.packets(entities, cx.since("ref")):
+    ref_entities = cx.ref.packets(entities, cx.since("ref"))
+    if not ref_entities:
         cx.scenario("no block entity data (sign, chest, banner, skull)")
-    if len(cx.via.packets(entities, cx.since("via"))) < len(cx.ref.packets(entities, cx.since("ref"))):
+    if cx.ref.protocol >= 757 and cx.via.protocol >= 757:
+        # From 1.18 the packet names a block entity type; one the client's
+        # version lacks (26.2 dropped beds') has nothing to arrive as.
+        def known(record):
+            name = cx.ref_reg.name("block_entity_type", record.value.get("action"))
+            return name.startswith("<") or cx.via_reg.knows("block_entity_type", name)
+        lacking = [record for record in ref_entities if not known(record)]
+        if lacking:
+            cx.info(f"{len(lacking)} block entity updates of types the client's version lacks")
+        ref_entities = [record for record in ref_entities if known(record)]
+    if len(cx.via.packets(entities, cx.since("via"))) < len(ref_entities):
         cx.fail("the translated client received fewer block entity updates than the reference")
 
 
