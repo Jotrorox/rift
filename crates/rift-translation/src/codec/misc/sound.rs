@@ -821,7 +821,15 @@ mod tests {
                             _ => Kind::SoundEntity,
                         };
                         let (sound, _) = read(other, kind, &out.data).unwrap();
-                        if protocol.min(other) >= 393 {
+                        // A sound the receiver lacks arrives as the rules'
+                        // stand-in for it.
+                        let kept = original.as_deref().is_some_and(|original| {
+                            data::version(other)
+                                .expect_registry("sound_event")
+                                .id(crate::data::strip(original))
+                                .is_some()
+                        });
+                        if protocol.min(other) >= 393 && kept {
                             assert_eq!(
                                 name(other, &sound.holder),
                                 original,

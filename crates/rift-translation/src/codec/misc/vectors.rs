@@ -102,11 +102,13 @@ fn real_sounds_keep_their_meaning_through_every_step() {
     }
     let registered = hex(SOUND_1_19_3);
     let original = sound_name(761, "sound", &registered);
-    for target in [393, 777] {
+    // 1.13 has no axolotls: their sound arrives as the rules' stand-in.
+    let stand_in = Some("minecraft:entity.dolphin.ambient".to_owned());
+    for (target, expected) in [(393, &stand_in), (777, &original)] {
         let out = chain(761, target, "sound", registered.clone());
         assert_eq!(
             sound_name(target, &out[0].0, &out[0].1),
-            original,
+            *expected,
             "{target}"
         );
     }
