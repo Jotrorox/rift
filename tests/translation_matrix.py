@@ -35,6 +35,15 @@ mandatory teleport and idle steps); --keep keeps the server directory;
 writes machine-readable results; --direct also runs the reference scenario
 with the "translated" client connected directly (validates the decoder).
 
+Result levels: FAIL (a translation or schema problem: the cell fails), INFO
+(e.g. a registry name the client's version lacks arrived as a stand-in),
+UNVERIFIED (a 26.2/26.3 layout no checked schema covers; never a pass), KNOWN
+(a documented deviation of non-vanilla server software, SERVER_DEVIATIONS,
+seen identically by the reference client). A decode failure on the reference
+client means the schema needs a correction (tests/protodef.py CORRECTIONS),
+not that translation is wrong. --redecode RUN_DIR replays a finished run's
+failed packets against the current schemas without starting servers.
+
 A server is started once per --server and reused for every --client. At most
 three Minecraft servers run at once machine-wide (RIFT_VIA_MAX_SERVERS); other
 invocations wait for a slot. Downloads, Paper patching, Spigot BuildTools
@@ -72,6 +81,17 @@ ROOT = fixtures.ROOT
 RUNS = ROOT / "target" / "minecraft" / "runs"
 PROXY = ROOT / "target" / "debug" / "examples" / "proxy"
 ALWAYS = ("teleport", "op", "idle")  # Kept by --scenario join.
+
+# Server software that deviates from the official server's encoding. A decode
+# failure matching an entry is reported as KNOWN (not a translation failure),
+# and only when the reference client, which talks to the server directly in
+# its own protocol, fails the same way.
+SERVER_DEVIATIONS = [
+    dict(software="pumpkin", packet="set_slot", where="banner_patterns",
+         why="Pumpkin 0.2.0 writes a banner pattern's registry holder as the raw ID without the +1 "
+             "holder offset (bytes 01 00 0f for one layer); vanilla 26.3 sends 01 05 0f for the same "
+             "item and decodes cleanly with the same schema."),
+]
 
 
 def release(protocol):
@@ -243,7 +263,7 @@ def run_cell(server, proxy, protocol, steps, label, directory, args):
     """Run the scenario for one client protocol on a running server."""
     result = dict(server=server.name, server_version=server.release, server_protocol=server.protocol,
                   client=release(protocol), client_protocol=protocol, via=args.via,
-                  status="FAIL", steps=[], findings=[], logs=str(directory))
+                  status="FAIL", steps=[], findings=[], logs=str(directory), server_start=server.started)
     begun = time.monotonic()
     directory.mkdir(parents=True, exist_ok=True)
     log_start, proxy_start = server.offset(), proxy.offset() if proxy else 0
@@ -304,6 +324,8 @@ def run_cell(server, proxy, protocol, steps, label, directory, args):
             if session.failure:
                 result["findings"].append(dict(level="FAIL", step=session.step,
                                                message=f"{session.label}: {session.failure}"))
+    except SessionError as error:  # Expected failures: the message says it all.
+        result["findings"].append(dict(level="FAIL", step="setup", message=str(error)))
     except Exception as error:
         result["findings"].append(dict(level="FAIL", step="setup", message=f"{type(error).__name__}: {error}",
                                        traceback=traceback.format_exc()[-2000:]))
@@ -321,11 +343,18 @@ def run_cell(server, proxy, protocol, steps, label, directory, args):
                   if "failed" in line or "cannot" in line.lower() or "error" in line.lower()]
         if errors:
             result["proxy_errors"] = errors[-20:]
+    reference_errors = {(record.name, record.error) for record in ref.failures()} if ref else set()
     for session, name in ((ref, "reference"), (via, "translated")):
         if session is None:
             continue
         session.write_log(directory / f"{name}.jsonl")
         report = decode_report(session)
+        for entry in report:
+            for deviation in SERVER_DEVIATIONS:
+                if (deviation["software"] == server.software and entry["packet"] == deviation["packet"]
+                        and deviation["where"] in entry["error"]
+                        and (entry["packet"], entry["error"]) in reference_errors):
+                    entry.update(level="KNOWN", known=deviation["why"])
         result[name] = dict(protocol=session.protocol, packets=len(session.records),
                             sent=len(session.sent), keepalives=session.keepalives,
                             decode_failures=sum(entry["count"] for entry in report if entry["level"] == "FAIL"),
@@ -334,7 +363,8 @@ def run_cell(server, proxy, protocol, steps, label, directory, args):
         for entry in report:
             result["findings"].append(dict(
                 level=entry["level"], step=entry["step"],
-                message=(f"{name} client could not decode {entry['state']} {entry['packet'] or '?'} "
+                message=(("known server deviation: " + entry["known"] + " " if entry.get("known") else "")
+                         + f"{name} client could not decode {entry['state']} {entry['packet'] or '?'} "
                          f"(id {entry['id']:#04x}, {entry['size']} bytes, x{entry['count']}): {entry['error']}"),
                 hexdump=entry["hexdump"]))
     kicked = [line for line in server_log.splitlines()
@@ -368,7 +398,6 @@ def run_server(name, clients, args, steps):
             label = f"{server.name}-client-{release(protocol)}"
             directory = RUNS / f"{stamp}-{label}"
             result = run_cell(server, proxy, protocol, steps, label, directory, args)
-            result["server_start"] = server.started
             results.append(result)
             print(summary_line(result), flush=True)
             if result["status"] != "PASS":

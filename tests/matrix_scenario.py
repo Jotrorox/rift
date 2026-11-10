@@ -341,6 +341,8 @@ def entity_nbt(cmd, name):
     if name == "falling_block":
         if cmd.legacy:
             return '{Block:"minecraft:sand",Time:1,NoGravity:1b}'
+        if cmd.p >= 777:  # 26.3 reads a block state string or {id:...}.
+            return '{BlockState:"minecraft:sand",Time:1,NoGravity:1b}'
         return '{BlockState:{Name:"minecraft:sand"},Time:1,NoGravity:1b}'
     if name == "pig_rider":
         return f'{{NoAI:1b,{custom("RiftPig")},Passengers:[{{id:"minecraft:chicken",NoAI:1b}}]}}'
@@ -634,6 +636,9 @@ def reappear(cx, timeout=12):
 @step(software=ALL)
 def step_teleport(cx):
     """Teleport both players to the build area; positions must match."""
+    # Let the join teleport's confirmation land first: Pumpkin kicks a client
+    # whose confirmation arrives after a newer teleport ("Wrong teleport id").
+    time.sleep(1)
     x, y, z = cx.base
     marks = (cx.ref.mark(), cx.via.mark())
     cx.console(f"tp {cx.ref.name} {x + 0.5} {y} {z + 0.5}", f"tp {cx.via.name} {x + 2.5} {y} {z + 0.5}")
@@ -678,7 +683,7 @@ def step_op(cx):
                cx.cmd.gamerule("keepInventory", "keep_inventory", "true"))
 
 
-@step()
+@step(software=ALL)
 def step_blocks(cx):
     """Blocks with states and block entities via /setblock; names must match."""
     positions = {}
@@ -713,7 +718,7 @@ def step_blocks(cx):
         cx.fail("the translated client received fewer block entity updates than the reference")
 
 
-@step()
+@step(software=ALL)
 def step_items(cx):
     """Many kinds of items via /give; the inventory updates must name them."""
     given = [item for item in ITEMS if item["min"] <= cx.server.protocol]
@@ -731,7 +736,7 @@ def step_items(cx):
     cx.compare_names("inventory", "item", sorted(set(ref)), via)
 
 
-@step()
+@step(software=ALL)
 def step_entities(cx):
     """Entities of many kinds (armour, names, passengers, leash, hanging)."""
     for label, entity, dx, dz, key in ENTITIES:
@@ -761,7 +766,7 @@ def step_entities(cx):
             cx.fail(f"the translated client received no {name}")
 
 
-@step()
+@step(software=ALL)
 def step_particles_and_sounds(cx):
     """Particles with data, and sounds; sound names must match."""
     x, y, z = cx.surface(2, 1, 2)
@@ -782,7 +787,7 @@ def step_particles_and_sounds(cx):
                 f"the reference {count(cx.ref, 'ref')}")
 
 
-@step()
+@step(software=ALL)
 def step_explosion(cx):
     """A primed TNT explodes away from the build."""
     x, y, z = cx.surface(-6, 0, 10)
@@ -805,7 +810,7 @@ def step_weather_and_time(cx):
     cx.expect_both({"update_time"}, "time update")
 
 
-@step()
+@step(software=ALL)
 def step_world_border(cx):
     """World border size, centre and warning."""
     cx.console("worldborder set 2000", "worldborder center 0 0", "worldborder warning distance 7")
@@ -845,7 +850,7 @@ def step_boss_bar(cx):
             cx.fail(f"the translated client's boss bar titles are {titles}")
 
 
-@step()
+@step(software=ALL)
 def step_scoreboard(cx):
     """A sidebar objective with a score, and a coloured team."""
     cx.console("scoreboard objectives add riftobj dummy", "scoreboard objectives setdisplay sidebar riftobj",
@@ -877,7 +882,7 @@ def step_tab_list(cx):
         cx.fail(f"tab list lacks {sorted(missing)} (has {sorted(names)[:10]})")
 
 
-@step()
+@step(software=ALL)
 def step_experience_and_health(cx):
     """Experience levels; damage in survival, then back to creative."""
     cx.console(cx.cmd.xp(cx.via.name, 5), cx.cmd.xp(cx.ref.name, 5))
@@ -896,7 +901,7 @@ def step_experience_and_health(cx):
     cx.sync()
 
 
-@step()
+@step(software=ALL)
 def step_effects(cx):
     """A potion effect on the player; effect names must match."""
     cx.console(cx.cmd.effect(cx.via.name, "speed", 60, 1), cx.cmd.effect(cx.ref.name, "speed", 60, 1))
@@ -931,7 +936,12 @@ def step_tab_complete(cx):
         return sorted(entry if isinstance(entry, str) else entry["match"] for entry in record.value["matches"])
     cx.console(f"op {cx.ref.name}")
     time.sleep(0.3)
-    ref, via = suggestions(cx.ref), suggestions(cx.via)
+    try:
+        ref = suggestions(cx.ref)
+    except SessionError:
+        cx.ref.check()
+        cx.scenario("the server answered no suggestion request")
+    via = suggestions(cx.via)
     if not any("gamemode" in text for text in ref):
         cx.info(f"the server suggests {ref} for /gamemo even to the reference client")
     if [text.lstrip("/") for text in ref] != [text.lstrip("/") for text in via]:
@@ -970,19 +980,32 @@ def step_dimension_change(cx):
 @step()
 def step_respawn(cx):
     """/kill in survival, then the client's respawn request."""
+    x, y, z = cx.base
     cx.console(cx.cmd.gamemode(cx.via.name, "survival"))
     if cx.server.protocol >= 573:  # The rule exists from 1.15 on; off is the default.
         cx.console(cx.cmd.gamerule("doImmediateRespawn", "immediate_respawn", "false"))
     cx.console(f"kill {cx.via.name}")
-    cx.via.wait_packet("update_health", "death", 10, cx.since("via"), where=lambda value: value["health"] <= 0)
-    mark = cx.via.mark()
-    cx.via.send_packet("client_command", {"actionId": "perform_respawn"})
-    cx.via.wait_packet("respawn", "respawn", 10, mark)
-    cx.via.wait_packet("update_health", "health after respawn", 10, mark, where=lambda value: value["health"] > 0)
-    x, y, z = cx.base
-    mark = cx.via.mark()
-    cx.console(cx.cmd.gamemode(cx.via.name, "creative"), f"tp {cx.via.name} {x + 2.5} {y} {z + 0.5}")
-    cx.via.wait_packet("position", "the teleport back", 10, mark)
+    try:
+        try:
+            cx.via.wait_packet("update_health", "death", 10, cx.since("via"),
+                               where=lambda value: value["health"] <= 0)
+        except SessionError:
+            cx.via.check()
+            died = any(record.value.get("entityStatus") == 3 and record.value.get("entityId") == cx.via.entity_id
+                       for record in cx.ref.packets("entity_status", cx.since("ref")))
+            if not died:
+                raise Skip("the server logged the kill but sent no death to either client") from None
+            raise StepFailure("the reference saw the translated player die; the translated client did not")
+        mark = cx.via.mark()
+        cx.via.send_packet("client_command", {"actionId": "perform_respawn"})
+        cx.via.wait_packet("respawn", "respawn", 10, mark)
+        cx.via.wait_packet("update_health", "health after respawn", 10, mark,
+                           where=lambda value: value["health"] > 0)
+    finally:
+        # Later steps need a creative player at the build, whatever happened.
+        mark = cx.via.mark()
+        cx.console(cx.cmd.gamemode(cx.via.name, "creative"), f"tp {cx.via.name} {x + 2.5} {y} {z + 0.5}")
+        cx.via.wait_packet("position", "the teleport back", 10, mark)
     reappear(cx)
     cx.sync()
 
@@ -1047,7 +1070,7 @@ def step_held_item_and_swing(cx):
                        where=lambda value: value["entityId"] == cx.via.entity_id)
 
 
-@step(software=JAVA)
+@step(software=ALL)
 def step_movement(cx):
     """The translated player walks; the reference client sees it move."""
     mark = cx.ref.mark()
@@ -1247,7 +1270,8 @@ def step_plugin_message(cx):
 def step_idle(cx):
     """Idle until both clients answered at least two keep-alives, and for a few
     seconds more (time updates, entity ticks)."""
-    deadline = time.monotonic() + 45
+    # Keep-alives come every 15 s of server time; a loaded machine stretches that.
+    deadline = time.monotonic() + 90
     while min(cx.ref.keepalives, cx.via.keepalives) < 2:
         cx.ref.check()
         cx.via.check()

@@ -182,8 +182,8 @@ class MatrixTests(unittest.TestCase):
         boss = next(step for step in matrix_scenario.STEPS if step.name == "boss_bar")
         self.assertIsNotNone(boss.applies(340, 774, "vanilla"))
         self.assertIsNone(boss.applies(774, 340, "vanilla"))
-        blocks = next(step for step in matrix_scenario.STEPS if step.name == "blocks")
-        self.assertIn("pumpkin", blocks.applies(777, 777, "pumpkin"))
+        containers = next(step for step in matrix_scenario.STEPS if step.name == "containers")
+        self.assertIn("pumpkin", containers.applies(777, 777, "pumpkin"))
 
 
 class EnvironmentTests(unittest.TestCase):

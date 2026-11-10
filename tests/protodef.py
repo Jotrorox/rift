@@ -163,7 +163,7 @@ CORRECTIONS = [
                                      {"field": "copyMetadata"}, "type"], value="u8",
          why="ClientboundRespawnPacket writes the dataToKeep flags byte (KEEP_ATTRIBUTES 1, "
              "KEEP_ENTITY_DATA 2) since 1.19.3, not a boolean; a dimension change sends 3."),
-    dict(protocols=(766, 766), path=RECIPE_TYPES,
+    dict(protocols=(766, 767), path=RECIPE_TYPES,
          value=_mapping(["crafting_shaped", "crafting_shapeless", "crafting_special_armordye",
                          "crafting_special_bookcloning", "crafting_special_mapcloning",
                          "crafting_special_mapextending", "crafting_special_firework_rocket",
@@ -174,8 +174,8 @@ CORRECTIONS = [
                          "blasting", "smoking", "campfire_cooking", "stonecutting", "smithing_transform",
                          "smithing_trim", "crafting_decorated_pot"]),
          why="1.20.5 removed the banner pattern recipe serializer; the schema still lists "
-             "crafting_special_banneraddpattern, shifting every later ID (the 1.20.6 data generator's "
-             "minecraft:recipe_serializer registry)."),
+             "crafting_special_banneraddpattern, shifting every later ID (the 1.20.6 and 1.21.1 data generators' "
+             "minecraft:recipe_serializer registries are identical to this list)."),
     dict(protocols=(766, 767), path=SLOT_COMPONENT + ["potion_contents"],
          value=_container(("potionId", ["option", "varint"]), ("customColor", ["option", "i32"]),
                           ("customEffects", ["array", {"countType": "varint", "type": "ItemPotionEffect"}])),
