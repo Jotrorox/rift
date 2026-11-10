@@ -485,7 +485,7 @@ pub fn unchanged(from: i32, to: i32) -> bool {
         return true;
     }
     if from < 393 || to < 393 {
-        return from >= 393 || to >= 393 || common::registry_identity(from, to, "particle_type");
+        return from < 393 && to < 393 && common::registry_identity(from, to, "particle_type");
     }
     // Layouts of some options types changed on these protocols.
     const LAYOUTS: &[i32] = &[759, 766, 768, 769, 775];

@@ -915,3 +915,19 @@ fn removals_split_for_1_17() {
         .unwrap();
     assert_eq!(back[0].data, [1, 5]);
 }
+
+#[test]
+#[ignore = "prints which handlers each step installs"]
+fn print_installed_handlers() {
+    for pair in PROTOCOLS.windows(2) {
+        let (older, newer) = (pair[0].0, pair[1].0);
+        for (client, backend) in [(newer, older), (older, newer)] {
+            let spawns = spawn::changes(backend, client);
+            let data = metadata::differs(backend, client);
+            let particles = particle::unchanged(backend, client);
+            eprintln!(
+                "{backend}->{client}: spawns {spawns} data {data} particles-unchanged {particles}"
+            );
+        }
+    }
+}

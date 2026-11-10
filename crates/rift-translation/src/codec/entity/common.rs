@@ -39,7 +39,14 @@ pub fn registry_identity(from: i32, to: i32, name: &str) -> bool {
     {
         return true;
     }
-    crate::mapping::mapping(from, to, name).is_identity()
+    // Sparse pre-1.13 registries map their gaps to -1, which is no
+    // identity mapping although no ID changes.
+    let (a, b) = (
+        data::version(from).expect_registry(name),
+        data::version(to).expect_registry(name),
+    );
+    (a.len() == b.len() && a.names().eq(b.names()))
+        || crate::mapping::mapping(from, to, name).is_identity()
 }
 
 /// Block state IDs between two flattened protocols, by block name and
