@@ -243,30 +243,34 @@ fn teleports_are_accepted_with_their_position() {
     assert_eq!(sent[1].name, "move_player_pos_rot");
     assert_eq!(sent[1].data, [&hex(ACCEPT_26_3)[1..], &[0]].concat());
 
-    // An absolute teleport is accepted at once with its target.
+    // The 26.2 client's acceptance and the movement it sends right after
+    // become one acceptance: 26.3 allows one position per client tick.
     let mut down = down();
     down.clientbound("player_position", &hex(TELEPORT)).unwrap();
-    assert_eq!(
-        down.one(Serverbound, "accept_teleportation", &hex("01")),
-        ("accept_teleportation".into(), hex(ACCEPT_26_3))
-    );
-    // A relative one before any known position waits for the movement
-    // packet the 26.2 client sends right after accepting.
-    let mut down = self::down();
-    let mut relative = hex(TELEPORT);
-    relative[0] = 2;
-    let flags = relative.len() - 4;
-    relative[flags..].copy_from_slice(&7i32.to_be_bytes());
-    down.clientbound("player_position", &relative).unwrap();
     assert!(
-        down.serverbound("accept_teleportation", &hex("02"))
+        down.serverbound("accept_teleportation", &hex("01"))
             .unwrap()
             .is_empty()
     );
     let mut moved = Writer::new();
-    moved.f64(4.0).f64(65.0).f64(-2.0).f32(90.0).f32(10.0).u8(1);
-    let sent = down.serverbound("move_player_pos_rot", &moved.buf).unwrap();
-    assert_eq!(sent.len(), 2);
+    moved.f64(-0.5).f64(-60.0).f64(3.5).f32(0.0).f32(0.0).u8(1);
+    assert_eq!(
+        down.one(Serverbound, "move_player_pos_rot", &moved.buf),
+        ("accept_teleportation".into(), hex(ACCEPT_26_3))
+    );
+    // Later movement passes as it is.
+    assert_eq!(
+        down.one(Serverbound, "move_player_pos_rot", &moved.buf),
+        ("move_player_pos_rot".into(), moved.buf.clone())
+    );
+    // A position-only follow-up keeps the rotation last reported.
+    let mut rotation = Writer::new();
+    rotation.f32(90.0).f32(10.0).u8(1);
+    down.serverbound("move_player_rot", &rotation.buf).unwrap();
+    down.serverbound("accept_teleportation", &hex("02"))
+        .unwrap();
+    let mut moved = Writer::new();
+    moved.f64(4.0).f64(65.0).f64(-2.0).u8(1);
     let mut accept = Writer::new();
     accept
         .varint(2)
@@ -275,21 +279,9 @@ fn teleports_are_accepted_with_their_position() {
         .f64(-2.0)
         .f32(90.0)
         .f32(10.0);
-    assert_eq!(sent[0].data, accept.buf);
     assert_eq!(
-        (sent[1].name.as_str(), &sent[1].data),
-        ("move_player_pos_rot", &moved.buf)
-    );
-    // Now the position is known: a relative teleport resolves at once.
-    relative[0] = 3;
-    relative[1..9].copy_from_slice(&1.0f64.to_be_bytes());
-    down.clientbound("player_position", &relative).unwrap();
-    let (_, data) = down.one(Serverbound, "accept_teleportation", &hex("03"));
-    let mut r = Reader::new(&data);
-    assert_eq!(r.varint().unwrap(), 3);
-    assert_eq!(
-        [r.f64().unwrap(), r.f64().unwrap(), r.f64().unwrap()],
-        [5.0, 5.0, 1.5]
+        down.one(Serverbound, "move_player_pos", &moved.buf),
+        ("accept_teleportation".into(), accept.buf)
     );
 }
 

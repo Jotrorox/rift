@@ -14,31 +14,18 @@ use crate::{
     steps::{Make, v1_21_11_to_26_1::join},
     wire::{Reader, Writer, invalid},
 };
-use std::{collections::VecDeque, io, sync::OnceLock};
+use std::{io, sync::OnceLock};
 
 pub const STEP: Option<Make> = Some(|| Box::new(Down::new()));
-
-/// Teleports remembered until the client accepts them; vanilla servers
-/// await one at a time.
-const MAX_TELEPORTS: usize = 8;
 
 pub struct Down {
     shared: Shared,
     brewing_stand: Option<i32>,
-    /// The player's position and rotation as the client last reported them
-    /// or a teleport set them, to resolve relative teleports.
-    position: Option<[f64; 3]>,
+    /// The rotation the client last reported.
     rotation: Option<[f32; 2]>,
-    /// Teleports the server sent, with the absolute target when known.
-    teleports: VecDeque<(i32, Option<Target>)>,
-    /// An accepted teleport whose target the next movement packet tells.
+    /// A teleport the client accepted, completed by the movement packet a
+    /// 26.2 client always sends right after accepting.
     accepted: Option<i32>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct Target {
-    position: [f64; 3],
-    rotation: [f32; 2],
 }
 
 impl HasShared for Down {
@@ -58,9 +45,7 @@ impl Down {
         Self {
             shared: Shared::new(OLDER, NEWER),
             brewing_stand: None,
-            position: None,
             rotation: None,
-            teleports: VecDeque::new(),
             accepted: None,
         }
     }
@@ -89,7 +74,6 @@ impl Down {
                 .tap(Clientbound, Play, "open_screen", Self::open_screen)
                 .tap(Clientbound, Play, "container_close", Self::container_closed)
                 .tap(Serverbound, Play, "container_close", Self::container_closed)
-                .clientbound(Play, "player_position", Self::player_position)
                 .serverbound(Play, "accept_teleportation", Self::accept_teleportation)
                 .serverbound(Play, "move_player_pos", Self::move_player_pos)
                 .serverbound(Play, "move_player_pos_rot", Self::move_player_pos_rot)
@@ -138,10 +122,8 @@ impl Down {
         Ok(())
     }
 
-    /// A new world: the old position means nothing for relative teleports.
     fn spawned(&mut self) {
         self.brewing_stand = None;
-        self.position = None;
     }
 
     fn movement(cx: &mut Cx<'_>, state: State, packet: Packet, kind: Move) -> io::Result<()> {
@@ -267,97 +249,20 @@ impl Down {
         Ok(())
     }
 
-    /// Remember where a teleport puts the player, when that can be known.
-    /// An acceptance that somehow came first is completed here.
-    fn player_position(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
-        let mut r = Reader::new(&packet.data);
-        let id = r.varint()?;
-        let given = [r.f64()?, r.f64()?, r.f64()?];
-        for _ in 0..3 {
-            r.f64()?;
-        }
-        let rotation = [r.f32()?, r.f32()?];
-        let relative = r.i32()?;
-        r.finish()?;
-        let mut target = Target {
-            position: given,
-            rotation,
-        };
-        let mut known = true;
-        for axis in 0..3 {
-            if relative & 1 << axis != 0 {
-                match self.position {
-                    Some(position) => target.position[axis] += position[axis],
-                    None => known = false,
-                }
-            }
-        }
-        for (index, bit) in [(0, 3), (1, 4)] {
-            if relative & 1 << bit != 0 {
-                match self.rotation {
-                    Some(current) => target.rotation[index] += current[index],
-                    None => known = false,
-                }
-            }
-        }
-        cx.to_client(state, packet);
-        if known && self.accepted == Some(id) {
-            self.accepted = None;
-            self.accept(cx, state, id, target);
-            return Ok(());
-        }
-        if self.teleports.len() == MAX_TELEPORTS {
-            self.teleports.pop_front();
-        }
-        self.teleports.push_back((id, known.then_some(target)));
-        Ok(())
-    }
-
-    /// 26.3 wants the accepted position and rotation. They are the
-    /// teleport's when it was absolute or relative to a known position;
-    /// otherwise the movement packet a 26.2 client sends right after the
-    /// acceptance tells them.
-    fn accept_teleportation(
-        &mut self,
-        cx: &mut Cx<'_>,
-        state: State,
-        packet: Packet,
-    ) -> io::Result<()> {
+    /// 26.3 accepts a teleport with the position and rotation the client
+    /// took, and counts it as the client's movement: a 26.2 client's
+    /// acceptance and the movement packet it sends right after become one
+    /// 26.3 acceptance (passing both would be two positions in one tick,
+    /// for which a 26.3 server disconnects the player).
+    fn accept_teleportation(&mut self, _: &mut Cx<'_>, _: State, packet: Packet) -> io::Result<()> {
         let mut r = Reader::new(&packet.data);
         let id = r.varint()?;
         r.finish()?;
-        let target = match self.teleports.iter().position(|(known, _)| *known == id) {
-            Some(index) => {
-                let target = self.teleports[index].1;
-                self.teleports.drain(..=index);
-                target
-            }
-            None => None,
-        };
-        match target {
-            Some(target) => self.accept(cx, state, id, target),
-            None => self.accepted = Some(id),
-        }
+        self.accepted = Some(id);
         Ok(())
     }
 
-    fn accept(&mut self, cx: &mut Cx<'_>, state: State, id: i32, target: Target) {
-        self.position = Some(target.position);
-        self.rotation = Some(target.rotation);
-        let mut w = Writer::with_capacity(37);
-        w.varint(id);
-        for value in target.position {
-            w.f64(value);
-        }
-        w.f32(target.rotation[0]).f32(target.rotation[1]);
-        cx.to_backend(
-            state,
-            Packet::new(Self::ids().accept_teleportation, w.into_inner()),
-        );
-    }
-
-    /// Track the position and complete a pending acceptance, then pass the
-    /// movement on.
+    /// Complete a pending acceptance with this movement, or pass it on.
     fn moved(
         &mut self,
         cx: &mut Cx<'_>,
@@ -366,15 +271,24 @@ impl Down {
         position: [f64; 3],
         rotation: Option<[f32; 2]>,
     ) {
-        if let Some(id) = self.accepted.take() {
-            let rotation = rotation.or(self.rotation).unwrap_or_default();
-            self.accept(cx, state, id, Target { position, rotation });
-        }
-        self.position = Some(position);
         if rotation.is_some() {
             self.rotation = rotation;
         }
-        cx.to_backend(state, packet);
+        let Some(id) = self.accepted.take() else {
+            cx.to_backend(state, packet);
+            return;
+        };
+        let rotation = self.rotation.unwrap_or_default();
+        let mut w = Writer::with_capacity(37);
+        w.varint(id);
+        for value in position {
+            w.f64(value);
+        }
+        w.f32(rotation[0]).f32(rotation[1]);
+        cx.to_backend(
+            state,
+            Packet::new(Self::ids().accept_teleportation, w.into_inner()),
+        );
     }
 
     fn move_player_pos(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
