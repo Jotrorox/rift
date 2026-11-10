@@ -143,6 +143,13 @@ GLOBAL_POS = ["option", _container(("dimension", "string"), ("position", "positi
 METADATA_1_19 = ["types", "entityMetadataItem", 1, "fields"]
 
 CORRECTIONS = [
+    dict(protocols=(755, 758), path=["play", "toClient", "types", "packet_sculk_vibration_signal", 1,
+                                     {"field": "destination"}, "type", 1, "fields"],
+         value={"minecraft:block": "position", "minecraft:entity": "varint"},
+         why="VibrationPath.writeToNetwork names the destination's PositionSourceType by its "
+             "registry key (minecraft:block or minecraft:entity, which writes a VarInt entity ID); "
+             "the schema matches bare names, so every real vibration from the official 1.17 to "
+             "1.18.2 servers left trailing bytes."),
     dict(protocols=(765, 765), path=["play", "toClient", "types", "packet_explosion", 1,
                                      {"field": "sound"}, "type"],
          value=_container(("soundName", "string"), ("range", ["option", "f32"])),

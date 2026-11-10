@@ -224,11 +224,11 @@ pub(super) fn install<S: HasShared + 'static>(builder: RouteBuilder<S>) -> Route
             creative_slot::<S>,
         );
     }
-    if up || crosses(client, backend, &[401, 756]) {
+    if up || crosses(client, backend, &[401, 754, 756]) {
         builder = builder.default_handler_paired(Serverbound, Play, "edit_book", edit_book::<S>);
     }
-    if crosses(client, backend, &[756]) {
-        // Books are edited by hotbar slot from 1.17.1 on; follow the
+    if crosses(client, backend, &[754]) {
+        // Books are edited by inventory slot from 1.16.4 on; follow the
         // selected slot for clients that name the hand instead.
         builder = builder
             .tap(
@@ -1236,7 +1236,7 @@ fn creative_slot<S: HasShared>(
     Ok(())
 }
 
-/// The off hand's inventory slot, which books name from 1.17.1 on.
+/// The off hand's inventory slot, which books name from 1.16.4 on.
 const OFF_HAND_SLOT: i32 = 40;
 
 fn edit_book<S: HasShared>(
@@ -1249,6 +1249,20 @@ fn edit_book<S: HasShared>(
     let direction = Direction::Serverbound;
     let (source, target) = (shared.source(direction), shared.target(direction));
     let edit = parse(source, &packet.data, EditBook::read)?;
+    // The book's inventory slot from the sender's hand or slot, and back.
+    let held = shared.item.held_slot;
+    let slot_of = |hand: i32| match (window::book_slot(source), hand) {
+        (true, slot) => slot,
+        (false, 1) => OFF_HAND_SLOT,
+        (false, _) => held,
+    };
+    let hand_for = |slot: i32| {
+        if window::book_slot(target) {
+            slot
+        } else {
+            i32::from(slot == OFF_HAND_SLOT)
+        }
+    };
     let edit = match (edit, window::book_pages(target)) {
         (
             EditBook::Stack {
@@ -1262,7 +1276,7 @@ fn edit_book<S: HasShared>(
             EditBook::Stack {
                 book,
                 signing,
-                hand,
+                hand: hand_for(slot_of(hand)),
             }
         }
         (EditBook::Pages { slot, pages, title }, true) => EditBook::Pages { slot, pages, title },
@@ -1290,12 +1304,11 @@ fn edit_book<S: HasShared>(
                     .unwrap_or_default()
                     .to_owned()
             });
-            let slot = if hand == 1 {
-                OFF_HAND_SLOT
-            } else {
-                shared.item.held_slot
-            };
-            EditBook::Pages { slot, pages, title }
+            EditBook::Pages {
+                slot: slot_of(hand),
+                pages,
+                title,
+            }
         }
         (EditBook::Pages { slot, pages, title }, false) => {
             let mut tag = Compound::new();
@@ -1316,7 +1329,7 @@ fn edit_book<S: HasShared>(
             EditBook::Stack {
                 book: Some(book),
                 signing: title.is_some(),
-                hand: i32::from(slot == OFF_HAND_SLOT),
+                hand: hand_for(slot),
             }
         }
     };
