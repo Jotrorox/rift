@@ -579,7 +579,11 @@ fn tap_login<S: HasShared>(step: &mut S, _: crate::State, packet: &Packet) -> io
     if let Some(codec) = &parsed.codec {
         for registry in codec {
             record(shared, Side::Backend, registry);
-            record(shared, Side::Client, registry);
+            // A client that does not synchronise a registry (biomes before
+            // 1.16.2) keeps its built-in IDs.
+            if defaults::syncs(shared.client, &registry.name) {
+                record(shared, Side::Client, registry);
+            }
         }
     }
     follow(shared, parsed.dimension, parsed.world);

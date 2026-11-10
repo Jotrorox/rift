@@ -1,4 +1,4 @@
-use super::dimension::VANILLA_CODEC;
+use super::dimension::RECORDED_CODEC;
 use super::{NEWER, OLDER, down, format_uuid, legacy_attribute, legacy_map_color, parse_uuid, up};
 use crate::{
     Direction, State, data,
@@ -28,7 +28,7 @@ const WORLDS: &str = "03 136d696e6563726166743a6f766572776f726c64 146d696e656372
 /// is inline, the codec is the recorded one.
 fn login_1_16(seed: &str) -> Vec<u8> {
     let mut packet = hex(&format!("00000001 01 ff {WORLDS}"));
-    packet.extend_from_slice(VANILLA_CODEC);
+    packet.extend_from_slice(RECORDED_CODEC);
     packet.extend(hex(&format!(
         "{OVERWORLD} {OVERWORLD} {seed} 14 02 00 01 00 01"
     )));
@@ -114,6 +114,12 @@ fn login_success_uuid_changes_form() {
         (sent[0].state, &sent[0].data),
         (State::Login, &hex(LOGIN_FINISHED_1_15_2))
     );
+}
+
+#[test]
+fn the_registries_codec_has_the_recorded_vanilla_codec() {
+    let codec = crate::codec::registries::login::default_codec(NEWER).unwrap();
+    assert_eq!(codec.to_bytes(true), RECORDED_CODEC);
 }
 
 #[test]
@@ -339,15 +345,14 @@ fn lightning_moves_between_its_packets() {
         "add_global_entity",
     );
     assert_eq!(sent, global);
-    // Other global entities never existed in vanilla; they are dropped.
+    // Other global entities never existed in vanilla.
     let other = body(|w| {
         w.varint(42).i8(2).f64(1.0).f64(2.0).f64(3.0);
     });
     assert!(
         upgrading()
             .clientbound("add_global_entity", &other)
-            .unwrap()
-            .is_empty()
+            .is_err()
     );
 }
 
