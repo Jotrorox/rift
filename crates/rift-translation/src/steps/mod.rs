@@ -77,7 +77,7 @@
 use crate::step::Step;
 
 mod v1_12_1_to_1_12_2;
-mod v1_12_2_to_1_13;
+pub(crate) mod v1_12_2_to_1_13;
 mod v1_12_to_1_12_1;
 mod v1_13_1_to_1_13_2;
 mod v1_13_2_to_1_14;

@@ -6,13 +6,10 @@
 //! files) names, for every key 1.12.2 lacks, a 1.12.2 key with the same
 //! English text, or else the English text to show literally.
 //!
-//! INTEGRATION: the text codec converts components; it should call
-//! [`legacy_translation`] for each `translate` key of components on their
-//! way from 1.13 to 1.12.2 (a re-export from `steps/mod.rs` makes it
-//! reachable from `codec::text`). With [`Legacy::Text`], the component
-//! becomes literal text with its `with` arguments substituted for the
-//! `%s` / `%1$s` placeholders.
-#![cfg_attr(not(test), allow(dead_code))]
+//! The text codec calls [`legacy_translation`] for each `translate` key of
+//! components on their way from 1.13 to 1.12.2. With [`Legacy::Text`], the
+//! component becomes literal text with its `with` arguments substituted for
+//! the `%s` / `%1$s` placeholders.
 use serde::Deserialize;
 use std::{collections::HashMap, sync::OnceLock};
 

@@ -1312,3 +1312,40 @@ fn malformed_packets_fail_without_panicking() {
         &payload("MC|BEdit", &[0xff, 0xff]),
     );
 }
+
+#[test]
+fn translation_keys_1_12_lacks_become_its_keys_or_english_text() {
+    let mut step = Down::new();
+    let mut body = Writer::new();
+    body.string(concat!(
+        r#"{"translate":"chat.type.announcement","with":["Server","#,
+        r#"{"translate":"block.minecraft.stone","extra":["#,
+        r#"{"translate":"block.minecraft.tube_coral","color":"red"}]}]}"#
+    ))
+    .u8(0);
+    let out = one(
+        clientbound(&mut step, "chat", &body.buf).unwrap(),
+        Direction::Clientbound,
+        "chat",
+    );
+    let mut reader = crate::wire::Reader::new(&out);
+    let json = reader.string(262_144).unwrap().to_owned();
+    assert_eq!(reader.u8().unwrap(), 0);
+    reader.finish().unwrap();
+    // The announcement's key is the same in 1.12, stone has a 1.12 key and
+    // tube coral, new in 1.13, becomes its English name in red.
+    assert!(
+        json.contains(r#""translate":"chat.type.announcement""#),
+        "{json}"
+    );
+    assert!(
+        json.contains(r#""translate":"tile.stone.stone.name""#),
+        "{json}"
+    );
+    assert!(!json.contains("tube_coral"), "{json}");
+    let component = crate::codec::text::from_json_str(OLDER, &json).unwrap();
+    assert_eq!(
+        component.plain_text(),
+        "[Server] tile.stone.stone.nameTube Coral"
+    );
+}

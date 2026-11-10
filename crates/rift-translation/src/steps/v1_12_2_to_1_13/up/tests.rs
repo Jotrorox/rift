@@ -1477,3 +1477,20 @@ fn the_block_store_stays_small_on_real_chunks() {
         bytes / columns
     );
 }
+
+#[test]
+fn translation_keys_1_13_renamed_take_their_new_names() {
+    let mut step = Up::new();
+    let mut body = Writer::new();
+    body.string(r#"{"translate":"commands.kill.successful","with":["Steve"]}"#)
+        .u8(1);
+    let out = only(clientbound(&mut step, "chat", &body.buf));
+    let mut reader = Reader::new(&out.data);
+    let json = reader.string(262_144).unwrap().to_owned();
+    assert_eq!(reader.u8().unwrap(), 1);
+    reader.finish().unwrap();
+    assert!(
+        json.contains(r#""translate":"commands.kill.success.single""#),
+        "{json}"
+    );
+}
