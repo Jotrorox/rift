@@ -950,6 +950,8 @@ mod layouts {
 
     #[test]
     fn book_edits_switch_between_stacks_and_pages_in_1_17_1() {
+        // 1.17 already names the book's inventory slot, as 1.17.1 does
+        // (`ServerboundEditBookPacket.slot` since 1.16.4): it passes as is.
         let mut up = Defaults::new(756, 755);
         let pages = EditBook::Pages {
             slot: 40,
@@ -968,14 +970,11 @@ mod layouts {
             panic!("expected a stack");
         };
         assert!(signing);
-        assert_eq!(hand, 1);
+        assert_eq!(hand, 40);
         let tag = book.unwrap().tag.unwrap();
         assert_eq!(tag.as_compound().unwrap().str("title"), Some("T"));
 
         let mut down = Defaults::new(755, 756);
-        // The client selected hotbar slot 4 earlier.
-        down.serverbound(State::Play, "set_carried_item", &[0, 4])
-            .unwrap();
         let mut tag = Compound::new();
         tag.insert("pages", vec![Nbt::from("one"), Nbt::from("two")]);
         let book = Some(ItemStack {
@@ -985,7 +984,7 @@ mod layouts {
         let stack = EditBook::Stack {
             book,
             signing: false,
-            hand: 0,
+            hand: 7,
         };
         let outs = down
             .serverbound(State::Play, "edit_book", &body(|w| stack.write(755, w)))
@@ -993,11 +992,49 @@ mod layouts {
         assert_eq!(
             read(756, &outs[0], EditBook::read),
             EditBook::Pages {
-                slot: 4,
+                slot: 7,
                 pages: vec!["one".into(), "two".into()],
                 title: None
             }
         );
+    }
+
+    #[test]
+    fn book_edits_name_a_slot_instead_of_a_hand_from_1_16_4() {
+        let book = |hand| EditBook::Stack {
+            book: stone(753, 1),
+            signing: false,
+            hand,
+        };
+        let hand = |outs: &[Out], protocol| match read(protocol, &outs[0], EditBook::read) {
+            EditBook::Stack { hand, .. } => hand,
+            other => panic!("{other:?}"),
+        };
+        let mut down = Defaults::new(753, 754);
+        // The client selected hotbar slot 4 earlier.
+        down.serverbound(State::Play, "set_carried_item", &[0, 4])
+            .unwrap();
+        for (sent, slot) in [(0, 4), (1, 40)] {
+            let outs = down
+                .serverbound(
+                    State::Play,
+                    "edit_book",
+                    &body(|w| book(sent).write(753, w)),
+                )
+                .unwrap();
+            assert_eq!(hand(&outs, 754), slot);
+        }
+        let mut up = Defaults::new(754, 753);
+        for (sent, expected) in [(40, 1), (3, 0)] {
+            let outs = up
+                .serverbound(
+                    State::Play,
+                    "edit_book",
+                    &body(|w| book(sent).write(754, w)),
+                )
+                .unwrap();
+            assert_eq!(hand(&outs, 753), expected);
+        }
     }
 
     #[test]

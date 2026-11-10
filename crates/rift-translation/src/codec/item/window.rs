@@ -549,14 +549,16 @@ impl Click {
     }
 }
 
-/// `edit_book`: a whole stack (with the hand from 1.13.1) until 1.17, then
-/// the inventory slot, the pages and the title when signing.
+/// `edit_book`: a whole stack (with the hand from 1.13.1, the inventory slot
+/// from 1.16.4) until 1.17, then the slot, the pages and the title when
+/// signing.
 #[derive(Clone, Debug, PartialEq)]
 pub enum EditBook {
     Stack {
         book: Stack,
         signing: bool,
-        /// 1.13.1 on: 0 main hand, 1 off hand.
+        /// 1.13.1 to 1.16.3: 0 main hand, 1 off hand; from 1.16.4 the
+        /// book's inventory slot (see [`book_slot`]).
         hand: i32,
     },
     Pages {
@@ -564,6 +566,12 @@ pub enum EditBook {
         pages: Vec<String>,
         title: Option<String>,
     },
+}
+
+/// Book edits name the book's inventory slot instead of a hand from 1.16.4
+/// on (`ServerboundEditBookPacket.slot`).
+pub fn book_slot(protocol: i32) -> bool {
+    protocol >= 754
 }
 
 /// Books are edited by pages instead of a whole stack from 1.17.1 on.
