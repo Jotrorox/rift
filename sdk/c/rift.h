@@ -269,7 +269,7 @@ static inline void rift_decision_from_action(rift_decision_t *ret, rift_action_t
 }
 
 // ---------------------------------------------------------------------------
-// Text builders (since 0.1.3)
+// Text builders (since 0.1.4)
 //
 // Each builder writes the JSON that the `-json` host functions, the
 // `deny-json`/`message-json` decisions, `rift_title_json` and the `styled`
@@ -576,13 +576,13 @@ static inline char *rift_component_finish(rift_component_t *c) {
 }
 
 // ---------------------------------------------------------------------------
-// Rich suggestions and server-list text (since 0.1.3)
+// Rich suggestions and server-list text (since 0.1.4)
 //
 // Define `exports_rift_plugin_styled_suggest` or
 // `exports_rift_plugin_styled_status` instead of the handler's `suggest` or
 // `status` to answer with JSON text tooltips, version text and sample lines.
 // The weak defaults of the `styled` export call your handler hooks, so a
-// plugin without rich text defines only those. Hosts before 0.1.3 call the
+// plugin without rich text defines only those. Hosts before 0.1.4 call the
 // handler hooks: define them too to support those.
 
 typedef rift_plugin_types_rich_suggestion_t rift_rich_suggestion_t;
@@ -698,7 +698,7 @@ static inline bool rift_message_json(const rift_string_t *target, const char *te
   return online;
 }
 
-// Shows `target` a title (since 0.1.3). `title_json` and `subtitle_json`
+// Shows `target` a title (since 0.1.4). `title_json` and `subtitle_json`
 // (NULL for none) are JSON text components, such as text builder results;
 // an empty `title_json` shows only the subtitle. Times are ticks (vanilla:
 // 10, 70, 20). Returns whether the player was online; a host error is

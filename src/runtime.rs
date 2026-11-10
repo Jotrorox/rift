@@ -92,6 +92,8 @@ impl Snapshot {
         permissions: Option<Arc<rift::permissions::Authority>>,
     ) -> io::Result<Self> {
         config.validate()?;
+        // Before any worker of this generation can spawn a server.
+        rift::managed::protect_secrets(&config);
         let mut policies = BTreeMap::new();
         for (listener, route) in &config.routes {
             let policy = match route {
@@ -172,8 +174,10 @@ impl Snapshot {
             |old| old.perms.clone(),
         );
         perms.set_commands(extensions.command_permissions());
+        // One roster for every generation: the directory owns it, so it can
+        // keep each record's visibility rule current.
         let players = previous.map_or_else(
-            || Arc::new(PlayerRegistry::default()),
+            || extensions.players().roster().clone(),
             |old| old.players.clone(),
         );
         let nodes = previous.map_or_else(
@@ -494,9 +498,12 @@ pub async fn handle(
         event.stage = "status_request";
         timeout(HANDSHAKE_TIMEOUT, session.status_request()).await??;
         let maintenance = snapshot.control.maintenance(&snapshot.config);
+        // The public count: hidden players are not on the server list.
         let default = Document::new(
             session.handshake.protocol,
-            metrics.players.get(),
+            snapshot
+                .players
+                .count_for(rift::players::Viewer::Public, None) as u64,
             snapshot.config.limits.max_connections as u64,
             catalog::notice(if maintenance {
                 Notice::StatusMaintenance
@@ -939,8 +946,15 @@ pub async fn handle(
                     if tab_synced == Some(tab_key) {
                         continue;
                     }
+                    let authority = live_snapshot.extensions.permissions();
+                    let own = session.identity().and_then(|identity| identity.uuid).unwrap_or_default();
+                    let holds = |node: &str| {
+                        authority.check_active(rift_permissions::Uuid::from_bytes(own), node)
+                            == rift_permissions::Tristate::True
+                    };
                     let view = rift::tab_list::view(
                         &live_snapshot.players,
+                        rift::players::Viewer::Player { uuid: own, holds: &holds },
                         live_snapshot.config.tab_list.as_ref(),
                         tab_override.as_ref(),
                         session.player_name().unwrap_or_default(),
@@ -1160,12 +1174,21 @@ pub async fn handle(
                         && let Some(identity) = session.identity()
                         && let Some(uuid) = identity.uuid
                     {
+                        // The rule goes in with the record, so no tab list or
+                        // count ever shows a hidden player, not even briefly.
+                        let visible_to = snapshot
+                            .extensions
+                            .players()
+                            .visibility(&uuid, &current_backend);
                         let registered = if let Some(reservation) = name_reservation.take() {
-                            reservation.register(uuid, &current_backend)
+                            reservation.register_visible(uuid, &current_backend, visible_to)
                         } else {
-                            snapshot
-                                .players
-                                .register(uuid, identity.name, &current_backend)
+                            snapshot.players.register_visible(
+                                uuid,
+                                identity.name,
+                                &current_backend,
+                                visible_to,
+                            )
                         };
                         match registered {
                             Ok(guard) => {
@@ -1230,13 +1253,16 @@ pub async fn handle(
                             }
                         }
                         if registered_backend != current_backend {
-                            if let Some(registration) = &registration {
-                                registration.set_server(&current_backend);
-                            }
+                            // The directory first: it resolves the rule for the
+                            // new server onto the roster record before the
+                            // roster moves the player there.
                             if let Some(directory) = &directory {
                                 directory.set_server(&current_backend);
                                 // The switch reset them after the new Join Game.
                                 session.sync_permission_contexts();
+                            }
+                            if let Some(registration) = &registration {
+                                registration.set_server(&current_backend);
                             }
                             registered_backend.clone_from(&current_backend);
                             if let Some(extension) = &mut session.extension {
@@ -2437,6 +2463,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
             .map_err(io::Error::other)?
             .map(|handler| handler.with_players(initial.extensions.player_api()));
     let messaging_controls = crate::messaging_runtime::Controls::new(initial.messaging.clone())?;
+    let player_requests = crate::messaging_runtime::PlayerRequests::new(initial.messaging.clone())?;
     let permission_bus = initial.perms.listen()?;
     initial.addresses = Arc::new(
         initial
@@ -2470,7 +2497,11 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         receiver.clone(),
         metrics.clone(),
         admin_commands.clone(),
+        app.workflows.clone(),
     ));
+    background.spawn(player_requests.run(receiver.clone(), app.workflows.clone()));
+    // Keep visibility rules current as permissions change.
+    background.spawn(snapshot.extensions.players().clone().watch());
     // Subscribe before any plugin starts so its first lifecycle change is
     // audited too.
     background.spawn(audit_plugins(

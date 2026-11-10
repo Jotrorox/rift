@@ -44,8 +44,8 @@ table lists the remaining fields in wire order.
 | `ConnectOther` | Player name, server name | No response; transfer the named player |
 | `IP` | None | Carrier IP address, integer port |
 | `IPOther` | Player name | Player name, IP address, integer port |
-| `PlayerCount` | Server name or `ALL` | Server name or `ALL`, integer player count |
-| `PlayerList` | Server name or `ALL` | Server name or `ALL`, comma-and-space-separated player names |
+| `PlayerCount` | Server name or `ALL` | Server name or `ALL`, integer player count, without players a [visibility rule](permissions.md#visibility) hides |
+| `PlayerList` | Server name or `ALL` | Server name or `ALL`, comma-and-space-separated player names, without hidden players |
 | `GetServers` | None | Comma-and-space-separated configured server names |
 | `GetServer` | None | Carrier's current server name |
 | `GetPlayerServer` | Player name | Player name, current server name |

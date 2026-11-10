@@ -1,10 +1,10 @@
 [package]
 name = "rift-plugin"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 rust-version = "1.85"
 license = "BSD-2-Clause"
-description = "Guest SDK for Rift WebAssembly plugins (rift:plugin@0.1.3)"
+description = "Guest SDK for Rift WebAssembly plugins (rift:plugin@0.1.4)"
 keywords = ["rift", "minecraft", "plugin", "wasm", "component"]
 categories = ["wasm", "api-bindings"]
 include = ["src/**", "wit/**", "Cargo.toml"]

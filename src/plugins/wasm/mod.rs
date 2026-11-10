@@ -157,7 +157,7 @@ struct CorePre {
     /// rift:plugin 0.1.0 or 0.1.1).
     decisions: Option<OptionalDecisionsIndices>,
     /// `None` for a component without the `styled` export (built against
-    /// rift:plugin 0.1.0 to 0.1.2).
+    /// rift:plugin 0.1.0 to 0.1.3).
     styled: Option<OptionalStyledIndices>,
 }
 

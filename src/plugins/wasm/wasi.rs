@@ -79,8 +79,15 @@ pub(super) fn context(
         builder.inherit_network();
     }
     match &capabilities.env {
+        // "The whole environment" means Rift's environment minus Rift's own
+        // secrets, as for managed servers; a manifest that lists one of them
+        // by name still gets it.
         None => {
-            builder.inherit_env();
+            for (name, value) in std::env::vars() {
+                if !crate::environment::is_protected(&name) {
+                    builder.env(name, value);
+                }
+            }
         }
         Some(names) => {
             for name in names {

@@ -295,6 +295,8 @@ fn player(lua: &Lua, info: &PlayerInfo) -> mlua::Result<Table> {
     player.raw_set("server", info.server.as_str())?;
     player.raw_set("connection_id", info.connection_id.to_string())?;
     player.raw_set("protocol", info.protocol)?;
+    // nil when everyone sees the player.
+    player.raw_set("visible_to", info.visible_to.as_deref())?;
     Ok(player)
 }
 
@@ -1020,7 +1022,55 @@ fn permissions(lua: &Lua, state: &Rc<State>) -> mlua::Result<Table> {
             decoded(lua, &meta)
         })?,
     )?;
+    // `set_meta(uuid, key, value_or_nil, options?)`, with the write options
+    // of extensions API v3: `contexts`, `expires_in` (seconds from now) and
+    // `expires_at` (Unix seconds). `nil` removes the node in those contexts.
+    let services = state.services.clone();
+    api.raw_set(
+        "set_meta",
+        function(
+            lua,
+            state,
+            move |_, (uuid, key, value, options): (String, String, Option<String>, Value)| {
+                let (contexts, expires_at) = meta_options(&options)?;
+                services
+                    .permissions()
+                    .set_meta(&uuid, &key, value.as_deref(), contexts, expires_at)
+                    .map_err(runtime)
+            },
+        )?,
+    )?;
     Ok(api)
+}
+
+/// The options table of `set_meta`.
+fn meta_options(options: &Value) -> mlua::Result<(rift_permissions::ContextSet, Option<u64>)> {
+    let Value::Table(options) = options else {
+        return match options {
+            Value::Nil => Ok((rift_permissions::ContextSet::new(), None)),
+            _ => Err(runtime("set_meta options must be a table")),
+        };
+    };
+    for pair in options.pairs::<String, Value>() {
+        let (key, _) = pair?;
+        if !matches!(key.as_str(), "contexts" | "expires_in" | "expires_at") {
+            return Err(runtime(format!("unknown set_meta option {key:?}")));
+        }
+    }
+    let contexts = match options.raw_get::<Value>("contexts")? {
+        Value::Nil => rift_permissions::ContextSet::new(),
+        value => crate::permissions::lua::contexts(&value)?,
+    };
+    let expires_at = match (
+        options.raw_get::<Option<u64>>("expires_at")?,
+        options.raw_get::<Option<u64>>("expires_in")?,
+    ) {
+        (Some(_), Some(_)) => return Err(runtime("give expires_at or expires_in, not both")),
+        (Some(at), None) => Some(at),
+        (None, Some(seconds)) => Some(rift_permissions::unix_now().saturating_add(seconds)),
+        (None, None) => None,
+    };
+    Ok((contexts, expires_at))
 }
 
 /// `nil` for the player's current contexts, or a context table.

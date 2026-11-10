@@ -90,6 +90,35 @@ fn builder_compiles_like_the_proxy() {
 }
 
 #[test]
+fn the_service_group_fills_the_group_context_with_the_server() {
+    let node = |key: &str, context: &str, value: &str| {
+        Node::permission(key, true)
+            .unwrap()
+            .with_context(context, value)
+            .unwrap()
+    };
+    let perms = TestPermissions::builder()
+        .user(ALICE, |u| {
+            u.node(node("lobby.fly", "group", "lobby"))
+                .node(node("lobby.old", "server", "lobby"))
+        })
+        .server("lobby-2")
+        .service_group("lobby")
+        .build();
+    assert_eq!(perms.check(ALICE, "lobby.fly", &global()), Tristate::True);
+    assert_eq!(
+        perms.check(ALICE, "lobby.old", &global()),
+        Tristate::Undefined
+    );
+    // A check about another server is not about this server's group.
+    let elsewhere = ContextSet::of("server", "survival").unwrap();
+    assert_eq!(
+        perms.check(ALICE, "lobby.fly", &elsewhere),
+        Tristate::Undefined
+    );
+}
+
+#[test]
 fn changes_bump_the_revision_and_notify_listeners() {
     let perms = fixture();
     let events: Arc<Mutex<Vec<ChangeEvent>>> = Arc::default();

@@ -1,0 +1,23 @@
+{
+  "kind": "luckperms",
+  "name": "server-to-group",
+  "description": "On a network whose service groups are listed in service_groups, LuckPerms' server=<group> becomes group=<group>; other servers stay server.",
+  "service_groups": ["lobby"],
+  "node": {"key": "lobby.fly", "context": {"server": ["Lobby", "survival"], "world": "spawn"}},
+  "expect": [
+    {
+      "kind": "permission",
+      "key": "lobby.fly",
+      "value": true,
+      "contexts": {"group": "lobby", "world": "spawn"},
+      "source": "import"
+    },
+    {
+      "kind": "permission",
+      "key": "lobby.fly",
+      "value": true,
+      "contexts": {"server": "survival", "world": "spawn"},
+      "source": "import"
+    }
+  ]
+}

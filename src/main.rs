@@ -56,6 +56,8 @@ const USAGE: &str = "Usage: rift [<listen-ip:port> <backend-ip:port>]\n\
     IPv6: rift '[::]:25565' '[::1]:25566'";
 
 fn main() -> ExitCode {
+    // First, while this is the only thread and before any secret is read.
+    rift::environment::harden_process();
     let args: Vec<String> = env::args().skip(1).collect();
     // `rift dev` sets its token variables before any thread exists.
     let dev = match args.first().map(String::as_str) {

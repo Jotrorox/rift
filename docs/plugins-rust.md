@@ -117,8 +117,8 @@ example and the host's conformance fixture.
 | `result<T, string>` | `Result<T, String>` with the host's message. |
 | WASI | `std::fs` on the granted directories (`/data`, `/host`), clocks and random through the standard library. |
 | `dialogs` export, `players.dialog` | [Dialogs](dialogs.md): `players::show_dialog(target, &serde_json::Value)` (or `players::dialog` with JSON text) and `players::clear_dialog`; clicks reach `Plugin::dialog(DialogResponse)`, whose `values::<T>()` and `payload::<T>()` decode the JSON. No registration needed. |
-| `players.title-json` | `players::title_json(target, &TitleJsonSpec::new(title).subtitle(sub).times(10, 70, 20))` (since 0.1.3); title and subtitle take anything `ToString`, such as a `text` builder or a `serde_json::Value`. |
-| `styled` export | `Plugin::suggest_rich(ctx) -> Vec<RichSuggestion>` and `Plugin::status_rich(ping) -> Option<RichStatusOverride>` (since 0.1.3). Their defaults call `suggest` and `status`; hosts before 0.1.3 get the rich text's words. |
+| `players.title-json` | `players::title_json(target, &TitleJsonSpec::new(title).subtitle(sub).times(10, 70, 20))` (since 0.1.4); title and subtitle take anything `ToString`, such as a `text` builder or a `serde_json::Value`. |
+| `styled` export | `Plugin::suggest_rich(ctx) -> Vec<RichSuggestion>` and `Plugin::status_rich(ping) -> Option<RichStatusOverride>` (since 0.1.4). Their defaults call `suggest` and `status`; hosts before 0.1.4 get the rich text's words. |
 | rich text | The `text` module: `text::mini`, `text::legacy`, `text::Component` (below). |
 
 ## Rich text builders

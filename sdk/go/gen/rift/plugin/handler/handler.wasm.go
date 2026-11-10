@@ -6,10 +6,10 @@ import (
 	"go.bytecodealliance.org/cm"
 )
 
-// This file contains wasmimport and wasmexport declarations for "rift:plugin@0.1.3".
+// This file contains wasmimport and wasmexport declarations for "rift:plugin@0.1.4".
 
-//go:wasmexport rift:plugin/handler@0.1.3#init
-//export rift:plugin/handler@0.1.3#init
+//go:wasmexport rift:plugin/handler@0.1.4#init
+//export rift:plugin/handler@0.1.4#init
 func wasmexport_Init(configJson0 *uint8, configJson1 uint32) (result *cm.Result[RegistrationShape, Registration, string]) {
 	configJSON := cm.LiftString[string]((*uint8)(configJson0), (uint32)(configJson1))
 	result_ := Exports.Init(configJSON)
@@ -17,8 +17,8 @@ func wasmexport_Init(configJson0 *uint8, configJson1 uint32) (result *cm.Result[
 	return
 }
 
-//go:wasmexport rift:plugin/handler@0.1.3#reload
-//export rift:plugin/handler@0.1.3#reload
+//go:wasmexport rift:plugin/handler@0.1.4#reload
+//export rift:plugin/handler@0.1.4#reload
 func wasmexport_Reload(configJson0 *uint8, configJson1 uint32) (result *cm.Result[string, struct{}, string]) {
 	configJSON := cm.LiftString[string]((*uint8)(configJson0), (uint32)(configJson1))
 	result_ := Exports.Reload(configJSON)
@@ -26,16 +26,16 @@ func wasmexport_Reload(configJson0 *uint8, configJson1 uint32) (result *cm.Resul
 	return
 }
 
-//go:wasmexport rift:plugin/handler@0.1.3#shutdown
-//export rift:plugin/handler@0.1.3#shutdown
+//go:wasmexport rift:plugin/handler@0.1.4#shutdown
+//export rift:plugin/handler@0.1.4#shutdown
 func wasmexport_Shutdown(reason0 *uint8, reason1 uint32) {
 	reason := cm.LiftString[string]((*uint8)(reason0), (uint32)(reason1))
 	Exports.Shutdown(reason)
 	return
 }
 
-//go:wasmexport rift:plugin/handler@0.1.3#route
-//export rift:plugin/handler@0.1.3#route
+//go:wasmexport rift:plugin/handler@0.1.4#route
+//export rift:plugin/handler@0.1.4#route
 func wasmexport_Route(connection0 *uint8, connection1 uint32, connection2 *uint8, connection3 uint32, connection4 *uint8, connection5 uint32, connection6 uint32, connection7 *uint8, connection8 uint32, connection9 *uint8, connection10 uint32, connection11 uint32, connection12 uint32, connection13 *uint8, connection14 uint32) (result *RouteDecision) {
 	connection := lift_Connection((*uint8)(connection0), (uint32)(connection1), (*uint8)(connection2), (uint32)(connection3), (*uint8)(connection4), (uint32)(connection5), (uint32)(connection6), (*uint8)(connection7), (uint32)(connection8), (*uint8)(connection9), (uint32)(connection10), (uint32)(connection11), (uint32)(connection12), (*uint8)(connection13), (uint32)(connection14))
 	result_ := Exports.Route(connection)
@@ -43,8 +43,8 @@ func wasmexport_Route(connection0 *uint8, connection1 uint32, connection2 *uint8
 	return
 }
 
-//go:wasmexport rift:plugin/handler@0.1.3#login
-//export rift:plugin/handler@0.1.3#login
+//go:wasmexport rift:plugin/handler@0.1.4#login
+//export rift:plugin/handler@0.1.4#login
 func wasmexport_Login(ctx *Context) (result *Action) {
 	ctx_ := *ctx
 	result_ := Exports.Login(ctx_)
@@ -52,8 +52,8 @@ func wasmexport_Login(ctx *Context) (result *Action) {
 	return
 }
 
-//go:wasmexport rift:plugin/handler@0.1.3#initial-server
-//export rift:plugin/handler@0.1.3#initial-server
+//go:wasmexport rift:plugin/handler@0.1.4#initial-server
+//export rift:plugin/handler@0.1.4#initial-server
 func wasmexport_InitialServer(ctx *Context) (result *Action) {
 	ctx_ := *ctx
 	result_ := Exports.InitialServer(ctx_)
@@ -61,8 +61,8 @@ func wasmexport_InitialServer(ctx *Context) (result *Action) {
 	return
 }
 
-//go:wasmexport rift:plugin/handler@0.1.3#before-transfer
-//export rift:plugin/handler@0.1.3#before-transfer
+//go:wasmexport rift:plugin/handler@0.1.4#before-transfer
+//export rift:plugin/handler@0.1.4#before-transfer
 func wasmexport_BeforeTransfer(ctx *Context) (result *Action) {
 	ctx_ := *ctx
 	result_ := Exports.BeforeTransfer(ctx_)
@@ -70,8 +70,8 @@ func wasmexport_BeforeTransfer(ctx *Context) (result *Action) {
 	return
 }
 
-//go:wasmexport rift:plugin/handler@0.1.3#command
-//export rift:plugin/handler@0.1.3#command
+//go:wasmexport rift:plugin/handler@0.1.4#command
+//export rift:plugin/handler@0.1.4#command
 func wasmexport_Command(ctx *Context) (result *Action) {
 	ctx_ := *ctx
 	result_ := Exports.Command(ctx_)
@@ -79,8 +79,8 @@ func wasmexport_Command(ctx *Context) (result *Action) {
 	return
 }
 
-//go:wasmexport rift:plugin/handler@0.1.3#suggest
-//export rift:plugin/handler@0.1.3#suggest
+//go:wasmexport rift:plugin/handler@0.1.4#suggest
+//export rift:plugin/handler@0.1.4#suggest
 func wasmexport_Suggest(ctx *Context) (result *cm.List[Suggestion]) {
 	ctx_ := *ctx
 	result_ := Exports.Suggest(ctx_)
@@ -88,8 +88,8 @@ func wasmexport_Suggest(ctx *Context) (result *cm.List[Suggestion]) {
 	return
 }
 
-//go:wasmexport rift:plugin/handler@0.1.3#status
-//export rift:plugin/handler@0.1.3#status
+//go:wasmexport rift:plugin/handler@0.1.4#status
+//export rift:plugin/handler@0.1.4#status
 func wasmexport_Status(ping0 *uint8, ping1 uint32, ping2 *uint8, ping3 uint32, ping4 uint32, ping5 *uint8, ping6 uint32, ping7 uint32, ping8 *uint8, ping9 uint32, ping10 uint32, ping11 uint64, ping12 uint64) (result *cm.Option[StatusOverride]) {
 	ping := lift_Ping((*uint8)(ping0), (uint32)(ping1), (*uint8)(ping2), (uint32)(ping3), (uint32)(ping4), (*uint8)(ping5), (uint32)(ping6), (uint32)(ping7), (*uint8)(ping8), (uint32)(ping9), (uint32)(ping10), (uint64)(ping11), (uint64)(ping12))
 	result_ := Exports.Status(ping)
@@ -97,8 +97,8 @@ func wasmexport_Status(ping0 *uint8, ping1 uint32, ping2 *uint8, ping3 uint32, p
 	return
 }
 
-//go:wasmexport rift:plugin/handler@0.1.3#http
-//export rift:plugin/handler@0.1.3#http
+//go:wasmexport rift:plugin/handler@0.1.4#http
+//export rift:plugin/handler@0.1.4#http
 func wasmexport_HTTP(request0 *uint8, request1 uint32, request2 *uint8, request3 uint32, request4 *uint8, request5 uint32, request6 *uint8, request7 uint32, request8 *[2]string, request9 uint32, request10 *uint8, request11 uint32) (result *cm.Option[HTTPResponse]) {
 	request := lift_HTTPRequest((*uint8)(request0), (uint32)(request1), (*uint8)(request2), (uint32)(request3), (*uint8)(request4), (uint32)(request5), (*uint8)(request6), (uint32)(request7), (*[2]string)(request8), (uint32)(request9), (*uint8)(request10), (uint32)(request11))
 	result_ := Exports.HTTP(request)
@@ -106,48 +106,48 @@ func wasmexport_HTTP(request0 *uint8, request1 uint32, request2 *uint8, request3
 	return
 }
 
-//go:wasmexport rift:plugin/handler@0.1.3#join
-//export rift:plugin/handler@0.1.3#join
+//go:wasmexport rift:plugin/handler@0.1.4#join
+//export rift:plugin/handler@0.1.4#join
 func wasmexport_Join(ctx *Context) {
 	ctx_ := *ctx
 	Exports.Join(ctx_)
 	return
 }
 
-//go:wasmexport rift:plugin/handler@0.1.3#after-transfer
-//export rift:plugin/handler@0.1.3#after-transfer
+//go:wasmexport rift:plugin/handler@0.1.4#after-transfer
+//export rift:plugin/handler@0.1.4#after-transfer
 func wasmexport_AfterTransfer(ctx *Context) {
 	ctx_ := *ctx
 	Exports.AfterTransfer(ctx_)
 	return
 }
 
-//go:wasmexport rift:plugin/handler@0.1.3#disconnect
-//export rift:plugin/handler@0.1.3#disconnect
+//go:wasmexport rift:plugin/handler@0.1.4#disconnect
+//export rift:plugin/handler@0.1.4#disconnect
 func wasmexport_Disconnect(ctx *Context) {
 	ctx_ := *ctx
 	Exports.Disconnect(ctx_)
 	return
 }
 
-//go:wasmexport rift:plugin/handler@0.1.3#message
-//export rift:plugin/handler@0.1.3#message
+//go:wasmexport rift:plugin/handler@0.1.4#message
+//export rift:plugin/handler@0.1.4#message
 func wasmexport_Message(message0 uint64, message1 *uint8, message2 uint32, message3 *uint8, message4 uint32, message5 uint32, message6 *uint8, message7 uint32) {
 	message := lift_BusMessage((uint64)(message0), (*uint8)(message1), (uint32)(message2), (*uint8)(message3), (uint32)(message4), (uint32)(message5), (*uint8)(message6), (uint32)(message7))
 	Exports.Message(message)
 	return
 }
 
-//go:wasmexport rift:plugin/handler@0.1.3#timer
-//export rift:plugin/handler@0.1.3#timer
+//go:wasmexport rift:plugin/handler@0.1.4#timer
+//export rift:plugin/handler@0.1.4#timer
 func wasmexport_Timer(handle0 uint64) {
 	handle := (uint64)((uint64)(handle0))
 	Exports.Timer(handle)
 	return
 }
 
-//go:wasmexport rift:plugin/handler@0.1.3#event
-//export rift:plugin/handler@0.1.3#event
+//go:wasmexport rift:plugin/handler@0.1.4#event
+//export rift:plugin/handler@0.1.4#event
 func wasmexport_Event(event0 *uint8, event1 uint32, event2 *uint8, event3 uint32) {
 	event := lift_RiftEvent((*uint8)(event0), (uint32)(event1), (*uint8)(event2), (uint32)(event3))
 	Exports.Event(event)

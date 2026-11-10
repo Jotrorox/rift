@@ -216,7 +216,7 @@ type Suggestion struct {
 }
 
 // RichSuggestion is a Suggestion whose tooltip is a JSON text component
-// (rift:plugin 0.1.3), offered by an OnRichSuggest handler. Use a text
+// (rift:plugin 0.1.4), offered by an OnRichSuggest handler. Use a text
 // builder: TooltipJSON: rift.Ptr(rift.Mini("<gray>A server").JSON()).
 type RichSuggestion struct {
 	Text        string
@@ -232,7 +232,7 @@ func (s Suggestion) rich() RichSuggestion {
 	return out
 }
 
-// plain is the suggestion for a host before rift:plugin 0.1.3: the
+// plain is the suggestion for a host before rift:plugin 0.1.4: the
 // tooltip's words.
 func (s RichSuggestion) plain() Suggestion {
 	out := Suggestion{Text: s.Text}
@@ -327,7 +327,7 @@ type StatusOverride struct {
 }
 
 // RichStatusOverride is a StatusOverride whose version and player-sample
-// lines are JSON text components (rift:plugin 0.1.3), returned by an
+// lines are JSON text components (rift:plugin 0.1.4), returned by an
 // OnRichStatus handler. Clients show them as § codes.
 type RichStatusOverride struct {
 	MotdJSON    *string // a JSON text component or a JSON string
@@ -356,7 +356,7 @@ func (s StatusOverride) rich() RichStatusOverride {
 	return out
 }
 
-// plain is the override for a host before rift:plugin 0.1.3: the words of
+// plain is the override for a host before rift:plugin 0.1.4: the words of
 // the version and sample lines.
 func (s RichStatusOverride) plain() StatusOverride {
 	out := StatusOverride{
@@ -459,7 +459,7 @@ type PlayerInfo struct {
 	Protocol     int32
 }
 
-// TitleJSON is a title with JSON text components (rift:plugin 0.1.3), shown
+// TitleJSON is a title with JSON text components (rift:plugin 0.1.4), shown
 // with SendTitleJSON; times are ticks. An empty TitleJSON shows only the
 // subtitle.
 type TitleJSON struct {
