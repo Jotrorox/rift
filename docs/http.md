@@ -393,9 +393,13 @@ instance files are preserved. Scaling policies can change while instances run.
 The same editor covers the network settings on the Server list and Tab list
 pages. `tab_list` and `server_list` definitions replace the whole
 setting with the fields of their Lua tables; text fields take a string or a chat
-component. A server list edit keeps the configured `favicon` and `hosts`, which
-can only be set in Lua, so a definition containing either is rejected.
-`GET /api/definitions` returns the favicon as its `data:` URL. Permission group
+component. A server list edit keeps the configured `hosts`, which can only be
+set in Lua, so a definition containing `hosts` is rejected. It also keeps the
+configured `favicon` unless the definition sets one: a
+`data:image/png;base64,...` URL of a 64×64 PNG up to 16 KiB replaces it, and
+`false` removes it. That choice is kept by later edits that omit `favicon`.
+File paths can only be set in Lua. `GET /api/definitions` returns the favicon as
+its `data:` URL. Permission group
 definitions take the fields of `extensions.groups` (`inherits`, `permissions`,
 `weight`, `prefix`, `suffix`, `meta`) and need extensions with `api_version = 2`
 or `3`; edits return `409` otherwise. They change configuration; the dashboard's

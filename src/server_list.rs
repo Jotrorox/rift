@@ -401,18 +401,41 @@ pub(crate) fn favicon_file(path: &Path) -> Result<Arc<str>, String> {
                 .read_to_end(&mut bytes)
         })
         .map_err(|error| fail(&error))?;
+    png_favicon(&bytes).map_err(|message| fail(&message))?;
+    Ok(format!("{FAVICON_PREFIX}{}", base64(&bytes)).into())
+}
+
+/// A favicon embedded in configuration as a `data:image/png;base64,...` URL,
+/// as the web dashboard saves uploads. It obeys the same rules as a file.
+pub(crate) fn is_favicon_data(value: &str) -> bool {
+    value.starts_with(FAVICON_PREFIX)
+}
+
+pub fn favicon_data(url: &str) -> Result<Arc<str>, String> {
+    if !valid_favicon(url.as_bytes()) {
+        return Err(format!(
+            "expected a \"{FAVICON_PREFIX}...\" URL of a PNG up to 16 KiB"
+        ));
+    }
+    let bytes = unbase64(&url[FAVICON_PREFIX.len()..])
+        .ok_or_else(|| "favicon data is not valid base64".to_owned())?;
+    png_favicon(&bytes)?;
+    Ok(url.into())
+}
+
+fn png_favicon(bytes: &[u8]) -> Result<(), &'static str> {
     if bytes.len() > MAX_FAVICON_BYTES {
-        return Err(fail(&"favicon exceeds 16 KiB"));
+        return Err("favicon exceeds 16 KiB");
     }
     if !bytes.starts_with(PNG_SIGNATURE) || bytes.get(12..16) != Some(b"IHDR") {
-        return Err(fail(&"favicon must be a PNG image"));
+        return Err("favicon must be a PNG image");
     }
     let dimension =
         |range: std::ops::Range<usize>| u32::from_be_bytes(bytes[range].try_into().unwrap());
     if bytes.len() < 24 || dimension(16..20) != 64 || dimension(20..24) != 64 {
-        return Err(fail(&"favicon must be 64×64 pixels"));
+        return Err("favicon must be 64×64 pixels");
     }
-    Ok(format!("{FAVICON_PREFIX}{}", base64(&bytes)).into())
+    Ok(())
 }
 
 /// A hook-supplied favicon: an already encoded PNG data URL.
@@ -544,6 +567,44 @@ fn base64(bytes: &[u8]) -> String {
     encoded
 }
 
+/// Standard padded base64, as [`base64`] writes it.
+fn unbase64(text: &str) -> Option<Vec<u8>> {
+    let text = text.as_bytes();
+    if !text.len().is_multiple_of(4) {
+        return None;
+    }
+    let padding = text.iter().rev().take_while(|&&b| b == b'=').count();
+    if padding > 2 {
+        return None;
+    }
+    let sextet = |byte: u8| -> Option<u32> {
+        Some(match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        } as u32)
+    };
+    let mut decoded = Vec::with_capacity(text.len() / 4 * 3);
+    let body = text.len() - padding;
+    for (index, chunk) in text.chunks(4).enumerate() {
+        let mut value = 0u32;
+        let mut length = 0;
+        for (offset, &byte) in chunk.iter().enumerate() {
+            let position = index * 4 + offset;
+            let bits = if position < body { sextet(byte)? } else { 0 };
+            if position < body {
+                length += 1;
+            }
+            value |= bits << (18 - 6 * offset);
+        }
+        decoded.extend(&value.to_be_bytes()[1..length.max(1)]);
+    }
+    Some(decoded)
+}
+
 /// Immutable source snapshot for `on_status`; no Lua handles escape.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusScript {
@@ -644,7 +705,29 @@ mod tests {
             (b"\xff\x00\xfe", "/wD+"),
         ] {
             assert_eq!(base64(input), expected);
+            assert_eq!(unbase64(expected).as_deref(), Some(input));
         }
+        for invalid in ["Zg=", "Z===", "Zg=a", "Zm9v!A==", "===="] {
+            assert_eq!(unbase64(invalid), None, "{invalid}");
+        }
+    }
+
+    #[test]
+    fn favicon_data_urls_must_hold_a_64_pixel_png() {
+        let mut png = PNG_SIGNATURE.to_vec();
+        png.extend(b"\0\0\0\x0dIHDR");
+        png.extend(64u32.to_be_bytes());
+        png.extend(64u32.to_be_bytes());
+        let url = format!("{FAVICON_PREFIX}{}", base64(&png));
+        assert!(is_favicon_data(&url));
+        assert_eq!(favicon_data(&url).unwrap().as_ref(), url);
+        png[19] = 32;
+        let small = format!("{FAVICON_PREFIX}{}", base64(&png));
+        assert!(favicon_data(&small).unwrap_err().contains("64×64"));
+        let jpeg = format!("{FAVICON_PREFIX}{}", base64(b"\xff\xd8\xff\xe0 not a png"));
+        assert!(favicon_data(&jpeg).unwrap_err().contains("PNG"));
+        assert!(favicon_data(&format!("{FAVICON_PREFIX}Zg=")).is_err());
+        assert!(favicon_data("data:image/jpeg;base64,AAAA").is_err());
     }
 
     #[test]

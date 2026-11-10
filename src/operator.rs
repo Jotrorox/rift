@@ -320,7 +320,9 @@ fn permission_group_name(name: &str) -> bool {
 ///
 /// Named sections replace one entry; `tab_list` and `server_list` replace the
 /// whole setting (`name` is `None`). A server list edit keeps the configured
-/// favicon and per-host entries, which only Lua can set.
+/// favicon and per-host entries, which only Lua can set, except that a
+/// `favicon` data URL replaces the favicon and `false` removes it. That choice
+/// sits on its own line so later edits that omit `favicon` keep it.
 pub fn edited_source(
     source: &str,
     section: &str,
@@ -364,9 +366,15 @@ pub fn edited_source(
             Value::String(value) => {
                 // Decimal escapes have exactly three digits; JSON's Unicode
                 // escapes are not Lua syntax. Work bytewise to retain UTF-8.
+                // Base64 characters stay literal so favicon data URLs remain
+                // a reasonable size.
                 let mut result = String::from("\"");
                 for byte in value.bytes() {
-                    result.push_str(&format!("\\{byte:03}"));
+                    if byte.is_ascii_alphanumeric() || b"+/=:;,.-_".contains(&byte) {
+                        result.push(byte as char);
+                    } else {
+                        result.push_str(&format!("\\{byte:03}"));
+                    }
                 }
                 result.push('"');
                 result
@@ -389,19 +397,14 @@ pub fn edited_source(
             ),
         })
     }
-    let target = format!("__rift_operator_config.{path}");
-    let definition = if kept.is_empty() || definition.is_null() {
-        lua(definition)?
-    } else {
-        let keep: String = kept
-            .iter()
-            .map(|field| format!("new.{field} = old.{field} "))
-            .collect();
-        format!(
-            "(function(new, old) if type(old) == \"table\" then {keep}end return new end)({}, {target})",
-            lua(definition)?
-        )
+    const FAVICON: &str = "local __rift_operator_favicon = ";
+    let server_list = section == "server_list";
+    let mut definition = definition.clone();
+    let favicon = match definition.as_object_mut() {
+        Some(values) if server_list => values.remove("favicon"),
+        _ => None,
     };
+    let target = format!("__rift_operator_config.{path}");
     // Reuse our wrapper on subsequent edits rather than nesting the user file.
     const PREFIX: &str =
         "-- Rift structured definitions v1\nlocal __rift_operator_config = (function()\n";
@@ -423,11 +426,39 @@ pub fn edited_source(
         Some(name) => format!("{target}[\"{name}\"] = "),
         None => format!("{target} = "),
     };
+    let favicon = match favicon {
+        _ if definition.is_null() => None,
+        Some(value) => Some(format!("{FAVICON}{}\n", lua(&value)?)),
+        None if server_list => overrides
+            .lines()
+            .find(|line| line.starts_with(FAVICON))
+            .map(|line| format!("{line}\n")),
+        None => None,
+    };
     let overrides: String = overrides
         .lines()
-        .filter(|line| !line.starts_with(&prefix))
+        .filter(|line| !line.starts_with(&prefix) && !(server_list && line.starts_with(FAVICON)))
         .map(|line| format!("{line}\n"))
         .collect();
+    let definition = if kept.is_empty() || definition.is_null() {
+        lua(&definition)?
+    } else {
+        let keep: String = kept
+            .iter()
+            .map(|field| format!("new.{field} = old.{field} "))
+            .collect();
+        // `false` (removed) becomes nil.
+        let replace = if favicon.is_some() {
+            "new.favicon = __rift_operator_favicon or nil "
+        } else {
+            ""
+        };
+        format!(
+            "(function(new, old) if type(old) == \"table\" then {keep}end {replace}return new end)({}, {target})",
+            lua(&definition)?
+        )
+    };
+    let favicon = favicon.unwrap_or_default();
     let initializer = format!("{target} = {target} or {{}}\n");
     let initializer =
         if name.is_none() || overrides.lines().any(|line| line == initializer.trim_end()) {
@@ -435,8 +466,9 @@ pub fn edited_source(
         } else {
             initializer
         };
-    let edited =
-        format!("{PREFIX}{base}{SUFFIX}{initializer}{overrides}{prefix}{definition}\n{END}");
+    let edited = format!(
+        "{PREFIX}{base}{SUFFIX}{initializer}{overrides}{favicon}{prefix}{definition}\n{END}"
+    );
     if edited.len() > control::MAX_SOURCE {
         return Err(control::Error::invalid(
             "structured source exceeds 256 KiB limit",
@@ -597,11 +629,38 @@ mod tests {
                 .count(),
             1
         );
+        // An uploaded data URL replaces the favicon file, survives later
+        // edits that omit it, and `false` clears it.
+        // A PNG signature and IHDR header for a 64×64 image.
+        let url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABA";
+        source = edit(
+            &source,
+            "server_list",
+            json!({"motd": "Icon", "favicon": url}),
+        );
+        assert!(source.contains(url), "data URL should stay literal");
+        source = edit(&source, "server_list", json!({"motd": "Kept"}));
+        source = edit(&source, "tab_list", json!({"header": "Between"}));
+        source = edit(&source, "server_list", json!({"motd": "Still kept"}));
+        let list = load(&source).server_list.unwrap();
+        assert_eq!(list.defaults.favicon.as_deref(), Some(url));
+        assert_eq!(list.hosts["play.example.com"].motd, Some(json!("Host")));
+        assert_eq!(source.matches("local __rift_operator_favicon").count(), 1);
+        assert_eq!(source.matches(url).count(), 1);
+        source = edit(
+            &source,
+            "server_list",
+            json!({"motd": "Gone", "favicon": false}),
+        );
+        let list = load(&source).server_list.unwrap();
+        assert_eq!(list.defaults.favicon, None);
+        assert_eq!(list.hosts["play.example.com"].motd, Some(json!("Host")));
         // Null removes the setting, favicon and hosts included.
         source = edit(&source, "server_list", Value::Null);
         source = edit(&source, "tab_list", Value::Null);
         let config = load(&source);
         assert!(config.server_list.is_none() && config.tab_list.is_none());
+        assert!(!source.contains("local __rift_operator_favicon"));
         fs::remove_dir_all(directory).unwrap();
     }
     #[test]

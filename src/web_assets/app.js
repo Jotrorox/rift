@@ -10,6 +10,9 @@
     permissions: null, groups: null, logServer: "", logCursor: null, logPolling: false, definitions: {}, definitionRevision: null, definitionDirty: false, definitionVersion: 0, definitionSection: "service_groups", definitionName: "", definitionInputs: new Map(),
     // Unsaved edits on the server list, tab list and permission group forms.
     settingsDirty: { serverList: false, tabList: false },
+    // A server icon chosen on the server list form: a PNG data URL, false to
+    // remove the icon, or undefined to keep the configured one.
+    serverListFavicon: undefined,
     // The permission views: loaded groups, tracks, the selected group and player.
     perms: permsState(),
     // Template downloads and the file browser.
@@ -84,7 +87,8 @@
     for (const id of ["perm-group-weight", "perm-group-display"]) $(id).disabled = !permsWrite();
     $("perm-group-save").classList.toggle("hidden", !permsWrite());
     // Fields that only matter while their setting is on.
-    for (const id of ["server-list-motd", "server-list-maintenance-motd", "server-list-version", "server-list-max-players", "server-list-sample"]) $(id).disabled = !$("server-list-enabled").checked;
+    for (const id of ["server-list-motd", "server-list-maintenance-motd", "server-list-version", "server-list-max-players", "server-list-sample", "server-list-favicon-choose", "server-list-favicon-remove"]) $(id).disabled = !$("server-list-enabled").checked;
+    $("server-list-favicon-picker").classList.toggle("disabled", !$("server-list-enabled").checked);
     for (const id of ["tab-list-header", "tab-list-footer", "tab-list-players"]) $(id).disabled = !$("tab-list-enabled").checked;
     for (const [id, permission] of [["config-panel", "config"], ["definitions-panel", "config"], ["server-list-panel", "config"], ["server-list-lua-panel", "config"], ["tab-list-panel", "config"], ["deployments-panel", "deploy"], ["audit-panel", "audit"], ["extensions-panel", "extensions"]]) $(id).classList.toggle("hidden", !allowed(permission));
     $("live-console-panel").classList.toggle("hidden", !allowed("logs") && !allowed("console"));
@@ -590,10 +594,7 @@
     $("server-list-version").value = list?.version ?? "";
     $("server-list-max-players").value = list?.max_players ?? "";
     $("server-list-sample").value = (list?.sample || []).join("\n");
-    const favicon = typeof list?.favicon === "string" && list.favicon.startsWith("data:image/png;base64,") ? list.favicon : "";
-    $("server-list-favicon").hidden = !favicon;
-    if (favicon) $("server-list-favicon").src = favicon;
-    text("server-list-favicon-state", favicon ? "Favicon configured in Lua" : "No favicon configured");
+    state.serverListFavicon = undefined; renderFavicon();
     table("server-list-hosts", Object.entries(list?.hosts || {}), 4, (tr, [host, entry]) => {
       cell(tr, host, "address"); cell(tr, componentSummary(entry.motd)); cell(tr, entry.version ?? "—"); cell(tr, entry.max_players ?? "—", "metric-value");
     }, "No hostname-specific entries.");
@@ -613,7 +614,63 @@
     }
     const sample = $("server-list-sample").value.split("\n").filter((line) => line.trim());
     if (sample.length) value.sample = sample;
+    const favicon = state.serverListFavicon;
+    if (favicon || (favicon === false && configuredFavicon())) value.favicon = favicon;
     return value;
+  }
+  // Server icons: Minecraft shows a 64×64 PNG of at most 16 KiB.
+  const FAVICON_PREFIX = "data:image/png;base64,", FAVICON_SIZE = 64, FAVICON_BYTES = 16 * 1024;
+  const configuredFavicon = () => {
+    const favicon = state.definitions.server_list?.favicon;
+    return typeof favicon === "string" && favicon.startsWith(FAVICON_PREFIX) ? favicon : "";
+  };
+  function renderFavicon() {
+    const pending = state.serverListFavicon, configured = configuredFavicon();
+    const shown = pending === undefined ? configured : pending || "";
+    $("server-list-favicon").hidden = !shown;
+    if (shown) $("server-list-favicon").src = shown;
+    $("server-list-favicon-remove").hidden = !shown;
+    text("server-list-favicon-state", pending ? "New icon. Save to apply it."
+      : pending === false && configured ? "The icon is removed when you save."
+      : shown ? "Current icon" : "No icon. Players see the default.");
+  }
+  const base64 = (bytes) => {
+    let binary = "";
+    for (let index = 0; index < bytes.length; index += 0x8000) binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+    return btoa(binary);
+  };
+  // A PNG data URL for any image the browser can decode. A 64×64 PNG within
+  // the limit is kept byte for byte; anything else is scaled to fit 64×64,
+  // keeping its aspect ratio on a transparent background.
+  async function faviconFromFile(file) {
+    if (file.size > 32 * 1024 * 1024) throw new Error("That image is larger than 32 MiB. Choose a smaller one.");
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const png = bytes.length >= 24 && [137, 80, 78, 71, 13, 10, 26, 10].every((byte, index) => bytes[index] === byte) && String.fromCharCode(...bytes.subarray(12, 16)) === "IHDR";
+    if (png && bytes.length <= FAVICON_BYTES && view.getUint32(16) === FAVICON_SIZE && view.getUint32(20) === FAVICON_SIZE) return FAVICON_PREFIX + base64(bytes);
+    let image;
+    try { image = await window.createImageBitmap(new Blob([bytes], { type: file.type })); } catch { throw new Error("That file isn’t an image this browser can read. Use a PNG, JPEG, WebP or GIF."); }
+    try {
+      const canvas = document.createElement("canvas"); canvas.width = canvas.height = FAVICON_SIZE;
+      const context = canvas.getContext("2d"), scale = Math.min(FAVICON_SIZE / image.width, FAVICON_SIZE / image.height);
+      const width = Math.max(1, Math.round(image.width * scale)), height = Math.max(1, Math.round(image.height * scale));
+      // Enlarged pixel art stays crisp; reduced images are smoothed.
+      context.imageSmoothingEnabled = scale < 1; context.imageSmoothingQuality = "high";
+      context.drawImage(image, Math.floor((FAVICON_SIZE - width) / 2), Math.floor((FAVICON_SIZE - height) / 2), width, height);
+      const url = canvas.toDataURL("image/png"), encoded = url.slice(FAVICON_PREFIX.length);
+      if (!url.startsWith(FAVICON_PREFIX)) throw new Error("This browser couldn’t create a PNG icon.");
+      if (encoded.length * 3 / 4 - (encoded.match(/=*$/)[0].length) > FAVICON_BYTES) throw new Error("That image has too much detail for Minecraft’s 16 KiB icon limit. Try a simpler image.");
+      return url;
+    } finally { image.close?.(); }
+  }
+  async function chooseFavicon(file) {
+    if (!file || !$("server-list-enabled").checked) return;
+    text("server-list-favicon-state", "Preparing icon…");
+    try {
+      state.serverListFavicon = await faviconFromFile(file);
+      markSettings("serverList");
+      renderFavicon();
+    } catch (error) { renderFavicon(); text("server-list-favicon-state", error.message); }
   }
   function renderTabList() {
     const list = state.definitions.tab_list || null;
@@ -1720,7 +1777,7 @@
   }
   $("server-list-form").addEventListener("submit", (event) => {
     event.preventDefault();
-    if (!$("server-list-enabled").checked && state.definitions.server_list && !window.confirm("Turn off the proxy-owned server list? Its favicon and hostname entries are removed too, and backends answer pings again.")) return;
+    if (!$("server-list-enabled").checked && state.definitions.server_list && !window.confirm("Turn off the proxy-owned server list? Its icon and hostname entries are removed too, and backends answer pings again.")) return;
     applySetting({ path: "/api/definitions/server_list", value: serverListValue, result: "server-list-result", key: "serverList",
       saved: (value) => value ? "Server list saved and applied." : "Server list turned off; backends answer pings again." });
   });
@@ -1730,6 +1787,23 @@
       saved: (value) => value ? "Tab list saved; players see it within half a second." : "Tab list turned off; backends control it again." });
   });
   $("server-list-refresh").addEventListener("click", () => refreshSettings("serverList", "server-list-result"));
+  $("server-list-favicon-choose").addEventListener("click", () => $("server-list-favicon-file").click());
+  $("server-list-favicon-file").addEventListener("change", async () => {
+    const file = $("server-list-favicon-file").files?.[0];
+    $("server-list-favicon-file").value = "";
+    await chooseFavicon(file);
+  });
+  $("server-list-favicon-remove").addEventListener("click", () => { state.serverListFavicon = false; markSettings("serverList"); renderFavicon(); });
+  const picker = $("server-list-favicon-picker");
+  picker.addEventListener("dragover", (event) => {
+    if (!$("server-list-enabled").checked) return;
+    event.preventDefault(); picker.classList.toggle("dragging", true);
+  });
+  picker.addEventListener("dragleave", () => picker.classList.toggle("dragging", false));
+  picker.addEventListener("drop", async (event) => {
+    event.preventDefault(); picker.classList.toggle("dragging", false);
+    await chooseFavicon(event.dataTransfer?.files?.[0]);
+  });
   $("tab-list-refresh").addEventListener("click", () => refreshSettings("tabList", "tab-list-result"));
   $("deployments-refresh").addEventListener("click", async () => { try { await loadDeployments(); } catch (error) { text("deployment-result", error.message); } });
   $("audit-refresh").addEventListener("click", async () => { try { await loadAudit(); } catch (error) { text("audit-result", error.message); } });
