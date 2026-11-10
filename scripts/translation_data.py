@@ -4,7 +4,8 @@
 Each pinned, checksum-verified vanilla server in tests/servers.json is run with
 its bundled data generator (`--reports`). The reports list every built-in
 registry with its network ID and every packet ID per protocol state. From
-them this script writes, under src/protocol/translation/data/:
+them this script writes, under
+crates/rift-translation/src/steps/v1_21_6_to_1_21_7/data/:
 
 * `<version>.json`: the small registries that select wire layouts (data
   component types, particle types, slot displays, ...) and the configuration
@@ -33,7 +34,8 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 CACHE = ROOT / "target" / "minecraft"
-OUTPUT = ROOT / "src" / "protocol" / "translation" / "data"
+OUTPUT = (ROOT / "crates" / "rift-translation" / "src" / "steps"
+          / "v1_21_6_to_1_21_7" / "data")
 SERVERS = json.loads((ROOT / "tests" / "servers.json").read_text())
 
 # Adjacent steps Rift translates, oldest first: (older fixture, newer fixture).

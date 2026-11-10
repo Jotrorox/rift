@@ -12,9 +12,9 @@
 //! Only packets that can carry an item or sound event ID are parsed. They are
 //! parsed completely: a value this layout does not understand is an error,
 //! never a guess, and trailing bytes after the last field fail translation.
-use super::data::Version;
-use super::wire::{Rename, Rewriter};
-use crate::protocol::{Direction, Packet, State, invalid};
+use super::rewriter::{Rename, Rewriter};
+use super::tables::Version;
+use crate::{Direction, Packet, State, wire::invalid};
 use std::io;
 
 /// Lists are bounded by the bytes that remain; every element is non-empty.

@@ -222,3 +222,110 @@ impl Translator {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wire::Writer;
+
+    fn id(protocol: i32, state: State, direction: Direction, name: &str) -> i32 {
+        data::version(protocol).expect_packet(state, direction, name)
+    }
+
+    #[test]
+    fn same_protocol_needs_no_translator_and_unknown_pairs_are_unsupported() {
+        assert!(Translator::new(772, 772).unwrap().is_none());
+        assert!(supported(772, 772) && supported(771, 772) && supported(772, 771));
+        assert!(!supported(771, 47) && !supported(1, 772));
+        let error = Translator::new(772, 47).err().unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+    }
+
+    #[test]
+    fn phases_follow_login_configuration_and_play_on_both_edges() {
+        use Direction::*;
+        use State::*;
+        let mut translator = Translator::new(772, 771).unwrap().unwrap();
+        assert_eq!(
+            (translator.client_phase(), translator.backend_phase()),
+            (Login, Login)
+        );
+        let mut out = Output::default();
+        let step = |translator: &mut Translator, direction, state, name: &str| {
+            let packet = match direction {
+                Clientbound => Packet::empty(id(771, state, direction, name)),
+                Serverbound => Packet::empty(id(772, state, direction, name)),
+            };
+            let mut out = Output::default();
+            match direction {
+                Clientbound => translator.clientbound(packet, &mut out).unwrap(),
+                Serverbound => translator.serverbound(packet, &mut out).unwrap(),
+            }
+            out
+        };
+        // Login Success moves clientbound traffic to configuration at once;
+        // serverbound follows with the acknowledgement.
+        let sent = step(&mut translator, Clientbound, Login, "login_finished");
+        assert_eq!(sent.client[0].state, Login);
+        assert_eq!(translator.backend_phase(), Configuration);
+        assert_eq!(translator.client_phase(), Login);
+        let sent = step(&mut translator, Serverbound, Login, "login_acknowledged");
+        assert_eq!(sent.backend[0].state, Login);
+        assert_eq!(translator.client_phase(), Configuration);
+        step(
+            &mut translator,
+            Clientbound,
+            Configuration,
+            "finish_configuration",
+        );
+        assert_eq!(translator.backend_phase(), Play);
+        step(
+            &mut translator,
+            Serverbound,
+            Configuration,
+            "finish_configuration",
+        );
+        assert_eq!(translator.client_phase(), Play);
+        step(&mut translator, Clientbound, Play, "start_configuration");
+        assert_eq!(translator.backend_phase(), Configuration);
+        step(
+            &mut translator,
+            Serverbound,
+            Play,
+            "configuration_acknowledged",
+        );
+        assert_eq!(translator.client_phase(), Configuration);
+
+        // A play packet with a renumbered sound is rewritten on its way through.
+        let mut translator = Translator::new(772, 771).unwrap().unwrap();
+        step(&mut translator, Clientbound, Login, "login_finished");
+        step(&mut translator, Serverbound, Login, "login_acknowledged");
+        step(
+            &mut translator,
+            Clientbound,
+            Configuration,
+            "finish_configuration",
+        );
+        step(
+            &mut translator,
+            Serverbound,
+            Configuration,
+            "finish_configuration",
+        );
+        let mut body = Writer::new();
+        body.varint(940 + 1) // A sound after the one 1.21.7 inserted.
+            .varint(0)
+            .i32(0)
+            .i32(0)
+            .i32(0)
+            .f32(1.0)
+            .f32(1.0)
+            .i64(0);
+        let sound = Packet::new(id(771, Play, Clientbound, "sound"), body.buf.clone());
+        translator.clientbound(sound, &mut out).unwrap();
+        assert_eq!(out.client.len(), 1);
+        assert_eq!(out.client[0].state, Play);
+        assert_eq!(out.client[0].packet.data[..2], [0xae, 0x07]); // 942.
+        assert!(out.backend.is_empty());
+    }
+}

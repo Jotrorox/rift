@@ -13,7 +13,7 @@ use std::{collections::VecDeque, io};
 
 /// Converts packets between two adjacent protocols for one connection.
 /// A step owns whatever per-connection state it needs.
-pub trait Step: Send {
+pub trait Step: Send + Sync {
     /// A packet from the backend, in the backend-side protocol.
     fn clientbound(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()>;
 

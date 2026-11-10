@@ -1,6 +1,6 @@
-use super::data::RegistryDiff;
+use super::tables::{self as data, RegistryDiff};
 use super::*;
-use crate::protocol::{write_string, write_varint};
+use crate::wire::Writer;
 
 const OLD: i32 = 771;
 const NEW: i32 = 772;
@@ -10,19 +10,46 @@ const CREATOR_DISC: i32 = 1253; // Its stand-in, unchanged in both.
 const LAVA_CHICKEN_SOUND: i32 = 939;
 const CREATOR_SOUND: i32 = 948; // Before insertion; 949 in 1.21.8.
 
-fn version(number: i32) -> ProtocolVersion {
-    ProtocolVersion::new(number).unwrap()
+fn write_varint(value: i32, data: &mut Vec<u8>) {
+    let mut writer = Writer {
+        buf: std::mem::take(data),
+    };
+    writer.varint(value);
+    *data = writer.buf;
+}
+
+fn write_string(value: &str, data: &mut Vec<u8>) {
+    write_varint(value.len() as i32, data);
+    data.extend_from_slice(value.as_bytes());
+}
+
+/// The step alone, as one client/backend pair uses it.
+struct Translator(Renumber);
+
+impl Translator {
+    fn clientbound(&mut self, state: State, packet: Packet) -> io::Result<Packet> {
+        self.0.rewrite(state, Direction::Clientbound, packet)
+    }
+
+    fn serverbound(&mut self, state: State, packet: Packet) -> io::Result<Packet> {
+        self.0.rewrite(state, Direction::Serverbound, packet)
+    }
 }
 
 fn translator(client: i32, backend: i32) -> Translator {
-    Translator::new(version(client), version(backend))
-        .unwrap()
-        .unwrap()
+    assert!([client, backend] == [OLD, NEW] || [client, backend] == [NEW, OLD]);
+    Translator(Renumber {
+        upgrade: backend < client,
+    })
 }
 
 /// An upgrading translator: a 1.21.8 client on a 1.21.6 backend.
 fn upgrading() -> Translator {
     translator(NEW, OLD)
+}
+
+fn steps() -> [&'static Renumbering; 1] {
+    [renumbering()]
 }
 
 fn varint(value: i32) -> Vec<u8> {
@@ -96,19 +123,9 @@ fn play(translator: &mut Translator, packet: Packet) -> io::Result<Packet> {
 
 #[test]
 fn generated_data_builds_one_step_with_identical_layouts() {
-    assert_eq!(steps().len(), 1);
-    assert!(supported(version(OLD), version(NEW)));
-    assert!(supported(version(NEW), version(OLD)));
-    assert!(supported(version(774), version(774)));
-    assert!(!supported(version(NEW), version(774)));
-    assert!(!supported(version(770), version(OLD)));
-    assert!(
-        Translator::new(version(OLD), version(OLD))
-            .unwrap()
-            .is_none()
-    );
-    let error = Translator::new(version(774), version(OLD)).err().unwrap();
-    assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+    // Building asserts that both versions share one layout and packet IDs.
+    renumbering();
+    assert!(UP.is_some() && DOWN.is_some());
 }
 
 #[test]
@@ -264,7 +281,7 @@ fn length_prefixes_follow_varint_size_changes() {
     let layout = &steps()[0].layout;
     // Map item 1 to 300, which needs one more VarInt byte.
     let table: Vec<i32> = (0..400).map(|id| if id == 1 { 300 } else { id }).collect();
-    let ids = v1_21_6::Ids {
+    let ids = layout::Ids {
         item: Some(&table),
         sound: None,
         missing_items: &[],

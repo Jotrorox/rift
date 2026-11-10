@@ -52,6 +52,7 @@ license.workspace = true
 [dependencies]
 mlua = { version = "0.12", features = ["luajit", "vendored"] }
 rift-permissions.workspace = true
+rift-translation.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal", "process", "fs"] }
 serde_json.workspace = true
 serde = { workspace = true, features = ["rc"] }

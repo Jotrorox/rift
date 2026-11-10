@@ -1,8 +1,58 @@
 //! A streaming rewriter: read one packet body, copying unchanged fields
 //! verbatim and writing changed ones. Every read is bounded by the input, so a
 //! malformed packet fails instead of allocating or recursing without limit.
-use crate::protocol::{invalid, read_varint, write_varint};
+use crate::wire::{Reader, Writer, invalid};
 use std::io;
+
+fn read_varint(bytes: &mut &[u8]) -> io::Result<i32> {
+    let mut reader = Reader::new(bytes);
+    let value = reader.varint()?;
+    *bytes = reader.rest();
+    Ok(value)
+}
+
+fn write_varint(value: i32, bytes: &mut Vec<u8>) {
+    let mut writer = Writer {
+        buf: std::mem::take(bytes),
+    };
+    writer.varint(value);
+    *bytes = writer.buf;
+}
+
+fn read_string<'a>(bytes: &mut &'a [u8], max: usize) -> io::Result<&'a str> {
+    let mut reader = Reader::new(bytes);
+    let value = reader.string(max)?;
+    *bytes = reader.rest();
+    Ok(value)
+}
+
+/// Write Java modified UTF-8 with its unsigned 16-bit byte length, as NBT
+/// strings use. Reject overlong values before writing.
+fn write_modified_utf8(value: &str, bytes: &mut Vec<u8>) -> io::Result<()> {
+    let length = value
+        .encode_utf16()
+        .map(|unit| match unit {
+            1..=0x7f => 1usize,
+            0..=0x7ff => 2,
+            _ => 3,
+        })
+        .sum::<usize>();
+    let length =
+        u16::try_from(length).map_err(|_| invalid("modified UTF-8 string exceeds size limit"))?;
+    bytes.extend_from_slice(&length.to_be_bytes());
+    for unit in value.encode_utf16() {
+        match unit {
+            1..=0x7f => bytes.push(unit as u8),
+            0..=0x7ff => bytes.extend([0xc0 | (unit >> 6) as u8, 0x80 | (unit & 63) as u8]),
+            _ => bytes.extend([
+                0xe0 | (unit >> 12) as u8,
+                0x80 | ((unit >> 6) & 63) as u8,
+                0x80 | (unit & 63) as u8,
+            ]),
+        }
+    }
+    Ok(())
+}
 
 /// Nested values (items in containers in bundles, slot displays in composite
 /// displays, ...) share this depth budget. Vanilla's own limits are far lower.
@@ -116,7 +166,7 @@ impl<'a> Rewriter<'a> {
     /// A UTF-8 string with a VarInt byte length, at most `max` UTF-16 units.
     pub(super) fn string(&mut self, max: usize) -> io::Result<&'a str> {
         let start = self.input;
-        let value = crate::protocol::read_string(&mut self.input, max)?;
+        let value = read_string(&mut self.input, max)?;
         self.output
             .extend_from_slice(&start[..start.len() - self.input.len()]);
         Ok(value)
@@ -307,7 +357,7 @@ impl<'a> Rewriter<'a> {
     }
 
     fn write_nbt_string(&mut self, value: &str) -> io::Result<()> {
-        crate::protocol::write_modified_utf8(value, &mut self.output)
+        write_modified_utf8(value, &mut self.output)
     }
 
     fn nbt_payload(&mut self, kind: u8, depth: usize) -> io::Result<()> {
