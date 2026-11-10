@@ -125,6 +125,9 @@ def run(server, proxy, client, stay, directory):
     result = real_client.join(client, "127.0.0.1", proxy.port, name=name, stay=stay,
                               on_joined=on_joined, expect_chat=[nonce, f"{nonce}-after"])
     time.sleep(1)
+    # The next client must not join beside this one's mounted pig: 1.21.11+
+    # clients warn about the passengers of a vehicle not spawned for them yet.
+    server.console("kill @e[type=!player]")
     server_log = server.text()[log_start:]
     rift_log = proxy.text()[rift_start:]
     directory.mkdir(parents=True, exist_ok=True)
