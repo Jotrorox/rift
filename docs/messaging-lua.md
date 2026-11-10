@@ -146,7 +146,9 @@ messaging = {
 ```
 
 Publication and subscription ACLs are explicit and default to empty. Control
-publication also requires `control = true`. Local Lua configuration is trusted
+publication also requires `control = true`, and publication on the
+[player API](messaging.md#player-api-subjects) (`rift.players.*`) requires
+`players = true`. Local Lua configuration is trusted
 and uses the local broker directly. Remote clients cannot impersonate Rift's
 `rift.events` publisher. Remote reply subjects must be authorized `_INBOX.*`
 subjects. Keep publish and subscribe grants as narrow as the plugin needs.

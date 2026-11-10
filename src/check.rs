@@ -191,27 +191,17 @@ fn secret(field: &str, variable: &str, min: usize) -> Result<(), String> {
 }
 
 fn environment(config: &Config, report: &mut Report) {
-    if let Some(forwarding) = &config.forwarding {
-        report.check(secret("forwarding.secret_env", &forwarding.secret_env, 1));
-    }
-    if let Some(admin) = &config.admin {
-        report.check(secret("admin.token_env", &admin.token_env, 32));
-    }
-    if let Some(messaging) = &config.messaging {
-        for principal in &messaging.principals {
-            report.check(secret(
-                &format!("messaging.principals.{}.token_env", principal.name),
-                &principal.token_env,
-                32,
-            ));
+    for (field, variable) in config.secret_variables() {
+        // Integration headers are checked below with their own rules.
+        if field.starts_with("extensions.") {
+            continue;
         }
-    }
-    for (name, node) in &config.nodes {
-        report.check(secret(
-            &format!("nodes.{name}.token_env"),
-            &node.token_env,
-            32,
-        ));
+        let minimum = if field == "forwarding.secret_env" {
+            1
+        } else {
+            32
+        };
+        report.check(secret(&field, &variable, minimum));
     }
     if let Some(extensions) = &config.extensions {
         report.check(extensions.check_environment());

@@ -208,8 +208,20 @@ impl Drop for ManagedLease {
     }
 }
 
+/// Register `config`'s secret variables so no child inherits them. Called
+/// wherever a configuration reaches the supervisor, before any spawn.
+pub fn protect_secrets(config: &Config) {
+    crate::environment::protect(
+        config
+            .secret_variables()
+            .into_iter()
+            .map(|(_, variable)| variable),
+    );
+}
+
 impl ManagedServers {
-    /// Construction is side-effect free and does not need a Tokio runtime.
+    /// Construction does not need a Tokio runtime and has no side effect
+    /// beyond [`protect_secrets`].
     pub fn new(config: &Config, players: Arc<PlayerRegistry>) -> Self {
         let nodes = Nodes::new(crate::messaging::Broker::default(), config);
         Self::with_nodes(config, players, nodes)
@@ -217,6 +229,7 @@ impl ManagedServers {
 
     /// Servers with a `node` run through that node's agent in `nodes`.
     pub fn with_nodes(config: &Config, players: Arc<PlayerRegistry>, nodes: Nodes) -> Self {
+        protect_secrets(config);
         let servers = config
             .managed_servers
             .iter()
@@ -293,6 +306,7 @@ impl ManagedServers {
     /// Register a configured backend and give its child process a worker owner.
     /// The registry lock serializes registration against launch and shutdown.
     pub fn add(&self, config: &Config, name: &str) -> io::Result<()> {
+        protect_secrets(config);
         let runtime = tokio::runtime::Handle::try_current().map_err(io::Error::other)?;
         let mut servers = lock(&self.0.servers);
         self.check_running()?;

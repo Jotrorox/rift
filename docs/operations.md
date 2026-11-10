@@ -416,6 +416,49 @@ without opening the database; run `sudo -u rift rift check --strict
 /etc/rift/rift.lua` to verify that the database opens or can be created. LuaJIT uses
 executable memory, so do not add `MemoryDenyWriteExecute=true` to this unit.
 
+## Secrets and the processes Rift starts
+
+Rift reads its secrets from environment variables: `admin.token_env`, every
+`messaging.principals[].token_env`, every `nodes.*.token_env`,
+`forwarding.secret_env` and the `headers_env` of
+`extensions.integrations`. A `rift node` agent reads `--token-env` and
+`--forwarding-secret-env`. Rift removes exactly these variables from the
+environment of every managed server it starts, locally and through agents,
+and from the default environment of WebAssembly plugins. Everything else is
+still inherited, so a database password you export for a server plugin
+keeps working; `env` and `inherit_env` on a managed server or service group
+narrow that further (see [managed servers](managed-servers.md#configuration)).
+A variable once used for a secret stays removed until Rift restarts, even if a
+reload stops naming it, because its value is still in Rift's environment.
+
+On Linux Rift also clears its dumpable flag (`PR_SET_DUMPABLE`) as the first
+thing it does, in every mode (`rift`, `rift node`, `rift dev`, `rift admin`).
+Processes of the same user, such as the Minecraft servers Rift starts, then
+cannot read `/proc/<rift pid>/environ` or `/proc/<rift pid>/mem`, or attach
+with `ptrace`, so they cannot recover the secrets from outside either. This has
+two side effects:
+
+- **No core dumps.** A crashing Rift writes no core file, because it would
+  contain every secret. Debug a crash with a build run under a debugger
+  started by root, or reproduce it on a host without production secrets.
+- **No same-user debugging or descriptor inspection.** `gdb -p`, `strace -p`,
+  `perf`, `lsof -p` and monitoring that lists `/proc/<pid>/fd` (open-file
+  counts in process exporters) are refused when they run as Rift's user; run
+  them as root (which has `CAP_SYS_PTRACE`) instead. `/proc/<pid>/status` and
+  `stat` stay readable, so CPU and memory monitoring keeps working.
+
+For a debugging session, start Rift with `RIFT_DUMPABLE=1` to skip this; Rift
+logs a warning at startup. It is read once, before anything else, so a reload
+cannot change it.
+
+This is hygiene, not isolation. Managed servers still run as Rift's user: they
+can read every file Rift can (the configuration, `rift.sqlite3`, the
+messaging private key and anything under `local/`), write Rift's plugins and
+templates, and signal Rift. Keep untrusted server plugins off the host, or run
+servers on [nodes](nodes.md) under a separate account, until instances get
+their own sandbox. macOS and Windows have no equivalent flag; there, a process
+of the same user can read Rift's environment.
+
 ## Container example
 
 The supplied [Dockerfile](../examples/Dockerfile) packages the Linux release
