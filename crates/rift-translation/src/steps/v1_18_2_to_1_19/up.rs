@@ -7,7 +7,6 @@ use super::{
     entities, id,
     login::{Finished, Hello, Key},
     messages::{MAX_MESSAGE, Placement, Sent, SystemChat},
-    players,
     world::{self, DimensionTypes},
 };
 use crate::{
@@ -65,7 +64,6 @@ impl Up {
             use Direction::*;
             use State::*;
             RouteBuilder::new(NEWER, OLDER)
-                .default_handler(Clientbound, Play, "player_info", Self::player_info)
                 .defaults()
                 .serverbound(Login, "hello", Self::hello)
                 .serverbound(Login, "key", Self::key)
@@ -381,15 +379,6 @@ impl Up {
         }
         r.finish()?;
         cx.to_backend(state, Packet::new(packet.id, w.buf));
-        Ok(())
-    }
-
-    fn player_info(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
-        let (action, entries) = players::read_legacy(OLDER, &packet.data)?;
-        cx.to_client(
-            state,
-            Packet::new(packet.id, players::write_legacy(NEWER, action, &entries)),
-        );
         Ok(())
     }
 }

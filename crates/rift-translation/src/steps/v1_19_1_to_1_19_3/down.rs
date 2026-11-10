@@ -15,7 +15,6 @@ use crate::{
             join::{Login, Respawn},
             login::{Hello, Key, clamp_velocity_forwarding},
             messages::{Placement, PlayerChat, Sent, ServerData, SystemChat, read_disguised_chat},
-            players::{self, Action},
         },
     },
     wire::{Reader, Writer},
@@ -53,21 +52,8 @@ impl Down {
     pub fn routes() -> &'static Routes<Self> {
         static ROUTES: OnceLock<Routes<Down>> = OnceLock::new();
         ROUTES.get_or_init(|| {
-            use Direction::Clientbound;
             use State::*;
             RouteBuilder::new(OLDER, NEWER)
-                .default_handler(
-                    Clientbound,
-                    Play,
-                    "player_info_update",
-                    Self::player_info_update,
-                )
-                .default_handler(
-                    Clientbound,
-                    Play,
-                    "player_info_remove",
-                    Self::player_info_remove,
-                )
                 .defaults()
                 .serverbound(Login, "hello", Self::hello)
                 .serverbound(Login, "key", Self::key)
@@ -207,36 +193,6 @@ impl Down {
         r.finish()?;
         let id = id(OLDER, state, Direction::Clientbound, name);
         cx.to_client(state, Packet::new(id, w.buf));
-        Ok(())
-    }
-
-    fn player_info_update(
-        &mut self,
-        cx: &mut Cx<'_>,
-        state: State,
-        packet: Packet,
-    ) -> io::Result<()> {
-        let (actions, entries) = players::read_update(&packet.data)?;
-        let id = id(OLDER, state, Direction::Clientbound, "player_info");
-        for action in players::legacy_actions(actions) {
-            cx.to_client(
-                state,
-                Packet::new(id, players::write_legacy(OLDER, action, &entries)),
-            );
-        }
-        Ok(())
-    }
-
-    fn player_info_remove(
-        &mut self,
-        cx: &mut Cx<'_>,
-        state: State,
-        packet: Packet,
-    ) -> io::Result<()> {
-        let entries = players::read_remove(&packet.data)?;
-        let id = id(OLDER, state, Direction::Clientbound, "player_info");
-        let data = players::write_legacy(OLDER, Action::Remove, &entries);
-        cx.to_client(state, Packet::new(id, data));
         Ok(())
     }
 

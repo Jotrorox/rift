@@ -475,9 +475,14 @@ fn the_player_list_splits_and_merges() {
         let out = up().one(Clientbound, Play, "player_info", &legacy);
         assert_eq!(out.name, "player_info_update");
         let (actions, entries) = players::read_update(&out.data).unwrap();
+        // The text codec sets the actions the entry carries: a 1.19.2 player
+        // has no chat session to initialise.
         assert_eq!(
             (actions, entries),
-            (players::update_actions(action), vec![alex(action)])
+            (
+                players::update_actions(action) & !players::INITIALIZE_CHAT,
+                vec![alex(action)]
+            )
         );
         let back = down().one(Clientbound, Play, "player_info_update", &out.data);
         assert_eq!(back.data, legacy);

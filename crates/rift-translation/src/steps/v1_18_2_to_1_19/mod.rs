@@ -8,6 +8,7 @@ pub(super) mod chat;
 pub(super) mod join;
 pub(super) mod login;
 pub(super) mod messages;
+#[cfg(test)]
 pub(super) mod players;
 #[cfg(test)]
 pub(super) mod testing;
