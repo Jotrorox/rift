@@ -21,7 +21,13 @@
 //! - `player_look_at` is emulated with a rotation-only teleport, and the
 //!   pufferfish sting game event with the sound it plays;
 //! - block entity and entity NBT queries, which a 1.12 client never makes,
-//!   have their answers dropped.
+//!   have their answers dropped;
+//! - named sounds take 1.12 names (`custom_sound`).
+//!
+//! Two parts belong in shared codecs' conversions for this pair and are
+//! provided for them: [`translations`] (1.13 translation keys a 1.12.2
+//! client lacks, for the text codec) and [`block_entities`] (block entity
+//! data 1.13 moved into block states, for the chunk codec).
 pub(super) mod block_entities;
 mod channels;
 mod recipes;
