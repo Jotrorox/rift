@@ -1,10 +1,85 @@
 {
+  "block": {
+    "down": {
+      "calibrated_sculk_sensor": "sculk_sensor",
+      "pitcher_crop": "beetroots",
+      "pitcher_plant": "lilac",
+      "sniffer_egg": "dragon_egg",
+      "suspicious_gravel": "gravel"
+    }
+  },
   "block_entity_type": {
+    "down": {
+      "calibrated_sculk_sensor": "sculk_sensor"
+    },
     "renames": {
       "suspicious_sand": "brushable_block"
     }
   },
+  "block_state": {
+    "down": {
+      "calibrated_sculk_sensor": "sculk_sensor",
+      "pitcher_crop[half=lower]": "beetroots",
+      "pitcher_crop[half=upper]": "air",
+      "pitcher_plant": "lilac",
+      "sniffer_egg": "dragon_egg",
+      "suspicious_gravel": "gravel"
+    }
+  },
+  "game_event": {
+    "down": {
+      "resonate_1": "block_change",
+      "resonate_10": "block_change",
+      "resonate_11": "block_change",
+      "resonate_12": "block_change",
+      "resonate_13": "block_change",
+      "resonate_14": "block_change",
+      "resonate_15": "block_change",
+      "resonate_2": "block_change",
+      "resonate_3": "block_change",
+      "resonate_4": "block_change",
+      "resonate_5": "block_change",
+      "resonate_6": "block_change",
+      "resonate_7": "block_change",
+      "resonate_8": "block_change",
+      "resonate_9": "block_change"
+    },
+    "up": {
+      "dispense_fail": "block_activate",
+      "piston_contract": "block_deactivate",
+      "piston_extend": "block_activate"
+    }
+  },
   "item": {
+    "down": {
+      "angler_pottery_sherd": "brick",
+      "blade_pottery_sherd": "brick",
+      "brewer_pottery_sherd": "brick",
+      "burn_pottery_sherd": "brick",
+      "calibrated_sculk_sensor": "sculk_sensor",
+      "danger_pottery_sherd": "brick",
+      "explorer_pottery_sherd": "brick",
+      "friend_pottery_sherd": "brick",
+      "heart_pottery_sherd": "brick",
+      "heartbreak_pottery_sherd": "brick",
+      "host_armor_trim_smithing_template": "snout_armor_trim_smithing_template",
+      "howl_pottery_sherd": "brick",
+      "miner_pottery_sherd": "brick",
+      "mourner_pottery_sherd": "brick",
+      "music_disc_relic": "music_disc_otherside",
+      "pitcher_plant": "lilac",
+      "pitcher_pod": "torchflower_seeds",
+      "plenty_pottery_sherd": "brick",
+      "raiser_armor_trim_smithing_template": "rib_armor_trim_smithing_template",
+      "shaper_armor_trim_smithing_template": "dune_armor_trim_smithing_template",
+      "sheaf_pottery_sherd": "brick",
+      "shelter_pottery_sherd": "brick",
+      "silence_armor_trim_smithing_template": "ward_armor_trim_smithing_template",
+      "sniffer_egg": "turtle_egg",
+      "snort_pottery_sherd": "brick",
+      "suspicious_gravel": "gravel",
+      "wayfinder_armor_trim_smithing_template": "wild_armor_trim_smithing_template"
+    },
     "renames": {
       "pottery_shard_archer": "archer_pottery_sherd",
       "pottery_shard_arms_up": "arms_up_pottery_sherd",
@@ -12,12 +87,46 @@
       "pottery_shard_skull": "skull_pottery_sherd"
     }
   },
+  "menu": {
+    "up": {
+      "legacy_smithing": "anvil"
+    }
+  },
   "particle_type": {
+    "down": {
+      "egg_crack": "poof"
+    },
     "renames": {
       "falling_cherry_leaves": "cherry_leaves"
+    },
+    "up": {
+      "dripping_cherry_leaves": "cherry_leaves",
+      "landing_cherry_leaves": "cherry_leaves"
     }
   },
   "sound_event": {
+    "down": {
+      "block.amethyst_block.resonate": "block.amethyst_block.chime",
+      "block.sign.waxed_interact_fail": "block.wood.hit",
+      "block.sniffer_egg.crack": "entity.turtle.egg_crack",
+      "block.sniffer_egg.hatch": "entity.turtle.egg_hatch",
+      "block.sniffer_egg.plop": "entity.chicken.egg",
+      "block.suspicious_gravel.break": "block.gravel.break",
+      "block.suspicious_gravel.fall": "block.gravel.fall",
+      "block.suspicious_gravel.hit": "block.gravel.hit",
+      "block.suspicious_gravel.place": "block.gravel.place",
+      "block.suspicious_gravel.step": "block.gravel.step",
+      "item.brush.brushing.gravel": "item.brush.brushing",
+      "item.brush.brushing.gravel.complete": "item.brush.brush_sand_completed",
+      "item.brush.brushing.sand": "item.brush.brushing",
+      "music.overworld.badlands": "music.game",
+      "music.overworld.bamboo_jungle": "music.overworld.jungle_and_forest",
+      "music.overworld.desert": "music.game",
+      "music.overworld.flower_forest": "music.overworld.jungle_and_forest",
+      "music.overworld.forest": "music.overworld.jungle_and_forest",
+      "music.overworld.sparse_jungle": "music.overworld.jungle_and_forest",
+      "music_disc.relic": "music_disc.otherside"
+    },
     "renames": {
       "item.brush.brush_sand_completed": "item.brush.brushing.sand.complete",
       "item.brush.brushing": "item.brush.brushing.generic",
