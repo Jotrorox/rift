@@ -35,6 +35,15 @@ mandatory teleport and idle steps); --keep keeps the server directory;
 writes machine-readable results; --direct also runs the reference scenario
 with the "translated" client connected directly (validates the decoder).
 
+Result levels: FAIL (a translation or schema problem: the cell fails), INFO
+(e.g. a registry name the client's version lacks arrived as a stand-in),
+UNVERIFIED (a 26.2/26.3 layout no checked schema covers; never a pass), KNOWN
+(a documented deviation of non-vanilla server software, SERVER_DEVIATIONS,
+seen identically by the reference client). A decode failure on the reference
+client means the schema needs a correction (tests/protodef.py CORRECTIONS),
+not that translation is wrong. --redecode RUN_DIR replays a finished run's
+failed packets against the current schemas without starting servers.
+
 A server is started once per --server and reused for every --client. At most
 three Minecraft servers run at once machine-wide (RIFT_VIA_MAX_SERVERS); other
 invocations wait for a slot. Downloads, Paper patching, Spigot BuildTools
@@ -315,6 +324,8 @@ def run_cell(server, proxy, protocol, steps, label, directory, args):
             if session.failure:
                 result["findings"].append(dict(level="FAIL", step=session.step,
                                                message=f"{session.label}: {session.failure}"))
+    except SessionError as error:  # Expected failures: the message says it all.
+        result["findings"].append(dict(level="FAIL", step="setup", message=str(error)))
     except Exception as error:
         result["findings"].append(dict(level="FAIL", step="setup", message=f"{type(error).__name__}: {error}",
                                        traceback=traceback.format_exc()[-2000:]))
