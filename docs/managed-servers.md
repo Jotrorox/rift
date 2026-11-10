@@ -91,6 +91,7 @@ rift.config.managed_servers.survival = {
 | `restart_retries` | `3` | Maximum automatic restart attempts after the initial start; an explicit Start resets the budget. `0` disables automatic recovery. |
 | `env` | None | Extra environment variables, `{ NAME = "value" }`. Values are literal (integers are written as numbers); service groups expand `{name}`, `{group}` and `{port}` in them. They are set after inheritance and win over inherited variables. |
 | `inherit_env` | Everything | `false` inherits nothing from Rift; a list such as `{ "PATH", "HOME", "JAVA_HOME" }` inherits only those. Rift's own secrets are never inherited either way. |
+| `messaging` | None | `{ preset = "backend", publish = {...}, subscribe = {...} }`: give the server (each instance of a group) its own bus login; see [bus logins](#bus-logins-for-instances). |
 
 Commands run without a shell: arguments containing spaces remain single
 arguments, and `$VARIABLE`, `~`, redirection and shell operators are not expanded.
@@ -531,6 +532,75 @@ Servers can be spun up from any of these places:
 All of them use the same serialized instance transaction. Each committed creation
 or removal is published on `rift.events.instances`. See
 [examples/cloud.lua](../examples/cloud.lua) for a complete setup.
+
+## Bus logins for instances
+
+A plugin on a backend that talks to Rift's [message bus](messaging.md), such
+as [RiftPerms](permissions-java.md), needs a principal and a token. Listing
+`server.lobby-1`, `server.lobby-2`, … under `messaging.principals` cannot
+follow scaling, and one shared login per group would let any lobby speak for
+any other, including reporting contexts for players who are not on it. A
+`messaging` block makes Rift issue every instance its own login instead:
+
+```lua
+rift.config.messaging = {
+    listen = "0.0.0.0:7443",
+    advertise = "10.0.0.2:7443", -- what instances connect to; optional for local ones
+    certificate = "certs/messaging.pem",
+    private_key = "certs/messaging-key.pem",
+}
+rift.config.service_groups.lobby = {
+    template = "lobby",
+    port_range = { 25600, 25649 },
+    messaging = { preset = "backend" }, -- plus publish = {...}, subscribe = {...} if needed
+}
+```
+
+Each instance authenticates as `server.<instance>` with the grants of the
+block (`preset = "backend"` adds the [permission replica's
+subjects](messaging.md#backend-permission-principals); `_INBOX.>` is always
+added for replies). Rift sets these variables for its process:
+
+| Variable | Value |
+| --- | --- |
+| `RIFT_SERVER_NAME` | The instance (or managed server) name, such as `lobby-3`; set for every managed server |
+| `RIFT_SERVER_GROUP` | Its service group, such as `lobby` |
+| `RIFT_BUS_ADDRESS` | `messaging.advertise`, else `127.0.0.1` and the listener's bound port |
+| `RIFT_BUS_SERVER_NAME` | `messaging.advertise_server_name`, else the host of `advertise`, else `localhost` |
+| `RIFT_BUS_CERT` | An absolute path to `rift-bus.pem` in the server directory: the messaging certificate, written at creation and refreshed on every start |
+| `RIFT_BUS_TOKEN` | The instance's token |
+
+RiftPerms, the Pumpkin adapter and the Rust client fall back to these when
+`server`, the bus address, certificate or token are unset, and fill the
+`group` [permission context](permissions.md#model) from `RIFT_SERVER_GROUP`,
+so one template configuration serves every instance. Java services can use
+`MessagingClient.builder().fromEnvironment()`.
+
+**Tokens.** A token is `ri1.<name>.<generation>.<HMAC>`, keyed by
+`local/instance-key` beside the configuration (32 random bytes, mode 0600,
+created on first use; keep it out of templates and backups you share). The
+generation increases each time an instance of that name is created and is
+kept in the instance database; static managed servers have generation 0.
+Nothing stores tokens: the bus verifies the HMAC and then checks that the
+instance is still registered at that generation, so tokens survive proxy
+restarts, which servers on nodes need, and a recreated instance never inherits
+its predecessor's token. Instance names are not reused by Rift's own name
+sequence anyway; the generation guards a reused name after a database restore
+or a recreated static server. Removing an instance withdraws its login and
+closes its open bus connections at once.
+
+Grants come from the definition when an instance registers; a reload that
+changes them applies to new connections. A `messaging` block needs
+`messaging.listen`, and the first one added to a running Rift takes effect
+after a restart, like other messaging changes. Servers on [nodes](nodes.md)
+get their token in each start command (the one secret that crosses the bus;
+the node never sees the key) and need `messaging.advertise` set to an address
+the nodes reach; `rift check` warns otherwise. `rift check` also warns when a
+group's template ships RiftPerms but the group has no `messaging` block.
+
+Everything else a server inherits from Rift is still subject to
+[`env` and `inherit_env`](#configuration); the variables above are set last,
+so `env` cannot override them.
 
 ## Servers on other hosts
 

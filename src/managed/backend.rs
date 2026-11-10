@@ -62,6 +62,47 @@ pub(super) trait ProcessBackend: Send + 'static {
 #[derive(Debug, Default)]
 pub(super) struct Local {
     child: Option<Child>,
+    logins: super::LoginSlot,
+}
+
+impl Local {
+    pub(super) fn new(logins: super::LoginSlot) -> Self {
+        Self {
+            child: None,
+            logins,
+        }
+    }
+}
+
+/// The server's environment plus what Rift sets for it: `RIFT_SERVER_NAME`,
+/// and with a bus login `RIFT_SERVER_GROUP` and the `RIFT_BUS_*` variables
+/// (see [`crate::instance_login`]). `directory` is where the process runs on
+/// this host, for `RIFT_BUS_CERT`; `None` leaves that to the node agent.
+/// Rift's variables are set last, so `env` cannot override them.
+fn with_login(
+    logins: &super::LoginSlot,
+    server: &Server,
+    directory: Option<&std::path::Path>,
+) -> io::Result<(ProcessEnvironment, Option<String>)> {
+    let mut environment = server.config.environment.clone();
+    let logins = logins
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let Some(logins) = logins else {
+        return Ok((environment, None));
+    };
+    if let Some(directory) = directory {
+        logins.write_certificate(directory)?;
+    }
+    environment
+        .set
+        .extend(logins.environment(&server.name, directory));
+    let certificate = logins
+        .is_registered(&server.name)
+        .then(|| logins.bus().map(|bus| bus.certificate))
+        .flatten();
+    Ok((environment, certificate))
 }
 
 impl ProcessBackend for Local {
@@ -96,10 +137,11 @@ impl ProcessBackend for Local {
             }
             Err(error) => return Err(error),
         }
+        let (environment, _) = with_login(&self.logins, server, Some(&server.config.directory))?;
         self.child = Some(spawn(
             &server.config.command,
             &server.config.directory,
-            &server.config.environment,
+            &environment,
         )?);
         Ok(())
     }
@@ -392,16 +434,18 @@ pub(super) struct Remote {
     agent: Option<String>,
     /// Snapshots older than the latest command reply are stale.
     revision: u64,
+    logins: super::LoginSlot,
 }
 
 impl Remote {
-    pub(super) fn new(nodes: Nodes, node: String) -> Self {
+    pub(super) fn new(nodes: Nodes, node: String, logins: super::LoginSlot) -> Self {
         Self {
             nodes,
             node,
             running: None,
             agent: None,
             revision: 0,
+            logins,
         }
     }
 
@@ -460,6 +504,10 @@ impl ProcessBackend for Remote {
             .ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidInput, "remote server has no port")
             })?;
+        // The token crosses the bus in the start command, the one secret
+        // that does: it is scoped to this instance, the node never gets the
+        // key, and every (re)start carries it, so a recovered server has it.
+        let (environment, bus_certificate) = with_login(&self.logins, server, None)?;
         let result = self
             .request(
                 protocol::Command::Start(protocol::Start {
@@ -467,7 +515,8 @@ impl ProcessBackend for Remote {
                     command: server.config.command.clone(),
                     directory: server.config.directory.clone(),
                     port,
-                    environment: (&server.config.environment).into(),
+                    environment: (&environment).into(),
+                    bus_certificate,
                 }),
                 COMMAND_WAIT,
             )

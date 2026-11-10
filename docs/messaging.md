@@ -81,7 +81,11 @@ messaging = {
 ```
 
 Set this field as `rift.config.messaging = { ... }` in a script, or inside a
-legacy returned configuration table. Tokens must contain
+legacy returned configuration table. Managed servers can get their own logins
+without being listed here: see [bus logins for
+instances](managed-servers.md#bus-logins-for-instances), which also describes
+`advertise` and `advertise_server_name`, the address and certificate name
+handed to them. Tokens must contain
 32–1024 bytes without control characters. An external principal needs explicit
 publish/subscribe grants. The [player API](#player-api-subjects) additionally
 requires `players = true`, and control subjects `control = true`;

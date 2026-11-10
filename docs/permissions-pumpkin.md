@@ -148,6 +148,13 @@ path = "replica.json"
 | `offline_policy` | `{mode = "deny"}` | `deny`, `last_snapshot` or `fallback_file` with a `path`; see [offline policies](permissions-clients.md#offline-policies) |
 
 Relative paths (`ca`, the policy's `path`) are relative to the data folder.
+
+On a server Rift manages with a `messaging` block, leave out `address`,
+`server_name`, `ca`, `token_env`, `server` and `group`: they fall back to the
+`RIFT_*` variables Rift sets for each instance (see [bus logins for
+instances](managed-servers.md#bus-logins-for-instances)), and with those
+variables present and no configuration file at all, the plugin starts on them
+alone instead of writing a template.
 The template uses `last_snapshot`, so players known before a restart keep
 their permissions while the proxy is away.
 

@@ -159,10 +159,16 @@ impl Snapshot {
         };
         let perms = previous.map_or_else(
             || {
-                let bus = Arc::new(rift::permissions::control::Bus::new(
+                let bus = Arc::new(rift::permissions::control::Bus::with_instances(
                     messaging.clone(),
                     extensions.permissions().clone(),
                     config.messaging.as_ref(),
+                    config
+                        .managed_servers
+                        .values()
+                        .chain(config.service_groups.values().map(|group| &group.server))
+                        .filter_map(|server| server.messaging.as_ref())
+                        .map(|grants| grants.subscribe.as_slice()),
                 ));
                 bus.install_directory();
                 bus
@@ -1626,6 +1632,81 @@ async fn proxied_client(
     Ok(true)
 }
 
+/// Instance logins (see [`rift::instance_login`]) when the bus listens and
+/// some managed server or service group has a `messaging` block. The key is
+/// `local/instance-key` beside the configuration file, or in the working
+/// directory without one. Adding the first `messaging` block needs a
+/// restart, like other messaging changes.
+fn instance_logins(
+    config: &Config,
+    source: Option<&std::path::Path>,
+) -> io::Result<Option<Arc<rift::instance_login::Logins>>> {
+    let listening = config
+        .messaging
+        .as_ref()
+        .is_some_and(|messaging| messaging.listen.is_some());
+    let wanted = config
+        .managed_servers
+        .values()
+        .chain(config.service_groups.values().map(|group| &group.server))
+        .any(|server| server.messaging.is_some());
+    if !listening || !wanted {
+        return Ok(None);
+    }
+    let directory = source
+        .and_then(std::path::Path::parent)
+        .unwrap_or(std::path::Path::new("."));
+    rift::instance_login::Logins::open(directory)
+        .map(|logins| Some(Arc::new(logins)))
+        .map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "{}: {error}",
+                    directory.join(rift::instance_login::KEY_FILE).display()
+                ),
+            )
+        })
+}
+
+/// Where instances reach the bus: `messaging.advertise`, else the bound
+/// address with `127.0.0.1` for an unspecified IP, which only local
+/// instances can use (`rift check` warns about nodes then).
+fn bus_for_instances(config: &Config, bound: SocketAddr) -> io::Result<rift::instance_login::Bus> {
+    let messaging = config.messaging.as_ref().expect("listening");
+    let address = messaging.advertise.clone().unwrap_or_else(|| {
+        let ip = if bound.ip().is_unspecified() {
+            std::net::IpAddr::from([127, 0, 0, 1])
+        } else {
+            bound.ip()
+        };
+        SocketAddr::new(ip, bound.port()).to_string()
+    });
+    let server_name = messaging.advertise_server_name.clone().unwrap_or_else(|| {
+        messaging
+            .advertise
+            .as_deref()
+            .and_then(|advertise| advertise.rsplit_once(':'))
+            .map(|(host, _)| host.trim_matches(['[', ']']).to_owned())
+            .unwrap_or_else(|| "localhost".to_owned())
+    });
+    let path = messaging
+        .certificate
+        .as_ref()
+        .expect("validated with listen");
+    let certificate = std::fs::read_to_string(path).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("messaging.certificate ({}): {error}", path.display()),
+        )
+    })?;
+    Ok(rift::instance_login::Bus {
+        address,
+        server_name,
+        certificate,
+    })
+}
+
 /// Make `next` visible to new connections, in-flight sessions and health checks.
 async fn publish(
     snapshot: &mut Arc<Snapshot>,
@@ -2428,7 +2509,17 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     initial.perms.set_changes_stream(changes.clone());
     streams.insert(rift_permissions::wire::CHANGES.to_owned(), changes);
     initial.messaging_streams = Arc::new(streams);
-    let messaging_server = crate::messaging_runtime::listen(&initial).await?;
+    let logins = instance_logins(&initial.config, source.as_deref())?;
+    let messaging_server = crate::messaging_runtime::listen(&initial, logins.clone()).await?;
+    if let (Some(logins), Some(server)) = (&logins, &messaging_server) {
+        logins.set_bus(bus_for_instances(
+            &initial.config,
+            server.local_addr().map_err(io::Error::other)?,
+        )?);
+        initial
+            .managed
+            .set_logins(logins.clone(), &initial.config)?;
+    }
     let message_handler =
         rift::message_script::MessageHandler::new(&initial.config, initial.messaging.clone())
             .map_err(io::Error::other)?

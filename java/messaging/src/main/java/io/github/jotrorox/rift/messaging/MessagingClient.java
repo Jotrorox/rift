@@ -419,6 +419,49 @@ public final class MessagingClient implements AutoCloseable {
         }
 
         /**
+         * Everything from the variables Rift sets for a managed server with a bus login, so one
+         * configuration serves every instance of a group: {@code RIFT_BUS_ADDRESS} ({@code
+         * host:port}), {@code RIFT_BUS_SERVER_NAME}, {@code RIFT_BUS_CERT} (the certificate to trust)
+         * and {@code RIFT_BUS_TOKEN}.
+         *
+         * @return this builder
+         * @throws IllegalStateException when a variable is missing, naming it
+         */
+        public Builder fromEnvironment() {
+            return fromEnvironment(System::getenv);
+        }
+
+        /**
+         * {@link #fromEnvironment()} over any variable lookup, for tests.
+         *
+         * @param variables a variable's value, or null
+         * @return this builder
+         */
+        public Builder fromEnvironment(java.util.function.Function<String, String> variables) {
+            java.util.function.Function<String, String> required = name -> {
+                String value = variables.apply(name);
+                if (value == null || value.isEmpty()) {
+                    throw new IllegalStateException(name + " is not set; Rift sets it for managed servers whose "
+                            + "group or managed server has a messaging block");
+                }
+                return value;
+            };
+            String address = required.apply("RIFT_BUS_ADDRESS");
+            int colon = address.lastIndexOf(':');
+            if (colon <= 0) {
+                throw new IllegalStateException("RIFT_BUS_ADDRESS must be host:port, got \"" + address + "\"");
+            }
+            address(address.substring(0, colon).replace("[", "").replace("]", ""),
+                    Integer.parseInt(address.substring(colon + 1)));
+            String serverName = variables.apply("RIFT_BUS_SERVER_NAME");
+            if (serverName != null && !serverName.isEmpty()) {
+                serverName(serverName);
+            }
+            trust(Path.of(required.apply("RIFT_BUS_CERT")));
+            return token(required.apply("RIFT_BUS_TOKEN"));
+        }
+
+        /**
          * @param timeout the QUIC handshake and authentication deadline
          * @return this builder
          */
