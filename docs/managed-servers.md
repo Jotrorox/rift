@@ -618,7 +618,9 @@ rift.config.service_groups.lobby = {
 }
 ```
 
-A confined server may read and write its own directory and `/tmp`; read and
+A confined server may read and write its own directory and `/tmp` (shared
+by every confined server, so keep Rift's configuration and instance
+directories out of it); read and
 execute `/usr`, `/lib*`, `/bin`, `/sbin`, the Java installation its command
 resolves to and every existing absolute path in its command line (a shared
 `/absolute/paper.jar`); and read the system files name resolution, TLS, time
