@@ -966,6 +966,12 @@ NOISE = [
      r"|Profiler|profiler|TickTimeTracker|Can't keep up|Running \d+ms|server overloaded|Failed to stop"
      r"|Couldn't (get|read) (current|system) (time|locale)|Locale|locale|Font|font|Glyph|glyph|Unifont|unifont",
      None, "JVM / OS / environment"),
+    # Vanilla servers send a passenger's vehicle's passenger list when they
+    # start tracking the passenger (26.3 ServerEntity.sendPairingData), also
+    # when the client has not been sent that vehicle yet: which of the two a
+    # client gets first follows the server's tracking order, so the warning
+    # comes and goes on direct connections too.
+    (r"^Received passengers for unknown entity$", None, "vanilla server behaviour: tracking order"),
 ]
 NOISE = [(re.compile(message), re.compile(logger) if logger else None, note) for message, logger, note in NOISE]
 
@@ -1017,7 +1023,8 @@ def classify(entry):
         if message.search(entry.message) and (logger is None or logger.search(entry.logger)):
             # A stack trace through the network stack is never noise.
             if not re.search(r"net\.minecraft\.network|io\.netty|PacketListener|NetHandler|DecoderException",
-                             blob) or "Mojang services" in _note or "offline" in _note:
+                             blob) or "Mojang services" in _note or "offline" in _note \
+                    or "vanilla server behaviour" in _note:
                 return "noise"
     if level == "FATAL" or FAILURE.search(blob) or NETWORK_THREAD.search(entry.thread):
         return "failure"
