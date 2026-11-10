@@ -1,0 +1,7 @@
+{
+  "entity_type": {
+    "renames": {
+      "potion": "splash_potion"
+    }
+  }
+}
