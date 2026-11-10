@@ -412,9 +412,10 @@ mod tests {
         assert_eq!(environment["RIFT_SERVER_GROUP"], "lobby");
         assert_eq!(environment["RIFT_BUS_ADDRESS"], "10.0.0.2:7443");
         assert_eq!(environment["RIFT_BUS_SERVER_NAME"], "rift.internal");
+        // Absolute in the host's own terms (Windows adds a drive).
         assert_eq!(
             Path::new(&environment["RIFT_BUS_CERT"]),
-            directory.join(CERTIFICATE_FILE)
+            std::path::absolute(directory.join(CERTIFICATE_FILE)).unwrap()
         );
         assert_eq!(environment["RIFT_BUS_TOKEN"], logins.token("lobby-3", 4));
     }
