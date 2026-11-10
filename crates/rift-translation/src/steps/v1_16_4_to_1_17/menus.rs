@@ -30,7 +30,9 @@ impl Menus {
             return &mut self.windows[index].1;
         }
         // One container is open at a time: a new one replaces the last.
-        self.windows.retain(|(id, _)| *id == INVENTORY);
+        if window != INVENTORY {
+            self.windows.retain(|(id, _)| *id == INVENTORY);
+        }
         self.windows.push((window, Vec::new()));
         &mut self.windows.last_mut().unwrap().1
     }
@@ -154,6 +156,11 @@ mod tests {
         assert_eq!(menus.get(3, 2), stack(9, 2));
         menus.set(4, 0, &stack(1, 1));
         assert!(!menus.knows(3), "a new container replaces the last");
+        menus.close(0);
+        let mut fresh = Menus::default();
+        fresh.set(4, 0, &stack(1, 1));
+        fresh.set(0, 0, &stack(1, 1));
+        assert!(fresh.knows(4), "the inventory does not replace a container");
         assert!(menus.knows(0));
         menus.close(4);
         menus.close(0);

@@ -36,6 +36,11 @@ pub fn to_backend(cx: &mut Cx<'_>, protocol: i32, state: State, name: &str, data
 // text codec lands; packets these steps split or merge carry their text
 // through it.
 pub fn text(shared: &mut Shared, direction: Direction, rw: &mut Rewriter<'_>) -> io::Result<()> {
+    #[cfg(test)]
+    if testing::stand_ins() {
+        rw.str()?;
+        return Ok(());
+    }
     codec::text::transcode(shared, direction, rw)
 }
 
@@ -44,6 +49,12 @@ pub fn text(shared: &mut Shared, direction: Direction, rw: &mut Rewriter<'_>) ->
 // INTEGRATION: the item codec's `transcode`, a stub that fails until the
 // item codec lands.
 pub fn item(shared: &mut Shared, direction: Direction, rw: &mut Rewriter<'_>) -> io::Result<()> {
+    #[cfg(test)]
+    if testing::stand_ins() {
+        let item = raw_item(&mut rw.r)?;
+        rw.w.bytes(item);
+        return Ok(());
+    }
     codec::item::transcode(shared, direction, rw)
 }
 
@@ -325,7 +336,26 @@ pub mod testing {
         data,
         step::{Cx, Emitted, Step},
     };
-    use std::{collections::BTreeMap, collections::VecDeque, io};
+    use std::{cell::Cell, collections::BTreeMap, collections::VecDeque, io};
+
+    thread_local! {
+        static STAND_INS: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Whether [`super::item`] and [`super::text`] copy stacks and text
+    /// unchanged on this thread instead of calling the shared codecs: for
+    /// testing what a step does around them, before the codecs exist.
+    pub fn stand_ins() -> bool {
+        STAND_INS.with(Cell::get)
+    }
+
+    /// Run `test` with stand-ins for the item and text codecs.
+    pub fn with_stand_ins<T>(test: impl FnOnce() -> T) -> T {
+        STAND_INS.with(|flag| flag.set(true));
+        let result = test();
+        STAND_INS.with(|flag| flag.set(false));
+        result
+    }
 
     /// A packet a step emitted, named in the protocol it is in.
     #[derive(Clone, Debug, PartialEq, Eq)]
