@@ -133,7 +133,11 @@ impl Client {
     /// Start with the token from the environment variable `config.token_env`.
     /// Must be called inside a tokio runtime. Fails only on unusable
     /// configuration; an unreachable proxy is retried in the background.
+    /// Unset connection fields come from the `RIFT_*` variables first (see
+    /// [`Config::with_environment`]).
     pub fn start(config: Config) -> Result<Self, Error> {
+        let config = config.with_environment();
+        config.check_complete()?;
         let token = std::env::var(&config.token_env).map_err(|_| {
             Error::Config(format!(
                 "environment variable {} is not set",
