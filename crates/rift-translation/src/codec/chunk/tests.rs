@@ -1256,3 +1256,88 @@ mod vectors {
         );
     }
 }
+
+/// A 1.16.2 to 1.17.1 server numbers biomes with gaps (the soul sand
+/// valley is 170) and the registry codec keeps them up to 1.20.4; from
+/// 1.20.5 IDs are places in `registry_data`. A recorded 1.16.5 column
+/// turned into soul sand valley must reach a 1.20.5 client with an ID its
+/// biome registry has.
+#[test]
+fn sparse_biome_ids_fit_the_registry_from_1_20_5() {
+    use crate::{Output, Packet, Translator};
+    let (backend, client) = (754, 766);
+    let (Some(session), Some(answers)) = (cached(backend), cached(client)) else {
+        eprintln!("skipped: no corpus for {backend} and {client}");
+        return;
+    };
+    // The client's own packets go in as soon as the translated client has
+    // reached the phase they were recorded in, as `examples/replay.rs` does.
+    let mut answers = answers
+        .iter()
+        .filter(|packet| packet.direction == Direction::Serverbound)
+        .peekable();
+    let plains = [&[0x80, 0x08][..], &[0x01; 1024]].concat();
+    let valley = [&[0x80, 0x08][..], &[0xaa, 0x01].repeat(1024)].concat();
+    let mut translator = Translator::new(client, backend).unwrap().unwrap();
+    let (mut biomes, mut registry, mut patched) = (Vec::new(), None, false);
+    for packet in session
+        .iter()
+        .filter(|packet| packet.direction == Direction::Clientbound)
+    {
+        let mut data = packet.data.clone();
+        if !patched
+            && packet.state == State::Play
+            && packet.name(backend) == "level_chunk"
+            && let Some(at) = data
+                .windows(plains.len())
+                .position(|window| window == plains)
+        {
+            data.splice(at..at + plains.len(), valley.iter().copied());
+            patched = true;
+        }
+        let mut out = Output::default();
+        while let Some(answer) = answers.next_if(|answer| answer.state == translator.client_phase())
+        {
+            translator
+                .serverbound(Packet::new(answer.id, answer.data.clone()), &mut out)
+                .unwrap();
+        }
+        translator
+            .clientbound(Packet::new(packet.id, data), &mut out)
+            .unwrap();
+        for sent in out.client {
+            let name = data::version(client)
+                .packet_name(sent.state, Direction::Clientbound, sent.packet.id)
+                .unwrap_or("?");
+            let mut reader = Reader::new(&sent.packet.data);
+            if name == "registry_data" && reader.str().unwrap() == "minecraft:worldgen/biome" {
+                registry = Some(reader.count().unwrap() as i32);
+            } else if name == "level_chunk_with_light" && biomes.is_empty() {
+                let chunk = Chunk::read(&sent.packet.data, client, &World::default()).unwrap();
+                let mut scratch = Vec::new();
+                for section in chunk.sections.iter().flatten() {
+                    let mut values = Vec::new();
+                    section
+                        .biomes
+                        .as_ref()
+                        .unwrap()
+                        .values(&mut values, &mut scratch)
+                        .unwrap();
+                    biomes.extend(values);
+                }
+            }
+        }
+    }
+    assert!(patched, "no plains column to turn into a valley");
+    let size = registry.expect("the client's biome registry");
+    assert!(!biomes.is_empty());
+    assert!(
+        biomes.iter().all(|biome| (0..size).contains(biome)),
+        "biomes {:?} beyond a registry of {size}",
+        biomes
+            .iter()
+            .filter(|biome| !(0..size).contains(*biome))
+            .take(3)
+            .collect::<Vec<_>>()
+    );
+}
