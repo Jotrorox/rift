@@ -1,0 +1,48 @@
+{
+  "attribute": {
+    "renames": {
+      "generic.armor": "armor",
+      "generic.armor_toughness": "armor_toughness",
+      "generic.attack_damage": "attack_damage",
+      "generic.attack_knockback": "attack_knockback",
+      "generic.attack_speed": "attack_speed",
+      "generic.burning_time": "burning_time",
+      "generic.explosion_knockback_resistance": "explosion_knockback_resistance",
+      "generic.fall_damage_multiplier": "fall_damage_multiplier",
+      "generic.flying_speed": "flying_speed",
+      "generic.follow_range": "follow_range",
+      "generic.gravity": "gravity",
+      "generic.jump_strength": "jump_strength",
+      "generic.knockback_resistance": "knockback_resistance",
+      "generic.luck": "luck",
+      "generic.max_absorption": "max_absorption",
+      "generic.max_health": "max_health",
+      "generic.movement_efficiency": "movement_efficiency",
+      "generic.movement_speed": "movement_speed",
+      "generic.oxygen_bonus": "oxygen_bonus",
+      "generic.safe_fall_distance": "safe_fall_distance",
+      "generic.scale": "scale",
+      "generic.step_height": "step_height",
+      "generic.water_movement_efficiency": "water_movement_efficiency",
+      "player.block_break_speed": "block_break_speed",
+      "player.block_interaction_range": "block_interaction_range",
+      "player.entity_interaction_range": "entity_interaction_range",
+      "player.mining_efficiency": "mining_efficiency",
+      "player.sneaking_speed": "sneaking_speed",
+      "player.submerged_mining_speed": "submerged_mining_speed",
+      "player.sweeping_damage_ratio": "sweeping_damage_ratio",
+      "zombie.spawn_reinforcements": "spawn_reinforcements"
+    }
+  },
+  "entity_type": {
+    "renames": {
+      "boat": "oak_boat",
+      "chest_boat": "oak_chest_boat"
+    }
+  },
+  "trigger_type": {
+    "renames": {
+      "killed_by_crossbow": "killed_by_arrow"
+    }
+  }
+}

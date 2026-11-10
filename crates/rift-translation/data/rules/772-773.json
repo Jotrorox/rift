@@ -1,0 +1,17 @@
+{
+  "block": {
+    "renames": {
+      "chain": "iron_chain"
+    }
+  },
+  "block_state": {
+    "renames": {
+      "chain": "iron_chain"
+    }
+  },
+  "item": {
+    "renames": {
+      "chain": "iron_chain"
+    }
+  }
+}

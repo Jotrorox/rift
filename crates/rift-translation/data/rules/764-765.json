@@ -1,0 +1,17 @@
+{
+  "block": {
+    "renames": {
+      "grass": "short_grass"
+    }
+  },
+  "block_state": {
+    "renames": {
+      "grass": "short_grass"
+    }
+  },
+  "item": {
+    "renames": {
+      "grass": "short_grass"
+    }
+  }
+}
