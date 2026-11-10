@@ -45,8 +45,9 @@ const USAGE: &str = "Usage: rift [<listen-ip:port> <backend-ip:port>]\n\
     rift node --controller <host:port> --name <node> --root <dir> --ca <pem> (run servers for a controller; see rift node --help)\n\
     rift --version (print package version)\n\
     rift --license (print project license and third-party notices)\n\
-    Routing: rift <listen-ip:port> [--route <hostname=backend:port>]... [--default <backend:port>]\n\
+    Routing: rift <listen-ip:port> [--route <hostname=backend:port>]... [--default <backend:port>] [--translation <on|off>]\n\
     Routes: exact hostname, '*.example.com', or '*' (default).\n\
+    Translation between Minecraft versions is on unless --translation off; see docs/translation.md.\n\
     Priority: exact, longest wildcard suffix, default. Unmatched clients get a message.\n\
     No arguments: load ./rift.lua if present, otherwise use defaults.\n\
     Defaults: 0.0.0.0:25565 127.0.0.1:25566\n\
@@ -247,6 +248,14 @@ async fn start(args: Vec<String>) -> io::Result<()> {
                         )
                     })?,
                     "--default" => ("*", option[1].as_str()),
+                    "--translation" => {
+                        config.translation.enabled = match option[1].as_str() {
+                            "on" => true,
+                            "off" => false,
+                            _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, USAGE)),
+                        };
+                        continue;
+                    }
                     _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, USAGE)),
                 };
                 let backend = Backend::parse(target)?;

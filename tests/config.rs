@@ -391,7 +391,7 @@ fn config(backends: &[SocketAddr], limits: &str) -> String {
         .collect::<Vec<_>>()
         .join(",");
     format!(
-        "return {{ listeners = {{ {listeners} }}, backends = {{ {backends} }}, routes = {{ {routes} }}, limits = {{ {limits} }} }}"
+        "return {{ listeners = {{ {listeners} }}, backends = {{ {backends} }}, routes = {{ {routes} }}, limits = {{ {limits} }}, translation = {{ detect = false }} }}"
     )
 }
 

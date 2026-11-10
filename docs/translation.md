@@ -31,6 +31,9 @@ config.network = { initial = { "lobby" }, hubs = { "lobby" } }
 | `translation.detect` | `true` | Ask backends without a declared `version` which version they run. With `false`, only backends that declare a `version` are translated. |
 | `backends.<name>.version` | none | The release the backend runs, by name from the [release matrix](network-protocol.md#release-matrix). Takes precedence over detection. |
 
+Without a configuration file, `rift <listen> --default <backend> --translation off`
+turns translation off; it is on otherwise, with detection.
+
 **Detection.** For a backend without `version`, Rift sends a status request
 with the player's own protocol in the handshake, as the player's client would,
 and reads the protocol the answer names. A backend that already accepts the
@@ -38,7 +41,9 @@ player's version, natively or through its own ViaVersion, answers with that
 version and is left alone. Answers are kept for 30 seconds per backend and
 client version, failures for 5; a backend that does not answer, or names a
 version outside 1.12–26.3, is spoken to in the player's own protocol. Managed
-servers and service-group instances are detected the same way.
+servers and service-group instances are detected the same way. Rift waits up
+to 2 seconds for the answer while a player logs in, so declare the `version`
+of a backend that accepts connections but never answers status requests.
 
 **Selection.** Initial-server selection, fallbacks, hub recovery and `/server`
 skip backends whose declared version cannot serve a player; with no candidate
