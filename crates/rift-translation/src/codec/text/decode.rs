@@ -267,7 +267,24 @@ fn typed_content(
             None => None,
             Some(key) => {
                 let mut args = Vec::new();
-                if let Some(with) = node.get("with") {
+                // NBT writes a list of numbers of one type as an array tag.
+                let numbers: Option<Vec<Nbt>> = match node.get("with") {
+                    Some(Node::Nbt(Nbt::ByteArray(values))) => {
+                        Some(values.iter().map(|v| Nbt::Byte(*v as i8)).collect())
+                    }
+                    Some(Node::Nbt(Nbt::IntArray(values))) => {
+                        Some(values.iter().copied().map(Nbt::Int).collect())
+                    }
+                    Some(Node::Nbt(Nbt::LongArray(values))) => {
+                        Some(values.iter().copied().map(Nbt::Long).collect())
+                    }
+                    _ => None,
+                };
+                if let Some(numbers) = numbers {
+                    for number in &numbers {
+                        args.push(argument(protocol, Node::Nbt(number), depth)?);
+                    }
+                } else if let Some(with) = node.get("with") {
                     for arg in with
                         .list()
                         .ok_or_else(|| invalid("translation arguments are not a list"))?
