@@ -1,8 +1,84 @@
 {
+  "block_state": {
+    "down": {
+      "dried_ghast": "heavy_core"
+    }
+  },
+  "block": {
+    "down": {
+      "dried_ghast": "heavy_core"
+    }
+  },
+  "item": {
+    "down": {
+      "dried_ghast": "heavy_core",
+      "white_harness": "saddle",
+      "orange_harness": "saddle",
+      "magenta_harness": "saddle",
+      "light_blue_harness": "saddle",
+      "yellow_harness": "saddle",
+      "lime_harness": "saddle",
+      "pink_harness": "saddle",
+      "gray_harness": "saddle",
+      "light_gray_harness": "saddle",
+      "cyan_harness": "saddle",
+      "purple_harness": "saddle",
+      "blue_harness": "saddle",
+      "brown_harness": "saddle",
+      "green_harness": "saddle",
+      "red_harness": "saddle",
+      "black_harness": "saddle",
+      "happy_ghast_spawn_egg": "ghast_spawn_egg",
+      "music_disc_tears": "music_disc_pigstep"
+    }
+  },
+  "entity_type": {
+    "down": {
+      "happy_ghast": "ghast"
+    }
+  },
+  "command_argument_type": {
+    "down": {
+      "hex_color": "color",
+      "dialog": "resource_location"
+    }
+  },
   "sound_event": {
     "renames": {
       "entity.leash_knot.break": "item.lead.break",
-      "entity.leash_knot.place": "item.lead.tied"
+      "entity.leash_knot.place": "item.lead.tied",
+      "block.sand.wind": "block.dry_grass.ambient"
+    },
+    "up": {
+      "entity.puffer_fish.ambient": "intentionally_empty"
+    },
+    "down": {
+      "block.dried_ghast.break": "block.bone_block.break",
+      "block.dried_ghast.step": "block.bone_block.step",
+      "block.dried_ghast.fall": "block.bone_block.fall",
+      "block.dried_ghast.ambient": "intentionally_empty",
+      "block.dried_ghast.ambient_water": "intentionally_empty",
+      "block.dried_ghast.place": "block.bone_block.place",
+      "block.dried_ghast.place_in_water": "block.bone_block.place",
+      "block.dried_ghast.transition": "intentionally_empty",
+      "entity.ghastling.ambient": "entity.ghast.ambient",
+      "entity.ghastling.death": "entity.ghast.death",
+      "entity.ghastling.hurt": "entity.ghast.hurt",
+      "entity.ghastling.spawn": "intentionally_empty",
+      "entity.happy_ghast.ambient": "entity.ghast.ambient",
+      "entity.happy_ghast.death": "entity.ghast.death",
+      "entity.happy_ghast.hurt": "entity.ghast.hurt",
+      "entity.happy_ghast.riding": "intentionally_empty",
+      "entity.happy_ghast.equip": "item.armor.equip_generic",
+      "entity.happy_ghast.unequip": "item.armor.unequip_wolf",
+      "entity.happy_ghast.harness_goggles_up": "item.armor.equip_leather",
+      "entity.happy_ghast.harness_goggles_down": "item.armor.equip_leather",
+      "item.horse_armor.unequip": "item.armor.unequip_wolf",
+      "item.lead.untied": "entity.leash_knot.break",
+      "item.llama_carpet.unequip": "item.armor.unequip_wolf",
+      "music_disc.tears": "music_disc.pigstep",
+      "item.shears.snip": "entity.sheep.shear",
+      "item.saddle.unequip": "item.armor.unequip_wolf"
     }
   }
 }
