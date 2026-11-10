@@ -25,7 +25,10 @@ pub async fn open_streams(config: &rift::config::Config) -> io::Result<HashMap<S
 }
 
 /// Bind only after certificates and all environment credentials have validated.
-pub async fn listen(snapshot: &Snapshot) -> io::Result<Option<quic::Server>> {
+pub async fn listen(
+    snapshot: &Snapshot,
+    logins: Option<Arc<rift::instance_login::Logins>>,
+) -> io::Result<Option<quic::Server>> {
     let Some(settings) = snapshot.config.messaging.clone() else {
         return Ok(None);
     };
@@ -87,6 +90,7 @@ pub async fn listen(snapshot: &Snapshot) -> io::Result<Option<quic::Server>> {
             tls,
             quic::AuthConfig {
                 identities,
+                dynamic: logins.map(|logins| quic::Dynamic(logins)),
                 max_connections: settings.max_connections,
                 max_connections_per_address: settings.max_connections_per_address,
                 max_connections_per_identity: settings.max_connections_per_principal,

@@ -28,6 +28,74 @@ pub struct ManagedServer {
     pub node: Option<String>,
     /// What the process inherits from Rift's environment and what it adds.
     pub environment: ProcessEnvironment,
+    /// The bus login Rift issues this server (see [`crate::instance_login`]);
+    /// `None` issues none.
+    pub messaging: Option<InstanceMessaging>,
+}
+
+/// `messaging = { preset = "backend", publish = {...}, subscribe = {...} }`
+/// on a managed server or service group: the grants of the login Rift
+/// issues each instance, named `server.<instance>`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InstanceMessaging {
+    pub publish: Vec<String>,
+    pub subscribe: Vec<String>,
+}
+
+impl InstanceMessaging {
+    fn parse(values: &Table, path: &str) -> Result<Option<Self>, String> {
+        let value = values
+            .raw_get::<Value>("messaging")
+            .map_err(|e| e.to_string())?;
+        if value.is_nil() {
+            return Ok(None);
+        }
+        let path = format!("{path}.messaging");
+        let table = table(value, &path)?;
+        fields(&table, &["preset", "publish", "subscribe"], &path)?;
+        let list = |key: &str| -> Result<Vec<String>, String> {
+            match table.raw_get::<Value>(key).map_err(|e| e.to_string())? {
+                Value::Nil => Ok(Vec::new()),
+                value => string_list(value, &format!("{path}.{key}"), 1024),
+            }
+        };
+        let mut grants = Self {
+            publish: list("publish")?,
+            subscribe: list("subscribe")?,
+        };
+        match table
+            .raw_get::<Value>("preset")
+            .map_err(|e| e.to_string())?
+        {
+            Value::Nil => {}
+            value => {
+                let preset = string(value, &format!("{path}.preset"))?;
+                if preset != super::messaging::BACKEND_PRESET {
+                    return Err(format!(
+                        "{path}.preset: unknown preset {preset:?}; expected \"backend\""
+                    ));
+                }
+                let (publish, subscribe) = crate::permissions::backend_grants();
+                for (list, preset) in [
+                    (&mut grants.publish, publish),
+                    (&mut grants.subscribe, subscribe),
+                ] {
+                    for pattern in preset {
+                        if !list.contains(&pattern) {
+                            list.push(pattern);
+                        }
+                    }
+                }
+            }
+        }
+        // Replies to the requests the instance makes.
+        for list in [&mut grants.publish, &mut grants.subscribe] {
+            if !list.iter().any(|pattern| pattern == "_INBOX.>") {
+                list.push("_INBOX.>".into());
+            }
+        }
+        Ok(Some(grants))
+    }
 }
 
 /// `env` and `inherit_env` of a managed server or service group.
@@ -148,6 +216,7 @@ pub(super) fn parse(root: &Table, base: &Path) -> Result<BTreeMap<String, Manage
                 "node",
                 "env",
                 "inherit_env",
+                "messaging",
             ],
             &path,
         )?;
@@ -221,6 +290,7 @@ pub(super) fn parse(root: &Table, base: &Path) -> Result<BTreeMap<String, Manage
                 restart_retries: bounded_count(&values, &path, "restart_retries", 3, 100)?,
                 node,
                 environment: ProcessEnvironment::parse(&values, &path)?,
+                messaging: InstanceMessaging::parse(&values, &path)?,
             },
         );
     }

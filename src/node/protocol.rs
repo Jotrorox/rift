@@ -95,6 +95,12 @@ pub struct Start {
     /// nothing, so upgrade agents together with the controller.
     #[serde(default, skip_serializing_if = "Environment::is_default")]
     pub environment: Environment,
+    /// The bus certificate (PEM, public) for a server with a bus login: the
+    /// agent writes it into the server directory and points `RIFT_BUS_CERT`
+    /// at it. The login's token is in `environment`, which makes this the one
+    /// command that carries a secret; it is scoped to this instance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bus_certificate: Option<String>,
 }
 
 /// [`crate::config::ProcessEnvironment`] on the wire. The agent removes its
@@ -220,8 +226,9 @@ pub struct Prepare {
     pub map: Option<String>,
     pub accept_eula: bool,
     /// `Some(online_mode)`: configure Velocity forwarding for Paper-family
-    /// software. The secret never crosses the bus; agents read their own copy
-    /// from `--forwarding-secret-env`.
+    /// software. The forwarding secret never crosses the bus; agents read
+    /// their own copy from `--forwarding-secret-env`. (The one secret that
+    /// does cross is an instance's bus token, in [`Start`].)
     pub forwarding: Option<bool>,
     /// `(name, value, replace)`: replaced settings always win, others are defaults.
     pub properties: Vec<(String, String, bool)>,

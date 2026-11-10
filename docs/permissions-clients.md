@@ -60,6 +60,16 @@ dashboard URL (see [`rift dev`](permissions.md#rift-dev)).
 | `request_timeout_ms` | 5000 | How long writes, commands and group requests wait |
 | `offline_policy` | `{"mode": "deny"}` | See [offline policies](#offline-policies) |
 
+On a server Rift manages with a `messaging` block, the connection fields may
+be left out. `Client::start` fills what is unset from the variables Rift sets
+([bus logins for instances](managed-servers.md#bus-logins-for-instances)):
+`address` from `RIFT_BUS_ADDRESS`, `server_name` from `RIFT_BUS_SERVER_NAME`
+(else the host of `address`), `ca` from `RIFT_BUS_CERT`, `server` from
+`RIFT_SERVER_NAME`, `group` from `RIFT_SERVER_GROUP`, and `token_env` defaults
+to `RIFT_BUS_TOKEN`. `Config::from_environment()` builds a configuration from
+the variables alone, and `Config::with_environment()` applies the fallback
+explicitly.
+
 ### Lifecycle
 
 `Client::start(config)` must run inside a tokio runtime. It fails only on
