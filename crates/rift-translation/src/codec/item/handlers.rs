@@ -79,6 +79,37 @@ fn text_changes(source: i32, target: i32) -> bool {
     matches!(pair, (340, 393) | (578, 735) | (764, 765) | (769, 770))
 }
 
+/// Defaults for packets the handler emits under the same name: none for a
+/// pair whose receiver lacks the packet, which its step converts.
+trait Paired<S> {
+    fn default_handler_paired(
+        self,
+        direction: Direction,
+        state: State,
+        name: &'static str,
+        handler: crate::step::Handler<S>,
+    ) -> Self;
+}
+
+impl<S> Paired<S> for RouteBuilder<S> {
+    fn default_handler_paired(
+        self,
+        direction: Direction,
+        state: State,
+        name: &'static str,
+        handler: crate::step::Handler<S>,
+    ) -> Self {
+        if self
+            .target(direction)
+            .packet_id(state, direction, name)
+            .is_none()
+        {
+            return self;
+        }
+        self.default_handler(direction, state, name, handler)
+    }
+}
+
 pub(super) fn install<S: HasShared + 'static>(builder: RouteBuilder<S>) -> RouteBuilder<S> {
     use crate::State::{Configuration, Play};
     use Direction::{Clientbound, Serverbound};
@@ -89,7 +120,7 @@ pub(super) fn install<S: HasShared + 'static>(builder: RouteBuilder<S>) -> Route
     let up = stacks_change(client, backend);
     if down || crosses(backend, client, &[756, 768]) {
         builder = builder
-            .default_handler(Clientbound, Play, "container_set_content", set_content::<S>)
+            .default_handler_paired(Clientbound, Play, "container_set_content", set_content::<S>)
             .default_handler(Clientbound, Play, "container_set_slot", set_slot::<S>);
     }
     if down {
@@ -108,18 +139,26 @@ pub(super) fn install<S: HasShared + 'static>(builder: RouteBuilder<S>) -> Route
             .default_handler(Clientbound, Play, "set_equipped_item", set_equipment::<S>);
     }
     if registry_changes(backend, client, "item") || crosses(backend, client, &[768]) {
-        builder = builder.default_handler(Clientbound, Play, "cooldown", cooldown::<S>);
+        builder = builder.default_handler_paired(Clientbound, Play, "cooldown", cooldown::<S>);
     }
     if down || crosses(backend, client, &[490, 498, 759, 766]) {
-        builder =
-            builder.default_handler(Clientbound, Play, "merchant_offers", merchant_offers::<S>);
+        builder = builder.default_handler_paired(
+            Clientbound,
+            Play,
+            "merchant_offers",
+            merchant_offers::<S>,
+        );
     }
     if down
         || text_changes(backend, client)
         || crosses(backend, client, &[763, 764, 765, 770, 775, 777])
     {
-        builder =
-            builder.default_handler(Clientbound, Play, "update_advancements", advancements::<S>);
+        builder = builder.default_handler_paired(
+            Clientbound,
+            Play,
+            "update_advancements",
+            advancements::<S>,
+        );
     }
     let recipes_change =
         down || crosses(
@@ -135,12 +174,16 @@ pub(super) fn install<S: HasShared + 'static>(builder: RouteBuilder<S>) -> Route
     let numbered = crosses(backend, client, &[393]);
     if recipes_change && !numbered {
         for state in [Configuration, Play] {
-            builder =
-                builder.default_handler(Clientbound, state, "update_recipes", update_recipes::<S>);
+            builder = builder.default_handler_paired(
+                Clientbound,
+                state,
+                "update_recipes",
+                update_recipes::<S>,
+            );
         }
         builder = builder
             .default_handler(Clientbound, Play, "recipe_book_add", recipe_book_add::<S>)
-            .default_handler(
+            .default_handler_paired(
                 Clientbound,
                 Play,
                 "place_ghost_recipe",
@@ -166,11 +209,15 @@ pub(super) fn install<S: HasShared + 'static>(builder: RouteBuilder<S>) -> Route
             );
     }
     if up || crosses(client, backend, &[755, 756, 768, 770]) {
-        builder =
-            builder.default_handler(Serverbound, Play, "container_click", container_click::<S>);
+        builder = builder.default_handler_paired(
+            Serverbound,
+            Play,
+            "container_click",
+            container_click::<S>,
+        );
     }
     if up || crosses(client, backend, &[770]) {
-        builder = builder.default_handler(
+        builder = builder.default_handler_paired(
             Serverbound,
             Play,
             "set_creative_mode_slot",
@@ -178,7 +225,7 @@ pub(super) fn install<S: HasShared + 'static>(builder: RouteBuilder<S>) -> Route
         );
     }
     if up || crosses(client, backend, &[401, 756]) {
-        builder = builder.default_handler(Serverbound, Play, "edit_book", edit_book::<S>);
+        builder = builder.default_handler_paired(Serverbound, Play, "edit_book", edit_book::<S>);
     }
     if crosses(client, backend, &[756]) {
         // Books are edited by hotbar slot from 1.17.1 on; follow the

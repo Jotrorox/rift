@@ -155,6 +155,38 @@ fn corpus_packets_round_trip_in_every_protocol() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// With `RIFT_ITEM_DUMP` set to a file, converted packets are appended to
+/// it as JSON lines for checking against minecraft-data's schemas.
+fn dump(protocol: i32, out: &crate::codec::testing::Out) {
+    use std::io::Write;
+    let Some(path) = std::env::var_os("RIFT_ITEM_DUMP") else {
+        return;
+    };
+    let Some(id) = crate::data::version(protocol).packet_id(out.state, out.direction, &out.name)
+    else {
+        return;
+    };
+    let hex: String = out.data.iter().map(|byte| format!("{byte:02x}")).collect();
+    let line = serde_json::json!({
+        "protocol": protocol,
+        "d": if out.direction == Direction::Clientbound { "c" } else { "s" },
+        "s": match out.state {
+            State::Configuration => "configuration",
+            State::Login => "login",
+            _ => "play",
+        },
+        "id": id,
+        "name": out.name,
+        "hex": hex,
+    });
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .expect("dump file");
+    writeln!(file, "{line}").expect("dump line");
+}
+
 /// Every adjacent pair, both ways: real packets go through the defaults
 /// step and what comes out must parse in the receiver's layout.
 #[test]
@@ -199,6 +231,7 @@ fn corpus_packets_convert_between_neighbours() {
                     }
                 };
                 for out in outs {
+                    dump(neighbour, &out);
                     match round_trip(neighbour, out.direction, &out.name, &out.data) {
                         None | Some(Ok(_)) => counts.checked += 1,
                         Some(Err(error)) if pending(&error) => counts.pending += 1,
