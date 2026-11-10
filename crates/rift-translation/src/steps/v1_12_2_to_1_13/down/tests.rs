@@ -259,12 +259,13 @@ fn commands_complete_through_the_backend() {
         Direction::Serverbound,
         "command_suggestion",
     );
+    // A 1.13 server would read the slash as part of the command name.
     let mut expected = Writer::new();
-    expected.varint(0).string("/gam");
+    expected.varint(0).string("gam");
     assert_eq!(forwarded, expected.buf);
 
-    // A stale answer is dropped; the real one loses its tooltips and keeps
-    // the slash of the word it replaces.
+    // A stale answer is dropped; the real one, whose range starts within
+    // "gam", loses its tooltips and keeps the slash of the word it replaces.
     let mut stale = Writer::new();
     stale.varint(9).varint(1).varint(3).varint(0);
     assert!(
@@ -275,7 +276,7 @@ fn commands_complete_through_the_backend() {
     let mut answer = Writer::new();
     answer
         .varint(0)
-        .varint(1)
+        .varint(0)
         .varint(3)
         .varint(2)
         .string("gamemode")

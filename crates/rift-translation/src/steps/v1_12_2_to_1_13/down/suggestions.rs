@@ -22,6 +22,8 @@ pub(super) struct Pending {
     id: i32,
     /// The input in UTF-16 units, the unit 1.13's ranges count in.
     text: Vec<u16>,
+    /// The leading slash taken off the input before forwarding it (0 or 1).
+    shift: i32,
 }
 
 impl Down {
@@ -59,14 +61,20 @@ impl Down {
         }
         let id = self.next_suggestion;
         self.next_suggestion = self.next_suggestion.wrapping_add(1);
+        // A 1.13 server (unlike 1.13.1) parses a leading slash as part of
+        // the command and suggests nothing; a command block's input
+        // (`assume_command`) usually has none.
+        let (command, shift) = match text.strip_prefix('/') {
+            Some(command) => (command, 1),
+            None => (text, 0),
+        };
         self.suggestion = Some(Pending {
             id,
             text: text.encode_utf16().collect(),
+            shift,
         });
-        // A 1.13 server skips a leading slash itself, and a command block's
-        // input (`assume_command`) has none.
         let mut out = Writer::new();
-        out.varint(id).string(text);
+        out.varint(id).string(command);
         cx.to_backend(state, Packet::new(packet.id, out.into_inner()));
         Ok(())
     }
@@ -92,7 +100,12 @@ impl Down {
             // An answer to a request the client has moved on from.
             return Ok(());
         };
-        let words = replacements(&pending.text, start, length, &matches);
+        let words = replacements(
+            &pending.text,
+            start.saturating_add(pending.shift),
+            length,
+            &matches,
+        );
         let words: Vec<&str> = words.iter().map(String::as_str).collect();
         cx.to_client(state, answer(&words));
         Ok(())

@@ -6,7 +6,6 @@
 //! whole contents also carry the cursor stack. Book edits send their pages
 //! as text instead of a whole book item, and entity removal is a list again
 //! after 1.17's one-entity packet.
-mod book;
 mod down;
 #[cfg(test)]
 mod tests;

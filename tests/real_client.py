@@ -381,6 +381,10 @@ NARRATOR_PLACEHOLDER = "package com.mojang.text2speech;\npublic interface Narrat
 # found by its use of the Objective-C bridge) gets empty void methods: its
 # Dock icon call (1.19.4-1.20.x) registers the JVM as a GUI app with a Dock
 # tile, and the menu/fullscreen calls have no business in a headless run.
+# For 1.13 to 1.14.3 (-Drift.headless.monitor=true) the monitor list's
+# lookup by handle (in the class that registers the GLFW monitor callback)
+# creates the monitor it lacks: the stubbed glfwGetMonitors lists none, and
+# their window uses the primary monitor without the null check of 1.14.4.
 # It uses the ASM copy shaded into HeadlessMC's jar.
 HELPER_AGENT = """package rift.headless;
 
@@ -390,11 +394,16 @@ import io.github.headlesshq.headlessmc.lwjgl.shadow.asm.ClassWriter;
 import io.github.headlesshq.headlessmc.lwjgl.shadow.asm.Opcodes;
 import io.github.headlesshq.headlessmc.lwjgl.shadow.asm.tree.ClassNode;
 import io.github.headlesshq.headlessmc.lwjgl.shadow.asm.tree.FieldInsnNode;
+import io.github.headlesshq.headlessmc.lwjgl.shadow.asm.tree.AbstractInsnNode;
 import io.github.headlesshq.headlessmc.lwjgl.shadow.asm.tree.FieldNode;
+import io.github.headlesshq.headlessmc.lwjgl.shadow.asm.tree.FrameNode;
 import io.github.headlesshq.headlessmc.lwjgl.shadow.asm.tree.InsnList;
 import io.github.headlesshq.headlessmc.lwjgl.shadow.asm.tree.InsnNode;
+import io.github.headlesshq.headlessmc.lwjgl.shadow.asm.tree.JumpInsnNode;
+import io.github.headlesshq.headlessmc.lwjgl.shadow.asm.tree.LabelNode;
 import io.github.headlesshq.headlessmc.lwjgl.shadow.asm.tree.MethodInsnNode;
 import io.github.headlesshq.headlessmc.lwjgl.shadow.asm.tree.MethodNode;
+import io.github.headlesshq.headlessmc.lwjgl.shadow.asm.tree.TypeInsnNode;
 import io.github.headlesshq.headlessmc.lwjgl.shadow.asm.tree.VarInsnNode;
 import java.io.IOException;
 import java.io.InputStream;
@@ -408,6 +417,7 @@ import java.util.List;
 public final class HeadlessAgent implements ClassFileTransformer {
     private static final byte[] MARKER = "Could not read info from the PNG file".getBytes(StandardCharsets.UTF_8);
     private static final byte[] OBJC = "ca/weblite/objc/".getBytes(StandardCharsets.UTF_8);
+    private static final byte[] MONITORS = "glfwSetMonitorCallback".getBytes(StandardCharsets.UTF_8);
     private static final String CONSTRUCTOR = "(Ljava/lang/String;Ljava/io/InputStream;)V";
 
     public static void premain(String arguments, Instrumentation instrumentation) {
@@ -447,6 +457,9 @@ public final class HeadlessAgent implements ClassFileTransformer {
         }
         if (contains(bytes, OBJC)) {
             return silenceMacos(name, bytes);
+        }
+        if (Boolean.getBoolean("rift.headless.monitor") && contains(bytes, MONITORS)) {
+            return createMissingMonitors(name, bytes);
         }
         if (!contains(bytes, MARKER)) {
             return null;
@@ -535,6 +548,67 @@ public final class HeadlessAgent implements ClassFileTransformer {
         }
     }
 
+    /** Lookups by handle, `Monitor get(long)` reading a map, create the monitor first if absent. */
+    private static byte[] createMissingMonitors(String name, byte[] bytes) {
+        try {
+            ClassNode node = new ClassNode();
+            new ClassReader(bytes).accept(node, 0);
+            List<String> patched = new ArrayList<>();
+            for (MethodNode method : node.methods) {
+                if ((method.access & Opcodes.ACC_STATIC) != 0 || !method.desc.startsWith("(J)L")
+                        || method.desc.startsWith("(J)Ljava/")) {
+                    continue;
+                }
+                String monitor = method.desc.substring(4, method.desc.length() - 1);
+                FieldInsnNode map = null;
+                for (AbstractInsnNode instruction : method.instructions) {
+                    if (instruction.getOpcode() == Opcodes.GETFIELD) {
+                        map = (FieldInsnNode) instruction;
+                        break;
+                    }
+                }
+                if (map == null || !"Ljava/util/Map;".equals(map.desc)) {
+                    continue;
+                }
+                LabelNode present = new LabelNode();
+                InsnList code = new InsnList();
+                code.add(new VarInsnNode(Opcodes.ALOAD, 0));
+                code.add(new FieldInsnNode(Opcodes.GETFIELD, node.name, map.name, map.desc));
+                code.add(new VarInsnNode(Opcodes.LLOAD, 1));
+                code.add(new MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", false));
+                code.add(new MethodInsnNode(Opcodes.INVOKEINTERFACE, "java/util/Map", "containsKey", "(Ljava/lang/Object;)Z", true));
+                code.add(new JumpInsnNode(Opcodes.IFNE, present));
+                code.add(new VarInsnNode(Opcodes.ALOAD, 0));
+                code.add(new FieldInsnNode(Opcodes.GETFIELD, node.name, map.name, map.desc));
+                code.add(new VarInsnNode(Opcodes.LLOAD, 1));
+                code.add(new MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", false));
+                code.add(new TypeInsnNode(Opcodes.NEW, monitor));
+                code.add(new InsnNode(Opcodes.DUP));
+                code.add(new VarInsnNode(Opcodes.ALOAD, 0));
+                code.add(new VarInsnNode(Opcodes.LLOAD, 1));
+                code.add(new MethodInsnNode(Opcodes.INVOKESPECIAL, monitor, "<init>", "(L" + node.name + ";J)V", false));
+                code.add(new MethodInsnNode(Opcodes.INVOKEINTERFACE, "java/util/Map", "put",
+                                            "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;", true));
+                code.add(new InsnNode(Opcodes.POP));
+                code.add(present);
+                // The locals and stack equal the method's entry state.
+                code.add(new FrameNode(Opcodes.F_SAME, 0, null, 0, null));
+                method.instructions.insert(code);
+                patched.add(method.name + method.desc);
+            }
+            if (patched.isEmpty()) {
+                return null;
+            }
+            ClassWriter writer = new ClassWriter(ClassWriter.COMPUTE_MAXS);
+            node.accept(writer);
+            System.out.println("[rift-headless] missing monitors are created by " + name + ": " + patched);
+            return writer.toByteArray();
+        } catch (Throwable error) {
+            System.out.println("[rift-headless] could not patch " + name + ": " + error);
+            return null;
+        }
+    }
+
     private static boolean contains(byte[] haystack, byte[] needle) {
         outer:
         for (int start = 0; start <= haystack.length - needle.length; start++) {
@@ -549,7 +623,7 @@ public final class HeadlessAgent implements ClassFileTransformer {
     }
 }
 """
-HELPERS_VERSION = 4
+HELPERS_VERSION = 5
 
 
 def helpers():
@@ -750,8 +824,16 @@ def command(prepared, game_dir, name, host, port, heap="1G"):
         "-Dio.netty.transport.noNative=true", "-Dfml.earlyprogresswindow=false",
         f"-Djava.io.tmpdir={game_dir / 'tmp'}",
     ] + [f"-Dminecraft.api.{service}.host={DEAD_HOST}" for service in ("auth", "account", "session", "services")]
+    # Plain URL connections ignore --proxyHost: patchy's blocked server list
+    # (fetched on the first connect, 1.13-1.16) once hung for 20 minutes on a
+    # stalled read from Mojang. A dead default proxy fails it at once, which
+    # patchy tolerates; loopback hosts bypass it.
+    options += [f"-D{scheme}.{key}={value}" for scheme in ("http", "https")
+                for key, value in (("proxyHost", "127.0.0.1"), ("proxyPort", "9"))]
     if prepared.java_major >= 9:
         options.append("-XX:+IgnoreUnrecognizedVMOptions")
+    if (1, 13) <= version_key(prepared.version) < (1, 14, 4):
+        options.append("-Drift.headless.monitor=true")
     (game_dir / "tmp").mkdir(exist_ok=True)
     (game_dir / "log4j2.xml").write_text(LOG4J_CONFIG.format(
         pattern=LOG_PATTERN, file=game_dir / "logs" / "latest.log", debug=xml_attribute(DEBUG_PASS)))

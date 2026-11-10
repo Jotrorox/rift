@@ -1,10 +1,10 @@
-use super::dimension::{self, DIMENSION_TYPE, Types, vanilla_codec};
-use super::{NEWER, OLDER, down, pack_section, unpack_section, up};
+use super::{NEWER, OLDER, down, up};
 use crate::{
-    Direction, data,
+    Direction,
+    codec::registries::{defaults, login},
+    data,
     nbt::{Compound, Nbt},
     steps::v1_14_4_to_1_15::support::harness::{Harness, body, hex, replay, truncations_fail},
-    steps::v1_15_2_to_1_16::VANILLA_CODEC_1_16,
     wire::Writer,
 };
 
@@ -19,14 +19,26 @@ fn downgrading() -> Harness {
 const OVERWORLD: &str = "minecraft:overworld";
 const WORLDS: &str = "03 136d696e6563726166743a6f766572776f726c64 146d696e6563726166743a7468655f6e6574686572 116d696e6563726166743a7468655f656e64";
 
-fn vanilla_1_16() -> Nbt {
-    Nbt::from_bytes(VANILLA_CODEC_1_16, true).unwrap().unwrap()
+/// What the official servers send as their codec, as named root compounds.
+fn vanilla_codec_bytes(protocol: i32) -> Vec<u8> {
+    login::default_codec(protocol).unwrap().to_bytes(true)
 }
 
+fn vanilla_codec() -> Compound {
+    match login::default_codec(NEWER).unwrap() {
+        Nbt::Compound(codec) => codec,
+        _ => unreachable!(),
+    }
+}
+
+/// A section position packed as 1.16.2 does: x and z 22 bits, y 20 bits.
+fn pack_section(x: i32, y: i32, z: i32) -> i64 {
+    (i64::from(x) & 0x3f_ffff) << 42 | (i64::from(z) & 0x3f_ffff) << 20 | (i64::from(y) & 0xf_ffff)
+}
+
+/// The vanilla 1.16.2 dimension type `name`.
 fn element(name: &str) -> Compound {
-    Types::from_registry(vanilla_codec())
-        .unwrap()
-        .element(name)
+    defaults::element(NEWER, "dimension_type", name)
         .unwrap()
         .clone()
 }
@@ -37,7 +49,7 @@ fn login_1_16_1(game_mode: u8, dimension: &str) -> Vec<u8> {
         w.i32(1).u8(game_mode).u8(0xff);
     });
     packet.extend(hex(WORLDS));
-    packet.extend_from_slice(VANILLA_CODEC_1_16);
+    packet.extend(vanilla_codec_bytes(OLDER));
     packet.extend(body(|w| {
         w.string(dimension)
             .string(OVERWORLD)
@@ -90,26 +102,6 @@ fn every_packet_has_a_route() {
 }
 
 #[test]
-fn vanilla_codecs_convert_into_each_other() {
-    // The 1.16.1 server's codec becomes exactly what the 1.16.2 server sends.
-    let (upgraded, types) = dimension::upgrade(&vanilla_1_16()).unwrap();
-    assert_eq!(
-        Nbt::Compound(upgraded).to_bytes(true),
-        Nbt::Compound(vanilla_codec().clone()).to_bytes(true)
-    );
-    assert_eq!(
-        types
-            .element("minecraft:the_nether")
-            .unwrap()
-            .str("effects"),
-        Some("minecraft:the_nether")
-    );
-    // And back.
-    let types = Types::from_registry(vanilla_codec()).unwrap();
-    assert_eq!(dimension::list(&types).to_bytes(true), VANILLA_CODEC_1_16);
-}
-
-#[test]
 fn login_converts_like_the_servers_send_it() {
     let sent = upgrading().one(
         Direction::Clientbound,
@@ -117,18 +109,18 @@ fn login_converts_like_the_servers_send_it() {
         &login_1_16_1(0x09, OVERWORLD),
         "login",
     );
-    assert_eq!(sent, login_1_16_2(true, 1, OVERWORLD, vanilla_codec()));
+    assert_eq!(sent, login_1_16_2(true, 1, OVERWORLD, &vanilla_codec()));
     let sent = downgrading().one(
         Direction::Clientbound,
         "login",
-        &login_1_16_2(true, 1, OVERWORLD, vanilla_codec()),
+        &login_1_16_2(true, 1, OVERWORLD, &vanilla_codec()),
         "login",
     );
     assert_eq!(sent, login_1_16_1(0x09, OVERWORLD));
     let sent = downgrading().one(
         Direction::Clientbound,
         "login",
-        &login_1_16_2(false, 2, "minecraft:the_end", vanilla_codec()),
+        &login_1_16_2(false, 2, "minecraft:the_end", &vanilla_codec()),
         "login",
     );
     assert_eq!(sent, login_1_16_1(2, "minecraft:the_end"));
@@ -180,8 +172,11 @@ fn respawn_names_and_describes_dimension_types() {
     );
 
     let mut step = downgrading();
-    step.clientbound("login", &login_1_16_2(false, 0, OVERWORLD, vanilla_codec()))
-        .unwrap();
+    step.clientbound(
+        "login",
+        &login_1_16_2(false, 0, OVERWORLD, &vanilla_codec()),
+    )
+    .unwrap();
     assert_eq!(
         step.one(Direction::Clientbound, "respawn", &new, "respawn"),
         old
@@ -204,7 +199,7 @@ fn a_login_dimension_without_a_type_gets_one() {
     let mut packet = body(|w| {
         w.i32(1).bool(false).u8(0).u8(0xff).varint(0);
     });
-    packet.extend(Nbt::Compound(vanilla_codec().clone()).to_bytes(true));
+    packet.extend(vanilla_codec_bytes(NEWER));
     packet.extend(Nbt::Compound(custom.clone()).to_bytes(true));
     packet.extend(body(|w| {
         w.string("rift:world")
@@ -228,15 +223,6 @@ fn a_login_dimension_without_a_type_gets_one() {
     reader.str().unwrap();
     reader.i64().unwrap();
     assert_eq!(reader.u8().unwrap(), 255); // Max players, clamped.
-}
-
-#[test]
-fn section_positions_pack() {
-    for (x, y, z) in [(0, 0, 0), (-2, 15, -11), (2_097_151, 3, -2_097_152)] {
-        assert_eq!(unpack_section(pack_section(x, y, z)), (x, y, z));
-    }
-    // Recorded from the 1.16.2 server: the section at chunk 1, 14, height 0.
-    assert_eq!(unpack_section(0x0000_0400_00e0_0000), (1, 0, 14));
 }
 
 #[test]
@@ -389,7 +375,7 @@ fn malformed_packets_fail() {
         &mut downgrading(),
         Direction::Clientbound,
         "login",
-        &login_1_16_2(false, 0, OVERWORLD, vanilla_codec()),
+        &login_1_16_2(false, 0, OVERWORLD, &vanilla_codec()),
     );
     truncations_fail(
         &mut upgrading(),
@@ -431,7 +417,159 @@ fn recorded_sessions_pass_through() {
     replay(&mut upgrading(), NEWER, Direction::Serverbound).unwrap();
 }
 
+/// A full 1.16.2 column without sections whose 1024 biome cells are
+/// `biomes`.
+fn column_1_16_2(biomes: &[i32]) -> Vec<u8> {
+    let mut packet = body(|w| {
+        w.i32(3).i32(-4).bool(true).varint(0);
+    });
+    packet.extend(Nbt::Compound(Compound::new()).to_bytes(true));
+    packet.extend(body(|w| {
+        w.varint(biomes.len() as i32);
+        for biome in biomes {
+            w.varint(*biome);
+        }
+        w.varint(0).varint(0);
+    }));
+    packet
+}
+
+/// The biome cells of a full 1.16.1 column without sections.
+fn biomes_1_16_1(packet: &[u8]) -> Vec<i32> {
+    let mut reader = crate::wire::Reader::new(packet);
+    reader.i32().unwrap();
+    reader.i32().unwrap();
+    assert!(reader.bool().unwrap());
+    reader.bool().unwrap(); // Ignore old light.
+    assert_eq!(reader.varint().unwrap(), 0);
+    Nbt::read(&mut reader, true).unwrap();
+    let biomes = (0..1024).map(|_| reader.i32().unwrap()).collect();
+    assert_eq!(reader.varint().unwrap(), 0);
+    assert_eq!(reader.varint().unwrap(), 0);
+    reader.finish().unwrap();
+    biomes
+}
+
 #[test]
-fn dimension_types_are_a_registry() {
-    assert!(vanilla_codec().compound(DIMENSION_TYPE).is_some());
+fn chunk_biomes_follow_the_registry_the_backend_sent() {
+    use crate::codec::registries::form::{self, Entry};
+    // A 1.16.2 backend whose datapack adds a biome before vanilla's and
+    // renumbers them: chunks name biomes by the IDs of its own registry.
+    let mut registries = defaults::registries(NEWER);
+    let biomes = registries
+        .iter_mut()
+        .find(|registry| registry.name == "worldgen/biome")
+        .unwrap();
+    let plains = biomes.entry("plains").unwrap().element.clone();
+    for entry in &mut biomes.entries {
+        entry.id += 1;
+    }
+    biomes.entries.insert(
+        0,
+        Entry {
+            name: "rift:glade".into(),
+            id: 0,
+            element: plains,
+        },
+    );
+    let mut login = body(|w| {
+        w.i32(1).bool(false).u8(1).u8(0xff);
+    });
+    login.extend(hex(WORLDS));
+    login.extend(
+        form::write_codec(NEWER, &registries)
+            .unwrap()
+            .to_bytes(true),
+    );
+    login.extend(Nbt::Compound(element(OVERWORLD)).to_bytes(true));
+    login.extend(body(|w| {
+        w.string(OVERWORLD)
+            .i64(5)
+            .varint(20)
+            .varint(2)
+            .bool(false)
+            .bool(true)
+            .bool(false)
+            .bool(true);
+    }));
+    let mut step = downgrading();
+    step.one(Direction::Clientbound, "login", &login, "login");
+    let builtin = data::version(OLDER).expect_registry("biome");
+    let id = |name: &str| builtin.id(name).unwrap();
+    // The glade, the desert and the badlands as the backend numbers them.
+    let cells: Vec<i32> = (0..1024)
+        .map(|cell| [0, id("desert") + 1, id("badlands") + 1][cell % 3])
+        .collect();
+    let sent = step.one(
+        Direction::Clientbound,
+        "level_chunk",
+        &column_1_16_2(&cells),
+        "level_chunk",
+    );
+    let expected: Vec<i32> = (0..1024)
+        .map(|cell| [id("plains"), id("desert"), id("badlands")][cell % 3])
+        .collect();
+    assert_eq!(biomes_1_16_1(&sent), expected);
+
+    // Going up, the 1.16.2 client is sent vanilla's registry, which numbers
+    // biomes as 1.16.1 does.
+    let mut step = upgrading();
+    step.one(
+        Direction::Clientbound,
+        "login",
+        &login_1_16_1(0, OVERWORLD),
+        "login",
+    );
+    let mut old = body(|w| {
+        w.i32(3).i32(-4).bool(true).bool(true).varint(0);
+    });
+    old.extend(Nbt::Compound(Compound::new()).to_bytes(true));
+    let cells: Vec<i32> = (0..1024)
+        .map(|cell| [id("desert"), id("jungle")][cell % 2])
+        .collect();
+    old.extend(body(|w| {
+        for cell in &cells {
+            w.i32(*cell);
+        }
+        w.varint(0).varint(0);
+    }));
+    let sent = step.one(Direction::Clientbound, "level_chunk", &old, "level_chunk");
+    assert_eq!(sent, column_1_16_2(&cells));
+}
+
+#[test]
+fn the_registries_codec_has_the_recorded_vanilla_codec() {
+    use std::io::Read;
+    // Recorded from the official 1.16.2 server (gzip of a named root).
+    const RECORDED: &[u8] = include_bytes!("recorded_codec.nbt.gz");
+    let mut recorded = Vec::new();
+    flate2::read::GzDecoder::new(RECORDED)
+        .read_to_end(&mut recorded)
+        .unwrap();
+    assert_eq!(vanilla_codec_bytes(NEWER), recorded);
+}
+
+#[test]
+fn a_recorded_section_position_unpacks() {
+    // Recorded from the 1.16.2 server: the section at chunk 1, 14, height 0.
+    let stone = (
+        data::version(NEWER).block_states.parse("stone").unwrap(),
+        data::version(OLDER).block_states.parse("stone").unwrap(),
+    );
+    let section = body(|w| {
+        w.i64(0x0000_0400_00e0_0000)
+            .bool(false)
+            .varint(1)
+            .varlong(i64::from(stone.0) << 12 | 0x3_2_5);
+    });
+    let sent = downgrading().one(
+        Direction::Clientbound,
+        "section_blocks_update",
+        &section,
+        "chunk_blocks_update",
+    );
+    let column = body(|w| {
+        w.i32(1).i32(14).varint(1).u8(0x32).u8(5).varint(stone.1);
+    });
+    assert_eq!(sent, column);
 }

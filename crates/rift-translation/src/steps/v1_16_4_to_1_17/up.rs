@@ -1,8 +1,8 @@
 //! A 1.17 client on a 1.16.4 backend: backend packets are upgraded for the
 //! client and client packets downgraded for the backend.
 use super::{
-    BORDER, COMBAT, HIDE_TITLES, NEWER, OLDER, RESET_TITLES, TITLES, check_border,
-    common::{self, EMPTY_ITEM, Login, Respawn, raw_item},
+    BORDER, NEWER, OLDER, check_border,
+    common::{self, EMPTY_ITEM, raw_item},
     menus::Menus,
 };
 use crate::{
@@ -54,15 +54,12 @@ impl Up {
             use State::Play;
             RouteBuilder::new(NEWER, OLDER)
                 .defaults()
-                .clientbound(Play, "login", Self::login)
-                .clientbound(Play, "respawn", Self::respawn)
+                .clientbound(Play, "login", common::login::<Self>)
+                .clientbound(Play, "respawn", common::respawn::<Self>)
                 .clientbound(Play, "player_position", Self::player_position)
                 .clientbound(Play, "set_default_spawn_position", Self::spawn_position)
                 .clientbound(Play, "container_ack", Self::container_ack)
-                .clientbound(Play, "player_combat", Self::player_combat)
-                .clientbound(Play, "remove_entities", Self::remove_entities)
                 .clientbound(Play, "set_border", Self::set_border)
-                .clientbound(Play, "set_titles", Self::set_titles)
                 // A no-op movement packet that 1.17 finally removed.
                 .drop_clientbound(Play, "move_entity")
                 .serverbound(Play, "pong", Self::pong)
@@ -90,22 +87,6 @@ impl Up {
                 })
                 .build()
         })
-    }
-
-    fn login(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
-        let mut login = Login::read(OLDER, &packet.data)?;
-        // INTEGRATION: the registries codec's conversion of the dimension codec.
-        login.edit_dimension_types(common::add_world_height)?;
-        cx.to_client(state, Packet::new(packet.id, login.write(NEWER)));
-        Ok(())
-    }
-
-    fn respawn(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
-        let mut respawn = Respawn::read(&packet.data)?;
-        // INTEGRATION: the registries codec's conversion of the dimension type.
-        common::add_world_height(respawn.dimension_type()?)?;
-        cx.to_client(state, Packet::new(packet.id, respawn.write()));
-        Ok(())
     }
 
     /// 1.17 tells the client whether a teleport dismounts it; 1.16 servers
@@ -166,44 +147,6 @@ impl Up {
         Ok(())
     }
 
-    fn player_combat(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
-        let mut rw = Rewriter::new(&packet.data);
-        let action = rw.r.varint()?;
-        let name = usize::try_from(action)
-            .ok()
-            .and_then(|action| COMBAT.get(action))
-            .ok_or_else(|| invalid("unknown combat action"))?;
-        match action {
-            1 => {
-                rw.varint()?;
-                rw.i32()?;
-            }
-            2 => {
-                rw.varint()?;
-                rw.i32()?;
-                common::text(&mut self.shared, Direction::Clientbound, &mut rw)?;
-            }
-            _ => {}
-        }
-        common::to_client(cx, NEWER, state, name, rw.finish()?);
-        Ok(())
-    }
-
-    /// 1.17.0 removes one entity per packet.
-    fn remove_entities(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
-        let mut r = Reader::new(&packet.data);
-        let ids = (0..r.count()?)
-            .map(|_| r.varint())
-            .collect::<io::Result<Vec<_>>>()?;
-        r.finish()?;
-        for id in ids {
-            let mut w = Writer::new();
-            w.varint(id);
-            common::to_client(cx, NEWER, state, "remove_entity", w.into_inner());
-        }
-        Ok(())
-    }
-
     fn set_border(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
         let mut r = Reader::new(&packet.data);
         let action = r.varint()?;
@@ -214,30 +157,6 @@ impl Up {
         let body = r.rest();
         check_border(action, body)?;
         common::to_client(cx, NEWER, state, name, body.to_vec());
-        Ok(())
-    }
-
-    fn set_titles(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
-        let mut rw = Rewriter::new(&packet.data);
-        let action = rw.r.varint()?;
-        let name = match action {
-            0..=2 => {
-                common::text(&mut self.shared, Direction::Clientbound, &mut rw)?;
-                TITLES[action as usize]
-            }
-            3 => {
-                for _ in 0..3 {
-                    rw.i32()?;
-                }
-                TITLES[3]
-            }
-            HIDE_TITLES | RESET_TITLES => {
-                rw.w.bool(action == RESET_TITLES);
-                "clear_titles"
-            }
-            _ => return Err(invalid("unknown title action")),
-        };
-        common::to_client(cx, NEWER, state, name, rw.finish()?);
         Ok(())
     }
 

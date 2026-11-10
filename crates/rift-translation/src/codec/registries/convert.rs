@@ -150,7 +150,11 @@ pub fn element_for(
         && sender.is_vanilla(name, &element)
         && let Some(vanilla) = defaults::tag(to, registry, name)
     {
-        return Ok(vanilla.clone());
+        let mut vanilla = vanilla.clone();
+        if registry == "dimension_type" {
+            keep_extent(&element, &mut vanilla, to);
+        }
+        return Ok(vanilla);
     }
     let mut element = element;
     // INTEGRATION: text components inside datapack entries (descriptions of
@@ -185,6 +189,24 @@ fn names_unknown_item(registry: &str, protocol: i32, element: &Nbt) -> bool {
         .filter(|(name, _)| *name == registry)
         .filter_map(|(_, key)| element.as_compound()?.get(key)?.as_str())
         .any(|item| items.id(crate::data::strip(item)).is_none())
+}
+
+/// The backend's chunks span its dimension's height, so a client that can
+/// show any height (1.17 on) keeps the sender's extent even where its own
+/// vanilla type differs: 1.18's overworld runs from -64 to 320, 1.17's
+/// from 0 to 256.
+fn keep_extent(sent: &Nbt, vanilla: &mut Nbt, to: i32) {
+    if to < 755 {
+        return;
+    }
+    let (Some(sent), Some(vanilla)) = (sent.as_compound(), vanilla.as_compound_mut()) else {
+        return;
+    };
+    for key in ["min_y", "height", "logical_height"] {
+        if let Some(value) = sent.get(key) {
+            vanilla.insert(key, value.clone());
+        }
+    }
 }
 
 /// Fields of a registry's elements as the vanilla entries of one protocol
