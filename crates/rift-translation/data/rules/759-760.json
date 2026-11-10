@@ -1,0 +1,8 @@
+{
+  "game_event": {
+    "down": {
+      "jukebox_play": "block_change",
+      "jukebox_stop_play": "block_change"
+    }
+  }
+}
