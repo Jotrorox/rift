@@ -24,6 +24,8 @@
 //! stay available to its handler.
 pub mod commands;
 pub mod container;
+#[cfg(test)]
+mod pairs;
 pub mod registry;
 pub mod screen;
 pub mod sound;
