@@ -48,7 +48,25 @@ pub fn adapt(shared: &mut Shared, direction: Direction, component: &mut super::C
         } else if from >= v::FLATTENING && to < v::FLATTENING {
             legacy_translation(component);
         }
+        if from >= SQUARE_BRACKETS && to < SQUARE_BRACKETS {
+            unbracket(component);
+        }
     });
+}
+
+/// 1.16 servers wrap item, entity and advancement names in the
+/// `chat.square_brackets` translation, which older clients lack: they
+/// would show the key instead of the name.
+const SQUARE_BRACKETS: i32 = 735;
+
+/// The bracketed name as literal brackets around it, as 1.15 servers
+/// send it.
+fn unbracket(component: &mut super::Component) {
+    if let Content::Translate { key, .. } = &component.content
+        && key == "chat.square_brackets"
+    {
+        inline_template(component, "[%s]");
+    }
 }
 
 /// 1.13 renamed most translation keys; a client shows a key it lacks as
@@ -65,7 +83,7 @@ fn upgrade_translation(component: &mut super::Component) {
 /// as literal text with the arguments in place of its placeholders.
 fn legacy_translation(component: &mut super::Component) {
     use steps::v1_12_2_to_1_13::{Legacy, legacy_translation};
-    let Content::Translate { key, args, .. } = &mut component.content else {
+    let Content::Translate { key, .. } = &mut component.content else {
         return;
     };
     let template = match legacy_translation(key) {
@@ -75,6 +93,15 @@ fn legacy_translation(component: &mut super::Component) {
             return;
         }
         Some(Legacy::Text(template)) => template,
+    };
+    inline_template(component, template);
+}
+
+/// A translation as literal text with the arguments in place of the
+/// placeholders of its English `template`.
+fn inline_template(component: &mut super::Component, template: &str) {
+    let Content::Translate { args, .. } = &mut component.content else {
+        return;
     };
     let args = std::mem::take(args);
     let mut parts = Vec::new();

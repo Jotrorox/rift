@@ -660,3 +660,27 @@ fn numeric_translation_arguments_may_be_an_array() {
     // A list of ints reads the same in vanilla's list codec.
     assert_eq!(from_nbt(766, &to_nbt(766, &component)).unwrap(), component);
 }
+
+#[test]
+fn square_brackets_become_literal_before_1_16() {
+    // An advancement message as the official 1.16.5 server sent it.
+    let sent = r#"{"translate":"chat.type.advancement.task","with":[{"text":"Bob"},{"color":"green","translate":"chat.square_brackets","with":[{"translate":"advancements.story.mine_stone.title"}]}]}"#;
+    let mut component = json(735, sent);
+    super::convert::adapt(
+        &mut Shared::new(578, 735),
+        Direction::Clientbound,
+        &mut component,
+    );
+    assert_eq!(
+        to_json_string(578, &component),
+        r#"{"translate":"chat.type.advancement.task","with":[{"text":"Bob"},{"color":"green","extra":[{"text":"["},{"translate":"advancements.story.mine_stone.title"},{"text":"]"}],"text":""}]}"#
+    );
+    // 1.16 clients know the key.
+    let mut component = json(735, sent);
+    super::convert::adapt(
+        &mut Shared::new(736, 735),
+        Direction::Clientbound,
+        &mut component,
+    );
+    assert_eq!(to_json_string(736, &component), sent);
+}

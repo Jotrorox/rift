@@ -16,6 +16,8 @@ pub struct Down {
     /// The backend's `doImmediateRespawn` game rule: 1.14 clients always
     /// show the death screen, so the step asks to respawn for them.
     immediate_respawn: bool,
+    /// The player's entity ID, from `login`.
+    player: i32,
 }
 
 impl HasShared for Down {
@@ -28,12 +30,15 @@ impl HasShared for Down {
 const BLOCKS: i32 = 4;
 /// `ServerboundClientCommandPacket`: perform respawn.
 const PERFORM_RESPAWN: i32 = 0;
+/// `entity_event`: a living entity died.
+const DEATH: i8 = 3;
 
 impl Down {
     fn create() -> Box<dyn crate::step::Step> {
         Box::new(Self {
             shared: Shared::new(OLDER, NEWER),
             immediate_respawn: false,
+            player: 0,
         })
     }
 
@@ -47,13 +52,14 @@ impl Down {
                 .clientbound(State::Play, "game_event", Self::game_event)
                 .clientbound(State::Play, "set_health", Self::set_health)
                 .clientbound(State::Play, "explode", Self::explode)
+                .clientbound(State::Play, "entity_event", Self::entity_event)
                 .build()
         })
     }
 
     fn login(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
         let mut rw = Rewriter::new(&packet.data);
-        rw.i32()?; // Entity ID.
+        self.player = rw.i32()?;
         rw.u8()?; // Game mode.
         rw.i32()?; // Dimension.
         rw.r.i64()?; // Hashed seed.
@@ -109,6 +115,20 @@ impl Down {
             let mut body = Writer::new();
             body.varint(PERFORM_RESPAWN);
             cx.to_backend(state, Packet::new(id, body.buf));
+        }
+        Ok(())
+    }
+
+    /// 1.15 servers tell the dying player itself that it died; a 1.14
+    /// client handles that as for any other entity and drops its loot,
+    /// which needs the integrated server and fails.
+    fn entity_event(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
+        let mut reader = Reader::new(&packet.data);
+        let entity = reader.i32()?;
+        let event = reader.i8()?;
+        reader.finish()?;
+        if !(entity == self.player && event == DEATH) {
+            cx.to_client(state, packet);
         }
         Ok(())
     }

@@ -107,6 +107,34 @@ fn immediate_respawn_is_followed_and_emulated() {
 }
 
 #[test]
+fn the_player_is_not_told_it_died() {
+    let mut step = downgrading();
+    step.clientbound("login", &hex(LOGIN_1_15)).unwrap();
+    let event = |entity: i32, event: i8| {
+        body(|w| {
+            w.i32(entity).i8(event);
+        })
+    };
+    assert!(
+        step.clientbound("entity_event", &event(1, 3))
+            .unwrap()
+            .is_empty()
+    );
+    for (entity, kind) in [(2, 3), (1, 2), (1, 24)] {
+        let packet = event(entity, kind);
+        assert_eq!(
+            step.one(
+                Direction::Clientbound,
+                "entity_event",
+                &packet,
+                "entity_event"
+            ),
+            packet
+        );
+    }
+}
+
+#[test]
 fn explosions_bring_their_sound_to_old_clients() {
     let explode = body(|w| {
         w.f32(1.5).f32(64.0).f32(-2.0).f32(4.0).i32(1);
