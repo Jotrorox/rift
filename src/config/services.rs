@@ -820,7 +820,8 @@ mod tests {
         );
         let isolation = parse("isolation={read={'/srv/maps'},write={'shared'}}").unwrap();
         assert_eq!(isolation.mode, IsolationMode::Landlock);
-        assert_eq!(isolation.read, [PathBuf::from("/srv/maps")]);
+        // Absolute in the host's own terms (Windows adds a drive).
+        assert_eq!(isolation.read, [std::path::absolute("/srv/maps").unwrap()]);
         assert!(isolation.write[0].is_absolute() && isolation.write[0].ends_with("shared"));
         for (bad, message) in [
             ("isolation='strict'", "expected \"off\""),
