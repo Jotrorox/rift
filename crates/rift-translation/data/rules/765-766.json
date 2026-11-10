@@ -4,25 +4,217 @@
       "horse.jump_strength": "generic.jump_strength"
     }
   },
+  "block": {
+    "down": {
+      "heavy_core": "polished_deepslate_wall",
+      "vault": "trial_spawner"
+    }
+  },
+  "block_entity_type": {
+    "down": {
+      "vault": "trial_spawner"
+    }
+  },
+  "block_state": {
+    "down": {
+      "heavy_core": "polished_deepslate_wall",
+      "vault": "trial_spawner"
+    }
+  },
+  "block_type": {
+    "down_default": "block"
+  },
+  "command_argument_type": {
+    "down": {
+      "item_slots": "item_slot",
+      "loot_modifier": "resource_location",
+      "loot_predicate": "resource_location",
+      "loot_table": "resource_location"
+    }
+  },
+  "decorated_pot_pattern": {
+    "down": {
+      "flow_pottery_pattern": "brewer_pottery_pattern",
+      "guster_pottery_pattern": "explorer_pottery_pattern",
+      "scrape_pottery_pattern": "miner_pottery_pattern"
+    }
+  },
   "enchantment": {
     "renames": {
       "sweeping": "sweeping_edge"
+    },
+    "down": {
+      "breach": "piercing",
+      "density": "sharpness",
+      "wind_burst": "knockback"
+    }
+  },
+  "entity_type": {
+    "down": {
+      "armadillo": "turtle",
+      "bogged": "skeleton",
+      "breeze_wind_charge": "wind_charge",
+      "ominous_item_spawner": "item_display"
     }
   },
   "item": {
     "renames": {
       "scute": "turtle_scute"
+    },
+    "down": {
+      "armadillo_scute": "scute",
+      "armadillo_spawn_egg": "turtle_spawn_egg",
+      "bogged_spawn_egg": "skeleton_spawn_egg",
+      "bolt_armor_trim_smithing_template": "rib_armor_trim_smithing_template",
+      "breeze_rod": "blaze_rod",
+      "flow_armor_trim_smithing_template": "vex_armor_trim_smithing_template",
+      "flow_banner_pattern": "flower_banner_pattern",
+      "flow_pottery_sherd": "brewer_pottery_sherd",
+      "guster_banner_pattern": "globe_banner_pattern",
+      "guster_pottery_sherd": "explorer_pottery_sherd",
+      "heavy_core": "polished_deepslate_wall",
+      "mace": "iron_axe",
+      "ominous_bottle": "experience_bottle",
+      "ominous_trial_key": "trial_key",
+      "scrape_pottery_sherd": "miner_pottery_sherd",
+      "vault": "trial_spawner",
+      "wind_charge": "snowball",
+      "wolf_armor": "leather_horse_armor"
+    }
+  },
+  "loot_function_type": {
+    "down_default": "set_count",
+    "renames": {
+      "set_nbt": "set_custom_data",
+      "copy_nbt": "copy_custom_data"
+    }
+  },
+  "loot_number_provider_type": {
+    "down_default": "constant"
+  },
+  "memory_module_type": {
+    "down_default": "dummy"
+  },
+  "mob_effect": {
+    "down": {
+      "infested": "unluck",
+      "oozing": "unluck",
+      "raid_omen": "bad_omen",
+      "trial_omen": "bad_omen",
+      "weaving": "unluck",
+      "wind_charged": "unluck"
     }
   },
   "particle_type": {
     "renames": {
       "gust_dust": "small_gust",
       "gust_emitter": "gust_emitter_large"
+    },
+    "down": {
+      "dust_pillar": "block",
+      "gust_emitter_small": "gust_emitter",
+      "infested": "poof",
+      "item_cobweb": "item_snowball",
+      "ominous_spawning": "reverse_portal",
+      "raid_omen": "witch",
+      "trial_omen": "soul_fire_flame",
+      "trial_spawner_detection_ominous": "trial_spawner_detection",
+      "vault_connection": "enchant"
+    },
+    "up": {
+      "ambient_entity_effect": "entity_effect"
     }
+  },
+  "potion": {
+    "down": {
+      "infested": "awkward",
+      "oozing": "awkward",
+      "weaving": "awkward",
+      "wind_charged": "awkward"
+    },
+    "up": {
+      "empty": "water"
+    }
+  },
+  "sensor_type": {
+    "down_default": "dummy"
   },
   "sound_event": {
     "renames": {
       "entity.generic.wind_burst": "entity.wind_charge.wind_burst"
+    },
+    "down": {
+      "block.cobweb.break": "block.wool.break",
+      "block.cobweb.fall": "block.wool.fall",
+      "block.cobweb.hit": "block.wool.hit",
+      "block.cobweb.place": "block.wool.place",
+      "block.cobweb.step": "block.wool.step",
+      "block.heavy_core.break": "block.netherite_block.break",
+      "block.heavy_core.fall": "block.netherite_block.fall",
+      "block.heavy_core.hit": "block.netherite_block.hit",
+      "block.heavy_core.place": "block.netherite_block.place",
+      "block.heavy_core.step": "block.netherite_block.step",
+      "block.trial_spawner.about_to_spawn_item": "block.trial_spawner.ambient",
+      "block.trial_spawner.ambient_charged": "block.trial_spawner.ambient",
+      "block.trial_spawner.charge_activate": "block.trial_spawner.detect_player",
+      "block.trial_spawner.spawn_item": "block.trial_spawner.eject_item",
+      "block.trial_spawner.spawn_item_begin": "block.trial_spawner.ambient",
+      "block.vault.activate": "block.trial_spawner.detect_player",
+      "block.vault.ambient": "block.trial_spawner.ambient",
+      "block.vault.break": "block.trial_spawner.break",
+      "block.vault.close_shutter": "block.trial_spawner.close_shutter",
+      "block.vault.deactivate": "block.trial_spawner.close_shutter",
+      "block.vault.eject_item": "block.trial_spawner.eject_item",
+      "block.vault.fall": "block.trial_spawner.fall",
+      "block.vault.hit": "block.trial_spawner.hit",
+      "block.vault.insert_item": "block.decorated_pot.insert",
+      "block.vault.insert_item_fail": "block.decorated_pot.insert_fail",
+      "block.vault.open_shutter": "block.trial_spawner.open_shutter",
+      "block.vault.place": "block.trial_spawner.place",
+      "block.vault.step": "block.trial_spawner.step",
+      "block.wet_sponge.dries": "block.fire.extinguish",
+      "entity.armadillo.ambient": "entity.turtle.ambient_land",
+      "entity.armadillo.brush": "item.brush.brushing.generic",
+      "entity.armadillo.death": "entity.turtle.death",
+      "entity.armadillo.eat": "entity.generic.eat",
+      "entity.armadillo.hurt": "entity.turtle.hurt",
+      "entity.armadillo.hurt_reduced": "entity.turtle.hurt",
+      "entity.armadillo.land": "entity.turtle.shamble",
+      "entity.armadillo.peek": "entity.turtle.ambient_land",
+      "entity.armadillo.roll": "entity.turtle.shamble",
+      "entity.armadillo.scute_drop": "entity.turtle.lay_egg",
+      "entity.armadillo.step": "entity.turtle.shamble",
+      "entity.armadillo.unroll_finish": "entity.turtle.shamble",
+      "entity.armadillo.unroll_start": "entity.turtle.shamble",
+      "entity.bogged.ambient": "entity.skeleton.ambient",
+      "entity.bogged.death": "entity.skeleton.death",
+      "entity.bogged.hurt": "entity.skeleton.hurt",
+      "entity.bogged.shear": "entity.sheep.shear",
+      "entity.bogged.step": "entity.skeleton.step",
+      "entity.breeze.charge": "entity.breeze.inhale",
+      "entity.breeze.deflect": "entity.breeze.hurt",
+      "entity.breeze.whirl": "entity.breeze.idle_air",
+      "entity.breeze.wind_burst": "entity.generic.wind_burst",
+      "entity.donkey.jump": "entity.horse.jump",
+      "entity.mule.jump": "entity.horse.jump",
+      "entity.parrot.imitate.bogged": "entity.parrot.imitate.skeleton",
+      "entity.wind_charge.throw": "entity.snowball.throw",
+      "event.mob_effect.bad_omen": "entity.illusioner.prepare_mirror",
+      "event.mob_effect.raid_omen": "entity.illusioner.prepare_mirror",
+      "event.mob_effect.trial_omen": "entity.illusioner.prepare_mirror",
+      "item.armor.equip_wolf": "item.armor.equip_leather",
+      "item.armor.unequip_wolf": "item.armor.equip_leather",
+      "item.mace.smash_air": "entity.player.attack.knockback",
+      "item.mace.smash_ground": "block.anvil.land",
+      "item.mace.smash_ground_heavy": "block.anvil.land",
+      "item.ominous_bottle.dispose": "item.bottle.empty",
+      "item.wolf_armor.break": "entity.item.break",
+      "item.wolf_armor.crack": "entity.item.break",
+      "item.wolf_armor.damage": "item.shield.block",
+      "item.wolf_armor.repair": "item.armor.equip_leather"
     }
+  },
+  "trigger_type": {
+    "down_default": "impossible"
   }
 }
