@@ -633,22 +633,36 @@ OPTIONS = {
 SOUND_CATEGORIES = ("master", "music", "record", "weather", "block", "hostile", "neutral", "player",
                     "ambient", "voice", "ui")
 
+# Old clients log why the connection broke ("Internal Exception: ...
+# DecoderException") only at DEBUG: the root logger runs at DEBUG and a
+# configuration-level filter passes INFO+ plus those few DEBUG messages.
 LOG4J_CONFIG = """<?xml version="1.0" encoding="UTF-8"?>
 <Configuration status="WARN">
+  <Filters>
+    <ThresholdFilter level="info" onMatch="ACCEPT" onMismatch="NEUTRAL"/>
+    <RegexFilter regex="{debug}" onMatch="ACCEPT" onMismatch="DENY"/>
+  </Filters>
   <Appenders>
     <Console name="SysOut" target="SYSTEM_OUT"><PatternLayout pattern="{pattern}"/></Console>
     <File name="File" fileName="{file}" append="false"><PatternLayout pattern="{pattern}"/></File>
   </Appenders>
   <Loggers>
-    <Root level="info">
+    <Root level="debug">
       <filters><MarkerFilter marker="NETWORK_PACKETS" onMatch="DENY" onMismatch="NEUTRAL"/></filters>
       <AppenderRef ref="SysOut"/><AppenderRef ref="File"/>
     </Root>
   </Loggers>
 </Configuration>
 """
+DEBUG_PASS = (r"(?s).*(Internal Exception|DecoderException|EncoderException|Failed to (sent|send|handle|decode) packet"
+              r"|Error (sending|receiving|handling) packet|Packet processing error|Network Protocol Error"
+              r"|disconnect\.|Disconnected|Connection reset|Timed out|Bad packet).*")
 # {nolookups} keeps old clients' log4j 2.8 from evaluating JNDI lookups.
 LOG_PATTERN = "[%d{HH:mm:ss.SSS}] [%t/%level] [%logger{1}]: %msg{nolookups}%n"
+
+
+def xml_attribute(text):
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
 def write_options(game_dir, data_version=None):
@@ -740,7 +754,7 @@ def command(prepared, game_dir, name, host, port, heap="1G"):
         options.append("-XX:+IgnoreUnrecognizedVMOptions")
     (game_dir / "tmp").mkdir(exist_ok=True)
     (game_dir / "log4j2.xml").write_text(LOG4J_CONFIG.format(
-        pattern=LOG_PATTERN, file=game_dir / "logs" / "latest.log"))
+        pattern=LOG_PATTERN, file=game_dir / "logs" / "latest.log", debug=xml_attribute(DEBUG_PASS)))
     return [java, *dict.fromkeys(options), *jvm, prepared.main_class, *game]
 
 
@@ -1269,15 +1283,29 @@ def record(result, entry):
         result.unknown.append(entry.text())
     if "[CHAT]" in entry.message:
         result.chat.append(entry.message.split("[CHAT]", 1)[1].strip())
+    if entry.level == "DEBUG":
+        # Only connection failures pass the DEBUG filter; trust them only from
+        # the network stack, where old clients report why they disconnect.
+        if "Internal Exception" not in entry.message and not NETWORK_THREAD.search(entry.thread):
+            return
+        result.failures.append(entry.text())
     if result.disconnect is None and entry.level != "INFO" and (match := DISCONNECT.search(entry.message)):
         result.disconnect = "client: " + next((group for group in match.groups() if group), entry.message)
+
+
+def headline(text):
+    """First line of a failure, plus its exception line when the message alone says little."""
+    lines = text.splitlines()
+    if len(lines) > 1 and not lines[1].startswith("at ") and EXCEPTION_HEADER.match(lines[1]):
+        return f"{lines[0]} :: {lines[1]}"
+    return lines[0]
 
 
 def finish(result, entries, stay, expected, strict):
     if result.disconnect:
         result.reason = f"disconnected: {result.disconnect}"
     elif result.failures:
-        result.reason = "client logged a network/packet error: " + result.failures[0].splitlines()[0]
+        result.reason = "client logged a network/packet error: " + headline(result.failures[0])
     elif strict and result.unknown:
         result.reason = "unknown warning (strict): " + result.unknown[0].splitlines()[0]
     elif not result.joined:
@@ -1294,7 +1322,7 @@ def finish(result, entries, stay, expected, strict):
         result.ok = True
         result.reason = f"joined and stayed {result.stayed:.0f}s without errors"
     if not result.ok and result.failures and "network/packet error" not in result.reason:
-        result.reason += " | first client error: " + result.failures[0].splitlines()[0]
+        result.reason += " | first client error: " + headline(result.failures[0])
 
 
 def prune(game_dir):
@@ -1465,7 +1493,8 @@ def selftest_one(version, stay, root, name=None):
         problems.append("server log has no join line")
     for match in re.finditer(rf".*{re.escape(name)} (lost connection|left the game).*", server_log):
         problems.append("server (before the harness stopped the client): " + match.group(0).strip())
-    for match in re.finditer(r".*(Exception|ERROR\]|Can't keep up).*", server_log):
+    joined_at = server_log.find(f"{name} joined the game")
+    for match in re.finditer(r".*(Exception|ERROR\]|Can't keep up).*", server_log[max(joined_at, 0):]):
         evidence.append("server note: " + match.group(0).strip()[:200])
     chat = [line for line in result.chat if nonce in line]
     evidence += [f"client: [CHAT] {line}" for line in chat]
@@ -1555,6 +1584,23 @@ def read_nbt(data, offset, tag):
     raise ValueError(f"bad NBT tag {tag}")
 
 
+# English text of the vanilla disconnect keys a harness user is likely to meet.
+TRANSLATIONS = {
+    "multiplayer.disconnect.incompatible": "Incompatible client! Please use %s",
+    "multiplayer.disconnect.outdated_client": "Incompatible client! Please use %s",
+    "multiplayer.disconnect.outdated_server": "Incompatible client! Please use %s",
+    "disconnect.timeout": "Timed out",
+    "disconnect.genericReason": "%s",
+    "multiplayer.disconnect.kicked": "Kicked by an operator",
+    "multiplayer.disconnect.not_whitelisted": "You are not white-listed on this server!",
+    "multiplayer.disconnect.server_full": "The server is full!",
+    "multiplayer.disconnect.duplicate_login": "You logged in from another location",
+    "multiplayer.disconnect.invalid_packet": "Server sent an invalid packet",
+    "multiplayer.disconnect.packet_processing_error": "Packet processing error",
+    "disconnect.packetError": "Network Protocol Error",
+}
+
+
 def component_text(value):
     """Flatten a chat component (JSON-decoded or NBT-decoded) to plain text."""
     if isinstance(value, str):
@@ -1566,7 +1612,11 @@ def component_text(value):
     text = value.get("text", "")
     if "translate" in value:
         arguments = [component_text(item) for item in value.get("with", [])]
-        text += value["translate"] + (f" {arguments}" if arguments else "")
+        template = TRANSLATIONS.get(value["translate"])
+        if template and template.count("%s") == len(arguments):
+            text += template % tuple(arguments) + f" ({value['translate']})"
+        else:
+            text += value["translate"] + (f" {arguments}" if arguments else "")
     return text + "".join(component_text(item) for item in value.get("extra", []))
 
 
@@ -1859,7 +1909,14 @@ def main(argv=None):
                              help="seconds in the world (>30 covers two keep-alive intervals)")
     self_parser.add_argument("--log-dir", default=None)
     self_parser.add_argument("--negative", action="store_true",
-                             help="also run the version-mismatch and corrupted-frame negative tests")
+                             help="also run the version-mismatch and corrupted-packet negative tests")
+    self_parser.add_argument("--mode", choices=("badid", "flip"), default="badid",
+                             help="corruption: replace the packet id, or invert the first 48 body bytes")
+    negative_parser = commands.add_parser("negative", help="only the negative tests (they must fail)")
+    negative_parser.add_argument("--versions", nargs="+", default=["26.3", "1.21.4", "1.20.1", "1.16.5", "1.12.2"])
+    negative_parser.add_argument("--mode", choices=("badid", "flip"), default="badid")
+    negative_parser.add_argument("--no-mismatch", action="store_true", help="skip the version-mismatch run")
+    negative_parser.add_argument("--log-dir", default=None)
     args = parser.parse_args(argv)
     if not args.accept_eula:
         parser.error("pass --accept-eula to accept the Minecraft EULA (https://aka.ms/MinecraftEULA)")
@@ -1883,10 +1940,11 @@ def main(argv=None):
                       heap=args.heap, strict=args.strict)
         print(json.dumps(asdict(result), indent=2) if args.json else result.report())
         return 0 if result.ok else 1
-    root = Path(args.log_dir) if args.log_dir else CACHE / "runs" / f"selftest-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}"
+    root = Path(args.log_dir) if args.log_dir else \
+        CACHE / "runs" / f"{args.action}-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}"
     root.mkdir(parents=True, exist_ok=True)
     outcomes, failed = [], 0
-    for version in args.versions:
+    for version in args.versions if args.action == "selftest" else ():
         try:
             ok, result, lines = selftest_one(version, args.stay, root)
         except Exception as exc:  # report and continue with the next version
@@ -1896,7 +1954,17 @@ def main(argv=None):
                          "report": lines})
         if not args.json:
             print("\n".join(lines), flush=True)
-    if args.negative:
+    if args.action == "negative" or args.negative:
+        failed += negatives(args, root, outcomes)
+    if args.json:
+        print(json.dumps(outcomes, indent=2))
+    return 1 if failed else 0
+
+
+def negatives(args, root, outcomes):
+    """Run the negative tests; returns how many were NOT detected."""
+    failed = 0
+    if not getattr(args, "no_mismatch", False):
         modern = args.versions[0]
         other = "1.20.1" if modern != "1.20.1" else "1.21.4"
         result, _ = negative_mismatch(modern, other, root)
@@ -1907,18 +1975,16 @@ def main(argv=None):
         if not args.json:
             print(f"NEGATIVE version mismatch {modern} -> {other}: "
                   f"{'detected' if passed else 'NOT DETECTED'}\n" + result.report(), flush=True)
-        for version in args.versions:
-            result = negative_corrupt(version, root)
-            passed = not result.ok and result.corrupted is not None and bool(result.failures or result.disconnect)
-            failed += not passed
-            outcomes.append({"negative": f"corrupted packet {version}", "detected": passed,
-                             "corrupted": result.corrupted, "result": asdict(result)})
-            if not args.json:
-                print(f"NEGATIVE corrupted packet {version} ({result.corrupted}): "
-                      f"{'detected' if passed else 'NOT DETECTED'}\n" + result.report(), flush=True)
-    if args.json:
-        print(json.dumps(outcomes, indent=2))
-    return 1 if failed else 0
+    for version in args.versions:
+        result = negative_corrupt(version, root, args.mode)
+        passed = not result.ok and result.corrupted is not None and bool(result.failures or result.disconnect)
+        failed += not passed
+        outcomes.append({"negative": f"corrupted packet {version}", "detected": passed,
+                         "corrupted": result.corrupted, "result": asdict(result)})
+        if not args.json:
+            print(f"NEGATIVE corrupted packet {version} ({result.corrupted}): "
+                  f"{'detected' if passed else 'NOT DETECTED'}\n" + result.report(), flush=True)
+    return failed
 
 
 if __name__ == "__main__":

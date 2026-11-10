@@ -163,6 +163,21 @@ class Classification(unittest.TestCase):
     def test_unknown_warnings_are_triaged(self):
         self.assertEqual(rc.classify(entry("WARN", "Something new happened")), "unknown")
 
+    def test_debug_connection_failures_count_only_from_the_network(self):
+        result = rc.Result("1.12.2", "h", 1, "Bot")
+        rc.record(result, entry("DEBUG", "Timed out", thread="Render thread"))
+        self.assertEqual((result.failures, result.disconnect), ([], None))
+        rc.record(result, entry("DEBUG", "Internal Exception: io.netty.handler.codec.DecoderException: Bad packet id 9",
+                                thread="Netty Client IO #0"))
+        self.assertEqual(len(result.failures), 1)
+        self.assertTrue(result.disconnect.startswith("client: Internal Exception: "))
+
+    def test_headline_includes_the_exception(self):
+        text = "[Netty Client IO #0/DEBUG] [nd]: Failed to sent packet\n" \
+            "io.netty.handler.codec.DecoderException: java.lang.IndexOutOfBoundsException: Index: 16383\n" \
+            "at io.netty.handler.codec.ByteToMessageDecoder.callDecode(ByteToMessageDecoder.java:459)"
+        self.assertIn(":: io.netty.handler.codec.DecoderException", rc.headline(text))
+
     def test_disconnect_reason(self):
         match = rc.DISCONNECT.search("Client disconnected with reason: Outdated server! I'm still on 1.20.1")
         self.assertEqual(match.group("reason"), "Outdated server! I'm still on 1.20.1")
@@ -180,7 +195,8 @@ class Wire(unittest.TestCase):
     def test_reasons(self):
         text = json.dumps({"translate": "multiplayer.disconnect.outdated_client", "with": ["1.20.1"]})
         body = rc.encode_string(text)
-        self.assertEqual(rc.decode_reason(body, 763, False), "multiplayer.disconnect.outdated_client ['1.20.1']")
+        self.assertEqual(rc.decode_reason(body, 763, False),
+                         "Incompatible client! Please use 1.20.1 (multiplayer.disconnect.outdated_client)")
         # NBT compound {"text": "Kicked", "extra": ["!"]} as network NBT (no root name).
         nbt = (b"\x0a" + b"\x08\x00\x04text\x00\x06Kicked"
                + b"\x09\x00\x05extra\x08\x00\x00\x00\x01\x00\x01!" + b"\x00")
