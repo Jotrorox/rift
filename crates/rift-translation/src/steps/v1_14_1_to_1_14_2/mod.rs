@@ -1,4 +1,7 @@
 //! Minecraft 1.14.1 (protocol 480) and 1.14.2 (protocol 485).
+//!
+//! The two protocols share packet IDs, layouts and every registry that
+//! travels on the wire: everything passes through.
 mod down;
 mod up;
 
