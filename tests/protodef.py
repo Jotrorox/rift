@@ -200,6 +200,16 @@ CORRECTIONS = [
          value=_container(("effect", "ItemPotionEffect"), ("probability", "f32")),
          why="FoodProperties.PossibleEffect.STREAM_CODEC writes a whole MobEffectInstance (ID and "
              "details) before the probability, not just the effect ID."),
+    dict(protocols=(766, 766),
+         path=["types", "entityMetadataEntry", 1, 2, "type", 1, "fields", "painting_variant"],
+         value="varint",
+         why="1.20.5/1.20.6 EntityDataSerializers.PAINTING_VARIANT is ByteBufCodecs.holderRegistry: a plain "
+             "registry ID (javap of the official 1.20.6 server); the holder with an inline variant came in "
+             "1.21. A kebab painting (ID 0) read as an inline variant and failed."),
+    dict(protocols=(766, 766),
+         path=["types", "entityMetadataEntry", 1, 2, "type", 1, "fields", "wolf_variant"],
+         value="varint",
+         why="1.20.5/1.20.6 EntityDataSerializers.WOLF_VARIANT is ByteBufCodecs.holderRegistry too."),
     dict(protocols=(771, 772),
          path=["types", "entityMetadataEntry", 1, 2, "type", 1, "fields", "optional_global_pos"],
          value=["option", _container(("dimension", "string"), ("position", "position"))],
@@ -232,6 +242,16 @@ CORRECTIONS = [
                                      ("maxValue", ["option", "string"]))}}])),
          why="StatePropertiesPredicate.ValueMatcher is ByteBufCodecs.either(exact, range), "
              "and a range's bounds are each optional."),
+    dict(protocols=(775, 775), path=SLOT_COMPONENT + ["instrument"],
+         value=["registryEntryHolder", {"baseName": "instrumentId",
+                                        "otherwise": {"name": "data", "type": "InstrumentData"}}],
+         why="26.1 InstrumentComponent.STREAM_CODEC is Instrument.STREAM_CODEC, a plain registry "
+             "holder; the EitherHolder (boolean, then holder or key) was 1.21.5 to 1.21.11."),
+    dict(protocols=(775, 775), path=SLOT_COMPONENT + ["provides_trim_material"],
+         value=["registryEntryHolder", {"baseName": "materialId",
+                                        "otherwise": {"name": "data", "type": "ArmorTrimMaterial"}}],
+         why="26.1 ProvidesTrimMaterial.STREAM_CODEC is TrimMaterial.STREAM_CODEC, a plain registry "
+             "holder, no longer an EitherHolder."),
 ]
 
 

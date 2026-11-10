@@ -794,6 +794,44 @@ mod handlers {
     }
 
     #[test]
+    fn records_become_songs_from_1_21() {
+        use crate::codec::{
+            Shared,
+            registries::{self, Side},
+        };
+        let event = |data: i32| {
+            let mut writer = Writer::new();
+            writer
+                .i32(1010)
+                .position(Position { x: 1, y: 2, z: 3 })
+                .i32(data)
+                .bool(false);
+            writer.buf
+        };
+        let record = crate::data::version(766)
+            .expect_registry("item")
+            .id("music_disc_cat")
+            .unwrap();
+        // Before any registry data the vanilla song order applies.
+        let song =
+            registries::id_of(&Shared::new(767, 766), Side::Client, "jukebox_song", "cat").unwrap();
+        assert_ne!(record, song);
+        let out = Defaults::new(767, 766)
+            .clientbound(State::Play, "level_event", &event(record))
+            .unwrap();
+        assert_eq!(out[0].data, event(song));
+        let out = Defaults::new(766, 767)
+            .clientbound(State::Play, "level_event", &event(song))
+            .unwrap();
+        assert_eq!(out[0].data, event(record));
+        // An item that is no record stops the music.
+        let out = Defaults::new(767, 766)
+            .clientbound(State::Play, "level_event", &event(1))
+            .unwrap();
+        assert_eq!(&out[0].data[..4], &1011i32.to_be_bytes());
+    }
+
+    #[test]
     fn explosions_change_layout_without_particles_on_the_way_up() {
         let mut writer = Writer::new();
         writer

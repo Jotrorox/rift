@@ -1,9 +1,12 @@
 //! A 26.1 client on a 26.2 backend: backend packets are downgraded for the
 //! client and client packets upgraded for the backend.
-use super::{NEWER, OLDER, copy_profile};
+use super::{NEWER, OLDER, beds, copy_profile};
 use crate::{
     Direction, Packet, State,
-    codec::{HasShared, Shared},
+    codec::{
+        HasShared, Shared,
+        chunk::{self, model::Chunk, packets::read_position},
+    },
     routed_step,
     step::{Cx, RouteBuilder, Routes},
     steps::{Make, v1_21_11_to_26_1::join},
@@ -15,6 +18,8 @@ pub const STEP: Option<Make> = Some(|| Box::new(Down::new()));
 
 pub struct Down {
     shared: Shared,
+    /// Unpacked section data, reused between columns.
+    scratch: Vec<u32>,
 }
 
 impl HasShared for Down {
@@ -27,6 +32,7 @@ impl Down {
     fn new() -> Self {
         Self {
             shared: Shared::new(OLDER, NEWER),
+            scratch: Vec::new(),
         }
     }
 
@@ -39,6 +45,9 @@ impl Down {
                 .clientbound(Login, "login_finished", Self::login_finished)
                 .clientbound(Play, "login", Self::login)
                 .serverbound(Play, "spectator_action", Self::spectator_action)
+                .clientbound(Play, "level_chunk_with_light", Self::level_chunk)
+                .clientbound(Play, "block_update", Self::block_update)
+                .clientbound(Play, "section_blocks_update", Self::section_blocks_update)
                 .build()
         })
     }
@@ -62,6 +71,34 @@ impl Down {
         login.online_mode = None;
         cx.to_client(state, Packet::new(packet.id, login.to_bytes(OLDER)));
         Ok(())
+    }
+
+    /// The chunk codec's conversion, plus the block entities of beds.
+    fn level_chunk(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
+        let mut chunk = Chunk::read(&packet.data, NEWER, &self.shared.chunk.world)?;
+        chunk::packets::convert_chunk(&mut self.shared, &mut chunk)?;
+        beds::add_to_chunk(&mut chunk, &mut self.scratch)?;
+        cx.to_client(state, Packet::new(packet.id, chunk.write(OLDER)?));
+        Ok(())
+    }
+
+    fn block_update(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
+        let mut r = Reader::new(&packet.data);
+        let position = read_position(&mut r, NEWER)?;
+        let block = r.varint()?;
+        chunk::blocks::block_update(self, cx, state, packet)?;
+        beds::after_block_update(&mut self.shared, cx, state, position, block)
+    }
+
+    fn section_blocks_update(
+        &mut self,
+        cx: &mut Cx<'_>,
+        state: State,
+        packet: Packet,
+    ) -> io::Result<()> {
+        let body = packet.data.clone();
+        chunk::blocks::section_blocks_update(self, cx, state, packet)?;
+        beds::after_section_update(&mut self.shared, cx, state, &body, NEWER)
     }
 
     fn spectator_action(

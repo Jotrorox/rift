@@ -828,6 +828,32 @@ mod layouts {
             )
             .unwrap();
         assert_eq!(read(770, &outs[0], Click::read), click);
+        // A damaged sword hashes its damage as the 1.21.5 client would.
+        use crate::codec::item::components::{
+            Component, Value, hashed::hash_component, layouts::Layout,
+        };
+        let damage = Component {
+            kind: "damage",
+            value: Value::Int(5),
+        };
+        let hash = hash_component(&damage).unwrap();
+        let mut damaged = full.clone();
+        let mut stack = sword(769).unwrap();
+        stack.components.as_mut().unwrap().added.push(damage);
+        damaged.changed = vec![(36, ClickSlot::Full(Some(stack)))];
+        let outs = Defaults::new(769, 770)
+            .serverbound(
+                State::Play,
+                "container_click",
+                &body(|w| damaged.write(769, w)),
+            )
+            .unwrap();
+        let hashed = read(770, &outs[0], Click::read);
+        let damage_id = Layout::of(770).unwrap().id("damage").unwrap();
+        let ClickSlot::Hashed(Some(stack)) = &hashed.changed[0].1 else {
+            panic!("{hashed:?}");
+        };
+        assert_eq!(stack.components, vec![(damage_id, hash)]);
     }
 
     #[test]
@@ -1105,6 +1131,82 @@ mod layouts {
             .unwrap();
         let old = read(763, &outs[0], Advancements::read);
         assert_eq!(old.added[0].criteria, vec!["a".to_owned(), "b".to_owned()]);
+    }
+
+    #[test]
+    fn tag_displays_become_item_sets_in_26_3_and_back() {
+        use super::super::recipes::{BookAdd, BookEntry, IdSet, RecipeDisplay, SlotDisplay};
+        let item = |protocol: i32, name: &str| {
+            crate::data::version(protocol)
+                .expect_registry("item")
+                .id(name)
+                .unwrap()
+        };
+        let book = |ingredients: Vec<SlotDisplay>, protocol: i32| BookAdd {
+            entries: vec![BookEntry {
+                id: 7,
+                display: RecipeDisplay::Shapeless {
+                    ingredients,
+                    result: SlotDisplay::Item(item(protocol, "stick")),
+                    station: SlotDisplay::Item(item(protocol, "crafting_table")),
+                },
+                group: 0,
+                category: 0,
+                requirements: None,
+                flags: 0,
+            }],
+            replace: false,
+        };
+        let planks = || "minecraft:planks".to_owned();
+        let newer = book(
+            vec![
+                SlotDisplay::Items(IdSet::Tag(planks())),
+                SlotDisplay::Items(IdSet::Ids(vec![
+                    item(777, "oak_planks"),
+                    item(777, "birch_planks"),
+                ])),
+                SlotDisplay::Items(IdSet::Ids(vec![item(777, "oak_planks")])),
+            ],
+            777,
+        );
+        let older = book(
+            vec![
+                SlotDisplay::Tag(planks()),
+                SlotDisplay::Composite(vec![
+                    SlotDisplay::Item(item(776, "oak_planks")),
+                    SlotDisplay::Item(item(776, "birch_planks")),
+                ]),
+                SlotDisplay::Item(item(776, "oak_planks")),
+            ],
+            776,
+        );
+        let mut down = Defaults::new(776, 777);
+        let outs = down
+            .clientbound(
+                State::Play,
+                "recipe_book_add",
+                &body(|w| newer.write(777, w)),
+            )
+            .unwrap();
+        assert_eq!(read(776, &outs[0], BookAdd::read), older);
+        let mut up = Defaults::new(777, 776);
+        let outs = up
+            .clientbound(
+                State::Play,
+                "recipe_book_add",
+                &body(|w| older.write(776, w)),
+            )
+            .unwrap();
+        let mut expected = newer;
+        let RecipeDisplay::Shapeless { ingredients, .. } = &mut expected.entries[0].display else {
+            unreachable!()
+        };
+        ingredients[1] = SlotDisplay::Composite(vec![
+            SlotDisplay::Item(item(777, "oak_planks")),
+            SlotDisplay::Item(item(777, "birch_planks")),
+        ]);
+        ingredients[2] = SlotDisplay::Item(item(777, "oak_planks"));
+        assert_eq!(read(777, &outs[0], BookAdd::read), expected);
     }
 
     #[test]

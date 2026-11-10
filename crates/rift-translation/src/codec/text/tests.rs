@@ -226,6 +226,25 @@ fn nbt_encoding_from_1_20_3() {
         to_json_string(764, &args),
         r#"{"translate":"k","with":["5","6"]}"#
     );
+    // The official server's NbtOps writes numbers of one type as an array.
+    for with in [
+        Nbt::IntArray(vec![5, 6]),
+        Nbt::LongArray(vec![5, 6]),
+        Nbt::ByteArray(vec![5, 6]),
+    ] {
+        let args = from_nbt(
+            766,
+            &Nbt::Compound(crate::nbt::Compound(vec![
+                ("translate".into(), Nbt::String("k".into())),
+                ("with".into(), with),
+            ])),
+        )
+        .unwrap();
+        assert_eq!(
+            to_json_string(764, &args),
+            r#"{"translate":"k","with":["5","6"]}"#
+        );
+    }
     // A type field selects the content.
     let typed = from_nbt(
         765,

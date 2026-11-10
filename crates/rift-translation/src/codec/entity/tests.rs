@@ -836,6 +836,23 @@ fn dust_colours_become_ints_in_1_21_2() {
 }
 
 #[test]
+fn item_particles_cross_the_26_1_item_template() {
+    // Recorded diamond particles: 1.21.11 sends a stack (count, item 893,
+    // empty patch), 26.1 a template (item 894, count, empty patch).
+    let head = "00003ff8000000000000c04d80000000000040250000000000000000000000000000000000003f80000000000005";
+    let older = unhex(&format!("{head}2f01fd060000"));
+    let newer = unhex(&format!("{head}2ffe06010000"));
+    let down = Defaults::new(774, 775)
+        .clientbound(Phase::Play, "level_particles", &newer)
+        .unwrap();
+    assert_eq!(hex(&down[0].data), hex(&older));
+    let up = Defaults::new(775, 774)
+        .clientbound(Phase::Play, "level_particles", &older)
+        .unwrap();
+    assert_eq!(hex(&up[0].data), hex(&newer));
+}
+
+#[test]
 fn attributes_and_effects_follow_their_layouts() {
     // 1.16 namespaced and renamed attribute keys.
     let mut body = Writer::new();
@@ -881,6 +898,70 @@ fn attributes_and_effects_follow_their_layouts() {
     let mut expected = Writer::new();
     expected.varint(1).varint(0).varint(1).varint(600).u8(6);
     assert_eq!(out[0].data, expected.buf);
+}
+
+/// Cat variants are built in until 1.21.5 and synchronised from then on,
+/// in a different order: they map by name.
+#[test]
+fn cat_variants_follow_their_names_across_1_21_5() {
+    use crate::codec::registries::{self, Side};
+    let cat = |protocol: i32| {
+        data::version(protocol)
+            .expect_registry("entity_type")
+            .id("cat")
+            .unwrap()
+    };
+    let field = |protocol: i32| {
+        let tables = tables::tables(protocol);
+        let fields = tables.fields("cat").unwrap();
+        let index = fields
+            .iter()
+            .position(|field| field.key == "Cat.DATA_VARIANT_ID")
+            .unwrap();
+        (
+            index as u8,
+            tables.serializer_id(fields[index].kind).unwrap(),
+        )
+    };
+    let red_769 = data::version(769)
+        .expect_registry("cat_variant")
+        .id("red")
+        .unwrap();
+    // Before any registry data the vanilla order applies.
+    let red_770 =
+        registries::id_of(&Shared::new(769, 770), Side::Backend, "cat_variant", "red").unwrap();
+    assert_ne!(red_769, red_770);
+    let entity_data = |protocol: i32, variant: i32| {
+        let (index, serializer) = field(protocol);
+        let mut body = Writer::new();
+        body.varint(8)
+            .u8(index)
+            .varint(serializer)
+            .varint(variant)
+            .u8(0xff);
+        body.buf
+    };
+    let spawn = |protocol: i32| {
+        let mut body = Writer::new();
+        body.varint(8).uuid(1).varint(cat(protocol));
+        body.f64(0.0).f64(63.0).f64(0.0).i8(0).i8(0).i8(0).varint(0);
+        body.i16(0).i16(0).i16(0);
+        body.buf
+    };
+    let mut down = Defaults::new(769, 770);
+    down.clientbound(Phase::Play, "add_entity", &spawn(770))
+        .unwrap();
+    let out = down
+        .clientbound(Phase::Play, "set_entity_data", &entity_data(770, red_770))
+        .unwrap();
+    assert_eq!(out[0].data, entity_data(769, red_769));
+    let mut up = Defaults::new(770, 769);
+    up.clientbound(Phase::Play, "add_entity", &spawn(769))
+        .unwrap();
+    let out = up
+        .clientbound(Phase::Play, "set_entity_data", &entity_data(769, red_769))
+        .unwrap();
+    assert_eq!(out[0].data, entity_data(770, red_770));
 }
 
 #[test]

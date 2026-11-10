@@ -641,6 +641,17 @@ pub(super) struct DownBook {
     settings: Settings,
     /// Item tags by name, in 1.21.2 IDs, for tag slot displays.
     tags: HashMap<String, Vec<i32>>,
+    /// Book additions the client has not been told yet (see [`Self::flush`]).
+    pending: Option<Pending>,
+}
+
+/// Additions to the book since the client was last told.
+#[derive(Default)]
+struct Pending {
+    /// The book was replaced: the client gets all of it.
+    replace: bool,
+    /// Display IDs added since, when not replaced.
+    added: Vec<i32>,
 }
 
 /// Packets the down book sends the client for one backend packet.
@@ -719,9 +730,12 @@ impl DownBook {
         reader.finish()
     }
 
-    /// 1.21.2's `recipe_book_add`: rebuild the recipes, resend the list and
-    /// unlock them.
-    pub(super) fn add(&mut self, shared: &mut Shared, body: &[u8]) -> io::Result<DownOut> {
+    /// 1.21.2's `recipe_book_add`: rebuild the recipes and remember what
+    /// the client must be told. Servers send one packet per unlocked recipe
+    /// in bursts (hundreds when every advancement is granted) and a 1.21
+    /// client can only learn recipes in a whole new list, so the list goes
+    /// out once per burst, from [`Self::flush`].
+    pub(super) fn add(&mut self, shared: &mut Shared, body: &[u8]) -> io::Result<()> {
         let mut reader = Reader::new(body);
         let count = reader.count()?;
         let mut added = Vec::with_capacity(count);
@@ -738,10 +752,16 @@ impl DownBook {
         reader.finish()?;
         if replace {
             self.known.clear();
+            self.pending = Some(Pending {
+                replace: true,
+                added: Vec::new(),
+            });
         }
-        let mut names = Vec::with_capacity(added.len());
+        let pending = self.pending.get_or_insert_with(Pending::default);
         for (id, (recipe, display_len), flags, start) in added {
-            names.push(id);
+            if !pending.replace {
+                pending.added.push(id);
+            }
             self.known.insert(
                 id,
                 DownRecipe {
@@ -751,10 +771,23 @@ impl DownBook {
                 },
             );
         }
+        Ok(())
+    }
+
+    /// What the client has not been told about the book yet: the whole
+    /// recipe list and a 1.21 `recipe` body unlocking the additions.
+    pub(super) fn flush(&mut self) -> DownOut {
+        let Some(pending) = self.pending.take() else {
+            return DownOut::default();
+        };
         let mut book = Writer::new();
-        book.varint(if replace { STATE_INIT } else { STATE_ADD });
+        book.varint(if pending.replace {
+            STATE_INIT
+        } else {
+            STATE_ADD
+        });
         write_settings(&mut book, &self.settings);
-        if replace {
+        if pending.replace {
             book.varint(self.known.len() as i32);
             for id in self.known.keys() {
                 book.string(&format!("{RECIPE_PREFIX}{id}"));
@@ -769,15 +802,21 @@ impl DownBook {
                 book.string(&format!("{RECIPE_PREFIX}{id}"));
             }
         } else {
-            book.varint(names.len() as i32);
-            for id in names {
+            // Removed again before the flush: nothing to unlock.
+            let added: Vec<_> = pending
+                .added
+                .iter()
+                .filter(|id| self.known.contains_key(id))
+                .collect();
+            book.varint(added.len() as i32);
+            for id in added {
                 book.string(&format!("{RECIPE_PREFIX}{id}"));
             }
         }
-        Ok(DownOut {
+        DownOut {
             recipes: Some(self.all_recipes()),
             book: Some(book.into_inner()),
-        })
+        }
     }
 
     /// 1.21.2's `recipe_book_remove` as a 1.21 `recipe` body.

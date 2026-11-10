@@ -673,7 +673,16 @@ fn recorded_stacks_round_trip_and_convert() {
             };
             let out = write_stack(*to, Some(&there));
             assert_eq!(read_stack(*to, &out).as_ref(), Some(&there));
-            let back = convert_stack(*to, *protocol, &there).unwrap();
+            let mut back = convert_stack(*to, *protocol, &there).unwrap();
+            // An item the neighbour lacks went there as a stand-in, which
+            // stays itself on the way back.
+            let stand_in = step(*protocol, *to)
+                .mapping(Direction::Clientbound, "item")
+                .kind(stack.id)
+                == Some(crate::mapping::Kind::StandIn);
+            if stand_in {
+                back.id = stack.id;
+            }
             assert_eq!(
                 normalized(&back),
                 normalized(&stack),

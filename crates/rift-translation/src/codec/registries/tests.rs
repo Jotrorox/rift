@@ -223,6 +223,39 @@ fn every_vanilla_registry_converts_to_each_neighbour_in_both_directions() {
     }
 }
 
+/// Trim materials and patterns name items; one the receiver lacks makes a
+/// real client reject the whole registry (the 1.21.4 resin trim on a
+/// 1.21.3 client), so every converted entry names an item it has.
+#[test]
+fn converted_trims_name_items_the_receiver_has() {
+    for (older, newer) in pairs() {
+        for (from, to) in [(older, newer), (newer, older)] {
+            let Some(items) = crate::data::version(to).registry("item") else {
+                continue;
+            };
+            let converted = convert::registries(from, to, &defaults::registries(from)).unwrap();
+            for registry in &converted {
+                let key = match registry.name.as_str() {
+                    "trim_material" => "ingredient",
+                    "trim_pattern" => "template_item",
+                    _ => continue,
+                };
+                for entry in &registry.entries {
+                    let element = entry.element.as_ref().unwrap().as_compound().unwrap();
+                    if let Some(item) = element.get(key).and_then(Nbt::as_str) {
+                        assert!(
+                            items.id(crate::data::strip(item)).is_some(),
+                            "{from}->{to} {} {}: {item}",
+                            registry.name,
+                            entry.name
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn custom_entries_built_from_real_ones_satisfy_the_neighbours_schema() {
     for (older, newer) in pairs() {

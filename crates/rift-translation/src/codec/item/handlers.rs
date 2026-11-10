@@ -2,7 +2,7 @@
 use super::{
     ItemStack, Stack,
     advancements::Advancements,
-    components::Components,
+    components::{self, Components},
     convert,
     convert::{item_id, item_name, map_item},
     merchant::Offers,
@@ -862,6 +862,29 @@ fn convert_display(
             .registry("slot_display")
             .is_some_and(|registry| registry.id(display.kind()).is_some())
     };
+    // 26.3 names a tag or lists the items where 26.2 named a tag. The tag
+    // reaches the client under its name through the tag codec; a list
+    // becomes item displays, mapped below like any other.
+    display.visit(&mut |display| {
+        let replace = match display {
+            SlotDisplay::Tag(tag) if target >= 777 => {
+                Some(SlotDisplay::Items(recipes::IdSet::Tag(std::mem::take(tag))))
+            }
+            SlotDisplay::Items(recipes::IdSet::Tag(tag)) if target < 777 => {
+                Some(SlotDisplay::Tag(std::mem::take(tag)))
+            }
+            SlotDisplay::Items(recipes::IdSet::Ids(ids)) if target < 777 => Some(match &ids[..] {
+                [] => SlotDisplay::Empty,
+                [id] => SlotDisplay::Item(*id),
+                _ => SlotDisplay::Composite(ids.iter().map(|id| SlotDisplay::Item(*id)).collect()),
+            }),
+            _ => None,
+        };
+        if let Some(replace) = replace {
+            *display = replace;
+        }
+        Ok(())
+    })?;
     display.visit(&mut |display| {
         let replace = match display {
             _ if !has_kind(display) => Some(SlotDisplay::Empty),
@@ -878,7 +901,6 @@ fn convert_display(
                 map_id_set(shared, direction, set);
                 None
             }
-            SlotDisplay::Tag(_) if target >= 777 => Some(SlotDisplay::Empty),
             SlotDisplay::SmithingTrim { pattern, .. } => {
                 // The pattern changed from a display to a trim pattern in
                 // 1.21.5; neither tells the other.
@@ -1105,10 +1127,10 @@ fn hash(
     let mut stack = stack.clone();
     convert::stack(shared, direction, &mut stack)?;
     let target = shared.target(direction);
-    let Some(hashed) = super::components::hashed::from_stack(target, stack.as_ref())? else {
+    let Some(hashed) = components::hashed::from_stack(target, stack.as_ref())? else {
         return Ok(None);
     };
-    let layout = super::components::layouts::Layout::of(target)?;
+    let layout = components::layouts::Layout::of(target)?;
     let id = |kind: &str| {
         layout
             .id(kind)
