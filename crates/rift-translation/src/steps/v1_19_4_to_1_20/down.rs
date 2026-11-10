@@ -43,7 +43,7 @@ fn damage_types() -> &'static [DamageType] {
 }
 
 impl Down {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             shared: Shared::new(OLDER, NEWER),
             back_sign: None,

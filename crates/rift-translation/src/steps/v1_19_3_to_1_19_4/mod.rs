@@ -21,6 +21,8 @@
 //! Respawn already carries the "data to keep" flags in 1.19.3 and keeps its
 //! layout; serverbound packets do not change.
 mod down;
+#[cfg(test)]
+pub(super) mod harness;
 pub(super) mod play;
 pub(super) mod registries;
 mod up;

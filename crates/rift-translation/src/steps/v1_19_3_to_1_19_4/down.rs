@@ -28,7 +28,7 @@ impl HasShared for Down {
 }
 
 impl Down {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             shared: Shared::new(OLDER, NEWER),
             damage_types: Vec::new(),
