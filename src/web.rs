@@ -1306,7 +1306,7 @@ async fn rollback(
 }
 fn definition_values(config: &Config) -> Value {
     let server = |s: &rift::config::ManagedServer| {
-        json!({
+        let mut value = json!({
             "directory": s.directory,
             "command": s.command,
             "autostart": s.autostart,
@@ -1316,7 +1316,22 @@ fn definition_values(config: &Config) -> Value {
             "stop_timeout_ms": s.stop_timeout.as_millis(),
             "restart_delay_ms": s.restart_delay.as_millis(),
             "restart_retries": s.restart_retries,
-        })
+        });
+        // Present only when set, so a structured edit writes them back
+        // instead of dropping a server's environment or bus login.
+        if !s.environment.set.is_empty() {
+            value["env"] = json!(s.environment.set);
+        }
+        match &s.environment.inherit {
+            Some(names) if names.is_empty() => value["inherit_env"] = json!(false),
+            Some(names) => value["inherit_env"] = json!(names),
+            None => {}
+        }
+        if let Some(messaging) = &s.messaging {
+            value["messaging"] =
+                json!({"publish": messaging.publish, "subscribe": messaging.subscribe});
+        }
+        value
     };
     let groups: BTreeMap<_, _> = config
         .service_groups

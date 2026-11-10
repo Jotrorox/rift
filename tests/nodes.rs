@@ -37,6 +37,24 @@ fn node_server_helper() {
     let listener = TcpListener::bind(address.trim()).unwrap();
     listener.set_nonblocking(true).unwrap();
     println!("helper stdout");
+    // What a zero-configuration plugin would read; one line per start.
+    let variable = |name: &str| std::env::var(name).unwrap_or_default();
+    let mut record = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("bus-env")
+        .unwrap();
+    writeln!(
+        record,
+        "{}",
+        serde_json::json!({
+            "name": variable("RIFT_SERVER_NAME"),
+            "token": variable("RIFT_BUS_TOKEN"),
+            "address": variable("RIFT_BUS_ADDRESS"),
+            "cert": variable("RIFT_BUS_CERT"),
+        })
+    )
+    .unwrap();
     let stopping = Arc::new(AtomicBool::new(false));
     {
         let stopping = stopping.clone();
@@ -105,6 +123,7 @@ rift.config.messaging={{listen='127.0.0.1:0',certificate='c.pem',private_key='k.
 rift.config.nodes.node1={{address='127.0.0.1',memory_mb=4096,labels={{'games'}}}}
 rift.config.managed_servers.survival={{node='node1',directory='survival',
   command={{{program:?},'--exact','node_server_helper','--nocapture'}},
+  messaging={{preset='backend'}},
   start_timeout_ms=5000,stop_timeout_ms=2000,restart_delay_ms=100,restart_retries=2}}"
             ),
             "nodes.lua",
@@ -381,6 +400,7 @@ async fn agents_refuse_unlisted_programs_and_paths_outside_their_root() {
             directory: directory.into(),
             port: fixture.port,
             environment: Default::default(),
+            bus_certificate: None,
         })
     };
     let wait = Duration::from_secs(5);
@@ -751,4 +771,73 @@ fn agent_options_require_a_token_and_default_to_java() {
         assert!(agent::Options::parse(&args(extra)).is_err(), "{extra:?}");
     }
     let _ = std::io::stdout().flush();
+}
+
+/// A server on a node gets its own bus login in its start command: the agent
+/// writes the certificate and passes the token, which authenticates as that
+/// server and no other, also after the controller recovers a crash. The node
+/// never sees the key.
+#[tokio::test(flavor = "multi_thread")]
+async fn servers_on_a_node_start_with_their_own_bus_login() {
+    use rift::messaging::quic::DynamicIdentities;
+    let fixture = Fixture::new().await;
+    let agent = fixture.agent(None);
+    tokio::spawn(agent.clone().monitor());
+    let connection = fixture.connect(&agent).await;
+    eventually("node online", || fixture.nodes.online("node1")).await;
+    let logins = Arc::new(rift::instance_login::Logins::with_key([9; 32]));
+    logins.set_bus(rift::instance_login::Bus {
+        address: "10.0.0.2:7443".into(),
+        server_name: "rift.internal".into(),
+        certificate: "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n".into(),
+    });
+    let managed = fixture.managed();
+    managed.set_logins(logins.clone(), &fixture.config).unwrap();
+    managed.start("survival").await.unwrap();
+    let directory = fixture.root.join("agent/survival");
+    let records = || -> Vec<serde_json::Value> {
+        fs::read_to_string(directory.join("bus-env"))
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    };
+    eventually("the server started", || !records().is_empty()).await;
+    let first = &records()[0];
+    assert_eq!(first["name"], "survival");
+    assert_eq!(first["address"], "10.0.0.2:7443");
+    let token = first["token"].as_str().unwrap();
+    // Static managed servers have generation 0; instances count creations.
+    assert_eq!(token, logins.token("survival", 0));
+    assert_eq!(logins.authenticate(token).unwrap().name, "server.survival");
+    let cert = PathBuf::from(first["cert"].as_str().unwrap());
+    assert!(cert.is_absolute(), "{cert:?}");
+    assert_eq!(cert, directory.join(rift::instance_login::CERTIFICATE_FILE));
+    assert!(
+        fs::read_to_string(&cert)
+            .unwrap()
+            .contains("BEGIN CERTIFICATE")
+    );
+    assert!(
+        !fs::read_dir(fixture.root.join("agent"))
+            .unwrap()
+            .any(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("instance-key")
+            })
+    );
+    // The controller recovers a crash with another start command, which
+    // carries the token again.
+    fs::write(directory.join("crash"), "").unwrap();
+    eventually("recovered with its login", || records().len() >= 2).await;
+    assert_eq!(records()[1]["token"], token);
+    // Removing the login (the instance) makes the token useless.
+    logins.unregister("survival");
+    assert!(logins.authenticate(token).is_none());
+    managed.stop("survival").await.unwrap();
+    managed.shutdown().await;
+    connection.abort();
 }
