@@ -211,6 +211,10 @@ run for unbounded time outside the instruction budget) and `table.sort`.
 - `rift.clock()` returns seconds, with sub-millisecond precision, from a fixed
   point in the process's life. Subtract two readings to measure elapsed time.
 - `rift.time()` returns the current Unix time in whole seconds.
+- `rift.text` builds styled text: `rift.text.mini(markup, args)` and
+  `rift.text.legacy(text, marker)` return chat component tables, and
+  `to_legacy`, `plain`, `to_mini` and `escape` convert text. See
+  [styled text](text.md).
 - `rift.publish`, `rift.enabled` and `rift.servers` (callbacks only),
   `rift.store`, `rift.http` and `rift.players` (API v2 and v3 extension
   callbacks; `rift.players` also in `on_message` and `on_http`), and

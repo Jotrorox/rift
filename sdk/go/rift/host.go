@@ -97,6 +97,16 @@ func SendTitle(target string, t Title) (bool, error) {
 	}))
 }
 
+// SendTitleJSON shows a title whose text is JSON text components, such as
+// text builders (rift:plugin 0.1.3):
+//
+//	rift.SendTitleJSON(target, rift.TitleJSON{TitleJSON: rift.Mini("<gold>Welcome").JSON(), FadeIn: 10, Stay: 70, FadeOut: 20})
+func SendTitleJSON(target string, t TitleJSON) (bool, error) {
+	return unwrap(players.TitleJSON(target, types.TitleJSONSpec{
+		TitleJSON: t.TitleJSON, SubtitleJSON: lowerOptString(t.SubtitleJSON), FadeIn: t.FadeIn, Stay: t.Stay, FadeOut: t.FadeOut,
+	}))
+}
+
 // SetTabList sets a player's tab list header and footer (JSON text
 // components); both nil restores the configured tab list.
 func SetTabList(target string, headerJSON, footerJSON *string) (bool, error) {

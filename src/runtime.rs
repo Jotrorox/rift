@@ -13,10 +13,14 @@ use rift::{
     hooks::{ConnectionInfo, RouteDecision, Router},
     messaging::{Broker, BrokerConfig, Stream},
     players::PlayerRegistry,
-    protocol::{Codec, Handshake, NextState},
+    protocol::{Codec, Handshake, NextState, ProtocolVersion},
     routing::Routes,
     server_list::{Document, Ping},
     session::{Session, SessionEvent},
+    text::{
+        Profile,
+        catalog::{self, Notice},
+    },
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -77,6 +81,7 @@ impl Snapshot {
 
     /// The first snapshot, using the process-wide permission authority.
     fn first(config: Config, permissions: Arc<rift::permissions::Authority>) -> io::Result<Self> {
+        catalog::install(config.text.clone());
         Self::build(config, None, Some(permissions))
     }
 
@@ -355,13 +360,17 @@ pub async fn handle(
             let reason = if maintenance {
                 metrics.access_rejected.inc();
                 event.reject("maintenance", "network is in maintenance mode");
-                "The network is under maintenance. Please try again later."
+                Notice::LoginMaintenance
             } else {
                 metrics.login_rejected.inc();
                 event.reject("login_rate_limited", "login rate limit exceeded");
-                "Too many login attempts. Please wait before reconnecting."
+                Notice::LoginRateLimited
             };
-            let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect(reason)).await;
+            let _ = timeout(
+                HANDSHAKE_TIMEOUT,
+                session.disconnect_text(&catalog::notice(reason)),
+            )
+            .await;
             return Ok((session.client.io.sent, session.client.io.received));
         }
     }
@@ -395,7 +404,7 @@ pub async fn handle(
                     session.handshake.protocol,
                     0,
                     snapshot.config.limits.max_connections as u64,
-                    "No server is configured for this hostname.",
+                    catalog::notice(Notice::StatusUnknownHost),
                 );
                 event.stage = "on_status";
                 let document = owned_status(
@@ -409,12 +418,12 @@ pub async fn handle(
                 .await
                 .unwrap_or(default);
                 event.stage = "status_response";
-                let response = document.packet()?;
+                let response = document.packet(status_profile(&session.handshake))?;
                 timeout(HANDSHAKE_TIMEOUT, session.respond_status(&response)).await??;
             } else {
                 let _ = timeout(
                     HANDSHAKE_TIMEOUT,
-                    session.disconnect("No server is configured for this hostname."),
+                    session.disconnect_text(&catalog::notice(Notice::LoginUnknownHost)),
                 )
                 .await;
             }
@@ -436,11 +445,11 @@ pub async fn handle(
             session.handshake.protocol,
             metrics.players.get(),
             snapshot.config.limits.max_connections as u64,
-            if maintenance {
-                "The network is under maintenance."
+            catalog::notice(if maintenance {
+                Notice::StatusMaintenance
             } else {
-                "Rift"
-            },
+                Notice::StatusDefault
+            }),
         );
         event.stage = "on_status";
         let owned = owned_status(
@@ -452,7 +461,10 @@ pub async fn handle(
             event,
         )
         .await;
-        let mut response = owned.as_ref().unwrap_or(&default).packet()?;
+        let mut response = owned
+            .as_ref()
+            .unwrap_or(&default)
+            .packet(status_profile(&session.handshake))?;
         if let Some(settings) = snapshot
             .config
             .status_cache
@@ -515,9 +527,9 @@ pub async fn handle(
                         session.handshake.protocol,
                         0,
                         snapshot.config.limits.max_connections as u64,
-                        "The server is currently unavailable. Please try again later.",
+                        catalog::notice(Notice::StatusUnavailable),
                     )
-                    .packet()?;
+                    .packet(status_profile(&session.handshake))?;
                     // Connection failures have per-attempt diagnostics. Reads and
                     // timeouts are also reported, while the client gets a pong.
                     if !matches!(event.stage, "connect" | "dns") {
@@ -531,13 +543,17 @@ pub async fn handle(
         timeout(HANDSHAKE_TIMEOUT, session.respond_status(&response)).await??;
     } else {
         if let Err(error) = session.version() {
-            let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect(&error.to_string())).await;
+            let _ = timeout(
+                HANDSHAKE_TIMEOUT,
+                session.disconnect_text(&rift::text::reason(&error)),
+            )
+            .await;
             return Err(error);
         }
         if snapshot.authenticator.is_some() && session.handshake.protocol < 761 {
-            let reason = "Online authentication with Velocity forwarding requires Minecraft 1.19.3 or newer.";
-            let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect(reason)).await;
-            return Err(io::Error::new(io::ErrorKind::Unsupported, reason));
+            let reason = catalog::notice(Notice::LoginOnlineModeVersion);
+            let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect_text(&reason)).await;
+            return Err(rift::text::error(io::ErrorKind::Unsupported, reason));
         }
         let network_configured = snapshot.config.network != Default::default()
             || snapshot.config.player_hooks()
@@ -569,7 +585,7 @@ pub async fn handle(
                     };
                     let _ = timeout(
                         HANDSHAKE_TIMEOUT,
-                        session.disconnect("Invalid or missing login start."),
+                        session.disconnect_text(&catalog::notice(Notice::LoginInvalidStart)),
                     )
                     .await;
                     return Err(error);
@@ -590,13 +606,17 @@ pub async fn handle(
             .await;
             if let Err(error) = result.map_err(io::Error::from).and_then(|result| result) {
                 let reason = if error.kind() == io::ErrorKind::PermissionDenied {
-                    "Unable to verify your Minecraft account. Please sign in again."
+                    Notice::LoginAuthDenied
                 } else if error.kind() == io::ErrorKind::InvalidData {
-                    "Invalid authentication response. Please reconnect."
+                    Notice::LoginAuthInvalid
                 } else {
-                    "Minecraft authentication is unavailable or timed out. Please try again later."
+                    Notice::LoginAuthUnavailable
                 };
-                let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect(reason)).await;
+                let _ = timeout(
+                    HANDSHAKE_TIMEOUT,
+                    session.disconnect_text(&catalog::notice(reason)),
+                )
+                .await;
                 return Err(error);
             }
             login_name = session.authenticated_profile().unwrap().name.clone();
@@ -606,9 +626,9 @@ pub async fn handle(
         let mut extension_selection = None;
         if snapshot.config.player_hooks() {
             if !session.switch_supported() {
-                let reason = "Extensions v1 requires Minecraft 1.19.3–26.3.";
-                let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect(reason)).await;
-                return Err(io::Error::new(io::ErrorKind::Unsupported, reason));
+                let reason = catalog::notice(Notice::LoginExtensionsVersion);
+                let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect_text(&reason)).await;
+                return Err(rift::text::error(io::ErrorKind::Unsupported, reason));
             }
             let mut context = rift::extensions::Context::authenticated(
                 event.id(),
@@ -639,7 +659,7 @@ pub async fn handle(
                     let reason = if error.kind() == io::ErrorKind::PermissionDenied {
                         rift::text::reason(&error)
                     } else {
-                        "Login extension failed. Please try again later.".into()
+                        catalog::notice(Notice::LoginExtensionFailed)
                     };
                     let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect_text(&reason)).await;
                     return Err(error);
@@ -659,15 +679,15 @@ pub async fn handle(
                     .filter(|name| snapshot.config.can_access(name, &login_name))
                     .collect())
             } else {
-                Err(io::Error::new(
+                Err(rift::text::notice_error(
                     io::ErrorKind::PermissionDenied,
-                    "You do not have access to this server.",
+                    Notice::LoginNoAccess,
                 ))
             }
         } else if unmatched {
-            Err(io::Error::new(
+            Err(rift::text::notice_error(
                 io::ErrorKind::PermissionDenied,
-                "No server is configured for this hostname.",
+                Notice::LoginUnknownHost,
             ))
         } else {
             network.initial_candidates(&primary, use_initial, &login_name)
@@ -676,7 +696,11 @@ pub async fn handle(
             Ok(candidates) => candidates,
             Err(error) => {
                 event.reject("access_denied", &error.to_string());
-                let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect(&error.to_string())).await;
+                let _ = timeout(
+                    HANDSHAKE_TIMEOUT,
+                    session.disconnect_text(&rift::text::reason(&error)),
+                )
+                .await;
                 return Err(error);
             }
         };
@@ -687,8 +711,11 @@ pub async fn handle(
             match snapshot.players.reserve_name(&login_name) {
                 Ok(reservation) => Some(reservation),
                 Err(error) => {
-                    let _ =
-                        timeout(HANDSHAKE_TIMEOUT, session.disconnect(&error.to_string())).await;
+                    let _ = timeout(
+                        HANDSHAKE_TIMEOUT,
+                        session.disconnect_text(&rift::text::reason(&error)),
+                    )
+                    .await;
                     return Err(error);
                 }
             }
@@ -704,8 +731,7 @@ pub async fn handle(
             Err(error) => {
                 let _ = timeout(
                     HANDSHAKE_TIMEOUT,
-                    session
-                        .disconnect("The server is currently unavailable. Please try again later."),
+                    session.disconnect_text(&catalog::notice(Notice::LoginUnavailable)),
                 )
                 .await;
                 return Err(error);
@@ -822,12 +848,12 @@ pub async fn handle(
                                 Err(error) => {
                                     session.extension.as_ref().unwrap().leave_queue();
                                     if session.switch_in_progress() || session.backend().is_none() { return Err(error); }
-                                    timeout(HANDSHAKE_TIMEOUT, session.send_system_message(&format!("Queue transfer failed: {error}"))).await??;
+                                    timeout(HANDSHAKE_TIMEOUT, session.send_text(&catalog::notice_with(Notice::QueueTransferFailed, &rift::text::Args::new().component("reason", rift::text::reason(&error).for_client(Profile::UNKNOWN).into_owned())))).await??;
                                 }
                             }
                         }
                         Ok(None) => {},
-                        Err(error) => { timeout(HANDSHAKE_TIMEOUT, session.send_system_message(&error.to_string())).await??; }
+                        Err(error) => { timeout(HANDSHAKE_TIMEOUT, session.send_text(&rift::text::reason(&error))).await??; }
                     }
                     continue;
                 }
@@ -886,7 +912,11 @@ pub async fn handle(
                         PlayerAction::Message(text) => timeout(HANDSHAKE_TIMEOUT, session.send_text(&text)).await??,
                         PlayerAction::ActionBar(text) => timeout(HANDSHAKE_TIMEOUT, session.send_action_bar_text(&text)).await??,
                         PlayerAction::Title { title, subtitle, times } => {
-                            timeout(HANDSHAKE_TIMEOUT, session.send_title(&title, subtitle.as_deref(), times)).await??;
+                            // A client that cannot show titles keeps its session.
+                            match timeout(HANDSHAKE_TIMEOUT, session.send_title(title.as_ref(), subtitle.as_ref(), times)).await? {
+                                Err(error) if error.kind() == io::ErrorKind::Unsupported => {}
+                                result => result?,
+                            }
                         }
                         PlayerAction::Kick(reason) => {
                             let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect_text(&reason)).await;
@@ -1094,7 +1124,9 @@ pub async fn handle(
                             Err(error) => {
                                 let _ = timeout(
                                     HANDSHAKE_TIMEOUT,
-                                    session.disconnect("This player is already connected."),
+                                    session.disconnect_text(&catalog::notice(
+                                        Notice::LoginAlreadyConnected,
+                                    )),
                                 )
                                 .await;
                                 return Err(error);
@@ -1324,8 +1356,7 @@ pub async fn handle(
                                 let reason = if error.kind() == io::ErrorKind::PermissionDenied {
                                     rift::text::reason(&error)
                                 } else {
-                                    "The server connection was lost and no fallback was available."
-                                        .into()
+                                    catalog::notice(Notice::ConnectionLostNoFallback)
                                 };
                                 let _ =
                                     timeout(HANDSHAKE_TIMEOUT, session.disconnect_text(&reason))
@@ -1336,7 +1367,7 @@ pub async fn handle(
                     }
                     timeout(
                         HANDSHAKE_TIMEOUT,
-                        session.disconnect("The server connection was lost. Please reconnect."),
+                        session.disconnect_text(&catalog::notice(Notice::ConnectionLost)),
                     )
                     .await??;
                     break;
@@ -1348,11 +1379,11 @@ pub async fn handle(
                             reply.send(Err(format!("transfer failed; session closed: {error}")));
                     }
                     let reason = if error.kind() == io::ErrorKind::Unsupported {
-                        error.to_string()
+                        rift::text::reason(&error)
                     } else {
-                        "The server connection failed. Please reconnect.".to_owned()
+                        catalog::notice(Notice::ConnectionFailed)
                     };
-                    let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect(&reason)).await;
+                    let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect_text(&reason)).await;
                     return Err(error);
                 }
             }
@@ -1405,7 +1436,7 @@ async fn settle_switch<C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
     if result.is_err() {
         let _ = timeout(
             HANDSHAKE_TIMEOUT,
-            session.disconnect("The server switch could not be completed."),
+            session.disconnect_text(&catalog::notice(Notice::SwitchIncomplete)),
         )
         .await;
     }
@@ -1537,6 +1568,12 @@ async fn proxied_client(
     Ok(true)
 }
 
+/// How the pinging client reads text; an unknown protocol gets components
+/// as written.
+fn status_profile(handshake: &Handshake) -> Profile {
+    ProtocolVersion::new(handshake.protocol).ok().into()
+}
+
 /// Make `next` visible to new connections, in-flight sessions and health checks.
 async fn publish(
     snapshot: &mut Arc<Snapshot>,
@@ -1547,6 +1584,7 @@ async fn publish(
 ) {
     snapshot.health.retire();
     *snapshot = next;
+    catalog::install(snapshot.config.text.clone());
     snapshot.extensions.update_destinations(&snapshot.config);
     *snapshot.live.lock().unwrap() = Arc::downgrade(snapshot);
     current.send_replace(snapshot.clone());

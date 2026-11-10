@@ -63,3 +63,12 @@ func lower_OptionBossBarSpec(v cm.Option[BossBarSpec]) (f0 uint32, f1 *uint8, f2
 	}
 	return
 }
+
+func lower_TitleJSONSpec(v types.TitleJSONSpec) (f0 *uint8, f1 uint32, f2 uint32, f3 *uint8, f4 uint32, f5 uint32, f6 uint32, f7 uint32) {
+	f0, f1 = cm.LowerString(v.TitleJSON)
+	f2, f3, f4 = lower_OptionString(v.SubtitleJSON)
+	f5 = (uint32)(v.FadeIn)
+	f6 = (uint32)(v.Stay)
+	f7 = (uint32)(v.FadeOut)
+	return
+}

@@ -102,13 +102,15 @@ pub enum Tone {
 }
 
 impl Tone {
-    fn color(self) -> Option<&'static str> {
+    /// The theme style that shows this tone: `heading`, `good`, `bad`,
+    /// `muted` or `plain` (see `text.theme` in the configuration).
+    pub fn style(self) -> &'static str {
         match self {
-            Self::Plain => None,
-            Self::Heading => Some("gold"),
-            Self::Good => Some("green"),
-            Self::Bad => Some("red"),
-            Self::Muted => Some("gray"),
+            Self::Plain => "plain",
+            Self::Heading => "heading",
+            Self::Good => "good",
+            Self::Bad => "bad",
+            Self::Muted => "muted",
         }
     }
 }
@@ -174,18 +176,25 @@ impl Output {
         text
     }
 
-    /// Adventure component JSON to show in game.
+    /// Adventure component JSON to show in game, styled by the theme in
+    /// effect.
     pub fn component(&self) -> Value {
+        self.component_with(&crate::text::catalog::theme())
+    }
+
+    /// [`Output::component`] with `styles` for the tones.
+    pub fn component_with(&self, styles: &crate::text::Styles) -> Value {
         let mut extra = Vec::with_capacity(self.lines.len() * 2);
         for (index, line) in self.lines.iter().enumerate() {
             if index > 0 {
                 extra.push(json!({"text": "\n"}));
             }
-            let mut part = json!({"text": line.text});
-            if let Some(color) = line.tone.color() {
-                part["color"] = color.into();
+            let mut part = serde_json::Map::new();
+            part.insert("text".into(), line.text.clone().into());
+            if let Some(style) = styles.get(line.tone.style()) {
+                style.write(&mut part);
             }
-            extra.push(part);
+            extra.push(Value::Object(part));
         }
         if extra.is_empty() {
             return json!({"text": ""});

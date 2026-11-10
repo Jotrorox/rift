@@ -17,10 +17,12 @@
 ///   new types and new interfaces, never a changed type or a new case in an
 ///   existing enum or variant. Wasmtime matches `@0.1.x` names with each
 ///   other, so 0.1.1 adds the optional `dialogs` export and the dialog host
-///   functions, and 0.1.2 the optional `decisions` export and the rich text
-///   host functions, without breaking components built against 0.1.0.
+///   functions, 0.1.2 the optional `decisions` export and the rich text
+///   host functions, and 0.1.3 `players.title-json` and the optional
+///   `styled` export (rich suggestion tooltips and server-list text),
+///   without breaking components built against 0.1.0.
 /// - Breaking changes move to 1.0.
-package rift:plugin@0.1.2;
+package rift:plugin@0.1.3;
 
 interface types {
     /// Log severity.
@@ -127,6 +129,15 @@ interface types {
         tooltip: option<string>,
     }
 
+    /// `suggestion` with a rich tooltip (since 0.1.3), the answer of the
+    /// `styled` export. `tooltip-json` is a JSON text component (including
+    /// the `mini` and `legacy` authoring objects, see docs/text.md) or text
+    /// shown as written; empty means no tooltip.
+    record rich-suggestion {
+        text: string,
+        tooltip-json: option<string>,
+    }
+
     /// A server-list ping, before any backend contact.
     record ping {
         listener: string,
@@ -149,6 +160,22 @@ interface types {
         online: option<u32>,
         max-players: option<u32>,
         sample: option<list<string>>,
+        /// A `data:image/png;base64,...` URI.
+        favicon: option<string>,
+    }
+
+    /// `status-override` with rich version and player-sample text (since
+    /// 0.1.3), the answer of the `styled` export. `version-json` and each
+    /// `sample-json` line are JSON text components (including the `mini`
+    /// and `legacy` authoring objects) or text shown as written; clients
+    /// show them as `§` codes.
+    record rich-status-override {
+        motd-json: option<string>,
+        version-json: option<string>,
+        protocol: option<s32>,
+        online: option<u32>,
+        max-players: option<u32>,
+        sample-json: option<list<string>>,
         /// A `data:image/png;base64,...` URI.
         favicon: option<string>,
     }
@@ -259,6 +286,18 @@ interface types {
         fade-out: s32,
     }
 
+    /// `title-spec` with rich text (since 0.1.3); times are ticks. Both are
+    /// JSON text components (including the `mini` and `legacy` authoring
+    /// objects) or text shown as written. An empty `title-json` shows only
+    /// the subtitle.
+    record title-json-spec {
+        title-json: string,
+        subtitle-json: option<string>,
+        fade-in: s32,
+        stay: s32,
+        fade-out: s32,
+    }
+
     /// A click on a plugin action of a dialog this plugin showed with
     /// `players.dialog` (since 0.1.1).
     record dialog-response {
@@ -281,7 +320,7 @@ interface types {
 
 /// The joined players. `target` is a name, a UUID or a connection id.
 interface players {
-    use types.{player-info, title-spec, boss-bar-spec};
+    use types.{player-info, title-spec, title-json-spec, boss-bar-spec};
 
     /// Players, optionally only those on one server or service group.
     %list: func(server: option<string>) -> result<list<player-info>, string>;
@@ -320,6 +359,8 @@ interface players {
     action-bar-json: func(target: string, text-json: string) -> result<bool, string>;
     kick-json: func(target: string, reason-json: string) -> result<bool, string>;
     broadcast-json: func(text-json: string) -> result<u32, string>;
+    /// `title` with JSON text components (since 0.1.3).
+    title-json: func(target: string, title: title-json-spec) -> result<bool, string>;
 }
 
 /// The durable key-value store. Namespaces are prefixed with
@@ -462,6 +503,18 @@ interface decisions {
     command: func(ctx: context) -> decision;
 }
 
+/// The `suggest` and `status` hooks answering with rich text (since 0.1.3).
+/// Optional: for a component that exports it, the host calls these instead
+/// of the `handler` functions of the same names, so components built against
+/// 0.1.0 to 0.1.2 still load. Deadlines and failure policies are those of the
+/// hooks.
+interface styled {
+    use types.{context, rich-suggestion, ping, rich-status-override};
+
+    suggest: func(ctx: context) -> list<rich-suggestion>;
+    status: func(ping: ping) -> option<rich-status-override>;
+}
+
 /// Every import and the exports every component has, without WASI: what the
 /// host requires. Exports added in later 0.1 releases are looked up
 /// separately.
@@ -487,11 +540,16 @@ world optional-decisions {
     export decisions;
 }
 
+world optional-styled {
+    export styled;
+}
+
 /// Imports and exports without WASI; the host links WASI separately.
 world core {
     include base;
     export dialogs;
     export decisions;
+    export styled;
 }
 
 /// The world guests build against. TinyGo's `wasip2` target expects the

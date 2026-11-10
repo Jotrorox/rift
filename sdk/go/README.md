@@ -1,6 +1,6 @@
 # Rift Go plugin SDK
 
-Write Rift WebAssembly plugins in Go against the `rift:plugin@0.1.2` contract
+Write Rift WebAssembly plugins in Go against the `rift:plugin@0.1.3` contract
 in [`wit/rift-plugin.wit`](../../wit/rift-plugin.wit).
 
 Module: `github.com/Jotrorox/rift/sdk/go`
@@ -104,6 +104,22 @@ one).
   `encoding/json`. Convenient, but `encoding/json` adds roughly 850 KB to a
   TinyGo build (hello-go is 135 KB with `ConfigString`, about 1 MB with
   `DecodeConfig`).
+
+### Rich text
+
+`rift.Mini` (markup, with `Arg`/`ArgComponent`), `rift.Legacy` (`&` codes)
+and `rift.Component` (fields, click and hover events, children) write the JSON
+the `JSON` functions take, escaped and without `encoding/json`:
+
+```go
+msg := rift.Mini("<gold>Hi <player>!").Arg("player", ctx.Name)
+rift.SendMessageJSON(ctx.UUID, msg.JSON())
+```
+
+`rift.SendTitleJSON` shows a title, and `rift.OnRichSuggest`/`rift.OnRichStatus`
+answer with rich tooltips and server-list text (rift:plugin 0.1.3). A bare
+string is never markup. See [Go plugins](../../docs/plugins-go.md#rich-text-builders)
+and [Text and markup](../../docs/text.md).
 
 ### Size
 
