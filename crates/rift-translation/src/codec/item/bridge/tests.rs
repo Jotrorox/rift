@@ -997,3 +997,24 @@ fn stacks_inside_entity_and_block_entity_data_change_format() {
         &jukebox
     ));
 }
+
+#[test]
+fn enchantments_1_20_5_cannot_hold_come_back() {
+    for snbt in [
+        "{Enchantments:[{id:\"plugin:soulbound\",lvl:1s},{id:\"minecraft:sharpness\",lvl:2s}]}",
+        "{Enchantments:[{id:\"minecraft:sharpness\",lvl:1000s}]}",
+        "{Enchantments:[{id:\"plugin:soulbound\",lvl:1s}],HideFlags:1}",
+        "{Enchantments:[{id:\"minecraft:sharpness\",lvl:2s},{id:\"minecraft:sharpness\",lvl:3s}]}",
+    ] {
+        let stack = old_stack("stick", snbt);
+        let there = up(&stack);
+        let patch = components_of(&there);
+        assert!(
+            patch.get("enchantments").is_some()
+                || patch.get("enchantment_glint_override").is_some(),
+            "{snbt}: {patch:?}"
+        );
+        let back = down_serverbound(&there.unwrap()).unwrap();
+        assert!(same_tag_meaning(&back, &stack), "{snbt}: {back:?}");
+    }
+}
