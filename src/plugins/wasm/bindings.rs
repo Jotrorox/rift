@@ -1,4 +1,4 @@
-//! Host bindings for `rift:plugin@0.1.2`: generated types and traits, the
+//! Host bindings for `rift:plugin@0.1.3`: generated types and traits, the
 //! trait implementations that forward every import to
 //! [`Services`](crate::plugins::services::Services), and conversions between
 //! the generated types and the engine-neutral [`api`] types. WASI is linked
@@ -380,6 +380,10 @@ impl players::Host for State {
     fn broadcast_json(&mut self, text_json: String) -> Result<u32, String> {
         self.services.players().broadcast_json(&text_json)
     }
+
+    fn visible_to(&mut self, target: String) -> Result<Option<String>, String> {
+        self.services.players().visible_to(&target)
+    }
 }
 
 impl store::Host for State {
@@ -431,6 +435,29 @@ impl permissions::Host for State {
 
     fn list_groups(&mut self) -> String {
         self.services.permissions().list_groups()
+    }
+
+    fn meta(&mut self, uuid: String, key: String) -> Option<String> {
+        self.services.permissions().meta_value(&uuid, &key)
+    }
+
+    fn set_meta(
+        &mut self,
+        uuid: String,
+        key: String,
+        value: Option<String>,
+        contexts_json: Option<String>,
+        expires_at: Option<u64>,
+    ) -> Result<bool, String> {
+        let contexts = match contexts_json {
+            None => rift_permissions::ContextSet::new(),
+            Some(json) => {
+                serde_json::from_str(&json).map_err(|error| format!("contexts-json: {error}"))?
+            }
+        };
+        self.services
+            .permissions()
+            .set_meta(&uuid, &key, value.as_deref(), contexts, expires_at)
     }
 }
 

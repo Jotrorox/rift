@@ -467,6 +467,9 @@ pub(super) fn render(
         .map(|value| substitute(value))
         .collect();
     server.directory = substitute(&server.directory.to_string_lossy()).into();
+    for value in server.environment.set.values_mut() {
+        *value = substitute(value);
+    }
     server
 }
 
@@ -754,6 +757,93 @@ mod tests {
             )),
             "scaling.lua",
         )
+    }
+
+    #[test]
+    fn instance_environment_expands_placeholders_and_rejects_bad_names() {
+        let source = group_source(
+            "directory='servers/{name}',command={'java'},port_range={25600,25602},env={DB_PASSWORD='hunter2',SERVER='{name}@{group}:{port}',HEAP=2048},inherit_env={'PATH','HOME'}",
+        );
+        let mut config = Config::from_lua(&source, "env.lua").unwrap();
+        config.add_instance("lobby", "lobby-2", 25601).unwrap();
+        let environment = &config.managed_servers["lobby-2"].environment;
+        assert_eq!(environment.set["SERVER"], "lobby-2@lobby:25601");
+        assert_eq!(environment.set["DB_PASSWORD"], "hunter2");
+        assert_eq!(environment.set["HEAP"], "2048");
+        assert_eq!(
+            environment.inherit,
+            Some(["HOME".to_owned(), "PATH".to_owned()].into())
+        );
+        config.validate().unwrap();
+        let closed = group_source(
+            "directory='servers/{name}',command={'java'},port_range={25600,25602},inherit_env=false",
+        );
+        let config = Config::from_lua(&closed, "closed.lua").unwrap();
+        assert_eq!(
+            config.service_groups["lobby"].server.environment.inherit,
+            Some(BTreeSet::new())
+        );
+        for (definition, message) in [
+            ("env={['A-B']='x'}", "is not a variable name"),
+            ("inherit_env={'2X'}", "is not a variable name"),
+            ("inherit_env='PATH'", "expected false or a list"),
+            ("env='x'", "expected a table"),
+        ] {
+            let source = group_source(&format!(
+                "directory='servers/{{name}}',command={{'java'}},port_range={{25600,25602}},{definition}"
+            ));
+            let error = Config::from_lua(&source, "bad.lua")
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("service_groups.lobby"), "{error}");
+            assert!(error.contains(message), "{definition}: {error}");
+        }
+    }
+
+    #[test]
+    fn isolation_takes_a_mode_or_a_table_with_extra_paths() {
+        let parse = |definition: &str| {
+            Config::from_lua(
+                &group_source(&format!(
+                    "directory='servers/{{name}}',command={{'java'}},port_range={{25600,25602}},{definition}"
+                )),
+                "isolation.lua",
+            )
+            .map(|config| config.service_groups["lobby"].server.isolation.clone())
+        };
+        use crate::config::IsolationMode;
+        assert_eq!(parse("").unwrap().mode, IsolationMode::Off);
+        assert_eq!(
+            parse("isolation='required'").unwrap().mode,
+            IsolationMode::Required
+        );
+        let isolation = parse("isolation={read={'/srv/maps'},write={'shared'}}").unwrap();
+        assert_eq!(isolation.mode, IsolationMode::Landlock);
+        // Absolute in the host's own terms (Windows adds a drive).
+        assert_eq!(isolation.read, [std::path::absolute("/srv/maps").unwrap()]);
+        assert!(isolation.write[0].is_absolute() && isolation.write[0].ends_with("shared"));
+        for (bad, message) in [
+            ("isolation='strict'", "expected \"off\""),
+            ("isolation={mode='landlock',extra=1}", "isolation"),
+            ("isolation=5", "expected a mode or a table"),
+        ] {
+            let error = parse(bad).unwrap_err().to_string();
+            assert!(error.contains(message), "{bad}: {error}");
+        }
+    }
+
+    #[test]
+    fn inherit_env_cannot_name_rifts_own_secret() {
+        let source = "return { listeners={public='127.0.0.1:25565'}, backends={}, routes={public='lobby'}, \
+            admin={listen='127.0.0.1:0', token_env='ADMIN_TOKEN', permissions={'status'}}, \
+            service_groups={lobby={directory='servers/{name}',command={'java'},port_range={25600,25602},inherit_env={'PATH','ADMIN_TOKEN'}}} }";
+        let error = Config::from_lua(source, "secret.lua")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("service_groups.lobby.inherit_env: ADMIN_TOKEN holds Rift's own secret (admin.token_env)"),
+            "{error}"
+        );
     }
 
     #[test]

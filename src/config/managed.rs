@@ -26,6 +26,265 @@ pub struct ManagedServer {
     /// The `rift node` agent running this server; `None` runs it on this host.
     /// Remote directories are relative to the agent's `--root`.
     pub node: Option<String>,
+    /// What the process inherits from Rift's environment and what it adds.
+    pub environment: ProcessEnvironment,
+    /// The bus login Rift issues this server (see [`crate::instance_login`]);
+    /// `None` issues none.
+    pub messaging: Option<InstanceMessaging>,
+    /// Whether the process is confined to its own directory.
+    pub isolation: Isolation,
+}
+
+/// How a managed server's process is confined; see
+/// [`crate::managed::landlock`] for what a confined server may use.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum IsolationMode {
+    /// Unconfined, as Rift's user, with Rift's view of the filesystem.
+    #[default]
+    Off,
+    /// Confined with Landlock where the kernel offers it; elsewhere the
+    /// server runs unconfined and Rift logs why.
+    Landlock,
+    /// Confined with Landlock, or not started at all.
+    Required,
+}
+
+impl IsolationMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Landlock => "landlock",
+            Self::Required => "required",
+        }
+    }
+}
+
+/// `isolation = "landlock"`, or `{ mode = "landlock", read = {...}, write = {...} }`
+/// with extra paths a confined server may read or write.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Isolation {
+    pub mode: IsolationMode,
+    pub read: Vec<PathBuf>,
+    pub write: Vec<PathBuf>,
+}
+
+impl Isolation {
+    fn parse(values: &Table, path: &str, base: &Path, remote: bool) -> Result<Self, String> {
+        let path = format!("{path}.isolation");
+        let mode = |value: &str| match value {
+            "off" => Ok(IsolationMode::Off),
+            "landlock" => Ok(IsolationMode::Landlock),
+            "required" => Ok(IsolationMode::Required),
+            _ => Err(format!(
+                "{path}: expected \"off\", \"landlock\" or \"required\""
+            )),
+        };
+        match values
+            .raw_get::<Value>("isolation")
+            .map_err(|e| e.to_string())?
+        {
+            Value::Nil => Ok(Self::default()),
+            Value::String(value) => Ok(Self {
+                mode: mode(&value.to_str().map_err(|e| e.to_string())?)?,
+                ..Self::default()
+            }),
+            Value::Table(table) => {
+                fields(&table, &["mode", "read", "write"], &path)?;
+                let mode = match table.raw_get::<Value>("mode").map_err(|e| e.to_string())? {
+                    Value::Nil => IsolationMode::Landlock,
+                    value => mode(&string(value, &format!("{path}.mode"))?)?,
+                };
+                let paths = |key: &str| -> Result<Vec<PathBuf>, String> {
+                    let list = match table.raw_get::<Value>(key).map_err(|e| e.to_string())? {
+                        Value::Nil => Vec::new(),
+                        value => string_list(value, &format!("{path}.{key}"), 64)?,
+                    };
+                    list.into_iter()
+                        .map(|entry| {
+                            let entry = PathBuf::from(entry);
+                            // Paths on a node are the node's, so they must be absolute.
+                            if remote && !entry.is_absolute() {
+                                return Err(format!(
+                                    "{path}.{key}: paths on a node must be absolute"
+                                ));
+                            }
+                            let entry = if entry.is_absolute() {
+                                entry
+                            } else {
+                                base.join(entry)
+                            };
+                            std::path::absolute(&entry)
+                                .map_err(|error| format!("{path}.{key}: {error}"))
+                        })
+                        .collect()
+                };
+                Ok(Self {
+                    mode,
+                    read: paths("read")?,
+                    write: paths("write")?,
+                })
+            }
+            _ => Err(format!("{path}: expected a mode or a table")),
+        }
+    }
+}
+
+/// `messaging = { preset = "backend", publish = {...}, subscribe = {...} }`
+/// on a managed server or service group: the grants of the login Rift
+/// issues each instance, named `server.<instance>`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InstanceMessaging {
+    pub publish: Vec<String>,
+    pub subscribe: Vec<String>,
+}
+
+impl InstanceMessaging {
+    fn parse(values: &Table, path: &str) -> Result<Option<Self>, String> {
+        let value = values
+            .raw_get::<Value>("messaging")
+            .map_err(|e| e.to_string())?;
+        if value.is_nil() {
+            return Ok(None);
+        }
+        let path = format!("{path}.messaging");
+        let table = table(value, &path)?;
+        fields(&table, &["preset", "publish", "subscribe"], &path)?;
+        let list = |key: &str| -> Result<Vec<String>, String> {
+            match table.raw_get::<Value>(key).map_err(|e| e.to_string())? {
+                Value::Nil => Ok(Vec::new()),
+                value => string_list(value, &format!("{path}.{key}"), 1024),
+            }
+        };
+        let mut grants = Self {
+            publish: list("publish")?,
+            subscribe: list("subscribe")?,
+        };
+        match table
+            .raw_get::<Value>("preset")
+            .map_err(|e| e.to_string())?
+        {
+            Value::Nil => {}
+            value => {
+                let preset = string(value, &format!("{path}.preset"))?;
+                if preset != super::messaging::BACKEND_PRESET {
+                    return Err(format!(
+                        "{path}.preset: unknown preset {preset:?}; expected \"backend\""
+                    ));
+                }
+                let (publish, subscribe) = crate::permissions::backend_grants();
+                for (list, preset) in [
+                    (&mut grants.publish, publish),
+                    (&mut grants.subscribe, subscribe),
+                ] {
+                    for pattern in preset {
+                        if !list.contains(&pattern) {
+                            list.push(pattern);
+                        }
+                    }
+                }
+            }
+        }
+        // Replies to the requests the instance makes.
+        for list in [&mut grants.publish, &mut grants.subscribe] {
+            if !list.iter().any(|pattern| pattern == "_INBOX.>") {
+                list.push("_INBOX.>".into());
+            }
+        }
+        Ok(Some(grants))
+    }
+}
+
+/// `env` and `inherit_env` of a managed server or service group.
+///
+/// Rift's own secrets are removed from every child whatever this says (see
+/// [`crate::environment`]). The default inherits the rest of Rift's
+/// environment, because networks pass database passwords to their server
+/// plugins that way; `inherit_env` narrows it to a list, or to nothing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProcessEnvironment {
+    /// `None` inherits everything except Rift's secrets; `Some` only these
+    /// variables (`inherit_env = false` is the empty set).
+    pub inherit: Option<BTreeSet<String>>,
+    /// Set after inheritance, so these win. Values are literal apart from
+    /// `{name}`, `{group}` and `{port}`, which service groups expand.
+    pub set: BTreeMap<String, String>,
+}
+
+const MAX_ENV_ENTRIES: usize = 128;
+const MAX_ENV_VALUE_BYTES: usize = 32 * 1024;
+
+impl ProcessEnvironment {
+    fn parse(values: &Table, path: &str) -> Result<Self, String> {
+        let inherit = match values
+            .raw_get::<Value>("inherit_env")
+            .map_err(|e| e.to_string())?
+        {
+            Value::Nil | Value::Boolean(true) => None,
+            Value::Boolean(false) => Some(BTreeSet::new()),
+            value @ Value::Table(_) => Some(string_set(value, &format!("{path}.inherit_env"))?),
+            _ => {
+                return Err(format!(
+                    "{path}.inherit_env: expected false or a list of variable names"
+                ));
+            }
+        };
+        let mut set = BTreeMap::new();
+        if let Value::Table(entries) = values.raw_get::<Value>("env").map_err(|e| e.to_string())? {
+            for pair in entries.pairs::<Value, Value>() {
+                let (key, value) = pair.map_err(|e| e.to_string())?;
+                let key = string(key, &format!("{path}.env key"))?;
+                let value = match value {
+                    // Ports and sizes are commonly written as numbers.
+                    Value::Integer(number) => number.to_string(),
+                    value => string(value, &format!("{path}.env.{key}"))?,
+                };
+                set.insert(key, value);
+            }
+        } else if !values
+            .raw_get::<Value>("env")
+            .map_err(|e| e.to_string())?
+            .is_nil()
+        {
+            return Err(format!(
+                "{path}.env: expected a table of variable names to strings"
+            ));
+        }
+        Ok(Self { inherit, set })
+    }
+
+    fn validate(&self, path: &str) -> Result<(), String> {
+        let inherited = self.inherit.iter().flatten();
+        if self.set.len() > MAX_ENV_ENTRIES
+            || self
+                .inherit
+                .as_ref()
+                .is_some_and(|names| names.len() > MAX_ENV_ENTRIES)
+        {
+            return Err(format!(
+                "{path}: env and inherit_env take at most {MAX_ENV_ENTRIES} variables each"
+            ));
+        }
+        for name in inherited {
+            if !crate::environment::valid_name(name) {
+                return Err(format!(
+                    "{path}.inherit_env: {name:?} is not a variable name (letters, digits and _, not starting with a digit)"
+                ));
+            }
+        }
+        for (name, value) in &self.set {
+            if !crate::environment::valid_name(name) {
+                return Err(format!(
+                    "{path}.env: {name:?} is not a variable name (letters, digits and _, not starting with a digit)"
+                ));
+            }
+            if value.contains('\0') || value.len() > MAX_ENV_VALUE_BYTES {
+                return Err(format!(
+                    "{path}.env.{name}: values must not contain NUL and are limited to {MAX_ENV_VALUE_BYTES} bytes"
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 pub(super) fn parse(root: &Table, base: &Path) -> Result<BTreeMap<String, ManagedServer>, String> {
@@ -51,6 +310,10 @@ pub(super) fn parse(root: &Table, base: &Path) -> Result<BTreeMap<String, Manage
                 "restart_delay_ms",
                 "restart_retries",
                 "node",
+                "env",
+                "inherit_env",
+                "messaging",
+                "isolation",
             ],
             &path,
         )?;
@@ -92,6 +355,7 @@ pub(super) fn parse(root: &Table, base: &Path) -> Result<BTreeMap<String, Manage
                 MAX_TIMEOUT_MS,
             )? as u64)),
         };
+        let remote = node.is_some();
         servers.insert(
             name,
             ManagedServer {
@@ -123,6 +387,9 @@ pub(super) fn parse(root: &Table, base: &Path) -> Result<BTreeMap<String, Manage
                 )? as u64),
                 restart_retries: bounded_count(&values, &path, "restart_retries", 3, 100)?,
                 node,
+                environment: ProcessEnvironment::parse(&values, &path)?,
+                messaging: InstanceMessaging::parse(&values, &path)?,
+                isolation: Isolation::parse(&values, &path, base, remote)?,
             },
         );
     }
@@ -210,6 +477,7 @@ pub(super) fn validate(
                 "{path}.command: arguments must not contain NUL and are limited to {MAX_ARGUMENT_BYTES} bytes each, {MAX_COMMAND_BYTES} bytes total"
             ));
         }
+        server.environment.validate(&path)?;
         validate_directory(&server.directory, &path)?;
         let directory = if server.node.is_some() {
             if !valid_node_directory(&server.directory) {

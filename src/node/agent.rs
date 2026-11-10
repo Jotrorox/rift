@@ -122,6 +122,8 @@ impl Options {
         let token_env = values
             .remove("--token-env")
             .unwrap_or_else(|| "RIFT_NODE_TOKEN".into());
+        // The agent's servers must not inherit its credentials.
+        crate::environment::protect([token_env.clone()]);
         let token = std::env::var(&token_env)
             .map_err(|_| invalid(format!("set {token_env} to this node's token")))?;
         if !(32..=1024).contains(&token.len()) || token.chars().any(char::is_control) {
@@ -144,6 +146,7 @@ impl Options {
         let forwarding_secret_env = explicit_secret_env
             .clone()
             .unwrap_or_else(|| "RIFT_FORWARDING_SECRET".into());
+        crate::environment::protect([forwarding_secret_env.clone()]);
         let forwarding_secret = match std::env::var(&forwarding_secret_env) {
             Ok(secret)
                 if !(1..=1024).contains(&secret.len()) || secret.chars().any(char::is_control) =>
@@ -634,7 +637,17 @@ impl Agent {
             }
             Err(error) => return Err(error),
         }
-        let child = crate::managed::spawn_process(&start.command, &directory)?;
+        let mut environment = crate::config::ProcessEnvironment::try_from(&start.environment)?;
+        if let Some(certificate) = &start.bus_certificate {
+            let path = directory.join(crate::instance_login::CERTIFICATE_FILE);
+            std::fs::write(&path, certificate)?;
+            environment
+                .set
+                .insert("RIFT_BUS_CERT".into(), path.to_string_lossy().into_owned());
+        }
+        let isolation = crate::config::Isolation::try_from(&start.isolation)?;
+        let child =
+            crate::managed::spawn_process(&start.command, &directory, &environment, &isolation)?;
         let pid = child.id();
         processes.insert(
             start.server.clone(),

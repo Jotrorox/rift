@@ -1,9 +1,20 @@
 # RiftPerms: answers permission checks from the Rift proxy's data.
 # docs/permissions-java.md in the Rift repository describes every setting.
 
+# On a server Rift manages with a messaging block on its group or managed
+# server, delete server, group and the bus settings: Rift sets RIFT_SERVER_NAME,
+# RIFT_SERVER_GROUP, RIFT_BUS_ADDRESS, RIFT_BUS_SERVER_NAME, RIFT_BUS_CERT and
+# RIFT_BUS_TOKEN for each instance, and missing settings fall back to them, so
+# this file can live in the group's template unchanged.
+
 # This backend's name, as the proxy knows it. It is the "server" context of
 # every check here, so it must match the backend names used in grants.
 server: survival-1
+
+# This backend's service group, when it is an instance of one (lobby for
+# lobby-2). It is the "group" context, so a grant limited to group=lobby
+# applies on every lobby instance. Leave it unset outside a group.
+# group: lobby
 
 bus:
   # The proxy's messaging listener (messaging.listen in rift.lua).

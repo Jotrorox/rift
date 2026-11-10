@@ -6,28 +6,36 @@ import (
 	"go.bytecodealliance.org/cm"
 )
 
-// This file contains wasmimport and wasmexport declarations for "rift:plugin@0.1.2".
+// This file contains wasmimport and wasmexport declarations for "rift:plugin@0.1.3".
 
-//go:wasmimport rift:plugin/permissions@0.1.2 has
+//go:wasmimport rift:plugin/permissions@0.1.3 has
 //go:noescape
 func wasmimport_Has(uuid0 *uint8, uuid1 uint32, node0 *uint8, node1 uint32) (result0 uint32)
 
-//go:wasmimport rift:plugin/permissions@0.1.2 set
+//go:wasmimport rift:plugin/permissions@0.1.3 set
 //go:noescape
 func wasmimport_Set(uuid0 *uint8, uuid1 uint32, node0 *uint8, node1 uint32, value0 uint32, value1 uint32, result *cm.Result[string, struct{}, string])
 
-//go:wasmimport rift:plugin/permissions@0.1.2 add-group
+//go:wasmimport rift:plugin/permissions@0.1.3 add-group
 //go:noescape
 func wasmimport_AddGroup(uuid0 *uint8, uuid1 uint32, group0 *uint8, group1 uint32, result *cm.Result[string, bool, string])
 
-//go:wasmimport rift:plugin/permissions@0.1.2 remove-group
+//go:wasmimport rift:plugin/permissions@0.1.3 remove-group
 //go:noescape
 func wasmimport_RemoveGroup(uuid0 *uint8, uuid1 uint32, group0 *uint8, group1 uint32, result *cm.Result[string, bool, string])
 
-//go:wasmimport rift:plugin/permissions@0.1.2 groups
+//go:wasmimport rift:plugin/permissions@0.1.3 groups
 //go:noescape
 func wasmimport_Groups(uuid0 *uint8, uuid1 uint32, result *cm.List[string])
 
-//go:wasmimport rift:plugin/permissions@0.1.2 list-groups
+//go:wasmimport rift:plugin/permissions@0.1.3 list-groups
 //go:noescape
 func wasmimport_ListGroups(result *string)
+
+//go:wasmimport rift:plugin/permissions@0.1.3 meta
+//go:noescape
+func wasmimport_Meta(uuid0 *uint8, uuid1 uint32, key0 *uint8, key1 uint32, result *cm.Option[string])
+
+//go:wasmimport rift:plugin/permissions@0.1.3 set-meta
+//go:noescape
+func wasmimport_SetMeta(uuid0 *uint8, uuid1 uint32, key0 *uint8, key1 uint32, value0 uint32, value1 *uint8, value2 uint32, contextsJson0 uint32, contextsJson1 *uint8, contextsJson2 uint32, expiresAt0 uint32, expiresAt1 uint64, result *cm.Result[string, bool, string])

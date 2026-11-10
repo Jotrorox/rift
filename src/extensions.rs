@@ -366,7 +366,7 @@ impl ExtensionScript {
                         || context_providers.len() >= MAX_CONTEXT_PROVIDERS
                     {
                         return Err(mlua::Error::runtime(format!(
-                            "context provider {key:?}: use a custom key of 1 to 64 bytes of [a-z0-9_.:-] (not server, world, dimension or gamemode), at most {MAX_CONTEXT_PROVIDERS} providers"
+                            "context provider {key:?}: use a custom key of 1 to 64 bytes of [a-z0-9_.:-] (not server, group, world, dimension or gamemode), at most {MAX_CONTEXT_PROVIDERS} providers"
                         )));
                     }
                     context_providers.insert(key);
@@ -1037,6 +1037,8 @@ impl Extensions {
     pub fn update_destinations(&self, config: &Config) {
         // Publish capacity membership before callbacks can select new names.
         *self.groups.lock().unwrap() = group_members(config);
+        self.permissions
+            .set_service_groups(config.service_groups.keys());
         *self.backends.lock().unwrap_or_else(|e| e.into_inner()) = config
             .backends
             .keys()
@@ -1245,6 +1247,20 @@ pub struct ExtensionSession {
     jobs: Arc<Semaphore>,
 }
 impl ExtensionSession {
+    /// Player names for completion: the ones this player may see.
+    fn visible_names(&self) -> Vec<String> {
+        let uuid = Uuid::parse(&self.context.uuid)
+            .map(|uuid| *uuid.as_bytes())
+            .unwrap_or_default();
+        let holds = |node: &str| self.runtime.permits(&self.context.uuid, node);
+        self.runtime
+            .players
+            .names_for(crate::players::Viewer::Player {
+                uuid,
+                holds: &holds,
+            })
+    }
+
     fn script_commands(&self) -> impl Iterator<Item = (&String, &Command)> {
         self.runtime
             .script
@@ -1338,12 +1354,7 @@ impl ExtensionSession {
                 let suggestions = match command.suggest {
                     SuggestKind::None => Vec::new(),
                     SuggestKind::Fixed(names) => return Ok(complete_names(names, word)),
-                    SuggestKind::Players => {
-                        return Ok(complete_names(
-                            self.runtime.players.names().into_values().collect(),
-                            word,
-                        ));
-                    }
+                    SuggestKind::Players => return Ok(complete_names(self.visible_names(), word)),
                     SuggestKind::Servers => return Ok(complete_names(servers(), word)),
                     SuggestKind::Dynamic => {
                         let mut input = self.context.clone();
@@ -1366,12 +1377,7 @@ impl ExtensionSession {
         let word = args.rsplit(' ').next().unwrap_or_default();
         let suggestions = match command.suggest {
             Suggest::None => Vec::new(),
-            Suggest::Players => {
-                return Ok(complete_names(
-                    self.runtime.players.names().into_values().collect(),
-                    word,
-                ));
-            }
+            Suggest::Players => return Ok(complete_names(self.visible_names(), word)),
             Suggest::Servers => return Ok(complete_names(servers(), word)),
             Suggest::Lua => {
                 let mut input = self.context.clone();

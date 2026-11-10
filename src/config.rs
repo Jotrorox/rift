@@ -14,7 +14,7 @@ use tokio::sync::Semaphore;
 pub use crate::message_script::MessageScript;
 pub use crate::server_list::{ServerList, StatusScript};
 pub use crate::{http_script::HttpScript, script::RouteScript};
-pub use managed::ManagedServer;
+pub use managed::{InstanceMessaging, Isolation, IsolationMode, ManagedServer, ProcessEnvironment};
 pub use messaging::{MessagingConfig, MessagingPrincipal, MessagingStream, MessagingSubscription};
 pub use nodes::{LOCAL_NODE, NodeConfig, NodeSelector, Placement, valid_node_directory};
 pub use permissions::PermissionsConfig;
@@ -334,6 +334,38 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Every environment variable this configuration reads a secret from, as
+    /// `(configuration field, variable name)`. Rift removes these from the
+    /// environment of every process it starts (see [`crate::environment`]),
+    /// and `rift check --strict` verifies that each is set.
+    pub fn secret_variables(&self) -> Vec<(String, String)> {
+        let mut variables = Vec::new();
+        if let Some(forwarding) = &self.forwarding {
+            variables.push((
+                "forwarding.secret_env".into(),
+                forwarding.secret_env.clone(),
+            ));
+        }
+        if let Some(admin) = &self.admin {
+            variables.push(("admin.token_env".into(), admin.token_env.clone()));
+        }
+        if let Some(messaging) = &self.messaging {
+            for principal in &messaging.principals {
+                variables.push((
+                    format!("messaging.principals.{}.token_env", principal.name),
+                    principal.token_env.clone(),
+                ));
+            }
+        }
+        for (name, node) in &self.nodes {
+            variables.push((format!("nodes.{name}.token_env"), node.token_env.clone()));
+        }
+        if let Some(extensions) = &self.extensions {
+            variables.extend(extensions.environment());
+        }
+        variables
+    }
+
     pub fn from_addresses(listen: &str, backend: &str) -> io::Result<Self> {
         let config = Self {
             listeners: BTreeMap::from([("default".into(), address(listen, "listen")?)]),
@@ -917,6 +949,43 @@ impl Config {
         nodes::validate(self).map_err(invalid)?;
         services::validate(self).map_err(invalid)?;
         managed::validate(&self.managed_servers, &self.backends, &self.nodes).map_err(invalid)?;
+        // Secrets are removed from every child anyway; naming one is a mistake
+        // worth reporting rather than a silently ignored grant.
+        let secrets = self.secret_variables();
+        let definitions = self
+            .managed_servers
+            .iter()
+            .map(|(name, server)| (format!("managed_servers.{name}"), server))
+            .chain(
+                self.service_groups
+                    .iter()
+                    .map(|(name, group)| (format!("service_groups.{name}"), &group.server)),
+            );
+        for (path, server) in definitions {
+            if let Some(grants) = &server.messaging {
+                let listening = self
+                    .messaging
+                    .as_ref()
+                    .is_some_and(|messaging| messaging.listen.is_some());
+                if !listening {
+                    return Err(invalid(format!(
+                        "{path}.messaging: instance logins need messaging.listen with a certificate"
+                    )));
+                }
+                let max = self.messaging.as_ref().map_or(256, |m| m.max_subject_bytes);
+                for pattern in grants.publish.iter().chain(&grants.subscribe) {
+                    messaging::pattern_valid(pattern, max)
+                        .map_err(|error| invalid(format!("{path}.messaging: {error}")))?;
+                }
+            }
+            for name in server.environment.inherit.iter().flatten() {
+                if let Some((field, _)) = secrets.iter().find(|(_, variable)| variable == name) {
+                    return Err(invalid(format!(
+                        "{path}.inherit_env: {name} holds Rift's own secret ({field}) and is never passed to servers"
+                    )));
+                }
+            }
+        }
         templates::validate(self).map_err(invalid)?;
         self.validate_status().map_err(invalid)?;
         if let Some(extensions) = &self.extensions {
@@ -940,8 +1009,15 @@ impl Config {
             }
         }
         if let Some(messaging) = &self.messaging {
+            // Node agents and instance logins are identities the listener
+            // serves without a configured principal.
+            let logins = self
+                .managed_servers
+                .values()
+                .chain(self.service_groups.values().map(|group| &group.server))
+                .any(|server| server.messaging.is_some());
             messaging
-                .validate_with_nodes(!self.nodes.is_empty())
+                .validate_with_nodes(!self.nodes.is_empty() || logins)
                 .map_err(invalid)?;
         }
         if self.server_list.is_some() && self.status_cache.is_some() {

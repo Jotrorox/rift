@@ -21,8 +21,13 @@ import java.util.Set;
  * empty set is {@code ""}.
  */
 public final class ContextSet implements Iterable<ContextSet.Pair> {
-    /** The backend name a player is on. */
+    /** The backend name a player is on, such as {@code lobby-2} for an instance. */
     public static final String SERVER = "server";
+    /**
+     * The service group of that backend, such as {@code lobby}; absent on a backend outside any group.
+     * A node limited to {@code group=lobby} applies on every instance of the group.
+     */
+    public static final String GROUP = "group";
     /** The world name. */
     public static final String WORLD = "world";
     /** The dimension, for example {@code minecraft:the_nether}. */
@@ -30,7 +35,7 @@ public final class ContextSet implements Iterable<ContextSet.Pair> {
     /** The game mode: {@code survival}, {@code creative}, {@code adventure} or {@code spectator}. */
     public static final String GAMEMODE = "gamemode";
     /** Keys Rift and the adapters fill themselves; each has one value in an active set. */
-    public static final Set<String> RESERVED = Set.of(SERVER, WORLD, DIMENSION, GAMEMODE);
+    public static final Set<String> RESERVED = Set.of(SERVER, GROUP, WORLD, DIMENSION, GAMEMODE);
 
     private static final ContextSet EMPTY = new ContextSet(List.of());
 
