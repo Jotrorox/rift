@@ -25,6 +25,7 @@ pub use component::Component;
 pub use convert::adapt;
 pub use decode::json_to_nbt;
 pub use encode::nbt_to_json;
+pub use legacy::{json_to_legacy, legacy_to_json, plain_text};
 
 use super::{HasShared, Shared};
 use crate::{

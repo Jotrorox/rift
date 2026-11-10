@@ -28,6 +28,9 @@ pub(crate) struct State {
     map_icons: HashMap<i32, Vec<misc::Icon>>,
     /// The next global chat index for clients from 1.21.5 on.
     chat_index: i32,
+    /// Whether the backend enforces secure chat, which 1.20.5 moved from
+    /// `server_data` into `login`.
+    secure_chat: bool,
 }
 
 /// One packet being converted.
@@ -306,7 +309,20 @@ fn install_one<S: HasShared + 'static>(
 
 pub(super) fn install<S: HasShared + 'static>(builder: RouteBuilder<S>) -> RouteBuilder<S> {
     const _: () = assert!(RULES.len() <= 40, "add indices to install_rules");
-    install_rules!(builder, 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39)
+    let builder = install_rules!(builder, 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39);
+    let backend = builder.backend().protocol;
+    if backend >= misc::SECURE_CHAT_MOVED && builder.client().protocol < misc::SECURE_CHAT_MOVED {
+        builder.tap(Direction::Clientbound, Phase::Play, "login", login::<S>)
+    } else {
+        builder
+    }
+}
+
+/// Follow the secure chat flag of a 1.20.5+ login for older clients'
+/// `server_data`. It is the login packet's last field from 1.20.5 on.
+fn login<S: HasShared>(step: &mut S, _: Phase, packet: &Packet) -> io::Result<()> {
+    step.shared().text.packets.secure_chat = packet.data.last() == Some(&1);
+    Ok(())
 }
 
 #[cfg(test)]

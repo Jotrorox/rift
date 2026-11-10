@@ -570,3 +570,54 @@ fn dump_conversions_for_schema_check() {
     }
     std::fs::write(path, lines).unwrap();
 }
+
+/// Every recorded text packet goes through each adjacent pair's default
+/// routes (IDs and dispatch included) without error, unless the receiver
+/// lacks the packet and the step must handle it.
+#[test]
+fn corpus_flows_through_default_routes() {
+    let mut routed = 0;
+    for (index, (protocol, _)) in PROTOCOLS.iter().enumerate() {
+        let Some(session) = testing::corpus(*protocol) else {
+            continue;
+        };
+        let neighbours = [index.checked_sub(1), Some(index + 1)]
+            .into_iter()
+            .flatten()
+            .filter_map(|index| PROTOCOLS.get(index).map(|(protocol, _)| *protocol));
+        for neighbour in neighbours {
+            let mut step = testing::Defaults::new(neighbour, *protocol);
+            let target = crate::data::version(neighbour);
+            for packet in session
+                .iter()
+                .filter(|packet| packet.direction == Direction::Clientbound)
+            {
+                let name = packet.name(*protocol);
+                if !RULES.iter().any(|rule| rule.name == name) {
+                    continue;
+                }
+                let result = step.send_id(
+                    Direction::Clientbound,
+                    packet.state,
+                    packet.id,
+                    &packet.data,
+                );
+                match result {
+                    Ok(out) => {
+                        for out in out {
+                            assert_ne!(out.name, "?", "{protocol}->{neighbour} {name}");
+                        }
+                        routed += 1;
+                    }
+                    Err(error) => assert!(
+                        target
+                            .packet_id(packet.state, Direction::Clientbound, name)
+                            .is_none(),
+                        "{protocol}->{neighbour} {name}: {error}"
+                    ),
+                }
+            }
+        }
+    }
+    eprintln!("text corpus: {routed} packets routed through neighbouring steps");
+}

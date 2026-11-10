@@ -379,7 +379,7 @@ pub fn resource_pack(cv: &mut Cv<'_>, data: &[u8]) -> io::Result<()> {
 const SECURE_CHAT: i32 = 760;
 const NO_PREVIEWS: i32 = 761;
 const ICON_BYTES: i32 = 762;
-const SECURE_CHAT_MOVED: i32 = 766;
+pub(super) const SECURE_CHAT_MOVED: i32 = 766;
 
 pub fn server_data_needed(from: i32, to: i32) -> bool {
     text_changes(from, to)
@@ -416,7 +416,7 @@ pub fn server_data(cv: &mut Cv<'_>, data: &[u8]) -> io::Result<()> {
     let secure_chat = if (SECURE_CHAT..SECURE_CHAT_MOVED).contains(&cv.from) {
         reader.bool()?
     } else {
-        false
+        cv.text().secure_chat
     };
     reader.finish()?;
     let mut writer = Writer::new();
