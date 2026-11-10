@@ -328,10 +328,17 @@ fn corpus_stacks_round_trip_byte_for_byte() {
                 *kinds.entry(component.kind).or_insert(0) += 1;
             }
         }
+        let registry = data::version(protocol).expect_registry("data_component_type");
+        let unseen: Vec<_> = registry
+            .names()
+            .map(|(_, name)| name)
+            .filter(|name| !kinds.contains_key(name))
+            .collect();
         report.push(format!(
-            "{protocol}: {} stacks, {} component types",
+            "{protocol}: {} stacks, {} component types; not in the corpus: {}",
             stacks.len(),
-            kinds.len()
+            kinds.len(),
+            unseen.join(" ")
         ));
     }
     eprintln!("{}", report.join("\n"));

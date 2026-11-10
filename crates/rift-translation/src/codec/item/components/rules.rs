@@ -1107,6 +1107,10 @@ fn typed_data(cx: &mut Conv<'_>, registry: &'static str, value: &Value) -> Res<V
         let Some(Nbt::Compound(mut data)) = value.as_nbt()? else {
             return Err(invalid("entity data is not a compound").into());
         };
+        // Going back puts `id` first; anywhere else, keep the original.
+        if data.iter().next().is_some_and(|(key, _)| key != "id") {
+            cx.lossy = true;
+        }
         let Some(Nbt::String(name)) = data.remove("id") else {
             return Err(Fail::Lost);
         };
