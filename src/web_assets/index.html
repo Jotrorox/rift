@@ -114,14 +114,24 @@
                 <div class="field"><label for="server-list-version">Version label <span class="muted">Optional</span></label><input id="server-list-version" maxlength="256" spellcheck="false" placeholder="Rift"></div>
                 <div class="field"><label for="server-list-max-players">Maximum players <span class="muted">Optional</span></label><input id="server-list-max-players" type="number" min="0" step="1" placeholder="Connection limit"></div>
                 <div class="field"><label for="server-list-sample">Player list hover <span class="muted">One line each</span></label><textarea id="server-list-sample" spellcheck="false" placeholder="Online players"></textarea></div>
+                <div class="field"><label for="server-list-favicon-choose">Server icon <span class="muted">Optional</span></label>
+                  <div class="favicon-picker" id="server-list-favicon-picker">
+                    <div class="favicon-preview" id="server-list-favicon-preview"><img id="server-list-favicon" alt="Server icon preview" width="64" height="64" hidden></div>
+                    <div class="favicon-actions">
+                      <div class="action-group"><button type="button" class="button secondary" id="server-list-favicon-choose">Upload image…</button><button type="button" class="button subtle" id="server-list-favicon-remove" hidden>Remove</button></div>
+                      <p class="field-help" id="server-list-favicon-state" aria-live="polite">No icon</p>
+                    </div>
+                  </div>
+                  <p class="field-help">PNG, JPEG, WebP or GIF. Rift fits it to 64×64 pixels.</p>
+                  <input type="file" id="server-list-favicon-file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+                </div>
               </div>
               <div class="editor-actions"><div class="action-group"></div><div class="action-group"><button type="submit" class="button" id="server-list-save">Save &amp; apply</button></div></div>
             </form>
             <p class="operation-result" id="server-list-result" role="status" aria-live="polite">Saving validates the complete configuration and checks its revision.</p>
           </section>
-          <section class="panel" id="server-list-lua-panel"><div class="panel-heading"><h2>Favicon and hostnames</h2><a class="text-link" href="#script">Edit in Lua</a></div>
-            <p class="panel-note">The favicon file and per-hostname entries are set in Lua. Saving here keeps them; turning the server list off removes them.</p>
-            <div class="favicon-row"><img id="server-list-favicon" alt="Configured favicon" width="64" height="64" hidden><span id="server-list-favicon-state" class="muted small">No favicon configured</span></div>
+          <section class="panel" id="server-list-lua-panel"><div class="panel-heading"><h2>Hostnames</h2><a class="text-link" href="#script">Edit in Lua</a></div>
+            <p class="panel-note">Per-hostname entries, including their own icons, are set in Lua. Saving here keeps them; turning the server list off removes them.</p>
             <div class="table-wrap"><table><thead><tr><th scope="col">Hostname</th><th scope="col">MOTD</th><th scope="col">Version label</th><th scope="col" class="numeric">Maximum players</th></tr></thead><tbody id="server-list-hosts"><tr><td colspan="4" class="empty">Waiting for data</td></tr></tbody></table></div>
           </section>
         </section>

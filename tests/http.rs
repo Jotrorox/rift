@@ -397,6 +397,44 @@ fn revision(client: Client) -> Value {
     client.get("/api/config").expect(200).value()["revision"].clone()
 }
 
+/// Asserts that the `/ext/test` Lua hook still answers after definition edits.
+/// Each call runs the configuration in a fresh VM under a 50 ms wall deadline,
+/// which a debug build on a busy CI runner can miss right after a reload; a
+/// 504 is retried because these tests check that the hook survived, not speed.
+fn assert_hook_preserved(client: Client) {
+    let mut response = client.get("/ext/test");
+    for _ in 0..4 {
+        if response.status != 504 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        response = client.get("/ext/test");
+    }
+    assert_eq!(response.expect(200).body, "hook preserved");
+}
+
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    bytes
+        .chunks(3)
+        .flat_map(|chunk| {
+            let value = chunk
+                .iter()
+                .enumerate()
+                .fold(0u32, |value, (index, &byte)| {
+                    value | (byte as u32) << (16 - 8 * index)
+                });
+            (0..4).map(move |index| {
+                if index <= chunk.len() {
+                    ALPHABET[(value >> (18 - 6 * index) & 63) as usize] as char
+                } else {
+                    '='
+                }
+            })
+        })
+        .collect()
+}
+
 fn eventually_closed(address: SocketAddr) {
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
@@ -1909,7 +1947,7 @@ fn structured_definitions_preserve_lua_and_apply_safe_group_and_template_edits()
         )
         .expect(200);
     assert!(fixture.read().contains(&source));
-    assert_eq!(client.get("/ext/test").expect(200).body, "hook preserved");
+    assert_hook_preserved(client);
     client
         .instance("POST", "/api/groups/lobby/instances", json!({}))
         .expect(201);
@@ -1990,7 +2028,7 @@ fn structured_definitions_preserve_lua_and_apply_safe_group_and_template_edits()
             .count(),
         1
     );
-    assert_eq!(client.get("/ext/test").expect(200).body, "hook preserved");
+    assert_hook_preserved(client);
 }
 
 #[test]
@@ -2040,11 +2078,52 @@ fn console_settings_edit_permission_groups_memberships_tab_list_and_server_list(
         json!({"motd": {"text": "Welcome", "color": "gold"}, "max_players": 50, "sample": ["one"]}),
     )
     .expect(200);
+    // Uploaded favicons arrive as PNG data URLs; file paths stay Lua-only.
     put(
         "/api/definitions/server_list",
         json!({"motd": "x", "favicon": "icon.png"}),
     )
     .expect(400);
+    put(
+        "/api/definitions/server_list",
+        json!({"motd": "x", "hosts": {}}),
+    )
+    .expect(400);
+    let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+    png.extend(64u32.to_be_bytes());
+    png.extend(64u32.to_be_bytes());
+    png.extend([8, 6, 0, 0, 0, 0, 0, 0, 0]);
+    let favicon = format!("data:image/png;base64,{}", base64(&png));
+    let mut wide = png.clone();
+    wide[19] = 128;
+    put(
+        "/api/definitions/server_list",
+        json!({"motd": "x", "favicon": format!("data:image/png;base64,{}", base64(&wide))}),
+    )
+    .expect(400);
+    put(
+        "/api/definitions/server_list",
+        json!({"motd": "x", "favicon": favicon}),
+    )
+    .expect(200);
+    put(
+        "/api/definitions/server_list",
+        json!({"motd": {"text": "Welcome", "color": "gold"}, "max_players": 50, "sample": ["one"]}),
+    )
+    .expect(200);
+    let values = client.get("/api/definitions").expect(200).value();
+    assert_eq!(values["server_list"]["favicon"], favicon);
+    put(
+        "/api/definitions/server_list",
+        json!({"motd": {"text": "Welcome", "color": "gold"}, "max_players": 50, "favicon": false}),
+    )
+    .expect(200);
+    assert!(client.get("/api/definitions").expect(200).value()["server_list"]["favicon"].is_null());
+    put(
+        "/api/definitions/server_list",
+        json!({"motd": {"text": "Welcome", "color": "gold"}, "max_players": 50, "sample": ["one"]}),
+    )
+    .expect(200);
     let values = client.get("/api/definitions").expect(200).value();
     assert_eq!(
         values["permission_groups"]["staff"],
@@ -2058,7 +2137,7 @@ fn console_settings_edit_permission_groups_memberships_tab_list_and_server_list(
     assert_eq!(values["server_list"]["max_players"], 50);
     assert_eq!(values["server_list"]["hosts"], json!({}));
     assert!(fixture.read().contains(&source));
-    assert_eq!(client.get("/ext/test").expect(200).body, "hook preserved");
+    assert_hook_preserved(client);
 
     // Memberships are runtime state in the permission store, not configuration.
     let uuid = "0123456789abcdef0123456789abcdef";

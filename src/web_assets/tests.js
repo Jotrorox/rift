@@ -746,6 +746,56 @@ async function testWebAssets(appSource, statusSource) {
     await h.element("server-list-form").emit("submit"); await flush();
     assert(h.calls.length === before && h.element("server-list-result").textContent.includes("nonnegative"), "Invalid maximum reached the API");
   });
+  await test("server icons upload as 64-pixel PNG data URLs, persist until saved and can be removed", async () => {
+    const h = fixture(appSource);
+    h.model.definitions.server_list = { motd: "Hi", favicon: null, hosts: {} };
+    await flush();
+    assert(h.element("server-list-favicon").hidden && h.element("server-list-favicon-remove").hidden, "Empty icon shown");
+    const png = (width, height, extra = 0) => {
+      const bytes = new Uint8Array(33 + extra), view = new DataView(bytes.buffer);
+      bytes.set([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82]); view.setUint32(16, width); view.setUint32(20, height);
+      return { type: "image/png", size: bytes.length, arrayBuffer: async () => bytes.buffer };
+    };
+    let submitted;
+    h.model.intercept = (path, options) => { if (options.method === "PUT") { submitted = JSON.parse(options.body).definition; return h.response({ revision: "rev-1" }); } return null; };
+    // An exact 64×64 PNG is kept byte for byte.
+    h.element("server-list-favicon-file").files = [png(64, 64)];
+    await h.element("server-list-favicon-file").emit("change"); await flush();
+    assert(h.element("server-list-favicon").src.startsWith("data:image/png;base64,iVBORw0KGgo") && !h.element("server-list-favicon").hidden, "Uploaded icon not previewed");
+    assert(h.element("server-list-favicon-state").textContent.includes("Save"), "Pending icon not explained");
+    h.model.definitions.server_list = { motd: "Elsewhere", favicon: null, hosts: {} }; await h.advance(5000);
+    assert(h.element("server-list-favicon-state").textContent.includes("Save"), "Refresh discarded the chosen icon");
+    await h.element("server-list-form").emit("submit"); await flush();
+    assert(submitted.favicon.startsWith("data:image/png;base64,iVBORw0KGgo") && submitted.motd === "Hi", "Icon not sent with the form");
+    // Other images are drawn onto a 64×64 canvas, keeping their aspect ratio.
+    let drawn;
+    h.window.createImageBitmap = async () => ({ width: 256, height: 128, close() {} });
+    const createElement = h.document.createElement;
+    h.document.createElement = (tag) => tag !== "canvas" ? createElement(tag) : { getContext: () => ({ drawImage: (...args) => { drawn = args.slice(1); } }), toDataURL: () => "data:image/png;base64,QUJD" };
+    h.element("server-list-favicon-file").files = [{ type: "image/jpeg", size: 9, arrayBuffer: async () => new ArrayBuffer(9) }];
+    await h.element("server-list-favicon-file").emit("change"); await flush();
+    assert(JSON.stringify(drawn) === "[0,16,64,32]", `Image not fitted inside the icon: ${drawn}`);
+    assert(h.element("server-list-favicon").src === "data:image/png;base64,QUJD", "Resized icon not previewed");
+    // Images the browser cannot read leave the chosen icon untouched.
+    h.window.createImageBitmap = async () => { throw new Error("decode"); };
+    h.element("server-list-favicon-file").files = [png(32, 32)];
+    await h.element("server-list-favicon-file").emit("change"); await flush();
+    assert(h.element("server-list-favicon-state").textContent.includes("isn’t an image"), "Unreadable image not reported");
+    assert(h.element("server-list-favicon").src === "data:image/png;base64,QUJD", "Failed upload replaced the chosen icon");
+    // Removing a configured icon sends false; with none configured, nothing.
+    h.model.definitions.server_list = { motd: "Hi", favicon: "data:image/png;base64,AAAA", hosts: {} };
+    await h.element("server-list-refresh").emit("click"); await flush();
+    assert(h.element("server-list-favicon-state").textContent === "Current icon", "Configured icon not shown");
+    await h.element("server-list-favicon-remove").emit("click");
+    assert(h.element("server-list-favicon").hidden && h.element("server-list-favicon-state").textContent.includes("removed"), "Removal not previewed");
+    await h.element("server-list-form").emit("submit"); await flush();
+    assert(submitted.favicon === false, "Removal not sent");
+    h.model.definitions.server_list = { motd: "Hi", favicon: null, hosts: {} };
+    await h.element("server-list-refresh").emit("click"); await flush();
+    await h.element("server-list-favicon-remove").emit("click");
+    await h.element("server-list-form").emit("submit"); await flush();
+    assert(!("favicon" in submitted), "Removing a missing icon was sent");
+  });
   await test("turning the tab list off sends null and network listing is explicit", async () => {
     const h = fixture(appSource);
     h.model.definitions.tab_list = { header: "Hi {player}", footer: null, players: "server" };
