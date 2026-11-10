@@ -641,7 +641,7 @@ fn action_bars_and_titles_use_verified_play_packets() {
         let version = ProtocolVersion::new(number).unwrap();
         let component = |text| disconnect(Some(version), State::Play, text).unwrap().data;
         assert_eq!(
-            title(version, "Hello", None, [10, 70, 20]).unwrap(),
+            title(version, Some(&"Hello".into()), None, [10, 70, 20]).unwrap(),
             [
                 Packet::new(times, vec![0, 0, 0, 10, 0, 0, 0, 70, 0, 0, 0, 20]),
                 Packet::new(subtitle, component("")),
@@ -650,7 +650,7 @@ fn action_bars_and_titles_use_verified_play_packets() {
             "protocol {number}"
         );
         assert_eq!(
-            title(version, "", Some("Sub"), [0, 1, 2]).unwrap()[1],
+            title(version, None, Some(&"Sub".into()), [0, 1, 2]).unwrap()[1],
             Packet::new(subtitle, component("Sub"))
         );
         // Session state tracking must treat these as ordinary play packets.
@@ -666,15 +666,70 @@ fn action_bars_and_titles_use_verified_play_packets() {
         let (overlay, text) = bar.data.split_last().unwrap();
         assert_eq!((*overlay, text), (1, chat.data.split_last().unwrap().1));
     }
-    for number in [47, 340, 758, 760] {
+    // Before 1.17, one Title packet per action: times, subtitle, title.
+    for (number, id, times_action) in [
+        (47, 0x45, 2),
+        (210, 0x45, 2),
+        (315, 0x45, 3),
+        (335, 0x47, 3),
+        (340, 0x48, 3),
+        (404, 0x4b, 3),
+        (498, 0x4f, 3),
+        (578, 0x50, 3),
+        (736, 0x4f, 3),
+        (754, 0x4f, 3),
+    ] {
         let version = ProtocolVersion::new(number).unwrap();
+        let action = |action: u8, body: &[u8]| {
+            let mut data = vec![action];
+            data.extend(body);
+            Packet::new(id, data)
+        };
+        let json = |text: &str| {
+            let mut data = Vec::new();
+            write_string(&serde_json::json!({ "text": text }).to_string(), &mut data);
+            data
+        };
         assert_eq!(
-            title(version, "Hello", None, [10, 70, 20])
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::Unsupported
+            title(version, Some(&"Hello".into()), None, [10, 70, 20]).unwrap(),
+            [
+                action(times_action, &[0, 0, 0, 10, 0, 0, 0, 70, 0, 0, 0, 20]),
+                action(1, &json("")),
+                action(0, &json("Hello")),
+            ],
+            "protocol {number}"
         );
     }
+    // 1.17 to 1.19.2: separate packets, JSON text.
+    for (number, subtitle, heading, times) in [
+        (755, 0x57, 0x59, 0x5a),
+        (756, 0x57, 0x59, 0x5a),
+        (757, 0x58, 0x5a, 0x5b),
+        (758, 0x58, 0x5a, 0x5b),
+        (759, 0x58, 0x5a, 0x5b),
+        (760, 0x5b, 0x5d, 0x5e),
+    ] {
+        let version = ProtocolVersion::new(number).unwrap();
+        let packets = title(
+            version,
+            Some(&"Hello".into()),
+            Some(&"Sub".into()),
+            [1, 2, 3],
+        )
+        .unwrap();
+        let ids: Vec<_> = packets.iter().map(|packet| packet.id).collect();
+        assert_eq!(ids, [times, subtitle, heading], "protocol {number}");
+        let mut expected = Vec::new();
+        write_string(r#"{"text":"Hello"}"#, &mut expected);
+        assert_eq!(packets[2].data, expected, "protocol {number}");
+    }
+    // Components are rendered for the client: hex becomes a named colour on 1.8.
+    let version = ProtocolVersion::new(47).unwrap();
+    let rich = crate::text::Text::Component(serde_json::json!({"text": "Hi", "color": "#ff8800"}));
+    let packets = title(version, Some(&rich), None, [1, 2, 3]).unwrap();
+    let mut expected = vec![0];
+    write_string(r#"{"color":"gold","text":"Hi"}"#, &mut expected);
+    assert_eq!(packets[2].data, expected);
 }
 
 #[test]
@@ -837,6 +892,40 @@ fn proxy_suggestion_requests_are_taken_only_for_proxy_command_arguments() {
                 .is_err()
         );
     }
+}
+
+#[test]
+fn rich_tooltips_and_titles_are_rendered_for_the_client() {
+    let component = serde_json::json!({"text": "Chill", "color": "#ff8800"});
+    let rich = crate::text::Text::Component(component.clone());
+    let matches = [Suggestion {
+        text: "lounge".into(),
+        tooltip: Some(rich.clone()),
+    }];
+    for number in [764, 770] {
+        let version = ProtocolVersion::new(number).unwrap();
+        let packet = version
+            .switching()
+            .unwrap()
+            .suggestions(version, 1, 0, 0, &matches)
+            .unwrap();
+        let mut expected = Vec::new();
+        write_varint(1, &mut expected);
+        expected.extend([0, 0, 1]);
+        write_string("lounge", &mut expected);
+        expected.push(1);
+        if version.nbt_components() {
+            crate::protocol::nbt::component(&component, &mut expected).unwrap();
+        } else {
+            write_string(&component.to_string(), &mut expected);
+        }
+        assert_eq!(packet.data, expected, "protocol {number}");
+    }
+    let version = ProtocolVersion::new(770).unwrap();
+    let packets = title(version, Some(&rich), None, [1, 2, 3]).unwrap();
+    let mut expected = Vec::new();
+    crate::protocol::nbt::component(&component, &mut expected).unwrap();
+    assert_eq!(packets[2].data, expected);
 }
 
 #[test]

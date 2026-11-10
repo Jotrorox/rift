@@ -192,12 +192,13 @@ snake_case; `target` is a player name, a UUID or a connection id.
 | `rift.players.kick` | `{"target":"Alice","reason":"Bye"}` | whether the player was online |
 | `rift.players.transfer` | `{"target":"Alice","server":"survival"}` (passes `before_transfer`) | whether the player was online |
 | `rift.players.broadcast` | `{"text":"…"}`, optionally `"server":"lobby"` | how many players received it |
-| `rift.players.message-json`, `action-bar-json`, `kick-json`, `broadcast-json` | as above, with `text` or `reason` a JSON text component | as above |
+| `rift.players.message-json`, `action-bar-json`, `kick-json`, `broadcast-json`, `title-json` | as above, with `text`, `reason`, `title` or `subtitle` a JSON text component | as above |
 
 Plain text is 1..=1024 bytes and is never read as JSON. The `-json`
 operations take a component of at most 32 KiB, either embedded
 (`"reason":{"text":"Banned","color":"red"}`) or as a JSON string, exactly as
-the WIT functions take it; line breaks make a multi-line kick screen, and
+the WIT functions take it, and may be written as markup
+(`"reason":{"mini":"<red>Banned"}`, see [styled text](text.md)); line breaks make a multi-line kick screen, and
 hover and click events are spelled for each player's client as described
 under [rich text](extensions.md#rich-text). Dialogs, tab lists and boss bars
 stay plugin-only, because their clicks and lifetimes belong to an owner.

@@ -23,6 +23,7 @@ use crate::{
     hooks::RouteError,
     protocol::{Packet, write_string},
     script::ScriptSource,
+    text::{Profile, Text},
 };
 
 const MAX_RESPONSE_BYTES: usize = 32767;
@@ -44,11 +45,13 @@ pub struct Entry {
     /// A plain string or a chat component.
     pub motd: Option<Json>,
     pub maintenance_motd: Option<Json>,
-    pub version: Option<String>,
+    /// Shown as `§` codes: the version name is a string to clients.
+    pub version: Option<Text>,
     pub max_players: Option<u32>,
     /// A `data:image/png;base64,...` URL of a 64×64 PNG.
     pub favicon: Option<Arc<str>>,
-    pub sample: Option<Vec<String>>,
+    /// Hover lines, shown as `§` codes like the version name.
+    pub sample: Option<Vec<Text>>,
 }
 
 impl Entry {
@@ -103,10 +106,10 @@ impl ServerList {
             }))
         {
             for maintenance in [false, true] {
-                let mut document = Document::new(i32::MIN, u64::MAX, u64::MAX, "");
+                let mut document = Document::new(i32::MIN, u64::MAX, u64::MAX, Text::from(""));
                 document.apply(&entry, maintenance);
                 document
-                    .packet()
+                    .packet(Profile::UNKNOWN)
                     .map_err(|error| format!("{path}: {error}"))?;
             }
         }
@@ -118,11 +121,11 @@ impl ServerList {
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StatusOverride {
     pub motd: Option<Json>,
-    pub version: Option<String>,
+    pub version: Option<Text>,
     pub protocol: Option<i32>,
     pub online: Option<u32>,
     pub max_players: Option<u32>,
-    pub sample: Option<Vec<String>>,
+    pub sample: Option<Vec<Text>>,
     pub favicon: Option<Arc<str>>,
 }
 
@@ -144,19 +147,20 @@ pub struct Ping {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Document {
     pub motd: Json,
-    pub version: String,
+    pub version: Text,
     pub protocol: i32,
     pub online: u64,
     pub max_players: u64,
-    pub sample: Vec<String>,
+    pub sample: Vec<Text>,
     pub favicon: Option<Arc<str>>,
 }
 
 impl Document {
-    pub fn new(protocol: i32, online: u64, max_players: u64, motd: &str) -> Self {
+    /// A document with Rift's version name (`status.version`).
+    pub fn new(protocol: i32, online: u64, max_players: u64, motd: Text) -> Self {
         Self {
-            motd: Json::String(motd.to_owned()),
-            version: "Rift".into(),
+            motd: motd.for_client(Profile::UNKNOWN).into_owned(),
+            version: crate::text::catalog::notice(crate::text::catalog::Notice::StatusVersion),
             protocol,
             online,
             max_players,
@@ -212,26 +216,31 @@ impl Document {
         if changes.favicon.is_some() {
             next.favicon = changes.favicon;
         }
-        next.packet()?;
+        next.packet(Profile::UNKNOWN)?;
         *self = next;
         Ok(())
     }
 
-    pub fn packet(&self) -> io::Result<Packet> {
+    /// The status response as `profile` reads it: the MOTD is downsampled
+    /// like any component, and the version name and hover lines, which
+    /// clients read as strings, become `§` codes.
+    pub fn packet(&self, profile: Profile) -> io::Result<Packet> {
         let description = match &self.motd {
             Json::String(text) => json!({ "text": text }),
-            component => component.clone(),
+            component => {
+                crate::text::for_client(component, profile).unwrap_or_else(|| component.clone())
+            }
         };
         let mut players = json!({ "max": self.max_players, "online": self.online });
         if !self.sample.is_empty() {
             players["sample"] = self
                 .sample
                 .iter()
-                .map(|name| json!({ "name": name, "id": SAMPLE_ID }))
+                .map(|line| json!({ "name": line.to_legacy(profile), "id": SAMPLE_ID }))
                 .collect();
         }
         let mut response = json!({
-            "version": { "name": self.version, "protocol": self.protocol },
+            "version": { "name": self.version.to_legacy(profile), "protocol": self.protocol },
             "players": players,
             "description": description,
             "enforcesSecureChat": false,
@@ -261,7 +270,11 @@ pub(crate) fn motd(value: Value, path: &str) -> Result<Json, String> {
             if component.as_object().is_some_and(serde_json::Map::is_empty) {
                 return Err(format!("{path}: chat component must not be empty"));
             }
-            component
+            // Markup objects expand here; the result is checked like any text.
+            match Text::component(component, path)? {
+                Text::Component(component) => component,
+                Text::Plain(text) => Json::String(text),
+            }
         }
         _ => {
             return Err(format!(
@@ -336,13 +349,33 @@ fn component(value: Value, depth: usize, nodes: &mut usize, path: &str) -> Resul
     })
 }
 
-pub(crate) fn text(value: Value, path: &str) -> Result<String, String> {
+/// A version name or hover line: a string of at most 256 bytes, or a chat
+/// component table (including `{ mini = ... }`) shown as `§` codes.
+pub(crate) fn text(value: Value, path: &str) -> Result<Text, String> {
     match value {
-        Value::String(text) if text.as_bytes().len() <= MAX_TEXT_BYTES => utf8(&text, path),
+        Value::String(text) if text.as_bytes().len() <= MAX_TEXT_BYTES => {
+            utf8(&text, path).map(Text::Plain)
+        }
+        Value::Table(_) => line_component(chat_component(value, path)?, path),
         _ => Err(format!(
-            "{path}: expected a string of at most {MAX_TEXT_BYTES} bytes"
+            "{path}: expected a string of at most {MAX_TEXT_BYTES} bytes or a chat component table"
         )),
     }
+}
+
+/// A component for a string-only field: checked, and at most 256 bytes once
+/// written as `§` codes.
+fn line_component(component: Json, path: &str) -> Result<Text, String> {
+    if component.to_string().len() > MAX_MOTD_BYTES {
+        return Err(format!("{path}: exceeds {MAX_MOTD_BYTES} bytes"));
+    }
+    let text = Text::component(component, path)?;
+    if text.to_legacy(Profile::UNKNOWN).len() > MAX_TEXT_BYTES {
+        return Err(format!(
+            "{path}: shows more than {MAX_TEXT_BYTES} bytes as a string"
+        ));
+    }
+    Ok(text)
 }
 
 /// A player count: an integer in `0..=i32::MAX`.
@@ -370,7 +403,7 @@ fn integer(value: Value, path: &str, minimum: i64) -> Result<i64, String> {
 }
 
 /// Hover lines shown over the player count.
-pub(crate) fn sample(value: Value, path: &str) -> Result<Vec<String>, String> {
+pub(crate) fn sample(value: Value, path: &str) -> Result<Vec<Text>, String> {
     let Value::Table(table) = value else {
         return Err(format!("{path}: expected a list of strings"));
     };
@@ -465,13 +498,12 @@ pub(crate) fn status_override_json(
             _ => true,
         }
     }
-    let line = |value: String, path: &str| {
-        if value.len() > MAX_TEXT_BYTES {
-            return Err(format!(
-                "{path}: expected a string of at most {MAX_TEXT_BYTES} bytes"
-            ));
-        }
-        Ok(value)
+    let line = |value: Text, path: &str| match value {
+        Text::Plain(text) if text.len() > MAX_TEXT_BYTES => Err(format!(
+            "{path}: expected a string of at most {MAX_TEXT_BYTES} bytes"
+        )),
+        Text::Plain(text) => Ok(Text::Plain(text)),
+        Text::Component(component) => line_component(component, path),
     };
     let motd = reply
         .motd_json
@@ -487,7 +519,13 @@ pub(crate) fn status_override_json(
                     "motd_json: expected a nonempty JSON string or chat component of at most {MAX_MOTD_BYTES} bytes, {MAX_COMPONENT_NODES} values and {MAX_COMPONENT_DEPTH} levels"
                 ));
             }
-            Ok(motd)
+            if motd.is_string() {
+                return Ok(motd);
+            }
+            match Text::component(motd, "motd_json")? {
+                Text::Component(component) => Ok(component),
+                Text::Plain(text) => Ok(Json::String(text)),
+            }
         })
         .transpose()?;
     let sample = reply
@@ -756,13 +794,13 @@ mod tests {
         ] {
             let resolved = list.entry(host);
             assert_eq!(resolved.motd, Some(Json::String(expected.into())), "{host}");
-            assert_eq!(resolved.version.as_deref(), Some("Network"));
+            assert_eq!(resolved.version, Some(Text::from("Network")));
         }
     }
 
     #[test]
     fn document_renders_components_sample_and_favicon_and_rejects_oversized_overrides() {
-        let mut document = Document::new(774, 3, 100, "Rift");
+        let mut document = Document::new(774, 3, 100, Text::from("Rift"));
         document.apply(
             &Entry {
                 motd: Some(json!({ "text": "Hi", "color": "gold" })),
@@ -774,7 +812,7 @@ mod tests {
             },
             false,
         );
-        let response = decode(&document.packet().unwrap());
+        let response = decode(&document.packet(Profile::UNKNOWN).unwrap());
         assert_eq!(
             response["description"],
             json!({ "text": "Hi", "color": "gold" })
@@ -801,5 +839,33 @@ mod tests {
                 .is_err()
         );
         assert_eq!(document, before);
+    }
+
+    #[test]
+    fn string_fields_become_section_codes_and_the_motd_follows_the_client() {
+        let mut document = Document::new(47, 1, 10, Text::from("x"));
+        document.motd = json!({"text": "Hi", "color": "#ff8800"});
+        document.version = Text::Component(json!({"text": "Net", "color": "gold", "bold": true}));
+        document.sample = vec![
+            Text::Component(json!({"text": "a", "color": "#5555ff"})),
+            Text::from("§cplain"),
+        ];
+        let old = Profile::of(crate::protocol::ProtocolVersion::new(47).unwrap());
+        let response = decode(&document.packet(old).unwrap());
+        assert_eq!(
+            response["description"],
+            json!({"text": "Hi", "color": "gold"})
+        );
+        assert_eq!(response["version"]["name"], "§6§lNet");
+        assert_eq!(
+            response["players"]["sample"],
+            json!([{"name": "§9a", "id": SAMPLE_ID}, {"name": "§cplain", "id": SAMPLE_ID}])
+        );
+        let new = Profile::of(crate::protocol::ProtocolVersion::new(774).unwrap());
+        let response = decode(&document.packet(new).unwrap());
+        assert_eq!(
+            response["description"],
+            json!({"text": "Hi", "color": "#ff8800"})
+        );
     }
 }

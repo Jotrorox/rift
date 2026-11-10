@@ -423,6 +423,10 @@ audit rows:
 - `rift admin perms <command>` runs it from the proxy host with console
   rights (admin permission `perms`, see [Command line](#command-line)).
 
+In game, lines are coloured by the theme styles `heading`, `good`, `bad`,
+`muted` and `plain` (gold, green, red, gray and none by default), which
+operators restyle under `text.theme` ([styled text](text.md#theme)).
+
 | Command | Effect |
 | --- | --- |
 | `user <player> info` | Online server, primary group, groups and contexts in effect, prefix, suffix and every own node |

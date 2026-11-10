@@ -216,9 +216,9 @@ impl ProtocolVersion {
             | 757
             | 758
             | 759..=777 => Ok(Self(protocol)),
-            _ => Err(io::Error::new(
+            _ => Err(crate::text::notice_error(
                 io::ErrorKind::Unsupported,
-                "Unsupported Minecraft version. Rift supports Java 1.8.9–26.3.",
+                crate::text::catalog::Notice::LoginUnsupportedVersion,
             )),
         }
     }
@@ -699,9 +699,25 @@ pub fn action_bar_component(
 /// Title packets in send order; `times` are fade-in, stay and fade-out ticks.
 pub fn title(
     version: ProtocolVersion,
-    title: &str,
-    subtitle: Option<&str>,
+    title: Option<&crate::text::Text>,
+    subtitle: Option<&crate::text::Text>,
     times: [i32; 3],
 ) -> io::Result<Vec<Packet>> {
     switching(version)?.title(version, title, subtitle, times)
+}
+
+/// Rift text as the client reads it: plain text stays literal and
+/// components are rewritten by [`crate::text::for_client`].
+pub(crate) fn with_text<R>(
+    text: &crate::text::Text,
+    version: Option<ProtocolVersion>,
+    write: impl FnOnce(Text<'_>) -> R,
+) -> R {
+    match text {
+        crate::text::Text::Plain(text) => write(Text::Literal(text)),
+        crate::text::Text::Component(component) => {
+            let converted = crate::text::for_client(component, version);
+            write(Text::Component(converted.as_ref().unwrap_or(component)))
+        }
+    }
 }

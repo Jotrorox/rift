@@ -368,6 +368,7 @@ fn install_helpers(
             exhausted,
         ))?;
     api.raw_set("try", try_)?;
+    crate::text::lua::install(lua, &api)?;
     let start = started();
     api.raw_set(
         "clock",

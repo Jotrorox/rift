@@ -152,6 +152,15 @@ typedef struct rift_plugin_types_suggestion_t {
   rift_plugin_option_string_t   tooltip;
 } rift_plugin_types_suggestion_t;
 
+// `suggestion` with a rich tooltip (since 0.1.4), the answer of the
+// `styled` export. `tooltip-json` is a JSON text component (including
+// the `mini` and `legacy` authoring objects, see docs/text.md) or text
+// shown as written; empty means no tooltip.
+typedef struct rift_plugin_types_rich_suggestion_t {
+  rift_plugin_string_t   text;
+  rift_plugin_option_string_t   tooltip_json;
+} rift_plugin_types_rich_suggestion_t;
+
 // A server-list ping, before any backend contact.
 typedef struct rift_plugin_types_ping_t {
   rift_plugin_string_t   listener;
@@ -197,6 +206,22 @@ typedef struct rift_plugin_types_status_override_t {
   // A `data:image/png;base64,...` URI.
   rift_plugin_option_string_t   favicon;
 } rift_plugin_types_status_override_t;
+
+// `status-override` with rich version and player-sample text (since
+// 0.1.4), the answer of the `styled` export. `version-json` and each
+// `sample-json` line are JSON text components (including the `mini`
+// and `legacy` authoring objects) or text shown as written; clients
+// show them as `§` codes.
+typedef struct rift_plugin_types_rich_status_override_t {
+  rift_plugin_option_string_t   motd_json;
+  rift_plugin_option_string_t   version_json;
+  rift_plugin_option_s32_t   protocol;
+  rift_plugin_option_u32_t   online;
+  rift_plugin_option_u32_t   max_players;
+  rift_plugin_option_list_string_t   sample_json;
+  // A `data:image/png;base64,...` URI.
+  rift_plugin_option_string_t   favicon;
+} rift_plugin_types_rich_status_override_t;
 
 typedef struct {
   rift_plugin_string_t f0;
@@ -334,6 +359,18 @@ typedef struct rift_plugin_types_title_spec_t {
   int32_t   fade_out;
 } rift_plugin_types_title_spec_t;
 
+// `title-spec` with rich text (since 0.1.4); times are ticks. Both are
+// JSON text components (including the `mini` and `legacy` authoring
+// objects) or text shown as written. An empty `title-json` shows only
+// the subtitle.
+typedef struct rift_plugin_types_title_json_spec_t {
+  rift_plugin_string_t   title_json;
+  rift_plugin_option_string_t   subtitle_json;
+  int32_t   fade_in;
+  int32_t   stay;
+  int32_t   fade_out;
+} rift_plugin_types_title_json_spec_t;
+
 // A click on a plugin action of a dialog this plugin showed with
 // `players.dialog` (since 0.1.1).
 typedef struct rift_plugin_types_dialog_response_t {
@@ -356,6 +393,8 @@ typedef struct rift_plugin_types_dialog_response_t {
 typedef rift_plugin_types_player_info_t rift_plugin_players_player_info_t;
 
 typedef rift_plugin_types_title_spec_t rift_plugin_players_title_spec_t;
+
+typedef rift_plugin_types_title_json_spec_t rift_plugin_players_title_json_spec_t;
 
 typedef rift_plugin_types_boss_bar_spec_t rift_plugin_players_boss_bar_spec_t;
 
@@ -497,6 +536,24 @@ typedef rift_plugin_types_context_t exports_rift_plugin_decisions_context_t;
 
 typedef rift_plugin_types_decision_t exports_rift_plugin_decisions_decision_t;
 
+typedef rift_plugin_types_context_t exports_rift_plugin_styled_context_t;
+
+typedef rift_plugin_types_rich_suggestion_t exports_rift_plugin_styled_rich_suggestion_t;
+
+typedef rift_plugin_types_ping_t exports_rift_plugin_styled_ping_t;
+
+typedef rift_plugin_types_rich_status_override_t exports_rift_plugin_styled_rich_status_override_t;
+
+typedef struct {
+  exports_rift_plugin_styled_rich_suggestion_t *ptr;
+  size_t len;
+} exports_rift_plugin_styled_list_rich_suggestion_t;
+
+typedef struct {
+  bool is_some;
+  exports_rift_plugin_styled_rich_status_override_t val;
+} exports_rift_plugin_styled_option_rich_status_override_t;
+
 typedef rift_plugin_types_context_t exports_rift_plugin_handler_context_t;
 
 typedef rift_plugin_types_connection_t exports_rift_plugin_handler_connection_t;
@@ -551,7 +608,7 @@ typedef struct {
   exports_rift_plugin_handler_http_response_t val;
 } exports_rift_plugin_handler_option_http_response_t;
 
-// Imported Functions from `rift:plugin/players@0.1.3`
+// Imported Functions from `rift:plugin/players@0.1.4`
 // Players, optionally only those on one server or service group.
 extern bool rift_plugin_players_list(rift_plugin_string_t *maybe_server, rift_plugin_players_list_player_info_t *ret, rift_plugin_string_t *err);
 extern bool rift_plugin_players_get(rift_plugin_string_t *target, rift_plugin_players_option_player_info_t *ret, rift_plugin_string_t *err);
@@ -594,8 +651,10 @@ extern bool rift_plugin_players_broadcast_json(rift_plugin_string_t *text_json, 
 // 0.1.3). `list` and `get` return hidden players too; Rift leaves them
 // out of tab lists, counts and completion for viewers without the node.
 extern bool rift_plugin_players_visible_to(rift_plugin_string_t *target, rift_plugin_option_string_t *ret, rift_plugin_string_t *err);
+// `title` with JSON text components (since 0.1.4).
+extern bool rift_plugin_players_title_json(rift_plugin_string_t *target, rift_plugin_players_title_json_spec_t *title, bool *ret, rift_plugin_string_t *err);
 
-// Imported Functions from `rift:plugin/store@0.1.3`
+// Imported Functions from `rift:plugin/store@0.1.4`
 extern bool rift_plugin_store_get(rift_plugin_string_t *namespace_, rift_plugin_string_t *key, rift_plugin_option_list_u8_t *ret, rift_plugin_string_t *err);
 extern bool rift_plugin_store_set(rift_plugin_string_t *namespace_, rift_plugin_string_t *key, rift_plugin_list_u8_t *value, rift_plugin_string_t *err);
 // Returns whether an entry existed.
@@ -605,7 +664,7 @@ extern bool rift_plugin_store_increment(rift_plugin_string_t *namespace_, rift_p
 // Entries whose key starts with `prefix`, sorted by key.
 extern bool rift_plugin_store_list(rift_plugin_string_t *namespace_, rift_plugin_string_t *prefix, rift_plugin_list_tuple2_string_list_u8_t *ret, rift_plugin_string_t *err);
 
-// Imported Functions from `rift:plugin/permissions@0.1.3`
+// Imported Functions from `rift:plugin/permissions@0.1.4`
 // Whether the node is true in the player's current contexts.
 extern bool rift_plugin_permissions_has(rift_plugin_string_t *uuid, rift_plugin_string_t *node);
 // Set the user's global permission node; `none` removes it.
@@ -626,7 +685,7 @@ extern bool rift_plugin_permissions_meta(rift_plugin_string_t *uuid, rift_plugin
 // changed (since 0.1.3).
 extern bool rift_plugin_permissions_set_meta(rift_plugin_string_t *uuid, rift_plugin_string_t *key, rift_plugin_string_t *maybe_value, rift_plugin_string_t *maybe_contexts_json, uint64_t *maybe_expires_at, bool *ret, rift_plugin_string_t *err);
 
-// Imported Functions from `rift:plugin/bus@0.1.3`
+// Imported Functions from `rift:plugin/bus@0.1.4`
 // Returns how many subscribers received the message.
 extern bool rift_plugin_bus_publish(rift_plugin_string_t *subject, rift_plugin_list_u8_t *payload, rift_plugin_string_t *maybe_reply, uint32_t *ret, rift_plugin_string_t *err);
 // Send a request and wait for the first reply.
@@ -638,7 +697,7 @@ extern bool rift_plugin_bus_unsubscribe(uint64_t handle);
 // Append to a durable stream; returns the sequence number.
 extern bool rift_plugin_bus_stream_publish(rift_plugin_string_t *subject, rift_plugin_list_u8_t *payload, uint64_t *ret, rift_plugin_string_t *err);
 
-// Imported Functions from `rift:plugin/servers@0.1.3`
+// Imported Functions from `rift:plugin/servers@0.1.4`
 extern bool rift_plugin_servers_create(rift_plugin_string_t *group, rift_plugin_string_t *ret, rift_plugin_string_t *err);
 extern bool rift_plugin_servers_remove(rift_plugin_string_t *name, rift_plugin_string_t *ret, rift_plugin_string_t *err);
 extern bool rift_plugin_servers_start(rift_plugin_string_t *name, rift_plugin_string_t *ret, rift_plugin_string_t *err);
@@ -648,7 +707,7 @@ extern bool rift_plugin_servers_download(rift_plugin_string_t *template_, rift_p
 // templates, transfer, drain, maintenance, reload) with a JSON payload.
 extern bool rift_plugin_servers_control(rift_plugin_string_t *operation, rift_plugin_string_t *payload_json, rift_plugin_string_t *ret, rift_plugin_string_t *err);
 
-// Imported Functions from `rift:plugin/timers@0.1.3`
+// Imported Functions from `rift:plugin/timers@0.1.4`
 // Repeats every `ms` milliseconds (at least 10).
 extern uint64_t rift_plugin_timers_every(uint32_t ms);
 // Fires once after `ms` milliseconds.
@@ -656,10 +715,10 @@ extern uint64_t rift_plugin_timers_after(uint32_t ms);
 // Returns whether the timer existed.
 extern bool rift_plugin_timers_cancel(uint64_t handle);
 
-// Imported Functions from `rift:plugin/log@0.1.3`
+// Imported Functions from `rift:plugin/log@0.1.4`
 extern void rift_plugin_log_log(rift_plugin_log_level_t level, rift_plugin_string_t *message);
 
-// Imported Functions from `rift:plugin/meta@0.1.3`
+// Imported Functions from `rift:plugin/meta@0.1.4`
 extern void rift_plugin_meta_name(rift_plugin_string_t *ret);
 extern void rift_plugin_meta_version(rift_plugin_string_t *ret);
 // Guest path of the plugin's private data directory (`/data`).
@@ -671,16 +730,20 @@ extern double rift_plugin_meta_clock(void);
 // Unix time in seconds.
 extern int64_t rift_plugin_meta_time(void);
 
-// Exported Functions from `rift:plugin/dialogs@0.1.3`
+// Exported Functions from `rift:plugin/dialogs@0.1.4`
 void exports_rift_plugin_dialogs_dialog(exports_rift_plugin_dialogs_dialog_response_t *response);
 
-// Exported Functions from `rift:plugin/decisions@0.1.3`
+// Exported Functions from `rift:plugin/decisions@0.1.4`
 void exports_rift_plugin_decisions_login(exports_rift_plugin_decisions_context_t *ctx, exports_rift_plugin_decisions_decision_t *ret);
 void exports_rift_plugin_decisions_initial_server(exports_rift_plugin_decisions_context_t *ctx, exports_rift_plugin_decisions_decision_t *ret);
 void exports_rift_plugin_decisions_before_transfer(exports_rift_plugin_decisions_context_t *ctx, exports_rift_plugin_decisions_decision_t *ret);
 void exports_rift_plugin_decisions_command(exports_rift_plugin_decisions_context_t *ctx, exports_rift_plugin_decisions_decision_t *ret);
 
-// Exported Functions from `rift:plugin/handler@0.1.3`
+// Exported Functions from `rift:plugin/styled@0.1.4`
+void exports_rift_plugin_styled_suggest(exports_rift_plugin_styled_context_t *ctx, exports_rift_plugin_styled_list_rich_suggestion_t *ret);
+bool exports_rift_plugin_styled_status(exports_rift_plugin_styled_ping_t *ping, exports_rift_plugin_styled_rich_status_override_t *ret);
+
+// Exported Functions from `rift:plugin/handler@0.1.4`
 bool exports_rift_plugin_handler_init(rift_plugin_string_t *config_json, exports_rift_plugin_handler_registration_t *ret, rift_plugin_string_t *err);
 bool exports_rift_plugin_handler_reload(rift_plugin_string_t *config_json, rift_plugin_string_t *err);
 void exports_rift_plugin_handler_shutdown(rift_plugin_string_t *reason);
@@ -719,6 +782,8 @@ void rift_plugin_types_decision_free(rift_plugin_types_decision_t *ptr);
 
 void rift_plugin_types_suggestion_free(rift_plugin_types_suggestion_t *ptr);
 
+void rift_plugin_types_rich_suggestion_free(rift_plugin_types_rich_suggestion_t *ptr);
+
 void rift_plugin_types_ping_free(rift_plugin_types_ping_t *ptr);
 
 void rift_plugin_option_s32_free(rift_plugin_option_s32_t *ptr);
@@ -730,6 +795,8 @@ void rift_plugin_list_string_free(rift_plugin_list_string_t *ptr);
 void rift_plugin_option_list_string_free(rift_plugin_option_list_string_t *ptr);
 
 void rift_plugin_types_status_override_free(rift_plugin_types_status_override_t *ptr);
+
+void rift_plugin_types_rich_status_override_free(rift_plugin_types_rich_status_override_t *ptr);
 
 void rift_plugin_tuple2_string_string_free(rift_plugin_tuple2_string_string_t *ptr);
 
@@ -759,11 +826,15 @@ void rift_plugin_types_boss_bar_spec_free(rift_plugin_types_boss_bar_spec_t *ptr
 
 void rift_plugin_types_title_spec_free(rift_plugin_types_title_spec_t *ptr);
 
+void rift_plugin_types_title_json_spec_free(rift_plugin_types_title_json_spec_t *ptr);
+
 void rift_plugin_types_dialog_response_free(rift_plugin_types_dialog_response_t *ptr);
 
 void rift_plugin_players_player_info_free(rift_plugin_players_player_info_t *ptr);
 
 void rift_plugin_players_title_spec_free(rift_plugin_players_title_spec_t *ptr);
+
+void rift_plugin_players_title_json_spec_free(rift_plugin_players_title_json_spec_t *ptr);
 
 void rift_plugin_players_boss_bar_spec_free(rift_plugin_players_boss_bar_spec_t *ptr);
 
@@ -810,6 +881,18 @@ void exports_rift_plugin_dialogs_dialog_response_free(exports_rift_plugin_dialog
 void exports_rift_plugin_decisions_context_free(exports_rift_plugin_decisions_context_t *ptr);
 
 void exports_rift_plugin_decisions_decision_free(exports_rift_plugin_decisions_decision_t *ptr);
+
+void exports_rift_plugin_styled_context_free(exports_rift_plugin_styled_context_t *ptr);
+
+void exports_rift_plugin_styled_rich_suggestion_free(exports_rift_plugin_styled_rich_suggestion_t *ptr);
+
+void exports_rift_plugin_styled_ping_free(exports_rift_plugin_styled_ping_t *ptr);
+
+void exports_rift_plugin_styled_rich_status_override_free(exports_rift_plugin_styled_rich_status_override_t *ptr);
+
+void exports_rift_plugin_styled_list_rich_suggestion_free(exports_rift_plugin_styled_list_rich_suggestion_t *ptr);
+
+void exports_rift_plugin_styled_option_rich_status_override_free(exports_rift_plugin_styled_option_rich_status_override_t *ptr);
 
 void exports_rift_plugin_handler_context_free(exports_rift_plugin_handler_context_t *ptr);
 
