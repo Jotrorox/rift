@@ -1,0 +1,10 @@
+{
+  "block_type": {
+    "renames": {
+      "farm": "farmland",
+      "fungus": "nether_fungus",
+      "roots": "nether_roots",
+      "waterlily": "lily_pad"
+    }
+  }
+}
