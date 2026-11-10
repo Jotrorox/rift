@@ -1,0 +1,11 @@
+{
+  "headlessmc-lwjgl": {
+    "version": "3.0.0-RC8",
+    "license": "MIT",
+    "source": "https://github.com/headlesshq/headlessmc",
+    "url": "https://github.com/headlesshq/headlessmc/releases/download/3.0.0-RC8/headlessmc-lwjgl-3.0.0-RC8-all.jar",
+    "algorithm": "sha256",
+    "checksum": "45c7a0041d580e7c80a190c49140e65c521e992af13229ca71795f3414146009",
+    "filename": "headlessmc-lwjgl-3.0.0-RC8-all.jar"
+  }
+}
