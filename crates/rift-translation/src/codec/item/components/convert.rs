@@ -153,6 +153,68 @@ fn synced_by_name(cx: &mut Conv<'_>, registry: &'static str, name: &str) -> Opti
     None
 }
 
+/// Whether patches carry over between the adjacent protocols `a` and `b`
+/// unchanged: the same component types with the same IDs and layouts, no
+/// explicit rules, and identity mappings for every built-in registry the
+/// layouts name. Text components inside are the text codec's to judge, and
+/// synchronised registries the registries codec's.
+// INTEGRATION: combine with the text codec's and the registries codec's own
+// "nothing to do for this pair" answers once they have them.
+pub fn identical(a: i32, b: i32) -> bool {
+    use std::{collections::HashMap, sync::Mutex, sync::OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<(i32, i32), bool>>> = OnceLock::new();
+    let key = (a.min(b), a.max(b));
+    *CACHE
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .entry(key)
+        .or_insert_with(|| compute_identical(key.0, key.1))
+}
+
+fn compute_identical(older: i32, newer: i32) -> bool {
+    let (Ok(old), Ok(new)) = (Layout::of(older), Layout::of(newer)) else {
+        return false;
+    };
+    if rules::PAIRS.contains(&older) {
+        return false;
+    }
+    let (old_types, new_types) = (
+        data::version(older).expect_registry("data_component_type"),
+        data::version(newer).expect_registry("data_component_type"),
+    );
+    if old_types.len() != new_types.len() {
+        return false;
+    }
+    let mut registries = Vec::new();
+    for id in 0..old_types.len() as i32 {
+        let (Some((a, x)), Some((b, y))) = (old.get(id), new.get(id)) else {
+            return false;
+        };
+        if a != b || !std::ptr::eq(x, y) {
+            return false;
+        }
+        schema::registries(x, &mut |registry| {
+            if !registries.contains(&registry) {
+                registries.push(registry);
+            }
+        });
+    }
+    registries.iter().all(|registry| {
+        match (
+            data::version(older).registry(registry),
+            data::version(newer).registry(registry),
+        ) {
+            (Some(_), Some(_)) => {
+                crate::mapping::mapping(older, newer, registry).is_identity()
+                    && crate::mapping::mapping(newer, older, registry).is_identity()
+            }
+            (None, None) => true,
+            _ => false,
+        }
+    })
+}
+
 /// The sender's name of a synchronised registry entry.
 // INTEGRATION: as for `synced`; until the registries codec exposes the
 // sender's synchronised entries, such names are unknown.

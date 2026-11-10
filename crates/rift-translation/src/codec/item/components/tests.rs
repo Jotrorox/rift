@@ -888,3 +888,18 @@ fn every_removed_type_converts_to_both_neighbours_and_back() {
         }
     }
 }
+
+/// Only pairs without any change to components report them identical.
+#[test]
+fn identical_pairs_have_nothing_to_convert() {
+    let all: Vec<i32> = protocols().collect();
+    let identical: Vec<_> = all
+        .windows(2)
+        .filter(|pair| super::identical(pair[0], pair[1]))
+        .map(|pair| pair[0])
+        .collect();
+    eprintln!("pairs with identical components: {identical:?}");
+    for older in &identical {
+        assert!(!super::rules::PAIRS.contains(older));
+    }
+}

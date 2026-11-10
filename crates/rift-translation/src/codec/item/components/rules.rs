@@ -21,6 +21,9 @@ use crate::{
 };
 use std::io;
 
+/// The older protocols of the pairs that have rules here.
+pub const PAIRS: &[i32] = &[766, 767, 768, 769, 770, 772, 776];
+
 /// Patch-level rules, before components are converted one by one.
 pub fn before(
     cx: &mut Conv<'_>,

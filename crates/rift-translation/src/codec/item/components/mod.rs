@@ -23,7 +23,7 @@ mod stash;
 #[cfg(test)]
 mod tests;
 
-pub use convert::{compatible, convert_value};
+pub use convert::{compatible, convert_value, identical};
 pub use schema::{Node, Value};
 
 use crate::{
