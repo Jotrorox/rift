@@ -1,7 +1,7 @@
 // Package rift is the Go SDK for Rift WebAssembly plugins.
 //
 // It wraps the bindings that wit-bindgen-go generates for the
-// rift:plugin@0.1.3 contract (see the gen directory) with plain Go types,
+// rift:plugin@0.1.4 contract (see the gen directory) with plain Go types,
 // registers a no-op default for every hook, and exposes setters for the hooks
 // a plugin implements:
 //
@@ -33,7 +33,7 @@
 // *JSON functions take (a bare string is never read as markup; see
 // docs/text.md). SendTitleJSON shows a title, and OnRichSuggest and
 // OnRichStatus answer with rich tooltips and server-list text through the
-// styled export of rift:plugin 0.1.3.
+// styled export of rift:plugin 0.1.4.
 //
 // Build with TinyGo 0.34 or newer:
 //

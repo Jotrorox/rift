@@ -1,6 +1,6 @@
 # Rift Go plugin SDK
 
-Write Rift WebAssembly plugins in Go against the `rift:plugin@0.1.3` contract
+Write Rift WebAssembly plugins in Go against the `rift:plugin@0.1.4` contract
 in [`wit/rift-plugin.wit`](../../wit/rift-plugin.wit).
 
 Module: `github.com/Jotrorox/rift/sdk/go`
@@ -117,7 +117,7 @@ rift.SendMessageJSON(ctx.UUID, msg.JSON())
 ```
 
 `rift.SendTitleJSON` shows a title, and `rift.OnRichSuggest`/`rift.OnRichStatus`
-answer with rich tooltips and server-list text (rift:plugin 0.1.3). A bare
+answer with rich tooltips and server-list text (rift:plugin 0.1.4). A bare
 string is never markup. See [Go plugins](../../docs/plugins-go.md#rich-text-builders)
 and [Text and markup](../../docs/text.md).
 

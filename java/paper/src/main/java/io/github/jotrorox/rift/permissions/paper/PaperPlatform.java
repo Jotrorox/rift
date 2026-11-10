@@ -69,6 +69,7 @@ final class PaperPlatform implements Platform {
 
     private ContextSet compute(Player player) {
         ContextSet.Builder contexts = ContextSet.builder().add(ContextSet.SERVER, server);
+        client.group().ifPresent(group -> contexts.add(ContextSet.GROUP, group));
         World world = player.getWorld();
         add(contexts, ContextSet.WORLD, world.getName());
         add(contexts, ContextSet.DIMENSION, switch (world.getEnvironment()) {

@@ -100,7 +100,7 @@ func OnStatus(f func(Ping) *StatusOverride) {
 }
 
 // OnRichSuggest sets the suggest handler with JSON text tooltips
-// (rift:plugin 0.1.3); it replaces an OnSuggest handler. Hosts before 0.1.3
+// (rift:plugin 0.1.4); it replaces an OnSuggest handler. Hosts before 0.1.4
 // show the tooltips' words.
 func OnRichSuggest(f func(Context) []RichSuggestion) {
 	onRichSuggest = f
@@ -108,8 +108,8 @@ func OnRichSuggest(f func(Context) []RichSuggestion) {
 }
 
 // OnRichStatus sets the status handler with JSON text for the version and
-// the player sample (rift:plugin 0.1.3); it replaces an OnStatus handler.
-// Hosts before 0.1.3 show the text's words.
+// the player sample (rift:plugin 0.1.4); it replaces an OnStatus handler.
+// Hosts before 0.1.4 show the text's words.
 func OnRichStatus(f func(Ping) *RichStatusOverride) {
 	onRichStatus = f
 	handled[HookStatus] = true
@@ -216,7 +216,7 @@ func init() {
 	d.InitialServer = func(c types.Context) types.Decision { return onInitialServer(liftContext(c)).lowerDecision() }
 	d.BeforeTransfer = func(c types.Context) types.Decision { return onBeforeTransfer(liftContext(c)).lowerDecision() }
 	d.Command = func(c types.Context) types.Decision { return onCommand(liftContext(c)).lowerDecision() }
-	// Hosts from rift:plugin 0.1.3 ask styled for suggest and status; older
+	// Hosts from rift:plugin 0.1.4 ask styled for suggest and status; older
 	// ones the handler.
 	s := &styled.Exports
 	s.Suggest = func(c types.Context) cm.List[types.RichSuggestion] {

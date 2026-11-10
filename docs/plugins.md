@@ -2,7 +2,7 @@
 
 Rift has one plugin system. A plugin is anything that receives Rift's events
 and calls Rift's host API, and every plugin uses the same contract,
-[`wit/rift-plugin.wit`](../wit/rift-plugin.wit) (`rift:plugin@0.1.3`): one
+[`wit/rift-plugin.wit`](../wit/rift-plugin.wit) (`rift:plugin@0.1.4`): one
 event schema, one set of answers, one host API. What differs is where the code
 runs:
 
@@ -10,7 +10,7 @@ runs:
 | --- | --- | --- | --- |
 | **script** | `rift.lua`, its modules and script-mode plugin folders, in the sandboxed configuration VM | Sandboxed: instruction and memory budgets, no I/O | `rift.on`, `rift.command`, `rift.config.plugins`, `rift.plugin` for a folder without a persistent manifest |
 | **persistent** | A plugin folder installed on disk with a `plugin.toml`, running in its own long-lived Lua state or WebAssembly instance on its own OS thread | Trusted: runs with Rift's process privileges | `rift.plugin(name, config)` |
-| **remote** | A service on the [message bus](messaging.md) that answers `login`, `initial_server` and `before_transfer` | Whatever the service is; Rift only reads its replies | `rift.config.plugins.decisions` |
+| **remote** | A service on the [message bus](messaging.md) that answers `login`, `initial_server` and `before_transfer`, and calls the `players` interface as [`rift.players.*`](messaging.md#player-api-subjects) | Whatever the service is; Rift only reads its replies and checks its login's grants | `rift.config.plugins.decisions`, `messaging.principals` |
 
 Persistent plugins come in two engines: [Lua](plugins-lua.md) (LuaJIT, the
 same `rift` API as `rift.lua`) and WebAssembly components written in
@@ -103,7 +103,7 @@ restart = "on-failure"      # "never", "on-failure" or "always"; default "on-fai
 [capabilities]
 filesystem = ["data"]       # "data", "host" or absolute paths; default ["data"]
 network = true              # default true
-env = ["RELAXOBAN_DSN"]     # omit to inherit Rift's whole environment; [] for none
+env = ["RELAXOBAN_DSN"]     # omit to inherit Rift's environment minus its own secrets; [] for none
 
 [lua]                       # engine = "lua" only
 ffi = false                 # LuaJIT's FFI; default false
@@ -121,7 +121,7 @@ jit = true                  # false: interpret everything so deadlines interrupt
 | `hot_reload` | `false` | See [lifecycle](#lifecycle-failures-restarts-and-reloads). |
 | `[deadlines]` | per hook | Keys are `init`, `reload`, `shutdown` and the awaited hooks; observers have no deadline and are rejected here. Awaited hooks allow 1–10 000 ms, `http` up to 60 000. |
 | `[failure]` | | `on_timeout` overrides the per-hook default for every hook. |
-| `[capabilities]` | `filesystem = ["data"]`, `network = true`, all of `env` | `data` is `plugins/<name>/data/` (created on start, read-write); `host` is the configuration directory, read-only; an absolute path is read-write and, for WebAssembly, may not contain or lie inside `local/plugincache` or `plugins/`. WebAssembly enforces all three. Lua enforces `env` (`os.getenv`) and `network` (`rift.http.request`) but not `filesystem`: Lua `io` sees what Rift sees. |
+| `[capabilities]` | `filesystem = ["data"]`, `network = true`, all of `env` except [Rift's own secrets](operations.md#secrets-and-the-processes-rift-starts) | `data` is `plugins/<name>/data/` (created on start, read-write); `host` is the configuration directory, read-only; an absolute path is read-write and, for WebAssembly, may not contain or lie inside `local/plugincache` or `plugins/`. WebAssembly enforces all three. Lua enforces `env` (`os.getenv`) and `network` (`rift.http.request`) but not `filesystem`: Lua `io` sees what Rift sees. |
 | `[lua]` | | `engine = "lua"` only. See [the JIT and deadlines](plugins-lua.md#the-jit-and-deadlines). |
 | `[wasm]` | | `engine = "wasm"` only: per-instance limits; see [WebAssembly plugins](#webassembly-plugins). |
 
@@ -169,7 +169,7 @@ validated exactly like Lua results and bus replies: strings are 1–1024 bytes,
 JSON text components (the `deny-json` and `message-json` answers of the
 optional `decisions` export, which a WebAssembly component that has it answers
 decision hooks with instead of `handler`) at most 32 KiB, servers must exist, and an answer a hook does not accept is a failure of the plugin.
-The same holds for the optional `styled` export (since 0.1.3), which a
+The same holds for the optional `styled` export (since 0.1.4), which a
 component that has it answers `suggest` and `status` with instead of
 `handler`: its suggestion tooltips (`tooltip-json`; empty means none), status
 `version-json` and `sample-json` lines are JSON text components, the `mini`
@@ -288,9 +288,9 @@ and the SDK guides map it to each language.
 
 | Interface | Functions | Notes |
 | --- | --- | --- |
-| `players` | `list(server?)`, `get(target)`, `names(prefix?)`, `message`, `action-bar`, `title`, `tab-list`, `boss-bar`, `dialog`, `clear-dialog`, `kick`, `transfer`, `broadcast`, `message-json`, `action-bar-json`, `kick-json`, `broadcast-json`, `title-json` | `target` is a name, a UUID or a connection id. Actions return whether the player was online. Transfers pass `before_transfer`. `dialog` and `clear-dialog` (since 0.1.1) show and close [dialogs](dialogs.md). The `-json` functions (since 0.1.2) take a JSON text component for colours, hover text and click events ([rich text](extensions.md#rich-text)); Lua takes a chat component table in place of the string. `title-json` (since 0.1.3) takes a `title-json-spec`: title and optional subtitle as JSON text components (an empty title shows only the subtitle) and times in ticks. Components may contain the authoring objects `{"mini": "<red>Hi <player>", "args": {...}}` and `{"legacy": "&cHi", "marker": "&"}` ([text](text.md)); a bare string is never read as markup. Every SDK has builders that write them. |
+| `players` | `list(server?)`, `get(target)`, `names(prefix?)`, `message`, `action-bar`, `title`, `tab-list`, `boss-bar`, `dialog`, `clear-dialog`, `kick`, `transfer`, `broadcast`, `message-json`, `action-bar-json`, `kick-json`, `broadcast-json`, `title-json` | `target` is a name, a UUID or a connection id. Actions return whether the player was online. Transfers pass `before_transfer`. `dialog` and `clear-dialog` (since 0.1.1) show and close [dialogs](dialogs.md). The `-json` functions (since 0.1.2) take a JSON text component for colours, hover text and click events ([rich text](extensions.md#rich-text)); Lua takes a chat component table in place of the string. `list` and `get` include hidden players; `visible-to(target)` (since 0.1.3; `visible_to` in Lua player tables and bus replies) returns the node a viewer needs to see one ([visibility](permissions.md#visibility)). `title-json` (since 0.1.4) takes a `title-json-spec`: title and optional subtitle as JSON text components (an empty title shows only the subtitle) and times in ticks. Components may contain the authoring objects `{"mini": "<red>Hi <player>", "args": {...}}` and `{"legacy": "&cHi", "marker": "&"}` ([text](text.md)); a bare string is never read as markup. Every SDK has builders that write them. |
 | `store` | `get`, `set`, `delete`, `increment`, `list(namespace, prefix)` | The durable store shared with API v2. Namespaces are private: `plugin.<name>.<namespace>`, which the configuration script's `rift.store` cannot read or write. |
-| `permissions` | `has`, `set`, `add-group`, `remove-group`, `groups`, `list-groups` | Rift's [permission store](permissions.md#persistent-plugins): user nodes and group memberships, checked in the player's current contexts. |
+| `permissions` | `has`, `set`, `add-group`, `remove-group`, `groups`, `list-groups`, `meta`, `set-meta` | Rift's [permission store](permissions.md#persistent-plugins): user nodes, group memberships and (since 0.1.3) meta values with contexts and expiry, checked in the player's current contexts. |
 | `bus` | `publish`, `request(subject, payload, timeout_ms)`, `subscribe(subject, queue_group?)`, `unsubscribe`, `stream-publish` | Messages arrive through the `message` hook. At most 256 subscriptions; requests wait at most 60 s. |
 | `servers` | `create`, `remove`, `start`, `stop`, `download`, `control(operation, payload_json)` | The same `rift.control.*` operations as the bus, awaiting the reply (at most 60 s). |
 | `timers` | `every(ms)`, `after(ms)`, `cancel(handle)` | Ticks arrive through the `timer` hook. At least 10 ms; at most 1024 timers. |
@@ -320,7 +320,8 @@ Install only plugins you would run as Rift's user.
   capabilities allow: with full WASI (`filesystem = ["host"]`,
   `network = true`, the whole environment) it can read `rift.sqlite3` and the
   configuration with its secrets, fill the disk through `data`, read every
-  secret in the environment, or open ports. Every plugin can also use the
+  secret in the environment (Rift's own token variables only when the
+  manifest names them in `env`), or open ports. Every plugin can also use the
   whole host API: kick players, change permissions, publish on the bus and
   start servers. Lua plugins, being trusted, can write anywhere Rift can,
   the cache included.
@@ -328,7 +329,8 @@ Install only plugins you would run as Rift's user.
   `network = false` and `env = []` (or a list of names) confine a WebAssembly
   plugin to its own folder; Lua honours `env` and `network` for the Rift API
   only. The defaults are permissive: `data`, network on and the whole
-  environment.
+  environment apart from Rift's own secrets. Lua's `io.popen` starts programs
+  with Rift's full environment.
 - **`rift check` prints the grants** for every plugin, including the Lua
   options and which grants Lua does not enforce, before anything runs.
 - **Rift never downloads or auto-enables plugins.** A plugin runs only when its
@@ -403,7 +405,9 @@ appear in the [operator audit log](http.md#authentication-and-access) as
 `plugin started`, `plugin stopped`, `plugin restarting`, `plugin failed`,
 `plugin reloaded` and `plugin reload_failed` by `system`, and operator
 restarts as `plugin restart_requested` by the operator (`local-admin` for the
-admin socket, `rift.control` for the bus, a name no web operator can have). Records carry the plugin name, never
+admin socket; on the bus `bus:<login>`, `plugin:<name>` for another plugin
+and `rift.control` for the configuration script, names no web operator can
+have). Records carry the plugin name, never
 error text. The HTTP and admin requests themselves are audited as usual.
 
 **Metrics** on the status service's `/metrics`:
@@ -440,14 +444,15 @@ same without WASI.
 
 Additions keep compiled components loading. Wasmtime matches interface
 versions on the `0.1` track, so a component built against `0.1.0` links
-against this `0.1.3` host and the other way round. An addition may bring new
+against this `0.1.4` host and the other way round. An addition may bring new
 host functions, types and interfaces, but never changes an existing type or
 adds a case to an existing enum or variant, since exports are checked exactly.
 A new export lives in its own interface, which the host looks up when it
 loads a component and treats as optional: world `base` holds what every
 component has, worlds `optional`, `optional-decisions` and `optional-styled`
 what later releases added (`dialogs` in 0.1.1, `decisions` in 0.1.2, `styled`
-in 0.1.3). The rich text host functions came in 0.1.2 and `players.title-json`
-in 0.1.3. A host function a component calls needs a host that has it; a
+in 0.1.4). The rich text host functions came in 0.1.2, the visibility and
+permission meta host functions in 0.1.3 and `players.title-json` in 0.1.4. A
+host function a component calls needs a host that has it; a
 component that only exports something new still loads on older 0.1 hosts.
 Breaking changes move to 1.0.

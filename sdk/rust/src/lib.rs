@@ -1,7 +1,7 @@
 //! Guest SDK for Rift WebAssembly plugins.
 //!
 //! A Rift plugin is a WebAssembly component built for `wasm32-wasip2` against
-//! the `plugin` world of `rift:plugin@0.1.3`. This crate ships that WIT,
+//! the `plugin` world of `rift:plugin@0.1.4`. This crate ships that WIT,
 //! generates the bindings and wraps them, so a plugin is an ordinary
 //! `cdylib` crate:
 //!
@@ -100,7 +100,7 @@
 //! The dialog functions are new in rift:plugin 0.1.1. A plugin that calls
 //! them needs a Rift that implements 0.1.1; older hosts refuse to load it.
 //! A plugin that does not call them loads on every 0.1 host. The same holds
-//! for the rich text functions of 0.1.2 and [`players::title_json`] of 0.1.3
+//! for the rich text functions of 0.1.2 and [`players::title_json`] of 0.1.4
 //! below.
 //!
 //! WASI 0.2 (`std::fs` on the granted directories, clocks, random) works
@@ -167,9 +167,9 @@
 //!
 //! [`Plugin::suggest_rich`] and [`Plugin::status_rich`] answer `suggest` and
 //! `status` with JSON tooltips, version text and player-sample lines (since
-//! 0.1.3, through the optional `styled` export). Their defaults call
+//! 0.1.4, through the optional `styled` export). Their defaults call
 //! [`Plugin::suggest`] and [`Plugin::status`], so implement whichever form
-//! you need. Hosts before 0.1.3 call the plain hooks; the SDK then shows the
+//! you need. Hosts before 0.1.4 call the plain hooks; the SDK then shows the
 //! rich text as its words.
 
 #![warn(missing_docs)]
@@ -181,7 +181,7 @@
 pub mod bindings {
     wit_bindgen::generate!({
         path: "wit",
-        world: "rift:plugin/plugin@0.1.3",
+        world: "rift:plugin/plugin@0.1.4",
         pub_export_macro: true,
         export_macro_name: "__export_rift_plugin",
         default_bindings_module: "rift_plugin::bindings",
@@ -263,7 +263,7 @@ pub trait Plugin: Default + 'static {
         None
     }
 
-    /// [`Plugin::suggest`] with JSON text tooltips (since 0.1.3). The default
+    /// [`Plugin::suggest`] with JSON text tooltips (since 0.1.4). The default
     /// answers with [`Plugin::suggest`].
     fn suggest_rich(&mut self, ctx: Context) -> Vec<RichSuggestion> {
         self.suggest(ctx)
@@ -273,7 +273,7 @@ pub trait Plugin: Default + 'static {
     }
 
     /// [`Plugin::status`] with JSON text for the version and the player
-    /// sample (since 0.1.3). The default answers with [`Plugin::status`].
+    /// sample (since 0.1.4). The default answers with [`Plugin::status`].
     fn status_rich(&mut self, ping: Ping) -> Option<RichStatusOverride> {
         self.status(ping).map(RichStatusOverride::from)
     }
@@ -542,12 +542,12 @@ impl TitleJsonSpec {
 /// The `_json` functions take a JSON text component as text, for example
 /// `&serde_json::json!({...}).to_string()` or
 /// `&text::mini("<red>Hi").to_string()`; see [rich text](crate#rich-text).
-/// `title_json` (since 0.1.3) takes a [`TitleJsonSpec`].
+/// `title_json` (since 0.1.4) takes a [`TitleJsonSpec`].
 pub mod players {
     pub use crate::bindings::rift::plugin::players::{
         action_bar, action_bar_json, boss_bar, broadcast, broadcast_json, clear_dialog, dialog,
         get, kick, kick_json, list, message, message_json, names, tab_list, title, title_json,
-        transfer,
+        transfer, visible_to,
     };
 
     /// Show a dialog in the vanilla JSON format (Minecraft 1.21.6+). Returns
@@ -589,8 +589,12 @@ pub mod store {
 /// Rift's permission store: user nodes and group memberships.
 pub mod permissions {
     pub use crate::bindings::rift::plugin::permissions::{
-        add_group, groups, has, list_groups, remove_group, set,
+        add_group, groups, has, list_groups, meta, remove_group, set, set_meta,
     };
+
+    /// The meta key that makes a player visible only to viewers holding the
+    /// node in its value (see docs/permissions.md, "Visibility").
+    pub const VISIBLE_TO: &str = "rift.visible-to";
 }
 
 /// The message bus. Subscriptions deliver to [`Plugin::message`](crate::Plugin::message).
@@ -1090,7 +1094,7 @@ pub mod __private {
             plain(with(|p: &mut P| p.command(ctx)))
         }
 
-        // Hosts before 0.1.3 call these; later ones call `styled`.
+        // Hosts before 0.1.4 call these; later ones call `styled`.
         fn suggest(ctx: Context) -> Vec<Suggestion> {
             let suggestions = with(|p: &mut P| p.suggest_rich(ctx));
             suggestions

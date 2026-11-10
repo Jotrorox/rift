@@ -83,7 +83,8 @@ messaging = {
 Set this field as `rift.config.messaging = { ... }` in a script, or inside a
 legacy returned configuration table. Tokens must contain
 32–1024 bytes without control characters. An external principal needs explicit
-publish/subscribe grants. Control subjects additionally require `control = true`;
+publish/subscribe grants. The [player API](#player-api-subjects) additionally
+requires `players = true`, and control subjects `control = true`;
 external clients cannot forge `rift.events` publications. Certificate and storage
 paths are relative to Rift's working directory. Messaging configuration changes,
 including credentials and stream limits, require a restart. Lua callback source
@@ -152,6 +153,64 @@ example, or start from [`examples/messaging.lua`](../examples/messaging.lua).
 VM globals do not persist between callbacks. Rust/QUIC clients provide
 the lower-overhead path when Lua VM creation is too expensive.
 
+## Player API subjects
+
+The `players` interface of the [plugin contract](plugins.md#host-api) is
+also served on the bus, so a service such as a ban list can message, kick and
+transfer players without being a plugin and without `control`. Give its login
+`players = true` and publish grants for exactly the operations it needs:
+
+```lua
+principals = {
+    {
+        name = "relaxoban",
+        token_env = "RIFT_RELAXOBAN_TOKEN",
+        publish = { "rift.players.kick-json", "rift.players.message-json", "_INBOX.>" },
+        subscribe = { "_INBOX.>", "rift.events.players" },
+        players = true,
+    },
+}
+```
+
+Send requests to `rift.players.<operation>`; answers are
+`{"ok":true,"data":...}` or `{"ok":false,"error":"..."}`, as for control
+subjects. Payloads are JSON objects whose fields are the WIT parameters in
+snake_case; `target` is a player name, a UUID or a connection id.
+
+| Subject | JSON payload | `data` |
+| --- | --- | --- |
+| `rift.players.list` | `{}` or `{"server":"lobby"}` (a server or service group) | `[{"connection_id":7,"uuid":"…","name":"Alice","server":"lobby-1","protocol":774}]` |
+| `rift.players.get` | `{"target":"Alice"}` | one player, or `null` |
+| `rift.players.names` | `{}` or `{"prefix":"Al"}` | sorted names |
+| `rift.players.message` | `{"target":"Alice","text":"Hello"}` | whether the player was online |
+| `rift.players.action-bar` | `{"target":"Alice","text":"…"}` | whether the player was online |
+| `rift.players.title` | `{"target":"Alice","title":"Welcome","subtitle":"…","fade_in":10,"stay":70,"fade_out":20}`; only `target` and one of `title`/`subtitle` are required | whether the player was online |
+| `rift.players.kick` | `{"target":"Alice","reason":"Bye"}` | whether the player was online |
+| `rift.players.transfer` | `{"target":"Alice","server":"survival"}` (passes `before_transfer`) | whether the player was online |
+| `rift.players.broadcast` | `{"text":"…"}`, optionally `"server":"lobby"` | how many players received it |
+| `rift.players.message-json`, `action-bar-json`, `kick-json`, `broadcast-json`, `title-json` | as above, with `text`, `reason`, `title` or `subtitle` a JSON text component | as above |
+
+Plain text is 1..=1024 bytes and is never read as JSON. The `-json`
+operations take a component of at most 32 KiB, either embedded
+(`"reason":{"text":"Banned","color":"red"}`) or as a JSON string, exactly as
+the WIT functions take it, and may be written as markup
+(`"reason":{"mini":"<red>Banned"}`, see [styled text](text.md)); line breaks make a multi-line kick screen, and
+hover and click events are spelled for each player's client as described
+under [rich text](extensions.md#rich-text). Dialogs, tab lists and boss bars
+stay plugin-only, because their clicks and lifetimes belong to an owner.
+
+Only principals with `control = true` may subscribe to `rift.players.*`: a
+subscriber would see every caller's actions and could answer in Rift's place.
+Requests run concurrently (up to 64 at once), need an `_INBOX.` reply subject
+like control requests, and publish no `rift.events.control` event. Every
+request that acts on a player (all but `list`, `get` and `names`) is written
+to the [operator audit log](http.md#authentication-and-access) as
+`players.<operation>` with the player as the target, never the text, by
+`bus:<login>`, before the reply is sent. Persistent plugins calling these subjects through their own
+`bus` interface appear as `plugin:<name>`, the configuration script as
+`rift.players`. Plugins normally use the `players` interface directly, which
+is not audited, like their other host calls.
+
 ## Rift control subjects
 
 Send a JSON request using `Client::request(subject, payload, timeout)`. Responses
@@ -159,6 +218,12 @@ are `{"ok":true,"data":...}` or `{"ok":false,"error":"..."}`. They use the same
 handlers as Rift's existing administration service, even if that service's TCP
 listener is disabled. The control bridge requires an `_INBOX.` reply subject;
 request helpers create one automatically. Control requests are serialized.
+Requests that change something (all but `status`, `servers`, `groups`,
+`nodes`, `templates` and the reading `plugins` actions) are written to the
+[operator audit log](http.md#authentication-and-access) as
+`control.<command>` by the caller: `bus:<login>` for a bus login,
+`plugin:<name>` for a persistent plugin's `servers` calls, and `rift.control`
+for the configuration script.
 
 | Subject | JSON payload | Result |
 | --- | --- | --- |
@@ -190,8 +255,12 @@ capacity the way CloudNet plugins follow service lifecycle events.
 `rift.events.control` reports command name and success, excluding status/player
 details. `rift.events.reload` reports the active revision after successful reload.
 `rift.events.players` reports players as they join, switch servers and quit:
-`{"event":"join","connection_id":"7","uuid":"…","name":"Alice","server":"lobby"}`.
+`{"event":"join","connection_id":"7","uuid":"…","name":"Alice","server":"lobby","visible_to":null}`.
 A `switch` also carries the `previous` server, and a `quit` names the last one.
+`visible_to` is the node a viewer needs to see the player
+([visibility](permissions.md#visibility)), or `null`; a `visibility` event
+reports a change of it, with the old value in `previous_visible_to`.
+`rift.players.list` and `get` include `visible_to` for every player.
 `uuid` is lowercase 32-digit hex without hyphens. Events for one player arrive in order.
 `rift.events.permissions` carries every committed [permission](permissions.md)
 change, the same JSON as `rift.perms.update`.

@@ -1,6 +1,6 @@
 # Rift C plugin SDK
 
-Write Rift WebAssembly plugins in C (or C++) against the `rift:plugin@0.1.3`
+Write Rift WebAssembly plugins in C (or C++) against the `rift:plugin@0.1.4`
 contract in [`wit/rift-plugin.wit`](../../wit/rift-plugin.wit).
 
 | File | What it is |
@@ -127,7 +127,7 @@ free(json);
 ```
 
 `rift_title_json` shows a title, and the weak `styled` exports
-(`exports_rift_plugin_styled_suggest`/`_status`, rift:plugin 0.1.3) can be
+(`exports_rift_plugin_styled_suggest`/`_status`, rift:plugin 0.1.4) can be
 replaced to answer with rich tooltips and server-list text. A bare string is
 never markup. See [C plugins](../../docs/plugins-c.md#rich-text-builders) and
 [Text and markup](../../docs/text.md).

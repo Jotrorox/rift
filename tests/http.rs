@@ -1766,6 +1766,69 @@ fn named_operators_enforce_permissions_and_group_scope_and_record_denials() {
 }
 
 #[test]
+fn player_endpoints_use_read_and_console_scopes_and_are_audited() {
+    let fixture = Fixture::new();
+    let source = fixture.source(&format!("token = '{TOKEN}', operators = {{ lobby_staff = {{ token = '{OPERATOR_TOKEN}', permissions = {{'read','console','audit'}}, groups = {{'lobby'}} }} }},"),
+        "service_groups = { lobby = { command = {'unused'}, directory = 'lobby/{name}', port_range = {26310,26312} } },");
+    let _process = fixture.start(&source);
+    let staff = Client {
+        token: Some(OPERATOR_TOKEN),
+        ..fixture.client()
+    };
+    let admin = fixture.client().authenticated();
+    fixture.client().get("/api/players").expect(401);
+    assert_eq!(
+        admin.get("/api/players").expect(200).value(),
+        json!({"players": []})
+    );
+    assert_eq!(
+        staff.get("/api/players").expect(200).value(),
+        json!({"players": []})
+    );
+    // Offline players: 404 for unrestricted operators, out of scope for
+    // group-scoped ones, who may only act on players on their servers.
+    admin
+        .json("POST", "/api/players/Nobody/kick", json!({"reason": "Bye"}))
+        .expect(404);
+    admin
+        .json(
+            "POST",
+            "/api/players/Nobody/message",
+            json!({"text": {"text": "Hi", "color": "gold"}}),
+        )
+        .expect(404);
+    staff
+        .json("POST", "/api/players/Nobody/kick", json!({"reason": "Bye"}))
+        .expect(403);
+    for body in [
+        json!({"reason": ""}),
+        json!({"reason": "Bye", "extra": 1}),
+        json!({"reason": []}),
+        json!({"reason": 5}),
+    ] {
+        let response = admin.json("POST", "/api/players/Nobody/kick", body.clone());
+        assert_eq!(response.status, 400, "{body}");
+    }
+    let audit = admin.get("/api/audit").expect(200).value();
+    assert!(
+        audit["records"].as_array().unwrap().iter().any(|record| {
+            record["actor"] == "admin"
+                && record["action"] == "POST kick_player"
+                && record["target"] == "Nobody"
+        }),
+        "{audit}"
+    );
+    assert!(
+        audit["records"].as_array().unwrap().iter().any(|record| {
+            record["actor"] == "lobby_staff"
+                && record["action"] == "POST kick_player"
+                && record["outcome"] == "denied"
+        }),
+        "{audit}"
+    );
+}
+
+#[test]
 fn loopback_without_credentials_requires_the_generated_token_and_denials_are_summarised() {
     let fixture = Fixture::new();
     let source = fixture.source("", "");

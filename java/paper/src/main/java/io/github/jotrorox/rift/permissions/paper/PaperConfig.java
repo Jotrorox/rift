@@ -9,6 +9,7 @@ import org.bukkit.configuration.ConfigurationSection;
  * {@code plugins/RiftPerms/config.yml}.
  *
  * @param server this backend's name, the {@code server} context
+ * @param group this backend's service group, the {@code group} context; null outside a group
  * @param host the messaging listener's host
  * @param port the messaging listener's UDP port
  * @param serverName the DNS name in the listener's certificate
@@ -22,6 +23,7 @@ import org.bukkit.configuration.ConfigurationSection;
  */
 record PaperConfig(
         String server,
+        String group,
         String host,
         int port,
         String serverName,
@@ -59,6 +61,7 @@ record PaperConfig(
         };
         return new PaperConfig(
                 require(config, "server"),
+                optional(config, "group"),
                 host,
                 port,
                 config.getString("bus.server_name", host),
@@ -69,6 +72,11 @@ record PaperConfig(
                 policy,
                 config.getBoolean("vault", true),
                 config.getBoolean("placeholders", true));
+    }
+
+    private static String optional(ConfigurationSection config, String path) {
+        String value = config.getString(path);
+        return value == null || value.isBlank() ? null : value;
     }
 
     private static String require(ConfigurationSection config, String path) {

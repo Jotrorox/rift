@@ -75,6 +75,9 @@ fn int(value: usize, data: &mut Vec<u8>) -> io::Result<()> {
     Ok(())
 }
 
+/// A player by name, hidden or not: `GetPlayerServer`, `UUIDOther`,
+/// `IPOther` and messages name a player the caller already knows, as kick and
+/// transfer by name do (the system view of [`rift::players::Viewer`]).
 fn player(snapshot: &Snapshot, name: &str) -> Option<Player> {
     snapshot
         .players
@@ -225,9 +228,10 @@ pub fn handle(
                 };
                 target
             };
+            // What a backend may tell its players: hidden players are left out.
             let mut names: Vec<_> = snapshot
                 .players
-                .snapshot()
+                .snapshot_for(rift::players::Viewer::Backend)
                 .into_iter()
                 .filter(|player| all || player.server == target)
                 .map(|player| player.name)
@@ -284,10 +288,9 @@ pub fn handle(
                 };
                 (target, config.destination_names(target))
             };
-            let mut players = BTreeMap::<String, usize>::new();
-            for player in snapshot.players.snapshot() {
-                *players.entry(player.server).or_default() += 1;
-            }
+            let players = snapshot
+                .players
+                .server_counts_for(rift::players::Viewer::Backend);
             let mut count = 0;
             let mut entries = Vec::new();
             for name in &names {
@@ -433,6 +436,32 @@ mod tests {
         ] {
             assert_eq!(query(&snapshot, request), None);
         }
+    }
+
+    #[test]
+    fn hidden_players_are_left_out_of_counts_and_lists_but_found_by_name() {
+        let snapshot = snapshot();
+        let _alice = snapshot
+            .players
+            .register([1; 16], "Alice", "Lobby")
+            .unwrap();
+        let _staff = snapshot
+            .players
+            .register_visible([2; 16], "Staff", "Lobby", Some("vanish.see".into()))
+            .unwrap();
+        assert_eq!(
+            query(&snapshot, Request::PlayerCount("ALL".into())).unwrap(),
+            b"\0\x0bPlayerCount\0\x03ALL\0\0\0\x01"
+        );
+        assert_eq!(
+            query(&snapshot, Request::PlayerList("Lobby".into())).unwrap(),
+            b"\0\x0aPlayerList\0\x05Lobby\0\x05Alice"
+        );
+        // A backend that already knows the name still finds the player.
+        assert_eq!(
+            query(&snapshot, Request::GetPlayerServer("Staff".into())).unwrap(),
+            b"\0\x0fGetPlayerServer\0\x05Staff\0\x05Lobby"
+        );
     }
 
     #[test]

@@ -2,7 +2,7 @@
 // `rift:plugin/dialogs` (dialog clicks, since 0.1.1), weak
 // `rift:plugin/decisions` exports (since 0.1.2) that answer with the
 // handler's decision hooks, and weak `rift:plugin/styled` exports (since
-// 0.1.3) that answer with the handler's `suggest` and `status`.
+// 0.1.4) that answer with the handler's `suggest` and `status`.
 //
 // Link this file next to the generated `rift_plugin.c` and define only the
 // hooks your plugin needs; a strong definition in your own source replaces
@@ -128,7 +128,7 @@ RIFT_FORWARD_DECISION(initial_server)
 RIFT_FORWARD_DECISION(before_transfer)
 RIFT_FORWARD_DECISION(command)
 
-// Rift 0.1.3 and newer ask `styled` instead of the handler's `suggest` and
+// Rift 0.1.4 and newer ask `styled` instead of the handler's `suggest` and
 // `status`. These defaults forward to the handler hooks and show their plain
 // text as written; define a `styled` hook to answer with rich text.
 RIFT_WEAK void exports_rift_plugin_styled_suggest(exports_rift_plugin_styled_context_t *ctx,

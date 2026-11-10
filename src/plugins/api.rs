@@ -46,6 +46,11 @@ pub struct PlayerInfo {
     pub name: String,
     pub server: String,
     pub protocol: i32,
+    /// The node a viewer needs to see this player (`rift.visible-to`), or
+    /// `None`. Plugins see every player and decide with this; the WIT
+    /// record has no such field, so components ask `players.visible-to`.
+    #[serde(default)]
+    pub visible_to: Option<String>,
 }
 
 /// Metadata available right after TCP accept (`route`).

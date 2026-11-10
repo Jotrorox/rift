@@ -1,0 +1,39 @@
+{
+  "kind": "resolve",
+  "name": "group-context",
+  "description": "A node limited to group=lobby applies on every instance of the lobby group; server=lobby matches only a backend named lobby.",
+  "now": 1000,
+  "users": {
+    "00000000000000000000000000000001": {
+      "nodes": [
+        {"kind": "permission", "key": "lobby.fly", "value": true, "contexts": {"group": "lobby"}},
+        {"kind": "permission", "key": "lobby.old", "value": true, "contexts": {"server": "lobby"}},
+        {"kind": "permission", "key": "lobby.fly", "value": false, "contexts": {"group": "lobby", "server": "lobby-3"}}
+      ]
+    }
+  },
+  "groups": {},
+  "checks": [
+    {"user": "00000000000000000000000000000001", "node": "lobby.fly", "contexts": {"server": "lobby-2", "group": "lobby"}, "expect": true},
+    {"user": "00000000000000000000000000000001", "node": "lobby.old", "contexts": {"server": "lobby-2", "group": "lobby"}, "expect": null},
+    {"user": "00000000000000000000000000000001", "node": "lobby.fly", "contexts": {"server": "lobby-3", "group": "lobby"}, "expect": false},
+    {"user": "00000000000000000000000000000001", "node": "lobby.fly", "contexts": {"server": "survival"}, "expect": null},
+    {"user": "00000000000000000000000000000001", "node": "lobby.old", "contexts": {"server": "lobby"}, "expect": true}
+  ],
+  "compiled": {
+    "00000000000000000000000000000001": {
+      "revision": 1,
+      "uuid": "00000000000000000000000000000001",
+      "primary_group": "default",
+      "entries": [
+        {"k": "perm", "key": "lobby.fly", "v": true, "ctx": {"group": "lobby"}, "rank": 0},
+        {"k": "perm", "key": "lobby.old", "v": true, "ctx": {"server": "lobby"}, "rank": 0},
+        {"k": "perm", "key": "lobby.fly", "v": false, "ctx": {"group": "lobby", "server": "lobby-3"}, "rank": 0},
+        {"k": "group", "key": "default", "v": true, "ctx": {}, "rank": 1}
+      ],
+      "prefix": [],
+      "suffix": [],
+      "meta": []
+    }
+  }
+}

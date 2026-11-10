@@ -77,7 +77,10 @@ routes and are never interrupted by an HTTP configuration change.
 ## Public status page
 
 The status server can be the page you link players to. Set
-`exposure = "public"` and it reveals only names, health and player counts:
+`exposure = "public"` and it reveals only names, health and player counts.
+Its player counts and its badge, under either exposure, leave out players a
+[visibility rule](permissions.md#visibility) hides; the `operator` exposure's
+`metrics` counters and `/api/status` count everyone, as Prometheus does.
 
 ```lua
 status = {
@@ -211,7 +214,7 @@ rift.config.web = {
 | --- | --- |
 | `read` | Status, metrics and scoped group/server listings; include it for dashboard use |
 | `logs` | Read managed server logs within the operator's scope |
-| `console` | Send commands with the managed server's console privileges |
+| `console` | Send commands with the managed server's console privileges, and message or kick players who are on a server within scope (`/api/players/{player}/…`) |
 | `servers` | Start/stop servers and whole groups, switch group modes and create/remove instances within scope |
 | `config` | Read, validate, edit and reload complete Lua source and structured definitions |
 | `deploy` | View configuration deployment metadata and restore retained deployments |
@@ -263,6 +266,9 @@ Errors use `{"error":"description"}`. `GET /api` provides endpoint discovery.
 | `POST /api/servers/{name}/stop` | Request an unused managed server stop and pause automatic wake with `{}`; returns `202` when accepted |
 | `GET /api/servers/{name}/logs?cursor={byte_offset}` | Up to 64 KiB of log text with the next byte cursor, `truncated` and `has_more`; omit cursor to tail the log |
 | `POST /api/servers/{name}/console` | Write one `{command: "list"}` to a running managed server; commands are limited to 4096 bytes without control characters |
+| `GET /api/players` | `{players: [...]}`: online players as `rift.players.list` reports them (`connection_id`, `uuid`, `name`, `server`, `protocol`, `visible_to`), hidden players included; group-scoped operators see the players on their servers. Needs `read` |
+| `POST /api/players/{player}/message` | Send `{text}` to one player (a name, UUID or connection id). A JSON string is plain text of 1..=1024 bytes; an object or list is a JSON text component of at most 32 KiB, with colours, hover text and click events ([rich text](extensions.md#rich-text)). Returns `{online: true}`, or `404` when the player is not online. Needs `console` and, for a group-scoped operator, a player on one of their servers |
+| `POST /api/players/{player}/kick` | Disconnect one player with `{reason}`, plain or a component as for `message`; line breaks in a component make a multi-line screen. Same answers and scope as `message` |
 | `GET /api/definitions` | Structured `templates`, `service_groups`, `permission_groups`, `tab_list`, `server_list` and the active `revision`; includes private paths and executable arguments. Absent settings are `null` |
 | `PUT /api/definitions/{section}/{name}` | Apply `{revision, definition}`; section is `templates`, `service_groups` or `permission_groups`, and `null` removes a definition |
 | `PUT /api/definitions/{section}` | Apply `{revision, definition}` to `tab_list` or `server_list`; `null` turns the setting off |
@@ -583,7 +589,12 @@ directory fails startup. A post-commit history write failure is reported in Rift
 stderr; the already-applied configuration remains active.
 
 HTTP mutations record the named actor, operation, target, timestamp and admission
-result. Scope denials, local CLI commands and signal reload results are also
+result. Player messages and kicks are recorded as `message_player` and
+`kick_player` with the player as the target; their text is not. Requests on
+the [message bus](messaging.md#player-api-subjects) that change something are
+recorded too, by `bus:<login>` for a bus login, `plugin:<name>` for a
+persistent plugin, and `rift.control` or `rift.players` for the configuration
+script. Scope denials, local CLI commands and signal reload results are also
 recorded. Requests without a valid token are summarised rather than recorded one
 by one: the first in each minute writes an `authentication` record by
 `anonymous` whose `count` is the number of such requests since the previous
