@@ -682,6 +682,34 @@ fn up_joined(session: &mut Session) {
         .unwrap();
 }
 
+/// A 1.20.1 server decodes login packets until it sends Join Game; the
+/// 1.20.2 client's settings, sent as soon as it has Login Success, wait.
+#[test]
+fn up_holds_client_packets_until_the_backend_is_in_play() {
+    let mut s = Session::up();
+    s.client(
+        "hello",
+        &hex("06436f72707573888b6130823b387bb012d6dc24e47d59"),
+    )
+    .unwrap();
+    s.backend("login_finished", &hex(LOGIN_FINISHED)).unwrap();
+    s.client("login_acknowledged", &[]).unwrap();
+    let (_, backend) = s
+        .client("client_information", &hex(CLIENT_INFORMATION))
+        .unwrap();
+    assert!(backend.is_empty());
+    let (_, backend) = s.client("custom_payload", &hex(BRAND)).unwrap();
+    assert!(backend.is_empty());
+    let (_, backend) = s.backend("login", &join_older(1, &older_codec())).unwrap();
+    assert_eq!(
+        Session::names(&backend),
+        ["client_information", "custom_payload"]
+    );
+    assert!(backend.iter().all(|packet| packet.state == State::Play));
+    let (_, backend) = s.client("custom_payload", &hex(BRAND)).unwrap();
+    assert_eq!(Session::names(&backend), ["custom_payload"]);
+}
+
 #[test]
 fn up_holds_the_backend_until_login_is_acknowledged() {
     let mut s = Session::up();

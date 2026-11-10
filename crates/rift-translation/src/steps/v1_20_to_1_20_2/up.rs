@@ -143,6 +143,11 @@ pub struct Up {
     early_finish: bool,
     /// Client configuration packets sent before the backend left login.
     early: Vec<Packet>,
+    /// Whether the backend has sent a play packet, so that it reads play
+    /// packets too.
+    backend_in_play: bool,
+    /// Client packets (1.20.1 play) for the backend from before then.
+    unsent: Vec<Packet>,
     /// Chunks in the chunk batch the client has been told about.
     batch: Option<i32>,
     /// The last tags (1.20.2 body), feature flags and resource pack (raw
@@ -173,6 +178,8 @@ impl Up {
             early_login_ack: false,
             early_finish: false,
             early: Vec::new(),
+            backend_in_play: false,
+            unsent: Vec::new(),
             batch: None,
             last_tags: None,
             last_features: None,
@@ -543,7 +550,18 @@ impl Up {
             .packet_name(state, Direction::Serverbound, packet.id)
             .ok_or_else(|| invalid("unknown configuration packet"))?;
         let id = data::version(OLDER).expect_packet(State::Play, Direction::Serverbound, name);
-        cx.to_backend(State::Play, Packet::new(id, packet.data));
+        let packet = Packet::new(id, packet.data);
+        if self.backend_in_play {
+            cx.to_backend(State::Play, packet);
+        } else {
+            // A 1.20.1 server reads login packets until it sends Join Game,
+            // some time after Login Success; a 1.20.1 client says nothing
+            // before Join Game, a 1.20.2 one sends its settings at once.
+            if self.unsent.len() >= 64 {
+                return Err(invalid("too many client packets before Join Game"));
+            }
+            self.unsent.push(packet);
+        }
         Ok(())
     }
 
@@ -633,7 +651,15 @@ impl Up {
 impl Step for Up {
     fn clientbound(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
         match state {
-            State::Play => self.backend_packet(cx, packet),
+            State::Play => {
+                if !self.backend_in_play {
+                    self.backend_in_play = true;
+                    for unsent in std::mem::take(&mut self.unsent) {
+                        cx.to_backend(State::Play, unsent);
+                    }
+                }
+                self.backend_packet(cx, packet)
+            }
             _ => Self::routes().dispatch(self, cx, Direction::Clientbound, state, packet),
         }
     }
