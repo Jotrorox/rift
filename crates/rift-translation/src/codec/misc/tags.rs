@@ -5,10 +5,13 @@
 //! 1.20.2 it is sent during configuration too. Entries are network IDs of
 //! their registry, so every list is mapped to the receiver's numbering.
 //!
-//! The client relies on vanilla tags its game logic names: a newer client
-//! behind an older backend misses the tags the older server never had. When
-//! upgrading, every vanilla tag of the receiver's version that the packet
-//! lacks is added, restricted to entries the sender's registry has.
+//! The client relies on vanilla tags its game logic and its registries name:
+//! a newer client behind an older backend misses the tags the older server
+//! never had, and an older client behind a newer one the tags it removed
+//! (1.21.11 dropped `enchantable/sword`, which a 1.21.10 client's vanilla
+//! enchantments name; it fails to load them without it). Every vanilla tag
+//! of the receiver's version that the packet lacks is added, restricted to
+//! entries the sender's registry has.
 use super::registry::{self, VanillaTags};
 use crate::{
     Direction, Packet, State,
@@ -153,13 +156,9 @@ fn accepts(protocol: i32, registry: &str) -> Option<bool> {
     registry::registry(protocol, registry).map(|_| true)
 }
 
-fn upgrading(source: i32, target: i32) -> bool {
-    version::index(target) > version::index(source)
-}
-
 /// Convert a tag set from the sender's numbering to the receiver's: map
-/// every list, drop registries the receiver lacks and, when upgrading, add
-/// the receiver's missing vanilla tags.
+/// every list, drop registries the receiver lacks and add the receiver's
+/// missing vanilla tags.
 pub fn convert(shared: &mut Shared, direction: Direction, set: TagSet) -> TagSet {
     let (source, target) = (shared.source(direction), shared.target(direction));
     let mut converted = TagSet::default();
@@ -197,9 +196,7 @@ pub fn convert(shared: &mut Shared, direction: Direction, set: TagSet) -> TagSet
         }
         converted.registries.push(tags);
     }
-    if upgrading(source, target)
-        && let Some(vanilla) = registry::vanilla_tags(target)
-    {
+    if let Some(vanilla) = registry::vanilla_tags(target) {
         add_missing(shared, direction, vanilla, &mut converted);
     }
     converted
@@ -310,12 +307,11 @@ pub fn needed(source: i32, target: i32) -> bool {
     {
         return true;
     }
-    upgrading(source, target)
-        && to.registries.iter().any(|(name, tags)| {
-            let sent = from.registry(name).unwrap_or(&[]);
-            tags.iter()
-                .any(|(tag, _)| !sent.iter().any(|(known, _)| known == tag))
-        })
+    to.registries.iter().any(|(name, tags)| {
+        let sent = from.registry(name).unwrap_or(&[]);
+        tags.iter()
+            .any(|(tag, _)| !sent.iter().any(|(known, _)| known == tag))
+    })
 }
 
 /// The default `update_tags` handler.
@@ -468,6 +464,28 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn downgrading_restores_tags_the_newer_version_removed() {
+        // 1.21.11 replaced enchantable/sword; a 1.21.10 client's vanilla
+        // enchantments name it and fail to load without it.
+        let body = vanilla_update_tags(774).unwrap();
+        let mut step = Defaults::new(773, 774);
+        let out = step.clientbound(State::Play, "update_tags", &body).unwrap();
+        let set = read(773, &out[0].data).unwrap();
+        let items = set
+            .registries
+            .iter()
+            .find(|tags| strip(&tags.registry) == "item")
+            .unwrap();
+        let (_, swords) = items
+            .tags
+            .iter()
+            .find(|(tag, _)| tag == "minecraft:enchantable/sword")
+            .unwrap();
+        let registry = crate::data::version(773).expect_registry("item");
+        assert!(swords.contains(&registry.id("diamond_sword").unwrap()));
     }
 
     #[test]
