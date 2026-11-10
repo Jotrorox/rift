@@ -224,7 +224,7 @@ fn compare(source: i32, target: i32, from: &Column, to: &Column, tally: &mut Tal
             let expected = mapping.get(*old).unwrap_or(fallback);
             assert_eq!(*new, expected, "{pair}: block {index} of section {section}");
             if mapping.kind(*old) == Some(Kind::Identical) {
-                if !source_states.is_empty() {
+                if !source_states.is_empty() && !target_states.is_empty() {
                     assert_eq!(
                         source_states.describe(*old),
                         target_states.describe(*new),
@@ -334,24 +334,11 @@ fn convert_stream(client: i32, backend: i32) -> Option<(Vec<Column>, Vec<Column>
     Some((from, to, out))
 }
 
-/// Pairs whose chunks cannot convert yet; see the INTEGRATION notes.
-fn blocked(older: i32, newer: i32) -> bool {
-    // The flattening mapping (`crate::legacy`) is not written yet.
-    (older, newer) == (340, 393)
-}
-
 #[test]
 fn corpus_chunks_convert_between_every_adjacent_pair() {
     let mut report = Vec::new();
     for pair in PROTOCOLS.windows(2) {
         let (older, newer) = (pair[0].0, pair[1].0);
-        if blocked(older, newer) {
-            report.push(format!(
-                "{}/{}: blocked on the flattening mapping",
-                pair[0].1, pair[1].1
-            ));
-            continue;
-        }
         for (client, backend) in [(newer, older), (older, newer)] {
             let Some((from, to, out)) = convert_stream(client, backend) else {
                 report.push(format!(
@@ -961,19 +948,16 @@ mod flattening_packets {
                 .parse("lime_bed[facing=east,occupied=false,part=head]")
                 .unwrap(),
         );
-        // The block update itself needs the flattening mapping; the block
-        // entity that follows it does not.
-        match step.clientbound(State::Play, "block_update", &writer.buf) {
-            Err(error) => assert!(error.to_string().contains("mapping"), "{error}"),
-            Ok(out) => {
-                assert_eq!(out[1].name, "block_entity_data");
-                let mut reader = Reader::new(&out[1].data);
-                reader.position_legacy().unwrap();
-                assert_eq!(reader.u8().unwrap(), 11);
-                let tag = Nbt::read(&mut reader, true).unwrap().unwrap();
-                assert_eq!(tag.as_compound().unwrap().int("color"), Some(5));
-            }
-        }
+        let out = step
+            .clientbound(State::Play, "block_update", &writer.buf)
+            .unwrap();
+        assert_eq!(out[0].name, "block_update");
+        assert_eq!(out[1].name, "block_entity_data");
+        let mut reader = Reader::new(&out[1].data);
+        reader.position_legacy().unwrap();
+        assert_eq!(reader.u8().unwrap(), 11);
+        let tag = Nbt::read(&mut reader, true).unwrap().unwrap();
+        assert_eq!(tag.as_compound().unwrap().int("color"), Some(5));
         // A 1.13 banner's patterns get the 1.12 base and inverted colours
         // once its block is known.
         let mut step = Defaults::new(340, 393);
@@ -1056,9 +1040,6 @@ fn dump_converted() {
     std::fs::create_dir_all(&directory).unwrap();
     for pair in PROTOCOLS.windows(2) {
         let (older, newer) = (pair[0].0, pair[1].0);
-        if blocked(older, newer) {
-            continue;
-        }
         for (client, backend) in [(newer, older), (older, newer)] {
             let Some((_, _, out)) = convert_stream(client, backend) else {
                 continue;
