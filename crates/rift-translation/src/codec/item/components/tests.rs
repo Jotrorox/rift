@@ -318,8 +318,6 @@ fn write_stack(protocol: i32, stack: Option<&ItemStack>) -> Vec<u8> {
     writer.buf
 }
 
-/// Convert a top-level stack as the item codec will: map the item, then
-/// the patch.
 /// A stack through the item codec, which also names and stashes stand-ins
 /// for items the receiver lacks.
 fn convert_stack(from: i32, to: i32, stack: &ItemStack) -> Option<ItemStack> {
@@ -673,16 +671,9 @@ fn recorded_stacks_round_trip_and_convert() {
             };
             let out = write_stack(*to, Some(&there));
             assert_eq!(read_stack(*to, &out).as_ref(), Some(&there));
-            let mut back = convert_stack(*to, *protocol, &there).unwrap();
-            // An item the neighbour lacks went there as a stand-in, which
-            // stays itself on the way back.
-            let stand_in = step(*protocol, *to)
-                .mapping(Direction::Clientbound, "item")
-                .kind(stack.id)
-                == Some(crate::mapping::Kind::StandIn);
-            if stand_in {
-                back.id = stack.id;
-            }
+            // An item the neighbour lacks went there as a stand-in named
+            // after it, and comes back as itself.
+            let back = convert_stack(*to, *protocol, &there).unwrap();
             assert_eq!(
                 normalized(&back),
                 normalized(&stack),
