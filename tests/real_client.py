@@ -853,7 +853,9 @@ NOISE = [
      r"|\[HeadlessMC\]|Unable to resize|Couldn't resize|Failed to (switch|change) (to )?fullscreen"
      r"|Requested post effect does not exist|Not setting icon|Fullscreen|fullscreen|Failed to (initialize|init) (the )?clipboard|Clipboard|clipboard"
      r"|Could not find (a )?(suitable )?(pixel|context)|Mipmap|mipmap|Unable to load (pack )?icon"
-     r"|Couldn't (get|find) (display|screen)|Screen size|screen resolution",
+     r"|Couldn't (get|find) (display|screen)|Screen size|screen resolution"
+     # 1.21.5+ render pipelines ask the stubbed driver for uniform names and get "".
+     r"|Found unknown and unsupported uniform",
      None, "rendering, window and input are stubbed"),
     # Missing (deliberately not downloaded) assets and resource pack quirks.
     (r"Missing language|Couldn't (read|load) language|Failed to load translations|Failed to load language"
