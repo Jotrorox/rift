@@ -89,7 +89,7 @@ impl Down {
                 .tap(Clientbound, Play, "open_screen", Self::open_screen)
                 .tap(Clientbound, Play, "container_close", Self::container_closed)
                 .tap(Serverbound, Play, "container_close", Self::container_closed)
-                .tap(Clientbound, Play, "player_position", Self::player_position)
+                .clientbound(Play, "player_position", Self::player_position)
                 .serverbound(Play, "accept_teleportation", Self::accept_teleportation)
                 .serverbound(Play, "move_player_pos", Self::move_player_pos)
                 .serverbound(Play, "move_player_pos_rot", Self::move_player_pos_rot)
@@ -268,7 +268,8 @@ impl Down {
     }
 
     /// Remember where a teleport puts the player, when that can be known.
-    fn player_position(&mut self, _: State, packet: &Packet) -> io::Result<()> {
+    /// An acceptance that somehow came first is completed here.
+    fn player_position(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
         let mut r = Reader::new(&packet.data);
         let id = r.varint()?;
         let given = [r.f64()?, r.f64()?, r.f64()?];
@@ -298,6 +299,12 @@ impl Down {
                     None => known = false,
                 }
             }
+        }
+        cx.to_client(state, packet);
+        if known && self.accepted == Some(id) {
+            self.accepted = None;
+            self.accept(cx, state, id, target);
+            return Ok(());
         }
         if self.teleports.len() == MAX_TELEPORTS {
             self.teleports.pop_front();
