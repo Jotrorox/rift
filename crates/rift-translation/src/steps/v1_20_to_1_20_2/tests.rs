@@ -1525,6 +1525,21 @@ fn down_converts_play_packets_that_changed() {
         &zombie.write(),
     );
     assert_eq!(out[0].data, zombie.write());
+    // The entity codec learns its type from this spawn: a zombie's own
+    // entries (mob flags, health) survive, not only those of every entity.
+    let mut entity_data = Writer::new();
+    entity_data.varint(zombie.id);
+    entity_data.u8(15).varint(0).u8(1);
+    entity_data.u8(9).varint(3).f32(20.0);
+    entity_data.u8(0xff);
+    let (out, _) = run(
+        &mut down,
+        Direction::Clientbound,
+        State::Play,
+        "set_entity_data",
+        &entity_data.buf,
+    );
+    assert_eq!(out[0].data, entity_data.buf);
     // Limited crafting is not a 1.20.1 game event.
     let (out, _) = run(
         &mut down,

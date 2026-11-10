@@ -25,7 +25,7 @@ use super::{Held, NEWER, OLDER, convert, layout};
 use crate::{
     Direction, Packet, State,
     codec::{
-        HasShared, Shared,
+        HasShared, Shared, entity,
         registries::{self, form},
     },
     data,
@@ -383,6 +383,19 @@ impl Down {
     fn add_entity(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
         let ids = ids();
         let mut entity = layout::AddEntity::read(&packet.data)?;
+        // The entity codec converts this entity's data by its type.
+        let names = (
+            entity::type_name(NEWER, entity.kind),
+            self.shared
+                .mapping(Direction::Clientbound, "entity_type")
+                .get(entity.kind)
+                .and_then(|kind| entity::type_name(OLDER, kind)),
+        );
+        if let (Some(backend), Some(client)) = names {
+            self.shared
+                .entity
+                .track(entity.id, entity::Tracked { backend, client });
+        }
         if entity.kind == layout::player_type(NEWER) {
             cx.to_client(state, Packet::new(ids.spawn_player, entity.spawn_player()));
             let mut head = Writer::new();
