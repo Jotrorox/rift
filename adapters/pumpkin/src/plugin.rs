@@ -133,6 +133,7 @@ impl RiftPermissionsPlugin {
         let config = config::load(&context.get_data_folder()).map_err(|e| e.to_string())?;
         let address = config.address.clone();
         let server = config.server.clone();
+        let group = config.group.clone();
         let join_timeout = config.join_timeout;
         let policy = config::describe_policy(&config.offline_policy);
 
@@ -150,6 +151,7 @@ impl RiftPermissionsPlugin {
             client,
             runtime: runtime.handle().clone(),
             server: server.clone(),
+            group,
             calculators: Calculators::default(),
             reported: Reported::default(),
             registrations: RwLock::default(),
@@ -264,6 +266,8 @@ struct Backend {
     client: Client,
     runtime: Handle,
     server: String,
+    /// The `group` context, for an instance of a service group.
+    group: Option<String>,
     calculators: Calculators<Arc<Player>>,
     reported: Reported,
     registrations: RwLock<Registrations>,
@@ -282,7 +286,7 @@ impl Backend {
             dimension: world.dimension.minecraft_name,
             gamemode: player.gamemode.load(),
         };
-        let base = base_contexts(&self.server, &state);
+        let base = base_contexts(&self.server, self.group.as_deref(), &state);
         let custom = self.calculators.calculate(player);
         let uuid = rift_uuid(&player.gameprofile.id);
         if self.reported.update(uuid, &custom) {

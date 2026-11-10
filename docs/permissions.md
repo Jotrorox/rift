@@ -39,9 +39,13 @@ Patterns are dot-separated segments of `[a-z0-9_:-]`, at most 256 bytes, with
 Pumpkin's `plugin:node` fits as written. Every node also has:
 
 - `contexts`: `key=value` pairs that must all be active for the node to apply.
-  `server`, `world`, `dimension` and `gamemode` are filled by Rift and the
-  backend adapters; any other key is custom (`region=spawn`). No contexts means
-  global.
+  `server`, `group`, `world`, `dimension` and `gamemode` are filled by Rift and
+  the backend adapters; any other key is custom (`region=spawn`). No contexts
+  means global. `server` is the backend's name, which for an instance of a
+  [service group](managed-servers.md#service-groups-and-dynamic-instances) is
+  the instance (`lobby-2`), so a grant meant for every lobby uses
+  `group=lobby` instead: `group` is the service group of the backend, and is
+  absent on backends outside groups.
 - an optional expiry (Unix seconds). A node expiring at `t` applies while the
   time is before `t`, exactly, at every check.
 - a source: `store` (edited at runtime), `config` (mirrored from
@@ -81,7 +85,8 @@ returns `nil` for it, so a script can tell "denied" from "never set".
 
 Proxy-side checks use the contexts Rift knows for an online player:
 
-- `server`, the backend they are on.
+- `server`, the backend they are on, and `group`, its service group when it
+  is an instance of one. Both follow the player on every switch.
 - `dimension` and `gamemode`, read from the play packets Rift relays from that
   backend on every supported version (1.8.9–26.3): Join Game and Respawn name
   both, and the game-mode Game Event updates `gamemode` in place. `dimension`
@@ -287,8 +292,8 @@ end)
 Providers (equivalently, `extensions.context_providers`) compute custom
 contexts when a player reaches a server: after the first join and after every
 switch, before the `join` and `after_transfer` callbacks. `player` has `uuid`,
-`name` and `server`. Keys must be custom (not `server`, `world`, `dimension` or
-`gamemode`); at most 16 providers.
+`name` and `server`. Keys must be custom (not `server`, `group`, `world`, `dimension`
+or `gamemode`); at most 16 providers.
 
 ## Persistent plugins
 
@@ -325,6 +330,11 @@ The authority reads the JSON that `/lp export` writes, gzipped or plain:
 - `{a,b}` and `(a|b)` shorthands expand into separate nodes.
 - LuckPerms context sets mean "any listed value"; Rift writes one node per
   combination, and drops `server=global` and `world=global`.
+- `server=<name>` naming one of the configuration's service groups becomes
+  `group=<name>`: LuckPerms knew one server per proxy entry, while Rift's
+  instances of that group are `<name>-1`, `<name>-2`, …, where only `group`
+  matches. Names that are not service groups stay `server`. Export writes
+  `group=<name>` back as `server=<name>`, so LuckPerms reads it the old way.
 - Regex nodes (`R=…`), invalid names, nodes past a limit and expiries already in
   the past are skipped, and the report lists each with the reason.
 

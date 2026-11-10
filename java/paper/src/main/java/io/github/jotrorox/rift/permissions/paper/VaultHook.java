@@ -43,7 +43,7 @@ final class VaultHook {
 
     /** Write contexts: global without a world, otherwise this server and that world. */
     private static ContextSet scope(Lookups lookups, String world) {
-        return world == null ? ContextSet.empty() : lookups.contexts(world);
+        return world == null ? ContextSet.empty() : lookups.scope(world);
     }
 
     @SuppressWarnings("deprecation")

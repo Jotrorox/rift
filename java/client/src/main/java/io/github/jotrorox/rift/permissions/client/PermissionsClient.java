@@ -81,6 +81,8 @@ public final class PermissionsClient implements RiftPermissions, AutoCloseable {
 
     private final MessagingClient messaging;
     private final String server;
+    /** This backend's service group, the {@code group} context; null outside a group. */
+    private final String group;
     private final Duration requestTimeout;
     private final Duration joinTimeout;
     private final OfflineStore offline;
@@ -164,6 +166,9 @@ public final class PermissionsClient implements RiftPermissions, AutoCloseable {
     private PermissionsClient(Builder builder) throws IOException {
         this.messaging = builder.messaging;
         this.server = ContextSet.of(ContextSet.SERVER, builder.server).get(ContextSet.SERVER).orElseThrow();
+        this.group = builder.group == null
+                ? null
+                : ContextSet.of(ContextSet.GROUP, builder.group).get(ContextSet.GROUP).orElseThrow();
         this.requestTimeout = builder.requestTimeout;
         this.joinTimeout = builder.joinTimeout;
         this.logger = builder.logger;
@@ -213,9 +218,27 @@ public final class PermissionsClient implements RiftPermissions, AutoCloseable {
         return replica.get(uuid).orElse(null);
     }
 
-    /** {@code contexts} with this server's {@code server} context when it names none. */
+    /**
+     * {@code contexts} with this server's {@code server} context when it names none, and its
+     * {@code group} context when it names neither: a check for another server is not about this
+     * server's group.
+     */
     private ContextSet active(ContextSet contexts) {
-        return contexts.get(ContextSet.SERVER).isPresent() ? contexts : contexts.with(ContextSet.SERVER, server);
+        if (contexts.get(ContextSet.SERVER).isPresent()) {
+            return contexts;
+        }
+        ContextSet here = contexts.with(ContextSet.SERVER, server);
+        return group == null || contexts.get(ContextSet.GROUP).isPresent() ? here : here.with(ContextSet.GROUP, group);
+    }
+
+    /** @return this backend's name, the {@code server} context */
+    public String server() {
+        return server;
+    }
+
+    /** @return this backend's service group, the {@code group} context, if it belongs to one */
+    public Optional<String> group() {
+        return Optional.ofNullable(group);
     }
 
     @Override
@@ -835,7 +858,11 @@ public final class PermissionsClient implements RiftPermissions, AutoCloseable {
 
         @Override
         public ContextSet contexts(Object player) {
-            return applyCalculators(uuid(player), ContextSet.builder().add(ContextSet.SERVER, server)).build();
+            ContextSet.Builder contexts = ContextSet.builder().add(ContextSet.SERVER, server);
+            if (group != null) {
+                contexts.add(ContextSet.GROUP, group);
+            }
+            return applyCalculators(uuid(player), contexts).build();
         }
     }
 
@@ -843,6 +870,7 @@ public final class PermissionsClient implements RiftPermissions, AutoCloseable {
     public static final class Builder {
         private MessagingClient messaging;
         private String server;
+        private String group;
         private Duration requestTimeout = Duration.ofSeconds(5);
         private Duration joinTimeout = Duration.ofSeconds(2);
         private OfflinePolicy offlinePolicy = OfflinePolicy.deny();
@@ -867,6 +895,16 @@ public final class PermissionsClient implements RiftPermissions, AutoCloseable {
          */
         public Builder server(String server) {
             this.server = Objects.requireNonNull(server, "server");
+            return this;
+        }
+
+        /**
+         * @param group this backend's service group (the {@code group} context), or null for a
+         *     backend outside any group (the default)
+         * @return this builder
+         */
+        public Builder group(String group) {
+            this.group = group == null || group.isBlank() ? null : group;
             return this;
         }
 
@@ -936,6 +974,9 @@ public final class PermissionsClient implements RiftPermissions, AutoCloseable {
                 throw new IllegalStateException("messaging and server are required");
             }
             ContextSet.of(ContextSet.SERVER, server);
+            if (group != null) {
+                ContextSet.of(ContextSet.GROUP, group);
+            }
             PermissionsClient client = new PermissionsClient(this);
             client.start();
             return client;

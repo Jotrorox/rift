@@ -102,7 +102,10 @@ impl PlayerHandle {
         if entry.server == server {
             return;
         }
-        self.players.permissions.switch_server(self.uuid, server);
+        let group = self.players.group_of(server);
+        self.players
+            .permissions
+            .switch_server(self.uuid, server, group.as_deref());
         let previous = std::mem::replace(&mut entry.server, server.to_owned());
         let event = self
             .players
@@ -372,7 +375,8 @@ impl Players {
         };
         let event = self.event("join", id, &entry, None);
         let player = rift_permissions::Uuid::from_bytes(*uuid);
-        self.permissions.join(player, name, server);
+        self.permissions
+            .join(player, name, server, self.group_of(server).as_deref());
         self.lock().insert(id, entry);
         self.publish(event);
         (
@@ -471,6 +475,17 @@ impl Players {
     }
 
     /// Match players on a server or in a service group; nil matches everyone.
+    /// The service group `server` is an instance of, for the `group`
+    /// permission context.
+    pub fn group_of(&self, server: &str) -> Option<String> {
+        self.groups
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .find(|(_, members)| members.contains(server))
+            .map(|(group, _)| group.clone())
+    }
+
     fn matcher(&self, server: Option<String>) -> Result<impl Fn(&Entry) -> bool, &'static str> {
         let mut members = None;
         if let Some(server) = &server {

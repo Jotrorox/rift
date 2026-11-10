@@ -1094,7 +1094,7 @@ mod tests {
         )
         .await;
         assert_eq!(lobby["code"], "forbidden", "{lobby}");
-        authority.join(ALICE, "Alice", "survival");
+        authority.join(ALICE, "Alice", "survival", None);
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert_eq!(
             authority.contexts(ALICE).get("region"),
