@@ -572,6 +572,11 @@ impl Host {
         );
         let mut stopping_by_name = persistent.stopping.lock().unwrap();
         stopping_by_name.retain(|_, instance| !instance.has_exited());
+        // Before any worker starts: `init` may log straight away.
+        persistent
+            .base
+            .monitor
+            .track(self.specs.iter().map(|spec| spec.name.as_str()));
         let mut next = Vec::with_capacity(self.specs.len());
         let mut stopping = Vec::new();
         let mut reloads = Vec::new();
@@ -635,6 +640,10 @@ impl Host {
                 instance.abort();
             }
             persistent.commands.0.lock().unwrap().script = script_commands;
+            persistent
+                .base
+                .monitor
+                .retain(previous.iter().map(|instance| instance.name()));
             return Err(error);
         }
         for old in previous.iter() {

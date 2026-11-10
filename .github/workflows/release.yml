@@ -18,15 +18,19 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # v0.1.0 releases Cargo.toml's 0.1.0; v0.1.0-rc.1 is a release candidate
+      # for it: the same pipeline, published as a prerelease.
       - name: Require tag to match Cargo.toml
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           python3 - <<'PY'
-          import os, tomllib
+          import os, re, tomllib
           with open('Cargo.toml', 'rb') as source:
               version = tomllib.load(source)['package']['version']
-          assert os.environ['RELEASE_TAG'] == 'v' + version, 'Tag must match Cargo.toml version'
+          tag = os.environ['RELEASE_TAG']
+          assert re.fullmatch('v' + re.escape(version) + r'(-rc\.[1-9][0-9]*)?', tag), (
+              f'Tag {tag} must be v{version} or v{version}-rc.N to match Cargo.toml')
           PY
 
   verify:
@@ -101,8 +105,13 @@ jobs:
         working-directory: dist
         run: |
           mapfile -t assets < <(cut -d ' ' -f 3- SHA256SUMS)
+          flags=()
+          # A release candidate never becomes the "latest" release.
+          if [[ "$RELEASE_TAG" == *-rc.* ]]; then
+            flags=(--prerelease --latest=false)
+          fi
           gh release create "$RELEASE_TAG" "${assets[@]}" SHA256SUMS \
-            --verify-tag --generate-notes --title "$RELEASE_TAG"
+            --verify-tag --generate-notes --title "$RELEASE_TAG" "${flags[@]}"
 
   packages:
     name: Mirror Java artifacts to GitHub Packages

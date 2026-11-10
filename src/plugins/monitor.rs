@@ -165,6 +165,16 @@ impl Monitor {
         }
     }
 
+    /// Create entries for `names` that have none. A plugin's worker thread
+    /// may log from `init` as soon as it starts, so its entry has to exist
+    /// before then or those lines are lost.
+    pub fn track<'a>(&self, names: impl IntoIterator<Item = &'a str>) {
+        let mut plugins = self.plugins.lock().unwrap();
+        for name in names {
+            plugins.entry(name.to_owned()).or_default();
+        }
+    }
+
     /// Count one call; `elapsed` is the time an awaited hook took.
     pub fn call(&self, plugin: &str, hook: Hook, outcome: Outcome, elapsed: Option<Duration>) {
         let mut plugins = self.plugins.lock().unwrap();
@@ -303,6 +313,11 @@ mod tests {
         monitor.retain(["b"]);
         assert_eq!(monitor.logs("a"), None);
         assert_eq!(monitor.logs("b"), Some(Vec::new()));
+        // Tracking adds entries without touching existing ones.
+        monitor.log("b", Level::Info, "kept".into());
+        monitor.track(["b", "c"]);
+        assert_eq!(monitor.logs("b").unwrap().len(), 1);
+        assert_eq!(monitor.logs("c"), Some(Vec::new()));
     }
 
     #[test]
