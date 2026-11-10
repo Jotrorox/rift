@@ -1,10 +1,15 @@
 use super::{
     NEWER, OLDER,
-    common::testing::{Out, awaiting_codec, hex, recorded, replay, send, with_stand_ins},
+    common::testing::{Out, hex, recorded, replay, send},
     down::Down,
     up::Up,
 };
-use crate::{Direction, State, step::Step, wire::Writer};
+use crate::{
+    Direction, State,
+    codec::registries::login::{self, Dimension},
+    step::Step,
+    wire::{Reader, Writer},
+};
 use Direction::{Clientbound, Serverbound};
 use State::Play;
 
@@ -50,12 +55,9 @@ fn titles_split_and_merge() {
         assert_eq!(back.data, [action]);
     }
 
-    // Real 1.16.5 title packets; their text waits for the text codec.
     for body in recorded(OLDER, Clientbound, "set_titles") {
-        match send(&mut *up, UP, Clientbound, Play, "set_titles", &body) {
-            Ok(outs) => assert!(one(outs).name.starts_with("set_")),
-            Err(error) => assert!(awaiting_codec(&error), "{error}"),
-        }
+        let out = one(send(&mut *up, UP, Clientbound, Play, "set_titles", &body).unwrap());
+        assert!(out.name.starts_with("set_"));
     }
     assert!(send(&mut *up, UP, Clientbound, Play, "set_titles", &[6]).is_err());
     assert!(send(&mut *up, UP, Clientbound, Play, "set_titles", &[3, 0]).is_err());
@@ -143,10 +145,8 @@ fn combat_splits_and_merges() {
 
     let mut kill = Writer::new();
     kill.varint(2).varint(1).i32(-1).string("{\"text\":\"x\"}");
-    match send(&mut *up, UP, Clientbound, Play, "player_combat", &kill.buf) {
-        Ok(outs) => assert_eq!(one(outs).name, "player_combat_kill"),
-        Err(error) => assert!(awaiting_codec(&error), "{error}"),
-    }
+    let out = one(send(&mut *up, UP, Clientbound, Play, "player_combat", &kill.buf).unwrap());
+    assert_eq!(out.name, "player_combat_kill");
     assert!(send(&mut *up, UP, Clientbound, Play, "player_combat", &[3]).is_err());
     assert!(send(&mut *up, UP, Clientbound, Play, "player_combat", &[0, 0]).is_err());
 }
@@ -534,7 +534,8 @@ fn clicks_name_the_stack_the_backend_expects() {
         .bytes(&stack(1, 64));
     assert_eq!(out.data, expected.buf);
 
-    // Reports of changed slots in a followed window need the item codec.
+    // Reports of changed slots in a followed window go through the item
+    // codec and update what the step follows.
     let mut click = Writer::new();
     click
         .u8(0)
@@ -545,17 +546,16 @@ fn clicks_name_the_stack_the_backend_expects() {
         .i16(36)
         .u8(0)
         .bytes(&stack(1, 64));
-    match send(
+    let out = one(send(
         &mut *up,
         UP,
         Serverbound,
         Play,
         "container_click",
         &click.buf,
-    ) {
-        Ok(outs) => assert_eq!(one(outs).data[4..6], [0, 3]),
-        Err(error) => assert!(awaiting_codec(&error), "{error}"),
-    }
+    )
+    .unwrap());
+    assert_eq!(out.data[4..6], [0, 3]);
     // Throwing names no stack.
     let mut click = Writer::new();
     click.u8(0).i16(36).i8(0).varint(4).varint(0).u8(0);
@@ -577,17 +577,16 @@ fn old_clicks_report_the_picked_up_stack_as_carried() {
     let mut down = down();
     let mut click = Writer::new();
     click.u8(0).i16(-999).i8(0).i16(4).varint(0).u8(0);
-    match send(
+    let out = one(send(
         &mut *down,
         DOWN,
         Serverbound,
         Play,
         "container_click",
         &click.buf,
-    ) {
-        Ok(outs) => assert_eq!(one(outs).data, hex("00fc1900000000")),
-        Err(error) => assert!(awaiting_codec(&error), "{error}"),
-    }
+    )
+    .unwrap());
+    assert_eq!(out.data, hex("00fc1900000000"));
     assert!(
         send(
             &mut *down,
@@ -601,22 +600,57 @@ fn old_clicks_report_the_picked_up_stack_as_carried() {
     );
 }
 
+/// The dimension type a `login` or `respawn` body of `protocol` puts the
+/// player in, and its world name.
+fn dimension(protocol: i32, login: bool, body: &[u8]) -> (crate::nbt::Compound, String) {
+    let mut r = Reader::new(body);
+    let (dimension, world) = if login {
+        let parsed = login::read_login(protocol, &mut r).unwrap();
+        (parsed.dimension, parsed.world)
+    } else {
+        login::read_respawn(protocol, &mut r).unwrap()
+    };
+    let Dimension::Element(element) = dimension else {
+        panic!("{dimension:?}");
+    };
+    (element, world.unwrap())
+}
+
 #[test]
 fn logins_convert_both_ways_on_real_sessions() {
     let (mut up, mut down) = (up(), down());
     for body in recorded(OLDER, Clientbound, "login") {
         let out = one(send(&mut *up, UP, Clientbound, Play, "login", &body).unwrap());
+        let (element, world) = dimension(NEWER, true, &out.data);
+        assert_eq!(
+            (element.int("min_y"), element.int("height")),
+            (Some(0), Some(256))
+        );
+        assert_eq!(world, dimension(OLDER, true, &body).1);
+        // What follows the world name is the same in both.
+        assert_eq!(out.data[out.data.len() - 15..], body[body.len() - 15..]);
         let back = one(send(&mut *down, DOWN, Clientbound, Play, "login", &out.data).unwrap());
-        assert_eq!(back.data, body);
+        let (element, _) = dimension(OLDER, true, &back.data);
+        assert!(!element.contains("min_y") && !element.contains("height"));
     }
     for body in recorded(NEWER, Clientbound, "login") {
         let out = one(send(&mut *down, DOWN, Clientbound, Play, "login", &body).unwrap());
+        let (element, _) = dimension(OLDER, true, &out.data);
+        assert!(element.int("logical_height").unwrap() <= 256);
         one(send(&mut *up, UP, Clientbound, Play, "login", &out.data).unwrap());
     }
     for body in recorded(OLDER, Clientbound, "respawn") {
         let out = one(send(&mut *up, UP, Clientbound, Play, "respawn", &body).unwrap());
+        assert_eq!(
+            dimension(NEWER, false, &out.data).0.int("height"),
+            Some(256)
+        );
         let back = one(send(&mut *down, DOWN, Clientbound, Play, "respawn", &out.data).unwrap());
-        assert_eq!(back.data, body);
+        assert_eq!(
+            dimension(OLDER, false, &back.data).1,
+            dimension(OLDER, false, &body).1
+        );
+        assert_eq!(back.data[back.data.len() - 12..], body[body.len() - 12..]);
     }
 }
 
@@ -632,10 +666,6 @@ fn recorded_sessions_replay_through_both_steps() {
                 eprintln!("no corpus for {recorded}; skipped");
                 continue;
             };
-            eprintln!(
-                "{name} {direction:?}: awaiting codecs {:?}",
-                result.awaiting_codec
-            );
             assert!(
                 result.failed.is_empty(),
                 "{name} {direction:?}: {:?}",
@@ -737,28 +767,6 @@ fn block_stand_ins_keep_shape_and_water() {
     assert_eq!(state(OLDER, NEWER, "grass_path"), "dirt_path");
 }
 
-#[test]
-fn recorded_sessions_replay_with_codec_stand_ins() {
-    with_stand_ins(|| {
-        for (name, mut step, sides, clientbound, serverbound) in [
-            ("up", up(), UP, OLDER, NEWER),
-            ("down", down(), DOWN, NEWER, OLDER),
-        ] {
-            for (direction, recorded) in [(Clientbound, clientbound), (Serverbound, serverbound)] {
-                let Some(result) = replay(&mut *step, sides, recorded, direction) else {
-                    continue;
-                };
-                assert!(
-                    result.failed.is_empty(),
-                    "{name} {direction:?}: {:?}",
-                    result.failed
-                );
-                assert!(result.awaiting_codec.is_empty());
-            }
-        }
-    });
-}
-
 /// Every packet a step emits for the recorded `name` packets, by name.
 fn converted(
     step: &mut dyn Step,
@@ -773,33 +781,39 @@ fn converted(
         .collect()
 }
 
+/// The 1.17 title packets, by 1.16 title action.
+const TITLES: [&str; 4] = [
+    "set_title_text",
+    "set_subtitle_text",
+    "set_action_bar_text",
+    "set_titles_animation",
+];
+
 #[test]
 fn split_packets_match_what_the_other_server_sends() {
-    with_stand_ins(|| {
-        let mut up = up();
-        let titles = converted(&mut *up, UP, OLDER, "set_titles");
-        if titles.is_empty() {
-            eprintln!("no corpus; skipped");
-            return;
-        }
-        // The same `/title` commands on a 1.17 server.
-        for name in super::TITLES {
-            let ours: Vec<_> = titles
-                .iter()
-                .filter(|(n, _)| n == name)
-                .map(|(_, d)| d.clone())
-                .collect();
-            assert_eq!(ours, recorded(NEWER, Clientbound, name), "{name}");
-        }
-        let mut down = down();
-        let mut merged: Vec<_> = super::TITLES
+    let mut up = up();
+    let titles = converted(&mut *up, UP, OLDER, "set_titles");
+    if titles.is_empty() {
+        eprintln!("no corpus; skipped");
+        return;
+    }
+    // The same `/title` commands on a 1.17 server.
+    for name in TITLES {
+        let ours: Vec<_> = titles
             .iter()
-            .flat_map(|name| converted(&mut *down, DOWN, NEWER, name))
-            .map(|(_, data)| data)
+            .filter(|(n, _)| n == name)
+            .map(|(_, d)| d.clone())
             .collect();
-        let mut real = recorded(OLDER, Clientbound, "set_titles");
-        merged.sort();
-        real.sort();
-        assert_eq!(merged, real);
-    });
+        assert_eq!(ours, recorded(NEWER, Clientbound, name), "{name}");
+    }
+    let mut down = down();
+    let mut merged: Vec<_> = TITLES
+        .iter()
+        .flat_map(|name| converted(&mut *down, DOWN, NEWER, name))
+        .map(|(_, data)| data)
+        .collect();
+    let mut real = recorded(OLDER, Clientbound, "set_titles");
+    merged.sort();
+    real.sort();
+    assert_eq!(merged, real);
 }
