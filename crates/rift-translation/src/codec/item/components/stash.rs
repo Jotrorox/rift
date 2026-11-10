@@ -93,7 +93,7 @@ pub fn take(cx: &mut Conv<'_>, mut input: Components) -> io::Result<Restored> {
 }
 
 /// What one stash entry records.
-enum Entry {
+pub enum Entry {
     /// The patch set this component.
     Set(Component),
     /// The patch removed this type.
@@ -178,6 +178,32 @@ pub fn put(cx: &mut Conv<'_>, out: &mut Out) -> io::Result<()> {
     out.components
         .insert("custom_data", Value::nbt(&Nbt::Compound(data)));
     Ok(())
+}
+
+/// An entry recording that a patch of `protocol` set `component`, for the
+/// item bridge, which stashes components in 1.20.4 tags.
+pub fn entry_set(protocol: i32, component: &Component) -> io::Result<Nbt> {
+    let (_, node) = Layout::of(protocol)?
+        .find(component.kind)
+        .ok_or_else(|| invalid("stashed component has no layout"))?;
+    let mut writer = Writer::new();
+    schema::write(protocol, node, &component.value, &mut writer)?;
+    Ok(entry(protocol, component.kind, |entry| {
+        entry.insert("value", Nbt::ByteArray(writer.buf));
+    }))
+}
+
+/// An entry recording that a patch of `protocol` removed (`"removed"`) or
+/// did not mention (`"absent"`) the type `kind`.
+pub fn entry_marker(protocol: i32, kind: &str, marker: &str) -> Nbt {
+    entry(protocol, kind, |entry| {
+        entry.insert(marker, Nbt::Byte(1));
+    })
+}
+
+/// What an entry stashes for `protocol`; `None` for another protocol's.
+pub fn restore_entry(protocol: i32, layout: &Layout, entry: &Nbt) -> io::Result<Option<Entry>> {
+    restore(protocol, layout, entry)
 }
 
 fn entry(protocol: i32, kind: &str, fill: impl FnOnce(&mut Compound)) -> Nbt {
