@@ -11,7 +11,7 @@ use std::io;
 /// The dimension codec a vanilla 1.16 server sends in `login`, as recorded
 /// from the official server: overworld, overworld caves, the nether and the
 /// end. A named root compound.
-pub(super) const VANILLA_CODEC: &[u8] = include_bytes!("dimension_codec.nbt");
+pub(in crate::steps) const VANILLA_CODEC: &[u8] = include_bytes!("dimension_codec.nbt");
 
 /// The worlds of a vanilla server, which 1.16 lists in `login`.
 pub(super) const VANILLA_WORLDS: [&str; 3] = [

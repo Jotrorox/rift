@@ -34,6 +34,10 @@ use crate::{
 };
 use std::io;
 
+/// The dimension codec of a vanilla 1.16 server, for the next step's tests.
+#[cfg(test)]
+pub(in crate::steps) use dimension::VANILLA_CODEC as VANILLA_CODEC_1_16;
+
 pub const OLDER: i32 = 578;
 pub const NEWER: i32 = 735;
 
