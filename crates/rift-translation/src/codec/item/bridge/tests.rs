@@ -1,5 +1,8 @@
 use super::{NEW, OLD, same_nbt, same_patch};
-use crate::codec::item::components::{Component, Components, schema::Value};
+use crate::codec::{
+    item::components::{Component, Components, schema::Value},
+    text::{self, component::HoverEvent, component::ItemInfo},
+};
 use crate::{
     Direction,
     codec::testing::{Recorded, corpus, corpus_in},
@@ -753,4 +756,193 @@ fn malformed_tags_fail_or_travel_unchanged() {
     stack.tag = Some(Nbt::Compound(tag));
     let mut shared = Shared::new(NEW, OLD);
     assert!(super::convert(&mut shared, Direction::Clientbound, &mut Some(stack)).is_err());
+}
+
+/// The `show_item` hovers of the bridge corpus's `tellraw hover <n>`
+/// messages, by `n`.
+fn hovers(protocol: i32) -> Option<Vec<(String, ItemInfo)>> {
+    let home = std::env::var_os("HOME")?;
+    let directory = std::path::Path::new(&home).join(".cache/rift-via/bridge/corpus");
+    let mut found = Vec::new();
+    for packet in corpus_in(&directory, protocol)? {
+        if packet.direction != Direction::Clientbound || packet.name(protocol) != "system_chat" {
+            continue;
+        }
+        let mut reader = Reader::new(&packet.data);
+        let Ok(Some(nbt)) = Nbt::read(&mut reader, false) else {
+            continue;
+        };
+        let Ok(component) = text::from_nbt(protocol, &nbt) else {
+            continue;
+        };
+        if let (text::component::Content::Text(label), Some(HoverEvent::ShowItem(item))) =
+            (&component.content, &component.style.hover)
+            && label.starts_with("hover ")
+        {
+            found.push((label.clone(), item.clone()));
+        }
+    }
+    Some(found)
+}
+
+/// Each hover of the bridge corpus converted across the bridge is what the
+/// other server sent for the same `tellraw`.
+#[test]
+fn hover_stacks_convert_to_what_the_other_server_sends() {
+    let (Some(old), Some(new)) = (hovers(OLD), hovers(NEW)) else {
+        eprintln!("bridge corpus not captured: skipped");
+        return;
+    };
+    assert!(
+        !old.is_empty() && old.len() == new.len(),
+        "{} {}",
+        old.len(),
+        new.len()
+    );
+    let mut failures = Vec::new();
+    for ((label, old), (other, new)) in old.iter().zip(&new) {
+        assert_eq!(label, other);
+        let mut up = old.clone();
+        let mut shared = Shared::new(NEW, OLD);
+        let converted = crate::codec::item::convert_hover_stack(
+            &mut shared,
+            Direction::Clientbound,
+            &mut up.id,
+            &mut up.count,
+            &mut up.tag,
+            &mut up.components,
+        );
+        assert!(converted.unwrap(), "{label}");
+        let empty = Nbt::Compound(Compound::new());
+        let as_nbt = |c: &Option<Compound>| c.clone().map(Nbt::Compound).unwrap_or(empty.clone());
+        if up.id != new.id
+            || !same_tag(
+                &normalized_nbt(&as_nbt(&up.components)),
+                &normalized_nbt(&as_nbt(&new.components)),
+            )
+        {
+            failures.push(format!(
+                "{label} up:\n  got    {:?}\n  1.20.5 {:?}",
+                up.components, new.components
+            ));
+        }
+        let mut down = new.clone();
+        let mut shared = Shared::new(OLD, NEW);
+        let converted = crate::codec::item::convert_hover_stack(
+            &mut shared,
+            Direction::Clientbound,
+            &mut down.id,
+            &mut down.count,
+            &mut down.tag,
+            &mut down.components,
+        );
+        assert!(converted.unwrap(), "{label}");
+        if down.id != old.id
+            || !same_tag(
+                &normalized_tag(&as_nbt(&down.tag)),
+                &normalized_tag(&as_nbt(&old.tag)),
+            )
+        {
+            failures.push(format!(
+                "{label} down:\n  got    {:?}\n  1.20.4 {:?}",
+                down.tag, old.tag
+            ));
+        }
+    }
+    eprintln!("{} hovers compared", old.len());
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// `tellraw` with a `show_item` hover of an enchanted, named sword, as the
+/// vanilla 1.20.4 and 1.20.6 servers sent it (`system_chat`).
+const HOVER_OLD: &str = "0a0a000a686f7665724576656e740a0008636f6e74656e7473080002696400176d696e6563726166743a6469616d6f6e645f73776f726408000374616700787b44616d6167653a332c456e6368616e746d656e74733a5b7b69643a226d696e6563726166743a73686172706e657373222c6c766c3a32737d5d2c646973706c61793a7b4c6f72653a5b27226122275d2c4e616d653a277b2274657874223a22426c616465222c22636f6c6f72223a22726564227d277d7d00080006616374696f6e000973686f775f6974656d00080004746578740007686f76657220300000";
+const HOVER_NEW: &str = "0a0a000a686f7665724576656e740a0008636f6e74656e74730a000a636f6d706f6e656e747309000e6d696e6563726166743a6c6f7265080000000100032261220a00166d696e6563726166743a656e6368616e746d656e74730a00066c6576656c730300136d696e6563726166743a73686172706e6573730000000200000300106d696e6563726166743a64616d616765000000030800156d696e6563726166743a637573746f6d5f6e616d65001e7b22636f6c6f72223a22726564222c2274657874223a22426c616465227d00030005636f756e7400000001080002696400176d696e6563726166743a6469616d6f6e645f73776f726400080006616374696f6e000973686f775f6974656d00080004746578740007686f76657220300000";
+
+fn hover_of(protocol: i32, body: &[u8]) -> ItemInfo {
+    let mut reader = Reader::new(body);
+    let nbt = Nbt::read(&mut reader, false).unwrap().unwrap();
+    match text::from_nbt(protocol, &nbt).unwrap().style.hover {
+        Some(HoverEvent::ShowItem(item)) => item,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// The whole path: the text codec converts a real `system_chat` with a
+/// `show_item` hover through the bridge, both ways.
+#[test]
+fn chat_hovers_cross_the_bridge() {
+    use crate::{State, codec::testing::Defaults};
+    let empty = Nbt::Compound(Compound::new());
+    for (client, backend, from, to) in [
+        (NEW, OLD, HOVER_OLD, HOVER_NEW),
+        (OLD, NEW, HOVER_NEW, HOVER_OLD),
+    ] {
+        let mut step = Defaults::new(client, backend);
+        let outs = step
+            .clientbound(State::Play, "system_chat", &unhex(from))
+            .unwrap();
+        let got = hover_of(client, &outs[0].data);
+        let want = hover_of(client, &unhex(to));
+        assert_eq!((&got.id, got.count), (&want.id, want.count));
+        let nbt = |c: &Option<Compound>| c.clone().map(Nbt::Compound).unwrap_or(empty.clone());
+        assert!(
+            same_tag(
+                &normalized_tag(&nbt(&got.tag)),
+                &normalized_tag(&nbt(&want.tag))
+            ),
+            "{got:?}"
+        );
+        assert!(
+            same_tag(
+                &normalized_nbt(&nbt(&got.components)),
+                &normalized_nbt(&nbt(&want.components))
+            ),
+            "{got:?}"
+        );
+    }
+}
+
+/// What the persistent encoder writes, it reads back, for every recorded
+/// 1.20.5 stack (components it does not cover are left out).
+#[test]
+fn persistent_components_round_trip() {
+    let new = given_stacks(NEW).unwrap_or_default();
+    let components = component_corpus().unwrap_or_default();
+    let pairs = paired_corpus().unwrap_or_default();
+    let mut checked = 0;
+    let mut shared = Shared::new(NEW, OLD);
+    let mut bridge = super::Bridge::new(&mut shared, Direction::Clientbound);
+    for stack in new
+        .iter()
+        .chain(&components)
+        .chain(pairs.iter().map(|(_, _, new)| new))
+    {
+        let patch = stack.components.clone().unwrap_or_default();
+        let encoded = super::persistent::encode(&mut bridge, &patch);
+        let decoded = super::persistent::decode(&mut bridge, &encoded);
+        let covered = Components {
+            added: patch
+                .added
+                .iter()
+                .filter(|component| encoded.contains(&format!("minecraft:{}", component.kind)))
+                .cloned()
+                .collect(),
+            removed: patch.removed.clone(),
+        };
+        assert!(
+            same_meaning(
+                &ItemStack {
+                    components: Some(decoded),
+                    ..stack.clone()
+                },
+                &ItemStack {
+                    components: Some(covered),
+                    ..stack.clone()
+                },
+            ),
+            "{stack:?}\n{encoded:?}"
+        );
+        checked += 1;
+    }
+    eprintln!("{checked} stacks through the persistent form");
 }

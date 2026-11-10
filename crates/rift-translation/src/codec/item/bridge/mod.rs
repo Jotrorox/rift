@@ -15,6 +15,7 @@
 //! the receiver lacks are named after the original and the original's ID is
 //! stashed the same way (`rift:766` in tags, `rift:765` in `custom_data`).
 mod down;
+mod persistent;
 mod tables;
 mod up;
 
@@ -64,6 +65,31 @@ pub(super) fn convert(
         bridge.down(item)?
     };
     Ok(())
+}
+
+/// Convert the stack of a `show_item` hover event across the bridge: the
+/// 1.20.4 tag and 1.20.5 persistent components (see `persistent`).
+/// `Ok(false)` when the item does not exist on the sender's side.
+pub(super) fn hover(
+    shared: &mut Shared,
+    direction: Direction,
+    id: &mut String,
+    count: &mut i32,
+    tag: &mut Option<Compound>,
+    components: &mut Option<Compound>,
+) -> io::Result<bool> {
+    let upward = shared.target(direction) == NEW;
+    let mut bridge = Bridge::new(shared, direction);
+    let converted = persistent::hover(&mut bridge, upward, id, count, tag, components)?;
+    // Nothing comes back from a hover: no stash. And a 1.20.4 hover holds
+    // the tag as given, without the `Damage` stacks always carry.
+    if let Some(tag) = tag {
+        tag.remove(&stash_key(NEW));
+        if tag.get("Damage").and_then(Nbt::as_i64) == Some(0) {
+            tag.remove("Damage");
+        }
+    }
+    Ok(converted)
 }
 
 /// One conversion across the bridge, in either direction.
@@ -139,6 +165,26 @@ impl<'a> Bridge<'a> {
         let mapped = self.shared.mapping(self.downward(), registry).get(id)?;
         let name = data::version(OLD).registry(registry)?.name(mapped)?;
         Some(format!("minecraft:{name}"))
+    }
+
+    /// The 1.20.5 name (without namespace) of the 1.20.5 entry `id`.
+    fn new_name(&mut self, registry: &'static str, id: i32) -> Option<String> {
+        if self.builtin(registry) {
+            return data::version(NEW)
+                .registry(registry)?
+                .name(id)
+                .map(str::to_owned);
+        }
+        registries::name_of(self.shared, self.new_side(), registry, id).map(str::to_owned)
+    }
+
+    /// The 1.20.5 ID of the 1.20.5 entry `name`.
+    fn new_id_by_name(&mut self, registry: &'static str, name: &str) -> Option<i32> {
+        let name = data::strip(name);
+        if self.builtin(registry) {
+            return data::version(NEW).registry(registry)?.id(name);
+        }
+        registries::id_of(self.shared, self.new_side(), registry, name)
     }
 
     fn builtin(&self, registry: &str) -> bool {
