@@ -1327,6 +1327,13 @@ fn definition_values(config: &Config) -> Value {
             Some(names) => value["inherit_env"] = json!(names),
             None => {}
         }
+        if s.isolation != rift::config::Isolation::default() {
+            value["isolation"] = if s.isolation.read.is_empty() && s.isolation.write.is_empty() {
+                json!(s.isolation.mode.as_str())
+            } else {
+                json!({"mode": s.isolation.mode.as_str(), "read": s.isolation.read, "write": s.isolation.write})
+            };
+        }
         if let Some(messaging) = &s.messaging {
             value["messaging"] =
                 json!({"publish": messaging.publish, "subscribe": messaging.subscribe});

@@ -738,6 +738,7 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn group_source(definition: &str) -> String {
@@ -797,6 +798,37 @@ mod tests {
                 .to_string();
             assert!(error.contains("service_groups.lobby"), "{error}");
             assert!(error.contains(message), "{definition}: {error}");
+        }
+    }
+
+    #[test]
+    fn isolation_takes_a_mode_or_a_table_with_extra_paths() {
+        let parse = |definition: &str| {
+            Config::from_lua(
+                &group_source(&format!(
+                    "directory='servers/{{name}}',command={{'java'}},port_range={{25600,25602}},{definition}"
+                )),
+                "isolation.lua",
+            )
+            .map(|config| config.service_groups["lobby"].server.isolation.clone())
+        };
+        use crate::config::IsolationMode;
+        assert_eq!(parse("").unwrap().mode, IsolationMode::Off);
+        assert_eq!(
+            parse("isolation='required'").unwrap().mode,
+            IsolationMode::Required
+        );
+        let isolation = parse("isolation={read={'/srv/maps'},write={'shared'}}").unwrap();
+        assert_eq!(isolation.mode, IsolationMode::Landlock);
+        assert_eq!(isolation.read, [PathBuf::from("/srv/maps")]);
+        assert!(isolation.write[0].is_absolute() && isolation.write[0].ends_with("shared"));
+        for (bad, message) in [
+            ("isolation='strict'", "expected \"off\""),
+            ("isolation={mode='landlock',extra=1}", "isolation"),
+            ("isolation=5", "expected a mode or a table"),
+        ] {
+            let error = parse(bad).unwrap_err().to_string();
+            assert!(error.contains(message), "{bad}: {error}");
         }
     }
 
