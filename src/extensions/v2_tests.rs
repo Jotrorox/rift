@@ -962,7 +962,7 @@ async fn players_api_lists_and_queues_actions_for_joined_players() {
         .await
         .unwrap();
     let title = |title: &str, subtitle: Option<&str>, times| PlayerAction::Title {
-        title: title.into(),
+        title: (!title.is_empty()).then(|| title.into()),
         subtitle: subtitle.map(Into::into),
         times,
     };

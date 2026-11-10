@@ -45,6 +45,7 @@ pub const OPERATIONS: &[&str] = &[
     "action-bar-json",
     "kick-json",
     "broadcast-json",
+    "title-json",
 ];
 
 /// One decoded `players` call.
@@ -106,7 +107,9 @@ impl Request {
             "get" => &["target"],
             "names" => &["prefix"],
             "message" | "action-bar" | "message-json" | "action-bar-json" => &["target", "text"],
-            "title" => &["target", "title", "subtitle", "fade_in", "stay", "fade_out"],
+            "title" | "title-json" => {
+                &["target", "title", "subtitle", "fade_in", "stay", "fade_out"]
+            }
             "kick" | "kick-json" => &["target", "reason"],
             "transfer" => &["target", "server"],
             "broadcast" | "broadcast-json" => &["text", "server"],
@@ -158,7 +161,7 @@ impl Request {
                 target: target()?,
                 text: rich("text", "action bar text")?,
             },
-            "title" => {
+            "title" | "title-json" => {
                 let ticks = |field: &str, default: i32| match object.get(field) {
                     None | Some(Value::Null) => Ok(default),
                     Some(value) => value
@@ -166,16 +169,25 @@ impl Request {
                         .and_then(|ticks| i32::try_from(ticks).ok())
                         .ok_or_else(|| format!("{field} must be an integer number of ticks")),
                 };
-                let text = |field: &str| match object.get(field) {
-                    None | Some(Value::Null) => Ok(None),
-                    Some(Value::String(text)) => Ok(Some(text.clone())),
-                    Some(_) => Err(format!("{field} must be a string")),
+                // `title` takes plain strings; `title-json` takes JSON text
+                // components, as strings or embedded, like the other -json
+                // operations. An empty or absent text is left out.
+                let text = |field: &str| -> Result<Option<Text>, String> {
+                    match object.get(field) {
+                        None | Some(Value::Null) => Ok(None),
+                        Some(Value::String(text)) if text.is_empty() => Ok(None),
+                        Some(Value::String(text)) if operation == "title" => {
+                            Ok(Some(Text::Plain(text.clone())))
+                        }
+                        Some(_) if operation == "title" => Err(format!("{field} must be a string")),
+                        Some(_) => rich(field, field).map(Some),
+                    }
                 };
                 Self::Title {
                     target: target()?,
                     // The vanilla `/title` defaults.
                     title: TitleSpec {
-                        title: text("title")?.unwrap_or_default(),
+                        title: text("title")?.unwrap_or_else(|| Text::Plain(String::new())),
                         subtitle: text("subtitle")?,
                         fade_in: ticks("fade_in", 10)?,
                         stay: ticks("stay", 70)?,
@@ -306,27 +318,33 @@ fn name(
     }
 }
 
-/// The checks of `players.title`, shared by every caller.
+/// The checks of `players.title`, shared by every caller: plain or rich
+/// text, where an empty plain title or subtitle is left out.
 pub fn title_action(title: &TitleSpec) -> Result<PlayerAction, String> {
     const MAX_TEXT: usize = crate::text::MAX_PLAIN_BYTES;
-    let subtitle = title
-        .subtitle
-        .as_deref()
-        .filter(|subtitle| !subtitle.is_empty())
-        .map(|subtitle| Text::plain(subtitle, "subtitle").map(|_| subtitle.to_owned()))
-        .transpose()?;
-    if title.title.is_empty() && subtitle.is_none() {
+    let checked = |text: &Text, label: &str| -> Result<Option<Text>, String> {
+        match text {
+            Text::Plain(plain) if plain.is_empty() => Ok(None),
+            Text::Plain(plain) if plain.len() > MAX_TEXT => {
+                Err(format!("{label} must contain at most 1024 bytes"))
+            }
+            text => text.validate(label).map(|()| Some(text.clone())),
+        }
+    };
+    let main = checked(&title.title, "title")?;
+    let subtitle = match &title.subtitle {
+        Some(subtitle) => checked(subtitle, "subtitle")?,
+        None => None,
+    };
+    if main.is_none() && subtitle.is_none() {
         return Err("title requires a title or subtitle".into());
-    }
-    if title.title.len() > MAX_TEXT {
-        return Err("title must contain at most 1024 bytes".into());
     }
     let times = [title.fade_in, title.stay, title.fade_out];
     if times.iter().any(|ticks| !(0..=1200).contains(ticks)) {
         return Err("title times must be 0..=1200 ticks".into());
     }
     Ok(PlayerAction::Title {
-        title: title.title.clone(),
+        title: main,
         subtitle,
         times,
     })
@@ -464,6 +482,22 @@ mod tests {
             panic!()
         };
         assert_eq!((title.fade_in, title.stay, title.fade_out), (10, 70, 20));
+        assert_eq!(title.title, Text::Plain("Hi".into()));
+        let rich = Request::decode(
+            "title-json",
+            br#"{"target":"A","title":{"mini":"<gold>Hi"},"subtitle":"{\"text\":\"s\"}"}"#,
+        )
+        .unwrap();
+        let Request::Title { title, .. } = &rich else {
+            panic!()
+        };
+        assert_eq!(
+            title.title,
+            Text::Component(json!({"text": "Hi", "color": "gold"}))
+        );
+        assert_eq!(title.subtitle, Some(Text::Component(json!({"text": "s"}))));
+        assert_eq!(rich.operation(), "title");
+        assert!(Request::decode("title", br#"{"target":"A","title":{"text":"x"}}"#).is_err());
         assert!(!Request::decode("names", b"{}").unwrap().acts());
     }
 }

@@ -35,6 +35,7 @@ mod services;
 mod status;
 mod tab_list;
 mod templates;
+mod text;
 
 // Configuration evaluation includes cold VM setup and can be descheduled on
 // busy hosts. Keep it bounded without applying the latency-sensitive callback
@@ -98,6 +99,8 @@ pub struct Config {
     pub web: Option<WebConfig>,
     pub status: Option<StatusConfig>,
     pub shutdown_timeout: Duration,
+    /// The theme and Rift's own messages (`text = { theme, messages }`).
+    pub text: std::sync::Arc<crate::text::catalog::Catalog>,
 }
 
 /// Gameplay destinations and access rules. An empty initial list retains the
@@ -455,6 +458,7 @@ impl Config {
             web: None,
             status: None,
             shutdown_timeout: Duration::from_secs(30),
+            text: std::sync::Arc::default(),
         };
         config.validate()?;
         Ok(config)
@@ -623,9 +627,13 @@ impl Config {
                     "web",
                     "status",
                     "shutdown_timeout_ms",
+                    "text",
                 ],
                 "config",
             )?;
+            // First, so markup elsewhere in this configuration uses its theme.
+            let text = text::parse(&root)?;
+            let _theme = crate::text::catalog::loading(text.styles().clone());
             let listeners = addresses(
                 root.get("listeners").map_err(|e| e.to_string())?,
                 "listeners",
@@ -951,6 +959,7 @@ impl Config {
                 web,
                 status,
                 shutdown_timeout,
+                text,
             })
         };
         let mut config = parse().map_err(|error| invalid(format!("{name}: {error}")))?;

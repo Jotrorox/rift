@@ -2267,6 +2267,70 @@ async fn rift_dialog_clicks_reach_the_owner_and_never_the_backend() {
     .unwrap();
 }
 
+#[tokio::test]
+async fn legacy_clients_receive_titles_rendered_for_them() {
+    timeout(Duration::from_secs(3), async {
+        let codec = Codec::default();
+        let (mut client, input) = tokio::io::duplex(65536);
+        let handshake = Handshake {
+            protocol: 47,
+            address: "play.test".into(),
+            port: 25565,
+            next_state: NextState::Login,
+        };
+        codec.write(&mut client, &handshake.packet()).await.unwrap();
+        let mut session = Session::accept(input).await.unwrap();
+        let (server, mut backend) = tokio::io::duplex(65536);
+        session.connect_backend(server).await.unwrap();
+        receive(&mut backend, codec).await;
+        let mut start = Vec::new();
+        write_string("Player", &mut start);
+        codec
+            .write(&mut client, &Packet::new(0, start))
+            .await
+            .unwrap();
+        session.forward().await.unwrap();
+        receive(&mut backend, codec).await;
+        let mut profile = Vec::new();
+        write_string("00000000-0000-0000-0000-000000000007", &mut profile);
+        write_string("Player", &mut profile);
+        let mut world = 1_i32.to_be_bytes().to_vec();
+        world.extend([1, 0, 0, 20]);
+        write_string("flat", &mut world);
+        world.push(0);
+        for packet in [Packet::new(2, profile), Packet::new(1, world)] {
+            codec.write(&mut backend, &packet).await.unwrap();
+            session.forward().await.unwrap();
+            assert_eq!(receive(&mut client, codec).await, packet);
+        }
+        let title = crate::text::Text::Component(
+            serde_json::json!({"text": "Hi", "color": "#ff8800", "shadow_color": 1}),
+        );
+        session
+            .send_title(Some(&title), Some(&"sub".into()), [1, 2, 3])
+            .await
+            .unwrap();
+        let mut times = vec![2];
+        times.extend([0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3]);
+        assert_eq!(receive(&mut client, codec).await, Packet::new(0x45, times));
+        let mut subtitle = vec![1];
+        write_string(r#"{"text":"sub"}"#, &mut subtitle);
+        assert_eq!(
+            receive(&mut client, codec).await,
+            Packet::new(0x45, subtitle)
+        );
+        // Hex becomes the nearest named colour and the shadow is dropped.
+        let mut heading = vec![0];
+        write_string(r#"{"color":"gold","text":"Hi"}"#, &mut heading);
+        assert_eq!(
+            receive(&mut client, codec).await,
+            Packet::new(0x45, heading)
+        );
+    })
+    .await
+    .unwrap();
+}
+
 /// Every protocol before 1.19.3, where online mode used to be refused.
 const LEGACY_ONLINE: [i32; 33] = [
     47, 107, 108, 109, 110, 210, 315, 316, 335, 338, 340, 393, 401, 404, 477, 480, 485, 490, 498,

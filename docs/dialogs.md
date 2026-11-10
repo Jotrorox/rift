@@ -22,6 +22,10 @@ data packs use in `data/<namespace>/dialog/*.json` (see the
 when the player is offline, older than 1.21.6 or has 32 undelivered actions,
 and fails when the dialog is invalid.
 
+Every text in a dialog (title, body, labels, tooltips) is a JSON text component
+and may be written as markup or legacy codes: `title = { mini = "<gold>Rules" }`.
+Rift checks it like every other [styled text](text.md).
+
 ## An example
 
 ```lua

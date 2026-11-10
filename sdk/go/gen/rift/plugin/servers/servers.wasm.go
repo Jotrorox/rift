@@ -6,28 +6,28 @@ import (
 	"go.bytecodealliance.org/cm"
 )
 
-// This file contains wasmimport and wasmexport declarations for "rift:plugin@0.1.3".
+// This file contains wasmimport and wasmexport declarations for "rift:plugin@0.1.4".
 
-//go:wasmimport rift:plugin/servers@0.1.3 create
+//go:wasmimport rift:plugin/servers@0.1.4 create
 //go:noescape
 func wasmimport_Create(group0 *uint8, group1 uint32, result *cm.Result[string, string, string])
 
-//go:wasmimport rift:plugin/servers@0.1.3 remove
+//go:wasmimport rift:plugin/servers@0.1.4 remove
 //go:noescape
 func wasmimport_Remove(name0 *uint8, name1 uint32, result *cm.Result[string, string, string])
 
-//go:wasmimport rift:plugin/servers@0.1.3 start
+//go:wasmimport rift:plugin/servers@0.1.4 start
 //go:noescape
 func wasmimport_Start(name0 *uint8, name1 uint32, result *cm.Result[string, string, string])
 
-//go:wasmimport rift:plugin/servers@0.1.3 stop
+//go:wasmimport rift:plugin/servers@0.1.4 stop
 //go:noescape
 func wasmimport_Stop(name0 *uint8, name1 uint32, result *cm.Result[string, string, string])
 
-//go:wasmimport rift:plugin/servers@0.1.3 download
+//go:wasmimport rift:plugin/servers@0.1.4 download
 //go:noescape
 func wasmimport_Download(template0 *uint8, template1 uint32, result *cm.Result[string, string, string])
 
-//go:wasmimport rift:plugin/servers@0.1.3 control
+//go:wasmimport rift:plugin/servers@0.1.4 control
 //go:noescape
 func wasmimport_Control(operation0 *uint8, operation1 uint32, payloadJson0 *uint8, payloadJson1 uint32, result *cm.Result[string, string, string])

@@ -11,7 +11,7 @@ Four persistent plugins that behave identically, one per supported language:
 | [`vanish-lua`](vanish-lua) | Lua | nothing to build | [Visibility](../../docs/permissions.md#visibility): `/vanish` through the `rift.visible-to` meta key |
 
 The WebAssembly examples are standalone projects that build a component
-against the `plugin` world of `rift:plugin@0.1.3` (`wit/rift-plugin.wit`). A
+against the `plugin` world of `rift:plugin@0.1.4` (`wit/rift-plugin.wit`). A
 plugin directory holds a `plugin.toml` manifest and the entry it names: the
 built `.wasm`, or `init.lua`.
 

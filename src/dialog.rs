@@ -217,9 +217,7 @@ impl<'a> Fields<'a> {
     ) -> Result<(), String> {
         match self.get(key) {
             Some(value) => {
-                crate::protocol::validate_component(value)
-                    .map_err(|error| format!("{}: {error}", self.path(key)))?;
-                out.insert(key.into(), value.clone());
+                out.insert(key.into(), text(value, &self.path(key))?);
                 Ok(())
             }
             None if required => Err(format!("{} is required", self.path(key))),
@@ -351,13 +349,26 @@ fn variable(name: &str) -> bool {
         && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
+/// A dialog text: a JSON text component, with markup objects (`{"mini":
+/// ...}`) expanded and checked like every text Rift sends. An empty string
+/// stays empty.
+fn text(value: &Value, path: &str) -> Result<Value, String> {
+    if value.as_str() == Some("") {
+        return Ok(value.clone());
+    }
+    Ok(match crate::text::Text::component(value.clone(), path)? {
+        crate::text::Text::Component(component) => component,
+        crate::text::Text::Plain(text) => Value::String(text),
+    })
+}
+
 /// Characters a chat command may contain (`StringUtil.isAllowedChatCharacter`).
-fn chat_string(text: &str) -> bool {
+pub(crate) fn chat_string(text: &str) -> bool {
     text.chars().all(|c| c != '§' && c >= ' ' && c != '\u{7f}')
 }
 
 /// An identifier (`namespace:path`) as Minecraft parses it.
-fn identifier(id: &str) -> bool {
+pub(crate) fn identifier(id: &str) -> bool {
     let (namespace, path) = id.split_once(':').unwrap_or(("minecraft", id));
     let valid = |text: &str, slash: bool| {
         text.bytes().all(|b| {
@@ -529,10 +540,9 @@ impl Builder {
                     .as_object()
                     .is_some_and(|fields| !fields.contains_key("type"));
             if component {
-                crate::protocol::validate_component(value)
-                    .map_err(|error| format!("{path}: {error}"))?;
+                let contents = text(value, path)?;
                 return Ok(
-                    serde_json::json!({"type": "minecraft:plain_message", "contents": value}),
+                    serde_json::json!({"type": "minecraft:plain_message", "contents": contents}),
                 );
             }
             let kind = object(value, path)?.get("type").and_then(Value::as_str);
