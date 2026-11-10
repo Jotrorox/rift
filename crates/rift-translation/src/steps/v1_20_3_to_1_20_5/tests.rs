@@ -800,3 +800,55 @@ fn dump_produced_packets() {
     }
     std::fs::write(path, lines).unwrap();
 }
+
+/// A 1.20.5 backend that leaves a registry out still gives the 1.20.4
+/// client one complete codec before the configuration ends; one that sends
+/// every registry has it sent as soon as the last arrives.
+#[test]
+fn a_backend_missing_registries_still_completes_the_codec() {
+    let Some(session) = corpus(NEWER) else {
+        eprintln!("corpus for {NEWER} not captured: skipped");
+        return;
+    };
+    let registry_data: Vec<_> = session
+        .iter()
+        .filter(|packet| {
+            packet.direction == Direction::Clientbound
+                && packet.state == State::Configuration
+                && packet.name(NEWER) == "registry_data"
+        })
+        .collect();
+    assert!(registry_data.len() > 2);
+    let id = registry_data[0].id;
+    for skip in [None, Some(registry_data.len() - 1)] {
+        let mut down = down();
+        let mut out = Vec::new();
+        for (index, packet) in registry_data.iter().enumerate() {
+            if Some(index) != skip {
+                out.extend(
+                    down.send_id(
+                        Direction::Clientbound,
+                        State::Configuration,
+                        id,
+                        &packet.data,
+                    )
+                    .unwrap(),
+                );
+            }
+        }
+        out.extend(
+            down.clientbound(State::Configuration, "finish_configuration", &[])
+                .unwrap(),
+        );
+        assert_eq!(names(&out), ["registry_data", "finish_configuration"]);
+        let codec = crate::codec::registries::form::read_codec_packet(OLDER, &out[0].data).unwrap();
+        let mut got: Vec<_> = codec.iter().map(|registry| registry.name.clone()).collect();
+        got.sort();
+        let mut want: Vec<_> = crate::codec::registries::defaults::all(OLDER)
+            .iter()
+            .map(|registry| registry.name.to_owned())
+            .collect();
+        want.sort();
+        assert_eq!(got, want, "{skip:?}");
+    }
+}
