@@ -150,6 +150,11 @@ fn bound(cv: &mut Cv<'_>, rw: &mut Rewriter<'_>) -> io::Result<()> {
 /// Copy a chat type reference: a registry ID before 1.21, a holder (ID + 1,
 /// or 0 and an inline definition) from then on. An inline type has no ID
 /// an older client knows; it becomes the first chat type (`chat`).
+// INTEGRATION: chat types are a synchronised registry. If the registries
+// codec renumbers `chat_type` entries between the two sides of a pair, map
+// the ID here through its per-connection state (for example a
+// `registries::State::map(direction, "chat_type", id)`); today IDs pass
+// through unchanged.
 pub fn chat_type(cv: &mut Cv<'_>, rw: &mut Rewriter<'_>) -> io::Result<()> {
     let (id, inline) = if cv.from >= CHAT_TYPE_HOLDER {
         match rw.r.varint()? {

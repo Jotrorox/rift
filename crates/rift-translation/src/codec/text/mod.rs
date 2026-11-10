@@ -8,6 +8,13 @@
 //! what the receiver cannot express. [`snbt`] and [`legacy`] (section-sign
 //! text) are public for the other codecs.
 //!
+//! JSON that not even a lenient reader can parse fails the packet, as it
+//! fails the vanilla client of that version: passing it on as plain text
+//! would show garbage instead of what the server meant, and a server whose
+//! output breaks vanilla clients is broken for them too. Anything vanilla's
+//! lenient reader accepts (unquoted strings, single quotes, comments,
+//! numbers and booleans where text belongs) is accepted.
+//!
 //! Rift's implementation was written independently from Mojang's own
 //! classes and minecraft-data's protocol descriptions.
 pub mod component;

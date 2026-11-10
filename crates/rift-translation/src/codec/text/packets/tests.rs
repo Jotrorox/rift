@@ -758,3 +758,51 @@ fn every_pair_routes_cleanly() {
         let _ = Defaults::new(newer, older);
     }
 }
+
+#[test]
+fn real_26_3_system_chat() {
+    // Recorded from the official 26.3 server: tellraw with click and hover.
+    let packet: &[u8] = b"\n\n\x00\x0bclick_event\x08\x00\x06action\x00\x0brun_command\x08\x00\x07command\x00\x05/help\x00\x08\x00\x05color\x00\x04gold\x08\x00\x04text\x00\x03raw\n\x00\x0bhover_event\x08\x00\x06action\x00\tshow_text\x08\x00\x05value\x00\x05hover\x00\x00\x00";
+    assert_eq!(
+        play(777, 777, "system_chat", packet),
+        [("system_chat", packet.to_vec())]
+    );
+    // Down the chain to 1.21.4 and 1.20.2 the events take their old shapes.
+    let mut body = packet.to_vec();
+    for (from, to) in [
+        (777, 776),
+        (776, 775),
+        (775, 774),
+        (774, 773),
+        (773, 772),
+        (772, 771),
+        (771, 770),
+        (770, 769),
+    ] {
+        body = play(from, to, "system_chat", &body).remove(0).1;
+    }
+    let tag = crate::nbt::Nbt::read(&mut crate::wire::Reader::new(&body), false)
+        .unwrap()
+        .unwrap();
+    let compound = tag.as_compound().unwrap();
+    assert_eq!(
+        compound.compound("clickEvent").unwrap().str("value"),
+        Some("/help")
+    );
+    assert_eq!(
+        compound.compound("hoverEvent").unwrap().str("contents"),
+        Some("hover")
+    );
+    for (from, to) in [(769, 768), (768, 767), (767, 766), (766, 765), (765, 764)] {
+        body = play(from, to, "system_chat", &body).remove(0).1;
+    }
+    assert_eq!(
+        body,
+        concat(&[
+            &json(
+                r#"{"color":"gold","clickEvent":{"action":"run_command","value":"/help"},"hoverEvent":{"action":"show_text","contents":{"text":"hover"}},"text":"raw"}"#
+            ),
+            &[0]
+        ])
+    );
+}
