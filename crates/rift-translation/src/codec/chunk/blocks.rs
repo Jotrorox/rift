@@ -8,7 +8,10 @@ use super::{
 };
 use crate::{
     Direction, Packet, State as Phase,
-    codec::{HasShared, Shared},
+    codec::{
+        HasShared, Shared,
+        registries::{self, Side},
+    },
     data,
     mapping::Mapping,
     nbt::{Compound, Nbt},
@@ -463,11 +466,29 @@ pub fn level_event<S: HasShared>(
             }
         }
         1010 if (source < 767) != (target < 767) => {
-            // INTEGRATION: from 1.21 the data is a `jukebox_song` registry
-            // ID, a registry the server sends; the registries codec will map
-            // between record items and songs. Until then the record stops.
-            event = 1011;
-            data = 0;
+            // From 1.21 the data is a song of the synchronised
+            // `jukebox_song` registry, named after its record minus
+            // `music_disc_`; a record without a song stops instead.
+            let song = if source < 767 {
+                data::version(source)
+                    .expect_registry("item")
+                    .name(data)
+                    .and_then(|item| item.strip_prefix("music_disc_"))
+                    .and_then(|song| registries::id_of(shared, Side::Client, "jukebox_song", song))
+            } else {
+                registries::name_of(shared, Side::Backend, "jukebox_song", data).and_then(|song| {
+                    data::version(target)
+                        .expect_registry("item")
+                        .id(&format!("music_disc_{song}"))
+                })
+            };
+            match song {
+                Some(song) => data = song,
+                None => {
+                    event = 1011;
+                    data = 0;
+                }
+            }
         }
         2000 if source == 393 && target == 401 => data = smoke_up(data),
         2000 if source == 401 && target == 393 => data = smoke_down(data),
