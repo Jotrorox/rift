@@ -1134,6 +1134,38 @@ mod layouts {
     }
 
     #[test]
+    fn a_26_3_client_learns_vanilla_brewing_from_older_servers() {
+        use super::super::recipes::UpdateRecipes;
+        let older = UpdateRecipes::Sets {
+            property_sets: Vec::new(),
+            stonecutter: Vec::new(),
+        };
+        let mut up = Defaults::new(777, 776);
+        let outs = up
+            .clientbound(
+                State::Play,
+                "update_recipes",
+                &body(|w| older.write(776, w)),
+            )
+            .unwrap();
+        let UpdateRecipes::Sets { property_sets, .. } = read(777, &outs[0], UpdateRecipes::read)
+        else {
+            panic!("26.3 has property sets")
+        };
+        let items = crate::data::version(777).expect_registry("item");
+        let names = |key: &str| -> Vec<&str> {
+            let (_, ids) = property_sets.iter().find(|(name, _)| name == key).unwrap();
+            ids.iter().map(|id| items.name(*id).unwrap()).collect()
+        };
+        assert_eq!(
+            names("minecraft:brewing_input"),
+            ["potion", "splash_potion", "lingering_potion"]
+        );
+        assert_eq!(names("minecraft:brewing_reagent").len(), 21);
+        assert!(names("minecraft:brewing_reagent").contains(&"nether_wart"));
+    }
+
+    #[test]
     fn tag_displays_become_item_sets_in_26_3_and_back() {
         use super::super::recipes::{BookAdd, BookEntry, IdSet, RecipeDisplay, SlotDisplay};
         let item = |protocol: i32, name: &str| {

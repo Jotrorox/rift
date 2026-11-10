@@ -215,6 +215,34 @@ def _dense(pairs):
     return names
 
 
+RULES = Path(__file__).resolve().parents[1] / "crates" / "rift-translation" / "data" / "rules"
+
+
+def renamed(registry, name, source, target):
+    """What the protocol `target` calls the entry `source` calls `name`,
+    following the `renames` of the translation rules of every pair between
+    them (a name both versions have can mean different things: 1.13's
+    stone_slab is 1.14's smooth_stone_slab), or None when `target` has no
+    entry of that meaning (1.14's new stone_slab in 1.13)."""
+    if not name.startswith("minecraft:"):
+        return name  # Raw IDs and invalid markers.
+    registry = "block" if registry == "block_state" else registry
+    pairs = []
+    for path in RULES.glob("*-*.json"):
+        older, newer = map(int, path.stem.split("-"))
+        if min(source, target) <= older and newer <= max(source, target):
+            pairs.append((older, json.loads(path.read_text()).get(registry, {}).get("renames", {})))
+    short = name.removeprefix("minecraft:")
+    for _, renames in sorted(pairs, reverse=source > target):
+        if source > target:
+            renames = {new: old for old, new in renames.items()}
+        if short in renames:
+            short = renames[short]
+        elif short in renames.values():
+            return None
+    return f"minecraft:{short}"
+
+
 _cache = {}
 
 

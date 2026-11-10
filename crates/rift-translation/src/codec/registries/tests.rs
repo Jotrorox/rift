@@ -767,3 +767,44 @@ fn entries_without_data_take_the_senders_vanilla_element() {
             .is_err()
     );
 }
+
+/// The parameters of every chat decoration of a converted registry.
+fn decoration_parameters(registry: &Registry) -> Vec<String> {
+    let mut found = Vec::new();
+    for entry in &registry.entries {
+        let element = entry.element.as_ref().and_then(Nbt::as_compound).unwrap();
+        for part in ["chat", "narration"] {
+            let Some(part) = element.compound(part) else {
+                continue;
+            };
+            let decoration = part.compound("decoration").unwrap_or(part);
+            for parameter in decoration.list("parameters").unwrap_or_default() {
+                found.push(parameter.as_str().unwrap().to_owned());
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn chat_parameters_take_each_versions_names() {
+    // 1.19's team and private message types name their target `team_name`;
+    // a 1.19.1 client rejects the registry with that name, and back.
+    let sent = defaults::get(759, "chat_type").unwrap().to_registry();
+    assert!(decoration_parameters(&sent).contains(&"team_name".to_owned()));
+    let up = convert::registry(759, 760, &sent).unwrap().unwrap();
+    for parameter in decoration_parameters(&up) {
+        assert!(
+            ["sender", "target", "content"].contains(&parameter.as_str()),
+            "{parameter}"
+        );
+    }
+    let sent = defaults::get(760, "chat_type").unwrap().to_registry();
+    let down = convert::registry(760, 759, &sent).unwrap().unwrap();
+    for parameter in decoration_parameters(&down) {
+        assert!(
+            ["sender", "team_name", "content"].contains(&parameter.as_str()),
+            "{parameter}"
+        );
+    }
+}

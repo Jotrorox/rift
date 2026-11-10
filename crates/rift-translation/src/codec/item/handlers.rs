@@ -54,12 +54,11 @@ fn tags_change(low: i32, high: i32) -> bool {
     )
 }
 
-/// INTEGRATION: the component codec should say which pairs change
-/// component layouts or IDs; until it does, a pair is assumed to when its
-/// component type registries differ or its items do.
+/// Whether the component codec has anything to convert between the pair:
+/// component types, layouts or built-in registry IDs (`identical`); text
+/// and synchronised registries inside are judged with the stacks' items.
 fn components_change(source: i32, target: i32) -> bool {
-    version::item_components(source.min(target))
-        && registry_changes(source, target, "data_component_type")
+    version::item_components(source.min(target)) && !super::components::identical(source, target)
 }
 
 /// Whether stacks sent from `source` to `target` need converting.
@@ -776,7 +775,7 @@ fn update_recipes<S: HasShared>(
     let direction = Direction::Clientbound;
     let (source, target) = (shared.source(direction), shared.target(direction));
     let recipes = parse(source, &packet.data, UpdateRecipes::read)?;
-    let converted = match recipes {
+    let mut converted = match recipes {
         UpdateRecipes::Recipes(mut list) if !recipes::displays(target) => {
             let mut kept = Vec::with_capacity(list.len());
             for mut recipe in list.drain(..) {
@@ -829,11 +828,61 @@ fn update_recipes<S: HasShared>(
             UpdateRecipes::Recipes(Vec::new())
         }
     };
+    if let UpdateRecipes::Sets { property_sets, .. } = &mut converted
+        && source < 777
+        && target >= 777
+    {
+        add_brewing_sets(target, property_sets);
+    }
     cx.to_client(
         state,
         Packet::new(packet.id, encode(|w| converted.write(target, w))?),
     );
     Ok(())
+}
+
+/// 26.3 made brewing data-driven: its client lets potions and reagents into
+/// a brewing stand only when the `brewing_input` and `brewing_reagent`
+/// property sets list them. An older server's brewing is vanilla's, which
+/// the official 26.3 server sends as these sets.
+fn add_brewing_sets(target: i32, property_sets: &mut Vec<(String, Vec<i32>)>) {
+    const INPUTS: &[&str] = &["potion", "splash_potion", "lingering_potion"];
+    const REAGENTS: &[&str] = &[
+        "sugar",
+        "cobweb",
+        "golden_carrot",
+        "redstone",
+        "stone",
+        "slime_block",
+        "ghast_tear",
+        "magma_cream",
+        "breeze_rod",
+        "glistering_melon_slice",
+        "pufferfish",
+        "gunpowder",
+        "glowstone_dust",
+        "fermented_spider_eye",
+        "dragon_breath",
+        "blaze_powder",
+        "nether_wart",
+        "phantom_membrane",
+        "turtle_helmet",
+        "spider_eye",
+        "rabbit_foot",
+    ];
+    for (key, items) in [
+        ("minecraft:brewing_input", INPUTS),
+        ("minecraft:brewing_reagent", REAGENTS),
+    ] {
+        if property_sets.iter().any(|(known, _)| known == key) {
+            continue;
+        }
+        let ids = items
+            .iter()
+            .filter_map(|name| convert::item_id(target, name))
+            .collect();
+        property_sets.push((key.to_owned(), ids));
+    }
 }
 
 fn map_id_set(shared: &mut Shared, direction: Direction, set: &mut recipes::IdSet) {

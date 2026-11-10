@@ -44,8 +44,7 @@ impl Up {
     }
 
     /// The registries codec converts the registries (damage types, trim
-    /// patterns whose template the receiver has); the portal cooldown comes
-    /// or goes.
+    /// patterns); the portal cooldown comes or goes.
     fn login(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
         let data = join::convert_login(&mut self.shared, Direction::Clientbound, &packet.data)?;
         cx.to_client(state, Packet::new(packet.id, data));

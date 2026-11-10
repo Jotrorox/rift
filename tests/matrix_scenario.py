@@ -23,6 +23,7 @@ import struct
 import time
 
 from matrix_client import SessionError, text_of
+import matrix_registries
 
 
 class StepFailure(AssertionError):
@@ -245,7 +246,10 @@ ITEMS = [
          nbt=("firework_rocket", '{Fireworks:{Flight:1b,Explosions:[{Type:1b,Colors:[I;16711680]}]}}'),
          components=("firework_rocket",
                      'fireworks={flight_duration:1,explosions:[{shape:"large_ball",colors:[I;16711680]}]}')),
-    dict(key="red_banner", min=0,
+    # Pumpkin 0.2.0 writes a banner pattern holder without its +1 offset
+    # (translation_matrix.SERVER_DEVIATIONS): the official 26.3 client cannot
+    # read such a slot either and disconnects, so it is not given there.
+    dict(key="red_banner", min=0, not_on=("pumpkin",),
          legacy=("banner", 1, '{BlockEntityTag:{Base:1,Patterns:[{Pattern:"cre",Color:15}]}}'),
          nbt=("red_banner", '{BlockEntityTag:{Patterns:[{Pattern:"cre",Color:15}]}}'),
          components=("red_banner", 'banner_patterns=[{pattern:"minecraft:creeper",color:"black"}]')),
@@ -596,11 +600,12 @@ class Context:
             self.fail(f"{what}: IDs outside the client's registries: {invalid[:5]}")
         remaining = list(translated)
         for name in reference:
-            if name in remaining:
-                remaining.remove(name)
+            target = matrix_registries.renamed(registry, name, self.ref.protocol, self.via.protocol)
+            if target in remaining:
+                remaining.remove(target)
             elif name.startswith("<"):
                 continue
-            elif not self.via_reg.knows(registry, name):
+            elif target is None or not self.via_reg.knows(registry, target):
                 self.info(f"{what}: {name} does not exist in the client's version; a stand-in is expected")
             else:
                 self.fail(f"{what}: the translated client did not receive {name} "
@@ -767,7 +772,8 @@ def step_blocks(cx):
 @step(software=ALL)
 def step_items(cx):
     """Many kinds of items via /give; the inventory updates must name them."""
-    given = [item for item in ITEMS if item["min"] <= cx.server.protocol]
+    given = [item for item in ITEMS if item["min"] <= cx.server.protocol
+             and cx.server.software not in item.get("not_on", ())]
     for item in given:
         cx.console(cx.cmd.give(cx.ref.name, item), cx.cmd.give(cx.via.name, item))
     cx.sync()
@@ -970,7 +976,7 @@ def step_effects(cx):
     cx.compare_names("effects", "mob_effect", ref, via)
 
 
-@step()
+@step(software=ALL)
 def step_advancements_and_recipes(cx):
     """Every advancement and recipe granted."""
     cx.console(f"advancement grant {cx.via.name} everything", f"advancement grant {cx.ref.name} everything",
@@ -1010,7 +1016,7 @@ def step_tab_complete(cx):
         cx.fail("the translated client never received the command tree")
 
 
-@step()
+@step(software=ALL)
 def step_statistics(cx):
     """The statistics screen request."""
     mark = cx.via.mark()
