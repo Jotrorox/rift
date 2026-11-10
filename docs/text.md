@@ -173,6 +173,7 @@ carries, such as a backend's ban screen.
 | `login.extensions_version` | – | Extensions v1 requires Minecraft 1.19.3–26.3. |
 | `login.extension_failed` | – | Login extension failed. Please try again later. |
 | `login.no_access` | – | You do not have access to this server. |
+| `login.dev_mode` | – | This server is in development mode. |
 | `login.duplicate_name` | – | That player is already connected to this network. |
 | `login.invalid_name` | – | Invalid player name. |
 | `login.unavailable` | – | The server is currently unavailable. Please try again later. |

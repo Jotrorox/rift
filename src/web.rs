@@ -487,6 +487,9 @@ fn router(kind: Kind, address: SocketAddr, mut app: App) -> Router {
                 any(files::server).layer(DefaultBodyLimit::max(files::MAX_FILE)),
             )
             .route("/api/groups/{name}/instances", post(create_instance))
+            .route("/api/groups/{name}/start", post(start_group))
+            .route("/api/groups/{name}/stop", post(stop_group))
+            .route("/api/groups/{name}/mode", put(group_mode))
             .route("/api/instances/{name}", delete(remove_instance))
             .route("/api/operations/{id}", get(instance_result))
             .route("/api/metrics", get(json_metrics))
@@ -741,7 +744,7 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
                 ["api", "plugins", _, "restart"] => "plugins",
                 ["api", "servers", _, "console"] => "console",
                 ["api", "servers", _, _]
-                | ["api", "groups", _, "instances"]
+                | ["api", "groups", _, "instances" | "start" | "stop" | "mode"]
                 | ["api", "instances", _]
                 | ["api", "operations", _] => "servers",
                 // Permission data: `perms` (or `config`) reads, `config` writes.
@@ -872,6 +875,9 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
             ["api", "servers", _, "stop"] => "stop",
             ["api", "servers", _, "console"] => "console",
             ["api", "groups", _, "instances"] => "create_instance",
+            ["api", "groups", _, "start"] => "start_group",
+            ["api", "groups", _, "stop"] => "stop_group",
+            ["api", "groups", _, "mode"] => "group_mode",
             ["api", "instances", _] => "remove_instance",
             ["api", "templates", _, "download"] => "download_software",
             ["api", "definitions", "templates", _] => "edit_template",
@@ -1375,15 +1381,25 @@ async fn apply_definition(
             "permission groups require extensions with api_version = 2 or 3; configure them in Lua first",
         );
     }
-    if section == "server_list"
-        && ["favicon", "hosts"]
-            .iter()
-            .any(|field| definition.get(field).is_some())
-    {
+    if section == "server_list" && definition.get("hosts").is_some() {
         return error(
             StatusCode::BAD_REQUEST,
-            "set the favicon and per-host entries in Lua; edits keep the configured ones",
+            "set per-host entries in Lua; edits keep the configured ones",
         );
+    }
+    // A favicon is an uploaded PNG data URL, or `false` to remove it; omitting
+    // it keeps the configured one, including a file set in Lua.
+    if section == "server_list"
+        && let Some(favicon) = definition.get("favicon")
+    {
+        let checked = match favicon {
+            Value::Bool(false) => Ok(()),
+            Value::String(url) => rift::server_list::favicon_data(url).map(drop),
+            _ => Err("expected a PNG data URL or false".to_owned()),
+        };
+        if let Err(message) = checked {
+            return error(StatusCode::BAD_REQUEST, format!("favicon: {message}"));
+        }
     }
     let source = match operator::edited_source(source, section, name, definition) {
         Ok(s) => s,
@@ -1787,6 +1803,50 @@ fn server_operation(
             },
             failure,
         ),
+    }
+}
+async fn start_group(
+    State(app): State<App>,
+    Path(name): Path<String>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    group_operation(body, &[], StatusCode::ACCEPTED, |_| {
+        crate::groups::start(&app.snapshot(), &name)
+    })
+}
+async fn stop_group(
+    State(app): State<App>,
+    Path(name): Path<String>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    group_operation(body, &[], StatusCode::ACCEPTED, |_| {
+        crate::groups::stop(&app.snapshot(), &name)
+    })
+}
+async fn group_mode(
+    State(app): State<App>,
+    Path(name): Path<String>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    group_operation(body, &["mode"], StatusCode::OK, |value| {
+        let mode = value
+            .get("mode")
+            .and_then(Value::as_str)
+            .ok_or_else(|| control::Error::invalid("mode must be \"active\" or \"dev\""))?;
+        crate::groups::set_mode(&app.snapshot(), &name, mode)
+    })
+}
+/// Group operations finish synchronously except for the process changes
+/// they request, which `/api/servers` reports as they complete.
+fn group_operation(
+    body: Result<Json<Value>, JsonRejection>,
+    allowed: &[&str],
+    status: StatusCode,
+    operation: impl FnOnce(&Value) -> Result<Value, control::Error>,
+) -> Response {
+    match payload(body, allowed).and_then(|value| operation(&value)) {
+        Ok(value) => (status, Json(value)).into_response(),
+        Err(failure) => failure.into_response(),
     }
 }
 /// Every plugin in dispatch order with its state, restarts and calls.

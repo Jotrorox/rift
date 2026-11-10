@@ -88,6 +88,8 @@ notices! {
         "Login extension failed. Please try again later.",
     LoginNoAccess => "login.no_access" []
         "You do not have access to this server.",
+    LoginDevMode => "login.dev_mode" []
+        "This server is in development mode.",
     LoginDuplicateName => "login.duplicate_name" []
         "That player is already connected to this network.",
     LoginInvalidName => "login.invalid_name" []

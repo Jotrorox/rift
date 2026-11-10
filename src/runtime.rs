@@ -22,6 +22,7 @@ use rift::{
         catalog::{self, Notice},
     },
 };
+use rift_permissions::{Tristate, Uuid};
 use std::{
     collections::{BTreeMap, HashMap},
     io,
@@ -244,6 +245,58 @@ impl Snapshot {
     pub fn reachable(&self, name: &str) -> bool {
         self.managed.can_connect(name)
             && (self.managed.is_managed(name) || self.health.available(name))
+    }
+
+    /// Whether a player may be sent to `backend` (a server or a service
+    /// group): the configured access rules, then the dev mode of the
+    /// service group it belongs to.
+    pub fn admits(&self, backend: &str, username: &str, uuid: Option<Uuid>) -> bool {
+        self.config.can_access(backend, username) && self.dev_admits(backend, uuid)
+    }
+
+    /// A group in dev mode admits only players granted its dev permission.
+    pub fn dev_admits(&self, backend: &str, uuid: Option<Uuid>) -> bool {
+        let group = match self.config.instances.get(backend) {
+            Some(instance) => instance.group.as_str(),
+            None if self.config.service_groups.contains_key(backend) => backend,
+            None => return true,
+        };
+        if self.control.group(group).mode != rift::config::GroupMode::Dev {
+            return true;
+        }
+        let node = rift::config::GroupMode::dev_permission(group);
+        uuid.is_some_and(|uuid| {
+            self.extensions.permissions().check_active(uuid, &node) == Tristate::True
+        })
+    }
+
+    /// Change a service group's operator state, recording it in the instance
+    /// database first when there is one.
+    pub fn update_group(
+        &self,
+        name: &str,
+        change: impl FnOnce(&mut rift::config::GroupState),
+    ) -> io::Result<rift::config::GroupState> {
+        self.control.update_group(name, change, |state| {
+            self.instance_store
+                .as_ref()
+                .map_or(Ok(()), |store| store.set_group_state(name, state))
+        })
+    }
+
+    /// Drop the state of groups this configuration no longer defines, so a
+    /// group defined again later starts active.
+    pub fn prune_groups(&self) {
+        for name in self
+            .control
+            .retain_groups(|name| self.config.service_groups.contains_key(name))
+        {
+            if let Some(store) = &self.instance_store
+                && let Err(error) = store.set_group_state(&name, Default::default())
+            {
+                eprintln!("rift: state of removed service group {name} not cleared: {error}");
+            }
+        }
     }
 
     pub fn latest(self: &Arc<Self>) -> Arc<Self> {
@@ -671,12 +724,13 @@ pub async fn handle(
             addresses,
             metrics: &metrics,
         };
+        let login_uuid = crate::network::expected_uuid(&session);
         let candidate_result = if let Some(selected) = extension_selection {
-            if snapshot.config.can_access(&selected, &login_name) {
+            if snapshot.admits(&selected, &login_name, login_uuid) {
                 Ok(snapshot
                     .candidates(&[selected])
                     .into_iter()
-                    .filter(|name| snapshot.config.can_access(name, &login_name))
+                    .filter(|name| snapshot.admits(name, &login_name, login_uuid))
                     .collect())
             } else {
                 Err(rift::text::notice_error(
@@ -690,7 +744,7 @@ pub async fn handle(
                 Notice::LoginUnknownHost,
             ))
         } else {
-            network.initial_candidates(&primary, use_initial, &login_name)
+            network.initial_candidates(&primary, use_initial, &login_name, login_uuid)
         };
         let candidates = match candidate_result {
             Ok(candidates) => candidates,
@@ -983,7 +1037,7 @@ pub async fn handle(
                     }
                     let name = session.player_name().unwrap_or_default();
                     if snapshot.config.network.access.get(target).is_some_and(|access| !access.permits(name))
-                        || !request.snapshot.config.can_access(target, name)
+                        || !request.snapshot.admits(target, name, crate::network::expected_uuid(&session))
                         || control.draining(&request.snapshot.config, target)
                         || !request.snapshot.reachable(target)
                     {
@@ -1744,6 +1798,11 @@ async fn create_instance(group: String, snapshot: &Arc<Snapshot>) -> InstanceRes
         status: 404,
         message: format!("unknown service group {group:?}"),
     })?;
+    if snapshot.control.group(&group).suspended {
+        return Err(Error::conflict(
+            "service group is stopped; start the group before creating instances",
+        ));
+    }
     if definition
         .scaling
         .as_ref()
@@ -2311,8 +2370,10 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     let mut initial = Snapshot::first(config, permissions)?;
     if let Some(store) = instance_store {
         initial.managed.with_persistence(store.clone())?;
+        initial.control.restore_groups(store.group_states()?);
         initial.instance_store = Some(store);
     }
+    initial.prune_groups();
     let admin_secret = initial
         .config
         .admin
@@ -2528,6 +2589,12 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                         }
                         continue;
                     }
+                    Some(crate::scaling::Change::Stop(name)) => {
+                        if let Err(error) = snapshot.managed.request_stop(&name) {
+                            eprintln!("rift: stop of {name} in a stopped group rejected: {error}");
+                        }
+                        continue;
+                    }
                     None => continue,
                 }
             }
@@ -2583,6 +2650,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                     updates.send_replace(script.clone());
                 }
                 publish(&mut snapshot, next, &current, &mut health, &metrics).await;
+                snapshot.prune_groups();
                 services.commit(&snapshot.config, prepared, &app);
                 // Reconfiguration always reads a source; never record an empty one.
                 if let Some(source) = snapshot.source.as_deref()

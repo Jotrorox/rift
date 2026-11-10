@@ -77,8 +77,15 @@ fn entry(values: &Table, path: &str, base: &Path) -> Result<Entry, String> {
         favicon: field("favicon")?
             .map(|value| {
                 let file = string(value, &at("favicon"))?;
+                if server_list::is_favicon_data(&file) {
+                    return server_list::favicon_data(&file)
+                        .map_err(|error| format!("{}: {error}", at("favicon")));
+                }
                 if file.trim().is_empty() || file.contains('\0') {
-                    return Err(format!("{}: expected a PNG file path", at("favicon")));
+                    return Err(format!(
+                        "{}: expected a PNG file path or data URL",
+                        at("favicon")
+                    ));
                 }
                 server_list::favicon_file(&base.join(file))
                     .map_err(|error| format!("{}: {error}", at("favicon")))
