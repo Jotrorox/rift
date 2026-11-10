@@ -1,0 +1,12 @@
+{
+  "block_type": {
+    "renames": {
+      "weathering_copper_trap_door": "weathering_copper_trapdoor"
+    }
+  },
+  "command_argument_type": {
+    "renames": {
+      "color": "team_color"
+    }
+  }
+}

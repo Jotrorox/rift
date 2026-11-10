@@ -23,6 +23,18 @@ minecraft-data, each name checked against that version's server jar. Block
 states come from reports/blocks.json, verified state by state. data/SOURCES.md
 says which version got which registry from where.
 
+data/legacy.json maps 1.12 numeric blocks and items to 1.13 names and back
+(minecraft-data's common/legacy.json, validated against both versions, plus a
+reverse chosen for every 1.13 state and item). data/rules/ is written by hand
+and only checked by the crate's tests.
+
+Cache layout under ~/.cache/rift-via:
+
+    servers/<jar>                checksum-verified vanilla server jars
+    reports/<version>/           data generator reports and vanilla datapack
+    ref/minecraft-data, ref/ViaVersion   git clones, read at pinned commits
+    jdks/jdk<N>/                 Java runtimes (not downloaded by this script)
+
 Usage (Python 3.11+, stdlib only):
 
     python3 scripts/translation_crate.py            # regenerate data/
@@ -35,6 +47,7 @@ found as ~/.cache/rift-via/jdks/jdk<N>/bin/java (or $RIFT_JDK_<N>).
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+import functools
 import hashlib
 import json
 import os
@@ -126,14 +139,16 @@ def reports(version):
     vanilla datapack, generating both on first use:
 
         reports/<version>/reports/{registries,blocks,packets,...}.json
-        reports/<version>/datapack/   (the jar's data/minecraft/ folder)
+        reports/<version>/datapack/         (the jar's data/minecraft/ folder)
+        reports/<version>/server.checksum   (the jar they came from)
     """
     directory = CACHE / "reports" / version
-    done = directory / "reports" / "blocks.json"
-    if done.exists():
+    fixture = server(version)
+    # The jar the reports came from: a different pinned jar regenerates them.
+    marker = directory / "server.checksum"
+    if marker.exists() and marker.read_text().strip() == fixture["checksum"]:
         return directory
     path = jar(version)
-    fixture = server(version)
     if not version_at_least(version, "1.13"):
         raise ValueError(f"{version} has no data generator")
     log(f"Generating reports for {version}...")
@@ -159,6 +174,7 @@ def reports(version):
                     target = staged / "datapack" / name.removeprefix("data/minecraft/")
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_bytes(game.read(name))
+        (staged / "server.checksum").write_text(fixture["checksum"] + "\n")
         if directory.exists():
             shutil.rmtree(directory)
         staged.replace(directory)
@@ -209,6 +225,7 @@ def git_files(name, repository, commit, prefix):
     return listing.split()
 
 
+@functools.cache
 def git_read(name, repository, commit, path):
     directory = checkout(name, repository, commit)
     return subprocess.run(["git", "-C", str(directory), "show", f"{commit}:{path}"],
@@ -219,8 +236,10 @@ def via_read(path):
     return git_read("ViaVersion", VIA_REPOSITORY, VIA_COMMIT, path)
 
 
+@functools.cache
 def mcdata(path):
-    """A minecraft-data file under data/, parsed, or None when absent."""
+    """A minecraft-data file under data/, parsed, or None when absent.
+    Cached: callers must not change what it returns."""
     files = mcdata_files()
     if f"data/{path}" not in files:
         return None
@@ -494,6 +513,10 @@ class RustTables:
         negative = self.peek() == "-"
         if negative:
             self.take()
+        token = self.peek() or ""
+        if not token[:1].isdigit():
+            context = " ".join(self.tokens[max(0, self.position - 8):self.position + 8])
+            raise ValueError(f"expected a number, found {token!r} near: {context}")
         value = int(self.take().replace("_", ""), 0)
         return -value if negative else value
 
@@ -1035,6 +1058,7 @@ MCDATA_REGISTRIES = {
 }
 
 
+@functools.cache
 def block_states(version):
     """Blocks as [name, [[property, [values]]...], default offset], in state
     order, from the blocks report.
@@ -1174,6 +1198,207 @@ def check_registry_renames(all_registries, all_sources):
                                  "check REGISTRY_RENAMES")
 
 
+# The flattening: 1.12 numeric blocks (id << 4 | metadata) and items (id
+# and damage) against 1.13 names. minecraft-data's legacy.json gives the
+# forward direction; the reverse is chosen here for every 1.13 state and item:
+#
+# 1. a legacy source whose forward target is exactly this state or item
+#    (still water and lava win over flowing, then the lowest id and meta);
+# 2. else, for blocks, the source targeting this block (or its family, see
+#    LEGACY_FAMILIES) whose target matches the most property values, then
+#    the lowest id and meta;
+# 3. else nothing: genuinely new 1.13 content, for which the 340-393 step
+#    names stand-ins in its rules.
+LEGACY_PREFERRED = {(9, 0): 0, (11, 0): 0, (8, 0): 1, (10, 0): 1}
+
+# legacy.json is written against 1.13.1, which added these properties.
+LEGACY_LATER_PROPERTIES = {"tnt": ["unstable"]}
+
+
+def legacy_families(names):
+    """1.13 blocks or items 1.12 encoded as another one plus block entity
+    or NBT data, or did not tell apart: name to the name whose legacy
+    source stands in for it."""
+    colors = ["white", "orange", "magenta", "light_blue", "yellow", "lime", "pink", "gray",
+              "light_gray", "cyan", "purple", "blue", "brown", "green", "red", "black"]
+    woods = ["oak", "spruce", "birch", "jungle", "acacia", "dark_oak"]
+    families = {}
+    for color in colors:
+        families[f"{color}_bed"] = "red_bed"  # bed colour is block entity data
+        families[f"{color}_banner"] = "white_banner"  # banner colour too
+        families[f"{color}_wall_banner"] = "white_wall_banner"
+    for skull in ("wither_skeleton_skull", "zombie_head", "player_head", "creeper_head",
+                  "dragon_head"):
+        families[skull] = "skeleton_skull"  # skull type is block entity data
+        families[skull.replace("_skull", "_wall_skull").replace("_head", "_wall_head")] = \
+            "skeleton_wall_skull"
+    for wood in woods:
+        families[f"stripped_{wood}_log"] = f"{wood}_log"
+        families[f"stripped_{wood}_wood"] = f"{wood}_wood"
+        if wood != "oak":
+            # 1.12 had only oak (wooden) pressure plates, trapdoors and buttons.
+            for kind in ("pressure_plate", "trapdoor", "button"):
+                families[f"{wood}_{kind}"] = f"oak_{kind}"
+    for name in names:
+        if name.startswith("potted_"):
+            families.setdefault(name, "flower_pot")  # the plant is block entity data
+        if name.endswith("_spawn_egg"):
+            families.setdefault(name, "pig_spawn_egg")  # the entity is NBT data
+    families.update({
+        "void_air": "air", "cave_air": "air",
+        "pumpkin": "carved_pumpkin",  # 1.12 pumpkins always had a face
+        "shulker_box": "purple_shulker_box",  # 1.12 boxes were all coloured
+        "attached_pumpkin_stem": "pumpkin_stem", "attached_melon_stem": "melon_stem",
+        "oak_wood": "oak_log", "spruce_wood": "spruce_log", "birch_wood": "birch_log",
+        "jungle_wood": "jungle_log", "acacia_wood": "acacia_log", "dark_oak_wood": "dark_oak_log",
+    })
+    return families
+
+
+def state_values(blocks, name, properties):
+    """Every property value of `name[properties]` (defaults filled in) and
+    the state's offset; raises when the block or a value does not exist."""
+    block = blocks.get(name)
+    if block is None:
+        raise ValueError(f"no block {name}")
+    listed, default = block
+    defaults = default_values(listed, default)
+    values = []
+    for property_name, choices in listed:
+        value = properties.get(property_name, defaults[property_name])
+        if value not in choices:
+            raise ValueError(f"{name} has no {property_name}={value}")
+        values.append(value)
+    unknown = set(properties) - {property_name for property_name, _ in listed}
+    if unknown:
+        raise ValueError(f"{name} has no properties {sorted(unknown)}")
+    return values
+
+
+def default_values(listed, offset):
+    values = {}
+    for property_name, choices in reversed(listed):
+        values[property_name] = choices[offset % len(choices)]
+        offset //= len(choices)
+    return values
+
+
+def split_state(text):
+    text = strip(text)
+    if "[" not in text:
+        return text, {}
+    name, rest = text.split("[", 1)
+    pairs = [pair.split("=", 1) for pair in rest.rstrip("]").split(",") if pair]
+    return name, dict(pairs)
+
+
+def legacy_data(registries):
+    source = mcdata("pc/common/legacy.json")
+    old_blocks = registries[340]["block"]
+    old_items = registries[340]["item"]
+    flat = block_states("1.13")
+    blocks = {name: (properties, default) for name, properties, default in flat}
+    items = [name for name in registries[393]["item"] if name]
+
+    # Forward: validate every entry against 1.12 and 1.13.
+    forward_blocks, targets = {}, {}
+    for key, text in source["blocks"].items():
+        block_id, meta = map(int, key.split(":"))
+        if block_id >= len(old_blocks) or old_blocks[block_id] is None or not 0 <= meta < 16:
+            raise ValueError(f"legacy.json block {key}: no such 1.12 block")
+        name, properties = split_state(text)
+        for dropped in LEGACY_LATER_PROPERTIES.get(name, ()):
+            properties.pop(dropped, None)
+        values = state_values(blocks, name, properties)
+        forward_blocks[key] = name + ("[" + ",".join(f"{key}={value}" for key, value in
+                                                     properties.items()) + "]"
+                                      if properties else "")
+        targets[(block_id, meta)] = (name, values)
+    forward_items = {}
+    for key, text in source["items"].items():
+        item_id, damage = map(int, key.split(":"))
+        if item_id >= len(old_items) or old_items[item_id] is None:
+            if item_id != 0:
+                raise ValueError(f"legacy.json item {key}: no such 1.12 item")
+        if strip(text) not in items:
+            raise ValueError(f"legacy.json item {key}: no 1.13 item {text}")
+        forward_items[key] = strip(text)
+
+    families = legacy_families([name for name, _, _ in flat] + items)
+    by_block = {}
+    for (block_id, meta), (name, values) in targets.items():
+        by_block.setdefault(name, []).append(((block_id, meta), values))
+    rank = lambda source: (LEGACY_PREFERRED.get(source, 0.5), source)
+    reverse_blocks, family_used, missing = [], set(), set()
+    for name, properties, default in flat:
+        count = 1
+        for _, choices in properties:
+            count *= len(choices)
+        for offset in range(count):
+            values, rest = [], offset
+            for _, choices in reversed(properties):
+                values.append(choices[rest % len(choices)])
+                rest //= len(choices)
+            values.reverse()
+            exact = [source for source, target in by_block.get(name, []) if target == values]
+            if exact:
+                block_id, meta = min(exact, key=rank)
+            else:
+                stand_in = name if name in by_block else families.get(name)
+                if stand_in not in by_block:
+                    reverse_blocks.append(None)
+                    missing.add(name)
+                    continue
+                if stand_in != name:
+                    family_used.add(name)
+                wanted = dict(zip([property_name for property_name, _ in properties], values))
+                stand_in_names = [property_name for property_name, _ in blocks[stand_in][0]]
+
+                def score(candidate):
+                    source, target = candidate
+                    matches = sum(wanted.get(property_name) == value
+                                  for property_name, value in zip(stand_in_names, target))
+                    return (-matches, rank(source))
+                (block_id, meta), _ = min(by_block[stand_in], key=score)
+            reverse_blocks.append(f"{block_id}:{meta}")
+
+    item_sources = {}
+    for key, name in forward_items.items():
+        item_id, damage = map(int, key.split(":"))
+        item_sources.setdefault(name, []).append((item_id, damage))
+    reverse_items, missing_items = {}, []
+    for name in items:
+        stand_in = name
+        while stand_in is not None and stand_in not in item_sources:
+            stand_in = families.get(stand_in)
+        if stand_in is None:
+            missing_items.append(name)
+            continue
+        item_id, damage = min(item_sources[stand_in])
+        reverse_items[name] = f"{item_id}:{damage}"
+
+    # 1.12 spawn eggs are one item with the entity in NBT.
+    renames = json.loads((OUTPUT / "rules" / "340-393.json").read_text())["entity_type"]["renames"]
+    back = {new: old for old, new in renames.items()}
+    old_entities = {name for name in registries[340]["entity_type"] if name}
+    spawn_eggs = {}
+    for name in items:
+        if name.endswith("_spawn_egg"):
+            entity = back.get(name.removesuffix("_spawn_egg"), name.removesuffix("_spawn_egg"))
+            if entity in old_entities:
+                spawn_eggs[entity] = name
+    return {
+        "blocks": dict(sorted(forward_blocks.items(), key=lambda item: tuple(
+            map(int, item[0].split(":"))))),
+        "block_reverse": reverse_blocks,
+        "items": dict(sorted(forward_items.items(), key=lambda item: tuple(
+            map(int, item[0].split(":"))))),
+        "item_reverse": reverse_items,
+        "spawn_eggs": dict(sorted(spawn_eggs.items())),
+    }, {"families": sorted(family_used), "missing_blocks": sorted(missing),
+        "missing_items": missing_items}
+
+
 def render(value):
     """Compact JSON with one top-level section per line, so diffs stay
     readable without bloating the files."""
@@ -1208,11 +1433,13 @@ def outputs():
     for protocol, version in PROTOCOLS:
         files[f"{protocol}.json"] = render(
             version_file(protocol, version, tables[protocol], all_registries[protocol]))
-    files["SOURCES.md"] = sources_summary(tables, all_sources)
+    legacy, legacy_summary = legacy_data(all_registries)
+    files["legacy.json"] = render(legacy)
+    files["SOURCES.md"] = sources_summary(tables, all_sources, legacy_summary)
     return files
 
 
-def sources_summary(tables, all_sources):
+def sources_summary(tables, all_sources, legacy):
     release = dict(PROTOCOLS)
     lines = [
         "# Where the translation data comes from",
@@ -1265,7 +1492,23 @@ def sources_summary(tables, all_sources):
         "## Block states",
         "",
         "From `reports/blocks.json` for 1.13 and later, verified state by state.",
-        "1.12.x blocks and items are numeric IDs with metadata; see `legacy.json`.",
+        "",
+        "## The flattening (`legacy.json`)",
+        "",
+        "1.12 blocks (`id << 4 | metadata`) and items (id and damage) map to 1.13",
+        "names by minecraft-data's `common/legacy.json`. The reverse is chosen for",
+        "every 1.13 state and item: an exact source, else the source of the same",
+        "block matching the most property values, else the source of a variant",
+        "1.12 kept in block entity or NBT data or did not tell apart.",
+        "",
+        "1.13 blocks reversed through such a variant: "
+        + ", ".join(f"`{name}`" for name in legacy["families"]) + ".",
+        "",
+        "1.13 blocks with no 1.12 counterpart (the 340-393 rules give stand-ins): "
+        + ", ".join(f"`{name}`" for name in legacy["missing_blocks"]) + ".",
+        "",
+        "1.13 items with no 1.12 counterpart: "
+        + ", ".join(f"`{name}`" for name in legacy["missing_items"]) + ".",
         "",
     ]
     return "\n".join(lines)

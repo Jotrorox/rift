@@ -1,0 +1,27 @@
+{
+  "block": {
+    "renames": {
+      "grass_path": "dirt_path"
+    }
+  },
+  "block_state": {
+    "renames": {
+      "grass_path": "dirt_path"
+    }
+  },
+  "custom_stat": {
+    "renames": {
+      "play_one_minute": "play_time"
+    }
+  },
+  "item": {
+    "renames": {
+      "grass_path": "dirt_path"
+    }
+  },
+  "sound_event": {
+    "renames": {
+      "item.sweet_berries.pick_from_bush": "block.sweet_berry_bush.pick_berries"
+    }
+  }
+}

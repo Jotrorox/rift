@@ -1,0 +1,28 @@
+{
+  "attribute": {
+    "renames": {
+      "horse.jump_strength": "generic.jump_strength"
+    }
+  },
+  "enchantment": {
+    "renames": {
+      "sweeping": "sweeping_edge"
+    }
+  },
+  "item": {
+    "renames": {
+      "scute": "turtle_scute"
+    }
+  },
+  "particle_type": {
+    "renames": {
+      "gust_dust": "small_gust",
+      "gust_emitter": "gust_emitter_large"
+    }
+  },
+  "sound_event": {
+    "renames": {
+      "entity.generic.wind_burst": "entity.wind_charge.wind_burst"
+    }
+  }
+}
