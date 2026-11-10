@@ -774,8 +774,13 @@ def step_blocks(cx):
         pot = positions["flower_pot"]
         ref_entities = [record for record in ref_entities
                         if (record.value or {}).get("location") != dict(zip("xyz", pot))]
-    if len(cx.via.packets(entities, cx.since("via"))) < len(ref_entities):
+    via_entities = cx.via.packets(entities, cx.since("via"))
+    if len(via_entities) < len(ref_entities):
         cx.fail("the translated client received fewer block entity updates than the reference")
+    if cx.via.protocol < 757 and any((record.value or {}).get("nbtData") is None for record in via_entities):
+        # Before 1.18 the client loads every tag it gets and fails on none
+        # (1.18 sends an ownerless skull's empty tag as none).
+        cx.fail("a block entity update without a tag reached a client older than 1.18")
 
 
 def flattened_names(protocol):
