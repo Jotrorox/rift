@@ -72,9 +72,10 @@ PROTOCOLS = [(int(protocol), name) for protocol, name in re.findall(
     r'\((\d+), "([^"]+)"\)', (CRATE / "src" / "version.rs").read_text().split("#[cfg(test)]")[0])]
 
 
-# Files under data/ that people write: rules/ holds each step's rename and
-# stand-in rules.
-HAND_WRITTEN = {"rules"}
+# Directories under data/ this script leaves alone: rules/ holds each step's
+# rename and stand-in rules, the others are written by
+# translation_registries.py, translation_entities.py and translation_tags.py.
+HAND_WRITTEN = {"rules", "registries", "entities", "tags"}
 
 
 def log(message):
