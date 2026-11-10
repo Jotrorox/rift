@@ -308,6 +308,28 @@ pub const CATEGORIES_1_16: &[&str] = &[
     "nether",
 ];
 
+/// Biome categories a 1.17 client knows: 1.16's and the caves'.
+pub const CATEGORIES_1_17: &[&str] = &[
+    "none",
+    "taiga",
+    "extreme_hills",
+    "jungle",
+    "mesa",
+    "plains",
+    "savanna",
+    "icy",
+    "the_end",
+    "beach",
+    "forest",
+    "ocean",
+    "desert",
+    "river",
+    "swamp",
+    "mushroom",
+    "nether",
+    "underground",
+];
+
 /// Give a biome a category the receiver knows: an unknown category fails
 /// the whole dimension codec on the client. 1.18's mountains were extreme
 /// hills before; anything else unknown becomes `none`.
@@ -323,6 +345,25 @@ pub fn known_category(biome: &mut Compound, known: &[&str]) -> io::Result<()> {
         }
         .to_owned();
     }
+    Ok(())
+}
+
+/// Before 1.18 every biome stated the terrain depth and scale it generated;
+/// clients require both but do not use them. Plains' values stand in.
+pub fn add_terrain_shape(biome: &mut Compound) -> io::Result<()> {
+    if !biome.contains("depth") {
+        biome.insert("depth", 0.125f32);
+    }
+    if !biome.contains("scale") {
+        biome.insert("scale", 0.05f32);
+    }
+    Ok(())
+}
+
+/// The reverse of [`add_terrain_shape`]: 1.18 biomes no longer carry them.
+pub fn remove_terrain_shape(biome: &mut Compound) -> io::Result<()> {
+    biome.remove("depth");
+    biome.remove("scale");
     Ok(())
 }
 
@@ -583,6 +624,23 @@ mod tests {
         })
         .unwrap();
         assert!(seen > 70);
+    }
+
+    #[test]
+    fn categories_and_terrain_shape_fit_older_clients() {
+        let mut biome = Compound::new();
+        biome.insert("category", "mountain");
+        known_category(&mut biome, CATEGORIES_1_17).unwrap();
+        assert_eq!(biome.str("category"), Some("extreme_hills"));
+        biome.insert("category", "underground");
+        known_category(&mut biome, CATEGORIES_1_17).unwrap();
+        assert_eq!(biome.str("category"), Some("underground"));
+        known_category(&mut biome, CATEGORIES_1_16).unwrap();
+        assert_eq!(biome.str("category"), Some("none"));
+        add_terrain_shape(&mut biome).unwrap();
+        assert_eq!(biome.get("depth"), Some(&Nbt::Float(0.125)));
+        remove_terrain_shape(&mut biome).unwrap();
+        assert!(!biome.contains("scale"));
     }
 
     #[test]
