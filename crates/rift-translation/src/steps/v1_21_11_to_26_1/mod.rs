@@ -18,6 +18,8 @@ pub(in crate::steps) mod join;
 mod up;
 
 #[cfg(test)]
+pub(in crate::steps) mod testing;
+#[cfg(test)]
 mod tests;
 
 use super::Make;
