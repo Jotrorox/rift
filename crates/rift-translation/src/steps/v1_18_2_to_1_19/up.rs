@@ -80,7 +80,6 @@ impl Up {
                 )
                 .clientbound(Play, "chat", Self::chat_clientbound)
                 .clientbound(Play, "custom_sound", Self::custom_sound)
-                .tap(Clientbound, Play, "update_tags", Self::tags_updated)
                 .tap(Clientbound, Play, "open_screen", Self::screen_opened)
                 .tap(Clientbound, Play, "container_close", Self::screen_closed)
                 .tap(Serverbound, Play, "container_close", Self::screen_closed)
@@ -245,15 +244,6 @@ impl Up {
         Ok(())
     }
 
-    /// 1.18.2 has no banner pattern registry, so its tags never name the
-    /// patterns a 1.19 loom offers. Add them in a tags packet of their own,
-    /// which leaves the other registries' tags alone.
-    fn tags_updated(&mut self, state: State, _: &Packet) -> io::Result<()> {
-        let id = id(NEWER, state, Direction::Clientbound, "update_tags");
-        self.after.push(Packet::new(id, banner_pattern_tags()));
-        Ok(())
-    }
-
     fn screen_opened(&mut self, _: State, packet: &Packet) -> io::Result<()> {
         let mut r = Reader::new(&packet.data);
         let container = r.varint()?;
@@ -387,27 +377,6 @@ impl Step for Up {
     fn serverbound(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
         Self::routes().dispatch(self, cx, Direction::Serverbound, state, packet)
     }
-}
-
-/// A 1.19 `update_tags` with only the vanilla banner pattern tags.
-fn banner_pattern_tags() -> Vec<u8> {
-    let patterns = data::version(NEWER).expect_registry("banner_pattern");
-    let item_patterns = ["globe", "creeper", "skull", "flower", "mojang", "piglin"];
-    let mut w = Writer::new();
-    w.varint(1)
-        .string("minecraft:banner_pattern")
-        .varint(1 + item_patterns.len() as i32);
-    w.string("minecraft:no_item_required")
-        .varint(SELECTABLE_PATTERNS);
-    for pattern in 1..=SELECTABLE_PATTERNS {
-        w.varint(pattern);
-    }
-    for name in item_patterns {
-        w.string(&format!("minecraft:pattern_item/{name}"))
-            .varint(1)
-            .varint(patterns.id(name).expect("vanilla banner pattern"));
-    }
-    w.buf
 }
 
 pub const STEP: Option<Make> = Some(|| Box::new(Up::new()));

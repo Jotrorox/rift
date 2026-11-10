@@ -779,18 +779,43 @@ fn beacons_and_looms() {
 
 #[test]
 fn tags_gain_banner_patterns_for_1_19() {
-    let Some(tags) = first(OLDER, Clientbound, Play, "update_tags") else {
+    let (Some(tags), Some(native)) = (
+        first(OLDER, Clientbound, Play, "update_tags"),
+        first(NEWER, Clientbound, Play, "update_tags"),
+    ) else {
         return;
     };
+    // One packet, with the banner pattern tags a 1.19 loom offers: a
+    // second, partial tags packet would be completed with vanilla tags
+    // further up a chain, replacing the backend's own.
     let out = up().clientbound(Play, "update_tags", &tags).unwrap();
-    assert_eq!(out.len(), 2);
-    assert_eq!(out[1].name, "update_tags");
-    let mut r = Reader::new(&out[1].data);
-    assert_eq!(r.varint().unwrap(), 1);
-    assert_eq!(r.str().unwrap(), "minecraft:banner_pattern");
-    assert_eq!(r.varint().unwrap(), 7);
-    assert_eq!(r.str().unwrap(), "minecraft:no_item_required");
-    assert_eq!(r.varint().unwrap(), 34);
+    assert_eq!(out.len(), 1);
+    let banner_patterns = |body: &[u8]| {
+        let mut r = Reader::new(body);
+        for _ in 0..r.varint().unwrap() {
+            let registry = r.str().unwrap().to_owned();
+            let mut tags = Vec::new();
+            for _ in 0..r.varint().unwrap() {
+                let name = r.str().unwrap().to_owned();
+                let ids: Vec<i32> = (0..r.varint().unwrap())
+                    .map(|_| r.varint().unwrap())
+                    .collect();
+                tags.push((name, ids));
+            }
+            if registry == "minecraft:banner_pattern" {
+                tags.sort();
+                return Some(tags);
+            }
+        }
+        None
+    };
+    let converted = banner_patterns(&out[0].data).unwrap();
+    assert_eq!(Some(converted.clone()), banner_patterns(&native));
+    let selectable = converted
+        .iter()
+        .find(|(name, _)| name == "minecraft:no_item_required")
+        .unwrap();
+    assert_eq!(selectable.1.len(), 34);
 }
 
 #[test]
