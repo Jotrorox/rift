@@ -13,11 +13,16 @@ use rift::{
     hooks::{ConnectionInfo, RouteDecision, Router},
     messaging::{Broker, BrokerConfig, Stream},
     players::PlayerRegistry,
-    protocol::{Codec, Handshake, NextState},
+    protocol::{Codec, Handshake, NextState, ProtocolVersion},
     routing::Routes,
     server_list::{Document, Ping},
     session::{Session, SessionEvent},
+    text::{
+        Profile,
+        catalog::{self, Notice},
+    },
 };
+use rift_permissions::{Tristate, Uuid};
 use std::{
     collections::{BTreeMap, HashMap},
     io,
@@ -77,6 +82,7 @@ impl Snapshot {
 
     /// The first snapshot, using the process-wide permission authority.
     fn first(config: Config, permissions: Arc<rift::permissions::Authority>) -> io::Result<Self> {
+        catalog::install(config.text.clone());
         Self::build(config, None, Some(permissions))
     }
 
@@ -86,6 +92,8 @@ impl Snapshot {
         permissions: Option<Arc<rift::permissions::Authority>>,
     ) -> io::Result<Self> {
         config.validate()?;
+        // Before any worker of this generation can spawn a server.
+        rift::managed::protect_secrets(&config);
         let mut policies = BTreeMap::new();
         for (listener, route) in &config.routes {
             let policy = match route {
@@ -129,11 +137,12 @@ impl Snapshot {
         let control =
             previous.map_or_else(|| Arc::new(Control::default()), |old| old.control.clone());
         let health = Health::with_control(&config, control.clone());
-        let forwarding_secret = config.forwarding.as_ref().map(|settings| {
-            let secret = std::env::var(&settings.secret_env).map_err(|_| {
+        let forwarding_secret = config.forwarding.as_ref().and_then(|settings| {
+            Some((settings.secret_env.as_ref()?, settings.mode.secret_name()?))
+        }).map(|(secret_env, what)| {
+            let secret = std::env::var(secret_env).map_err(|_| {
                 io::Error::new(io::ErrorKind::InvalidInput, format!(
-                    "forwarding.secret_env: set {} to the Paper Velocity secret before starting Rift",
-                    settings.secret_env,
+                    "forwarding.secret_env: set {secret_env} to the backends' {what} before starting Rift",
                 ))
             })?;
             if secret.is_empty() || secret.len() > 1024 || secret.chars().any(char::is_control) {
@@ -155,10 +164,16 @@ impl Snapshot {
         };
         let perms = previous.map_or_else(
             || {
-                let bus = Arc::new(rift::permissions::control::Bus::new(
+                let bus = Arc::new(rift::permissions::control::Bus::with_instances(
                     messaging.clone(),
                     extensions.permissions().clone(),
                     config.messaging.as_ref(),
+                    config
+                        .managed_servers
+                        .values()
+                        .chain(config.service_groups.values().map(|group| &group.server))
+                        .filter_map(|server| server.messaging.as_ref())
+                        .map(|grants| grants.subscribe.as_slice()),
                 ));
                 bus.install_directory();
                 bus
@@ -166,8 +181,10 @@ impl Snapshot {
             |old| old.perms.clone(),
         );
         perms.set_commands(extensions.command_permissions());
+        // One roster for every generation: the directory owns it, so it can
+        // keep each record's visibility rule current.
         let players = previous.map_or_else(
-            || Arc::new(PlayerRegistry::default()),
+            || extensions.players().roster().clone(),
             |old| old.players.clone(),
         );
         let nodes = previous.map_or_else(
@@ -239,6 +256,58 @@ impl Snapshot {
     pub fn reachable(&self, name: &str) -> bool {
         self.managed.can_connect(name)
             && (self.managed.is_managed(name) || self.health.available(name))
+    }
+
+    /// Whether a player may be sent to `backend` (a server or a service
+    /// group): the configured access rules, then the dev mode of the
+    /// service group it belongs to.
+    pub fn admits(&self, backend: &str, username: &str, uuid: Option<Uuid>) -> bool {
+        self.config.can_access(backend, username) && self.dev_admits(backend, uuid)
+    }
+
+    /// A group in dev mode admits only players granted its dev permission.
+    pub fn dev_admits(&self, backend: &str, uuid: Option<Uuid>) -> bool {
+        let group = match self.config.instances.get(backend) {
+            Some(instance) => instance.group.as_str(),
+            None if self.config.service_groups.contains_key(backend) => backend,
+            None => return true,
+        };
+        if self.control.group(group).mode != rift::config::GroupMode::Dev {
+            return true;
+        }
+        let node = rift::config::GroupMode::dev_permission(group);
+        uuid.is_some_and(|uuid| {
+            self.extensions.permissions().check_active(uuid, &node) == Tristate::True
+        })
+    }
+
+    /// Change a service group's operator state, recording it in the instance
+    /// database first when there is one.
+    pub fn update_group(
+        &self,
+        name: &str,
+        change: impl FnOnce(&mut rift::config::GroupState),
+    ) -> io::Result<rift::config::GroupState> {
+        self.control.update_group(name, change, |state| {
+            self.instance_store
+                .as_ref()
+                .map_or(Ok(()), |store| store.set_group_state(name, state))
+        })
+    }
+
+    /// Drop the state of groups this configuration no longer defines, so a
+    /// group defined again later starts active.
+    pub fn prune_groups(&self) {
+        for name in self
+            .control
+            .retain_groups(|name| self.config.service_groups.contains_key(name))
+        {
+            if let Some(store) = &self.instance_store
+                && let Err(error) = store.set_group_state(&name, Default::default())
+            {
+                eprintln!("rift: state of removed service group {name} not cleared: {error}");
+            }
+        }
     }
 
     pub fn latest(self: &Arc<Self>) -> Arc<Self> {
@@ -355,13 +424,17 @@ pub async fn handle(
             let reason = if maintenance {
                 metrics.access_rejected.inc();
                 event.reject("maintenance", "network is in maintenance mode");
-                "The network is under maintenance. Please try again later."
+                Notice::LoginMaintenance
             } else {
                 metrics.login_rejected.inc();
                 event.reject("login_rate_limited", "login rate limit exceeded");
-                "Too many login attempts. Please wait before reconnecting."
+                Notice::LoginRateLimited
             };
-            let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect(reason)).await;
+            let _ = timeout(
+                HANDSHAKE_TIMEOUT,
+                session.disconnect_text(&catalog::notice(reason)),
+            )
+            .await;
             return Ok((session.client.io.sent, session.client.io.received));
         }
     }
@@ -395,7 +468,7 @@ pub async fn handle(
                     session.handshake.protocol,
                     0,
                     snapshot.config.limits.max_connections as u64,
-                    "No server is configured for this hostname.",
+                    catalog::notice(Notice::StatusUnknownHost),
                 );
                 event.stage = "on_status";
                 let document = owned_status(
@@ -409,12 +482,12 @@ pub async fn handle(
                 .await
                 .unwrap_or(default);
                 event.stage = "status_response";
-                let response = document.packet()?;
+                let response = document.packet(status_profile(&session.handshake))?;
                 timeout(HANDSHAKE_TIMEOUT, session.respond_status(&response)).await??;
             } else {
                 let _ = timeout(
                     HANDSHAKE_TIMEOUT,
-                    session.disconnect("No server is configured for this hostname."),
+                    session.disconnect_text(&catalog::notice(Notice::LoginUnknownHost)),
                 )
                 .await;
             }
@@ -432,15 +505,18 @@ pub async fn handle(
         event.stage = "status_request";
         timeout(HANDSHAKE_TIMEOUT, session.status_request()).await??;
         let maintenance = snapshot.control.maintenance(&snapshot.config);
+        // The public count: hidden players are not on the server list.
         let default = Document::new(
             session.handshake.protocol,
-            metrics.players.get(),
+            snapshot
+                .players
+                .count_for(rift::players::Viewer::Public, None) as u64,
             snapshot.config.limits.max_connections as u64,
-            if maintenance {
-                "The network is under maintenance."
+            catalog::notice(if maintenance {
+                Notice::StatusMaintenance
             } else {
-                "Rift"
-            },
+                Notice::StatusDefault
+            }),
         );
         event.stage = "on_status";
         let owned = owned_status(
@@ -452,7 +528,10 @@ pub async fn handle(
             event,
         )
         .await;
-        let mut response = owned.as_ref().unwrap_or(&default).packet()?;
+        let mut response = owned
+            .as_ref()
+            .unwrap_or(&default)
+            .packet(status_profile(&session.handshake))?;
         if let Some(settings) = snapshot
             .config
             .status_cache
@@ -515,9 +594,9 @@ pub async fn handle(
                         session.handshake.protocol,
                         0,
                         snapshot.config.limits.max_connections as u64,
-                        "The server is currently unavailable. Please try again later.",
+                        catalog::notice(Notice::StatusUnavailable),
                     )
-                    .packet()?;
+                    .packet(status_profile(&session.handshake))?;
                     // Connection failures have per-attempt diagnostics. Reads and
                     // timeouts are also reported, while the client gets a pong.
                     if !matches!(event.stage, "connect" | "dns") {
@@ -531,13 +610,21 @@ pub async fn handle(
         timeout(HANDSHAKE_TIMEOUT, session.respond_status(&response)).await??;
     } else {
         if let Err(error) = session.version() {
-            let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect(&error.to_string())).await;
+            let _ = timeout(
+                HANDSHAKE_TIMEOUT,
+                session.disconnect_text(&rift::text::reason(&error)),
+            )
+            .await;
             return Err(error);
         }
-        if snapshot.authenticator.is_some() && session.handshake.protocol < 761 {
-            let reason = "Online authentication with Velocity forwarding requires Minecraft 1.19.3 or newer.";
-            let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect(reason)).await;
-            return Err(io::Error::new(io::ErrorKind::Unsupported, reason));
+        if let Some(forwarding) = &snapshot.config.forwarding
+            && session.handshake.protocol < forwarding.mode.minimum_protocol()
+        {
+            // Velocity forwarding answers a login plugin request, which
+            // arrived in 1.13; Velocity itself turns older clients away too.
+            let reason = catalog::notice(Notice::LoginForwardingVersion);
+            let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect_text(&reason)).await;
+            return Err(rift::text::error(io::ErrorKind::Unsupported, reason));
         }
         let network_configured = snapshot.config.network != Default::default()
             || snapshot.config.player_hooks()
@@ -569,7 +656,7 @@ pub async fn handle(
                     };
                     let _ = timeout(
                         HANDSHAKE_TIMEOUT,
-                        session.disconnect("Invalid or missing login start."),
+                        session.disconnect_text(&catalog::notice(Notice::LoginInvalidStart)),
                     )
                     .await;
                     return Err(error);
@@ -590,25 +677,33 @@ pub async fn handle(
             .await;
             if let Err(error) = result.map_err(io::Error::from).and_then(|result| result) {
                 let reason = if error.kind() == io::ErrorKind::PermissionDenied {
-                    "Unable to verify your Minecraft account. Please sign in again."
+                    Notice::LoginAuthDenied
                 } else if error.kind() == io::ErrorKind::InvalidData {
-                    "Invalid authentication response. Please reconnect."
+                    Notice::LoginAuthInvalid
                 } else {
-                    "Minecraft authentication is unavailable or timed out. Please try again later."
+                    Notice::LoginAuthUnavailable
                 };
-                let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect(reason)).await;
+                let _ = timeout(
+                    HANDSHAKE_TIMEOUT,
+                    session.disconnect_text(&catalog::notice(reason)),
+                )
+                .await;
                 return Err(error);
             }
             login_name = session.authenticated_profile().unwrap().name.clone();
-            session.set_forwarding(snapshot.forwarding_secret.clone().unwrap(), peer_ip)?;
+            session.set_forwarding(
+                snapshot.config.forwarding.as_ref().unwrap().mode,
+                snapshot.forwarding_secret.clone(),
+                peer_ip,
+            )?;
             event.failure = "io_error";
         }
         let mut extension_selection = None;
         if snapshot.config.player_hooks() {
             if !session.switch_supported() {
-                let reason = "Extensions v1 requires Minecraft 1.19.3–26.3.";
-                let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect(reason)).await;
-                return Err(io::Error::new(io::ErrorKind::Unsupported, reason));
+                let reason = catalog::notice(Notice::LoginExtensionsVersion);
+                let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect_text(&reason)).await;
+                return Err(rift::text::error(io::ErrorKind::Unsupported, reason));
             }
             let mut context = rift::extensions::Context::authenticated(
                 event.id(),
@@ -624,12 +719,10 @@ pub async fn handle(
                 use rift::extensions::Action;
                 let extension = session.extension.as_ref().unwrap();
                 if let Action::Deny(reason) = extension.decision("login").await? {
-                    return Err(io::Error::new(io::ErrorKind::PermissionDenied, reason));
+                    return Err(rift::text::denied(reason));
                 }
                 match extension.decision("initial_server").await? {
-                    Action::Deny(reason) => {
-                        Err(io::Error::new(io::ErrorKind::PermissionDenied, reason))
-                    }
+                    Action::Deny(reason) => Err(rift::text::denied(reason)),
                     Action::Server(server) => Ok(Some(server)),
                     _ => Ok(None),
                 }
@@ -639,11 +732,11 @@ pub async fn handle(
                 Ok(selected) => extension_selection = selected,
                 Err(error) => {
                     let reason = if error.kind() == io::ErrorKind::PermissionDenied {
-                        error.to_string()
+                        rift::text::reason(&error)
                     } else {
-                        "Login extension failed. Please try again later.".into()
+                        catalog::notice(Notice::LoginExtensionFailed)
                     };
-                    let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect(&reason)).await;
+                    let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect_text(&reason)).await;
                     return Err(error);
                 }
             }
@@ -653,32 +746,37 @@ pub async fn handle(
             addresses,
             metrics: &metrics,
         };
+        let login_uuid = crate::network::expected_uuid(&session);
         let candidate_result = if let Some(selected) = extension_selection {
-            if snapshot.config.can_access(&selected, &login_name) {
+            if snapshot.admits(&selected, &login_name, login_uuid) {
                 Ok(snapshot
                     .candidates(&[selected])
                     .into_iter()
-                    .filter(|name| snapshot.config.can_access(name, &login_name))
+                    .filter(|name| snapshot.admits(name, &login_name, login_uuid))
                     .collect())
             } else {
-                Err(io::Error::new(
+                Err(rift::text::notice_error(
                     io::ErrorKind::PermissionDenied,
-                    "You do not have access to this server.",
+                    Notice::LoginNoAccess,
                 ))
             }
         } else if unmatched {
-            Err(io::Error::new(
+            Err(rift::text::notice_error(
                 io::ErrorKind::PermissionDenied,
-                "No server is configured for this hostname.",
+                Notice::LoginUnknownHost,
             ))
         } else {
-            network.initial_candidates(&primary, use_initial, &login_name)
+            network.initial_candidates(&primary, use_initial, &login_name, login_uuid)
         };
         let candidates = match candidate_result {
             Ok(candidates) => candidates,
             Err(error) => {
                 event.reject("access_denied", &error.to_string());
-                let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect(&error.to_string())).await;
+                let _ = timeout(
+                    HANDSHAKE_TIMEOUT,
+                    session.disconnect_text(&rift::text::reason(&error)),
+                )
+                .await;
                 return Err(error);
             }
         };
@@ -689,8 +787,11 @@ pub async fn handle(
             match snapshot.players.reserve_name(&login_name) {
                 Ok(reservation) => Some(reservation),
                 Err(error) => {
-                    let _ =
-                        timeout(HANDSHAKE_TIMEOUT, session.disconnect(&error.to_string())).await;
+                    let _ = timeout(
+                        HANDSHAKE_TIMEOUT,
+                        session.disconnect_text(&rift::text::reason(&error)),
+                    )
+                    .await;
                     return Err(error);
                 }
             }
@@ -706,8 +807,7 @@ pub async fn handle(
             Err(error) => {
                 let _ = timeout(
                     HANDSHAKE_TIMEOUT,
-                    session
-                        .disconnect("The server is currently unavailable. Please try again later."),
+                    session.disconnect_text(&catalog::notice(Notice::LoginUnavailable)),
                 )
                 .await;
                 return Err(error);
@@ -824,12 +924,12 @@ pub async fn handle(
                                 Err(error) => {
                                     session.extension.as_ref().unwrap().leave_queue();
                                     if session.switch_in_progress() || session.backend().is_none() { return Err(error); }
-                                    timeout(HANDSHAKE_TIMEOUT, session.send_system_message(&format!("Queue transfer failed: {error}"))).await??;
+                                    timeout(HANDSHAKE_TIMEOUT, session.send_text(&catalog::notice_with(Notice::QueueTransferFailed, &rift::text::Args::new().component("reason", rift::text::reason(&error).for_client(Profile::UNKNOWN).into_owned())))).await??;
                                 }
                             }
                         }
                         Ok(None) => {},
-                        Err(error) => { timeout(HANDSHAKE_TIMEOUT, session.send_system_message(&error.to_string())).await??; }
+                        Err(error) => { timeout(HANDSHAKE_TIMEOUT, session.send_text(&rift::text::reason(&error))).await??; }
                     }
                     continue;
                 }
@@ -861,8 +961,15 @@ pub async fn handle(
                     if tab_synced == Some(tab_key) {
                         continue;
                     }
+                    let authority = live_snapshot.extensions.permissions();
+                    let own = session.identity().and_then(|identity| identity.uuid).unwrap_or_default();
+                    let holds = |node: &str| {
+                        authority.check_active(rift_permissions::Uuid::from_bytes(own), node)
+                            == rift_permissions::Tristate::True
+                    };
                     let view = rift::tab_list::view(
                         &live_snapshot.players,
+                        rift::players::Viewer::Player { uuid: own, holds: &holds },
                         live_snapshot.config.tab_list.as_ref(),
                         tab_override.as_ref(),
                         session.player_name().unwrap_or_default(),
@@ -882,21 +989,20 @@ pub async fn handle(
                         phase_deadline = Deadline::now() + Duration::from_secs(30);
                         // Tab lists and boss bars are state and apply after the next join.
                         // Dialogs are dropped: configuration closes every screen.
-                        if !matches!(action, PlayerAction::Kick(_) | PlayerAction::RawKick(_) | PlayerAction::TabList(_) | PlayerAction::BossBar { .. }) { continue; }
+                        if !matches!(action, PlayerAction::Kick(_) | PlayerAction::TabList(_) | PlayerAction::BossBar { .. }) { continue; }
                     }
                     match action {
-                        PlayerAction::Message(text) => timeout(HANDSHAKE_TIMEOUT, session.send_system_message(&text)).await??,
-                        PlayerAction::ActionBar(text) => timeout(HANDSHAKE_TIMEOUT, session.send_action_bar(&text)).await??,
+                        PlayerAction::Message(text) => timeout(HANDSHAKE_TIMEOUT, session.send_text(&text)).await??,
+                        PlayerAction::ActionBar(text) => timeout(HANDSHAKE_TIMEOUT, session.send_action_bar_text(&text)).await??,
                         PlayerAction::Title { title, subtitle, times } => {
-                            timeout(HANDSHAKE_TIMEOUT, session.send_title(&title, subtitle.as_deref(), times)).await??;
+                            // A client that cannot show titles keeps its session.
+                            match timeout(HANDSHAKE_TIMEOUT, session.send_title(title.as_ref(), subtitle.as_ref(), times)).await? {
+                                Err(error) if error.kind() == io::ErrorKind::Unsupported => {}
+                                result => result?,
+                            }
                         }
-                        PlayerAction::RawMessage(component) => timeout(HANDSHAKE_TIMEOUT, session.send_system_component(&component)).await??,
                         PlayerAction::Kick(reason) => {
-                            let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect(&reason)).await;
-                            break;
-                        }
-                        PlayerAction::RawKick(reason) => {
-                            let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect_component(&reason)).await;
+                            let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect_text(&reason)).await;
                             break;
                         }
                         // Forwarded plugin messages are addressed to a server, not to
@@ -960,7 +1066,7 @@ pub async fn handle(
                     }
                     let name = session.player_name().unwrap_or_default();
                     if snapshot.config.network.access.get(target).is_some_and(|access| !access.permits(name))
-                        || !request.snapshot.config.can_access(target, name)
+                        || !request.snapshot.admits(target, name, crate::network::expected_uuid(&session))
                         || control.draining(&request.snapshot.config, target)
                         || !request.snapshot.reachable(target)
                     {
@@ -1083,12 +1189,21 @@ pub async fn handle(
                         && let Some(identity) = session.identity()
                         && let Some(uuid) = identity.uuid
                     {
+                        // The rule goes in with the record, so no tab list or
+                        // count ever shows a hidden player, not even briefly.
+                        let visible_to = snapshot
+                            .extensions
+                            .players()
+                            .visibility(&uuid, &current_backend);
                         let registered = if let Some(reservation) = name_reservation.take() {
-                            reservation.register(uuid, &current_backend)
+                            reservation.register_visible(uuid, &current_backend, visible_to)
                         } else {
-                            snapshot
-                                .players
-                                .register(uuid, identity.name, &current_backend)
+                            snapshot.players.register_visible(
+                                uuid,
+                                identity.name,
+                                &current_backend,
+                                visible_to,
+                            )
                         };
                         match registered {
                             Ok(guard) => {
@@ -1101,7 +1216,9 @@ pub async fn handle(
                             Err(error) => {
                                 let _ = timeout(
                                     HANDSHAKE_TIMEOUT,
-                                    session.disconnect("This player is already connected."),
+                                    session.disconnect_text(&catalog::notice(
+                                        Notice::LoginAlreadyConnected,
+                                    )),
                                 )
                                 .await;
                                 return Err(error);
@@ -1151,13 +1268,16 @@ pub async fn handle(
                             }
                         }
                         if registered_backend != current_backend {
-                            if let Some(registration) = &registration {
-                                registration.set_server(&current_backend);
-                            }
+                            // The directory first: it resolves the rule for the
+                            // new server onto the roster record before the
+                            // roster moves the player there.
                             if let Some(directory) = &directory {
                                 directory.set_server(&current_backend);
                                 // The switch reset them after the new Join Game.
                                 session.sync_permission_contexts();
+                            }
+                            if let Some(registration) = &registration {
+                                registration.set_server(&current_backend);
                             }
                             registered_backend.clone_from(&current_backend);
                             if let Some(extension) = &mut session.extension {
@@ -1329,20 +1449,20 @@ pub async fn handle(
                             }
                             Err(error) => {
                                 let reason = if error.kind() == io::ErrorKind::PermissionDenied {
-                                    error.to_string()
+                                    rift::text::reason(&error)
                                 } else {
-                                    "The server connection was lost and no fallback was available."
-                                        .into()
+                                    catalog::notice(Notice::ConnectionLostNoFallback)
                                 };
                                 let _ =
-                                    timeout(HANDSHAKE_TIMEOUT, session.disconnect(&reason)).await;
+                                    timeout(HANDSHAKE_TIMEOUT, session.disconnect_text(&reason))
+                                        .await;
                                 return Err(error);
                             }
                         }
                     }
                     timeout(
                         HANDSHAKE_TIMEOUT,
-                        session.disconnect("The server connection was lost. Please reconnect."),
+                        session.disconnect_text(&catalog::notice(Notice::ConnectionLost)),
                     )
                     .await??;
                     break;
@@ -1354,11 +1474,11 @@ pub async fn handle(
                             reply.send(Err(format!("transfer failed; session closed: {error}")));
                     }
                     let reason = if error.kind() == io::ErrorKind::Unsupported {
-                        error.to_string()
+                        rift::text::reason(&error)
                     } else {
-                        "The server connection failed. Please reconnect.".to_owned()
+                        catalog::notice(Notice::ConnectionFailed)
                     };
-                    let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect(&reason)).await;
+                    let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect_text(&reason)).await;
                     return Err(error);
                 }
             }
@@ -1411,7 +1531,7 @@ async fn settle_switch<C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
     if result.is_err() {
         let _ = timeout(
             HANDSHAKE_TIMEOUT,
-            session.disconnect("The server switch could not be completed."),
+            session.disconnect_text(&catalog::notice(Notice::SwitchIncomplete)),
         )
         .await;
     }
@@ -1543,6 +1663,87 @@ async fn proxied_client(
     Ok(true)
 }
 
+/// How the pinging client reads text; an unknown protocol gets components
+/// as written.
+fn status_profile(handshake: &Handshake) -> Profile {
+    ProtocolVersion::new(handshake.protocol).ok().into()
+}
+
+/// Instance logins (see [`rift::instance_login`]) when the bus listens and
+/// some managed server or service group has a `messaging` block. The key is
+/// `local/instance-key` beside the configuration file, or in the working
+/// directory without one. Adding the first `messaging` block needs a
+/// restart, like other messaging changes.
+fn instance_logins(
+    config: &Config,
+    source: Option<&std::path::Path>,
+) -> io::Result<Option<Arc<rift::instance_login::Logins>>> {
+    let listening = config
+        .messaging
+        .as_ref()
+        .is_some_and(|messaging| messaging.listen.is_some());
+    let wanted = config
+        .managed_servers
+        .values()
+        .chain(config.service_groups.values().map(|group| &group.server))
+        .any(|server| server.messaging.is_some());
+    if !listening || !wanted {
+        return Ok(None);
+    }
+    let directory = source
+        .and_then(std::path::Path::parent)
+        .unwrap_or(std::path::Path::new("."));
+    rift::instance_login::Logins::open(directory)
+        .map(|logins| Some(Arc::new(logins)))
+        .map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "{}: {error}",
+                    directory.join(rift::instance_login::KEY_FILE).display()
+                ),
+            )
+        })
+}
+
+/// Where instances reach the bus: `messaging.advertise`, else the bound
+/// address with `127.0.0.1` for an unspecified IP, which only local
+/// instances can use (`rift check` warns about nodes then).
+fn bus_for_instances(config: &Config, bound: SocketAddr) -> io::Result<rift::instance_login::Bus> {
+    let messaging = config.messaging.as_ref().expect("listening");
+    let address = messaging.advertise.clone().unwrap_or_else(|| {
+        let ip = if bound.ip().is_unspecified() {
+            std::net::IpAddr::from([127, 0, 0, 1])
+        } else {
+            bound.ip()
+        };
+        SocketAddr::new(ip, bound.port()).to_string()
+    });
+    let server_name = messaging.advertise_server_name.clone().unwrap_or_else(|| {
+        messaging
+            .advertise
+            .as_deref()
+            .and_then(|advertise| advertise.rsplit_once(':'))
+            .map(|(host, _)| host.trim_matches(['[', ']']).to_owned())
+            .unwrap_or_else(|| "localhost".to_owned())
+    });
+    let path = messaging
+        .certificate
+        .as_ref()
+        .expect("validated with listen");
+    let certificate = std::fs::read_to_string(path).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("messaging.certificate ({}): {error}", path.display()),
+        )
+    })?;
+    Ok(rift::instance_login::Bus {
+        address,
+        server_name,
+        certificate,
+    })
+}
+
 /// Make `next` visible to new connections, in-flight sessions and health checks.
 async fn publish(
     snapshot: &mut Arc<Snapshot>,
@@ -1553,6 +1754,7 @@ async fn publish(
 ) {
     snapshot.health.retire();
     *snapshot = next;
+    catalog::install(snapshot.config.text.clone());
     snapshot.extensions.update_destinations(&snapshot.config);
     *snapshot.live.lock().unwrap() = Arc::downgrade(snapshot);
     current.send_replace(snapshot.clone());
@@ -1712,6 +1914,11 @@ async fn create_instance(group: String, snapshot: &Arc<Snapshot>) -> InstanceRes
         status: 404,
         message: format!("unknown service group {group:?}"),
     })?;
+    if snapshot.control.group(&group).suspended {
+        return Err(Error::conflict(
+            "service group is stopped; start the group before creating instances",
+        ));
+    }
     if definition
         .scaling
         .as_ref()
@@ -2279,8 +2486,10 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     let mut initial = Snapshot::first(config, permissions)?;
     if let Some(store) = instance_store {
         initial.managed.with_persistence(store.clone())?;
+        initial.control.restore_groups(store.group_states()?);
         initial.instance_store = Some(store);
     }
+    initial.prune_groups();
     let admin_secret = initial
         .config
         .admin
@@ -2338,12 +2547,23 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     initial.perms.set_changes_stream(changes.clone());
     streams.insert(rift_permissions::wire::CHANGES.to_owned(), changes);
     initial.messaging_streams = Arc::new(streams);
-    let messaging_server = crate::messaging_runtime::listen(&initial).await?;
+    let logins = instance_logins(&initial.config, source.as_deref())?;
+    let messaging_server = crate::messaging_runtime::listen(&initial, logins.clone()).await?;
+    if let (Some(logins), Some(server)) = (&logins, &messaging_server) {
+        logins.set_bus(bus_for_instances(
+            &initial.config,
+            server.local_addr().map_err(io::Error::other)?,
+        )?);
+        initial
+            .managed
+            .set_logins(logins.clone(), &initial.config)?;
+    }
     let message_handler =
         rift::message_script::MessageHandler::new(&initial.config, initial.messaging.clone())
             .map_err(io::Error::other)?
             .map(|handler| handler.with_players(initial.extensions.player_api()));
     let messaging_controls = crate::messaging_runtime::Controls::new(initial.messaging.clone())?;
+    let player_requests = crate::messaging_runtime::PlayerRequests::new(initial.messaging.clone())?;
     let permission_bus = initial.perms.listen()?;
     initial.addresses = Arc::new(
         initial
@@ -2377,7 +2597,11 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         receiver.clone(),
         metrics.clone(),
         admin_commands.clone(),
+        app.workflows.clone(),
     ));
+    background.spawn(player_requests.run(receiver.clone(), app.workflows.clone()));
+    // Keep visibility rules current as permissions change.
+    background.spawn(snapshot.extensions.players().clone().watch());
     // Subscribe before any plugin starts so its first lifecycle change is
     // audited too.
     background.spawn(audit_plugins(
@@ -2496,6 +2720,12 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                         }
                         continue;
                     }
+                    Some(crate::scaling::Change::Stop(name)) => {
+                        if let Err(error) = snapshot.managed.request_stop(&name) {
+                            eprintln!("rift: stop of {name} in a stopped group rejected: {error}");
+                        }
+                        continue;
+                    }
                     None => continue,
                 }
             }
@@ -2551,6 +2781,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                     updates.send_replace(script.clone());
                 }
                 publish(&mut snapshot, next, &current, &mut health, &metrics).await;
+                snapshot.prune_groups();
                 services.commit(&snapshot.config, prepared, &app);
                 // Reconfiguration always reads a source; never record an empty one.
                 if let Some(source) = snapshot.source.as_deref()

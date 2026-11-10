@@ -45,7 +45,7 @@ pub const USAGE: &str = "Usage: rift node --controller <host:port> --name <node>
     --token-env <variable>    environment variable with this node's token (default RIFT_NODE_TOKEN)\n\
     --server-name <name>      TLS name of the controller certificate (default: the controller host)\n\
     --web <url>               the controller's web API over https://, e.g. https://rift.example:8443, for templates\n\
-    --forwarding-secret-env <variable>  environment variable with the Velocity forwarding secret (default RIFT_FORWARDING_SECRET)\n\
+    --forwarding-secret-env <variable>  environment variable with the Velocity forwarding secret or BungeeGuard token (default RIFT_FORWARDING_SECRET)\n\
     --allow-program <name>    a program servers may run; repeatable (default: java)";
 
 /// Parsed `rift node` arguments.
@@ -122,6 +122,8 @@ impl Options {
         let token_env = values
             .remove("--token-env")
             .unwrap_or_else(|| "RIFT_NODE_TOKEN".into());
+        // The agent's servers must not inherit its credentials.
+        crate::environment::protect([token_env.clone()]);
         let token = std::env::var(&token_env)
             .map_err(|_| invalid(format!("set {token_env} to this node's token")))?;
         if !(32..=1024).contains(&token.len()) || token.chars().any(char::is_control) {
@@ -144,6 +146,7 @@ impl Options {
         let forwarding_secret_env = explicit_secret_env
             .clone()
             .unwrap_or_else(|| "RIFT_FORWARDING_SECRET".into());
+        crate::environment::protect([forwarding_secret_env.clone()]);
         let forwarding_secret = match std::env::var(&forwarding_secret_env) {
             Ok(secret)
                 if !(1..=1024).contains(&secret.len()) || secret.chars().any(char::is_control) =>
@@ -155,7 +158,7 @@ impl Options {
             Ok(secret) => Some(secret),
             Err(_) if explicit_secret_env.is_some() => {
                 return Err(invalid(format!(
-                    "set {forwarding_secret_env} to the controller's Velocity forwarding secret"
+                    "set {forwarding_secret_env} to the controller's forwarding secret"
                 )));
             }
             Err(_) => None,
@@ -634,7 +637,17 @@ impl Agent {
             }
             Err(error) => return Err(error),
         }
-        let child = crate::managed::spawn_process(&start.command, &directory)?;
+        let mut environment = crate::config::ProcessEnvironment::try_from(&start.environment)?;
+        if let Some(certificate) = &start.bus_certificate {
+            let path = directory.join(crate::instance_login::CERTIFICATE_FILE);
+            std::fs::write(&path, certificate)?;
+            environment
+                .set
+                .insert("RIFT_BUS_CERT".into(), path.to_string_lossy().into_owned());
+        }
+        let isolation = crate::config::Isolation::try_from(&start.isolation)?;
+        let child =
+            crate::managed::spawn_process(&start.command, &directory, &environment, &isolation)?;
         let pid = child.id();
         processes.insert(
             start.server.clone(),
@@ -763,13 +776,23 @@ impl Agent {
         let forwarding = prepare
             .forwarding
             .map(|online_mode| {
-                let secret = self.options.forwarding_secret.clone().ok_or_else(|| {
-                    invalid(format!(
-                        "set {} on node {} to the controller's Velocity forwarding secret",
-                        self.options.forwarding_secret_env, self.options.name
-                    ))
-                })?;
-                Ok::<_, io::Error>((secret, online_mode))
+                let mode = match prepare.forwarding_mode.as_deref() {
+                    None => crate::config::ForwardingMode::Velocity,
+                    Some(mode) => crate::config::ForwardingMode::parse(mode)
+                        .ok_or_else(|| invalid(format!("unknown forwarding mode {mode}")))?,
+                };
+                let secret = match mode.secret_name() {
+                    Some(what) => {
+                        Some(self.options.forwarding_secret.clone().ok_or_else(|| {
+                            invalid(format!(
+                                "set {} on node {} to the controller's {what}",
+                                self.options.forwarding_secret_env, self.options.name
+                            ))
+                        })?)
+                    }
+                    None => None,
+                };
+                provisioning::InstanceForwarding::new(mode, secret, online_mode)
             })
             .transpose()?;
         let jar = match (&prepare.software, &prepare.server_jar) {

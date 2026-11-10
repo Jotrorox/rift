@@ -1,4 +1,5 @@
 use super::*;
+use crate::text::Text;
 
 const VALID: &str = include_str!("../../examples/rift.lua");
 
@@ -13,7 +14,9 @@ fn online_authentication_and_velocity_are_validated_together() {
     ), "online.lua").unwrap();
     assert!(config.authentication.online_mode);
     assert_eq!(config.authentication.timeout, Duration::from_millis(2500));
-    assert_eq!(config.forwarding.unwrap().secret_env, "PAPER_SECRET");
+    let forwarding = config.forwarding.unwrap();
+    assert_eq!(forwarding.mode, ForwardingMode::Velocity);
+    assert_eq!(forwarding.secret_env.as_deref(), Some("PAPER_SECRET"));
     let defaults = Config::from_lua(VALID, "offline.lua").unwrap();
     assert!(!defaults.authentication.online_mode);
     assert!(defaults.forwarding.is_none());
@@ -26,8 +29,39 @@ fn online_authentication_and_velocity_are_validated_together() {
     )
     .unwrap();
     assert_eq!(
-        config.forwarding.unwrap().secret_env,
-        "RIFT_FORWARDING_SECRET"
+        config.forwarding.unwrap().secret_env.as_deref(),
+        Some("RIFT_FORWARDING_SECRET")
+    );
+    // BungeeCord forwarding has no secret; BungeeGuard's token has the same default.
+    for (mode, expected, secret_env) in [
+        ("bungeecord", ForwardingMode::BungeeCord, None),
+        (
+            "bungeeguard",
+            ForwardingMode::BungeeGuard,
+            Some("RIFT_FORWARDING_SECRET"),
+        ),
+    ] {
+        let config = Config::from_lua(
+            &with_security(&format!(
+                "authentication = {{ online_mode = true }}, forwarding = {{ mode = '{mode}' }}"
+            )),
+            "online.lua",
+        )
+        .unwrap();
+        let forwarding = config.forwarding.unwrap();
+        assert_eq!(forwarding.mode, expected);
+        assert_eq!(forwarding.secret_env.as_deref(), secret_env);
+    }
+    let config = Config::from_lua(
+        &with_security(
+            "authentication = { online_mode = true }, forwarding = { mode = 'bungeeguard', secret_env = 'GUARD_TOKEN' }",
+        ),
+        "online.lua",
+    )
+    .unwrap();
+    assert_eq!(
+        config.forwarding.unwrap().secret_env.as_deref(),
+        Some("GUARD_TOKEN")
     );
 }
 
@@ -63,6 +97,14 @@ fn insecure_or_misspelled_authentication_settings_are_rejected() {
             "unknown field",
         ),
         ("forwarding = { mode = 'legacy' }", "forwarding.mode"),
+        (
+            "authentication = { online_mode = true }, forwarding = { mode = 'bungeecord', secret_env = 'TOKEN' }",
+            "has no secret",
+        ),
+        (
+            "forwarding = { mode = 'bungeecord' }",
+            "must be enabled together",
+        ),
         (
             "forwarding = { mode = 'velocity', secret = 'literal' }",
             "unknown field",
@@ -1634,7 +1676,10 @@ fn server_list_parses_components_hosts_and_favicon_files() {
         serde_json::json!({ "text": "Welcome", "color": "gold", "extra": [{ "text": "!" }] })
     );
     assert_eq!(list.defaults.max_players, Some(500));
-    assert_eq!(list.defaults.sample.unwrap(), ["line one", "line two"]);
+    assert_eq!(
+        list.defaults.sample.unwrap(),
+        [Text::from("line one"), Text::from("line two")]
+    );
     assert!(
         list.defaults
             .favicon
@@ -1826,4 +1871,77 @@ fn release_names_map_to_their_protocols() {
     }
     assert_eq!(ProtocolVersion::new(772).unwrap().release(), "1.21.8");
     assert_eq!(ProtocolVersion::from_release("1.21.99"), None);
+}
+
+#[test]
+fn text_theme_and_messages_are_checked_at_load() {
+    use crate::text::{Args, Text, catalog::Notice};
+    let config = Config::from_lua(
+        &with_security(
+            "text = { theme = { accent = '<#ffaa00><bold>' }, \
+             messages = { ['queue.joined'] = '<accent><server></accent> #<position>' } }, \
+             tab_list = { header = { mini = '<accent>Hi' } }",
+        ),
+        "text.lua",
+    )
+    .unwrap();
+    assert_eq!(
+        config.text.render(
+            Notice::QueueJoined,
+            &Args::new().text("server", "lobby").text("position", "2")
+        ),
+        Text::Component(serde_json::json!({"text": "", "extra": [
+            {"text": "lobby", "color": "#ffaa00", "bold": true},
+            {"text": " #2"},
+        ]}))
+    );
+    assert_eq!(
+        config.text.render(Notice::QueueLeft, &Args::new()),
+        Text::Plain("Left the queue.".into())
+    );
+    // Markup elsewhere in the configuration uses its own theme.
+    assert_eq!(
+        config.tab_list.unwrap().header,
+        Some(serde_json::json!({"text": "Hi", "color": "#ffaa00", "bold": true}))
+    );
+    assert_eq!(
+        Config::from_lua(VALID, "text.lua").unwrap().text,
+        std::sync::Arc::default()
+    );
+    for (settings, expected) in [
+        (
+            "text = { messages = { ['queue.nope'] = 'x' } }",
+            "unknown message \"queue.nope\"",
+        ),
+        (
+            "text = { messages = { ['queue.left'] = '<bolt>' } }",
+            "text.messages[\"queue.left\"]: <bolt> at byte 0: unknown tag",
+        ),
+        (
+            "text = { messages = { ['queue.joined'] = 'Queued for <player>' } }",
+            "<player> at byte 11: unknown tag",
+        ),
+        (
+            "text = { theme = { bold = '<red>' } }",
+            "<bold> is a built-in tag",
+        ),
+        (
+            "text = { theme = { accent = '<red>words' } }",
+            "only formatting tags are allowed",
+        ),
+        ("text = { colours = {} }", "unknown field"),
+        (
+            "text = { messages = { ['queue.left'] = 3 } }",
+            "expected a string",
+        ),
+        (
+            "server_list = { motd = { mini = '<color:orange>x' } }",
+            "\"orange\" is not a colour name",
+        ),
+    ] {
+        let error = Config::from_lua(&with_security(settings), "text.lua")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(expected), "{settings}: {error}");
+    }
 }

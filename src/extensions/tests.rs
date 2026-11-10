@@ -96,6 +96,157 @@ async fn group_queue_capacity_and_fifo_follow_live_instance_membership() {
     assert_eq!(runtime.queue_lengths()["game"], 0);
 }
 
+#[tokio::test]
+async fn players_on_an_instance_carry_its_service_group_as_a_context() {
+    let source = "return {listeners={public='127.0.0.1:0'},backends={hub='127.0.0.1:25001'},routes={public='hub'},service_groups={lobby={command={'unused'},directory='instances/{name}',port_range={26010,26013}}}}";
+    let mut config = Config::from_lua(source, "group-context.lua").unwrap();
+    config.add_instance("lobby", "lobby-3", 26012).unwrap();
+    let runtime = Extensions::new(&config, Broker::new(Default::default()).unwrap(), None).unwrap();
+    runtime.update_destinations(&config);
+    let uuid = Uuid::from_bytes([9; 16]);
+    let (player, _actions) = runtime
+        .players()
+        .register(9, &[9; 16], "Alice", 774, "lobby-3");
+    let contexts = || runtime.permissions().contexts(uuid).to_string();
+    assert_eq!(contexts(), "group=lobby;server=lobby-3");
+    player.set_server("hub");
+    assert_eq!(contexts(), "server=hub");
+    player.set_server("lobby-3");
+    assert_eq!(contexts(), "group=lobby;server=lobby-3");
+    // The import mapping knows the groups of the live configuration.
+    assert_eq!(
+        runtime.permissions().service_groups(),
+        ["lobby".to_owned()].into()
+    );
+}
+
+/// The visibility rule end to end in the directories: a player whose
+/// `rift.visible-to` is set is missing from another server's tab list, from
+/// every public and backend count and from completion, is visible to a viewer
+/// holding the node, stays hidden across a switch and a reconnect, and still
+/// counts for the capacity check that keeps their server from stopping.
+#[tokio::test]
+async fn a_hidden_player_is_missing_for_viewers_without_the_node() {
+    use crate::players::Viewer;
+    let source = "return {listeners={public='127.0.0.1:0'},backends={},routes={public='lobby'},service_groups={lobby={command={'unused'},directory='instances/{name}',port_range={26020,26023},idle_timeout_ms=1}}}";
+    let mut config = Config::from_lua(source, "visibility.lua").unwrap();
+    config.add_instance("lobby", "lobby-1", 26020).unwrap();
+    config.add_instance("lobby", "lobby-2", 26021).unwrap();
+    let runtime = Extensions::new(&config, Broker::new(Default::default()).unwrap(), None).unwrap();
+    runtime.update_destinations(&config);
+    let players = runtime.players().clone();
+    let roster = players.roster().clone();
+    let authority = runtime.permissions().clone();
+    let (staff, alice, moderator) = ([1; 16], [2; 16], [3; 16]);
+    authority
+        .apply(
+            rift_permissions::Actor::Cli,
+            rift_permissions::Change::SetNode {
+                subject: SubjectRef::User(Uuid::from_bytes(staff)),
+                node: Node::meta(crate::players::VISIBLE_TO, "Vanish.See").unwrap(),
+            },
+        )
+        .unwrap();
+    grant(&runtime, &"03".repeat(16), &["vanish.see"]);
+    // Logins in the order a session makes them: the roster record with its
+    // rule first, the directory once the player is in a world.
+    let join = |uuid: [u8; 16], name: &str, server: &str| {
+        let rule = players.visibility(&uuid, server);
+        let record = roster.register_visible(uuid, name, server, rule).unwrap();
+        let (handle, actions) = players.register(u64::from(uuid[0]), &uuid, name, 774, server);
+        (record, handle, actions)
+    };
+    let hidden = join(staff, "Staff", "lobby-1");
+    let _alice = join(alice, "Alice", "lobby-2");
+    let _moderator = join(moderator, "Moderator", "lobby-2");
+    assert_eq!(
+        players.visibility(&staff, "lobby-1").as_deref(),
+        Some("vanish.see")
+    );
+    let holds = |uuid: [u8; 16]| {
+        let authority = authority.clone();
+        move |node: &str| {
+            authority.check_active(Uuid::from_bytes(uuid), node) == rift_permissions::Tristate::True
+        }
+    };
+    let (alice_holds, moderator_holds) = (holds(alice), holds(moderator));
+    let as_alice = Viewer::Player {
+        uuid: alice,
+        holds: &alice_holds,
+    };
+    let as_moderator = Viewer::Player {
+        uuid: moderator,
+        holds: &moderator_holds,
+    };
+    let tab = crate::tab_list::TabList {
+        header: Some(serde_json::json!("{online}/{server_online}")),
+        network: true,
+        ..Default::default()
+    };
+    let check_hidden = |server: &str| {
+        let view = crate::tab_list::view(&roster, as_alice, Some(&tab), None, "Alice", "lobby-2");
+        let names: Vec<_> = view.players.unwrap().into_iter().map(|e| e.name).collect();
+        assert!(!names.contains(&"Staff".to_owned()), "{names:?}");
+        assert_eq!(view.header.unwrap().0, serde_json::json!("2/2"));
+        let seen = crate::tab_list::view(
+            &roster,
+            as_moderator,
+            Some(&tab),
+            None,
+            "Moderator",
+            "lobby-2",
+        );
+        let expected: usize = if server == "lobby-2" { 0 } else { 1 };
+        assert_eq!(
+            seen.players.unwrap().len(),
+            expected,
+            "the moderator sees Staff on {server}"
+        );
+        assert_eq!(
+            seen.header.unwrap().0,
+            serde_json::json!(format!("3/{}", 2 + (1 - expected)))
+        );
+        assert_eq!(roster.count_for(Viewer::Public, None), 2);
+        assert_eq!(
+            roster.count_for(Viewer::Backend, Some(server)),
+            usize::from(server == "lobby-2") * 2
+        );
+        assert!(!players.names_for(as_alice).contains(&"Staff".to_owned()));
+        assert!(
+            players
+                .names_for(as_moderator)
+                .contains(&"Staff".to_owned())
+        );
+        assert_eq!(
+            roster.count_on_server(server),
+            1 + usize::from(server == "lobby-2") * 2
+        );
+    };
+    check_hidden("lobby-1");
+    // The capacity check behind idle and manual stops counts the hidden player.
+    let managed = crate::managed::ManagedServers::new(&config, roster.clone());
+    managed.launch().unwrap();
+    let refused = managed.stop("lobby-1").await.unwrap_err();
+    assert_eq!(
+        refused.kind(),
+        std::io::ErrorKind::ResourceBusy,
+        "{refused}"
+    );
+    managed.shutdown().await;
+    // A switch keeps the rule, resolved again for the new server.
+    hidden.1.set_server("lobby-2");
+    hidden.0.set_server("lobby-2");
+    assert_eq!(
+        players.get("Staff").unwrap().unwrap().visible_to.as_deref(),
+        Some("vanish.see")
+    );
+    check_hidden("lobby-2");
+    // So does a reconnect: the rule lives in the permission store.
+    drop(hidden);
+    let _again = join(staff, "Staff", "lobby-1");
+    check_hidden("lobby-1");
+}
+
 #[test]
 fn version_schema_and_authenticated_mode_are_required() {
     for invalid in [
@@ -381,6 +532,64 @@ async fn malformed_decisions_unknown_servers_and_runaway_callbacks_fail_closed()
             .is_err()
         );
     }
+}
+
+#[tokio::test]
+async fn deny_reasons_and_messages_may_be_chat_component_tables() {
+    use crate::text::Text;
+    let runtime = runtime(
+        r#"api_version=1,
+        login=function(ctx)
+            if ctx.name == 'Player1' then
+                return { deny = { text = 'Banned', color = 'red', extra = { { text = '\nspam', italic = true } } } }
+            end
+            if ctx.name == 'Player2' then return { deny = {} } end
+            if ctx.name == 'Player3' then return { deny = { text = function() end } } end
+            if ctx.name == 'Player4' then return { deny = 'plain' } end
+        end,
+        before_transfer=function(ctx) return { deny = { { text = 'Not now', color = 'gold' } } } end"#,
+    );
+    let banned = Text::Component(serde_json::json!({
+        "text": "Banned", "color": "red", "extra": [{"text": "\nspam", "italic": true}],
+    }));
+    assert_eq!(
+        runtime
+            .session(context(1))
+            .unwrap()
+            .decision("login")
+            .await
+            .unwrap(),
+        Action::Deny(banned)
+    );
+    for id in [2, 3] {
+        let error = runtime
+            .session(context(id))
+            .unwrap()
+            .decision("login")
+            .await;
+        assert!(error.is_err(), "Player{id}");
+    }
+    assert_eq!(
+        runtime
+            .session(context(4))
+            .unwrap()
+            .decision("login")
+            .await
+            .unwrap(),
+        Action::Deny("plain".into())
+    );
+    let error = runtime
+        .session(context(1))
+        .unwrap()
+        .before_transfer("game", "command")
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    assert_eq!(error.to_string(), "Not now");
+    assert_eq!(
+        crate::text::reason(&error),
+        Text::Component(serde_json::json!([{"text": "Not now", "color": "gold"}]))
+    );
 }
 
 #[tokio::test]

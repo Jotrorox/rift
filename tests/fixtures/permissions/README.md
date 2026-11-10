@@ -104,4 +104,7 @@ output must equal `json`. With `"error": true` parsing must fail instead.
 Decode `node`, one entry of a `/lp export` `nodes` array, into typed nodes
 with source `import` and compare with `expect` in order. With
 `"error": "regex"` decoding must be refused as a regex node; with
-`"error": "invalid"` it must fail for any other reason.
+`"error": "invalid"` it must fail for any other reason. An optional
+`service_groups` lists the network's service groups (lowercase): a
+`server=<name>` pair naming one of them becomes `group=<name>`, the reserved
+context Rift fills with a player's service group.

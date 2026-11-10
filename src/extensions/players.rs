@@ -4,8 +4,18 @@
 //!
 //! Joins, server switches and quits are published on `rift.events.players`
 //! and tell the permission authority who is online and on which server.
+//!
+//! The directory also owns the network roster ([`PlayerRegistry`]) and keeps
+//! each player's visibility rule on both records: the `rift.visible-to` meta
+//! value, resolved in the player's contexts when they log in, join, switch
+//! servers and whenever their permissions change (see [`Players::watch`]).
 use super::fields;
-use crate::{messaging::Broker, permissions::Authority};
+use crate::{
+    messaging::Broker,
+    permissions::Authority,
+    players::{PlayerRegistry, VISIBLE_TO, Viewer},
+    text::Text,
+};
 use mlua::{Lua, Table, Value};
 use std::{
     cell::Cell,
@@ -25,19 +35,18 @@ const MAX_TITLE_MS: i64 = 60_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlayerAction {
-    Message(String),
-    ActionBar(String),
+    /// Plain text or a JSON text component already checked by `Text`.
+    Message(Text),
+    ActionBar(Text),
     /// Fade-in, stay and fade-out are ticks.
+    /// At least one of title and subtitle is set.
     Title {
-        title: String,
-        subtitle: Option<String>,
+        title: Option<Text>,
+        subtitle: Option<Text>,
         times: [i32; 3],
     },
-    Kick(String),
+    Kick(Text),
     Transfer(String),
-    /// A JSON text component, already checked by `protocol::validate_component`.
-    RawMessage(serde_json::Value),
-    RawKick(serde_json::Value),
     /// A BungeeCord plugin message for the player's backend. The session drops
     /// it if the player has left `server` before the message can be sent.
     Forward {
@@ -64,7 +73,11 @@ pub enum PlayerAction {
 
 struct Entry {
     uuid: String,
+    /// `uuid` as the roster keys it.
+    key: [u8; 16],
     name: String,
+    /// The node a viewer needs to see this player; `None` is everyone.
+    visible_to: Option<Arc<str>>,
     server: String,
     protocol: i32,
     actions: mpsc::Sender<PlayerAction>,
@@ -79,6 +92,8 @@ pub(crate) type Groups = Arc<Mutex<BTreeMap<String, BTreeSet<String>>>>;
 #[derive(Clone)]
 pub struct Players {
     sessions: Arc<Mutex<BTreeMap<u64, Entry>>>,
+    /// The network roster sessions, tab lists and counts read.
+    roster: Arc<PlayerRegistry>,
     destinations: Destinations,
     groups: Groups,
     events: Broker,
@@ -104,7 +119,15 @@ impl PlayerHandle {
         if entry.server == server {
             return;
         }
-        self.players.permissions.switch_server(self.uuid, server);
+        let group = self.players.group_of(server);
+        self.players
+            .permissions
+            .switch_server(self.uuid, server, group.as_deref());
+        // Contexts changed, so the rule may have: resolve it before the
+        // switch is published or the roster moves the player.
+        let visible_to = self.players.visibility(&entry.key, server);
+        entry.visible_to = visible_to.clone();
+        self.players.roster.set_visibility(&entry.key, visible_to);
         let previous = std::mem::replace(&mut entry.server, server.to_owned());
         let event = self
             .players
@@ -157,7 +180,7 @@ pub(crate) fn title(value: Value) -> mlua::Result<PlayerAction> {
     let options = match value {
         Value::String(title) => {
             return Ok(PlayerAction::Title {
-                title: text(title.to_str()?.to_owned(), "title")?,
+                title: Some(Text::Plain(text(title.to_str()?.to_owned(), "title")?)),
                 subtitle: None,
                 times: [10, 70, 20],
             });
@@ -169,18 +192,21 @@ pub(crate) fn title(value: Value) -> mlua::Result<PlayerAction> {
         &options,
         &["title", "subtitle", "fade_in_ms", "stay_ms", "fade_out_ms"],
     )?;
-    let optional = |field| -> mlua::Result<Option<String>> {
-        options
-            .raw_get::<Option<String>>(field)?
-            .map(|value| text(value, field))
-            .transpose()
+    // Each is a string or a chat component table, such as `{ mini = "..." }`.
+    let optional = |field| -> mlua::Result<Option<Text>> {
+        match options.raw_get::<Value>(field)? {
+            Value::Nil => Ok(None),
+            value => Text::lua(value, field)
+                .map(Some)
+                .map_err(mlua::Error::runtime),
+        }
     };
     let (title, subtitle) = (optional("title")?, optional("subtitle")?);
     if title.is_none() && subtitle.is_none() {
         return Err(error("title requires a title or subtitle"));
     }
     Ok(PlayerAction::Title {
-        title: title.unwrap_or_default(),
+        title,
         subtitle,
         times: [
             ticks(&options, "fade_in_ms", 500)?,
@@ -319,6 +345,7 @@ impl Players {
     ) -> Self {
         Self {
             sessions: Arc::default(),
+            roster: Arc::default(),
             destinations,
             groups,
             events,
@@ -335,6 +362,7 @@ impl Players {
             "uuid": entry.uuid,
             "name": entry.name,
             "server": entry.server,
+            "visible_to": entry.visible_to.as_deref(),
         });
         if let Some(previous) = previous {
             event["previous"] = previous.into();
@@ -364,8 +392,17 @@ impl Players {
         server: &str,
     ) -> (PlayerHandle, mpsc::Receiver<PlayerAction>) {
         let (actions, receiver) = mpsc::channel(QUEUE);
+        let player = rift_permissions::Uuid::from_bytes(*uuid);
+        self.permissions
+            .join(player, name, server, self.group_of(server).as_deref());
+        // The rule is in place before the join is published, and on the
+        // roster record the login created (usually already with this rule).
+        let visible_to = self.visibility(uuid, server);
+        self.roster.set_visibility(uuid, visible_to.clone());
         let entry = Entry {
             uuid: uuid.iter().map(|b| format!("{b:02x}")).collect(),
+            key: *uuid,
+            visible_to,
             name: name.to_owned(),
             server: server.to_owned(),
             protocol,
@@ -373,8 +410,6 @@ impl Players {
             boss_bars: BTreeSet::new(),
         };
         let event = self.event("join", id, &entry, None);
-        let player = rift_permissions::Uuid::from_bytes(*uuid);
-        self.permissions.join(player, name, server);
         self.lock().insert(id, entry);
         self.publish(event);
         (
@@ -473,6 +508,117 @@ impl Players {
     }
 
     /// Match players on a server or in a service group; nil matches everyone.
+    /// The network roster, shared with sessions and every count.
+    pub fn roster(&self) -> &Arc<PlayerRegistry> {
+        &self.roster
+    }
+
+    /// The player's visibility rule on `server`: the node in their
+    /// `rift.visible-to` meta, resolved in their current contexts once the
+    /// authority has them on `server`, and in `server` and its group before
+    /// (a login on its first backend). A value that is not a valid node
+    /// still hides the player; nobody can hold it.
+    pub fn visibility(&self, uuid: &[u8; 16], server: &str) -> Option<Arc<str>> {
+        let player = rift_permissions::Uuid::from_bytes(*uuid);
+        let contexts = if self
+            .permissions
+            .server_of(player)
+            .is_some_and(|current| current.eq_ignore_ascii_case(server))
+        {
+            self.permissions.contexts(player)
+        } else {
+            let mut contexts =
+                rift_permissions::ContextSet::of(rift_permissions::context::SERVER, server)
+                    .unwrap_or_default();
+            if let Some(group) = self.group_of(server) {
+                let _ = contexts.insert(rift_permissions::context::GROUP, &group);
+            }
+            contexts
+        };
+        let value = self
+            .permissions
+            .meta(player, &contexts)
+            .meta
+            .remove(VISIBLE_TO)?;
+        let node = rift_permissions::node::normalize_node(value.trim())
+            .unwrap_or_else(|_| value.trim().to_ascii_lowercase());
+        Some(Arc::from(node))
+    }
+
+    /// Resolve one online player's rule again; publishes a `visibility`
+    /// event when it changed.
+    pub fn refresh(&self, uuid: &[u8; 16]) -> bool {
+        let mut sessions = self.lock();
+        let Some((id, entry)) = sessions.iter_mut().find(|(_, entry)| entry.key == *uuid) else {
+            return false;
+        };
+        let visible_to = self.visibility(uuid, &entry.server);
+        if visible_to == entry.visible_to {
+            return false;
+        }
+        let previous = std::mem::replace(&mut entry.visible_to, visible_to.clone());
+        self.roster.set_visibility(uuid, visible_to);
+        let mut event: serde_json::Value =
+            serde_json::from_str(&self.event("visibility", *id, entry, None)).unwrap_or_default();
+        event["previous_visible_to"] = previous.as_deref().into();
+        drop(sessions);
+        self.publish(event.to_string());
+        true
+    }
+
+    /// Follow permission changes until the authority goes away: a changed
+    /// player gets their rule resolved again, and every session rebuilds its
+    /// view, because the change may be to a viewer's own nodes. Expired
+    /// nodes take effect when the sweeper commits their removal.
+    pub async fn watch(self) {
+        use tokio::sync::broadcast::error::RecvError;
+        let mut changes = self.permissions.subscribe();
+        loop {
+            match changes.recv().await {
+                Ok(crate::permissions::Notification::Committed { subjects, .. }) => {
+                    let mut online = false;
+                    for subject in &subjects {
+                        let uuid = *subject.uuid.as_bytes();
+                        online |= self.lock().values().any(|entry| entry.key == uuid);
+                        self.refresh(&uuid);
+                    }
+                    if online {
+                        self.roster.touch();
+                    }
+                }
+                Ok(_) => {}
+                Err(RecvError::Lagged(_)) => {
+                    let keys: Vec<_> = self.lock().values().map(|entry| entry.key).collect();
+                    for key in keys {
+                        self.refresh(&key);
+                    }
+                    self.roster.touch();
+                }
+                Err(RecvError::Closed) => return,
+            }
+        }
+    }
+
+    /// Names of joined players `viewer` may see, for name completion.
+    pub fn names_for(&self, viewer: Viewer<'_>) -> Vec<String> {
+        self.lock()
+            .values()
+            .filter(|entry| viewer.sees(&entry.key, entry.visible_to.as_deref()))
+            .map(|entry| entry.name.clone())
+            .collect()
+    }
+
+    /// The service group `server` is an instance of, for the `group`
+    /// permission context.
+    pub fn group_of(&self, server: &str) -> Option<String> {
+        self.groups
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .find(|(_, members)| members.contains(server))
+            .map(|(group, _)| group.clone())
+    }
+
     fn matcher(&self, server: Option<String>) -> Result<impl Fn(&Entry) -> bool, &'static str> {
         let mut members = None;
         if let Some(server) = &server {
@@ -501,6 +647,7 @@ impl Players {
             name: entry.name.clone(),
             server: entry.server.clone(),
             protocol: entry.protocol,
+            visible_to: entry.visible_to.as_deref().map(str::to_owned),
         }
     }
 
@@ -550,10 +697,7 @@ impl Players {
 
     /// Queue a chat message for every player on `server` (everyone for
     /// `None`) and count those that accepted it.
-    pub fn broadcast(&self, message: &str, server: Option<&str>) -> Result<usize, String> {
-        if message.is_empty() || message.len() > MAX_TEXT {
-            return Err("message must contain 1..=1024 bytes".into());
-        }
+    pub fn broadcast(&self, message: &Text, server: Option<&str>) -> Result<usize, String> {
         let matches = self.matcher(server.map(str::to_owned))?;
         Ok(self
             .lock()
@@ -562,7 +706,7 @@ impl Players {
             .filter(|entry| {
                 entry
                     .actions
-                    .try_send(PlayerAction::Message(message.to_owned()))
+                    .try_send(PlayerAction::Message(message.clone()))
                     .is_ok()
             })
             .count())
@@ -645,6 +789,7 @@ impl Players {
         player.raw_set("server", entry.server.as_str())?;
         player.raw_set("connection_id", id.to_string())?;
         player.raw_set("protocol", entry.protocol)?;
+        player.raw_set("visible_to", entry.visible_to.as_deref())?;
         Ok(player)
     }
 
@@ -719,7 +864,7 @@ impl Players {
             (
                 "message",
                 "message",
-                PlayerAction::Message as fn(String) -> PlayerAction,
+                PlayerAction::Message as fn(Text) -> PlayerAction,
             ),
             ("action_bar", "action bar text", PlayerAction::ActionBar),
             ("kick", "kick reason", PlayerAction::Kick),
@@ -728,11 +873,10 @@ impl Players {
             let (players, charge) = (self.clone(), budget.clone());
             api.raw_set(
                 name,
-                lua.create_function(move |_, (target, value): (String, String)| {
+                lua.create_function(move |_, (target, value): (String, Value)| {
                     charge()?;
-                    players
-                        .send(&target, action(text(value, label)?))
-                        .map_err(lua_error)
+                    let text = Text::lua(value, label).map_err(mlua::Error::runtime)?;
+                    players.send(&target, action(text)).map_err(lua_error)
                 })?,
             )?;
         }
@@ -800,9 +944,9 @@ impl Players {
         let players = self.clone();
         api.raw_set(
             "broadcast",
-            lua.create_function(move |_, (message, server): (String, Option<String>)| {
+            lua.create_function(move |_, (message, server): (Value, Option<String>)| {
                 budget()?;
-                let message = text(message, "message")?;
+                let message = Text::lua(message, "message").map_err(mlua::Error::runtime)?;
                 let matches = players.matcher(server).map_err(error)?;
                 Ok(players
                     .lock()

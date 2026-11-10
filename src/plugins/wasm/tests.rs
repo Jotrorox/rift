@@ -588,7 +588,7 @@ async fn probe_report(runtime: &Extensions, args: &str) -> Report {
     else {
         panic!("probe did not reply with a message");
     };
-    serde_json::from_str(&text).unwrap()
+    serde_json::from_str(&text.to_string()).unwrap()
 }
 
 #[tokio::test]
@@ -873,5 +873,99 @@ async fn components_show_dialogs_and_receive_clicks_without_registering_a_hook()
         PlayerAction::Message(r#"reply {"answer":"42"} {"round":1}"#.into())
     );
     assert_eq!(instance(&runtime).status(), Status::Running);
+    runtime.plugins().shutdown().await;
+}
+
+#[tokio::test]
+async fn styled_components_answer_with_rich_text_and_titles() {
+    use crate::text::Text;
+    let Some(guest) = probe() else { return };
+    let root = directory();
+    let config = configure(&root, &guest, "", "{}");
+    let runtime = start(&config, &Broker::default()).await;
+    grant(&runtime, 1, "probe.use");
+
+    // `styled.suggest` replaces `handler.suggest`; tooltips are components.
+    let suggestions = session(&runtime, 1, "Alex")
+        .suggest("probe", "", Vec::new)
+        .await
+        .unwrap();
+    let texts: Vec<_> = suggestions.iter().map(|s| s.text.as_str()).collect();
+    assert_eq!(texts, ["rich", "plain"]);
+    let Some(Text::Component(tooltip)) = &suggestions[0].tooltip else {
+        panic!("expected a component tooltip: {:?}", suggestions[0].tooltip);
+    };
+    let tooltip = tooltip.to_string();
+    assert!(
+        tooltip.contains("Alex") && !tooltip.contains("mini"),
+        "{tooltip}"
+    );
+    assert_eq!(suggestions[1].tooltip, None);
+    let bad = session(&runtime, 1, "Alex")
+        .suggest("probe", "bad", Vec::new)
+        .await;
+    assert!(
+        bad.as_ref().map_or(true, Vec::is_empty),
+        "an invalid tooltip offers nothing: {bad:?}"
+    );
+
+    // `styled.status` replaces `handler.status`.
+    let ping = |hostname: &str| crate::server_list::Ping {
+        listener: "public".into(),
+        hostname: hostname.into(),
+        protocol: 774,
+        peer_addr: "127.0.0.1:5000".parse().unwrap(),
+        backend: None,
+        maintenance: false,
+        online: 0,
+        max_players: 20,
+    };
+    let status = runtime
+        .plugins()
+        .status(&ping("rich.example"))
+        .await
+        .unwrap()
+        .expect("an override");
+    let Some(Text::Component(version)) = &status.version else {
+        panic!("expected a component version: {:?}", status.version);
+    };
+    assert!(version.to_string().contains("Probe"), "{version}");
+    assert_eq!(status.sample.as_ref().map(Vec::len), Some(2));
+    assert_eq!(
+        runtime
+            .plugins()
+            .status(&ping("other.example"))
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(
+        !matches!(
+            runtime.plugins().status(&ping("bad.example")).await,
+            Ok(Some(_))
+        ),
+        "an invalid version is not applied"
+    );
+
+    // `players.title-json` with markup and legacy codes.
+    let (_handle, mut actions) = runtime
+        .players()
+        .register(41, &[41; 16], "Title", 774, "lobby");
+    let player = session(&runtime, 41, "Title");
+    assert_eq!(player.decision("login").await.unwrap(), Action::Continue);
+    let Ok(PlayerAction::Title {
+        title: Some(title),
+        subtitle: Some(subtitle),
+        times,
+    }) = actions.try_recv()
+    else {
+        panic!("expected a title");
+    };
+    assert_eq!(times, [5, 40, 10]);
+    assert!(format!("{title:?}").contains("Welcome"), "{title:?}");
+    assert!(
+        format!("{subtitle:?}").contains("to the probe"),
+        "{subtitle:?}"
+    );
     runtime.plugins().shutdown().await;
 }

@@ -39,9 +39,13 @@ Patterns are dot-separated segments of `[a-z0-9_:-]`, at most 256 bytes, with
 Pumpkin's `plugin:node` fits as written. Every node also has:
 
 - `contexts`: `key=value` pairs that must all be active for the node to apply.
-  `server`, `world`, `dimension` and `gamemode` are filled by Rift and the
-  backend adapters; any other key is custom (`region=spawn`). No contexts means
-  global.
+  `server`, `group`, `world`, `dimension` and `gamemode` are filled by Rift and
+  the backend adapters; any other key is custom (`region=spawn`). No contexts
+  means global. `server` is the backend's name, which for an instance of a
+  [service group](managed-servers.md#service-groups-and-dynamic-instances) is
+  the instance (`lobby-2`), so a grant meant for every lobby uses
+  `group=lobby` instead: `group` is the service group of the backend, and is
+  absent on backends outside groups.
 - an optional expiry (Unix seconds). A node expiring at `t` applies while the
   time is before `t`, exactly, at every check.
 - a source: `store` (edited at runtime), `config` (mirrored from
@@ -81,7 +85,8 @@ returns `nil` for it, so a script can tell "denied" from "never set".
 
 Proxy-side checks use the contexts Rift knows for an online player:
 
-- `server`, the backend they are on.
+- `server`, the backend they are on, and `group`, its service group when it
+  is an instance of one. Both follow the player on every switch.
 - `dimension` and `gamemode`, read from the play packets Rift relays from that
   backend on every supported version (1.8.9–26.3): Join Game and Respawn name
   both, and the game-mode Game Event updates `gamemode` in place. `dimension`
@@ -287,14 +292,68 @@ end)
 Providers (equivalently, `extensions.context_providers`) compute custom
 contexts when a player reaches a server: after the first join and after every
 switch, before the `join` and `after_transfer` callbacks. `player` has `uuid`,
-`name` and `server`. Keys must be custom (not `server`, `world`, `dimension` or
-`gamemode`); at most 16 providers.
+`name` and `server`. Keys must be custom (not `server`, `group`, `world`, `dimension`
+or `gamemode`); at most 16 providers.
+
+## Visibility
+
+Rift does not know what "vanished" means; it knows who may see whom. A player
+whose meta key `rift.visible-to` is set is shown only to viewers who hold the
+permission node in its value. A vanish plugin sets the key and Rift does the
+rest:
+
+```sh
+/perms user Staff meta set rift.visible-to vanish.see          # hidden everywhere
+/perms user Staff meta settemp rift.visible-to vanish.see 30m  # for 30 minutes
+/perms user Staff meta set rift.visible-to vanish.see server=lobby-1
+/perms group mod meta set rift.visible-to vanish.mod           # a vanish level
+/perms group admin permission set vanish.see                   # who sees them
+```
+
+The rule is meta, not a permission node, so staff holding `*` are not all
+hidden; and because it is meta, it is durable, known at login, scoped by
+contexts, expirable, audited in the change log and replicated to backends like
+every other node, so timed vanish, per-server vanish and vanish levels need no
+code. A value that is not a valid node still hides the player: nobody holds
+it.
+
+Every reader of "who is online" names who is looking:
+
+| Viewer | Sees | Used by |
+| --- | --- | --- |
+| player | unrestricted players, themselves, and players whose node they hold (in the viewer's current contexts) | the [network tab list](operations.md#tab-list-header-footer-and-network-wide-players), the `{online}` and `{server_online}` placeholders, player-name completion of extension and plugin commands |
+| public | unrestricted players only | the server-list player count, the status server's counts and its badge |
+| backend | unrestricted players only | BungeeCord `PlayerCount`, `PlayerList` and the `RiftServers` counts |
+| system | everyone | capacity, queues, scaling and idle shutdown, Prometheus metrics, `/api/status`, kick and transfer by name, `GetPlayerServer`, `rift.players.*` and the plugin API |
+
+System readers must see hidden players: if idle shutdown counted only visible
+players, Rift could stop the server a hidden administrator stands on. Plugins
+see everyone too, with the rule beside each player (`visible_to`; see
+[the plugin API](plugins.md#host-api)), and decide for themselves.
+
+Rift resolves the rule onto the player when they log in (before any tab list
+or count includes them), when they join a world (before the join event is
+published), on every server switch (contexts change, so per-server rules
+apply), and whenever their permissions change; each change is published on
+`rift.events.players` as a `visibility` event. Sessions rebuild their tab list
+when any online player's permissions change, so a viewer who gains or loses
+the node sees the difference at once. An expiring rule or `see` node takes
+effect when the sweeper deletes it, within `sweep_interval_ms`. A dimension or
+game-mode change does not resolve the rule again; scope rules by `server` or
+`group` rather than by `dimension` or `gamemode`.
+
+Rift hides players from what it builds itself. A backend lists its own players
+in their tab list and in its own player count; a Paper plugin reads the same
+key through RiftPerms and hides the player locally (see
+[RiftPerms](permissions-java.md#visibility-on-paper)). The example
+[`vanish-lua`](../examples/plugins/vanish-lua/init.lua) plugin implements
+`/vanish`, `/vanish here` and `/vanish <minutes>` in 40 lines.
 
 ## Persistent plugins
 
 Persistent [plugins](plugins.md), in Lua or WebAssembly, use the store through
 the `permissions` interface of the plugin contract (`rift:plugin@0.1`). Its
-six calls keep their signatures and map onto the store like this:
+calls keep their signatures and map onto the store like this:
 
 | Contract call | In the permission store |
 | --- | --- |
@@ -305,15 +364,20 @@ six calls keep their signatures and map onto the store like this:
 | `remove-group(uuid, group)` | unsets the global `inherit` node; returns whether anything changed |
 | `groups(uuid)` | the groups the player is in, in their current contexts: direct, inherited and `default`, in rank order |
 | `list-groups()` | every group as a JSON object keyed by name: `name`, `weight`, `display_name` and `nodes` |
+| `meta(uuid, key)` (0.1.3) | one meta value in the player's current contexts, or `none` |
+| `set-meta(uuid, key, value, contexts-json, expires-at)` (0.1.3) | sets the user's meta node in exactly those contexts (`none`: global), expiring at Unix seconds if given; a `none` value removes it; returns whether anything changed |
 
 Writes are committed when the call returns and persist like any other store
 change. They are recorded with actor `lua:plugin:<name>`, whatever the
-plugin's engine, and the nodes carry source `plugin:<name>`. Nodes with
-contexts, expiry, meta, tracks and group edits are not part of the contract;
-use the dashboard, `/perms` or `rift.lua` with API v3 for them. Persistent Lua
-plugins also have `rift.permissions.check(uuid, node, contexts?)` (true, false
-or nil) and `rift.permissions.meta(uuid, contexts?)`, as in the Lua API above;
-without contexts they use the player's current ones.
+plugin's engine, and the nodes carry source `plugin:<name>`. Permission and
+group nodes with contexts or expiry, tracks and group edits are not part of
+the contract; use the dashboard, `/perms` or `rift.lua` with API v3 for them.
+Persistent Lua plugins also have `rift.permissions.check(uuid, node, contexts?)`
+(true, false or nil), `rift.permissions.meta(uuid, contexts?)`, as in the Lua
+API above (without contexts they use the player's current ones), and
+`rift.permissions.set_meta(uuid, key, value, options?)`, whose `value` `nil`
+removes the node and whose options are `contexts`, `expires_in` and
+`expires_at` as for API v3 writes.
 
 ## LuckPerms import and export
 
@@ -325,6 +389,11 @@ The authority reads the JSON that `/lp export` writes, gzipped or plain:
 - `{a,b}` and `(a|b)` shorthands expand into separate nodes.
 - LuckPerms context sets mean "any listed value"; Rift writes one node per
   combination, and drops `server=global` and `world=global`.
+- `server=<name>` naming one of the configuration's service groups becomes
+  `group=<name>`: LuckPerms knew one server per proxy entry, while Rift's
+  instances of that group are `<name>-1`, `<name>-2`, …, where only `group`
+  matches. Names that are not service groups stay `server`. Export writes
+  `group=<name>` back as `server=<name>`, so LuckPerms reads it the old way.
 - Regex nodes (`R=…`), invalid names, nodes past a limit and expiries already in
   the past are skipped, and the report lists each with the reason.
 
@@ -353,6 +422,10 @@ audit rows:
   [`rift.perms.command`](permissions-protocol.md#commands) and shows the reply;
 - `rift admin perms <command>` runs it from the proxy host with console
   rights (admin permission `perms`, see [Command line](#command-line)).
+
+In game, lines are coloured by the theme styles `heading`, `good`, `bad`,
+`muted` and `plain` (gold, green, red, gray and none by default), which
+operators restyle under `text.theme` ([styled text](text.md#theme)).
 
 | Command | Effect |
 | --- | --- |

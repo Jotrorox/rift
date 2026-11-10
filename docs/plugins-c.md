@@ -73,12 +73,60 @@ Rust, Go and Lua examples.
 | `handler` exports | `exports_rift_plugin_handler_<hook>` with the exact signatures in `rift_plugin.h`. `rift_plugin_defaults.c` provides weak no-op versions; define only the hooks you need. |
 | `registration` | `rift_registration_init`, `rift_registration_add_hook`, `rift_registration_add_command`, `rift_registration_add_command_fixed`. |
 | `action` | `rift_action_continue`, `rift_action_deny`, `rift_action_server`, `rift_action_message`, `rift_action_queue`, `rift_action_leave_queue`. |
-| host functions | `rift_plugin_<interface>_<function>`, for example `rift_plugin_players_message`, `rift_plugin_store_increment`, `rift_plugin_bus_publish`, `rift_plugin_timers_every`. |
+| `decisions` export | `exports_rift_plugin_decisions_<hook>` answers with `rift_decision_deny_json` or `rift_decision_message_json`, a JSON text component ([rich text](extensions.md#rich-text)); the weak defaults forward to the handler hooks. |
+| `styled` export | `exports_rift_plugin_styled_suggest` (build the list with `rift_rich_suggestions_add(ret, text, tooltip_json)`) and `exports_rift_plugin_styled_status` answer with JSON text tooltips, version and sample lines (since 0.1.4). The weak defaults forward to the handler's `suggest` and `status`; hosts before 0.1.4 call only those. |
+| host functions | `rift_plugin_<interface>_<function>`, for example `rift_plugin_players_message`, `rift_plugin_players_message_json`, `rift_plugin_store_increment`, `rift_plugin_bus_publish`, `rift_plugin_timers_every`. `rift_message` and `rift_message_json` wrap the chat message calls; `rift_title_json(&target, title_json, subtitle_json_or_NULL, fade_in, stay, fade_out)` (since 0.1.4) wraps `players.title-json`. |
+| rich text | `rift_mini`, `rift_legacy`, `rift_component` builders (below). |
 | `result<T, string>` | The function returns `bool` and fills a `ret` and an `err` out-parameter. |
 | `option<T>` parameters | Pointers; `NULL` is `none`. |
 | `log` | `rift_log(RIFT_INFO, "format %d", value)`. |
 | configuration JSON | `rift_json_get_string(&config, "key", &out)` reads one top-level string; use cJSON or jsmn for more. |
 | `dialogs` export, `players.dialog` | [Dialogs](dialogs.md): `rift_show_dialog(&target, json)` and `rift_plugin_players_clear_dialog`; clicks reach `exports_rift_plugin_dialogs_dialog(rift_dialog_response_t *)`, which owns its argument (free it with `rift_dialog_response_free`). The weak default ignores clicks. No registration needed. |
+
+## Rich text builders
+
+`rift.h` writes JSON text components, escaping every string. Each builder
+returns a malloc'd, NUL-terminated string; free it with `free()`:
+
+```c
+// Rift markup, written as {"mini": "...", "args": {...}}; see docs/text.md.
+rift_mini_t m = rift_mini("<gold>Welcome, <player>!</gold> <gray><click:run_command:/spawn>[Spawn]");
+char *name = rift_string_cstr(&ctx->name);
+rift_mini_arg(&m, "player", name);              // shown as written, never parsed
+char *rank = rift_legacy("&c[Admin]");          // {"legacy": "&c[Admin]", "marker": "&"}
+rift_mini_arg_component(&m, "rank", rank);      // a component argument
+char *welcome = rift_mini_finish(&m);
+rift_message_json(&ctx->uuid, welcome);
+free(welcome), free(rank), free(name);
+
+// A component field by field (1.21.5 spellings; Rift converts for older clients).
+rift_component_t c = rift_component("[Accept]");
+rift_component_color(&c, "green");
+rift_component_bold(&c);
+rift_component_run_command(&c, "/party accept Alex");
+rift_component_hover_text(&c, "Join Alex's party");
+rift_component_extra_text(&c, " or ignore it");
+char *accept = rift_component_finish(&c);
+rift_decision_message_json(ret, accept);       // copies
+free(accept);
+
+// A title with a legacy subtitle.
+char *sub = rift_legacy_marker("§7Have fun", "§");
+rift_title_json(&ctx->uuid, "{\"mini\":\"<green>Lobby\"}", sub, 10, 70, 20);
+free(sub);
+```
+
+The component setters are `rift_component_color`, `_bold`, `_italic`,
+`_underlined`, `_strikethrough`, `_obfuscated`, `_run_command`,
+`_suggest_command`, `_open_url`, `_copy_to_clipboard`, `_hover_text` (plain),
+`_hover` (a component as JSON), `_insertion`, `_extra` (a child as JSON),
+`_extra_text` and `_field` (any other key, raw JSON); call each at most once.
+`rift_string_quote` turns a `rift_string_t` into an owned JSON string.
+
+Markup is only read from an explicit `mini` object: a bare string, as in
+`rift_message_json(&t, "<red>hi")`, is shown as written. Pass player input
+with `rift_mini_arg`, never by formatting it into the markup. The tags are
+listed in [Text and markup](text.md).
 
 ## Memory ownership
 

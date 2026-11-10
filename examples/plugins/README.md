@@ -8,9 +8,10 @@ Four persistent plugins that behave identically, one per supported language:
 | [`hello-c`](hello-c) | WebAssembly | `make WASI_SDK_PATH=/path/to/wasi-sdk` | [C plugins](../../docs/plugins-c.md) |
 | [`hello-go`](hello-go) | WebAssembly | `make TINYGO=/path/to/tinygo` (TinyGo 0.42.0) | [Go plugins](../../docs/plugins-go.md) |
 | [`hello-lua`](hello-lua) | Lua | nothing to build | [Lua plugins](../../docs/plugins-lua.md) |
+| [`vanish-lua`](vanish-lua) | Lua | nothing to build | [Visibility](../../docs/permissions.md#visibility): `/vanish` through the `rift.visible-to` meta key |
 
 The WebAssembly examples are standalone projects that build a component
-against the `plugin` world of `rift:plugin@0.1.1` (`wit/rift-plugin.wit`). A
+against the `plugin` world of `rift:plugin@0.1.4` (`wit/rift-plugin.wit`). A
 plugin directory holds a `plugin.toml` manifest and the entry it names: the
 built `.wasm`, or `init.lua`.
 

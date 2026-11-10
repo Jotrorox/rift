@@ -13,7 +13,6 @@ const DEFAULT_TIMEOUT_MS: u64 = 1000;
 const MAX_TIMEOUT_MS: u64 = 10_000;
 const DEFAULT_IN_FLIGHT: usize = 256;
 const MAX_IN_FLIGHT: usize = 65_536;
-const DEFAULT_DENY: &str = "Unable to check your access, please try again later.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Policy {
@@ -27,7 +26,8 @@ pub(crate) struct Decision {
     timeout: Duration,
     on_timeout: Policy,
     on_no_responders: Policy,
-    deny_message: String,
+    /// `None` shows Rift's `decision.unavailable` message.
+    deny_message: Option<crate::text::Text>,
     pub(crate) max_in_flight: usize,
 }
 
@@ -95,14 +95,14 @@ pub(super) fn parse(value: Value) -> mlua::Result<BTreeMap<String, Decision>> {
                 "extensions.decisions.{hook}.timeout_ms must be 1..={MAX_TIMEOUT_MS}"
             )));
         }
-        let deny_message = entry
-            .raw_get::<Option<String>>("deny_message")?
-            .unwrap_or_else(|| DEFAULT_DENY.into());
-        if deny_message.is_empty() || deny_message.len() > 1024 {
-            return Err(error(format!(
-                "extensions.decisions.{hook}.deny_message must contain 1..=1024 bytes"
-            )));
-        }
+        // A string or a chat component table, such as `{ mini = "..." }`.
+        let deny_message = match entry.raw_get::<Value>("deny_message")? {
+            Value::Nil => None,
+            value => Some(
+                crate::text::Text::lua(value, &format!("extensions.decisions.{hook}.deny_message"))
+                    .map_err(error)?,
+            ),
+        };
         let max_in_flight = entry
             .raw_get::<Option<usize>>("max_in_flight")?
             .unwrap_or(DEFAULT_IN_FLIGHT);
@@ -136,7 +136,9 @@ impl Decision {
     fn apply(&self, policy: Policy) -> Action {
         match policy {
             Policy::Allow => Action::Continue,
-            Policy::Deny => Action::Deny(self.deny_message.clone()),
+            Policy::Deny => Action::Deny(self.deny_message.clone().unwrap_or_else(|| {
+                crate::text::catalog::notice(crate::text::catalog::Notice::DecisionUnavailable)
+            })),
         }
     }
 
@@ -184,8 +186,9 @@ fn request(hook: &str, input: &Context) -> bytes::Bytes {
 }
 
 /// `{"action":"continue"}`, `{"action":"deny","reason":…}` or, for
-/// `initial_server` only, `{"action":"server","server":…}`. Anything else is
-/// an error, exactly like an invalid Lua result.
+/// `initial_server` only, `{"action":"server","server":…}`. A reason is a
+/// string of plain text or a JSON text component (an object or a list).
+/// Anything else is an error, exactly like an invalid Lua result.
 fn parse_reply(hook: &str, payload: &[u8]) -> io::Result<Action> {
     let fail = |message: &str| invalid(format!("extensions.decisions.{hook}: {message}"));
     let value: serde_json::Value =
@@ -212,15 +215,21 @@ fn parse_reply(hook: &str, payload: &[u8]) -> io::Result<Action> {
     let Some(field) = field else {
         return Ok(Action::Continue);
     };
+    if field == "reason" {
+        let reason = match &object[field] {
+            serde_json::Value::String(text) => crate::text::Text::plain(text.as_str(), "reason"),
+            component @ (serde_json::Value::Object(_) | serde_json::Value::Array(_)) => {
+                crate::text::Text::component(component.clone(), "reason")
+            }
+            _ => Err("reason must be a string or a JSON text component".into()),
+        };
+        return reason.map(Action::Deny).map_err(|error| fail(&error));
+    }
     let text = object[field]
         .as_str()
         .filter(|text| !text.is_empty() && text.len() <= 1024)
         .ok_or_else(|| fail("decision string must contain 1..=1024 bytes"))?;
-    Ok(if field == "reason" {
-        Action::Deny(text.into())
-    } else {
-        Action::Server(text.into())
-    })
+    Ok(Action::Server(text.into()))
 }
 
 #[cfg(test)]
@@ -246,6 +255,27 @@ mod tests {
                 r#"{"action":"deny","reason":"no"}"#,
                 Action::Deny("no".into()),
             ),
+            (
+                "login",
+                r#"{"action":"deny","reason":{"text":"Banned","color":"red"}}"#,
+                Action::Deny(crate::text::Text::Component(
+                    serde_json::json!({"text": "Banned", "color": "red"}),
+                )),
+            ),
+            (
+                "login",
+                r#"{"action":"deny","reason":{"mini":"<red>Banned <who>","args":{"who":"<b>"}}}"#,
+                Action::Deny(crate::text::Text::Component(
+                    serde_json::json!({"text": "Banned <b>", "color": "red"}),
+                )),
+            ),
+            (
+                "login",
+                r#"{"action":"deny","reason":["Banned",{"text":"!"}]}"#,
+                Action::Deny(crate::text::Text::Component(
+                    serde_json::json!(["Banned", {"text": "!"}]),
+                )),
+            ),
         ] {
             assert_eq!(parse_reply(hook, reply.as_bytes()).unwrap(), expected);
         }
@@ -256,6 +286,17 @@ mod tests {
             ("login", r#"{"action":"deny"}"#),
             ("login", r#"{"action":"deny","reason":""}"#),
             ("login", r#"{"action":"deny","reason":7}"#),
+            ("login", r#"{"action":"deny","reason":{}}"#),
+            ("login", r#"{"action":"deny","reason":{"text":null}}"#),
+            ("login", r#"{"action":"deny","reason":{"mini":"<bolt>"}}"#),
+            (
+                "login",
+                r#"{"action":"deny","reason":{"text":"x","color":"orange"}}"#,
+            ),
+            (
+                "initial_server",
+                r#"{"action":"server","server":{"text":"lobby"}}"#,
+            ),
             ("login", long.as_str()),
             ("login", r#"{"action":"continue","reason":"x"}"#),
             ("login", r#"{"action":"allow"}"#),

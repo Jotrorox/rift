@@ -803,11 +803,12 @@ async fn player_actions_reach_the_client_and_kick_closes_the_session() {
             rift::protocol::action_bar(version, "bar").unwrap()
         );
         assert!(send(PlayerAction::Title {
-            title: "Big".into(),
+            title: Some("Big".into()),
             subtitle: Some("small".into()),
             times: [1, 2, 3],
         }));
-        for packet in rift::protocol::title(version, "Big", Some("small"), [1, 2, 3]).unwrap() {
+        let (big, small) = ("Big".into(), "small".into());
+        for packet in rift::protocol::title(version, Some(&big), Some(&small), [1, 2, 3]).unwrap() {
             assert_eq!(receive(&mut fixture.client, fixture.codec).await, packet);
         }
         // An unavailable target leaves the player on the original backend.
@@ -1049,6 +1050,181 @@ async fn boss_bars_survive_reconfiguration_and_can_be_removed() {
         );
         fixture.task.abort();
         let _ = fixture.task.await;
+    })
+    .await
+    .unwrap();
+}
+
+/// A ban service whose login may only publish `rift.players.kick-json` and
+/// `rift.players.message-json` sends a player a clickable message, kicks
+/// them with a multi-line coloured screen, cannot use any other player
+/// operation or stop a server, and both actions are in the audit log under
+/// its own login.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_players_only_login_messages_and_kicks_with_rich_text_and_is_audited() {
+    use rift::messaging::quic;
+    use rustls::pki_types::PrivateKeyDer;
+    timeout(Duration::from_secs(10), async {
+        let mut fixture = SessionFixture::new().await;
+        let broker = fixture.snapshot.messaging.clone();
+        let (current, receiver) = tokio::sync::watch::channel(fixture.snapshot.clone());
+        let audit = Arc::new(crate::operator::Store::open(None).unwrap());
+        let (commands, _requests) = tokio::sync::mpsc::channel(1);
+        let players = crate::messaging_runtime::PlayerRequests::new(broker.clone()).unwrap();
+        let controls = crate::messaging_runtime::Controls::new(broker.clone()).unwrap();
+        let services = [
+            tokio::spawn(players.run(receiver.clone(), audit.clone())),
+            tokio::spawn(controls.run(receiver, fixture.metrics.clone(), commands, audit.clone())),
+        ];
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let server_tls = quic::server_config_from_der(
+            vec![cert.cert.der().clone()],
+            PrivateKeyDer::Pkcs8(cert.signing_key.serialize_der().into()),
+        )
+        .unwrap();
+        let token = "relaxoban-test-token-with-at-least-32-bytes";
+        let server = quic::Server::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            server_tls,
+            broker.clone(),
+            quic::AuthConfig {
+                identities: vec![quic::Identity {
+                    name: "relaxoban".into(),
+                    token: token.into(),
+                    publish: vec![
+                        "rift.players.kick-json".into(),
+                        "rift.players.message-json".into(),
+                        // Even a grant for every control subject needs `control`.
+                        "rift.control.*".into(),
+                        "_INBOX.>".into(),
+                    ],
+                    subscribe: vec!["_INBOX.>".into()],
+                    control: false,
+                    players: true,
+                }],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let client = quic::Client::connect(
+            server.local_addr().unwrap(),
+            "localhost",
+            quic::client_config_from_der(vec![cert.cert.der().clone()]).unwrap(),
+            token,
+        )
+        .await
+        .unwrap();
+        let request = |subject: &'static str, payload: Value| {
+            let client = &client;
+            async move {
+                let reply = client
+                    .request(
+                        subject,
+                        bytes::Bytes::from(payload.to_string()),
+                        Duration::from_secs(5),
+                    )
+                    .await?;
+                Ok::<Value, rift::messaging::Error>(serde_json::from_slice(&reply.payload).unwrap())
+            }
+        };
+        let version = rift::protocol::ProtocolVersion::new(774).unwrap();
+
+        let appeal = json!({
+            "text": "Appeal here",
+            "color": "aqua",
+            "underlined": true,
+            "clickEvent": {"action": "open_url", "value": "https://example.org/appeal"},
+            "hoverEvent": {"action": "show_text", "contents": "Opens the appeal form"},
+        });
+        let reply = request(
+            "rift.players.message-json",
+            json!({"target": "Player", "text": appeal}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(reply, json!({"ok": true, "data": true}));
+        assert_eq!(
+            receive(&mut fixture.client, fixture.codec).await,
+            rift::protocol::system_component(version, &appeal).unwrap()
+        );
+
+        // Grants are per subject: the plain operations are not included.
+        let refused = request(
+            "rift.players.kick",
+            json!({"target": "Player", "reason": "x"}),
+        )
+        .await;
+        assert!(refused.is_err(), "kick was not granted: {refused:?}");
+        let refused = request("rift.control.stop", json!({"name": "default"})).await;
+        assert!(refused.is_err(), "control was not granted: {refused:?}");
+
+        let screen = json!({"text": "", "extra": [
+            {"text": "You are banned from this network\n", "color": "red", "bold": true},
+            {"text": "Reason: ", "color": "gray"},
+            {"text": "Cheating\n\n", "color": "white"},
+            {"text": "Appeal at example.org/appeal", "color": "aqua"},
+        ]});
+        let reply = request(
+            "rift.players.kick-json",
+            json!({"target": "Player", "reason": screen}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(reply, json!({"ok": true, "data": true}));
+        assert_eq!(
+            receive(&mut fixture.client, fixture.codec).await,
+            rift::protocol::disconnect_component(
+                Some(version),
+                rift::protocol::State::Play,
+                &screen
+            )
+            .unwrap()
+        );
+        fixture.task.await.unwrap().unwrap();
+        // The player is gone; the action still answers, with `false`.
+        let reply = request(
+            "rift.players.message-json",
+            json!({"target": "Player", "text": "gone"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(reply, json!({"ok": true, "data": false}));
+
+        let records = audit.audits();
+        let actions: Vec<_> = records["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|record| {
+                (
+                    record["actor"].as_str().unwrap().to_owned(),
+                    record["action"].as_str().unwrap().to_owned(),
+                    record["target"].as_str().unwrap().to_owned(),
+                    record["outcome"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        let has = |action: &str| {
+            actions.iter().any(|(actor, recorded, target, outcome)| {
+                actor == "bus:relaxoban"
+                    && recorded == action
+                    && target == "Player"
+                    && outcome == "ok"
+            })
+        };
+        assert!(has("players.message"), "{actions:?}");
+        assert!(has("players.kick"), "{actions:?}");
+        // A refused publication never reaches Rift's handlers.
+        assert!(
+            !actions
+                .iter()
+                .any(|(_, action, ..)| action.starts_with("control."))
+        );
+        drop(current);
+        server.shutdown().await;
+        for service in services {
+            service.abort();
+        }
     })
     .await
     .unwrap();

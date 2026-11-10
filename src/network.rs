@@ -1,6 +1,10 @@
 //! Policy and bounded attachment attempts shared by commands and outage recovery.
 use crate::{events::Connection, health, metrics::Metrics, runtime::Snapshot};
 use rift::session::{Session, SessionEvent};
+use rift::text::{
+    Args,
+    catalog::{self, Notice},
+};
 use std::{collections::HashSet, future::Future, io, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -158,8 +162,8 @@ impl Network<'_> {
                     SessionEvent::Packet => {}
                     SessionEvent::ProxyCommand(_) => {
                         if !command_notice_sent {
-                            timeout(Duration::from_secs(5), session.send_system_message(
-                                "A server is starting. Please wait for the current transfer.",
+                            timeout(Duration::from_secs(5), session.send_text(
+                                &catalog::notice(Notice::SwitchStarting),
                             )).await??;
                             command_notice_sent = true;
                         }
@@ -183,8 +187,8 @@ impl Network<'_> {
                     SessionEvent::ClientClosed => return Err(io::Error::new(
                         io::ErrorKind::UnexpectedEof, "client closed while destination was starting",
                     )),
-                    SessionEvent::Disconnected => return Err(io::Error::new(
-                        io::ErrorKind::PermissionDenied, "The current backend disconnected the player.",
+                    SessionEvent::Disconnected => return Err(rift::text::notice_error(
+                        io::ErrorKind::PermissionDenied, Notice::ConnectionBackendClosed,
                     )),
                     SessionEvent::BackendClosed | SessionEvent::BackendFailed => return Err(io::Error::new(
                         io::ErrorKind::ConnectionAborted, "current backend closed while destination was starting",
@@ -220,12 +224,19 @@ impl Network<'_> {
         primary: &str,
         use_initial: bool,
         name: &str,
+        uuid: Option<rift_permissions::Uuid>,
     ) -> io::Result<Vec<String>> {
         let config = &self.snapshot.config;
         if !use_initial && !config.can_access(primary, name) {
-            return Err(io::Error::new(
+            return Err(rift::text::notice_error(
                 io::ErrorKind::PermissionDenied,
-                "You do not have access to this server.",
+                Notice::LoginNoAccess,
+            ));
+        }
+        if !use_initial && !self.snapshot.dev_admits(primary, uuid) {
+            return Err(rift::text::notice_error(
+                io::ErrorKind::PermissionDenied,
+                Notice::LoginDevMode,
             ));
         }
         let candidates = if use_initial {
@@ -248,7 +259,7 @@ impl Network<'_> {
             .snapshot
             .candidates(&candidates)
             .into_iter()
-            .filter(|server| config.can_access(server, name))
+            .filter(|server| self.snapshot.admits(server, name, uuid))
             .collect())
     }
 
@@ -431,21 +442,20 @@ impl Network<'_> {
             .identity()
             .ok_or_else(|| io::Error::other("missing player identity"))?;
         let config = &self.snapshot.config;
+        let uuid = expected_uuid(session);
         let expanded = self.snapshot.candidates(candidates);
         let candidates: Vec<_> = expanded
             .iter()
             .filter(|server| {
                 server.as_str() != current
-                    && config.can_access(server, &identity.name)
+                    && self.snapshot.admits(server, &identity.name, uuid)
                     && self.snapshot.reachable(server)
                     && self.serves(server, session)
             })
             .collect();
         let mut deadline = Instant::now() + config.limits.connect_timeout;
-        let mut last_error = io::Error::new(
-            io::ErrorKind::NotConnected,
-            "No available server could be reached.",
-        );
+        let mut last_error =
+            rift::text::notice_error(io::ErrorKind::NotConnected, Notice::SwitchNoServer);
         for (index, name) in candidates.iter().enumerate() {
             if let Some(extension) = &mut session.extension
                 && let Err(error) = extension.before_transfer(name, reason).await
@@ -531,11 +541,12 @@ impl Network<'_> {
         let Some(identity) = session.identity() else {
             return Vec::new();
         };
+        let uuid = expected_uuid(session);
         config
             .backends
             .keys()
             .chain(config.service_groups.keys())
-            .filter(|name| *name != current && config.can_access(name, &identity.name))
+            .filter(|name| *name != current && self.snapshot.admits(name, &identity.name, uuid))
             .cloned()
             .collect()
     }
@@ -551,6 +562,8 @@ impl Network<'_> {
         let identity = session
             .identity()
             .ok_or_else(|| io::Error::other("missing player identity"))?;
+        let uuid = expected_uuid(session);
+        let admits = |server: &str| self.snapshot.admits(server, &identity.name, uuid);
         let words: Vec<_> = command.split_whitespace().collect();
         let extension_action = if let Some(extension) = &session.extension
             && words.first().is_some_and(|name| extension.intercepts(name))
@@ -559,9 +572,9 @@ impl Network<'_> {
                 Ok(action) => Some(action),
                 Err(error) => {
                     eprintln!("rift: {error}");
-                    Some(rift::extensions::Action::Message(
-                        "Extension command failed.".into(),
-                    ))
+                    Some(rift::extensions::Action::Message(catalog::notice(
+                        Notice::CommandFailed,
+                    )))
                 }
             }
         } else {
@@ -573,19 +586,24 @@ impl Network<'_> {
                 Action::Server(target) => (vec![target], None),
                 Action::Message(message) => (Vec::new(), Some(message)),
                 Action::Queue(target) => {
-                    let message = if !config.can_access(&target, &identity.name) {
-                        "You do not have access to that server.".into()
+                    let message = if !admits(&target) {
+                        catalog::notice(Notice::QueueNoAccess)
                     } else {
                         match session.extension.as_ref().unwrap().enqueue(&target) {
-                            Ok(position) => format!("Queued for {target}. Position: {position}."),
-                            Err(error) => error.to_string(),
+                            Ok(position) => catalog::notice_with(
+                                Notice::QueueJoined,
+                                &Args::new()
+                                    .text("server", target.as_str())
+                                    .text("position", position.to_string()),
+                            ),
+                            Err(error) => rift::text::reason(&error),
                         }
                     };
                     (Vec::new(), Some(message))
                 }
                 Action::LeaveQueue => {
                     session.extension.as_ref().unwrap().leave_queue();
-                    (Vec::new(), Some("Left the queue.".into()))
+                    (Vec::new(), Some(catalog::notice(Notice::QueueLeft)))
                 }
                 Action::Continue => return Ok(None),
                 Action::Deny(_) => unreachable!(),
@@ -596,39 +614,39 @@ impl Network<'_> {
                     let servers: Vec<_> = config
                         .backends
                         .keys()
-                        .filter(|server| config.can_access(server, &identity.name))
+                        .filter(|server| admits(server))
                         .map(String::as_str)
                         .collect();
                     (
                         Vec::new(),
-                        Some(format!(
-                            "Current server: {current}. Available servers: {}",
-                            servers.join(", ")
+                        Some(catalog::notice_with(
+                            Notice::ServerList,
+                            &Args::new()
+                                .text("current", current)
+                                .text("servers", servers.join(", ")),
                         )),
                     )
                 }
-                ["server", target] if *target == current => {
-                    (Vec::new(), Some(format!("You are already on {current}.")))
-                }
-                ["server", target]
-                    if !config.is_destination(target)
-                        || !config.can_access(target, &identity.name) =>
-                {
-                    (
-                        Vec::new(),
-                        Some("Server unavailable or you do not have access to it.".into()),
-                    )
+                ["server", target] if *target == current => (
+                    Vec::new(),
+                    Some(catalog::notice_with(
+                        Notice::ServerAlreadyOn,
+                        &Args::new().text("current", current),
+                    )),
+                ),
+                ["server", target] if !config.is_destination(target) || !admits(target) => {
+                    (Vec::new(), Some(catalog::notice(Notice::ServerUnavailable)))
                 }
                 ["server", target] => (vec![(*target).to_owned()], None),
                 ["hub"] if config.network.hubs.iter().any(|hub| hub == current) => {
-                    (Vec::new(), Some("You are already in a hub.".into()))
+                    (Vec::new(), Some(catalog::notice(Notice::HubAlready)))
                 }
                 ["hub"] => (config.network.hubs.clone(), None),
-                _ => (Vec::new(), Some("Usage: /server [name] or /hub".into())),
+                _ => (Vec::new(), Some(catalog::notice(Notice::ServerUsage))),
             }
         };
         if let Some(message) = message {
-            session.send_system_message(&message).await?;
+            session.send_text(&message).await?;
             return Ok(None);
         }
         match self
@@ -643,9 +661,15 @@ impl Network<'_> {
             {
                 // The old attachment remains usable after preflight failures,
                 // including a target's ban or whitelist rejection.
-                session
-                    .send_system_message(&format!("Unable to switch servers: {error}"))
-                    .await?;
+                let reason = rift::text::reason(&error);
+                let reason = catalog::notice_with(
+                    Notice::SwitchFailed,
+                    &Args::new().component(
+                        "reason",
+                        reason.for_client(rift::text::Profile::UNKNOWN).into_owned(),
+                    ),
+                );
+                session.send_text(&reason).await?;
                 Ok(None)
             }
             Err(error) => Err(error),

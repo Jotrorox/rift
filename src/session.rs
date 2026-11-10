@@ -397,6 +397,8 @@ pub struct Session<C, B> {
     login_start: Option<Packet>,
     identity: Option<PlayerIdentity>,
     authenticated_profile: Option<AuthenticatedProfile>,
+    /// The chat key a 1.19–1.19.2 client logged in with.
+    profile_key: Option<protocol::ProfileKey>,
     forwarding: Option<Forwarding>,
     network: bool,
     bungeecord: bool,
@@ -440,6 +442,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             login_start: None,
             identity: None,
             authenticated_profile: None,
+            profile_key: None,
             forwarding: None,
             network: false,
             bungeecord: false,
@@ -548,9 +551,9 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
     pub fn version(&self) -> io::Result<ProtocolVersion> {
         let version = ProtocolVersion::new(self.handshake.protocol)?;
         if self.handshake.next_state == NextState::Transfer && !version.has_transfer() {
-            return Err(io::Error::new(
+            return Err(crate::text::notice_error(
                 io::ErrorKind::Unsupported,
-                "Transfer requires Minecraft 1.20.5 or newer.",
+                crate::text::catalog::Notice::LoginTransferVersion,
             ));
         }
         Ok(version)
@@ -613,30 +616,60 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         }
         let requested = self.read_login_start().await?;
         let version = self.version()?;
+        let key = protocol::start_profile_key(version, self.login_start.as_ref().unwrap())?;
         let profile = authenticator
-            .authenticate(&mut self.client.io, version, &requested.name)
+            .authenticate(
+                &mut self.client.io,
+                version,
+                &requested.name,
+                key.as_ref().map(|key| key.public_key.as_slice()),
+            )
             .await?;
-        self.login_start = Some(forwarding::login_start(&profile, version));
+        self.login_start = Some(forwarding::login_start(&profile, version, key.as_ref()));
+        self.profile_key = key;
         self.authenticated_profile = Some(profile);
         Ok(())
     }
 
-    pub fn set_forwarding(&mut self, secret: Arc<[u8]>, address: IpAddr) -> io::Result<()> {
+    /// Forward the authenticated player to every backend this session joins.
+    pub fn set_forwarding(
+        &mut self,
+        mode: crate::config::ForwardingMode,
+        secret: Option<Arc<[u8]>>,
+        address: IpAddr,
+    ) -> io::Result<()> {
+        use crate::config::ForwardingMode;
         if self.backend.is_some() || self.identity.is_some() {
             return Err(protocol::invalid(
                 "forwarding must be configured before backend login",
             ));
         }
-        if self.version()?.number() < 761 {
-            return Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "Velocity forwarding requires Minecraft 1.19.3 or newer in Rift.",
-            ));
+        let version = self.version()?;
+        if version.number() < mode.minimum_protocol() {
+            return Err(velocity_needs_1_13());
         }
         let profile = self.authenticated_profile.clone().ok_or_else(|| {
-            protocol::invalid("Velocity forwarding requires an authenticated profile")
+            protocol::invalid("player forwarding requires an authenticated profile")
         })?;
-        self.forwarding = Some(Forwarding::new(secret, address, profile)?);
+        let missing = || protocol::invalid("player forwarding requires a secret");
+        let method = match mode {
+            ForwardingMode::Velocity => forwarding::Method::Velocity {
+                secret: secret.ok_or_else(missing)?,
+            },
+            ForwardingMode::BungeeCord => forwarding::Method::BungeeCord,
+            ForwardingMode::BungeeGuard => forwarding::Method::BungeeGuard {
+                token: std::str::from_utf8(&secret.ok_or_else(missing)?)
+                    .map_err(|_| protocol::invalid("BungeeGuard token must be UTF-8"))?
+                    .into(),
+            },
+        };
+        self.forwarding = Some(Forwarding::new(
+            method,
+            address,
+            profile,
+            self.profile_key.clone(),
+            version,
+        )?);
         Ok(())
     }
 
@@ -721,8 +754,15 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         let translator = Translator::new(version.number(), backend_version.number())?;
         if self.authenticated_profile.is_some() && self.forwarding.is_none() {
             return Err(protocol::invalid(
-                "Authenticated backend login requires Velocity forwarding.",
+                "Authenticated backend login requires player forwarding.",
             ));
+        }
+        if self
+            .forwarding
+            .as_ref()
+            .is_some_and(|forwarding| backend_version.number() < forwarding.minimum_protocol())
+        {
+            return Err(velocity_needs_1_13());
         }
         if self.handshake.next_state == NextState::Status {
             return Err(protocol::invalid(
@@ -752,6 +792,11 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         handshake.protocol = backend_version.number();
         if replacing || self.authenticated_profile.is_some() {
             handshake.next_state = NextState::Login;
+        }
+        if let Some(forwarding) = &self.forwarding
+            && let Some(address) = forwarding.handshake_address(&self.handshake.address)?
+        {
+            handshake.address = address;
         }
         backend
             .codec
@@ -785,8 +830,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                             SessionEvent::BackendClosed | SessionEvent::BackendFailed => {}
                             SessionEvent::ClientClosed => return Err(io::Error::new(
                                 io::ErrorKind::UnexpectedEof, "client closed during replacement login")),
-                            SessionEvent::Disconnected => return Err(io::Error::new(
-                                io::ErrorKind::PermissionDenied, "The current backend disconnected the player.")),
+                            SessionEvent::Disconnected => return Err(crate::text::notice_error(io::ErrorKind::PermissionDenied, crate::text::catalog::Notice::ConnectionBackendClosed)),
                         }
                     }
                 }
@@ -971,9 +1015,9 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                             .observe(version, Direction::Clientbound, &packet)?;
                         self.client
                             .queue(version, Direction::Clientbound, &packet)?;
-                        return Err(io::Error::new(
+                        return Err(crate::text::notice_error(
                             io::ErrorKind::PermissionDenied,
-                            "The current backend disconnected the player.",
+                            crate::text::catalog::Notice::ConnectionBackendClosed,
                         ));
                     }
                     bytes += packet.data.len();
@@ -993,9 +1037,9 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                 Poll::Pending => break,
             }
         }
-        Err(io::Error::new(
+        Err(crate::text::notice_error(
             io::ErrorKind::WouldBlock,
-            "The current server is busy. Please retry the switch.",
+            crate::text::catalog::Notice::SwitchBusy,
         ))
     }
 
@@ -1031,9 +1075,9 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                     return Ok(());
                 }
                 Poll::Ready(Ok(SessionEvent::Disconnected)) => {
-                    return Err(io::Error::new(
+                    return Err(crate::text::notice_error(
                         io::ErrorKind::PermissionDenied,
-                        "The current backend disconnected the player.",
+                        crate::text::catalog::Notice::ConnectionBackendClosed,
                     ));
                 }
                 Poll::Ready(Ok(SessionEvent::ClientClosed)) => {
@@ -1052,9 +1096,9 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                     {
                         // The decoded ban is authoritative even if delivering
                         // it is backpressured. The owner will flush it on close.
-                        return Err(io::Error::new(
+                        return Err(crate::text::notice_error(
                             io::ErrorKind::PermissionDenied,
-                            "The current backend disconnected the player.",
+                            crate::text::catalog::Notice::ConnectionBackendClosed,
                         ));
                     }
                     if self.client.pending.is_some() {
@@ -1077,9 +1121,9 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                 }
             }
         }
-        Err(io::Error::new(
+        Err(crate::text::notice_error(
             io::ErrorKind::WouldBlock,
-            "The current server is busy. Please retry the switch.",
+            crate::text::catalog::Notice::SwitchBusy,
         ))
     }
 
@@ -1112,9 +1156,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                     .codec
                     .set_compression(read_varint(&mut packet.data.as_slice())?),
                 PacketKind::LoginSuccess => {
-                    backend
-                        .login_plugins
-                        .require_forwarded(forwarding.is_some())?;
+                    backend.login_plugins.require_forwarded(forwarding)?;
                     if protocol::success_identity(version, &packet)? != *expected {
                         return Err(protocol::invalid(
                             "replacement backend changed the player identity",
@@ -1140,10 +1182,15 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                 PacketKind::Disconnect => {
                     // A ban/whitelist rejection is authoritative. Preserve its
                     // text for the requesting player and do not try another hub.
-                    let reason = protocol::read_string(&mut packet.data.as_slice(), 32767)
-                        .unwrap_or("The destination server denied access.")
-                        .to_owned();
-                    return Err(io::Error::new(io::ErrorKind::PermissionDenied, reason));
+                    // Login disconnects carry a JSON text component; keep its
+                    // formatting instead of showing the JSON.
+                    let reason = match protocol::read_string(&mut packet.data.as_slice(), 32767) {
+                        Ok(raw) => crate::text::Text::from_backend_json(raw),
+                        Err(_) => crate::text::catalog::notice(
+                            crate::text::catalog::Notice::ConnectionDenied,
+                        ),
+                    };
+                    return Err(crate::text::error(io::ErrorKind::PermissionDenied, reason));
                 }
                 PacketKind::LoginPluginRequest => {
                     let response = if let Some(response) =
@@ -1244,6 +1291,27 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             .await
     }
 
+    /// A chat message from plain text or a validated JSON text component.
+    pub async fn send_text(&mut self, message: &crate::text::Text) -> io::Result<()> {
+        match message {
+            crate::text::Text::Plain(text) => self.send_system_message(text).await,
+            crate::text::Text::Component(component) => self.send_system_component(component).await,
+        }
+    }
+
+    /// An action bar from plain text or a validated JSON text component.
+    pub async fn send_action_bar_text(&mut self, message: &crate::text::Text) -> io::Result<()> {
+        let crate::text::Text::Component(component) = message else {
+            return self.send_action_bar(&message.to_string()).await;
+        };
+        self.client.flush_pending().await?;
+        if !self.client.state.settled(State::Play) {
+            return Err(protocol::invalid("action bar messages require play state"));
+        }
+        self.send_client(&protocol::action_bar_component(self.version()?, component)?)
+            .await
+    }
+
     pub async fn send_action_bar(&mut self, message: &str) -> io::Result<()> {
         self.client.flush_pending().await?;
         if !self.client.state.settled(State::Play) {
@@ -1256,8 +1324,8 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
     /// `times` are fade-in, stay and fade-out ticks.
     pub async fn send_title(
         &mut self,
-        title: &str,
-        subtitle: Option<&str>,
+        title: Option<&crate::text::Text>,
+        subtitle: Option<&crate::text::Text>,
         times: [i32; 3],
     ) -> io::Result<()> {
         self.client.flush_pending().await?;
@@ -1690,7 +1758,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                         PacketKind::LoginSuccess => {
                             backend
                                 .login_plugins
-                                .require_forwarded(self.forwarding.is_some())?;
+                                .require_forwarded(self.forwarding.as_ref())?;
                             let identity = protocol::success_identity(version, &packet)?;
                             let requested = protocol::start_identity(
                                 version,
@@ -1706,7 +1774,15 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                                     || identity.name != profile.name
                                 {
                                     return Err(protocol::invalid(
-                                        "backend changed the authenticated player identity",
+                                        if self
+                                            .forwarding
+                                            .as_ref()
+                                            .is_some_and(|forwarding| !forwarding.velocity())
+                                        {
+                                            "Backend ignored BungeeCord forwarding. Set settings.bungeecord: true in spigot.yml."
+                                        } else {
+                                            "backend changed the authenticated player identity"
+                                        },
                                     ));
                                 }
                                 forwarding::login_success(profile, version, &packet)?
@@ -1807,6 +1883,14 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         .await
     }
 
+    /// Disconnect with plain text or a validated JSON text component.
+    pub async fn disconnect_text(&mut self, reason: &crate::text::Text) -> io::Result<()> {
+        match reason {
+            crate::text::Text::Plain(text) => self.disconnect(text).await,
+            crate::text::Text::Component(component) => self.disconnect_component(component).await,
+        }
+    }
+
     async fn disconnect_with(
         &mut self,
         packet: impl FnOnce(Option<ProtocolVersion>, State) -> io::Result<Packet>,
@@ -1904,6 +1988,13 @@ fn sync_world(
         world.dimension.as_deref(),
         world.gamemode.map(protocol::GameMode::name),
     );
+}
+
+fn velocity_needs_1_13() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        "Velocity forwarding requires Minecraft 1.13 or newer. Use forwarding.mode = 'bungeeguard' for older versions.",
+    )
 }
 
 fn encryption_unsupported() -> io::Error {

@@ -7,6 +7,7 @@ use crate::{
     permissions::{self, Authority},
     protocol::Suggestion,
     script,
+    text::catalog::Notice,
 };
 use mlua::{Function, Table, Value};
 use rift_permissions::{Actor, ChangeEvent, ContextSet, Group, Node, SubjectRef, Tristate, Uuid};
@@ -97,6 +98,11 @@ const MAX_SUGGESTION_RESULTS: usize = 1024;
 
 fn invalid(message: impl ToString) -> io::Error {
     io::Error::other(message.to_string())
+}
+
+/// An error showing Rift's message `notice` to the player.
+fn notice(notice: Notice) -> io::Error {
+    crate::text::notice_error(io::ErrorKind::Other, notice)
 }
 pub(crate) fn fields(table: &Table, allowed: &[&str]) -> mlua::Result<()> {
     for pair in table.clone().pairs::<String, Value>() {
@@ -366,7 +372,7 @@ impl ExtensionScript {
                         || context_providers.len() >= MAX_CONTEXT_PROVIDERS
                     {
                         return Err(mlua::Error::runtime(format!(
-                            "context provider {key:?}: use a custom key of 1 to 64 bytes of [a-z0-9_.:-] (not server, world, dimension or gamemode), at most {MAX_CONTEXT_PROVIDERS} providers"
+                            "context provider {key:?}: use a custom key of 1 to 64 bytes of [a-z0-9_.:-] (not server, group, world, dimension or gamemode), at most {MAX_CONTEXT_PROVIDERS} providers"
                         )));
                     }
                     context_providers.insert(key);
@@ -425,7 +431,7 @@ impl ExtensionScript {
             input,
             deadline,
             runtime,
-            || Action::Message("You do not have permission to use this command.".into()),
+            || Action::Message(crate::text::catalog::notice(Notice::CommandNoPermission)),
             parse_action,
         )
     }
@@ -616,14 +622,16 @@ pub(crate) fn dialog_fields(
 const PERMISSION_EVENTS: &str = "permission_change";
 
 /// A decision hook's answer. Serialized like a Lua result table:
-/// `"continue"`, `{"deny":"reason"}`, `"leave_queue"`.
+/// `"continue"`, `{"deny":"reason"}`, `"leave_queue"`. A deny reason or a
+/// message is a string of plain text or a JSON text component (an object
+/// or a list).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Action {
     Continue,
-    Deny(String),
+    Deny(crate::text::Text),
     Server(String),
-    Message(String),
+    Message(crate::text::Text),
     Queue(String),
     LeaveQueue,
 }
@@ -657,6 +665,19 @@ pub(crate) fn parse_action(hook: &str, value: Value) -> mlua::Result<Action> {
     if key == "leave_queue" && *value == Value::Boolean(true) {
         return Ok(Action::LeaveQueue);
     }
+    if key == "deny" || key == "message" {
+        let label = if key == "deny" {
+            "deny reason"
+        } else {
+            "message"
+        };
+        let text = crate::text::Text::lua(value.clone(), label).map_err(mlua::Error::runtime)?;
+        return Ok(if key == "deny" {
+            Action::Deny(text)
+        } else {
+            Action::Message(text)
+        });
+    }
     let Value::String(value) = value else {
         return Err(mlua::Error::runtime("decision requires a string"));
     };
@@ -667,9 +688,7 @@ pub(crate) fn parse_action(hook: &str, value: Value) -> mlua::Result<Action> {
         ));
     }
     Ok(match key.as_str() {
-        "deny" => Action::Deny(value),
         "server" => Action::Server(value),
-        "message" => Action::Message(value),
         "queue" => Action::Queue(value),
         _ => return Err(mlua::Error::runtime("invalid decision")),
     })
@@ -717,9 +736,14 @@ pub(crate) fn parse_suggestions(_hook: &str, value: Value) -> mlua::Result<Vec<S
                 fields(&entry, &["text", "tooltip"])?;
                 Suggestion {
                     text: text(entry.raw_get("text")?, "text")?,
+                    // A string or a chat component table.
                     tooltip: match entry.raw_get::<Value>("tooltip")? {
                         Value::Nil => None,
-                        tooltip => Some(text(tooltip, "tooltip")?),
+                        tooltip @ Value::Table(_) => Some(
+                            crate::text::Text::lua(tooltip, "tooltip")
+                                .map_err(mlua::Error::runtime)?,
+                        ),
+                        tooltip => Some(crate::text::Text::Plain(text(tooltip, "tooltip")?)),
                     },
                 }
             }
@@ -1024,6 +1048,8 @@ impl Extensions {
     pub fn update_destinations(&self, config: &Config) {
         // Publish capacity membership before callbacks can select new names.
         *self.groups.lock().unwrap() = group_members(config);
+        self.permissions
+            .set_service_groups(config.service_groups.keys());
         *self.backends.lock().unwrap_or_else(|e| e.into_inner()) = config
             .backends
             .keys()
@@ -1232,6 +1258,20 @@ pub struct ExtensionSession {
     jobs: Arc<Semaphore>,
 }
 impl ExtensionSession {
+    /// Player names for completion: the ones this player may see.
+    fn visible_names(&self) -> Vec<String> {
+        let uuid = Uuid::parse(&self.context.uuid)
+            .map(|uuid| *uuid.as_bytes())
+            .unwrap_or_default();
+        let holds = |node: &str| self.runtime.permits(&self.context.uuid, node);
+        self.runtime
+            .players
+            .names_for(crate::players::Viewer::Player {
+                uuid,
+                holds: &holds,
+            })
+    }
+
     fn script_commands(&self) -> impl Iterator<Item = (&String, &Command)> {
         self.runtime
             .script
@@ -1325,12 +1365,7 @@ impl ExtensionSession {
                 let suggestions = match command.suggest {
                     SuggestKind::None => Vec::new(),
                     SuggestKind::Fixed(names) => return Ok(complete_names(names, word)),
-                    SuggestKind::Players => {
-                        return Ok(complete_names(
-                            self.runtime.players.names().into_values().collect(),
-                            word,
-                        ));
-                    }
+                    SuggestKind::Players => return Ok(complete_names(self.visible_names(), word)),
                     SuggestKind::Servers => return Ok(complete_names(servers(), word)),
                     SuggestKind::Dynamic => {
                         let mut input = self.context.clone();
@@ -1353,12 +1388,7 @@ impl ExtensionSession {
         let word = args.rsplit(' ').next().unwrap_or_default();
         let suggestions = match command.suggest {
             Suggest::None => Vec::new(),
-            Suggest::Players => {
-                return Ok(complete_names(
-                    self.runtime.players.names().into_values().collect(),
-                    word,
-                ));
-            }
+            Suggest::Players => return Ok(complete_names(self.visible_names(), word)),
             Suggest::Servers => return Ok(complete_names(servers(), word)),
             Suggest::Lua => {
                 let mut input = self.context.clone();
@@ -1405,9 +1435,9 @@ impl ExtensionSession {
             CommandOwner::Plugin(_, command) => command.permission.clone(),
         };
         if !self.runtime.permits(&self.context.uuid, &permission) {
-            return Ok(Action::Message(
-                "You do not have permission to use this command.".into(),
-            ));
+            return Ok(Action::Message(crate::text::catalog::notice(
+                Notice::CommandNoPermission,
+            )));
         }
         let mut input = self.context.clone();
         input.command = Some(name.into());
@@ -1445,9 +1475,7 @@ impl ExtensionSession {
             .call("before_transfer", &input, &self.jobs)
             .await?
         {
-            Action::Deny(reason) => {
-                return Err(io::Error::new(io::ErrorKind::PermissionDenied, reason));
-            }
+            Action::Deny(reason) => return Err(crate::text::denied(reason)),
             Action::Continue => {}
             _ => unreachable!(),
         }
@@ -1485,9 +1513,9 @@ impl ExtensionSession {
                 .and_then(|q| q.front())
                 .map(|(id, _)| *id);
             if used >= capacity || head.is_some_and(|id| id != self.context.id) {
-                return Err(io::Error::new(
+                return Err(crate::text::notice_error(
                     io::ErrorKind::WouldBlock,
-                    "Server is full; use the queue command.",
+                    Notice::QueueServerFull,
                 ));
             }
         }
@@ -1559,7 +1587,7 @@ impl ExtensionSession {
 
     pub fn enqueue(&self, target: &str) -> io::Result<usize> {
         if !self.queues().contains_key(target) {
-            return Err(invalid("No queue is configured for that server."));
+            return Err(notice(Notice::QueueNotConfigured));
         }
         if self.context.server.as_deref().is_some_and(|current| {
             current == target
@@ -1571,7 +1599,7 @@ impl ExtensionSession {
                     .get(target)
                     .is_some_and(|members| members.contains(current))
         }) {
-            return Err(invalid("You are already on that server."));
+            return Err(notice(Notice::QueueAlreadyOn));
         }
         let mut host = self.runtime.host.lock().unwrap();
         if let Some(queue) = host.queues.get(target)
@@ -1580,7 +1608,7 @@ impl ExtensionSession {
             return Ok(position + 1);
         }
         if host.queues.get(target).is_some_and(|q| q.len() >= 1024) {
-            return Err(invalid("Queue is full."));
+            return Err(notice(Notice::QueueFull));
         }
         for queue in host.queues.values_mut() {
             queue.retain(|(id, _)| *id != self.context.id);
@@ -1602,7 +1630,7 @@ impl ExtensionSession {
                 && entered.elapsed() >= Duration::from_secs(300)
             {
                 queue.retain(|(id, _)| *id != self.context.id);
-                return Err(invalid("Queue expired after five minutes."));
+                return Err(notice(Notice::QueueExpired));
             }
             if queue.front().is_some_and(|(id, _)| *id == self.context.id) {
                 head = Some(server.clone());

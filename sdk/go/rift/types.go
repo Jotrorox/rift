@@ -1,6 +1,8 @@
 package rift
 
 import (
+	"strings"
+
 	"go.bytecodealliance.org/cm"
 
 	"github.com/Jotrorox/rift/sdk/go/gen/rift/plugin/types"
@@ -100,9 +102,9 @@ func (d RouteDecision) lower() types.RouteDecision {
 }
 
 // Action answers a decision hook. Each hook accepts a subset:
-//   - login, before-transfer: Continue, Deny
-//   - initial-server: Continue, Deny, Server
-//   - command: Continue, Message, Server, Queue, LeaveQueue
+//   - login, before-transfer: Continue, Deny, DenyJSON
+//   - initial-server: Continue, Deny, DenyJSON, Server
+//   - command: Continue, Message, MessageJSON, Server, Queue, LeaveQueue
 type Action struct {
 	kind  uint8
 	value string
@@ -115,6 +117,8 @@ const (
 	actionMessage
 	actionQueue
 	actionLeaveQueue
+	actionDenyJSON
+	actionMessageJSON
 )
 
 // Continue lets the event proceed unchanged.
@@ -123,11 +127,19 @@ func Continue() Action { return Action{kind: actionContinue} }
 // Deny refuses the login or transfer with a reason shown to the player.
 func Deny(reason string) Action { return Action{kind: actionDeny, value: reason} }
 
+// DenyJSON refuses the login or transfer with a JSON text component of at
+// most 32 KiB, for colours, line breaks and hover text.
+func DenyJSON(reason string) Action { return Action{kind: actionDenyJSON, value: reason} }
+
 // Server sends the player to a server.
 func Server(name string) Action { return Action{kind: actionServer, value: name} }
 
 // Message replies to a command with a chat message.
 func Message(text string) Action { return Action{kind: actionMessage, value: text} }
+
+// MessageJSON replies to a command with a JSON text component of at most
+// 32 KiB, for colours, hover text and click events.
+func MessageJSON(text string) Action { return Action{kind: actionMessageJSON, value: text} }
 
 // Queue puts the player into a server's queue.
 func Queue(server string) Action { return Action{kind: actionQueue, value: server} }
@@ -147,15 +159,89 @@ func (a Action) lower() types.Action {
 		return types.ActionQueue(a.value)
 	case actionLeaveQueue:
 		return types.ActionLeaveQueue()
+	// Hosts before rift:plugin 0.1.2 call the handler hooks and have no
+	// rich text: they get the component's words.
+	case actionDenyJSON:
+		return types.ActionDeny(componentWords(a.value))
+	case actionMessageJSON:
+		return types.ActionMessage(componentWords(a.value))
 	default:
 		return types.ActionContinue()
 	}
+}
+
+// lowerDecision is the answer of the decisions export (rift:plugin 0.1.2).
+func (a Action) lowerDecision() types.Decision {
+	switch a.kind {
+	case actionDeny:
+		return types.DecisionDeny(a.value)
+	case actionServer:
+		return types.DecisionServer(a.value)
+	case actionMessage:
+		return types.DecisionMessage(a.value)
+	case actionQueue:
+		return types.DecisionQueue(a.value)
+	case actionLeaveQueue:
+		return types.DecisionLeaveQueue()
+	case actionDenyJSON:
+		return types.DecisionDenyJSON(a.value)
+	case actionMessageJSON:
+		return types.DecisionMessageJSON(a.value)
+	default:
+		return types.DecisionContinue()
+	}
+}
+
+// componentWords is the visible text of a JSON text component, without
+// formatting; text that is not a valid component is returned as it is. It
+// uses the configuration scanner rather than encoding/json, which would add
+// hundreds of kilobytes to every plugin.
+func componentWords(text string) string {
+	p := &jsonScanner{s: text}
+	var out strings.Builder
+	if !p.words(&out, 0) {
+		return text
+	}
+	p.ws()
+	if p.i != len(p.s) {
+		return text
+	}
+	return out.String()
 }
 
 // Suggestion is one completion offered by the suggest hook.
 type Suggestion struct {
 	Text    string
 	Tooltip *string
+}
+
+// RichSuggestion is a Suggestion whose tooltip is a JSON text component
+// (rift:plugin 0.1.4), offered by an OnRichSuggest handler. Use a text
+// builder: TooltipJSON: rift.Ptr(rift.Mini("<gray>A server").JSON()).
+type RichSuggestion struct {
+	Text        string
+	TooltipJSON *string // nil or "" for no tooltip
+}
+
+func (s Suggestion) rich() RichSuggestion {
+	out := RichSuggestion{Text: s.Text}
+	if s.Tooltip != nil {
+		quoted := jsonQuote(*s.Tooltip)
+		out.TooltipJSON = &quoted
+	}
+	return out
+}
+
+// plain is the suggestion for a host before rift:plugin 0.1.4: the
+// tooltip's words.
+func (s RichSuggestion) plain() Suggestion {
+	out := Suggestion{Text: s.Text}
+	if s.TooltipJSON != nil {
+		if words := componentWords(*s.TooltipJSON); words != "" {
+			out.Tooltip = &words
+		}
+	}
+	return out
 }
 
 // SuggestKind says how a command's arguments are completed.
@@ -240,6 +326,70 @@ type StatusOverride struct {
 	Favicon    *string  // a data:image/png;base64,... URI
 }
 
+// RichStatusOverride is a StatusOverride whose version and player-sample
+// lines are JSON text components (rift:plugin 0.1.4), returned by an
+// OnRichStatus handler. Clients show them as § codes.
+type RichStatusOverride struct {
+	MotdJSON    *string // a JSON text component or a JSON string
+	VersionJSON *string
+	Protocol    *int32
+	Online      *uint32
+	MaxPlayers  *uint32
+	SampleJSON  []string // nil keeps the sample; use an empty slice to clear it
+	Favicon     *string  // a data:image/png;base64,... URI
+}
+
+func (s StatusOverride) rich() RichStatusOverride {
+	out := RichStatusOverride{
+		MotdJSON: s.MotdJSON, Protocol: s.Protocol, Online: s.Online, MaxPlayers: s.MaxPlayers, Favicon: s.Favicon,
+	}
+	if s.Version != nil {
+		quoted := jsonQuote(*s.Version)
+		out.VersionJSON = &quoted
+	}
+	if s.Sample != nil {
+		out.SampleJSON = make([]string, len(s.Sample))
+		for i, line := range s.Sample {
+			out.SampleJSON[i] = jsonQuote(line)
+		}
+	}
+	return out
+}
+
+// plain is the override for a host before rift:plugin 0.1.4: the words of
+// the version and sample lines.
+func (s RichStatusOverride) plain() StatusOverride {
+	out := StatusOverride{
+		MotdJSON: s.MotdJSON, Protocol: s.Protocol, Online: s.Online, MaxPlayers: s.MaxPlayers, Favicon: s.Favicon,
+	}
+	if s.VersionJSON != nil {
+		words := componentWords(*s.VersionJSON)
+		out.Version = &words
+	}
+	if s.SampleJSON != nil {
+		out.Sample = make([]string, len(s.SampleJSON))
+		for i, line := range s.SampleJSON {
+			out.Sample[i] = componentWords(line)
+		}
+	}
+	return out
+}
+
+func (s RichStatusOverride) lower() types.RichStatusOverride {
+	out := types.RichStatusOverride{
+		MotdJSON:    lowerOptString(s.MotdJSON),
+		VersionJSON: lowerOptString(s.VersionJSON),
+		Protocol:    lowerOpt(s.Protocol),
+		Online:      lowerOpt(s.Online),
+		MaxPlayers:  lowerOpt(s.MaxPlayers),
+		Favicon:     lowerOptString(s.Favicon),
+	}
+	if s.SampleJSON != nil {
+		out.SampleJSON = cm.Some(cm.ToList(s.SampleJSON))
+	}
+	return out
+}
+
 func (s StatusOverride) lower() types.StatusOverride {
 	out := types.StatusOverride{
 		MotdJSON:   lowerOptString(s.MotdJSON),
@@ -307,6 +457,17 @@ type PlayerInfo struct {
 	Name         string
 	Server       string // the backend the player is connected to
 	Protocol     int32
+}
+
+// TitleJSON is a title with JSON text components (rift:plugin 0.1.4), shown
+// with SendTitleJSON; times are ticks. An empty TitleJSON shows only the
+// subtitle.
+type TitleJSON struct {
+	TitleJSON    string
+	SubtitleJSON *string
+	FadeIn       int32
+	Stay         int32
+	FadeOut      int32
 }
 
 // Title is a title shown to one player; times are ticks.

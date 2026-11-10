@@ -299,3 +299,173 @@ func (p *jsonScanner) skip(depth int) bool {
 		return p.number()
 	}
 }
+
+// words appends the visible text of one JSON text component value: strings,
+// list items, and an object's text (or translation fallback or key)
+// followed by its extra components. Everything else is validated and
+// skipped.
+func (p *jsonScanner) words(out *strings.Builder, depth int) bool {
+	if depth > 64 {
+		return false
+	}
+	p.ws()
+	switch {
+	case p.peek('"'):
+		text, ok := p.str()
+		out.WriteString(text)
+		return ok
+	case p.consume('['):
+		p.ws()
+		if p.consume(']') {
+			return true
+		}
+		for {
+			if !p.words(out, depth+1) {
+				return false
+			}
+			p.ws()
+			if p.consume(']') {
+				return true
+			}
+			if !p.consume(',') {
+				return false
+			}
+		}
+	case p.consume('{'):
+		var text, fallback, translate string
+		var extra strings.Builder
+		// The mini and legacy authoring objects lose their tags and codes.
+		var mini, legacy, marker *string
+		args := map[string]string{}
+		p.ws()
+		if !p.consume('}') {
+			for {
+				p.ws()
+				key, ok := p.str()
+				if !ok {
+					return false
+				}
+				p.ws()
+				if !p.consume(':') {
+					return false
+				}
+				p.ws()
+				switch {
+				case key == "extra":
+					if !p.words(&extra, depth+1) {
+						return false
+					}
+				case (key == "mini" || key == "legacy" || key == "marker") && p.peek('"'):
+					value, ok := p.str()
+					if !ok {
+						return false
+					}
+					switch key {
+					case "mini":
+						mini = &value
+					case "legacy":
+						legacy = &value
+					default:
+						marker = &value
+					}
+				case key == "args" && p.peek('{'):
+					if !p.argWords(args, depth+1) {
+						return false
+					}
+				case (key == "text" || key == "fallback" || key == "translate") && p.peek('"'):
+					value, ok := p.str()
+					if !ok {
+						return false
+					}
+					switch key {
+					case "text":
+						text = value
+					case "fallback":
+						fallback = value
+					default:
+						translate = value
+					}
+				default:
+					if !p.skip(depth + 1) {
+						return false
+					}
+				}
+				p.ws()
+				if p.consume('}') {
+					break
+				}
+				if !p.consume(',') {
+					return false
+				}
+			}
+		}
+		switch {
+		case mini != nil:
+			stripMarkup(*mini, out, func(name string, out *strings.Builder) { out.WriteString(args[name]) })
+			return true
+		case legacy != nil:
+			m := '&'
+			if marker != nil {
+				if r, _ := utf8.DecodeRuneInString(*marker); r != utf8.RuneError {
+					m = r
+				}
+			}
+			stripLegacy(*legacy, m, out)
+			return true
+		case text != "":
+			out.WriteString(text)
+		case fallback != "":
+			out.WriteString(fallback)
+		default:
+			out.WriteString(translate)
+		}
+		out.WriteString(extra.String())
+		return true
+	default:
+		return p.skip(depth)
+	}
+}
+
+// argWords reads the args object of a mini object: each argument's words by
+// lowercase name.
+func (p *jsonScanner) argWords(args map[string]string, depth int) bool {
+	if depth > 64 || !p.consume('{') {
+		return false
+	}
+	p.ws()
+	if p.consume('}') {
+		return true
+	}
+	for {
+		p.ws()
+		name, ok := p.str()
+		if !ok {
+			return false
+		}
+		p.ws()
+		if !p.consume(':') {
+			return false
+		}
+		p.ws()
+		var value strings.Builder
+		if p.peek('"') || p.peek('{') || p.peek('[') {
+			if !p.words(&value, depth+1) {
+				return false
+			}
+		} else {
+			start := p.i
+			if !p.skip(depth + 1) {
+				return false
+			}
+			value.WriteString(p.s[start:p.i])
+		}
+		args[strings.ToLower(name)] = value.String()
+		p.ws()
+		if p.consume('}') {
+			return true
+		}
+		if !p.consume(',') {
+			return false
+		}
+	}
+}

@@ -572,6 +572,11 @@ impl Host {
         );
         let mut stopping_by_name = persistent.stopping.lock().unwrap();
         stopping_by_name.retain(|_, instance| !instance.has_exited());
+        // Before any worker starts: `init` may log straight away.
+        persistent
+            .base
+            .monitor
+            .track(self.specs.iter().map(|spec| spec.name.as_str()));
         let mut next = Vec::with_capacity(self.specs.len());
         let mut stopping = Vec::new();
         let mut reloads = Vec::new();
@@ -635,6 +640,10 @@ impl Host {
                 instance.abort();
             }
             persistent.commands.0.lock().unwrap().script = script_commands;
+            persistent
+                .base
+                .monitor
+                .retain(previous.iter().map(|instance| instance.name()));
             return Err(error);
         }
         for old in previous.iter() {
@@ -1140,11 +1149,13 @@ fn validate_action(hook: Hook, action: &Action) -> Result<(), String> {
         let action: String = format!("{action:?}").chars().take(256).collect();
         return Err(format!("invalid decision for {}: {action}", hook.name()));
     }
-    if let Action::Deny(text) | Action::Server(text) | Action::Message(text) | Action::Queue(text) =
-        action
-        && (text.is_empty() || text.len() > 1024)
-    {
-        return Err("decision string must contain 1..=1024 bytes".into());
+    match action {
+        Action::Deny(text) => text.validate("deny reason")?,
+        Action::Message(text) => text.validate("message")?,
+        Action::Server(text) | Action::Queue(text) if text.is_empty() || text.len() > 1024 => {
+            return Err("decision string must contain 1..=1024 bytes".into());
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -1156,12 +1167,18 @@ fn validate_suggestions(suggestions: Vec<Suggestion>) -> Result<Vec<Suggestion>,
     let valid =
         |text: &str| !text.is_empty() && text.len() <= 256 && !text.chars().any(char::is_control);
     if suggestions.iter().any(|suggestion| {
-        !valid(&suggestion.text) || suggestion.tooltip.as_deref().is_some_and(|tip| !valid(tip))
+        !valid(&suggestion.text)
+            || matches!(&suggestion.tooltip, Some(crate::text::Text::Plain(tip)) if !valid(tip))
     }) {
         return Err(
             "suggestion text and tooltip must contain 1..=256 bytes without control characters"
                 .into(),
         );
+    }
+    for suggestion in &suggestions {
+        if let Some(tooltip @ crate::text::Text::Component(_)) = &suggestion.tooltip {
+            tooltip.validate("suggestion tooltip")?;
+        }
     }
     Ok(suggestions)
 }

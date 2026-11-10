@@ -33,7 +33,9 @@ use std::{
 
 use rift_permissions::{
     Actor, Applied, Change, ChangeEvent, CompiledSubject, ContextSet, DEFAULT_GROUP, Group,
-    MetaView, Node, Track, Tristate, User, Uuid, compile, context::SERVER, unix_now,
+    MetaView, Node, Track, Tristate, User, Uuid, compile,
+    context::{GROUP, SERVER},
+    unix_now,
     wire::GroupInfo,
 };
 use rift_permissions_client::{BoxFuture, Error, Listener, Listeners, RiftPermissions};
@@ -43,6 +45,8 @@ use rift_permissions_client::{BoxFuture, Error, Listener, Listeners, RiftPermiss
 pub struct TestPermissions {
     store: Mutex<Store>,
     server: Option<String>,
+    /// The `group` context filled in with `server`.
+    service_group: Option<String>,
     changes: Listeners<ChangeEvent>,
 }
 
@@ -96,7 +100,13 @@ impl TestPermissions {
     fn active<'a>(&self, contexts: &'a ContextSet) -> Cow<'a, ContextSet> {
         match &self.server {
             Some(server) if contexts.get(SERVER).is_none() => {
-                Cow::Owned(contexts.clone().with(SERVER, server).expect("validated"))
+                let mut active = contexts.clone().with(SERVER, server).expect("validated");
+                if let Some(group) = &self.service_group
+                    && contexts.get(GROUP).is_none()
+                {
+                    active.insert(GROUP, group).expect("validated");
+                }
+                Cow::Owned(active)
             }
             _ => Cow::Borrowed(contexts),
         }
@@ -172,6 +182,7 @@ impl RiftPermissions for TestPermissions {
 pub struct Builder {
     store: Store,
     server: Option<String>,
+    service_group: Option<String>,
 }
 
 impl Builder {
@@ -232,6 +243,14 @@ impl Builder {
         self
     }
 
+    /// Fill in this `group` context together with `server`, as a backend
+    /// client on an instance of a service group does.
+    pub fn service_group(mut self, name: &str) -> Self {
+        let set = ContextSet::of(GROUP, name).unwrap_or_else(|error| panic!("{error}"));
+        self.service_group = set.get(GROUP).map(str::to_owned);
+        self
+    }
+
     /// The store at revision 1, with `default` created if no fixture named it.
     pub fn build(mut self) -> TestPermissions {
         self.store
@@ -242,6 +261,7 @@ impl Builder {
         TestPermissions {
             store: Mutex::new(self.store),
             server: self.server,
+            service_group: self.service_group,
             changes: Listeners::default(),
         }
     }

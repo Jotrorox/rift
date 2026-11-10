@@ -77,9 +77,9 @@ depend: [RiftPerms]   # or softdepend, if your plugin also runs without it
 ## Reading
 
 Reads never touch the network. They answer from the replica, in the contexts
-you pass or in the player's current ones (`server`, `world`, `dimension`,
-`gamemode` and whatever context calculators add). A set that names no
-`server` gets this server's, as in the Rust client.
+you pass or in the player's current ones (`server`, `group`, `world`,
+`dimension`, `gamemode` and whatever context calculators add). A set that names
+no `server` gets this server's, and its `group` too, as in the Rust client.
 
 ```java
 RiftPermissions perms = RiftPermissions.get();
@@ -155,6 +155,45 @@ Listeners run in order on one RiftPerms thread, never on a server thread;
 schedule back (with the entity scheduler on Folia) before touching game state.
 Change events are delivered at most once, so use them for reactions, not for
 bookkeeping that must see every revision.
+
+## Visibility on Paper
+
+Rift leaves a hidden player out of everything it builds (see
+[visibility](permissions.md#visibility)), but a backend lists its own players
+itself. A Paper vanish plugin hides them there by reading the same meta key
+from the replica, so the proxy, every backend and the plugin agree without
+talking to each other:
+
+```java
+RiftPermissions perms = RiftPermissions.get();
+
+/** Whether viewer may see target, by Rift's rule. */
+boolean visible(Player viewer, Player target) {
+    Optional<String> node = perms.meta(target).value("rift.visible-to");
+    return node.isEmpty()
+            || viewer.equals(target)
+            || perms.check(viewer.getUniqueId(), node.get(), perms.contexts().of(viewer)).asBoolean(false);
+}
+
+void apply(Player target) {
+    for (Player viewer : Bukkit.getOnlinePlayers()) {
+        if (visible(viewer, target)) {
+            viewer.showPlayer(plugin, target);
+        } else {
+            viewer.hidePlayer(plugin, target);
+        }
+    }
+}
+```
+
+Call `apply` for a player on join (and for every other player, since the
+newcomer is a viewer too), on world change, and from a `SubjectUpdatedEvent`
+listener, which fires when a player's snapshot changes: the target's rule, or
+a viewer's `see` node. Listeners run off the main thread, so schedule back
+(with the entity scheduler on Folia) before calling `hidePlayer`. Toggling is a
+write like any other, for example
+`perms.user(uuid).set(Node.meta("rift.visible-to", "vanish.see")).join()`; the
+proxy then hides the player network-wide.
 
 ## Custom contexts
 
@@ -237,6 +276,7 @@ assertTrue(player.hasPermission("kits.starter"));
 
    ```yaml
    server: survival-1            # this backend's name: the "server" context
+   # group: survival             # its service group, for an instance: the "group" context
    bus:
      address: 127.0.0.1:4222     # messaging.listen on the proxy
      server_name: localhost      # the DNS name in the bus certificate
@@ -336,6 +376,24 @@ Tab completion offers online players, the group table and registered
 permissions. On enable, RiftPerms sends every plugin's `plugin.yml`
 permissions to the proxy for the dashboard and tab completion.
 
+### One configuration for every instance
+
+When the server is an instance of a group (or a managed server) whose
+definition has a `messaging` block, Rift gives it its own bus login and sets
+`RIFT_SERVER_NAME`, `RIFT_SERVER_GROUP` and the `RIFT_BUS_*` variables (see
+[bus logins for instances](managed-servers.md#bus-logins-for-instances)).
+RiftPerms falls back to them for every setting the file leaves out, so the
+group's template can ship this `config.yml` for all instances:
+
+```yaml
+offline_policy: last_snapshot
+```
+
+`server` comes from `RIFT_SERVER_NAME`, `group` from `RIFT_SERVER_GROUP`,
+`bus.address`, `bus.server_name` and `bus.certificate` from `RIFT_BUS_ADDRESS`,
+`RIFT_BUS_SERVER_NAME` and `RIFT_BUS_CERT`, and the token from
+`RIFT_BUS_TOKEN` when `bus.token_env` is unset. Settings in the file win.
+
 ## Standalone Java services
 
 A lobby bot or a web service can follow permissions without Bukkit:
@@ -360,7 +418,10 @@ and `playerLeft` mirror the Rust client's `join` and `leave`; `register`,
 `reportContexts`, `command` and `fetchGroup` cover the rest of the protocol,
 and `isAvailable` tells whether the proxy answered `hello`. `rift-messaging` alone is a
 general client for the bus: `publish`, `request`, `subscribe` (re-established
-after every reconnect) and a pipelined `Publisher`.
+after every reconnect) and a pipelined `Publisher`. On a managed server with a
+bus login, `MessagingClient.builder().fromEnvironment().build()` takes the
+address, certificate name, certificate and token from Rift's `RIFT_BUS_*`
+variables and names the first missing one otherwise.
 
 ## What a LuckPerms user loses
 

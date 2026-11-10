@@ -46,6 +46,11 @@ pub struct PlayerInfo {
     pub name: String,
     pub server: String,
     pub protocol: i32,
+    /// The node a viewer needs to see this player (`rift.visible-to`), or
+    /// `None`. Plugins see every player and decide with this; the WIT
+    /// record has no such field, so components ask `players.visible-to`.
+    #[serde(default)]
+    pub visible_to: Option<String>,
 }
 
 /// Metadata available right after TCP accept (`route`).
@@ -111,11 +116,13 @@ impl From<&crate::server_list::Ping> for Ping {
 pub struct StatusOverride {
     /// A JSON text component or a JSON string.
     pub motd_json: Option<String>,
-    pub version: Option<String>,
+    /// Plain text or a component, shown as `§` codes.
+    pub version: Option<crate::text::Text>,
     pub protocol: Option<i32>,
     pub online: Option<u32>,
     pub max_players: Option<u32>,
-    pub sample: Option<Vec<String>>,
+    /// Hover lines: plain text or components, shown as `§` codes.
+    pub sample: Option<Vec<crate::text::Text>>,
     /// A `data:image/png;base64,...` URI.
     pub favicon: Option<String>,
 }
@@ -289,11 +296,12 @@ pub struct BossBarSpec {
     pub create_fog: bool,
 }
 
-/// A title; times are ticks.
+/// A title; times are ticks. Each text is plain or a component; an empty
+/// plain title shows only the subtitle.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TitleSpec {
-    pub title: String,
-    pub subtitle: Option<String>,
+    pub title: crate::text::Text,
+    pub subtitle: Option<crate::text::Text>,
     pub fade_in: i32,
     pub stay: i32,
     pub fade_out: i32,

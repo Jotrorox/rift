@@ -680,7 +680,9 @@ async fn plugin_commands_check_permissions_and_suggest() {
     let root = directory();
     let mocks = Mocks::default();
     let mut plan = Plan::new(|event, _| match event {
-        Event::Command(ctx) => Ok(Reply::Action(Action::Message(format!("hi {}", ctx.args)))),
+        Event::Command(ctx) => Ok(Reply::Action(Action::Message(
+            format!("hi {}", ctx.args).into(),
+        ))),
         event => Ok(Reply::default_for(event.hook())),
     })
     .commands(&["hello"]);

@@ -18,15 +18,19 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # v0.1.0 releases Cargo.toml's 0.1.0; v0.1.0-rc.1 is a release candidate
+      # for it: the same pipeline, published as a prerelease.
       - name: Require tag to match Cargo.toml
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           python3 - <<'PY'
-          import os, tomllib
+          import os, re, tomllib
           with open('Cargo.toml', 'rb') as source:
               version = tomllib.load(source)['package']['version']
-          assert os.environ['RELEASE_TAG'] == 'v' + version, 'Tag must match Cargo.toml version'
+          tag = os.environ['RELEASE_TAG']
+          assert re.fullmatch('v' + re.escape(version) + r'(-rc\.[1-9][0-9]*)?', tag), (
+              f'Tag {tag} must be v{version} or v{version}-rc.N to match Cargo.toml')
           PY
 
   verify:
@@ -40,7 +44,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: temurin
           java-version: '21'
@@ -62,30 +66,52 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish tested release executables
+    name: Publish tested release assets
     needs: [verify, java]
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions:
       contents: write
+      # Sign and store build provenance attestations for every asset.
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: release-*
           path: dist
           merge-multiple: true
-      - name: Publish executables, the RiftPerms plugin and the Maven layout
+      - name: Record asset checksums
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        working-directory: dist
+        run: |
+          version="${RELEASE_TAG#v}"
+          # sha256sum fails here if any expected asset is missing.
+          sha256sum \
+            rift-linux-x86_64.tar.gz rift-macos-aarch64.tar.gz rift-windows-x86_64.zip \
+            rift-linux-x86_64 rift-macos-aarch64 rift-windows-x86_64.exe \
+            "RiftPerms-$version.jar" "rift-maven-$version.zip" > SHA256SUMS
+          { echo '```'; cat SHA256SUMS; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - name: Attest build provenance for every asset
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-checksums: dist/SHA256SUMS
+      - name: Publish archives, executables, Java artifacts and checksums
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
         working-directory: dist
         run: |
-          version="${RELEASE_TAG#v}"
-          gh release create "$RELEASE_TAG" \
-            rift-linux-x86_64 rift-macos-aarch64 rift-windows-x86_64.exe \
-            "RiftPerms-$version.jar" "rift-maven-$version.zip" \
-            --verify-tag --generate-notes --title "$RELEASE_TAG"
+          mapfile -t assets < <(cut -d ' ' -f 3- SHA256SUMS)
+          flags=()
+          # A release candidate never becomes the "latest" release.
+          if [[ "$RELEASE_TAG" == *-rc.* ]]; then
+            flags=(--prerelease --latest=false)
+          fi
+          gh release create "$RELEASE_TAG" "${assets[@]}" SHA256SUMS \
+            --verify-tag --generate-notes --title "$RELEASE_TAG" "${flags[@]}"
 
   packages:
     name: Mirror Java artifacts to GitHub Packages
@@ -97,7 +123,7 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
         with:
           distribution: temurin
           java-version: '21'

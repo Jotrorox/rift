@@ -10,6 +10,7 @@ use tokio::{
 };
 
 use super::{LOG_FILE, Server, lock, loopback_address};
+use crate::config::ProcessEnvironment;
 use crate::node::{Nodes, protocol};
 
 /// What a status check found.
@@ -61,6 +62,47 @@ pub(super) trait ProcessBackend: Send + 'static {
 #[derive(Debug, Default)]
 pub(super) struct Local {
     child: Option<Child>,
+    logins: super::LoginSlot,
+}
+
+impl Local {
+    pub(super) fn new(logins: super::LoginSlot) -> Self {
+        Self {
+            child: None,
+            logins,
+        }
+    }
+}
+
+/// The server's environment plus what Rift sets for it: `RIFT_SERVER_NAME`,
+/// and with a bus login `RIFT_SERVER_GROUP` and the `RIFT_BUS_*` variables
+/// (see [`crate::instance_login`]). `directory` is where the process runs on
+/// this host, for `RIFT_BUS_CERT`; `None` leaves that to the node agent.
+/// Rift's variables are set last, so `env` cannot override them.
+fn with_login(
+    logins: &super::LoginSlot,
+    server: &Server,
+    directory: Option<&std::path::Path>,
+) -> io::Result<(ProcessEnvironment, Option<String>)> {
+    let mut environment = server.config.environment.clone();
+    let logins = logins
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let Some(logins) = logins else {
+        return Ok((environment, None));
+    };
+    if let Some(directory) = directory {
+        logins.write_certificate(directory)?;
+    }
+    environment
+        .set
+        .extend(logins.environment(&server.name, directory));
+    let certificate = logins
+        .is_registered(&server.name)
+        .then(|| logins.bus().map(|bus| bus.certificate))
+        .flatten();
+    Ok((environment, certificate))
 }
 
 impl ProcessBackend for Local {
@@ -95,7 +137,13 @@ impl ProcessBackend for Local {
             }
             Err(error) => return Err(error),
         }
-        self.child = Some(spawn(&server.config.command, &server.config.directory)?);
+        let (environment, _) = with_login(&self.logins, server, Some(&server.config.directory))?;
+        self.child = Some(spawn(
+            &server.config.command,
+            &server.config.directory,
+            &environment,
+            &server.config.isolation,
+        )?);
         Ok(())
     }
 
@@ -180,12 +228,20 @@ static SPAWN: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// Spawn `command` in `directory`, appending stdout and stderr to its log.
 /// Shared with the node agent, which runs the same launch locally.
 ///
+/// The child's environment follows `environment` (see [`apply_environment`]),
+/// and never contains Rift's own secrets.
+///
 /// The child leads its own process group, so a kill also reaches helper
 /// processes a start script left behind. `kill_on_drop` covers normal exits
 /// only: after SIGKILL or the OOM killer an orphaned server would keep its
 /// port, and the next start would refuse to take the port over. On Linux the
 /// kernel therefore kills the child when Rift dies (`PR_SET_PDEATHSIG`).
-pub(crate) fn spawn(command: &[String], directory: &std::path::Path) -> io::Result<Child> {
+pub(crate) fn spawn(
+    command: &[String],
+    directory: &std::path::Path,
+    environment: &ProcessEnvironment,
+    isolation: &crate::config::Isolation,
+) -> io::Result<Child> {
     let (program, arguments) = command.split_first().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -204,11 +260,16 @@ pub(crate) fn spawn(command: &[String], directory: &std::path::Path) -> io::Resu
         .stderr(Stdio::from(log.try_clone()?))
         .stdout(Stdio::from(log))
         .kill_on_drop(true);
+    apply_environment(command.as_std_mut(), environment);
     #[cfg(unix)]
     command.process_group(0);
+    // Built before fork; it lives until this function returns, after the
+    // child has exec'd.
+    let _sandbox = sandbox(isolation, directory, &arguments_with(program, arguments))?;
     #[cfg(target_os = "linux")]
     {
         let parent = std::process::id() as libc::pid_t;
+        let ruleset = _sandbox.as_ref().map(super::landlock::Sandbox::raw);
         // SAFETY: runs in the forked child before exec and only makes
         // async-signal-safe calls, building errors without allocating.
         unsafe {
@@ -220,11 +281,108 @@ pub(crate) fn spawn(command: &[String], directory: &std::path::Path) -> io::Resu
                 if libc::getppid() != parent {
                     return Err(io::Error::from_raw_os_error(libc::ESRCH));
                 }
+                if let Some(ruleset) = ruleset {
+                    super::landlock::Sandbox::enter(ruleset)?;
+                }
                 Ok(())
             });
         }
     }
     spawner::spawn(command)
+}
+
+fn arguments_with(program: &str, arguments: &[String]) -> Vec<String> {
+    std::iter::once(program.to_owned())
+        .chain(arguments.iter().cloned())
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+type Sandbox = super::landlock::Sandbox;
+/// Nothing to hold where there is no Landlock.
+#[cfg(not(target_os = "linux"))]
+struct Sandbox;
+
+/// The confinement `isolation` asks for, where the kernel offers it.
+/// `"landlock"` without Landlock runs the server unconfined and says why;
+/// `"required"` refuses to start it.
+fn sandbox(
+    isolation: &crate::config::Isolation,
+    directory: &std::path::Path,
+    command: &[String],
+) -> io::Result<Option<Sandbox>> {
+    use crate::config::IsolationMode;
+    if isolation.mode == IsolationMode::Off {
+        return Ok(None);
+    }
+    #[cfg(target_os = "linux")]
+    let available = super::landlock::abi();
+    #[cfg(not(target_os = "linux"))]
+    let available: Result<u32, String> = {
+        let _ = command;
+        Err("Landlock exists only on Linux".to_owned())
+    };
+    match available {
+        #[cfg(target_os = "linux")]
+        Ok(abi) => {
+            let directory = std::path::absolute(directory)?;
+            super::landlock::Sandbox::new(
+                abi,
+                &directory,
+                command,
+                &isolation.read,
+                &isolation.write,
+            )
+            .map(Some)
+        }
+        #[cfg(not(target_os = "linux"))]
+        Ok(_) => Ok(None),
+        Err(reason) if isolation.mode == IsolationMode::Required => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("isolation = \"required\", but {reason}"),
+        )),
+        Err(reason) => {
+            eprintln!(
+                "rift: warning: starting {} unconfined: isolation = \"landlock\", but {reason}",
+                directory.display()
+            );
+            Ok(None)
+        }
+    }
+}
+
+/// Give a child Rift's environment minus Rift's secrets, or only the
+/// variables `inherit_env` lists, then the `env` entries on top.
+///
+/// The default edits the inherited environment instead of rebuilding it, so
+/// `PATH` lookup of the program and everything else behaves exactly as it
+/// did before secrets were removed. A restricted environment is built from
+/// scratch; without `PATH` in it the program is looked up in the system's
+/// default path, so a restricted server should keep `PATH` or name an
+/// absolute executable.
+pub(crate) fn apply_environment(
+    command: &mut std::process::Command,
+    environment: &ProcessEnvironment,
+) {
+    match &environment.inherit {
+        None => {
+            for name in crate::environment::protected() {
+                command.env_remove(name);
+            }
+        }
+        Some(names) => {
+            command.env_clear();
+            for name in names {
+                if crate::environment::is_protected(name) {
+                    continue;
+                }
+                if let Some(value) = std::env::var_os(name) {
+                    command.env(name, value);
+                }
+            }
+        }
+    }
+    command.envs(&environment.set);
 }
 
 /// Spawns every child from one thread that lives as long as the process.
@@ -345,16 +503,18 @@ pub(super) struct Remote {
     agent: Option<String>,
     /// Snapshots older than the latest command reply are stale.
     revision: u64,
+    logins: super::LoginSlot,
 }
 
 impl Remote {
-    pub(super) fn new(nodes: Nodes, node: String) -> Self {
+    pub(super) fn new(nodes: Nodes, node: String, logins: super::LoginSlot) -> Self {
         Self {
             nodes,
             node,
             running: None,
             agent: None,
             revision: 0,
+            logins,
         }
     }
 
@@ -413,6 +573,10 @@ impl ProcessBackend for Remote {
             .ok_or_else(|| {
                 io::Error::new(io::ErrorKind::InvalidInput, "remote server has no port")
             })?;
+        // The token crosses the bus in the start command, the one secret
+        // that does: it is scoped to this instance, the node never gets the
+        // key, and every (re)start carries it, so a recovered server has it.
+        let (environment, bus_certificate) = with_login(&self.logins, server, None)?;
         let result = self
             .request(
                 protocol::Command::Start(protocol::Start {
@@ -420,6 +584,9 @@ impl ProcessBackend for Remote {
                     command: server.config.command.clone(),
                     directory: server.config.directory.clone(),
                     port,
+                    environment: (&environment).into(),
+                    bus_certificate,
+                    isolation: (&server.config.isolation).into(),
                 }),
                 COMMAND_WAIT,
             )
@@ -548,10 +715,17 @@ mod tests {
         // Spawning from a short-lived blocking thread works like any other.
         let mut child = {
             let directory = directory.clone();
-            tokio::task::spawn_blocking(move || spawn(&command, &directory))
-                .await
-                .unwrap()
-                .unwrap()
+            tokio::task::spawn_blocking(move || {
+                spawn(
+                    &command,
+                    &directory,
+                    &ProcessEnvironment::default(),
+                    &Default::default(),
+                )
+            })
+            .await
+            .unwrap()
+            .unwrap()
         };
         let pid = child.id().unwrap() as libc::pid_t;
         // SAFETY: a plain syscall without memory arguments.
@@ -569,6 +743,146 @@ mod tests {
             assert!(tokio::time::Instant::now() < deadline, "helper survived");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    /// A spawned server sees neither the admin token nor any other secret
+    /// the configuration names, but keeps every other inherited variable.
+    /// The test binary runs this test again with the variables set, as a
+    /// stand-in for Rift started with secrets in its environment (setting
+    /// them here would race other test threads reading the environment).
+    #[test]
+    fn children_do_not_inherit_rifts_secrets() {
+        const STAND_IN: &str = "RIFT_TEST_SECRETS_DIRECTORY";
+        const ADMIN: &str = "RIFT_TEST_SPAWN_ADMIN_TOKEN";
+        const NODE: &str = "RIFT_TEST_SPAWN_FORWARDING_SECRET";
+        const UNRELATED: &str = "RIFT_TEST_SPAWN_DATABASE_PASSWORD";
+        let name = format!(
+            "{}::children_do_not_inherit_rifts_secrets",
+            module_path!().split_once("::").unwrap().1
+        );
+        if let Ok(directory) = std::env::var(STAND_IN) {
+            let directory = std::path::PathBuf::from(directory);
+            crate::environment::harden_process();
+            let config = crate::config::Config::from_lua(&format!(
+                "return {{ listeners = {{ public = '127.0.0.1:0' }}, backends = {{ lobby = '127.0.0.1:25001' }}, \
+                 routes = {{ public = 'lobby' }}, admin = {{ listen = '127.0.0.1:0', token_env = '{ADMIN}', permissions = {{ 'status' }} }}, \
+                 authentication = {{ online_mode = true }}, forwarding = {{ mode = 'velocity', secret_env = '{NODE}' }} }}"
+            ), "secrets.lua")
+            .unwrap();
+            super::super::protect_secrets(&config);
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let report = |file: &str| {
+                    [
+                        "sh".to_owned(),
+                        "-c".to_owned(),
+                        format!(
+                            "env > {file}.tmp; cat /proc/$PPID/environ > {file}.proc 2>/dev/null; echo $? > {file}.status; mv {file}.tmp {file}"
+                        ),
+                    ]
+                };
+                let mut restricted = ProcessEnvironment {
+                    inherit: Some([UNRELATED.to_owned(), "PATH".to_owned()].into()),
+                    ..Default::default()
+                };
+                restricted.set.insert("RIFT_TEST_EXTRA".into(), "added".into());
+                for (file, environment) in [
+                    ("default", ProcessEnvironment::default()),
+                    ("restricted", restricted),
+                ] {
+                    let mut child =
+                        spawn(&report(file), &directory, &environment, &Default::default()).unwrap();
+                    child.wait().await.unwrap();
+                }
+            });
+            return;
+        }
+        let directory =
+            std::env::temp_dir().join(format!("rift-spawn-secrets-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &name, "--test-threads=1", "--nocapture"])
+            .env(STAND_IN, &directory)
+            .env(ADMIN, "admin-secret-0123456789abcdef0123456789")
+            .env(NODE, "node-secret-0123456789abcdef0123456789ab")
+            .env(UNRELATED, "keep-me")
+            .stdout(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "stand-in Rift failed: {status}");
+        let read = |file: &str| std::fs::read_to_string(directory.join(file)).unwrap();
+        let default = read("default");
+        assert!(
+            !default.contains(ADMIN),
+            "the admin token leaked:\n{default}"
+        );
+        assert!(!default.contains("admin-secret"), "the admin token leaked");
+        assert!(!default.contains(NODE), "the forwarding secret leaked");
+        assert!(
+            default.contains(&format!("{UNRELATED}=keep-me")),
+            "{default}"
+        );
+        assert!(default.lines().any(|line| line.starts_with("PATH=")));
+        let restricted = read("restricted");
+        assert!(restricted.contains(&format!("{UNRELATED}=keep-me")));
+        assert!(restricted.contains("RIFT_TEST_EXTRA=added"));
+        assert!(!restricted.contains(ADMIN));
+        assert!(
+            !restricted.contains("HOME="),
+            "inherit_env must drop unlisted variables"
+        );
+        // A same-user process cannot read a hardened Rift's environment
+        // through /proc either (root can, through CAP_SYS_PTRACE).
+        #[cfg(target_os = "linux")]
+        // SAFETY: a plain syscall without arguments.
+        if unsafe { libc::geteuid() } != 0 {
+            assert_ne!(
+                read("default.status").trim(),
+                "0",
+                "/proc/<rift>/environ was readable"
+            );
+            assert!(!read("default.proc").contains("admin-secret"));
+        }
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    /// Where Landlock is missing, `"landlock"` starts the server unconfined
+    /// and `"required"` refuses to start it.
+    #[cfg(not(target_os = "linux"))]
+    #[tokio::test]
+    async fn isolation_falls_back_or_refuses_without_landlock() {
+        use crate::config::{Isolation, IsolationMode};
+        let directory = std::env::temp_dir().join(format!("rift-isolation-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let command = ["true".to_owned()];
+        let isolation = |mode| Isolation {
+            mode,
+            ..Default::default()
+        };
+        let mut child = spawn(
+            &command,
+            &directory,
+            &ProcessEnvironment::default(),
+            &isolation(IsolationMode::Landlock),
+        )
+        .unwrap();
+        assert!(child.wait().await.unwrap().success());
+        let refused = spawn(
+            &command,
+            &directory,
+            &ProcessEnvironment::default(),
+            &isolation(IsolationMode::Required),
+        )
+        .unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::Unsupported);
+        assert!(
+            refused.to_string().contains("isolation = \"required\""),
+            "{refused}"
+        );
         let _ = std::fs::remove_dir_all(directory);
     }
 
@@ -591,7 +905,13 @@ mod tests {
                 .build()
                 .unwrap();
             runtime.block_on(async {
-                let child = spawn(&["sleep".into(), "60".into()], &directory).unwrap();
+                let child = spawn(
+                    &["sleep".into(), "60".into()],
+                    &directory,
+                    &ProcessEnvironment::default(),
+                    &Default::default(),
+                )
+                .unwrap();
                 let temporary = directory.join("child.pid.tmp");
                 std::fs::write(&temporary, child.id().unwrap().to_string()).unwrap();
                 std::fs::rename(temporary, directory.join("child.pid")).unwrap();
