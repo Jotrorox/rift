@@ -68,20 +68,7 @@ impl ChatTypes {
     /// codec recorded them (the side's vanilla types before any `login`).
     pub fn from_shared(shared: &Shared, side: Side) -> Self {
         let Some(synced) = registries::synced(shared, side, "chat_type") else {
-            let protocol = registries::protocol(shared, side);
-            let types = registries::defaults::get(protocol, "chat_type")
-                .map(|vanilla| {
-                    vanilla
-                        .entries
-                        .iter()
-                        .filter_map(|entry| {
-                            let element = entry.element.as_compound()?;
-                            Some((entry.id, ChatType::from_element(element)))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            return Self { types };
+            return Self::vanilla(registries::protocol(shared, side));
         };
         let types = synced
             .iter()
@@ -90,6 +77,24 @@ impl ChatTypes {
                 Some((id, ChatType::from_element(element)))
             })
             .collect();
+        Self { types }
+    }
+
+    /// The chat types a vanilla server of `protocol` sends (none before
+    /// 1.19).
+    pub fn vanilla(protocol: i32) -> Self {
+        let types = registries::defaults::get(protocol, "chat_type")
+            .map(|vanilla| {
+                vanilla
+                    .entries
+                    .iter()
+                    .filter_map(|entry| {
+                        let element = entry.element.as_compound()?;
+                        Some((entry.id, ChatType::from_element(element)))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         Self { types }
     }
 
@@ -197,23 +202,6 @@ impl Decoration {
     }
 }
 
-/// The entries (`{name, id, element}` compounds) of one registry in a
-/// `login` registry codec.
-pub fn registry_entries<'a>(codec: &'a Compound, registry: &str) -> Option<&'a [Nbt]> {
-    codec.compound(registry)?.list("value")
-}
-
-/// Mutable entries of one registry in a `login` registry codec.
-pub fn registry_entries_mut<'a>(
-    codec: &'a mut Compound,
-    registry: &str,
-) -> Option<&'a mut Vec<Nbt>> {
-    codec
-        .compound_mut(registry)?
-        .get_mut("value")?
-        .as_list_mut()
-}
-
 /// Parse a JSON text component as a client would; text that is not JSON is
 /// shown literally.
 pub fn parse_component(text: &str) -> Value {
@@ -265,9 +253,7 @@ mod tests {
 
     #[test]
     fn decorations_follow_their_parameters_and_style() {
-        let mut codec = Compound::new();
-        codec.insert("minecraft:chat_type", vanilla_1_19());
-        let types = ChatTypes::from_codec(&codec);
+        let types = ChatTypes::vanilla(759);
         let sender = literal("Alex");
         let content = literal("hi");
         assert_eq!(
@@ -291,9 +277,7 @@ mod tests {
             Some(json!({"translate": "chat.type.text", "with": [sender, content]}))
         );
 
-        let mut codec = Compound::new();
-        codec.insert("minecraft:chat_type", vanilla_1_19_1());
-        let types = ChatTypes::from_codec(&codec);
+        let types = ChatTypes::vanilla(760);
         let target = literal("Steve");
         assert_eq!(
             types.display(3, &sender, Some(&target), &content),

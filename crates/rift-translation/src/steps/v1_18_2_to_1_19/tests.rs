@@ -1,13 +1,17 @@
 use super::{
     DOWN, NEWER, OLDER, UP,
-    chat::{self, ChatTypes, registry_entries},
-    join::{Dimension, Login, Respawn},
+    chat::{self, ChatTypes},
+    layout::{Dimension, Login, Respawn, registry_entries},
     messages::{Placement, SystemChat},
     testing::{Harness, first, hex, recorded, truncations_fail},
 };
 use crate::{
     Direction::{Clientbound, Serverbound},
     State::{Login as LoginState, Play},
+    codec::{
+        Shared,
+        registries::{self, Side},
+    },
     data,
     nbt::Nbt,
     wire::{Position, Reader, Writer},
@@ -124,16 +128,19 @@ fn respawn_follows_the_dimension_types_of_login() {
         .compound("element")
         .unwrap()
         .clone();
+    // Before any login the vanilla types identify the element.
     let mut up = up();
-    assert!(
-        up.clientbound(
-            Play,
-            "respawn",
-            &nether(Dimension::Element(element.clone()))
-                .write(OLDER)
-                .unwrap()
-        )
-        .is_err()
+    let out = up.one(
+        Clientbound,
+        Play,
+        "respawn",
+        &nether(Dimension::Element(element.clone()))
+            .write(OLDER)
+            .unwrap(),
+    );
+    assert_eq!(
+        Respawn::read(NEWER, &out.data).unwrap(),
+        nether(Dimension::Key("minecraft:the_nether".into()))
     );
     up.clientbound(Play, "login", &older).unwrap();
     let out = up.one(
@@ -157,10 +164,16 @@ fn respawn_follows_the_dimension_types_of_login() {
         panic!("1.18.2 gets the element");
     };
     assert_eq!(element.str("effects"), Some("minecraft:the_nether"));
+    // A type the backend never announced degrades to the vanilla type of
+    // its kind: the overworld for any name but the nether's and the end's.
     let unknown = nether(Dimension::Key("minecraft:moon".into()))
         .write(NEWER)
         .unwrap();
-    assert!(down.clientbound(Play, "respawn", &unknown).is_err());
+    let out = down.one(Clientbound, Play, "respawn", &unknown);
+    let Dimension::Element(element) = Respawn::read(OLDER, &out.data).unwrap().dimension else {
+        panic!("1.18.2 gets the element");
+    };
+    assert_eq!(element.str("effects"), Some("minecraft:overworld"));
 }
 
 /// The entity type of a 1.19 `add_entity`.
@@ -803,7 +816,13 @@ fn chat_types_of_the_backend_decorate() {
     let Some(login) = first(NEWER, Clientbound, Play, "login") else {
         return;
     };
-    let types = ChatTypes::from_codec(&Login::read(NEWER, &login).unwrap().codec);
+    let mut shared = Shared::new(OLDER, NEWER);
+    let parsed = registries::login::read_login(NEWER, &mut Reader::new(&login)).unwrap();
+    for registry in parsed.codec.unwrap() {
+        registries::record(&mut shared, Side::Backend, &registry);
+    }
+    let types = ChatTypes::from_shared(&shared, Side::Backend);
+    assert_eq!(types, ChatTypes::vanilla(NEWER));
     assert!(types.is_overlay(2));
     assert_eq!(
         types
