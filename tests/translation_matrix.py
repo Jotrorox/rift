@@ -263,7 +263,7 @@ def run_cell(server, proxy, protocol, steps, label, directory, args):
     """Run the scenario for one client protocol on a running server."""
     result = dict(server=server.name, server_version=server.release, server_protocol=server.protocol,
                   client=release(protocol), client_protocol=protocol, via=args.via,
-                  status="FAIL", steps=[], findings=[], logs=str(directory))
+                  status="FAIL", steps=[], findings=[], logs=str(directory), server_start=server.started)
     begun = time.monotonic()
     directory.mkdir(parents=True, exist_ok=True)
     log_start, proxy_start = server.offset(), proxy.offset() if proxy else 0
@@ -398,7 +398,6 @@ def run_server(name, clients, args, steps):
             label = f"{server.name}-client-{release(protocol)}"
             directory = RUNS / f"{stamp}-{label}"
             result = run_cell(server, proxy, protocol, steps, label, directory, args)
-            result["server_start"] = server.started
             results.append(result)
             print(summary_line(result), flush=True)
             if result["status"] != "PASS":

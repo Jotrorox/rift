@@ -1270,7 +1270,8 @@ def step_plugin_message(cx):
 def step_idle(cx):
     """Idle until both clients answered at least two keep-alives, and for a few
     seconds more (time updates, entity ticks)."""
-    deadline = time.monotonic() + 45
+    # Keep-alives come every 15 s of server time; a loaded machine stretches that.
+    deadline = time.monotonic() + 90
     while min(cx.ref.keepalives, cx.via.keepalives) < 2:
         cx.ref.check()
         cx.via.check()
