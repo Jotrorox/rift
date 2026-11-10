@@ -768,6 +768,52 @@ fn entries_without_data_take_the_senders_vanilla_element() {
     );
 }
 
+#[test]
+fn environment_attributes_the_receiver_lacks_are_dropped() {
+    // The official 26.3 server's nether attributes, two of them new in 26.1
+    // and one in 26.3: a 1.21.11 client fails to load the whole registry
+    // over an attribute key it does not know.
+    let attributes = || {
+        let mut attributes = Compound::new();
+        attributes.insert("minecraft:gameplay/fast_lava", 1i8);
+        attributes.insert("minecraft:visual/ambient_light_color", "#302821");
+        attributes.insert("minecraft:visual/block_light_tint", "#ffffff");
+        attributes.insert("minecraft:gameplay/natural_mob_spawns", 1i8);
+        attributes
+    };
+    let keys = |element: &Compound, field: &str| -> Vec<String> {
+        element
+            .compound(field)
+            .unwrap()
+            .0
+            .iter()
+            .map(|(key, _)| key.clone())
+            .collect()
+    };
+    let mut element = Compound::new();
+    element.insert("attributes", attributes());
+    transform::apply("dimension_type", 777, 776, "the_nether", &mut element).unwrap();
+    assert_eq!(
+        keys(&element, "attributes"),
+        [
+            "minecraft:gameplay/fast_lava",
+            "minecraft:visual/ambient_light_color",
+            "minecraft:visual/block_light_tint"
+        ]
+    );
+    let mut element = Compound::new();
+    element.insert("attributes", attributes());
+    transform::apply("worldgen/biome", 775, 774, "plains", &mut element).unwrap();
+    assert_eq!(
+        keys(&element, "attributes"),
+        ["minecraft:gameplay/fast_lava"]
+    );
+    let mut element = Compound::new();
+    element.insert("tracks", attributes());
+    transform::apply("timeline", 775, 774, "day", &mut element).unwrap();
+    assert_eq!(keys(&element, "tracks"), ["minecraft:gameplay/fast_lava"]);
+}
+
 /// The parameters of every chat decoration of a converted registry.
 fn decoration_parameters(registry: &Registry) -> Vec<String> {
     let mut found = Vec::new();
