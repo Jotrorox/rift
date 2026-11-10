@@ -242,7 +242,8 @@ class Server:
         except (OSError, EOFError, AssertionError, ValueError, KeyError):
             return False
 
-    def start(self, timeout=240):
+    def start(self, timeout=None):
+        timeout = timeout or float(os.environ.get("RIFT_VIA_START_TIMEOUT", "420"))
         # Prepare artifacts before taking a slot: downloads and builds may wait.
         self.directory.mkdir(parents=True, exist_ok=True)
         if self.software == "paper":

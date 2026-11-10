@@ -34,6 +34,11 @@ CACHE = HOME / "minecraft-data"
 REFERENCE = HOME / "ref" / "minecraft-data"
 
 
+# Hand-written decoders for types protodef cannot express, by type name:
+# name -> fn(reader) (registered by schema_patches for derived schemas).
+NATIVES = {}
+
+
 class DecodeError(ValueError):
     """A decode failure; `path` names the field it happened in."""
 
@@ -134,7 +139,24 @@ SLOT_COMPONENT = ["types", "SlotComponent", 1, 1, "type", 1, "fields"]
 RECIPE_TYPES = ["play", "toClient", "types", "packet_declare_recipes", 1, 0, "type", 1, "type", 1, 1,
                 "type", 1, "mappings"]
 
+GLOBAL_POS = ["option", _container(("dimension", "string"), ("position", "position"))]
+METADATA_1_19 = ["types", "entityMetadataItem", 1, "fields"]
+
 CORRECTIONS = [
+    dict(protocols=(759, 759), path=METADATA_1_19 + ["19"], value="varint", add=True,
+         why="1.19 added the cat variant serializer (EntityDataSerializers.CAT_VARIANT, ID 19); "
+             "the schema stops at 18 (a summoned painting's metadata failed to decode)."),
+    dict(protocols=(759, 759), path=METADATA_1_19 + ["20"], value="varint", add=True,
+         why="1.19 frog variant serializer (ID 20)."),
+    dict(protocols=(759, 760), path=METADATA_1_19 + ["21"], value=GLOBAL_POS, add=True,
+         why="1.19 optional global position serializer (ID 21): GlobalPos is a dimension key and "
+             "a block position, not a string."),
+    dict(protocols=(759, 759), path=METADATA_1_19 + ["22"], value="varint", add=True,
+         why="1.19 painting variant serializer (ID 22): a registry ID."),
+    dict(protocols=(761, 765), path=["play", "toClient", "types", "packet_respawn", 1,
+                                     {"field": "copyMetadata"}, "type"], value="u8",
+         why="ClientboundRespawnPacket writes the dataToKeep flags byte (KEEP_ATTRIBUTES 1, "
+             "KEEP_ENTITY_DATA 2) since 1.19.3, not a boolean; a dimension change sends 3."),
     dict(protocols=(766, 766), path=RECIPE_TYPES,
          value=_mapping(["crafting_shaped", "crafting_shapeless", "crafting_special_armordye",
                          "crafting_special_bookcloning", "crafting_special_mapcloning",
@@ -193,15 +215,25 @@ def corrections_for(protocol):
             if entry["protocols"][0] <= protocol <= entry["protocols"][1]]
 
 
+def _key(target, key, path):
+    """A path element; {"field": name} selects a container field by name."""
+    if isinstance(key, dict):
+        for index, field in enumerate(target):
+            if isinstance(field, dict) and field.get("name") == key["field"]:
+                return index
+        raise KeyError(f"correction target {path} is missing")
+    return key
+
+
 def patch(document, path, value, add=False):
     """Replace `document` at `path`; the target must exist unless `add`."""
     target = document
     for key in path[:-1]:
         try:
-            target = target[key]
+            target = target[_key(target, key, path)]
         except (KeyError, IndexError, TypeError):
             raise KeyError(f"correction target {path} is missing") from None
-    last = path[-1]
+    last = _key(target, path[-1], path)
     if isinstance(target, dict):
         if last not in target and not add:
             raise KeyError(f"correction target {path} is missing")
@@ -399,6 +431,8 @@ class Decoder(Codec):
                 self.hooks[kind](value)
             return value
         name, args = kind
+        if name == "unverified":
+            raise Unverified(f"unverified layout: {args}")
         method = getattr(self, "read_" + name, None)
         if method is None:
             # A custom type taking arguments, such as particleData.
@@ -434,6 +468,8 @@ class Decoder(Codec):
             return lp_vec3(reader)
         if name == "string":
             return self.read_pstring(reader, {"countType": "varint"}, scopes)
+        if name in NATIVES:
+            return NATIVES[name](reader)
         definition = self.resolve(name)
         if definition == "native":
             raise DecodeError(f"unsupported native {name}")
@@ -645,6 +681,8 @@ class Encoder(Codec):
         definition = self.resolve(name)
         if definition == "native":
             raise ValueError(f"unsupported native {name}")
+        if isinstance(definition, list) and definition and definition[0] == "unverified":
+            raise ValueError(f"cannot encode unverified layout {name}: {definition[1]}")
         return self.write(out, definition, value, scopes)
 
     def write_count(self, out, args, count, scopes):

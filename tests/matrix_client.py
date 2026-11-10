@@ -133,6 +133,7 @@ class Session(Client):
         self.dimension_changes = 0
         self.keepalives = 0
         self.teleports = 0
+        self.chunks = set()  # Loaded (x, z) chunk columns.
         self.joined = threading.Event()
         self.loaded_sent = False
         self.ended = threading.Event()
@@ -270,8 +271,13 @@ class Session(Client):
             self.resource_pack(value)
         elif name == "cookie_request":
             self.send_packet("cookie_response", {"cookie": value.get("cookie")})
+        elif name == "map_chunk":
+            self.chunks.add((value.get("x"), value.get("z")))
+        elif name in ("unload_chunk", "forget_level_chunk"):
+            self.chunks.discard((value.get("chunkX", value.get("x")), value.get("chunkZ", value.get("z"))))
         elif name == "respawn":
             self.dimension_changes += 1
+            self.chunks.clear()
         elif name == "start_configuration":
             self.send_packet("configuration_acknowledged")
             self.state = "configuration"

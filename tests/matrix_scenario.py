@@ -594,6 +594,30 @@ class Context:
 
 # --- Steps -------------------------------------------------------------------
 
+PLAYER_SPAWNS = {"named_entity_spawn", "spawn_entity"}
+
+
+def reappear(cx, timeout=12):
+    """After a respawn or dimension change the server re-adds the translated
+    player to the reference's view only once it moves: nudge it until the
+    reference sees it spawn again."""
+    mark = cx.ref.mark()
+    deadline = time.monotonic() + timeout
+    while True:
+        cx.via.move(dx=0.0625)
+        time.sleep(0.1)
+        cx.via.move(dx=-0.0625)
+        try:
+            cx.ref.wait_packet(PLAYER_SPAWNS, "the translated player back in view", 1.0, mark,
+                               where=lambda value: value.get("entityId") == cx.via.entity_id)
+            return
+        except SessionError:
+            cx.ref.check()
+            if time.monotonic() > deadline:
+                raise StepFailure("the reference client never saw the translated player again") from None
+
+
+
 @step(software=ALL)
 def step_teleport(cx):
     """Teleport both players to the build area; positions must match."""
@@ -606,7 +630,19 @@ def step_teleport(cx):
                                      or value.get("flags") not in (0, None))
         if abs(session.position[0] - expected) > 0.01 or abs(session.position[1] - y) > 0.01:
             raise StepFailure(f"{session.label} ended at {session.position[:3]}, expected x={expected} y={y}")
-    time.sleep(1.5)  # Let chunks around the build area arrive.
+    # Blocks set in a chunk the client has not received yet arrive inside the
+    # chunk data, not as block updates: wait for the chunks around the build.
+    wanted = {(cx_, cz) for cx_ in range(-1, 2) for cz in range(-1, 2)}
+    for session in (cx.ref, cx.via):
+        deadline = time.monotonic() + 20
+        while not wanted <= session.chunks:
+            session.check()
+            if time.monotonic() > deadline:
+                missing = sorted(wanted - session.chunks)
+                if session is cx.ref:
+                    cx.scenario(f"chunks {missing} never arrived")
+                raise StepFailure(f"the translated client never received chunks {missing}")
+            time.sleep(0.1)
     cx.sync()
 
 
@@ -625,7 +661,8 @@ def step_op(cx):
         cx.fail(f"op level status {record.value['entityStatus']}, expected 28 (level 4)")
     cx.console(cx.cmd.gamerule("doMobSpawning", "spawn_mobs", "false"),
                cx.cmd.gamerule("doDaylightCycle", "advance_time", "false"),
-               cx.cmd.gamerule("sendCommandFeedback", "send_command_feedback", "true"))
+               cx.cmd.gamerule("sendCommandFeedback", "send_command_feedback", "true"),
+               cx.cmd.gamerule("keepInventory", "keep_inventory", "true"))
 
 
 @step()
@@ -692,9 +729,13 @@ def step_entities(cx):
     time.sleep(1)
     ref = entity_types_seen(cx.ref, cx.ref_reg, cx.since("ref"))
     via = entity_types_seen(cx.via, cx.via_reg, cx.since("via"))
-    if len(set(ref.values())) < 8:
-        cx.scenario(f"only {sorted(set(ref.values()))} spawned")
-    cx.compare_names("spawned entities", "entity_type", sorted(set(ref.values())), set(via.values()))
+    # Only what the step summoned: natural spawns before doMobSpawning took
+    # effect differ between two clients standing in different places.
+    summoned = {f"minecraft:{entity(cx.cmd)}" for _, entity, _, _, _ in ENTITIES} | {"minecraft:chicken"}
+    seen = sorted(name for name in set(ref.values()) if name in summoned)
+    if len(seen) < 8:
+        cx.scenario(f"only {seen} of the summoned entities spawned")
+    cx.compare_names("spawned entities", "entity_type", seen, set(via.values()))
     for name in ("set_passengers", "entity_equipment", "entity_metadata"):
         if cx.ref.packets(name, cx.since("ref")) and not cx.via.packets(name, cx.since("via")):
             cx.fail(f"the translated client received no {name}")
@@ -902,7 +943,7 @@ def step_dimension_change(cx):
     cx.via.wait_packet("position", "overworld position", 15, mark)
     if cx.via.dimension_changes < changes + 2:
         cx.fail("fewer than two dimension changes reached the translated client")
-    time.sleep(1.5)
+    reappear(cx)
     cx.sync()
 
 
@@ -919,25 +960,22 @@ def step_respawn(cx):
     cx.via.wait_packet("respawn", "respawn", 10, mark)
     cx.via.wait_packet("update_health", "health after respawn", 10, mark, where=lambda value: value["health"] > 0)
     x, y, z = cx.base
+    mark = cx.via.mark()
     cx.console(cx.cmd.gamemode(cx.via.name, "creative"), f"tp {cx.via.name} {x + 2.5} {y} {z + 0.5}")
-    time.sleep(1.5)
+    cx.via.wait_packet("position", "the teleport back", 10, mark)
+    reappear(cx)
     cx.sync()
 
 
 def creative_slot(cx, slot, item):
     """Put `item` into an inventory slot with a creative inventory action."""
-    registries, protocol = cx.via_reg, cx.via.protocol
+    registries = cx.via_reg
     item_id = registries.id("item", item)
     if item_id is None:
         raise Skip(f"{item} has no ID in the client's version")
-    if protocol < 393:
-        value = {"blockId": item_id, "itemCount": 1, "itemDamage": 0}
-    elif protocol < 402:
-        value = {"itemId": item_id, "itemCount": 1}
-    elif protocol < 766:
-        value = {"present": True, "itemId": item_id, "itemCount": 1}
-    else:
-        value = {"itemCount": 1, "itemId": item_id}
+    # Every era's field names at once; the encoder writes those the client's
+    # schema has (1.12 blockId/itemDamage, 1.13.2 present, 1.20.5 components).
+    value = {"present": True, "blockId": item_id, "itemId": item_id, "itemCount": 1, "itemDamage": 0}
     cx.via.send_packet("set_creative_slot", {"slot": slot, "item": value})
 
 
