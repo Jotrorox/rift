@@ -1,7 +1,7 @@
 //! Guest SDK for Rift WebAssembly plugins.
 //!
 //! A Rift plugin is a WebAssembly component built for `wasm32-wasip2` against
-//! the `plugin` world of `rift:plugin@0.1.2`. This crate ships that WIT,
+//! the `plugin` world of `rift:plugin@0.1.3`. This crate ships that WIT,
 //! generates the bindings and wraps them, so a plugin is an ordinary
 //! `cdylib` crate:
 //!
@@ -144,7 +144,7 @@
 pub mod bindings {
     wit_bindgen::generate!({
         path: "wit",
-        world: "rift:plugin/plugin@0.1.2",
+        world: "rift:plugin/plugin@0.1.3",
         pub_export_macro: true,
         export_macro_name: "__export_rift_plugin",
         default_bindings_module: "rift_plugin::bindings",
@@ -404,6 +404,7 @@ pub mod players {
     pub use crate::bindings::rift::plugin::players::{
         action_bar, action_bar_json, boss_bar, broadcast, broadcast_json, clear_dialog, dialog,
         get, kick, kick_json, list, message, message_json, names, tab_list, title, transfer,
+        visible_to,
     };
 
     /// Show a dialog in the vanilla JSON format (Minecraft 1.21.6+). Returns
@@ -445,8 +446,12 @@ pub mod store {
 /// Rift's permission store: user nodes and group memberships.
 pub mod permissions {
     pub use crate::bindings::rift::plugin::permissions::{
-        add_group, groups, has, list_groups, remove_group, set,
+        add_group, groups, has, list_groups, meta, remove_group, set, set_meta,
     };
+
+    /// The meta key that makes a player visible only to viewers holding the
+    /// node in its value (see docs/permissions.md, "Visibility").
+    pub const VISIBLE_TO: &str = "rift.visible-to";
 }
 
 /// The message bus. Subscriptions deliver to [`Plugin::message`](crate::Plugin::message).

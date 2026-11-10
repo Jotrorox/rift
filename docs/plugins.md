@@ -2,7 +2,7 @@
 
 Rift has one plugin system. A plugin is anything that receives Rift's events
 and calls Rift's host API, and every plugin uses the same contract,
-[`wit/rift-plugin.wit`](../wit/rift-plugin.wit) (`rift:plugin@0.1.2`): one
+[`wit/rift-plugin.wit`](../wit/rift-plugin.wit) (`rift:plugin@0.1.3`): one
 event schema, one set of answers, one host API. What differs is where the code
 runs:
 
@@ -281,9 +281,9 @@ and the SDK guides map it to each language.
 
 | Interface | Functions | Notes |
 | --- | --- | --- |
-| `players` | `list(server?)`, `get(target)`, `names(prefix?)`, `message`, `action-bar`, `title`, `tab-list`, `boss-bar`, `dialog`, `clear-dialog`, `kick`, `transfer`, `broadcast`, `message-json`, `action-bar-json`, `kick-json`, `broadcast-json` | `target` is a name, a UUID or a connection id. Actions return whether the player was online. Transfers pass `before_transfer`. `dialog` and `clear-dialog` (since 0.1.1) show and close [dialogs](dialogs.md). The `-json` functions (since 0.1.2) take a JSON text component for colours, hover text and click events ([rich text](extensions.md#rich-text)); Lua takes a chat component table in place of the string. |
+| `players` | `list(server?)`, `get(target)`, `names(prefix?)`, `message`, `action-bar`, `title`, `tab-list`, `boss-bar`, `dialog`, `clear-dialog`, `kick`, `transfer`, `broadcast`, `message-json`, `action-bar-json`, `kick-json`, `broadcast-json` | `target` is a name, a UUID or a connection id. Actions return whether the player was online. Transfers pass `before_transfer`. `dialog` and `clear-dialog` (since 0.1.1) show and close [dialogs](dialogs.md). The `-json` functions (since 0.1.2) take a JSON text component for colours, hover text and click events ([rich text](extensions.md#rich-text)); Lua takes a chat component table in place of the string. `list` and `get` include hidden players; `visible-to(target)` (since 0.1.3; `visible_to` in Lua player tables and bus replies) returns the node a viewer needs to see one ([visibility](permissions.md#visibility)). |
 | `store` | `get`, `set`, `delete`, `increment`, `list(namespace, prefix)` | The durable store shared with API v2. Namespaces are private: `plugin.<name>.<namespace>`, which the configuration script's `rift.store` cannot read or write. |
-| `permissions` | `has`, `set`, `add-group`, `remove-group`, `groups`, `list-groups` | Rift's [permission store](permissions.md#persistent-plugins): user nodes and group memberships, checked in the player's current contexts. |
+| `permissions` | `has`, `set`, `add-group`, `remove-group`, `groups`, `list-groups`, `meta`, `set-meta` | Rift's [permission store](permissions.md#persistent-plugins): user nodes, group memberships and (since 0.1.3) meta values with contexts and expiry, checked in the player's current contexts. |
 | `bus` | `publish`, `request(subject, payload, timeout_ms)`, `subscribe(subject, queue_group?)`, `unsubscribe`, `stream-publish` | Messages arrive through the `message` hook. At most 256 subscriptions; requests wait at most 60 s. |
 | `servers` | `create`, `remove`, `start`, `stop`, `download`, `control(operation, payload_json)` | The same `rift.control.*` operations as the bus, awaiting the reply (at most 60 s). |
 | `timers` | `every(ms)`, `after(ms)`, `cancel(handle)` | Ticks arrive through the `timer` hook. At least 10 ms; at most 1024 timers. |
@@ -437,12 +437,12 @@ same without WASI.
 
 Additions keep compiled components loading. Wasmtime matches interface
 versions on the `0.1` track, so a component built against `0.1.0` links
-against this `0.1.2` host and the other way round. An addition may bring new
+against this `0.1.3` host and the other way round. An addition may bring new
 host functions, types and interfaces, but never changes an existing type or
 adds a case to an existing enum or variant, since exports are checked exactly.
 A new export lives in its own interface, which the host looks up when it
 loads a component and treats as optional: world `base` holds what every
 component has, worlds `optional` and `optional-decisions` what later releases added
-(`dialogs` in 0.1.1, `decisions` in 0.1.2). A host function a component calls needs a host that has it; a
+(`dialogs` in 0.1.1, `decisions` in 0.1.2; 0.1.3 adds only host functions). A host function a component calls needs a host that has it; a
 component that only exports something new still loads on older 0.1 hosts.
 Breaking changes move to 1.0.

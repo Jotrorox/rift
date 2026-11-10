@@ -182,7 +182,8 @@ names are unauthenticated and cannot establish account ownership.
 
 ## Server list: MOTD, favicon and player count
 
-By default Rift answers server-list pings itself with the network's player count,
+By default Rift answers server-list pings itself with the network's player count
+(without players a [visibility rule](permissions.md#visibility) hides),
 `limits.max_connections` as the maximum and the description `Rift`. With
 `status_cache` it instead relays the routed backend's response. To set the
 network's own entry, configure `server_list`:
@@ -277,8 +278,10 @@ display names from their plugins; Rift only adds players the current backend
 does not list, so a player is never listed twice and moving between servers
 needs no cleanup. Entries Rift adds show the player's skin when authentication
 is enabled and the default skin otherwise, with full signal bars and no game
-mode or display name. Vanished players remain hidden from their own server's list,
-but Rift lists them to players on other servers.
+mode or display name. A player whose
+[visibility rule](permissions.md#visibility) hides them from a viewer is not
+listed to that viewer, nor counted in `{online}` and `{server_online}`; their
+own server's list is the backend's (a vanish plugin there hides them).
 
 Configuration reloads apply to connected players. Removing `tab_list` removes
 Rift's entries and blanks the header and footer, after which backends' own

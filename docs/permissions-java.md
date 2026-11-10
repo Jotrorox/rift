@@ -156,6 +156,45 @@ schedule back (with the entity scheduler on Folia) before touching game state.
 Change events are delivered at most once, so use them for reactions, not for
 bookkeeping that must see every revision.
 
+## Visibility on Paper
+
+Rift leaves a hidden player out of everything it builds (see
+[visibility](permissions.md#visibility)), but a backend lists its own players
+itself. A Paper vanish plugin hides them there by reading the same meta key
+from the replica, so the proxy, every backend and the plugin agree without
+talking to each other:
+
+```java
+RiftPermissions perms = RiftPermissions.get();
+
+/** Whether viewer may see target, by Rift's rule. */
+boolean visible(Player viewer, Player target) {
+    Optional<String> node = perms.meta(target).value("rift.visible-to");
+    return node.isEmpty()
+            || viewer.equals(target)
+            || perms.check(viewer.getUniqueId(), node.get(), perms.contexts().of(viewer)).asBoolean(false);
+}
+
+void apply(Player target) {
+    for (Player viewer : Bukkit.getOnlinePlayers()) {
+        if (visible(viewer, target)) {
+            viewer.showPlayer(plugin, target);
+        } else {
+            viewer.hidePlayer(plugin, target);
+        }
+    }
+}
+```
+
+Call `apply` for a player on join (and for every other player, since the
+newcomer is a viewer too), on world change, and from a `SubjectUpdatedEvent`
+listener, which fires when a player's snapshot changes: the target's rule, or
+a viewer's `see` node. Listeners run off the main thread, so schedule back
+(with the entity scheduler on Folia) before calling `hidePlayer`. Toggling is a
+write like any other, for example
+`perms.user(uuid).set(Node.meta("rift.visible-to", "vanish.see")).join()`; the
+proxy then hides the player network-wide.
+
 ## Custom contexts
 
 ```java
