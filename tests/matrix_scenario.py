@@ -768,6 +768,16 @@ def step_blocks(cx):
         if lacking:
             cx.info(f"{len(lacking)} block entity updates of types the client's version lacks")
         ref_entities = [record for record in ref_entities if known(record)]
+    elif cx.via.protocol >= 757 and "block_entity_type" in cx.via_reg.ids:
+        # Before 1.18 the tag names the type: the same holds for a server
+        # that old (a 1.12 bed has nothing to arrive as on a 26.2+ client).
+        def known(record):
+            name = ((record.value or {}).get("nbtData") or {}).get("id")
+            return not isinstance(name, str) or cx.via_reg.knows("block_entity_type", name)
+        lacking = [record for record in ref_entities if not known(record)]
+        if lacking:
+            cx.info(f"{len(lacking)} block entity updates of types the client's version lacks")
+        ref_entities = [record for record in ref_entities if known(record)]
     if flattens:
         # 1.13 made the plant part of the block: a 1.12 pot with a poppy is a
         # potted_poppy, and has no block entity any more.
