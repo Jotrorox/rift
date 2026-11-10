@@ -377,7 +377,11 @@ NARRATOR_PLACEHOLDER = "package com.mojang.text2speech;\npublic interface Narrat
 # cannot answer, so every texture would be missing and block models null
 # (chunk meshing then crashes). The class doing that (found by its error
 # message, the name is obfuscated) gets a constructor that parses the IHDR
-# chunk in Java instead. It uses the ASM copy shaded into HeadlessMC's jar.
+# chunk in Java instead. And the game's macOS integration class (MacosUtil,
+# found by its use of the Objective-C bridge) gets empty void methods: its
+# Dock icon call (1.19.4-1.20.x) registers the JVM as a GUI app with a Dock
+# tile, and the menu/fullscreen calls have no business in a headless run.
+# It uses the ASM copy shaded into HeadlessMC's jar.
 HELPER_AGENT = """package rift.headless;
 
 import io.github.headlesshq.headlessmc.lwjgl.agent.MacosMenuAgent;
@@ -403,6 +407,7 @@ import java.util.List;
 
 public final class HeadlessAgent implements ClassFileTransformer {
     private static final byte[] MARKER = "Could not read info from the PNG file".getBytes(StandardCharsets.UTF_8);
+    private static final byte[] OBJC = "ca/weblite/objc/".getBytes(StandardCharsets.UTF_8);
     private static final String CONSTRUCTOR = "(Ljava/lang/String;Ljava/io/InputStream;)V";
 
     public static void premain(String arguments, Instrumentation instrumentation) {
@@ -436,7 +441,14 @@ public final class HeadlessAgent implements ClassFileTransformer {
     public byte[] transform(ClassLoader loader, String name, Class<?> redefined, ProtectionDomain domain,
                             byte[] bytes) {
         if (name == null || loader == null || name.startsWith("org/lwjgl/") || name.startsWith("java")
-                || name.startsWith("io/github/headlesshq/") || !contains(bytes, MARKER)) {
+                || name.startsWith("io/github/headlesshq/") || name.startsWith("ca/weblite/")
+                || name.startsWith("com/mojang/text2speech/")) {
+            return null;
+        }
+        if (contains(bytes, OBJC)) {
+            return silenceMacos(name, bytes);
+        }
+        if (!contains(bytes, MARKER)) {
             return null;
         }
         try {
@@ -490,6 +502,39 @@ public final class HeadlessAgent implements ClassFileTransformer {
         }
     }
 
+    private static byte[] silenceMacos(String name, byte[] bytes) {
+        try {
+            ClassNode node = new ClassNode();
+            new ClassReader(bytes).accept(node, 0);
+            List<String> silenced = new ArrayList<>();
+            for (MethodNode method : node.methods) {
+                if (method.name.startsWith("<") || !method.desc.endsWith(")V")
+                        || (method.access & (Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE)) != 0) {
+                    continue;
+                }
+                InsnList code = new InsnList();
+                code.add(new InsnNode(Opcodes.RETURN));
+                method.instructions = code;
+                method.tryCatchBlocks.clear();
+                method.localVariables = null;
+                method.visibleLocalVariableAnnotations = null;
+                method.invisibleLocalVariableAnnotations = null;
+                method.maxStack = 0;
+                silenced.add(method.name + method.desc);
+            }
+            if (silenced.isEmpty()) {
+                return null;
+            }
+            ClassWriter writer = new ClassWriter(ClassWriter.COMPUTE_MAXS);
+            node.accept(writer);
+            System.out.println("[rift-headless] macOS integration disabled in " + name + ": " + silenced);
+            return writer.toByteArray();
+        } catch (Throwable error) {
+            System.out.println("[rift-headless] could not patch " + name + ": " + error);
+            return null;
+        }
+    }
+
     private static boolean contains(byte[] haystack, byte[] needle) {
         outer:
         for (int start = 0; start <= haystack.length - needle.length; start++) {
@@ -504,7 +549,7 @@ public final class HeadlessAgent implements ClassFileTransformer {
     }
 }
 """
-HELPERS_VERSION = 3
+HELPERS_VERSION = 4
 
 
 def helpers():
