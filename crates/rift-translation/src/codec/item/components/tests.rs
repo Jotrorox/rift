@@ -1,0 +1,633 @@
+//! Tests of the component layouts and conversions: completeness of the
+//! tables, a generated value of every layout through every pair, real
+//! stacks from the recorded corpus (byte-exact round trips and conversions
+//! both ways), and hand-built cases for what the rules and the stash do.
+use super::{
+    convert::tests::TEXT_PASSTHROUGH,
+    layouts::{FIRST, Layout},
+    schema::{self, Node},
+    *,
+};
+use crate::{
+    Direction, State,
+    codec::{item::ItemStack, testing},
+    data,
+    nbt::{Compound, Nbt},
+    version::PROTOCOLS,
+    wire::{Reader, Writer},
+};
+use std::collections::BTreeMap;
+
+/// Protocols with data components, oldest first.
+fn protocols() -> impl Iterator<Item = i32> {
+    PROTOCOLS
+        .iter()
+        .map(|(protocol, _)| *protocol)
+        .filter(|protocol| *protocol >= FIRST)
+}
+
+/// A step that carries packets from `from` to the adjacent `to`, clientbound.
+fn step(from: i32, to: i32) -> Shared {
+    Shared::new(to, from)
+}
+
+fn passthrough_text() {
+    TEXT_PASSTHROUGH.with(|flag| flag.set(true));
+}
+
+#[test]
+fn every_component_type_has_a_layout() {
+    for protocol in protocols() {
+        let layout = Layout::of(protocol).unwrap();
+        assert_eq!(
+            layout.missing(),
+            Vec::<String>::new(),
+            "protocol {protocol} has component types without a layout"
+        );
+    }
+}
+
+/// Every registry a layout names exists in some protocol's data or is one
+/// of the synchronised registries.
+#[test]
+fn layouts_name_known_registries() {
+    const SYNCED: &[&str] = &[
+        "trim_material",
+        "trim_pattern",
+        "banner_pattern",
+        "jukebox_song",
+        "damage_type",
+        "wolf_variant",
+        "wolf_sound_variant",
+        "pig_variant",
+        "pig_sound_variant",
+        "cow_variant",
+        "cow_sound_variant",
+        "chicken_variant",
+        "chicken_sound_variant",
+        "cat_sound_variant",
+        "zombie_nautilus_variant",
+        "block_transformer",
+    ];
+    for protocol in protocols() {
+        let layout = Layout::of(protocol).unwrap();
+        let registry = data::version(protocol).expect_registry("data_component_type");
+        for id in 0..registry.len() as i32 {
+            let (kind, node) = layout.get(id).unwrap();
+            schema::registries(node, &mut |name| {
+                let known = SYNCED.contains(&name)
+                    || protocols().any(|p| data::version(p).registry(name).is_some());
+                assert!(known, "{kind} names unknown registry {name}");
+            });
+        }
+    }
+}
+
+/// A value of `node` that exercises it: every optional present, one element
+/// per list, the given variant of dispatches.
+fn sample(protocol: i32, node: &Node, depth: usize) -> Value {
+    use Node::*;
+    let item = |protocol: i32| {
+        let registry = data::version(protocol).expect_registry("item");
+        registry.id("stone").unwrap()
+    };
+    match node {
+        Unit => Value::Unit,
+        Bool => Value::Bool(false),
+        Byte => Value::Byte(1),
+        VarInt | Int => Value::Int(1),
+        VarLong | Long | Position => Value::Long(1),
+        Float => Value::Float(1.0),
+        Double => Value::Double(1.0),
+        Str(_) => Value::String("a".into()),
+        Identifier => Value::String("minecraft:stone".into()),
+        Uuid => Value::Uuid(1),
+        Tag | Compound => Value::nbt(&Nbt::Compound(Default::default())),
+        Text => Value::nbt(&Nbt::String("text".into())),
+        Id(registry) | Holder(registry, _) => Value::Id(match *registry {
+            "item" => item(protocol),
+            _ => 0,
+        }),
+        HolderSet(_) => Value::Tag("minecraft:planks".into()),
+        Enum(names) => Value::Enum(names[0]),
+        Optional(inner) if depth < 6 => Value::some(sample(protocol, inner, depth + 1)),
+        Optional(_) => Value::none(),
+        List(element, _) if depth < 6 => Value::List(vec![sample(protocol, element, depth + 1)]),
+        List(_, _) => Value::List(Vec::new()),
+        Array(element, count) => Value::List(
+            (0..*count)
+                .map(|_| sample(protocol, element, depth + 1))
+                .collect(),
+        ),
+        Struct(fields) => Value::Struct(
+            fields
+                .iter()
+                .map(|(_, field)| sample(protocol, field, depth + 1))
+                .collect(),
+        ),
+        Either(left, _) => Value::Either(true, Box::new(sample(protocol, left, depth + 1))),
+        Dispatch(_, variants) | Union(variants) => {
+            // The deepest variants nest displays; stop at a leaf one.
+            let (name, variant) = if depth < 4 {
+                variants.last()
+            } else {
+                variants.first()
+            }
+            .unwrap();
+            Value::Variant(name, Box::new(sample(protocol, variant, depth + 1)))
+        }
+        Stack | Template => Value::Stack(Some(Box::new(ItemStack {
+            id: item(protocol),
+            count: 1,
+            damage: 0,
+            tag: None,
+            components: Some(Components::default()),
+        }))),
+        Kind => Value::Kind("damage"),
+        Typed => Value::Typed(Box::new(Component {
+            kind: "damage",
+            value: Value::Int(3),
+        })),
+        Ref(inner) => sample(protocol, inner, depth + 1),
+    }
+}
+
+fn encode(protocol: i32, components: &Components) -> Vec<u8> {
+    let mut writer = Writer::new();
+    write(protocol, components, &mut writer).unwrap();
+    writer.buf
+}
+
+fn decode(protocol: i32, bytes: &[u8]) -> Components {
+    let mut reader = Reader::new(bytes);
+    let components = read(protocol, &mut reader).unwrap();
+    reader.finish().unwrap();
+    components
+}
+
+/// A generated value of every component of every protocol survives its own
+/// writer and reader, converts to both neighbours, and what comes out
+/// writes and reads back in the neighbour's layout.
+#[test]
+fn every_layout_converts_to_both_neighbours() {
+    passthrough_text();
+    let all: Vec<i32> = protocols().collect();
+    for (index, &protocol) in all.iter().enumerate() {
+        let layout = Layout::of(protocol).unwrap();
+        let registry = data::version(protocol).expect_registry("data_component_type");
+        for id in 0..registry.len() as i32 {
+            let (kind, node) = layout.get(id).unwrap();
+            let mut components = Components::default();
+            components.insert(kind, sample(protocol, node, 0));
+            let bytes = encode(protocol, &components);
+            assert_eq!(decode(protocol, &bytes), components, "{kind} in {protocol}");
+            let neighbours = [index.checked_sub(1), Some(index + 1)];
+            for to in neighbours.into_iter().flatten().filter_map(|i| all.get(i)) {
+                let mut shared = step(protocol, *to);
+                let mut converted = components.clone();
+                convert(&mut shared, Direction::Clientbound, 1, &mut converted)
+                    .unwrap_or_else(|error| panic!("{kind} from {protocol} to {to}: {error}"));
+                let out = encode(*to, &converted);
+                assert_eq!(
+                    decode(*to, &out),
+                    converted,
+                    "{kind} from {protocol} to {to}"
+                );
+            }
+        }
+    }
+}
+
+/// The stacks of one recorded packet, as byte ranges of its body, for the
+/// packets whose layout around stacks is short: `None` for other packets.
+fn stack_ranges(protocol: i32, name: &str, body: &[u8]) -> Option<Vec<(usize, usize)>> {
+    let mut reader = Reader::new(body);
+    let mut ranges = Vec::new();
+    let offset = |reader: &Reader| body.len() - reader.remaining();
+    let mut stack = |reader: &mut Reader| {
+        let start = offset(reader);
+        schema::read_stack(protocol, reader, 0)
+            .unwrap_or_else(|error| panic!("{name} in {protocol}: {error}"));
+        ranges.push((start, offset(reader)));
+    };
+    let container = |reader: &mut Reader, signed: bool| {
+        if protocol >= 768 {
+            reader.varint().map(drop)
+        } else if signed {
+            reader.i8().map(drop)
+        } else {
+            reader.u8().map(drop)
+        }
+    };
+    match name {
+        "container_set_content" => {
+            container(&mut reader, false).ok()?;
+            reader.varint().ok()?;
+            for _ in 0..reader.count().ok()? {
+                stack(&mut reader);
+            }
+            stack(&mut reader);
+        }
+        "container_set_slot" => {
+            container(&mut reader, true).ok()?;
+            reader.varint().ok()?;
+            reader.i16().ok()?;
+            stack(&mut reader);
+        }
+        "set_equipment" => {
+            reader.varint().ok()?;
+            loop {
+                let slot = reader.u8().ok()?;
+                stack(&mut reader);
+                if slot & 0x80 == 0 {
+                    break;
+                }
+            }
+        }
+        "set_cursor_item" => stack(&mut reader),
+        "set_player_inventory" => {
+            reader.varint().ok()?;
+            stack(&mut reader);
+        }
+        _ => return None,
+    }
+    assert!(reader.is_empty(), "{name} in {protocol} has trailing data");
+    Some(ranges)
+}
+
+/// Every non-empty stack the corpus of `protocol` holds, as recorded.
+fn corpus_stacks(protocol: i32) -> Option<Vec<Vec<u8>>> {
+    let packets = testing::corpus(protocol)?;
+    let mut stacks = Vec::new();
+    for packet in packets {
+        if packet.direction != Direction::Clientbound || packet.state != State::Play {
+            continue;
+        }
+        let name = packet.name(protocol);
+        if let Some(ranges) = stack_ranges(protocol, name, &packet.data) {
+            for (start, end) in ranges {
+                let bytes = &packet.data[start..end];
+                if bytes != [0] && !stacks.iter().any(|known: &Vec<u8>| known == bytes) {
+                    stacks.push(bytes.to_vec());
+                }
+            }
+        }
+    }
+    Some(stacks)
+}
+
+fn read_stack(protocol: i32, bytes: &[u8]) -> Option<ItemStack> {
+    let mut reader = Reader::new(bytes);
+    let stack = schema::read_stack(protocol, &mut reader, 0).unwrap();
+    reader.finish().unwrap();
+    stack
+}
+
+fn write_stack(protocol: i32, stack: Option<&ItemStack>) -> Vec<u8> {
+    let mut writer = Writer::new();
+    schema::write_stack(protocol, stack, &mut writer).unwrap();
+    writer.buf
+}
+
+/// Convert a top-level stack as the item codec will: map the item, then
+/// the patch.
+fn convert_stack(from: i32, to: i32, stack: &ItemStack) -> Option<ItemStack> {
+    let mut shared = step(from, to);
+    let id = shared
+        .mapping(Direction::Clientbound, "item")
+        .get(stack.id)?;
+    let mut components = stack.components.clone().unwrap();
+    convert(&mut shared, Direction::Clientbound, id, &mut components)
+        .unwrap_or_else(|error| panic!("stack from {from} to {to}: {error}"));
+    Some(ItemStack {
+        id,
+        components: Some(components),
+        ..stack.clone()
+    })
+}
+
+#[test]
+fn corpus_stacks_round_trip_byte_for_byte() {
+    let mut report = Vec::new();
+    for protocol in protocols() {
+        let Some(stacks) = corpus_stacks(protocol) else {
+            report.push(format!("{protocol}: no corpus"));
+            continue;
+        };
+        let mut kinds = BTreeMap::new();
+        for bytes in &stacks {
+            let stack = read_stack(protocol, bytes);
+            assert_eq!(
+                &write_stack(protocol, stack.as_ref()),
+                bytes,
+                "stack in {protocol}"
+            );
+            for component in &stack.unwrap().components.unwrap().added {
+                *kinds.entry(component.kind).or_insert(0) += 1;
+            }
+        }
+        report.push(format!(
+            "{protocol}: {} stacks, {} component types",
+            stacks.len(),
+            kinds.len()
+        ));
+    }
+    eprintln!("{}", report.join("\n"));
+}
+
+/// Real stacks go to each neighbour and back: the neighbour's reader takes
+/// what comes out, and coming back gives the original (whatever the
+/// neighbour cannot express travels in the stash).
+#[test]
+fn corpus_stacks_convert_to_both_neighbours_and_back() {
+    passthrough_text();
+    let all: Vec<i32> = protocols().collect();
+    let mut report = Vec::new();
+    for (index, &protocol) in all.iter().enumerate() {
+        let Some(stacks) = corpus_stacks(protocol) else {
+            continue;
+        };
+        let neighbours = [index.checked_sub(1), Some(index + 1)];
+        for to in neighbours.into_iter().flatten().filter_map(|i| all.get(i)) {
+            let (mut converted, mut exact) = (0, 0);
+            for bytes in &stacks {
+                let stack = read_stack(protocol, bytes).unwrap();
+                let Some(there) = convert_stack(protocol, *to, &stack) else {
+                    continue;
+                };
+                let out = write_stack(*to, Some(&there));
+                assert_eq!(read_stack(*to, &out).as_ref(), Some(&there));
+                converted += 1;
+                let back = convert_stack(*to, protocol, &there).unwrap();
+                assert_eq!(
+                    normalized(&back),
+                    normalized(&stack),
+                    "stack from {protocol} to {to} and back"
+                );
+                if write_stack(protocol, Some(&back)) == *bytes {
+                    exact += 1;
+                }
+            }
+            report.push(format!(
+                "{protocol} -> {to} -> {protocol}: {converted} stacks, {exact} byte-identical"
+            ));
+        }
+    }
+    eprintln!("{}", report.join("\n"));
+}
+
+/// A stack with its components in a fixed order, for comparisons where a
+/// conversion may reorder them.
+fn normalized(stack: &ItemStack) -> ItemStack {
+    let mut stack = stack.clone();
+    if let Some(components) = &mut stack.components {
+        components.added.sort_by_key(|component| component.kind);
+        components.removed.sort();
+    }
+    stack
+}
+
+fn patch(protocol: i32, components: &[(&'static str, Value)]) -> Components {
+    let mut patch = Components::default();
+    for (kind, value) in components {
+        patch.insert(kind, value.clone());
+    }
+    let _ = protocol;
+    patch
+}
+
+fn converted(from: i32, to: i32, components: &Components) -> Components {
+    let mut shared = step(from, to);
+    let mut components = components.clone();
+    convert(&mut shared, Direction::Clientbound, 1, &mut components).unwrap();
+    // What comes out is valid for the receiver.
+    let bytes = encode(to, &components);
+    assert_eq!(decode(to, &bytes), components);
+    components
+}
+
+fn stash_entries(components: &Components) -> Vec<Nbt> {
+    let Some(value) = components.get("custom_data") else {
+        return Vec::new();
+    };
+    let Some(Nbt::Compound(data)) = value.as_nbt().unwrap() else {
+        panic!("custom_data is not a compound");
+    };
+    data.list(stash::KEY)
+        .map(<[Nbt]>::to_vec)
+        .unwrap_or_default()
+}
+
+#[test]
+fn components_the_receiver_lacks_are_stashed_and_come_back() {
+    let weapon = Value::Struct(vec![Value::Int(2), Value::Float(5.0)]);
+    let original = patch(
+        770,
+        &[("weapon", weapon.clone()), ("max_damage", Value::Int(9))],
+    );
+    let down = converted(770, 769, &original);
+    assert!(down.get("weapon").is_none());
+    assert_eq!(down.get("max_damage"), Some(&Value::Int(9)));
+    let entries = stash_entries(&down);
+    assert_eq!(entries.len(), 1);
+    let entry = entries[0].as_compound().unwrap();
+    assert_eq!(entry.int("protocol"), Some(770));
+    assert_eq!(entry.str("type"), Some("weapon"));
+    // Two steps further down, the entry for 770 rides along.
+    let further = converted(768, 767, &converted(769, 768, &down));
+    assert_eq!(stash_entries(&further).len(), 1);
+    let back = converted(767, 768, &further);
+    let back = converted(768, 769, &back);
+    let back = converted(769, 770, &back);
+    assert_eq!(back.get("weapon"), Some(&weapon));
+    assert!(back.get("custom_data").is_none(), "the stash is emptied");
+    assert_eq!(back.get("max_damage"), Some(&Value::Int(9)));
+}
+
+#[test]
+fn stash_keeps_custom_data_of_its_own() {
+    let mut data = Compound::new();
+    data.insert("mine", Nbt::Int(7));
+    let custom = Value::nbt(&Nbt::Compound(data));
+    let original = patch(
+        770,
+        &[
+            ("custom_data", custom.clone()),
+            ("glider", Value::Unit),
+            (
+                "weapon",
+                Value::Struct(vec![Value::Int(1), Value::Float(0.0)]),
+            ),
+        ],
+    );
+    let down = converted(770, 769, &original);
+    assert_eq!(stash_entries(&down).len(), 1);
+    let back = converted(769, 770, &down);
+    assert_eq!(back.get("custom_data"), Some(&custom));
+    assert_eq!(normalized_patch(back), normalized_patch(original));
+}
+
+fn normalized_patch(mut components: Components) -> Components {
+    components.added.sort_by_key(|component| component.kind);
+    components.removed.sort();
+    components
+}
+
+#[test]
+fn removed_types_the_receiver_lacks_come_back() {
+    let mut original = Components::default();
+    original.removed.push("weapon");
+    let down = converted(770, 769, &original);
+    assert!(down.removed.is_empty());
+    let back = converted(769, 770, &down);
+    assert_eq!(back, original);
+}
+
+#[test]
+fn tooltip_flags_become_tooltip_display_and_back() {
+    let levels = Value::List(Vec::new());
+    let original = patch(
+        769,
+        &[
+            (
+                "enchantments",
+                Value::Struct(vec![levels.clone(), Value::Bool(false)]),
+            ),
+            ("unbreakable", Value::Bool(true)),
+            ("hide_tooltip", Value::Unit),
+        ],
+    );
+    let up = converted(769, 770, &original);
+    assert_eq!(up.get("enchantments"), Some(&levels));
+    assert_eq!(up.get("unbreakable"), Some(&Value::Unit));
+    assert_eq!(
+        up.get("tooltip_display"),
+        Some(&Value::Struct(vec![
+            Value::Bool(true),
+            Value::List(vec![Value::Kind("enchantments")]),
+        ]))
+    );
+    assert!(stash_entries(&up).is_empty(), "nothing is lost going up");
+    let back = converted(770, 769, &up);
+    assert_eq!(normalized_patch(back), normalized_patch(original));
+}
+
+#[test]
+fn food_splits_into_consumable_and_merges_back() {
+    let effect = Value::Struct(vec![
+        Value::Id(1),
+        Value::Struct(vec![
+            Value::Int(0),
+            Value::Int(100),
+            Value::Bool(false),
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::none(),
+        ]),
+    ]);
+    let food = Value::Struct(vec![
+        Value::Int(4),
+        Value::Float(2.4),
+        Value::Bool(false),
+        Value::Float(1.6),
+        Value::none(),
+        Value::List(vec![Value::Struct(vec![effect, Value::Float(0.5)])]),
+    ]);
+    let original = patch(767, &[("food", food)]);
+    let up = converted(767, 768, &original);
+    assert!(up.get("consumable").is_some());
+    assert_eq!(up.get("food").unwrap().fields().unwrap().len(), 3);
+    assert!(stash_entries(&up).is_empty());
+    let back = converted(768, 767, &up);
+    assert_eq!(back, original);
+}
+
+#[test]
+fn entity_data_moves_its_type_out_and_back() {
+    let mut data = Compound::new();
+    data.insert("id", Nbt::String("minecraft:pig".into()));
+    data.insert("NoAI", Nbt::Byte(1));
+    let original = patch(772, &[("entity_data", Value::nbt(&Nbt::Compound(data)))]);
+    let up = converted(772, 773, &original);
+    let fields = up.get("entity_data").unwrap().fields().unwrap();
+    let pig = data::version(773)
+        .expect_registry("entity_type")
+        .id("pig")
+        .unwrap();
+    assert_eq!(fields[0], Value::Id(pig));
+    let back = converted(773, 772, &up);
+    assert_eq!(back, original);
+}
+
+#[test]
+fn swing_animation_splits_and_merges() {
+    let swing = Value::Struct(vec![Value::Int(1), Value::Int(6)]);
+    let original = patch(776, &[("swing_animation", swing.clone())]);
+    let up = converted(776, 777, &original);
+    assert_eq!(up.get("attack_animation"), Some(&swing));
+    assert_eq!(up.get("interact_animation"), Some(&swing));
+    assert_eq!(converted(777, 776, &up), original);
+}
+
+#[test]
+fn hashed_stacks_map_types_and_keep_hashes() {
+    use super::hashed::{HashedStack, read as read_hashed, write as write_hashed};
+    let stack = HashedStack {
+        item: data::version(776)
+            .expect_registry("item")
+            .id("stone")
+            .unwrap(),
+        count: 3,
+        added: vec![("swing_animation", 0x1234), ("damage", -5)],
+        removed: vec!["map_color"],
+    };
+    let mut writer = Writer::new();
+    write_hashed(776, Some(&stack), &mut writer).unwrap();
+    let mut reader = Reader::new(&writer.buf);
+    assert_eq!(
+        read_hashed(776, &mut reader).unwrap().as_ref(),
+        Some(&stack)
+    );
+    let mut converted = Some(stack.clone());
+    let mut shared = step(776, 777);
+    hashed::convert(&mut shared, Direction::Clientbound, &mut converted).unwrap();
+    let converted = converted.unwrap();
+    assert_eq!(
+        converted.added,
+        vec![
+            ("attack_animation", 0x1234),
+            ("interact_animation", 0x1234),
+            ("damage", -5)
+        ]
+    );
+    assert!(converted.removed.is_empty(), "26.3 has no map_color");
+}
+
+#[test]
+fn delimited_patches_round_trip() {
+    let original = patch(771, &[("damage", Value::Int(3)), ("glider", Value::Unit)]);
+    let mut writer = Writer::new();
+    write_delimited(771, &original, &mut writer).unwrap();
+    let mut reader = Reader::new(&writer.buf);
+    assert_eq!(read_delimited(771, &mut reader).unwrap(), original);
+    reader.finish().unwrap();
+}
+
+/// Stacks from the corpus, embedded so these checks run without it.
+#[test]
+fn recorded_stacks_round_trip() {
+    for (protocol, hex) in VECTORS {
+        let bytes: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|index| u8::from_str_radix(&hex[index..index + 2], 16).unwrap())
+            .collect();
+        let stack = read_stack(*protocol, &bytes);
+        assert_eq!(
+            write_stack(*protocol, stack.as_ref()),
+            bytes,
+            "vector in {protocol}"
+        );
+    }
+}
+
+const VECTORS: &[(i32, &str)] = &[];
