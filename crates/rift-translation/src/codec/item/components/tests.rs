@@ -783,3 +783,32 @@ fn corpus_recipe_displays_round_trip_and_convert() {
     }
     eprintln!("{}", report.join("\n"));
 }
+
+/// Hashes computed by the official 26.3 server's `HashOps.CRC32C_INSTANCE`.
+#[test]
+fn hashes_match_the_official_server() {
+    use super::hashed::hash_component;
+    let hash = |kind, value| hash_component(&Component { kind, value }).unwrap();
+    assert_eq!(hash("damage", Value::Int(5)), 645064431);
+    assert_eq!(hash("damage", Value::Int(-7)), -204940306);
+    assert_eq!(
+        hash("potion_duration_scale", Value::Float(1.5)),
+        -1709970540
+    );
+    assert_eq!(
+        hash("enchantment_glint_override", Value::Bool(true)),
+        -1019818302
+    );
+    assert_eq!(hash("glider", Value::Unit), -982207288);
+    assert_eq!(
+        hash("item_model", Value::String("minecraft:diamond".into())),
+        58140582
+    );
+    assert_eq!(hash("rarity", Value::Int(2)), -1420566726);
+    let nbt = "0a03000161000000010c00056c6f6e677300000001000000000000000601000162030200017300090600016440040000000000000b0004696e747300000003000000010000000200000003050001663e80000007000562797465730000000204050800046e616d6500085269667420e29c930400016c0000011f71fb04cb0900046c69737408000000020001780001790a0005696e6e65720100017a010000";
+    let bytes: Vec<u8> = (0..nbt.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&nbt[index..index + 2], 16).unwrap())
+        .collect();
+    assert_eq!(hash("custom_data", Value::Nbt(bytes)), -2028272530);
+}

@@ -16,10 +16,18 @@
 //! going back keeps the attack one. Types the receiver lacks are dropped
 //! (again a resync at worst), and a stack whose item the receiver lacks
 //! becomes empty.
-use super::{convert::Conv, layouts::Layout};
+//!
+//! [`from_stack`] hashes a whole stack for a client that sends whole stacks
+//! to a server that expects hashes (1.21.4 and older on 1.21.5 and newer),
+//! exactly for components whose persistent encoding is a plain value
+//! (numbers, flags, units, identifiers, `custom_data`), checked against the
+//! official 26.3 server's `HashOps`; other components get a placeholder and
+//! cost a resend of the slot.
+use super::{Component, Value, convert::Conv, layouts::Layout};
 use crate::{
     Direction,
-    codec::Shared,
+    codec::{Shared, item::ItemStack},
+    nbt::Nbt,
     wire::{Reader, Rewriter, Writer, invalid},
 };
 use std::io;
@@ -169,4 +177,213 @@ pub fn transcode(
     let mut stack = read(shared.source(direction), &mut rw.r)?;
     convert(shared, direction, &mut stack)?;
     write(shared.target(direction), stack.as_ref(), &mut rw.w)
+}
+
+/// CRC32C (Castagnoli), as Guava's `Hashing.crc32c()`.
+fn crc32c(bytes: &[u8]) -> u32 {
+    static TABLE: std::sync::OnceLock<[u32; 256]> = std::sync::OnceLock::new();
+    let table = TABLE.get_or_init(|| {
+        let mut table = [0u32; 256];
+        for (index, entry) in table.iter_mut().enumerate() {
+            let mut crc = index as u32;
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 {
+                    (crc >> 1) ^ 0x82f6_3b78
+                } else {
+                    crc >> 1
+                };
+            }
+            *entry = crc;
+        }
+        table
+    });
+    !bytes.iter().fold(!0u32, |crc, byte| {
+        table[((crc ^ u32::from(*byte)) & 0xff) as usize] ^ (crc >> 8)
+    })
+}
+
+/// `HashOps.CRC32C_INSTANCE` (1.21.5+): a value's hash is the CRC32C of a
+/// type tag and its little-endian payload; maps hash their entries' hashes
+/// sorted by key hash, then value hash.
+mod ops {
+    use super::crc32c;
+
+    fn tagged(tag: u8, payload: &[u8]) -> u32 {
+        let mut bytes = Vec::with_capacity(payload.len() + 1);
+        bytes.push(tag);
+        bytes.extend_from_slice(payload);
+        crc32c(&bytes)
+    }
+
+    pub fn byte(value: i8) -> u32 {
+        tagged(6, &value.to_le_bytes())
+    }
+
+    pub fn short(value: i16) -> u32 {
+        tagged(7, &value.to_le_bytes())
+    }
+
+    pub fn int(value: i32) -> u32 {
+        tagged(8, &value.to_le_bytes())
+    }
+
+    pub fn long(value: i64) -> u32 {
+        tagged(9, &value.to_le_bytes())
+    }
+
+    pub fn float(value: f32) -> u32 {
+        tagged(10, &value.to_bits().to_le_bytes())
+    }
+
+    pub fn double(value: f64) -> u32 {
+        tagged(11, &value.to_bits().to_le_bytes())
+    }
+
+    /// Java strings: the UTF-16 length, then each unit little-endian.
+    pub fn string(value: &str) -> u32 {
+        let units: Vec<u16> = value.encode_utf16().collect();
+        let mut payload = Vec::with_capacity(4 + units.len() * 2);
+        payload.extend_from_slice(&(units.len() as i32).to_le_bytes());
+        for unit in units {
+            payload.extend_from_slice(&unit.to_le_bytes());
+        }
+        tagged(12, &payload)
+    }
+
+    pub fn boolean(value: bool) -> u32 {
+        tagged(13, &[u8::from(value)])
+    }
+
+    pub fn map(mut entries: Vec<(u32, u32)>) -> u32 {
+        entries.sort_unstable();
+        let mut bytes = Vec::with_capacity(entries.len() * 8 + 2);
+        bytes.push(2);
+        for (key, value) in entries {
+            bytes.extend_from_slice(&key.to_le_bytes());
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes.push(3);
+        crc32c(&bytes)
+    }
+
+    pub fn list(elements: impl IntoIterator<Item = u32>) -> u32 {
+        let mut bytes = vec![4];
+        for element in elements {
+            bytes.extend_from_slice(&element.to_le_bytes());
+        }
+        bytes.push(5);
+        crc32c(&bytes)
+    }
+
+    /// A typed array: start tag, the elements little-endian, end tag.
+    pub fn array(start: u8, payload: &[u8]) -> u32 {
+        let mut bytes = Vec::with_capacity(payload.len() + 2);
+        bytes.push(start);
+        bytes.extend_from_slice(payload);
+        bytes.push(start + 1);
+        crc32c(&bytes)
+    }
+}
+
+/// The hash of an NBT tag through `NbtOps` into `HashOps`.
+fn hash_nbt(tag: &Nbt) -> u32 {
+    match tag {
+        Nbt::Byte(value) => ops::byte(*value),
+        Nbt::Short(value) => ops::short(*value),
+        Nbt::Int(value) => ops::int(*value),
+        Nbt::Long(value) => ops::long(*value),
+        Nbt::Float(value) => ops::float(*value),
+        Nbt::Double(value) => ops::double(*value),
+        Nbt::String(value) => ops::string(value),
+        Nbt::ByteArray(values) => ops::array(14, values),
+        Nbt::IntArray(values) => ops::array(
+            16,
+            &values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<_>>(),
+        ),
+        Nbt::LongArray(values) => ops::array(
+            18,
+            &values
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect::<Vec<_>>(),
+        ),
+        Nbt::List(values) => ops::list(values.iter().map(hash_nbt)),
+        Nbt::Compound(compound) => ops::map(
+            compound
+                .iter()
+                .map(|(key, value)| (ops::string(key), hash_nbt(value)))
+                .collect(),
+        ),
+    }
+}
+
+/// `Rarity`, by ID.
+const RARITIES: &[&str] = &["common", "uncommon", "rare", "epic"];
+
+/// The hash a 1.21.5+ client computes for `component`, where its persistent
+/// encoding is a plain value this module can reproduce exactly; `None` for
+/// the others (text, registry entries by name, records).
+pub fn hash_component(component: &Component) -> Option<i32> {
+    let value = &component.value;
+    let hash = match component.kind {
+        "custom_data" => hash_nbt(&value.as_nbt().ok()??),
+        "max_stack_size"
+        | "max_damage"
+        | "damage"
+        | "repair_cost"
+        | "map_id"
+        | "map_color"
+        | "ominous_bottle_amplifier" => ops::int(value.as_int()?),
+        "dyed_color" => match value {
+            Value::Int(rgb) => ops::int(*rgb),
+            _ => return None,
+        },
+        "enchantment_glint_override" => ops::boolean(value.as_bool()?),
+        "potion_duration_scale" | "minimum_attack_charge" => match value {
+            Value::Float(scale) => ops::float(*scale),
+            _ => return None,
+        },
+        "item_model" | "tooltip_style" | "note_block_sound" => ops::string(value.as_str()?),
+        "rarity" => ops::string(RARITIES.get(usize::try_from(value.as_int()?).ok()?)?),
+        "unbreakable" | "glider" | "waxed" if *value == Value::Unit => ops::map(Vec::new()),
+        // A unit sent through its persistent codec as an empty compound.
+        "intangible_projectile" => ops::map(Vec::new()),
+        "enchantable" => ops::map(vec![(
+            ops::string("value"),
+            ops::int(value.fields().ok()?[0].as_int()?),
+        )]),
+        _ => return None,
+    };
+    Some(hash as i32)
+}
+
+/// The hashed form of a whole stack in `protocol` (1.21.5+), for a client
+/// that sends whole stacks when the server expects hashes. Components
+/// [`hash_component`] cannot hash get 0: the server then sees a mismatch
+/// and resends the slot, which is safe.
+pub fn from_stack(protocol: i32, stack: Option<&ItemStack>) -> io::Result<Option<HashedStack>> {
+    let layout = Layout::of(protocol)?;
+    let Some(stack) = stack.filter(|stack| stack.count > 0) else {
+        return Ok(None);
+    };
+    let components = stack.components.clone().unwrap_or_default();
+    let mut added = Vec::with_capacity(components.added.len());
+    for component in &components.added {
+        if layout.id(component.kind).is_none() {
+            return Err(invalid(&format!(
+                "protocol {protocol} has no {} component",
+                component.kind
+            )));
+        }
+        added.push((component.kind, hash_component(component).unwrap_or(0)));
+    }
+    Ok(Some(HashedStack {
+        item: stack.id,
+        count: stack.count,
+        added,
+        removed: components.removed,
+    }))
 }
