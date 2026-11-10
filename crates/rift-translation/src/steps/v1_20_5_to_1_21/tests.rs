@@ -352,3 +352,36 @@ fn recorded_sessions_convert_through_both_steps() {
         assert!(converted > 100, "{protocol}: only {converted} packets");
     }
 }
+
+/// Each version is told only the flags it knows: 1.20.3 put the 1.21
+/// content behind `update_1_21`, 1.20.2 added `trade_rebalance`.
+#[test]
+fn feature_flags_follow_each_version() {
+    let flags = |names: &[&str]| {
+        let mut writer = Writer::new();
+        writer.varint(names.len() as i32);
+        for name in names {
+            writer.string(&format!("minecraft:{name}"));
+        }
+        writer.into_inner()
+    };
+    let all = flags(&["vanilla", "bundle", "trade_rebalance", "update_1_21"]);
+    for (protocol, expected) in [
+        (
+            766,
+            flags(&["vanilla", "bundle", "trade_rebalance", "update_1_21"]),
+        ),
+        (
+            765,
+            flags(&["vanilla", "bundle", "trade_rebalance", "update_1_21"]),
+        ),
+        (764, flags(&["vanilla", "bundle", "trade_rebalance"])),
+        (763, flags(&["vanilla", "bundle"])),
+    ] {
+        assert_eq!(
+            super::rewrite_features(&all, protocol, &[]).unwrap(),
+            expected,
+            "{protocol}"
+        );
+    }
+}

@@ -42,8 +42,9 @@ pub const DOWN: Option<Make> = down::STEP;
 /// in sending them.
 pub(super) fn known_features(protocol: i32) -> &'static [&'static str] {
     match protocol {
-        ..=765 => &["vanilla", "bundle", "trade_rebalance", "update_1_21"],
-        766 => &["vanilla", "bundle", "trade_rebalance", "update_1_21"],
+        ..=763 => &["vanilla", "bundle"],
+        764 => &["vanilla", "bundle", "trade_rebalance"],
+        765 | 766 => &["vanilla", "bundle", "trade_rebalance", "update_1_21"],
         767 => &["vanilla", "bundle", "trade_rebalance"],
         _ => &[
             "vanilla",

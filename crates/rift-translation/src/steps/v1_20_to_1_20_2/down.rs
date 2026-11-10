@@ -218,13 +218,13 @@ impl Down {
         Ok(())
     }
 
+    /// 1.20.2's trade rebalance experiment is unknown to 1.20.1.
     fn features(&mut self, _: &mut Cx<'_>, _: State, packet: Packet) -> io::Result<()> {
-        let mut r = Reader::new(&packet.data);
-        for _ in 0..r.count()? {
-            r.str()?;
-        }
-        r.finish()?;
-        self.features = Some(packet.data);
+        self.features = Some(super::super::v1_20_5_to_1_21::rewrite_features(
+            &packet.data,
+            OLDER,
+            &[],
+        )?);
         Ok(())
     }
 

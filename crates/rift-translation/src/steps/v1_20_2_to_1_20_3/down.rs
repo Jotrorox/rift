@@ -53,6 +53,7 @@ impl Down {
                 // replaces it.
                 .drop_clientbound(Configuration, "resource_pack_pop")
                 .drop_clientbound(Play, "resource_pack_pop")
+                .clientbound(Configuration, "update_enabled_features", Self::features)
                 .serverbound(Configuration, "resource_pack", Self::resource_pack)
                 .serverbound(Play, "resource_pack", Self::resource_pack)
                 .clientbound(Play, "set_score", Self::set_score)
@@ -89,6 +90,13 @@ impl Down {
         push_rest(&mut self.shared, Direction::Clientbound, &mut rw)?;
         let body = rw.finish()?;
         self.resource_pack = Some(id);
+        cx.to_client(state, Packet::new(packet.id, body));
+        Ok(())
+    }
+
+    /// 1.20.3 put the coming 1.21 content behind a flag 1.20.2 lacks.
+    fn features(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
+        let body = super::super::v1_20_5_to_1_21::rewrite_features(&packet.data, OLDER, &[])?;
         cx.to_client(state, Packet::new(packet.id, body));
         Ok(())
     }
