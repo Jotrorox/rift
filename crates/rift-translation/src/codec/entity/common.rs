@@ -119,7 +119,9 @@ pub fn block_states(from: i32, to: i32) -> Option<&'static Mapping> {
 
 /// Convert a block state ID for packets travelling in `direction`. Unknown
 /// states become air; pre-1.13 IDs pass through untouched (see
-/// [`block_states`]).
+/// [`block_states`]). Across the flattening, the 1.12 side is the
+/// `id | metadata << 12` form entity data, spawn data and particles use
+/// (chunks and block updates send `id << 4 | metadata`).
 pub fn block_state(shared: &Shared, direction: Direction, id: i32) -> i32 {
     let (from, to) = (shared.source(direction), shared.target(direction));
     if from == to {
@@ -127,7 +129,17 @@ pub fn block_state(shared: &Shared, direction: Direction, id: i32) -> i32 {
     }
     match block_states(from, to) {
         Some(mapping) => mapping.get_or(id, 0),
-        None if version::flattened(from) != version::flattened(to) => 0,
+        None if version::flattened(from) != version::flattened(to) => {
+            let Some(mapping) = crate::mapping::try_mapping(from, to, "block_state") else {
+                return 0;
+            };
+            if version::flattened(to) {
+                mapping.get_or((id & 0xfff) << 4 | (id >> 12 & 0xf), 0)
+            } else {
+                let state = mapping.get_or(id, 0);
+                state >> 4 | (state & 0xf) << 12
+            }
+        }
         None => id,
     }
 }
