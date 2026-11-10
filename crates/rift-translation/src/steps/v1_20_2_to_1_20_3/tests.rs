@@ -314,3 +314,38 @@ fn recorded_sessions_go_through_both_steps() {
         }
     }
 }
+
+/// The pair's stand-ins keep a block's shape and state where they can.
+#[test]
+fn new_blocks_stand_in_with_their_states() {
+    let (newer, older) = (crate::data::version(NEWER), crate::data::version(OLDER));
+    let mapping = crate::mapping::mapping(NEWER, OLDER, "block_state");
+    for (from, to) in [
+        (
+            "waxed_weathered_copper_door[facing=east,half=upper,hinge=right,open=true,powered=false]",
+            "warped_door[facing=east,half=upper,hinge=right,open=true,powered=false]",
+        ),
+        (
+            "tuff_brick_stairs[facing=south,half=top,shape=outer_left,waterlogged=true]",
+            "stone_brick_stairs[facing=south,half=top,shape=outer_left,waterlogged=true]",
+        ),
+        (
+            "tuff_slab[type=double,waterlogged=false]",
+            "andesite_slab[type=double,waterlogged=false]",
+        ),
+        (
+            "copper_bulb[lit=true,powered=false]",
+            "redstone_lamp[lit=true]",
+        ),
+        ("short_grass", "grass"),
+    ] {
+        let id = newer
+            .block_states
+            .parse(from)
+            .unwrap_or_else(|| panic!("{from}"));
+        let mapped = mapping
+            .get(id)
+            .unwrap_or_else(|| panic!("{from} is unmapped"));
+        assert_eq!(older.block_states.describe(mapped).unwrap(), to);
+    }
+}
