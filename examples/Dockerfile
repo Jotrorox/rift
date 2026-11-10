@@ -1,4 +1,4 @@
-# Build from a repository checkout with the Linux release executable saved as rift:
+# Build from the extracted Linux release archive (or a checkout with the executable saved as rift):
 # docker build -f examples/Dockerfile -t rift:local .
 # Ubuntu 24.04 matches the release runner's libc. Use a binary for this image's CPU.
 FROM ubuntu:24.04
