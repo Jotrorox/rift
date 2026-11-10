@@ -234,6 +234,45 @@ fn spawns_merge_into_add_entity_for_1_19() {
     assert!(checked > 20, "checked {checked} spawns");
 }
 
+/// The step spawns entities itself; the entity codec still learns their
+/// types, so a zombie's own entries (mob flags, health) keep through its
+/// entity data in both directions.
+#[test]
+fn spawned_entities_keep_their_own_entity_data() {
+    let zombie = |protocol: i32| {
+        data::version(protocol)
+            .expect_registry("entity_type")
+            .id("zombie")
+            .unwrap()
+    };
+    let entity_data = bytes(|w| {
+        w.varint(7).u8(15).varint(0).u8(1);
+        w.u8(9).varint(2).f32(20.0).u8(0xff);
+    });
+    let mut up = up();
+    let spawn = bytes(|w| {
+        w.varint(7).uuid(1).varint(zombie(OLDER));
+        w.f64(0.0).f64(-60.0).f64(0.0).i8(0).i8(0).i8(0);
+        w.i16(0).i16(0).i16(0);
+    });
+    up.clientbound(Play, "add_mob", &spawn).unwrap();
+    let out = up
+        .clientbound(Play, "set_entity_data", &entity_data)
+        .unwrap();
+    assert_eq!(out[0].data, entity_data);
+    let mut down = down();
+    let spawn = bytes(|w| {
+        w.varint(7).uuid(1).varint(zombie(NEWER));
+        w.f64(0.0).f64(-60.0).f64(0.0).i8(0).i8(0).i8(0).varint(0);
+        w.i16(0).i16(0).i16(0);
+    });
+    down.clientbound(Play, "add_entity", &spawn).unwrap();
+    let out = down
+        .clientbound(Play, "set_entity_data", &entity_data)
+        .unwrap();
+    assert_eq!(out[0].data, entity_data);
+}
+
 #[test]
 fn add_entity_splits_for_1_18_2() {
     let Some(session) = crate::codec::testing::corpus(NEWER) else {
