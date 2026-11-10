@@ -340,6 +340,7 @@ pub(super) fn install(lua: &Lua, state: &Rc<State>, spec: &PluginSpec) -> mlua::
 
     registration(lua, &rift, state)?;
     helpers(lua, &rift, state)?;
+    crate::text::lua::install(lua, &rift)?;
     rift.raw_set("players", players(lua, state)?)?;
     rift.raw_set("store", store(lua, state)?)?;
     rift.raw_set("permissions", permissions(lua, state)?)?;
@@ -360,6 +361,7 @@ pub(super) fn install(lua: &Lua, state: &Rc<State>, spec: &PluginSpec) -> mlua::
         "players",
         "servers",
         "timers",
+        "text",
     ] {
         loaded.raw_set(format!("rift.{module}"), rift.raw_get::<Table>(module)?)?;
     }
@@ -736,7 +738,7 @@ fn players(lua: &Lua, state: &Rc<State>) -> mlua::Result<Table> {
                 .title(
                     &target,
                     &TitleSpec {
-                        title,
+                        title: title.unwrap_or_else(|| Text::Plain(String::new())),
                         subtitle,
                         fade_in: times[0],
                         stay: times[1],

@@ -213,7 +213,8 @@ may join with `/server`. Neither runs Lua. A `suggest` function gets the command
 context with `args` untrimmed, plus `word` (the argument being typed, possibly
 empty) and `position` (its 1-based number). It returns nil or an array of up to
 1024 entries. Each entry is a string or `{ text = ..., tooltip = ... }`, both
-1–256 bytes without control characters, with a plain-text tooltip. It runs
+1–256 bytes without control characters. The tooltip may also be a chat
+component table, including `{ mini = ... }` ([styled text](text.md)). It runs
 under the usual 50 ms deadline, like every callback.
 
 Rift keeps entries that start with `word` (ignoring ASCII case), drops
@@ -262,7 +263,7 @@ rift.config.plugins = {
 | `timeout_ms` | `1000` | How long to wait for a reply, 1–10000 |
 | `on_timeout` | `"deny"` | `"allow"` or `"deny"` when no reply arrives in time |
 | `on_no_responders` | `"deny"` | Applied at once when nobody subscribes to `subject` |
-| `deny_message` | `"Unable to check your access, please try again later."` | Shown to the player when a policy denies |
+| `deny_message` | Rift's `decision.unavailable` [message](text.md#rifts-own-messages) | Shown to the player when a policy denies; a string or a chat component table |
 | `max_in_flight` | `256` | Open requests for this hook, 1–65536. When it is full, `on_timeout` applies at once |
 
 Decisions fail closed by default. `on_no_responders` takes effect immediately,
@@ -544,9 +545,11 @@ closes. Pending logins and players on other Rift processes are not listed.
 Title options are `title` and `subtitle` (at least one), plus `fade_in_ms`,
 `stay_ms` and `fade_out_ms` (integers from 0 to 60000; defaults 500, 3500 and
 1000; rounded down to 50 ms ticks). A title without a subtitle clears any earlier
-subtitle. Titles are 1–1024 bytes of UTF-8, shown as plain text. Messages,
-action bars and kick reasons are the same plain text, or chat component tables
-as described under [rich text](#rich-text).
+subtitle. A title or subtitle is a string of 1–1024 bytes, or a chat component
+table (including `{ mini = ... }`). Titles reach every supported client, 1.8.9 to
+26.3; a client that cannot show one keeps its session. Messages, action bars and kick reasons are
+the same plain text, or chat component tables as described under
+[rich text](#rich-text).
 
 Tab list options are `header` and `footer`, each a string or chat component
 table of up to 4096 bytes, with the same placeholders as the `tab_list` setting
@@ -655,17 +658,22 @@ rift.config.extensions = {
 
 ### Rich text
 
-Chat messages, action bars, broadcasts, kick reasons, deny reasons and command
-replies are plain text by default: a string of 1–1024 bytes, shown exactly as
-written. For colours, line breaks, hover text and click events, give a
-[JSON text component](https://minecraft.wiki/w/Text_component_format) instead:
+Chat messages, action bars, titles, broadcasts, kick reasons, deny reasons,
+command replies and suggestion tooltips are plain text by default: a string of
+1–1024 bytes, shown exactly as written. For colours, line breaks, hover text and
+click events, give a
+[JSON text component](https://minecraft.wiki/w/Text_component_format) instead,
+or write it as markup or legacy codes in an explicit object such as
+`{ mini = "<gold>Hi <player>", args = { player = name } }` or
+`{ legacy = "&6Hi" }`. [Styled text](text.md) has the markup reference, the
+theme, Rift's own message catalogue and how each client version is served.
 
 - in Lua (configuration callbacks and [Lua plugins](plugins-lua.md)), a chat
   component table where the string would go, as for tab lists:
   `{ deny = { text = "Banned", color = "red" } }`,
   `rift.players.message(player, { text = "Hi", bold = true })`;
 - in [bus replies](#decisions-answered-over-the-message-bus), an object or a
-  list as the `reason`;
+  list as the `reason`, including `{"mini": "<red>Banned"}`;
 - in WebAssembly plugins, the `-json` functions of the plugin contract
   (`players.message-json`, `action-bar-json`, `kick-json`, `broadcast-json`)
   and the `deny-json` and `message-json` answers of its optional `decisions`
@@ -676,8 +684,28 @@ Rift never reads JSON out of a plain string, so a plugin that relays what a
 player typed cannot be made to send click events. A component may be at most
 32 KiB of compact JSON (a Lua table at most 1024 values in 16 levels); it must
 not be empty, must not contain `null` and must have an NBT form, as every
-component does. An invalid component fails the call or the decision like any
-other invalid argument.
+component does. Rift also checks the fields it knows, so a mistake fails at the
+call instead of disconnecting the player:
+
+| Key | Rule |
+| --- | --- |
+| content | exactly one of `text`, `translate`, `keybind`, `score`, `selector`, `nbt`, `object` (a bare string or a list is also content) |
+| `color` | one of the 16 colour names, or `#rrggbb` |
+| `bold`, `italic`, `underlined`, `strikethrough`, `obfuscated` | `true` or `false` |
+| `shadow_color` | an ARGB integer, or a list of four numbers in 0..=1 |
+| `font` | an identifier such as `minecraft:uniform` |
+| `insertion` | a string |
+| `extra`, `with` | a non-empty list of components (`with` also takes numbers and booleans) |
+| `click_event` / `clickEvent` | a known action with the field it needs; `open_url` must be `http` or `https`, commands must not contain control characters or `§`; `show_dialog` and `custom` only in the `click_event` form |
+| `hover_event` / `hoverEvent` | `show_text` with a valid component, or `show_item` / `show_entity` naming what it shows |
+
+Other keys are passed through unchanged, so fields newer than Rift keep working.
+The error names the key, for example
+`message: extra[1].color must be one of the 16 colour names or #rrggbb, got "orange"`.
+An invalid component fails the call or the decision like any other invalid
+argument.
+
+The same rules apply to markup, after Rift parses it.
 
 Minecraft 1.21.5 renamed `clickEvent` and `hoverEvent` to `click_event` and
 `hover_event` and changed their fields (`clickEvent.value` became `url`,
@@ -686,7 +714,9 @@ plain fields for items and entities). Write either form: Rift rewrites the
 events of every message, action bar, kick and denial into the form each
 player's client reads, and when a component carries both forms for one event
 it keeps the matching one. An event the client cannot express, such as
-`show_dialog` before 1.21.5, is dropped; the text stays.
+`show_dialog` before 1.21.5, is dropped; the text stays. Hex colours, shadows,
+fonts and newer content are downsampled for older clients the same way (see
+[how each client sees it](text.md#how-each-client-sees-it)).
 
 A party invitation with buttons, and a ban screen:
 
@@ -721,6 +751,22 @@ rift.config.plugins = {
     end,
 }
 ```
+
+With markup, the invitation is one call, and `inviter` cannot add tags:
+
+```lua
+rift.players.message(target.uuid, rift.text.mini(
+    "<inviter> invited you to their party. "
+        .. "<green><b><click:run_command:/party accept><hover:show_text:'Join the party'>"
+        .. "[Accept]</hover></click></b></green> "
+        .. "<red><b><click:run_command:/party decline>[Decline]</click></b></red>",
+    { inviter = inviter }
+))
+```
+
+Arguments fill in text, not tag values: `<click:run_command:/party <x>>` is not
+filled in. Build such values in Lua instead, and pass player-supplied parts
+through `rift.text.escape` before splicing them into markup.
 
 Logs and admin replies show a component's words without formatting.
 

@@ -91,8 +91,10 @@ Lua examples.
 | `handler` exports | `rift.OnInit`, `rift.OnLogin`, `rift.OnCommand`, ... set from a package `init` function. The host calls exports right after instantiation and never runs `main`, which must exist but stays empty. |
 | `registration` | `rift.Registration{Commands, Hooks}`. Leave `Hooks` nil and the SDK lists exactly the hooks you set a handler for. |
 | `action` | `rift.Continue()`, `rift.Deny`, `rift.DenyJSON`, `rift.Server`, `rift.Message`, `rift.MessageJSON`, `rift.Queue`, `rift.LeaveQueue()` (the `JSON` forms take a JSON text component, see [rich text](extensions.md#rich-text)); `route` answers are `rift.RouteDefault()`, `rift.RouteBackend`, `rift.RouteReject`. |
-| `players` | `rift.Players`, `rift.Player`, `rift.PlayerNames`, `rift.SendMessage`, `rift.SendMessageJSON`, `rift.SendActionBar`, `rift.SendActionBarJSON`, `rift.SendTitle`, `rift.SetTabList`, `rift.SetBossBar`, `rift.ShowDialog`, `rift.ClearDialog`, `rift.Kick`, `rift.KickJSON`, `rift.Transfer`, `rift.Broadcast`, `rift.BroadcastJSON`. |
+| `players` | `rift.Players`, `rift.Player`, `rift.PlayerNames`, `rift.SendMessage`, `rift.SendMessageJSON`, `rift.SendActionBar`, `rift.SendActionBarJSON`, `rift.SendTitle`, `rift.SendTitleJSON` (since 0.1.3), `rift.SetTabList`, `rift.SetBossBar`, `rift.ShowDialog`, `rift.ClearDialog`, `rift.Kick`, `rift.KickJSON`, `rift.Transfer`, `rift.Broadcast`, `rift.BroadcastJSON`. |
 | `dialogs` export | `rift.OnDialog(func(rift.DialogResponse))` receives clicks on the plugin's [dialogs](dialogs.md); it needs no hook in the registration. |
+| `styled` export | `rift.OnRichSuggest(func(rift.Context) []rift.RichSuggestion)` and `rift.OnRichStatus(func(rift.Ping) *rift.RichStatusOverride)` (since 0.1.3) replace `OnSuggest` and `OnStatus` with JSON text tooltips, version and sample lines. Without them the SDK answers `styled` with the plain handlers; hosts before 0.1.3 get the rich text's words. |
+| rich text | `rift.Mini`, `rift.Legacy`, `rift.Component`, `rift.Plain`, `rift.RawJSON` (below); `rift.Ptr(v)` for optional fields. |
 | `store` | `rift.StoreGet`, `StoreSet`, `StoreDelete`, `StoreIncrement`, `StoreList`. |
 | `permissions` | `rift.HasPermission`, `SetPermission`, `AddGroup`, `RemoveGroup`, `Groups`, `ListGroupsJSON`. |
 | `bus` | `rift.Publish`, `Reply`, `Request`, `Subscribe`, `Unsubscribe`, `StreamPublish`. |
@@ -101,6 +103,52 @@ Lua examples.
 | `log`, `meta` | `rift.Log(level, msg)` and `Tracef` ... `Errorf`; `rift.Name`, `Version`, `DataDir`, `ConfigDir`, `Clock`, `Time`. |
 | `result<T, string>` | `(T, error)` with a `rift.HostError`. |
 | configuration JSON | `rift.ConfigString(json, "key")` returns `(value, ok, err)` with a built-in parser; `rift.DecodeConfig(json, &cfg)` uses `encoding/json`, which adds about 850 KB. |
+
+## Rich text builders
+
+The `JSON` functions and answers take a JSON text component. The builders
+write one, escaping every string, without `encoding/json`:
+
+```go
+// Rift markup, written as {"mini": "...", "args": {...}}; see docs/text.md.
+welcome := rift.Mini("<gold>Welcome, <player>!</gold> <gray><click:run_command:/spawn>[Spawn]").
+	Arg("player", ctx.Name).                      // shown as written, never parsed
+	ArgComponent("rank", rift.Legacy("&c[Admin]")) // a component argument
+rift.SendMessageJSON(ctx.UUID, welcome.JSON())
+
+// Legacy codes, written as {"legacy": "...", "marker": "&"}; .Marker('§') for another marker.
+rift.SendTitleJSON(ctx.UUID, rift.TitleJSON{
+	TitleJSON:    rift.Mini("<green>Lobby").JSON(),
+	SubtitleJSON: rift.Ptr(rift.Legacy("&7Have fun").JSON()),
+	FadeIn: 10, Stay: 70, FadeOut: 20,
+})
+
+// A component field by field (1.21.5 spellings; Rift converts for older clients).
+accept := rift.Component("[Accept]").Color("green").Bold().
+	RunCommand("/party accept Alex").HoverText("Join Alex's party").
+	Extra(rift.Plain(" or ignore it"))
+return rift.MessageJSON(accept.JSON())
+```
+
+`rift.Component` has `Color`, `Bold`, `Italic`, `Underlined`, `Strikethrough`,
+`Obfuscated`, `RunCommand`, `SuggestCommand`, `OpenURL`, `CopyToClipboard`,
+`HoverText` (plain), `Hover` (a component), `Insertion`, `Extra` (children)
+and `Field` (any other key, raw JSON). Builders nest through the `TextJSON`
+interface (`JSON() string`), which `rift.Plain` (text as written) and
+`rift.RawJSON` (hand-written JSON) also implement.
+
+Rich tooltips and server-list text use the same builders:
+
+```go
+rift.OnRichSuggest(func(ctx rift.Context) []rift.RichSuggestion {
+	return []rift.RichSuggestion{{Text: "lobby", TooltipJSON: rift.Ptr(rift.Mini("<gray>The main lobby").JSON())}}
+})
+```
+
+Markup is only read from an explicit `mini` object: a bare string, as in
+`rift.MessageJSON("<red>hi")`, is shown as written. Pass player input with
+`Arg`, never by concatenating it into the markup. The tags are listed in
+[Text and markup](text.md).
 
 ## Gotchas
 

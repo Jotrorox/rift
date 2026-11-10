@@ -455,9 +455,9 @@ async fn the_same_handler_body_runs_in_rift_lua_and_as_a_plugin() {
         assert_eq!(
             suggestions
                 .iter()
-                .map(|suggestion| (suggestion.text.as_str(), suggestion.tooltip.as_deref()))
+                .map(|suggestion| (suggestion.text.as_str(), suggestion.tooltip.clone()))
                 .collect::<Vec<_>>(),
-            [("hello", None), ("hey", Some("he"))]
+            [("hello", None), ("hey", Some("he".into()))]
         );
         assert_eq!(
             session(runtime, 3, "Other").command("greet").await.unwrap(),

@@ -10,7 +10,7 @@ Four persistent plugins that behave identically, one per supported language:
 | [`hello-lua`](hello-lua) | Lua | nothing to build | [Lua plugins](../../docs/plugins-lua.md) |
 
 The WebAssembly examples are standalone projects that build a component
-against the `plugin` world of `rift:plugin@0.1.2` (`wit/rift-plugin.wit`). A
+against the `plugin` world of `rift:plugin@0.1.3` (`wit/rift-plugin.wit`). A
 plugin directory holds a `plugin.toml` manifest and the entry it names: the
 built `.wasm`, or `init.lua`.
 

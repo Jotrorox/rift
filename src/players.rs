@@ -274,17 +274,17 @@ fn checked_name(name: String) -> io::Result<String> {
     if valid_username(&name) {
         Ok(name)
     } else {
-        Err(io::Error::new(
+        Err(crate::text::notice_error(
             io::ErrorKind::InvalidInput,
-            "invalid player name",
+            crate::text::catalog::Notice::LoginInvalidName,
         ))
     }
 }
 
 fn already_connected() -> io::Error {
-    io::Error::new(
+    crate::text::notice_error(
         io::ErrorKind::AlreadyExists,
-        "That player is already connected to this network.",
+        crate::text::catalog::Notice::LoginDuplicateName,
     )
 }
 
