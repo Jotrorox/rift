@@ -1039,3 +1039,48 @@ mod flattening_packets {
         );
     }
 }
+
+/// Write every converted corpus packet of every pair to
+/// `$RIFT_CHUNK_DUMP/<source>-<target>.jsonl` (one `{"id", "hex"}` object
+/// per line, in the target protocol) for `schema_check.py` to decode with
+/// minecraft-data's schemas, independently of Rift's readers. Run with
+/// `RIFT_CHUNK_DUMP=dir cargo test --release -p rift-translation dump_converted -- --ignored`.
+#[test]
+#[ignore]
+fn dump_converted() {
+    let Some(directory) = std::env::var_os("RIFT_CHUNK_DUMP") else {
+        eprintln!("RIFT_CHUNK_DUMP is not set: skipped");
+        return;
+    };
+    let directory = std::path::PathBuf::from(directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    for pair in PROTOCOLS.windows(2) {
+        let (older, newer) = (pair[0].0, pair[1].0);
+        if blocked(older, newer) {
+            continue;
+        }
+        for (client, backend) in [(newer, older), (older, newer)] {
+            let Some((_, _, out)) = convert_stream(client, backend) else {
+                continue;
+            };
+            let target = data::version(client);
+            let mut text = String::new();
+            for packet in out {
+                let Some(id) = target.packet_id(packet.state, packet.direction, &packet.name)
+                else {
+                    continue;
+                };
+                let hex: String = packet
+                    .data
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect();
+                text.push_str(&format!(
+                    "{{\"id\":{id},\"name\":\"{}\",\"hex\":\"{hex}\"}}\n",
+                    packet.name
+                ));
+            }
+            std::fs::write(directory.join(format!("{backend}-{client}.jsonl")), text).unwrap();
+        }
+    }
+}
