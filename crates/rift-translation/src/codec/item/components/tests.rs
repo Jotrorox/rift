@@ -4,6 +4,8 @@
 //! both ways), and hand-built cases for what the rules and the stash do.
 use super::{
     convert::tests::TEXT_PASSTHROUGH,
+    convert::{self, convert_value},
+    layouts,
     layouts::{FIRST, Layout},
     schema::{self, Node},
     *,
@@ -631,3 +633,153 @@ fn recorded_stacks_round_trip() {
 }
 
 const VECTORS: &[(i32, &str)] = &[];
+
+/// `recipe_book_add` and `update_recipes` (1.21.2+) around one protocol's
+/// displays: the packets are the same in every protocol that has them.
+macro_rules! recipe_packets {
+    ($add:ident, $update:ident, $recipe:path, $slot:path) => {
+        static $add: Node = Node::Struct(&[
+            (
+                "entries",
+                Node::List(
+                    &Node::Struct(&[
+                        ("id", Node::VarInt),
+                        ("display", Node::Ref(&$recipe)),
+                        ("group", Node::VarInt),
+                        ("category", Node::Id("recipe_book_category")),
+                        (
+                            "requirements",
+                            Node::Optional(&Node::List(&Node::HolderSet("item"), usize::MAX)),
+                        ),
+                        ("flags", Node::Byte),
+                    ]),
+                    usize::MAX,
+                ),
+            ),
+            ("replace", Node::Bool),
+        ]);
+        static $update: Node = Node::Struct(&[
+            (
+                "item_sets",
+                Node::List(
+                    &Node::Struct(&[
+                        ("key", Node::Identifier),
+                        ("items", Node::List(&Node::Id("item"), usize::MAX)),
+                    ]),
+                    usize::MAX,
+                ),
+            ),
+            (
+                "stonecutter",
+                Node::List(
+                    &Node::Struct(&[
+                        ("input", Node::HolderSet("item")),
+                        ("display", Node::Ref(&$slot)),
+                    ]),
+                    usize::MAX,
+                ),
+            ),
+        ]);
+    };
+}
+recipe_packets!(
+    ADD_768,
+    UPDATE_768,
+    layouts::RECIPE_DISPLAY_768,
+    layouts::SLOT_DISPLAY_768
+);
+recipe_packets!(
+    ADD_770,
+    UPDATE_770,
+    layouts::RECIPE_DISPLAY_770,
+    layouts::SLOT_DISPLAY_770
+);
+recipe_packets!(
+    ADD_775,
+    UPDATE_775,
+    layouts::RECIPE_DISPLAY_775,
+    layouts::SLOT_DISPLAY_775
+);
+recipe_packets!(
+    ADD_777,
+    UPDATE_777,
+    layouts::RECIPE_DISPLAY_777,
+    layouts::SLOT_DISPLAY_777
+);
+
+fn recipe_packet(protocol: i32, name: &str) -> Option<&'static Node> {
+    let index = match protocol {
+        768..770 => 0,
+        770..775 => 1,
+        775..777 => 2,
+        777.. => 3,
+        _ => return None,
+    };
+    match name {
+        "recipe_book_add" => Some([&ADD_768, &ADD_770, &ADD_775, &ADD_777][index]),
+        "update_recipes" => Some([&UPDATE_768, &UPDATE_770, &UPDATE_775, &UPDATE_777][index]),
+        _ => None,
+    }
+}
+
+/// Recorded recipe packets parse completely and write back unchanged, and
+/// their displays convert to both neighbours and back.
+#[test]
+fn corpus_recipe_displays_round_trip_and_convert() {
+    passthrough_text();
+    let all: Vec<i32> = protocols().collect();
+    let mut report = Vec::new();
+    for (index, &protocol) in all.iter().enumerate() {
+        let Some(packets) = testing::corpus(protocol) else {
+            continue;
+        };
+        let (mut seen, mut lossy_count) = (0, 0);
+        for packet in packets.iter().filter(|packet| packet.state == State::Play) {
+            let name = packet.name(protocol);
+            let Some(node) = recipe_packet(protocol, name) else {
+                continue;
+            };
+            let mut reader = Reader::new(&packet.data);
+            let value = schema::read(protocol, node, &mut reader, 0)
+                .unwrap_or_else(|error| panic!("{name} in {protocol}: {error}"));
+            reader.finish().unwrap();
+            let mut writer = Writer::new();
+            schema::write(protocol, node, &value, &mut writer).unwrap();
+            assert_eq!(writer.buf, packet.data, "{name} in {protocol}");
+            seen += 1;
+            let neighbours = [index.checked_sub(1), Some(index + 1)];
+            for to in neighbours.into_iter().flatten().filter_map(|i| all.get(i)) {
+                let Some(target) = recipe_packet(*to, name) else {
+                    continue;
+                };
+                let mut shared = step(protocol, *to);
+                let (there, lossy) = convert::with(&mut shared, Direction::Clientbound, |cx| {
+                    convert_value(cx, node, target, &value).map(|there| (there, cx.lossy))
+                })
+                .unwrap()
+                .unwrap();
+                let mut writer = Writer::new();
+                schema::write(*to, target, &there, &mut writer).unwrap();
+                let mut reader = Reader::new(&writer.buf);
+                schema::read(*to, target, &mut reader, 0).unwrap();
+                reader.finish().unwrap();
+                let mut shared = step(*to, protocol);
+                let back = convert::with(&mut shared, Direction::Clientbound, |cx| {
+                    convert_value(cx, target, node, &there)
+                })
+                .unwrap()
+                .unwrap();
+                if lossy {
+                    // Entries the neighbour lacks (newer items) were left out.
+                    lossy_count += 1;
+                } else {
+                    assert_eq!(back, value, "{name} from {protocol} to {to} and back");
+                }
+            }
+        }
+        report.push(format!(
+            "{protocol}: {seen} recipe packets, {lossy_count} conversions left something out"
+        ));
+    }
+    eprintln!("{}", report.join("\n"));
+}

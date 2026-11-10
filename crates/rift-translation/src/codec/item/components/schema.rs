@@ -15,7 +15,6 @@ use std::io;
 
 /// One node of a layout. Registry names are those of `data::VersionData`
 /// (without the `minecraft:` namespace).
-#[derive(Debug)]
 pub enum Node {
     /// `StreamCodec.unit`: nothing on the wire.
     Unit,
@@ -77,6 +76,53 @@ pub enum Node {
     Ref(&'static Node),
     /// `TypedDataComponent.STREAM_CODEC`: a component type and its value.
     Typed,
+}
+
+/// Layouts are recursive through [`Node::Ref`], which prints as `Ref`.
+impl std::fmt::Debug for Node {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use Node::*;
+        match self {
+            Str(max) => write!(f, "Str({max})"),
+            Id(registry) => write!(f, "Id({registry})"),
+            Holder(registry, inline) => write!(f, "Holder({registry}, {inline:?})"),
+            HolderSet(registry) => write!(f, "HolderSet({registry})"),
+            Enum(names) => write!(f, "Enum({names:?})"),
+            Optional(inner) => write!(f, "Optional({inner:?})"),
+            List(element, _) => write!(f, "List({element:?})"),
+            Array(element, count) => write!(f, "Array({element:?}, {count})"),
+            Struct(fields) => {
+                let names: Vec<_> = fields.iter().map(|(name, _)| *name).collect();
+                write!(f, "Struct({names:?})")
+            }
+            Either(left, right) => write!(f, "Either({left:?}, {right:?})"),
+            Dispatch(registry, _) => write!(f, "Dispatch({registry})"),
+            Union(variants) => {
+                let names: Vec<_> = variants.iter().map(|(name, _)| *name).collect();
+                write!(f, "Union({names:?})")
+            }
+            Ref(_) => write!(f, "Ref"),
+            Unit => write!(f, "Unit"),
+            Bool => write!(f, "Bool"),
+            Byte => write!(f, "Byte"),
+            VarInt => write!(f, "VarInt"),
+            VarLong => write!(f, "VarLong"),
+            Int => write!(f, "Int"),
+            Long => write!(f, "Long"),
+            Float => write!(f, "Float"),
+            Double => write!(f, "Double"),
+            Identifier => write!(f, "Identifier"),
+            Uuid => write!(f, "Uuid"),
+            Position => write!(f, "Position"),
+            Tag => write!(f, "Tag"),
+            Compound => write!(f, "Compound"),
+            Text => write!(f, "Text"),
+            Stack => write!(f, "Stack"),
+            Template => write!(f, "Template"),
+            Kind => write!(f, "Kind"),
+            Typed => write!(f, "Typed"),
+        }
+    }
 }
 
 /// A value read by a [`Node`], independent of any protocol's numbering
@@ -662,6 +708,10 @@ fn compatible_in(source: &Node, target: &Node, seen: &mut Vec<(usize, usize)>) -
         // a tag key and a holder set, a stack and an optional template.
         (Either(x, _), y) | (y, Either(x, _)) => compatible_in(x, y, seen),
         (Identifier, HolderSet(_)) | (HolderSet(_), Identifier) => true,
+        // 1.21.5's smithing trim display names its pattern instead of
+        // showing the template item.
+        (Dispatch("slot_display", _), Holder("trim_pattern", _))
+        | (Holder("trim_pattern", _), Dispatch("slot_display", _)) => true,
         (Stack, Optional(inner)) | (Optional(inner), Stack) => {
             matches!(inner, Template | Stack)
         }

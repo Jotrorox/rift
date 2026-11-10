@@ -153,6 +153,14 @@ fn synced_by_name(cx: &mut Conv<'_>, registry: &'static str, name: &str) -> Opti
     None
 }
 
+/// The sender's name of a synchronised registry entry.
+// INTEGRATION: as for `synced`; until the registries codec exposes the
+// sender's synchronised entries, such names are unknown.
+fn synced_name(cx: &mut Conv<'_>, registry: &'static str, id: i32) -> Option<String> {
+    let _ = (cx, registry, id);
+    None
+}
+
 /// Whether values of `source` can be carried over to `target` by
 /// [`convert_value`] without an explicit rule.
 pub fn compatible(source: &Node, target: &Node) -> bool {
@@ -253,6 +261,31 @@ pub fn convert_value(cx: &mut Conv<'_>, source: &Node, target: &Node, value: &Va
                 let (x, y) = if *left { (l1, l2) } else { (r1, r2) };
                 Value::Either(*left, Box::new(convert_value(cx, x, y, inner)?))
             }
+            // 26.3's tag display may list items, which a tag name cannot;
+            // a composite of item displays shows the same.
+            (
+                Dispatch("slot_display", _),
+                Dispatch("slot_display", ys),
+                Value::Variant("tag", inner),
+            ) if matches!(**inner, Value::Ids(_))
+                && ys
+                    .iter()
+                    .any(|(name, node)| *name == "tag" && matches!(node, Identifier)) =>
+            {
+                let Value::Ids(ids) = &**inner else {
+                    unreachable!("matched above");
+                };
+                // The same items, but not the same value coming back.
+                cx.lossy = true;
+                let mut items = Vec::with_capacity(ids.len());
+                for id in ids {
+                    match cx.map_id("item", *id) {
+                        Some(id) => items.push(Value::Variant("item", Box::new(Value::Id(id)))),
+                        None => cx.lossy = true,
+                    }
+                }
+                Value::Variant("composite", Box::new(Value::List(items)))
+            }
             (Dispatch(_, xs), Dispatch(_, ys), Value::Variant(name, inner))
             | (Union(xs), Union(ys), Value::Variant(name, inner)) => {
                 let (_, x) = xs
@@ -303,6 +336,12 @@ pub fn convert_value(cx: &mut Conv<'_>, source: &Node, target: &Node, value: &Va
             (x, Either(y, _), inner) if !matches!(x, Either(..)) => {
                 Value::Either(true, Box::new(convert_value(cx, x, y, inner)?))
             }
+            (Dispatch("slot_display", _), Holder("trim_pattern", _), display) => {
+                display_to_pattern(cx, display)?
+            }
+            (Holder("trim_pattern", _), Dispatch("slot_display", _), pattern) => {
+                pattern_to_display(cx, pattern)?
+            }
             (Identifier, HolderSet(_), Value::String(tag)) => Value::Tag(tag.clone()),
             (HolderSet(_), Identifier, Value::Tag(tag)) => Value::String(tag.clone()),
             (HolderSet(_), Identifier, Value::Ids(_)) => return Err(Fail::Lost),
@@ -318,6 +357,47 @@ pub fn convert_value(cx: &mut Conv<'_>, source: &Node, target: &Node, value: &Va
             _ => return Err(mismatch()),
         })
     }
+}
+
+/// Vanilla names each trim pattern's smithing template after it.
+const TEMPLATE_SUFFIX: &str = "_armor_trim_smithing_template";
+
+/// A smithing trim display's pattern, from the template item it showed
+/// before 1.21.5 to the pattern it names since.
+fn display_to_pattern(cx: &mut Conv<'_>, display: &Value) -> Res<Value> {
+    let Value::Variant("item", item) = display else {
+        return Err(Fail::Lost);
+    };
+    let id = item.as_int().ok_or(Fail::Lost)?;
+    let name = data::version(cx.source)
+        .registry("item")
+        .and_then(|registry| registry.name(id))
+        .and_then(|name| name.strip_suffix(TEMPLATE_SUFFIX))
+        .ok_or(Fail::Lost)?
+        .to_owned();
+    Ok(Value::Id(
+        cx.target_id("trim_pattern", &name).ok_or(Fail::Lost)?,
+    ))
+}
+
+/// The reverse of [`display_to_pattern`].
+fn pattern_to_display(cx: &mut Conv<'_>, pattern: &Value) -> Res<Value> {
+    let name = match pattern {
+        Value::Id(id) => synced_name(cx, "trim_pattern", *id).ok_or(Fail::Lost)?,
+        Value::Direct(inner) => {
+            let asset = inner
+                .fields()?
+                .first()
+                .and_then(Value::as_str)
+                .ok_or(Fail::Lost)?;
+            data::strip(asset).to_owned()
+        }
+        _ => return Err(Fail::Lost),
+    };
+    let item = cx
+        .target_id("item", &format!("{name}{TEMPLATE_SUFFIX}"))
+        .ok_or(Fail::Lost)?;
+    Ok(Value::Variant("item", Box::new(Value::Id(item))))
 }
 
 /// The registry a holder or ID node refers to.
@@ -447,6 +527,13 @@ pub fn patch(
     let mut out = Out::default();
     rules::before(&mut cx, item, &mut input, &mut out)?;
     for component in std::mem::take(&mut input.added) {
+        // The stash brings back the exact value of this one.
+        let restoring = cx
+            .target_kind(component.kind)
+            .is_some_and(|kind| restored.components.iter().any(|known| known.kind == kind));
+        if restoring {
+            continue;
+        }
         cx.lossy = false;
         let converted = match rules::component(&mut cx, item, &component, &mut out)? {
             true => None,

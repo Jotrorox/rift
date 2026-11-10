@@ -957,12 +957,20 @@ fn tooltip_up(cx: &mut Conv<'_>, input: &mut Components, out: &mut Out) -> io::R
         .collect();
     let hide = input.take("hide_tooltip").is_some();
     if input.take("hide_additional_tooltip").is_some() {
+        let before = hidden.len();
         hidden.extend(
             ADDITIONAL
                 .iter()
                 .copied()
                 .filter(|kind| input.get(kind).is_some()),
         );
+        if hidden.len() == before {
+            // It hides nothing this stack has, so no list can say it.
+            out.lost.push(Component {
+                kind: "hide_additional_tooltip",
+                value: Value::Unit,
+            });
+        }
     }
     if hide || !hidden.is_empty() {
         let kinds = hidden
