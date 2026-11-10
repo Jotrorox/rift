@@ -42,9 +42,6 @@ pub fn is_identity(mapping: &'static Mapping) -> bool {
 /// nothing changes, an error when there is no mapping at all.
 pub fn ids(from: i32, to: i32, registry: &str) -> io::Result<Option<&'static Mapping>> {
     match mapping::try_mapping(from, to, registry) {
-        // INTEGRATION: the pre-flattening block state and item mappings
-        // (`crate::legacy`) are still being written; until then the
-        // 1.12.2 / 1.13 pair has none and its chunks fail.
         None => Err(invalid(&format!(
             "no {registry} mapping from {} to {}",
             version::release(from),
