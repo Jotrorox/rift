@@ -47,26 +47,40 @@ jobs:
     uses: ./.github/workflows/ci.yml
 
   publish:
-    name: Publish tested nightly executables
+    name: Publish tested nightly archives and executables
     needs: [changes, verify]
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions:
       contents: write
+      # Sign and store build provenance attestations for every asset.
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: release-*
           path: dist
           merge-multiple: true
-      - name: Publish executables
+      - name: Record asset checksums
+        working-directory: dist
+        run: |
+          # sha256sum fails here if any expected asset is missing.
+          sha256sum \
+            rift-linux-x86_64.tar.gz rift-macos-aarch64.tar.gz rift-windows-x86_64.zip \
+            rift-linux-x86_64 rift-macos-aarch64 rift-windows-x86_64.exe > SHA256SUMS
+      - name: Attest build provenance for every asset
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-checksums: dist/SHA256SUMS
+      - name: Publish archives, executables and checksums
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ needs.changes.outputs.tag }}
         working-directory: dist
         run: |
-          gh release create "$RELEASE_TAG" \
-            rift-linux-x86_64 rift-macos-aarch64 rift-windows-x86_64.exe \
+          mapfile -t assets < <(cut -d ' ' -f 3- SHA256SUMS)
+          gh release create "$RELEASE_TAG" "${assets[@]}" SHA256SUMS \
             --target "$GITHUB_SHA" --prerelease --latest=false \
             --title "$RELEASE_TAG" --notes "Built from $GITHUB_SHA."

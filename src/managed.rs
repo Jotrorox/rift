@@ -22,6 +22,9 @@ use crate::{
 };
 
 mod backend;
+/// Landlock confinement of managed servers (Linux).
+#[cfg(target_os = "linux")]
+pub mod landlock;
 use backend::{Local, ProcessBackend, Remote, Status};
 pub(crate) use backend::{spawn as spawn_process, stop_child, write_console};
 
