@@ -28,8 +28,9 @@ Usage (Python 3.11+; use /opt/homebrew/bin/python3 on macOS):
     tests/translation_matrix.py --list                                          # fixtures, steps, matrices
 
 Options: --via proxy (default; crates/rift-translation's example, built with
-cargo) or --via rift (the rift binary with a generated config declaring the
-backend's version); --scenario all|join|name,name (join runs only login, the
+cargo), --via rift (the rift binary with a generated config declaring the
+backend's version) or --via rift-detect (the same without the declaration, so
+Rift has to ask the backend which version it runs); --scenario all|join|name,name (join runs only login, the
 mandatory teleport and idle steps); --keep keeps the server directory;
 --trace passes --trace to the proxy (packet names on its stderr); --json FILE
 writes machine-readable results; --direct also runs the reference scenario
@@ -187,11 +188,14 @@ class Proxy:
             ready = "translating"
         else:
             config = self.directory / "rift.lua"
+            address = f'"127.0.0.1:{self.server.port}"'
+            # rift-detect declares no version: Rift asks the backend itself.
+            backend = (address if self.kind == "rift-detect"
+                       else f'{{ address = {address}, version = "{self.server.release}" }}')
             config.write_text(
                 'local config = require("rift.config")\n'
                 f'config.listeners.public = "127.0.0.1:{self.port}"\n'
-                f'config.backends.main = {{ address = "127.0.0.1:{self.server.port}", '
-                f'version = "{self.server.release}" }}\n'
+                f'config.backends.main = {backend}\n'
                 'config.routes.public = "main"\n')
             command = [str(self.binary or build("rift")), "--config", str(config)]
             ready = "rift: listening on"
@@ -555,7 +559,7 @@ def main():
                              "(repeat or comma-separate)")
     parser.add_argument("--client", default=None, help="client versions, comma-separated (default: the server's)")
     parser.add_argument("--matrix", choices=sorted(matrices()), help="a predefined set of cells")
-    parser.add_argument("--via", choices=["proxy", "rift", "direct"], default="proxy",
+    parser.add_argument("--via", choices=["proxy", "rift", "rift-detect", "direct"], default="proxy",
                         help="proxy: the rift-translation example; rift: the rift binary; "
                              "direct: no proxy (validates the decoder and scenario)")
     parser.add_argument("--binary", type=Path, help="use this proxy/rift binary instead of building")
@@ -596,8 +600,8 @@ def main():
                 parser.error("--via direct connects clients of the server's own version only")
     if args.binary:
         args.binary = args.binary.resolve(strict=True)
-    elif args.via in ("proxy", "rift"):
-        build(args.via)
+    elif args.via in ("proxy", "rift", "rift-detect"):
+        build("proxy" if args.via == "proxy" else "rift")
     RUNS.mkdir(parents=True, exist_ok=True)
     began = time.monotonic()
     results = []
