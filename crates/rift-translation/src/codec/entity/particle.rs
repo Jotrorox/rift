@@ -370,6 +370,10 @@ fn adapt(options: Options, kind: Option<&str>) -> Option<Options> {
             power: 1.0,
         },
         (Some("PowerParticleOption"), Options::None) => Options::Power(1.0),
+        // A colour transition degrades to dust of its starting colour.
+        (Some("DustParticleOptions"), Options::DustTransition { from, scale, .. }) => {
+            Options::Dust { color: from, scale }
+        }
         (
             Some("TargetColorParticleOption" | "TrailParticleOption"),
             trail @ Options::Trail { .. },
@@ -414,9 +418,21 @@ pub fn convert(
     let (sent, received) = (options_type(from, particle.id)?, options_type(to, id)?);
     let mut options = particle.options;
     if sent != received {
-        match adapt(options, received) {
-            Some(adapted) => options = adapted,
-            None => return Ok(None),
+        if received == Some("BlockParticleOption") && options == Options::None {
+            // 1.18 shows barriers and lights as a marker naming the block.
+            let block = data::version(from)
+                .expect_registry("particle_type")
+                .name(particle.id)
+                .and_then(|name| data::version(to).block_states.block(name));
+            match block {
+                Some(block) => options = Options::Block(block.default_state()),
+                None => return Ok(None),
+            }
+        } else {
+            match adapt(options, received) {
+                Some(adapted) => options = adapted,
+                None => return Ok(None),
+            }
         }
     }
     match &mut options {
