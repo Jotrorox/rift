@@ -854,3 +854,31 @@ fn chat_parameters_take_each_versions_names() {
         );
     }
 }
+
+#[test]
+fn loot_conditions_change_their_kind_key_in_26_3() {
+    // Pumpkin sends its enchantments in full; 26.3 names a condition's kind
+    // `type`, older clients `condition` (they reject the whole registry).
+    let newer = r#"{effects:{"minecraft:post_attack":[{affected:"attacker",enchanted:"victim",effect:{type:"minecraft:all_of",effects:[{type:"minecraft:change_item_damage",amount:2.0f}]},requirements:{type:"minecraft:all_of",terms:[{type:"minecraft:random_chance",chance:{type:"minecraft:enchantment_level",amount:0.15f}},{type:"minecraft:inverted",term:{type:"minecraft:entity_properties",entity:"this",predicate:{}}}]}}]}}"#;
+    let older = newer
+        .replace(r#"requirements:{type:"#, r#"requirements:{condition:"#)
+        .replace(
+            r#"{type:"minecraft:random_chance""#,
+            r#"{condition:"minecraft:random_chance""#,
+        )
+        .replace(
+            r#"{type:"minecraft:inverted""#,
+            r#"{condition:"minecraft:inverted""#,
+        )
+        .replace(r#"term:{type:"#, r#"term:{condition:"#);
+    let element = |text: &str| match snbt::parse(text).unwrap() {
+        Nbt::Compound(compound) => compound,
+        _ => unreachable!(),
+    };
+    let mut down = element(newer);
+    transform::apply("enchantment", 777, 776, "thorns", &mut down).unwrap();
+    assert_eq!(Nbt::Compound(down), Nbt::Compound(element(&older)));
+    let mut up = element(&older);
+    transform::apply("enchantment", 776, 777, "thorns", &mut up).unwrap();
+    assert_eq!(Nbt::Compound(up), Nbt::Compound(element(newer)));
+}
