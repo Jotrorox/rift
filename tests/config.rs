@@ -390,6 +390,8 @@ fn config(backends: &[SocketAddr], limits: &str) -> String {
         .map(|(i, addr)| format!("b{i} = '{addr}'"))
         .collect::<Vec<_>>()
         .join(",");
+    // The test backends accept only the players' own connections, not the
+    // status requests that detect a backend's version.
     format!(
         "return {{ listeners = {{ {listeners} }}, backends = {{ {backends} }}, routes = {{ {routes} }}, limits = {{ {limits} }}, translation = {{ detect = false }} }}"
     )
