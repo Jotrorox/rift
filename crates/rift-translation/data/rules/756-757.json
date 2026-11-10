@@ -1,0 +1,33 @@
+{
+  "item": {
+    "down": {
+      "music_disc_otherside": "music_disc_pigstep"
+    }
+  },
+  "particle_type": {
+    "down": {
+      "block_marker": "barrier"
+    },
+    "up": {
+      "barrier": "block_marker",
+      "light": "block_marker"
+    }
+  },
+  "sound_event": {
+    "down": {
+      "block.growing_plant.crop": "entity.sheep.shear",
+      "item.bundle.drop_contents": "item.armor.equip_leather",
+      "item.bundle.insert": "item.armor.equip_leather",
+      "item.bundle.remove_one": "item.armor.equip_leather",
+      "music.overworld.dripstone_caves": "music.game",
+      "music.overworld.frozen_peaks": "music.game",
+      "music.overworld.grove": "music.game",
+      "music.overworld.jagged_peaks": "music.game",
+      "music.overworld.lush_caves": "music.game",
+      "music.overworld.meadow": "music.game",
+      "music.overworld.snowy_slopes": "music.game",
+      "music.overworld.stony_peaks": "music.game",
+      "music_disc.otherside": "music_disc.pigstep"
+    }
+  }
+}
