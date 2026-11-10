@@ -16,6 +16,7 @@ use aws_lc_rs::{
     encoding::{AsDer, PublicKeyX509Der},
     rand,
     rsa::{KeySize, Pkcs1PrivateDecryptingKey, PrivateDecryptingKey},
+    signature,
 };
 use cfb8::cipher::{
     IvState, KeyIvInit, SetIvState,
@@ -217,11 +218,16 @@ impl Authenticator {
     /// The caller bounds the complete login with its connection deadline. HTTP
     /// requests also have their own timeout. Encryption starts before hasJoined
     /// so outages and rejected sessions receive an encrypted login disconnect.
+    ///
+    /// `profile_key` is the X.509 public key a 1.19–1.19.2 client sent in
+    /// Login Start. Such a client signs the challenge with it instead of
+    /// encrypting it, as the vanilla server requires.
     pub async fn authenticate<S: AsyncRead + AsyncWrite + Unpin>(
         &self,
         stream: &mut CryptoStream<S>,
         version: ProtocolVersion,
         name: &str,
+        profile_key: Option<&[u8]>,
     ) -> io::Result<AuthenticatedProfile> {
         if !valid_name(name) || stream.is_encrypted() {
             return Err(failed());
@@ -242,7 +248,7 @@ impl Authenticator {
         // A separate exact-length Reader cannot consume the first encrypted
         // packet while reading the final plaintext Encryption Response.
         let frame = Reader::default()
-            .read_frame(stream, 1024)
+            .read_frame(stream, 2048)
             .await?
             .ok_or_else(failed)?;
         let response = Packet::from_body(&frame).map_err(|_| failed())?;
@@ -251,26 +257,65 @@ impl Authenticator {
         }
         let mut bytes = response.data.as_slice();
         let secret_ciphertext = read_rsa_bytes(&mut bytes, self.private_key.key_size_bytes())?;
-        let token_ciphertext = read_rsa_bytes(&mut bytes, self.private_key.key_size_bytes())?;
+        // 1.19–1.19.2 say which proof follows; a client with a profile key
+        // must sign, and one without must encrypt (vanilla's own rule).
+        let signed = matches!(version.number(), 759..=760) && {
+            let (&flag, rest) = bytes.split_first().ok_or_else(failed)?;
+            bytes = rest;
+            match flag {
+                1 => false,
+                0 => true,
+                _ => return Err(failed()),
+            }
+        };
+        if signed != profile_key.is_some() {
+            return Err(failed());
+        }
+        let challenge = if signed {
+            let salt = bytes.get(..8).ok_or_else(failed)?;
+            bytes = &bytes[8..];
+            let length = read_varint(&mut bytes).map_err(|_| failed())?;
+            if !(1..=1024).contains(&length) {
+                return Err(failed());
+            }
+            let signature = bytes.get(..length as usize).ok_or_else(failed)?;
+            bytes = &bytes[length as usize..];
+            Challenge::Signed { salt, signature }
+        } else {
+            Challenge::Encrypted(read_rsa_bytes(
+                &mut bytes,
+                self.private_key.key_size_bytes(),
+            )?)
+        };
         if !bytes.is_empty() {
             return Err(failed());
         }
         let mut secret_buffer = Zeroizing::new(vec![0; self.private_key.min_output_size()]);
         let mut token_buffer = Zeroizing::new(vec![0; self.private_key.min_output_size()]);
-        // Perform both decryptions before validating either result; all malformed
-        // RSA/token failures have the same externally visible error.
+        // Perform both checks before validating either result; all malformed
+        // RSA/token/signature failures have the same externally visible error.
         let secret = self
             .private_key
             .decrypt(secret_ciphertext, &mut secret_buffer);
-        let actual_token = self
-            .private_key
-            .decrypt(token_ciphertext, &mut token_buffer);
-        let (Ok(secret), Ok(actual_token)) = (secret, actual_token) else {
+        let proven = match challenge {
+            Challenge::Encrypted(ciphertext) => self
+                .private_key
+                .decrypt(ciphertext, &mut token_buffer)
+                .is_ok_and(|actual| verify_slices_are_equal(&token, actual).is_ok()),
+            Challenge::Signed { salt, signature } => {
+                let mut message = token.to_vec();
+                message.extend_from_slice(salt);
+                signature::UnparsedPublicKey::new(
+                    &signature::RSA_PKCS1_2048_8192_SHA256,
+                    profile_key.unwrap(),
+                )
+                .verify(&message, signature)
+                .is_ok()
+            }
+        };
+        let (Ok(secret), true) = (secret, proven) else {
             return Err(failed());
         };
-        if verify_slices_are_equal(&token, actual_token).is_err() {
-            return Err(failed());
-        }
         let mut secret: [u8; 16] = secret.try_into().map_err(|_| failed())?;
         let hash = server_hash(&secret, &self.public_key);
         stream.enable_encryption(secret)?;
@@ -312,6 +357,14 @@ impl Authenticator {
         }
         parse_profile(&body, name)
     }
+}
+
+/// The client's proof that it answered this login's challenge.
+enum Challenge<'a> {
+    /// The challenge, encrypted with the proxy's public key.
+    Encrypted(&'a [u8]),
+    /// SHA256withRSA over the challenge and salt, by the client's profile key.
+    Signed { salt: &'a [u8], signature: &'a [u8] },
 }
 
 fn valid_name(name: &str) -> bool {

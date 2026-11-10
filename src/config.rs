@@ -68,7 +68,7 @@ pub struct Config {
     pub routes: BTreeMap<String, Route>,
     pub limits: Limits,
     pub authentication: Authentication,
-    pub forwarding: Option<VelocityForwarding>,
+    pub forwarding: Option<Forwarding>,
     pub on_route: Option<RouteScript>,
     pub extensions: Option<crate::extensions::ExtensionScript>,
     /// Persistent plugins from `rift.plugin(name, config)`, in call order.
@@ -123,7 +123,7 @@ pub struct ServerAccess {
     pub deny: Vec<String>,
 }
 
-/// Online authentication and Velocity forwarding are enabled together. Existing
+/// Online authentication and player forwarding are enabled together. Existing
 /// configurations retain their explicitly documented offline behavior.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Authentication {
@@ -140,10 +140,58 @@ impl Default for Authentication {
     }
 }
 
+/// How backends learn the authenticated player's UUID, skin and address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForwardingMode {
+    /// Velocity modern forwarding: an HMAC-signed login plugin answer, 1.13+.
+    Velocity,
+    /// BungeeCord IP forwarding in the handshake, every version. Unsigned:
+    /// backends must accept connections from Rift alone.
+    BungeeCord,
+    /// BungeeCord forwarding plus a BungeeGuard token property.
+    BungeeGuard,
+}
+
+impl ForwardingMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Velocity => "velocity",
+            Self::BungeeCord => "bungeecord",
+            Self::BungeeGuard => "bungeeguard",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        [Self::Velocity, Self::BungeeCord, Self::BungeeGuard]
+            .into_iter()
+            .find(|mode| mode.as_str() == value)
+    }
+
+    /// The oldest protocol a backend can receive this forwarding on.
+    pub fn minimum_protocol(self) -> i32 {
+        match self {
+            // Login plugin messages arrived in 1.13.
+            Self::Velocity => 393,
+            Self::BungeeCord | Self::BungeeGuard => 0,
+        }
+    }
+
+    /// What the variable named by `secret_env` holds.
+    pub fn secret_name(self) -> Option<&'static str> {
+        match self {
+            Self::Velocity => Some("Velocity forwarding secret"),
+            Self::BungeeGuard => Some("BungeeGuard token"),
+            Self::BungeeCord => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VelocityForwarding {
+pub struct Forwarding {
+    pub mode: ForwardingMode,
     /// The configuration stores a variable name, never its secret value.
-    pub secret_env: String,
+    /// `None` only for `bungeecord`, which has no secret.
+    pub secret_env: Option<String>,
 }
 
 /// Listeners behind a load balancer that prepends a HAProxy PROXY protocol
@@ -960,7 +1008,7 @@ impl Config {
         }
         if self.authentication.online_mode != self.forwarding.is_some() {
             return Err(invalid(
-                "authentication.online_mode and forwarding.mode = 'velocity' must be enabled together",
+                "authentication.online_mode and forwarding.mode must be enabled together",
             ));
         }
         if self.authentication.timeout < Duration::from_millis(1)
@@ -968,8 +1016,12 @@ impl Config {
         {
             return Err(invalid("authentication.timeout_ms: expected 1..=60000"));
         }
-        if let Some(forwarding) = &self.forwarding {
-            let mut bytes = forwarding.secret_env.bytes();
+        if let Some(secret_env) = self
+            .forwarding
+            .as_ref()
+            .and_then(|forwarding| forwarding.secret_env.as_ref())
+        {
+            let mut bytes = secret_env.bytes();
             if !bytes
                 .next()
                 .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
@@ -1341,7 +1393,7 @@ fn authentication(root: &Table) -> Result<Authentication, String> {
     })
 }
 
-fn forwarding(root: &Table) -> Result<Option<VelocityForwarding>, String> {
+fn forwarding(root: &Table) -> Result<Option<Forwarding>, String> {
     let Some(values) = options(root, "forwarding", &["mode", "secret_env"])? else {
         return Ok(None);
     };
@@ -1349,17 +1401,23 @@ fn forwarding(root: &Table) -> Result<Option<VelocityForwarding>, String> {
         values.get("mode").map_err(|e| e.to_string())?,
         "forwarding.mode",
     )?;
-    if mode != "velocity" {
-        return Err("forwarding.mode: expected 'velocity' (omit forwarding to disable)".into());
-    }
+    let mode = ForwardingMode::parse(&mode).ok_or(
+        "forwarding.mode: expected 'velocity', 'bungeecord' or 'bungeeguard' (omit forwarding to disable)",
+    )?;
     let secret_env = match values
         .get::<Value>("secret_env")
         .map_err(|e| e.to_string())?
     {
-        Value::Nil => "RIFT_FORWARDING_SECRET".into(),
-        value => string(value, "forwarding.secret_env")?,
+        Value::Nil if mode == ForwardingMode::BungeeCord => None,
+        Value::Nil => Some("RIFT_FORWARDING_SECRET".into()),
+        _ if mode == ForwardingMode::BungeeCord => {
+            return Err(
+                "forwarding.secret_env: 'bungeecord' forwarding has no secret; use 'bungeeguard' for a token".into(),
+            );
+        }
+        value => Some(string(value, "forwarding.secret_env")?),
     };
-    Ok(Some(VelocityForwarding { secret_env }))
+    Ok(Some(Forwarding { mode, secret_env }))
 }
 
 fn network(root: &Table) -> Result<Network, String> {

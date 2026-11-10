@@ -6,6 +6,9 @@
 --   config/paper-global.yml: proxies.velocity.enabled=true,
 --     proxies.velocity.online-mode=true, proxies.velocity.secret=<matching secret>
 -- Restart Paper after editing. Existing UUID-based player data and skins persist.
+-- Backends older than 1.13 cannot read Velocity forwarding: use
+-- mode = "bungeeguard" with spigot.yml settings.bungeecord=true and the
+-- BungeeGuard plugin instead (see README.md, Authentication).
 rift.config.listeners = { public = "0.0.0.0:25565" }
 rift.config.backends = {
     lobby = "127.0.0.1:25566",

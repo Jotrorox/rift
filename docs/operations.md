@@ -36,7 +36,7 @@ environment as the service (for example `sudo -u rift --preserve-env=...` or
 `systemd-run --property=EnvironmentFile=...`), since it reads that environment:
 
 - **Secrets:** every variable the configuration names is set and has the length
-  startup requires: `forwarding.secret_env` (1–1024 bytes), `admin.token_env`,
+  startup requires: `forwarding.secret_env` (1–1024 bytes, for `velocity` and `bungeeguard`), `admin.token_env`,
   `messaging.principals[].token_env` and `nodes.*.token_env` (32–1024 bytes),
   and `extensions.integrations.*.headers_env` (a valid header value). Output
   names the variables, never their values.
@@ -72,7 +72,8 @@ The generated configuration forwards port 25565 to loopback port 25566.
 Configure that backend as described in the README. For public Paper networks,
 enable online authentication and Velocity modern forwarding using
 [`examples/online.lua`](../examples/online.lua). Rift verifies accounts; private
-Paper backends run `online-mode=false` with `proxies.velocity.online-mode=true`.
+Paper backends run `online-mode=false` with `proxies.velocity.online-mode=true`
+(or BungeeGuard forwarding for networks with versions older than 1.13).
 The generated starter retains unauthenticated offline behavior until these
 settings are enabled.
 [`examples/network.lua`](../examples/network.lua) adds hostname routing, fallback,

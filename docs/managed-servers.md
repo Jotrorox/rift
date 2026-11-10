@@ -465,7 +465,11 @@ on; use `network.access` to restrict players). Offline networks without
 With `forwarding = { mode = "velocity", ... }`, Paper, Folia and Purpur
 instances get `config/paper-global.yml` with Velocity forwarding enabled and the
 secret from `secret_env`, unless a config layer supplies that file. The file is
-created with mode `0600`. Templates with a local `server_jar` keep the previous
+created with mode `0600`. With `mode = "bungeecord"` or `"bungeeguard"` they get
+`spigot.yml` with `settings.bungeecord: true` instead; `bungeeguard` also writes
+the token to `plugins/BungeeGuard/config.yml` (mode `0600`). Add the BungeeGuard
+plugin jar to the template's `plugins`: without it the backend accepts the
+forwarded data unchecked. A config layer's own copy of either file wins. Templates with a local `server_jar` keep the previous
 behavior and receive only the endpoint settings.
 
 The resulting layout matches CloudNet v4:

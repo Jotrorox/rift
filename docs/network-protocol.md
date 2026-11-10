@@ -4,12 +4,22 @@ Network commands and backend replacement support Java **1.8.9–26.3**
 (66 releases, 50 protocols).
 Clients and backends use the same protocol version unless a backend declares
 another one that Rift translates; see [protocol translation](translation.md)
-(1.21.6 ↔ 1.21.7/1.21.8). Online authentication and Velocity modern forwarding require
-**1.19.3 or newer**; older versions use offline backends with forwarding disabled.
+(1.21.6 ↔ 1.21.7/1.21.8). Online authentication works on every supported
+version. Velocity modern forwarding requires **1.13 or newer** (login plugin
+messages arrived in 1.13); BungeeCord and BungeeGuard forwarding work on all.
 With online authentication enabled, Rift encrypts the client connection, verifies
 the Mojang session and retains its UUID, canonical name and signed profile properties.
 Paper backends run `online-mode=false` with Velocity modern forwarding enabled
-and `proxies.velocity.online-mode=true`; see the README for configuration.
+and `proxies.velocity.online-mode=true`, or with `settings.bungeecord=true` for
+BungeeCord forwarding; see the README for configuration.
+
+1.19–1.19.2 clients send a chat signing key in Login Start and sign the login
+challenge with it instead of encrypting it. Rift checks that signature against
+the key, as the vanilla server does, and passes the key on: in the backend's
+Login Start (as Velocity and BungeeCord do) and, when Paper asks for it, in
+Velocity forwarding versions 2 (1.19) and 3 (1.19.1–1.19.2, with the owning
+Mojang UUID). Rift does not check Mojang's signature over the key; a backend
+with `enforce-secure-profile=true` does.
 The backend login exchange receives the same verified profile and socket peer IP
 on initial login and every replacement. Authentication service failures never
 fall back to offline identities. Omitted security settings retain the original
@@ -204,15 +214,25 @@ The backend handshake carries the client's hostname and, for Forge clients, its
 network version, found anywhere in the NUL-delimited list as Forge itself
 reads it). Rift drops any other NUL-delimited data the client sends after the
 hostname, so a client cannot pass BungeeCord-style IP, UUID or skin data to an
-offline backend that has `settings.bungeecord=true`. Rift never sends BungeeCord IP forwarding itself; use
-Velocity modern forwarding to give backends player identities.
+offline backend that has `settings.bungeecord=true`.
+
+With `forwarding.mode = "bungeecord"` or `"bungeeguard"`, Rift itself writes
+BungeeCord's layout into the backend handshake: the client's hostname, the
+socket peer IP, the undashed verified UUID and the verified profile properties
+as JSON, NUL-separated. A Forge marker travels as Bungee's `forgeClient` and
+`extraData` properties. BungeeGuard adds one `bungeeguard-token` property;
+a profile property of that name from anywhere else is dropped. The hostname
+may be up to 32767 characters, which Spigot and Paper read; a backend that
+ignores the forwarded data derives an offline UUID, which Rift refuses at
+Login Success with a pointer to `spigot.yml`.
 
 Velocity `velocity:player_info` requests stay inside the proxy. Their responses
 use HMAC-SHA256 over the negotiated version, socket peer IP, verified UUID, name
-and profile properties, including property signatures. Rift supports forwarding
-version 1 and the version 4 format used by modern Paper; versions 2/3's legacy
-1.19 player-key fields are outside Rift's online authentication range. Each backend
-must request forwarding before Login Success. Client responses can only answer
+and profile properties, including property signatures. Rift negotiates the
+version as Velocity does: 4 for a 1.19.3+ player when Paper asks for it, 2 or 3
+with a 1.19–1.19.2 chat key, otherwise 1. With Velocity forwarding each backend
+must request forwarding before Login Success; a Velocity request while Rift
+uses BungeeCord forwarding fails the login. Client responses can only answer
 plugin queries actually relayed to that client; they cannot answer a Velocity
 query or reuse a completed query ID. Proxy-owned forwarding can be repeated on
 a safe initial transport retry because it needs no new client exchange.
