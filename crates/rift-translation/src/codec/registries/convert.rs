@@ -147,6 +147,13 @@ pub fn element_for(
         return Ok(vanilla.clone());
     }
     let mut element = element;
+    // INTEGRATION: text components inside datapack entries (descriptions of
+    // trims, enchantments, jukebox songs and instruments, painting titles,
+    // dialog texts) pass unconverted. Vanilla's only use `translate` and
+    // `color`, which every version reads alike; once `text::convert_nbt`
+    // works, the registry_data handlers should run it on those fields of
+    // non-vanilla entries when both protocols are 1.20.3+ (it needs
+    // `&mut Shared`, which this pure function does not have).
     if let Nbt::Compound(compound) = &mut element {
         transform::apply(registry, from, to, name, compound)?;
         conform(registry, to, name, compound);

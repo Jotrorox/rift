@@ -667,3 +667,70 @@ fn every_pair_installs_without_route_problems() {
         }
     }
 }
+
+fn hex(text: &str) -> Vec<u8> {
+    (0..text.len())
+        .step_by(2)
+        .map(|index| u8::from_str_radix(&text[index..index + 2], 16).unwrap())
+        .collect()
+}
+
+/// A real 1.20.5 `login` (vanilla 1.20.6, overworld) and 1.15.2 `login`.
+const LOGIN_766: &str = "000000010003136d696e6563726166743a6f766572776f726c64146d696e6563726166743a7468655f6e6574686572116d696e6563726166743a7468655f656e6414020200010000136d696e6563726166743a6f766572776f726c64d39468421171e08501ff0001000000";
+const LOGIN_578: &str = "000000010100000000c7feab42c557da511404666c6174020001";
+
+#[test]
+fn real_logins_convert_their_registry_parts() {
+    let body = hex(LOGIN_766);
+    for client in [766, 767] {
+        let mut shared = Shared::new(client, 766);
+        let mut rw = Rewriter::new(&body);
+        login::transcode_login(&mut shared, Direction::Clientbound, &mut rw).unwrap();
+        rw.copy_rest();
+        assert_eq!(rw.finish().unwrap(), body, "{client}");
+        let overworld = dimension(&shared, Side::Client).unwrap();
+        assert_eq!(
+            (overworld.min_y, overworld.height, overworld.has_skylight),
+            (-64, 384, true)
+        );
+        assert_eq!(world(&shared, Side::Client), Some("minecraft:overworld"));
+    }
+    let parsed = login::read_login(578, &mut Reader::new(&hex(LOGIN_578))).unwrap();
+    assert_eq!(parsed.dimension, Dimension::Legacy(0));
+    assert_eq!(parsed.world, None);
+    let shared = &Shared::new(735, 578);
+    assert_eq!(
+        login::convert_dimension(shared, Direction::Clientbound, parsed.dimension).unwrap(),
+        Dimension::Name("minecraft:overworld".into())
+    );
+    assert!(!login::transcodes_login(shared));
+}
+
+#[test]
+fn entries_without_data_take_the_senders_vanilla_element() {
+    let mut chat = defaults::get(773, "chat_type").unwrap().to_registry();
+    for entry in &mut chat.entries {
+        entry.element = None;
+    }
+    let mut step = Defaults::new(772, 773);
+    let out = step
+        .clientbound(
+            Phase::Configuration,
+            "registry_data",
+            &form::write_packet(&chat),
+        )
+        .unwrap();
+    let sent = out
+        .iter()
+        .map(|out| form::read_packet(&out.data).unwrap())
+        .find(|registry| registry.name == "chat_type")
+        .unwrap();
+    assert_eq!(sent, defaults::get(772, "chat_type").unwrap().to_registry());
+    chat.entries[0].name = "mypack:shout".into();
+    let mut step = Defaults::new(772, 773);
+    let body = form::write_packet(&chat);
+    assert!(
+        step.clientbound(Phase::Configuration, "registry_data", &body)
+            .is_err()
+    );
+}
