@@ -19,7 +19,9 @@
 //!   durations, recipes, the new smithing menu, tags and registry IDs.
 //!
 //! Respawn already carries the "data to keep" flags in 1.19.3 and keeps its
-//! layout; serverbound packets do not change.
+//! layout, and both clients ignore `teleport_entity` for the player they
+//! control, so neither needs converting; serverbound packets do not change.
+//! The signed chat format is the same on both sides: signatures pass intact.
 mod down;
 #[cfg(test)]
 pub(super) mod harness;
