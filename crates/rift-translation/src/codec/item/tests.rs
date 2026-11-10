@@ -1227,3 +1227,32 @@ mod trades {
         assert_eq!(modern.offers[0].cost, wool(477));
     }
 }
+
+#[test]
+fn creative_stacks_with_components_round_trip_in_the_untrusted_layout() {
+    use crate::codec::item::{
+        ItemStack,
+        components::{Components, Value},
+    };
+    let mut components = Components::default();
+    components.insert("damage", Value::Int(3));
+    components.insert("repair_cost", Value::Int(2));
+    components.removed.push("max_damage");
+    let slot = CreativeSlot {
+        slot: 36,
+        item: Some(ItemStack {
+            id: 1,
+            count: 2,
+            damage: 0,
+            tag: None,
+            components: Some(components),
+        }),
+    };
+    for protocol in [770, 777] {
+        let mut writer = Writer::new();
+        slot.write(protocol, &mut writer).unwrap();
+        let mut reader = Reader::new(&writer.buf);
+        assert_eq!(CreativeSlot::read(protocol, &mut reader).unwrap(), slot);
+        reader.finish().unwrap();
+    }
+}

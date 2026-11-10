@@ -2,7 +2,7 @@
 use super::{ItemStack, Stack, bridge, components, flatten, tags};
 use crate::{
     Direction,
-    codec::Shared,
+    codec::{Shared, text},
     data,
     mapping::Kind,
     nbt::{Compound, Nbt},
@@ -210,22 +210,73 @@ fn tag_era(shared: &mut Shared, direction: Direction, item: &mut ItemStack) -> i
 }
 
 /// Both protocols have data components: map the item and let the component
-/// codec convert the patch.
+/// codec convert the patch. A stand-in gets the original's name as
+/// `item_name` and the original stashed in `custom_data` under
+/// `rift:<protocol>`, so it is restored when the stack comes back.
 fn components_era(shared: &mut Shared, direction: Direction, stack: &mut Stack) -> io::Result<()> {
+    let (source, target) = (shared.source(direction), shared.target(direction));
     let item = stack.as_mut().expect("caller checked");
+    let components = item.components.get_or_insert_with(Default::default);
+    let restore = bridge::take_custom_data(components, &stash_key(target))?;
+    if let Some(stash) = &restore
+        && let Some(original) = stash
+            .str("id")
+            .and_then(|name| item_id(target, data::strip(name)))
+    {
+        // Back to the protocol the stand-in was made for: the patch is the
+        // original's, converted on the way out and back.
+        let named = stash.int("named") == Some(1);
+        components::convert(shared, direction, original, components)?;
+        if named {
+            components.take("item_name");
+        }
+        item.id = original;
+        return Ok(());
+    }
     let mapped = map_item(shared, direction, item.id)?;
     item.id = mapped.id;
-    // INTEGRATION: a stand-in (`mapped.stand_in_for`) should get the
-    // original's name as `custom_name` and the original ID stashed in
-    // `custom_data` under `rift:<protocol>`, restored on the way back; that
-    // needs component accessors from the component codec.
-    let components = item.components.get_or_insert_with(Default::default);
-    components::convert(shared, direction, mapped.id, components)
+    components::convert(shared, direction, mapped.id, components)?;
+    if let Some(original) = mapped.stand_in_for {
+        let mut stash = Compound::new();
+        stash.insert("id", format!("minecraft:{original}"));
+        if components.get("item_name").is_none() {
+            let name = text::to_nbt(target, &text::Component::text(readable(original)));
+            components.insert("item_name", components::Value::Nbt(name.to_bytes(false)));
+            stash.insert("named", Nbt::Byte(1));
+        }
+        bridge::put_custom_data(components, &stash_key(source), Nbt::Compound(stash))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn component_stand_ins_are_named_and_restored() {
+        // 1.21 added this disc; a 1.20.6 client gets a stand-in.
+        let original = item_id(767, "music_disc_creator").unwrap();
+        let mut shared = Shared::new(766, 767);
+        let mut converted = Some(ItemStack {
+            id: original,
+            count: 1,
+            damage: 0,
+            tag: None,
+            components: Some(Default::default()),
+        });
+        stack(&mut shared, Direction::Clientbound, &mut converted).unwrap();
+        let there = converted.clone().unwrap();
+        assert_ne!(item_name(766, there.id), Some("music_disc_creator"));
+        let patch = there.components.as_ref().unwrap();
+        assert!(patch.get("item_name").is_some());
+        assert!(patch.get("custom_data").is_some());
+        // The creative client returns it: the backend gets its disc back.
+        stack(&mut shared, Direction::Serverbound, &mut converted).unwrap();
+        let back = converted.unwrap();
+        assert_eq!(back.id, original);
+        assert!(back.components.unwrap().is_empty());
+    }
 
     #[test]
     fn readable_names_are_title_case() {

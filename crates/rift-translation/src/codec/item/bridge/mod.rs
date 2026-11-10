@@ -433,7 +433,10 @@ fn restore(components: &mut Components, entries: &[Nbt]) -> io::Result<()> {
 
 /// Remove `key` from the patch's `custom_data`, dropping the component
 /// when nothing else is left in it.
-fn take_custom_data(components: &mut Components, key: &str) -> io::Result<Option<Compound>> {
+pub(super) fn take_custom_data(
+    components: &mut Components,
+    key: &str,
+) -> io::Result<Option<Compound>> {
     let Some(value) = components.get("custom_data") else {
         return Ok(None);
     };
@@ -465,7 +468,11 @@ fn take_custom_data(components: &mut Components, key: &str) -> io::Result<Option
     Ok(Some(taken))
 }
 
-fn put_custom_data(components: &mut Components, key: &str, value: Nbt) -> io::Result<()> {
+pub(super) fn put_custom_data(
+    components: &mut Components,
+    key: &str,
+    value: Nbt,
+) -> io::Result<()> {
     let mut data = match components
         .get("custom_data")
         .map(Value::as_nbt)

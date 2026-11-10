@@ -327,7 +327,7 @@ impl CreativeSlot {
     pub fn write(&self, protocol: i32, w: &mut Writer) -> io::Result<()> {
         w.i16(self.slot);
         if untrusted_creative(protocol) {
-            write_untrusted(w, &self.item)
+            write_untrusted(protocol, w, &self.item)
         } else {
             write_stack(protocol, w, &self.item)
         }
@@ -369,22 +369,22 @@ fn read_untrusted(protocol: i32, r: &mut Reader<'_>) -> io::Result<Stack> {
     }))
 }
 
-fn write_untrusted(w: &mut Writer, stack: &Stack) -> io::Result<()> {
+fn write_untrusted(protocol: i32, w: &mut Writer, stack: &Stack) -> io::Result<()> {
     let Some(stack) = stack else {
         w.varint(0);
         return Ok(());
     };
-    let components = stack.components.clone().unwrap_or_default();
-    w.varint(stack.count.max(1)).varint(stack.id);
-    // INTEGRATION: the component codec should write the untrusted layout
-    // itself; until it can, only an empty patch is expressible here.
-    if components != components::Components::default() {
+    if stack.tag.is_some() {
         return Err(invalid(
-            "writing components in the creative (untrusted) layout needs the component codec",
+            "an NBT item tag in a protocol with data components",
         ));
     }
-    w.varint(0).varint(0);
-    Ok(())
+    w.varint(stack.count.max(1)).varint(stack.id);
+    components::write_delimited(
+        protocol,
+        stack.components.as_ref().unwrap_or(&Default::default()),
+        w,
+    )
 }
 
 /// A stack a click reports: the full stack before 1.21.5, a hashed one
