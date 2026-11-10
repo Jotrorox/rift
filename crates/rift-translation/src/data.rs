@@ -155,7 +155,7 @@ impl Block {
 }
 
 /// A block as stored: name, properties with their values, default offset.
-type RawBlock = (String, Vec<(String, Vec<String>)>, i32);
+pub type RawBlock = (String, Vec<(String, Vec<String>)>, i32);
 
 /// The flattened (1.13+) block states of one version.
 #[derive(Debug, Default)]
@@ -166,7 +166,8 @@ pub struct BlockStates {
 }
 
 impl BlockStates {
-    fn new(raw: Vec<RawBlock>) -> Self {
+    /// Block states from blocks in state order, as data files store them.
+    pub fn from_raw(raw: Vec<RawBlock>) -> Self {
         let mut blocks = Vec::with_capacity(raw.len());
         let mut by_name = HashMap::with_capacity(raw.len());
         let mut next = 0;
@@ -340,7 +341,7 @@ impl VersionData {
                 .into_iter()
                 .map(|(name, names)| (name, Registry::new(names)))
                 .collect(),
-            block_states: BlockStates::new(raw.blocks),
+            block_states: BlockStates::from_raw(raw.blocks),
             extra: raw.extra,
         }
     }
@@ -410,7 +411,7 @@ mod tests {
     use super::*;
 
     fn states() -> BlockStates {
-        BlockStates::new(vec![
+        BlockStates::from_raw(vec![
             ("air".into(), vec![], 0),
             (
                 "lever".into(),
