@@ -316,11 +316,13 @@ class Session(Client):
         self.send_packet("teleport_confirm", {"teleportId": value["teleportId"],
                                               "x": x, "y": y, "z": z, "yaw": yaw, "pitch": pitch})
         # Like a real client: confirm, then report the position. From 26.3 the
-        # confirmation carries the position itself, and a second position in
-        # the same tick is a kick (ServerGamePacketListenerImpl.handleMovePlayer).
-        if self.protocol < 777:
-            self.send_packet("position_look", {"x": x, "y": y, "z": z, "yaw": yaw, "pitch": pitch,
-                                               "onGround": True, "flags": {"onGround": True}})
+        # confirmation carries the position itself and counts as this tick's
+        # movement (one per client tick, ServerGamePacketListenerImpl
+        # handleMovePlayer), so the report follows in the next tick.
+        if self.protocol >= 777:
+            self.tick_end()
+        self.send_packet("position_look", {"x": x, "y": y, "z": z, "yaw": yaw, "pitch": pitch,
+                                           "onGround": True, "flags": {"onGround": True}})
         self.tick_end()
         if self.has("player_loaded") and not self.loaded_sent:
             self.send_packet("player_loaded")

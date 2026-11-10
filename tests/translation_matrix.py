@@ -73,6 +73,17 @@ RUNS = ROOT / "target" / "minecraft" / "runs"
 PROXY = ROOT / "target" / "debug" / "examples" / "proxy"
 ALWAYS = ("teleport", "op", "idle")  # Kept by --scenario join.
 
+# Server software that deviates from the official server's encoding. A decode
+# failure matching an entry is reported as KNOWN (not a translation failure),
+# and only when the reference client, which talks to the server directly in
+# its own protocol, fails the same way.
+SERVER_DEVIATIONS = [
+    dict(software="pumpkin", packet="set_slot", where="banner_patterns",
+         why="Pumpkin 0.2.0 writes a banner pattern's registry holder as the raw ID without the +1 "
+             "holder offset (bytes 01 00 0f for one layer); vanilla 26.3 sends 01 05 0f for the same "
+             "item and decodes cleanly with the same schema."),
+]
+
 
 def release(protocol):
     return fixtures.RELEASE_OF[protocol]
@@ -321,11 +332,18 @@ def run_cell(server, proxy, protocol, steps, label, directory, args):
                   if "failed" in line or "cannot" in line.lower() or "error" in line.lower()]
         if errors:
             result["proxy_errors"] = errors[-20:]
+    reference_errors = {(record.name, record.error) for record in ref.failures()} if ref else set()
     for session, name in ((ref, "reference"), (via, "translated")):
         if session is None:
             continue
         session.write_log(directory / f"{name}.jsonl")
         report = decode_report(session)
+        for entry in report:
+            for deviation in SERVER_DEVIATIONS:
+                if (deviation["software"] == server.software and entry["packet"] == deviation["packet"]
+                        and deviation["where"] in entry["error"]
+                        and (entry["packet"], entry["error"]) in reference_errors):
+                    entry.update(level="KNOWN", known=deviation["why"])
         result[name] = dict(protocol=session.protocol, packets=len(session.records),
                             sent=len(session.sent), keepalives=session.keepalives,
                             decode_failures=sum(entry["count"] for entry in report if entry["level"] == "FAIL"),
@@ -334,7 +352,8 @@ def run_cell(server, proxy, protocol, steps, label, directory, args):
         for entry in report:
             result["findings"].append(dict(
                 level=entry["level"], step=entry["step"],
-                message=(f"{name} client could not decode {entry['state']} {entry['packet'] or '?'} "
+                message=(("known server deviation: " + entry["known"] + " " if entry.get("known") else "")
+                         + f"{name} client could not decode {entry['state']} {entry['packet'] or '?'} "
                          f"(id {entry['id']:#04x}, {entry['size']} bytes, x{entry['count']}): {entry['error']}"),
                 hexdump=entry["hexdump"]))
     kicked = [line for line in server_log.splitlines()
