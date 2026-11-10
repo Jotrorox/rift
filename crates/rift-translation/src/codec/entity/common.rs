@@ -12,11 +12,7 @@ use crate::{
     version,
     wire::{Position, Reader, Writer, invalid},
 };
-use std::{
-    collections::HashMap,
-    io,
-    sync::{Mutex, OnceLock},
-};
+use std::io;
 
 /// The mapping of a built-in registry for packets travelling in
 /// `direction`, or `None` when either protocol lacks the registry (it is
@@ -81,40 +77,15 @@ pub fn registry_identity(from: i32, to: i32, name: &str) -> bool {
 }
 
 /// Block state IDs between two flattened protocols, by block name and
-/// property values. `None` when either protocol is older than 1.13.
-// INTEGRATION: replace with `shared.mapping(direction, "block_state")` once
-// the mapping engine maps block states (with its stand-in rules); and map
-// pre-1.13 numeric block IDs through the data engineer's `legacy` module.
+/// property values with the stand-in rules of the mapping engine. `None`
+/// when either protocol is older than 1.13.
+// INTEGRATION: map pre-1.13 numeric block IDs through the data engineer's
+// `legacy` module.
 pub fn block_states(from: i32, to: i32) -> Option<&'static Mapping> {
     if !version::flattened(from) || !version::flattened(to) {
         return None;
     }
-    static CACHE: OnceLock<Mutex<HashMap<(i32, i32), &'static Mapping>>> = OnceLock::new();
-    let mut cache = CACHE.get_or_init(Default::default).lock().unwrap();
-    Some(cache.entry((from, to)).or_insert_with(|| {
-        let (source, target) = (
-            &data::version(from).block_states,
-            &data::version(to).block_states,
-        );
-        let table = (0..source.len())
-            .map(|id| {
-                let (block, offset) = source.locate(id).expect("state in range");
-                let Some(other) = target.block(&block.name) else {
-                    return -1;
-                };
-                // Properties the receiver lacks are dropped, new ones default.
-                let values: Vec<(&str, &str)> = block
-                    .values(offset)
-                    .into_iter()
-                    .filter(|(name, _)| other.properties.iter().any(|(known, _)| &**known == *name))
-                    .collect();
-                other
-                    .offset(&values)
-                    .map_or(other.default_state(), |offset| other.first_state + offset)
-            })
-            .collect();
-        Box::leak(Box::new(Mapping::new(table)))
-    }))
+    crate::mapping::try_mapping(from, to, "block_state")
 }
 
 /// Convert a block state ID for packets travelling in `direction`. Unknown

@@ -71,14 +71,31 @@ pub fn block_fallback(protocol: i32) -> i32 {
 }
 
 /// The biome ID mapping for built-in biome registries (before 1.16.2).
+/// From 1.16.2 biome IDs index the registry the server sent, which passes
+/// on with its IDs; across 1.16.1 / 1.16.2 see [`synced_biome_ids`].
 pub fn biome_ids(from: i32, to: i32) -> Option<&'static Mapping> {
     if from >= 751 || to >= 751 {
-        // INTEGRATION: from 1.16.2 biome IDs index the registry the server
-        // sends; the registries codec will provide that mapping. Until then
-        // IDs pass unchanged across 1.16.1 / 1.16.2 and later pairs.
         return None;
     }
     mapping::try_mapping(from, to, "biome").filter(|mapping| !is_identity(mapping))
+}
+
+/// Across 1.16.1 / 1.16.2, where one side numbers biomes by its built-in
+/// registry and the other by the registry the server sent (or the client
+/// was sent): the client's ID for each backend ID, by name, with the
+/// client's plains for biomes it lacks.
+fn synced_biome_ids(shared: &Shared) -> Option<(Vec<i32>, i32)> {
+    use crate::codec::registries::{self, Side};
+    if (shared.backend < 751) == (shared.client < 751) {
+        return None;
+    }
+    const BIOME: &str = "worldgen/biome";
+    let fallback = registries::id_of(shared, Side::Client, BIOME, "plains").unwrap_or(0);
+    let size = registries::size(shared, Side::Backend, BIOME);
+    let table = (0..size as i32)
+        .map(|id| registries::map(shared, Direction::Clientbound, BIOME, id).unwrap_or(fallback))
+        .collect();
+    Some((table, fallback))
 }
 
 fn plains(protocol: i32) -> i32 {
@@ -110,7 +127,19 @@ pub fn convert_chunk(shared: &mut Shared, chunk: &mut Chunk) -> io::Result<()> {
     let blocks = ids(source, target, "block_state")?;
     let biomes = biome_ids(source, target);
     let fallback_biome = plains(target);
-    let biome_map = biomes.map(|mapping| move |id: i32| mapping.get(id).unwrap_or(fallback_biome));
+    let synced = synced_biome_ids(shared);
+    let biome_map: Option<Box<dyn Fn(i32) -> i32>> = match (biomes, synced) {
+        (Some(mapping), _) => Some(Box::new(move |id| {
+            mapping.get(id).unwrap_or(fallback_biome)
+        })),
+        (None, Some((table, fallback))) => Some(Box::new(move |id| {
+            usize::try_from(id)
+                .ok()
+                .and_then(|id| table.get(id).copied())
+                .unwrap_or(fallback)
+        })),
+        (None, None) => None,
+    };
     let block_entity_types = if source >= 757 && target >= 757 {
         ids(source, target, "block_entity_type")?
     } else {
@@ -121,7 +150,7 @@ pub fn convert_chunk(shared: &mut Shared, chunk: &mut Chunk) -> io::Result<()> {
         target,
         blocks,
         block_fallback: block_fallback(target),
-        biomes: biome_map.as_ref().map(|map| map as &dyn Fn(i32) -> i32),
+        biomes: biome_map.as_deref(),
         block_entity_types,
         world: target_world(&shared.chunk, source, target),
     };

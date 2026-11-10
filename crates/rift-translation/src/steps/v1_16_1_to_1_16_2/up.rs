@@ -1,14 +1,9 @@
 //! A 1.16.2 client on a 1.16.1 backend: backend packets are upgraded for the
 //! client and client packets downgraded for the backend.
-use super::{
-    BOOKS, Change, HARDCORE, NEWER, OLDER, SETTINGS, SHOWN,
-    dimension::{self, Types},
-    pack_section,
-};
+use super::{BOOKS, HARDCORE, NEWER, OLDER, SETTINGS, SHOWN};
 use crate::{
     Direction, Packet, State,
-    codec::{HasShared, Shared},
-    nbt::Nbt,
+    codec::{HasShared, Shared, registries::login},
     routed_step,
     step::{Cx, RouteBuilder, Routes},
     steps::Make,
@@ -18,8 +13,6 @@ use std::{io, sync::OnceLock};
 
 pub struct Up {
     shared: Shared,
-    /// The backend's dimension types, as 1.16.2 elements.
-    types: Types,
     /// Open and filtering, per recipe book: 1.16.2 clients change one book
     /// at a time, 1.16.1 servers want all four at once.
     books: [(bool, bool); BOOKS as usize],
@@ -35,7 +28,6 @@ impl Up {
     fn create() -> Box<dyn crate::step::Step> {
         Box::new(Self {
             shared: Shared::new(NEWER, OLDER),
-            types: Types::default(),
             books: Default::default(),
         })
     }
@@ -47,11 +39,6 @@ impl Up {
                 .defaults()
                 .clientbound(State::Play, "login", Self::login)
                 .clientbound(State::Play, "respawn", Self::respawn)
-                .clientbound(
-                    State::Play,
-                    "chunk_blocks_update",
-                    Self::chunk_blocks_update,
-                )
                 .tap(Direction::Clientbound, State::Play, "recipe", Self::recipe)
                 .serverbound(
                     State::Play,
@@ -67,23 +54,23 @@ impl Up {
         })
     }
 
+    /// The dimension list becomes the codec of dimension types and the
+    /// biomes the 1.16.1 backend numbers as vanilla does; the login's
+    /// dimension becomes its type's element.
     fn login(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
+        let shared = &mut self.shared;
         let mut rw = Rewriter::new(&packet.data);
         rw.i32()?; // Entity ID.
         let game_mode = rw.r.u8()?;
         rw.w.bool(game_mode & HARDCORE != 0)
             .u8(game_mode & !HARDCORE);
         rw.u8()?; // Previous game mode.
-        for _ in 0..rw.count()? {
-            rw.str()?; // World names.
-        }
-        let codec =
-            Nbt::read(&mut rw.r, true)?.ok_or_else(|| invalid("missing dimension codec"))?;
-        let (codec, types) = dimension::upgrade(&codec)?;
-        self.types = types;
-        Nbt::Compound(codec).write(&mut rw.w, true);
-        let element = self.types.element(rw.r.str()?)?;
-        Nbt::Compound(element.clone()).write(&mut rw.w, true);
+        rw.list(|rw| rw.str().map(drop))?; // World names.
+        login::transcode_codec(shared, Direction::Clientbound, &mut rw)?;
+        let mut ahead = rw.r;
+        ahead.str()?;
+        let world = ahead.str()?.to_owned();
+        login::transcode_dimension(shared, Direction::Clientbound, &mut rw, Some(&world))?;
         rw.str()?; // World name.
         rw.i64()?; // Hashed seed.
         let max_players = rw.r.u8()?;
@@ -99,9 +86,7 @@ impl Up {
 
     fn respawn(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
         let mut rw = Rewriter::new(&packet.data);
-        let element = self.types.element(rw.r.str()?)?;
-        Nbt::Compound(element.clone()).write(&mut rw.w, true);
-        rw.str()?; // World name.
+        login::transcode_respawn(&mut self.shared, Direction::Clientbound, &mut rw)?;
         rw.i64()?; // Hashed seed.
         rw.u8()?; // Game mode.
         rw.u8()?; // Previous game mode.
@@ -109,54 +94,6 @@ impl Up {
         rw.bool()?; // Flat.
         rw.bool()?; // Keep attributes.
         cx.to_client(state, Packet::new(packet.id, rw.finish()?));
-        Ok(())
-    }
-
-    /// One packet per section the changes touch.
-    fn chunk_blocks_update(
-        &mut self,
-        cx: &mut Cx<'_>,
-        state: State,
-        packet: Packet,
-    ) -> io::Result<()> {
-        let mut reader = Reader::new(&packet.data);
-        let (x, z) = (reader.i32()?, reader.i32()?);
-        let mapping = self.shared.mapping(Direction::Clientbound, "block_state");
-        let client = Self::routes().client();
-        let stone = client.block_states.parse("stone").unwrap_or(0);
-        let mut sections: Vec<(i32, Vec<Change>)> = Vec::new();
-        for _ in 0..reader.count()? {
-            let horizontal = reader.u8()?;
-            let y = reader.u8()?;
-            let state = mapping.get_or(reader.varint()?, stone);
-            let section = i32::from(y >> 4);
-            let change = Change {
-                x: horizontal >> 4,
-                y: y & 15,
-                z: horizontal & 15,
-                state,
-            };
-            match sections.iter_mut().find(|(known, _)| *known == section) {
-                Some((_, changes)) => changes.push(change),
-                None => sections.push((section, vec![change])),
-            }
-        }
-        reader.finish()?;
-        sections.sort_by_key(|(section, _)| *section);
-        let id = client.expect_packet(State::Play, Direction::Clientbound, "section_blocks_update");
-        for (section, changes) in sections {
-            let mut writer = Writer::with_capacity(12 + changes.len() * 4);
-            writer
-                .i64(pack_section(x, section, z))
-                .bool(false) // Light updates are not suppressed.
-                .varint(changes.len() as i32);
-            for change in changes {
-                let position =
-                    i64::from(change.x) << 8 | i64::from(change.z) << 4 | i64::from(change.y);
-                writer.varlong(i64::from(change.state) << 12 | position);
-            }
-            cx.to_client(state, Packet::new(id, writer.buf));
-        }
         Ok(())
     }
 

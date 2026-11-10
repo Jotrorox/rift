@@ -220,6 +220,12 @@ impl SetEquipment {
                 }
             }
         }
+        if slots
+            .iter()
+            .any(|(slot, _)| !(0..equipment_slots(protocol)).contains(slot))
+        {
+            return Err(invalid("invalid equipment slot"));
+        }
         Ok(Self { entity, slots })
     }
 
