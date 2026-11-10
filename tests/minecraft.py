@@ -650,6 +650,16 @@ def play(port, name, protocol=774, compression=True, pumpkin=False, hostname="lo
         raise AssertionError(f"incomplete play: joined={joined}, positioned={positioned}, chunks={chunks}")
 
 
+def java_binary(major):
+    """RIFT_JAVA_<major>, else the shared cache's JDK when present, else `java`."""
+    explicit = os.environ.get(f"RIFT_JAVA_{major}")
+    if explicit:
+        return explicit
+    cache = Path(os.environ.get("RIFT_VIA_CACHE") or Path.home() / ".cache" / "rift-via")
+    cached = cache / "jdks" / f"jdk{major}" / "bin" / "java"
+    return str(cached) if cached.exists() else "java"
+
+
 def unused_port():
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -724,26 +734,31 @@ def verify_checksum(path, fixture):
         raise ValueError(f"checksum mismatch: {path}: {actual}")
 
 
+def pumpkin_config(backend, compression, motd, gamemode="Creative"):
+    """The pinned Pumpkin release's pumpkin.toml for an offline loopback test server."""
+    return (
+        f'seed = "12345"\ndefault_gamemode = "{gamemode}"\n'
+        'default_difficulty = "Peaceful"\nallow_nether = false\nallow_end = false\n'
+        '[telemetry]\nenabled = false\n[plugins]\nenabled = false\n'
+        '[commands]\nuse_console = true\nuse_tty = false\n'
+        '[networking.java]\nenabled = true\n'
+        f'address = "127.0.0.1:{backend}"\nmotd = "{motd}"\n'
+        'online_mode = false\nencryption = false\nview_distance = 2\n'
+        'simulation_distance = 2\nmax_players = 20\nkeep_alive_time = 3\n'
+        '[networking.java.authentication]\nenabled = false\n'
+        f'[networking.java.compression]\nenabled = {str(compression).lower()}\n'
+        'threshold = 256\n[networking.bedrock]\nenabled = false\n'
+        '[networking.bedrock.nethernet]\nenabled = false\n'
+    )
+
+
 def configure_server(name, directory, backend, compression, motd=None, online=False):
     artifact = download(name)
     motd = motd or f"rift-{name}-test"
     if name == "pumpkin":
         if online:
             raise ValueError("the manual authenticated fixture uses vanilla or Paper")
-        (directory / "pumpkin.toml").write_text(
-            'seed = "12345"\ndefault_gamemode = "Creative"\n'
-            'default_difficulty = "Peaceful"\nallow_nether = false\nallow_end = false\n'
-            '[telemetry]\nenabled = false\n[plugins]\nenabled = false\n'
-            '[commands]\nuse_console = true\nuse_tty = false\n'
-            '[networking.java]\nenabled = true\n'
-            f'address = "127.0.0.1:{backend}"\nmotd = "{motd}"\n'
-            'online_mode = false\nencryption = false\nview_distance = 2\n'
-            'simulation_distance = 2\nmax_players = 20\nkeep_alive_time = 3\n'
-            '[networking.java.authentication]\nenabled = false\n'
-            f'[networking.java.compression]\nenabled = {str(compression).lower()}\n'
-            'threshold = 256\n[networking.bedrock]\nenabled = false\n'
-            '[networking.bedrock.nethernet]\nenabled = false\n'
-        )
+        (directory / "pumpkin.toml").write_text(pumpkin_config(backend, compression, motd))
         return [str(artifact)]
 
     (directory / "eula.txt").write_text("eula=true\n")
@@ -760,7 +775,7 @@ def configure_server(name, directory, backend, compression, motd=None, online=Fa
         "generate-structures=false\nspawn-protection=0\nmax-tick-time=-1\n"
         "pause-when-empty-seconds=0\n"
     )
-    java = os.environ.get(f"RIFT_JAVA_{SERVERS[name]['java']}", "java")
+    java = java_binary(SERVERS[name]["java"])
     if SERVERS[name]["protocol"] < 759:
         properties = directory / "server.properties"
         properties.write_text(properties.read_text().replace("level-type=minecraft:flat", "level-type=flat"))
