@@ -329,7 +329,10 @@ mod tests {
             eprintln!("skipped: {}", abi().unwrap_err());
             return;
         };
-        let root = std::env::temp_dir().join(format!("rift-landlock-{}", std::process::id()));
+        // Not under /tmp, which confined servers may use.
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("rift-landlock-{}", std::process::id()));
         let instance = root.join("services/lobby-3");
         std::fs::create_dir_all(&instance).unwrap();
         std::fs::write(root.join("instance-key"), "secret").unwrap();
