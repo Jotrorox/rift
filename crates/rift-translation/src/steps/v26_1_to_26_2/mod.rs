@@ -7,9 +7,11 @@
 //! optional entity ID so a spectator's click on nothing reaches the server.
 //! `set_player_team` (colour moved and became optional) and
 //! `update_attributes` (a list limit) belong to the shared codecs. Beds lost
-//! their block entity (see `beds`).
+//! their block entity (see `beds`), and entity ID 0 became invalid (see
+//! `entity_ids`).
 mod beds;
 mod down;
+mod entity_ids;
 mod up;
 
 #[cfg(test)]

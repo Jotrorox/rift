@@ -1,10 +1,10 @@
 //! A 26.2 client on a 26.1 backend: backend packets are upgraded for the
 //! client and client packets downgraded for the backend.
-use super::{NEWER, OLDER, copy_profile};
+use super::{NEWER, OLDER, copy_profile, entity_ids};
 use crate::{
     Direction, Packet, State,
     codec::{HasShared, Shared},
-    routed_step,
+    data, routed_step,
     step::{Cx, RouteBuilder, Routes},
     steps::{Make, v1_21_11_to_26_1::join},
     wire::{Reader, Writer},
@@ -42,13 +42,66 @@ impl Up {
         static ROUTES: OnceLock<Routes<Up>> = OnceLock::new();
         ROUTES.get_or_init(|| {
             use State::*;
-            RouteBuilder::new(NEWER, OLDER)
-                .defaults()
+            let mut builder = RouteBuilder::new(NEWER, OLDER).defaults();
+            for name in entity_ids::clientbound_packets().filter(|name| *name != "login") {
+                builder = builder.clientbound(
+                    Play,
+                    name,
+                    |step: &mut Up, cx: &mut Cx<'_>, state, packet| {
+                        step.entity_ids(cx, Direction::Clientbound, state, packet)
+                    },
+                );
+            }
+            for name in entity_ids::serverbound_packets().filter(|name| *name != "spectator_action")
+            {
+                builder = builder.serverbound(
+                    Play,
+                    name,
+                    |step: &mut Up, cx: &mut Cx<'_>, state, packet| {
+                        step.entity_ids(cx, Direction::Serverbound, state, packet)
+                    },
+                );
+            }
+            builder
                 .clientbound(Login, "login_finished", Self::login_finished)
                 .clientbound(Play, "login", Self::login)
                 .serverbound(Play, "spectator_action", Self::spectator_action)
                 .build()
         })
+    }
+
+    /// The shared codecs' routes alone, for packets this step only
+    /// renumbers. Dispatching through them runs the codecs' taps a second
+    /// time.
+    fn defaults() -> &'static Routes<Self> {
+        static DEFAULTS: OnceLock<Routes<Up>> = OnceLock::new();
+        DEFAULTS.get_or_init(|| RouteBuilder::new(NEWER, OLDER).defaults().build())
+    }
+
+    /// Renumber entity 0 (see `entity_ids`), then convert as usual.
+    fn entity_ids(
+        &mut self,
+        cx: &mut Cx<'_>,
+        direction: Direction,
+        state: State,
+        mut packet: Packet,
+    ) -> io::Result<()> {
+        let source = if direction == Direction::Clientbound {
+            OLDER
+        } else {
+            NEWER
+        };
+        let name = data::version(source)
+            .packet_name(state, direction, packet.id)
+            .unwrap_or_default();
+        let renumbered = match direction {
+            Direction::Clientbound => entity_ids::clientbound(name, &packet.data)?,
+            Direction::Serverbound => entity_ids::serverbound(name, &packet.data)?,
+        };
+        if let Some(data) = renumbered {
+            packet.data = data;
+        }
+        Self::defaults().dispatch(self, cx, direction, state, packet)
     }
 
     fn login_finished(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
@@ -65,7 +118,8 @@ impl Up {
     /// prepared their chat signing key, which a backend that enforces
     /// secure chat needs.
     fn login(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
-        let mut login = join::Login::parse(OLDER, &packet.data)?;
+        let data = entity_ids::clientbound("login", &packet.data)?;
+        let mut login = join::Login::parse(OLDER, data.as_deref().unwrap_or(&packet.data))?;
         login
             .spawn
             .convert(&mut self.shared, Direction::Clientbound);
@@ -87,7 +141,7 @@ impl Up {
         r.finish()?;
         if target != 0 {
             let mut w = Writer::new();
-            w.varint(target - 1);
+            w.varint(entity_ids::spectator_target(target));
             cx.to_backend(state, Packet::new(packet.id, w.into_inner()));
         }
         Ok(())
