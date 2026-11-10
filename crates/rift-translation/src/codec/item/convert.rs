@@ -181,19 +181,24 @@ fn tag_era(shared: &mut Shared, direction: Direction, item: &mut ItemStack) -> i
         tidy(item);
         return Ok(());
     }
+    let source_name = item_name(source, item.id).unwrap_or("stone");
     let mapped = map_item(shared, direction, item.id)?;
     item.id = mapped.id;
     let original = item.tag.clone();
     let name = item_name(target, item.id).unwrap_or("stone");
+    let mut lossy = false;
     if let Some(tag) = item.tag.as_mut().and_then(Nbt::as_compound_mut) {
-        tags::convert(shared, direction, name, tag)?;
+        lossy = tags::convert(shared, direction, name, tag)?;
     }
-    if let Some(stand_in_for) = mapped.stand_in_for
+    if (lossy || mapped.stand_in_for.is_some())
         && let Some(tag) = tag_compound(item)
     {
-        let named = name_stand_in(tag, target, stand_in_for);
+        let named = match mapped.stand_in_for {
+            Some(stand_in_for) => name_stand_in(tag, target, stand_in_for),
+            None => false,
+        };
         let mut stash = Compound::new();
-        stash.insert("id", format!("minecraft:{stand_in_for}"));
+        stash.insert("id", format!("minecraft:{source_name}"));
         stash.insert("named", i8::from(named));
         if let Some(original) = original {
             stash.insert("tag", original);

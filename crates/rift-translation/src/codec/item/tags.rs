@@ -12,7 +12,7 @@
 //!   pages), and the item names of stacks held inside the tag (shulker box
 //!   contents, bundles, crossbow projectiles).
 use super::{
-    convert::{item_id, item_name, map_item, stash_key},
+    convert::{item_id, item_name, map_item, readable, stash_key},
     legacy_text,
 };
 use crate::{
@@ -33,12 +33,14 @@ fn json_text_changes(older: i32, newer: i32) -> bool {
     matches!((older, newer), (340, 393) | (578, 735) | (764, 765))
 }
 
+/// Returns whether the receiver cannot hold everything the tag said, so
+/// the caller stashes the original.
 pub(super) fn convert(
     shared: &mut Shared,
     direction: Direction,
     item: &str,
     tag: &mut Compound,
-) -> io::Result<()> {
+) -> io::Result<bool> {
     let (source, target) = (shared.source(direction), shared.target(direction));
     let (older, newer) = (source.min(target), source.max(target));
     let up = target > source;
@@ -55,7 +57,68 @@ pub(super) fn convert(
         (763, 764) => potion_effects(tag, up),
         _ => {}
     }
-    nested(shared, direction, tag)
+    nested(shared, direction, tag)?;
+    Ok(unknown_enchantments(tag, target))
+}
+
+/// Enchantments the receiver does not know (newer than it) would vanish
+/// from the tooltip; list them in the lore instead, as `Name level`.
+fn unknown_enchantments(tag: &mut Compound, target: i32) -> bool {
+    let Some(registry) = data::version(target).registry("enchantment") else {
+        return false;
+    };
+    let mut lines = Vec::new();
+    for key in ["Enchantments", "StoredEnchantments"] {
+        let Some(Nbt::List(list)) = tag.get_mut(key) else {
+            continue;
+        };
+        list.retain(|entry| {
+            let Some(entry) = entry.as_compound() else {
+                return true;
+            };
+            let Some(id) = entry.str("id") else {
+                return true;
+            };
+            if registry.id(id).is_some() {
+                return true;
+            }
+            let level = entry.int("lvl").unwrap_or(1);
+            lines.push(format!("{} {}", readable(id), roman(level)));
+            false
+        });
+    }
+    if lines.is_empty() {
+        return false;
+    }
+    if !tag.contains("display") {
+        tag.insert("display", Compound::new());
+    }
+    let Some(display) = tag.compound_mut("display") else {
+        return true;
+    };
+    let mut lore = match display.remove("Lore") {
+        Some(Nbt::List(lore)) => lore,
+        _ => Vec::new(),
+    };
+    let json = target >= 477;
+    for (index, line) in lines.into_iter().enumerate() {
+        let line = if json {
+            serde_json::json!({"text": line, "italic": false, "color": "gray"}).to_string()
+        } else {
+            format!("§7{line}")
+        };
+        lore.insert(index, Nbt::String(line));
+    }
+    display.insert("Lore", Nbt::List(lore));
+    true
+}
+
+fn roman(level: i32) -> String {
+    const NUMERALS: [&str; 10] = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"];
+    usize::try_from(level - 1)
+        .ok()
+        .and_then(|index| NUMERALS.get(index))
+        .map_or_else(|| level.to_string(), |numeral| (*numeral).to_owned())
 }
 
 fn convert_json(shared: &mut Shared, direction: Direction, value: &mut Nbt) -> io::Result<()> {
@@ -367,6 +430,26 @@ fn nested_stack(shared: &mut Shared, direction: Direction, item: &mut Compound) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enchantments_the_receiver_lacks_move_to_the_lore() {
+        let mut soul_speed = Compound::new();
+        soul_speed.insert("id", "minecraft:soul_speed");
+        soul_speed.insert("lvl", 3i16);
+        let mut sharpness = Compound::new();
+        sharpness.insert("id", "minecraft:sharpness");
+        sharpness.insert("lvl", 1i16);
+        let mut tag = Compound::new();
+        tag.insert(
+            "Enchantments",
+            vec![Nbt::Compound(soul_speed), Nbt::Compound(sharpness)],
+        );
+        assert!(unknown_enchantments(&mut tag, 578));
+        assert_eq!(tag.list("Enchantments").unwrap().len(), 1);
+        let lore = tag.compound("display").unwrap().list("Lore").unwrap();
+        assert!(lore[0].as_str().unwrap().contains("Soul Speed III"));
+        assert!(!unknown_enchantments(&mut tag, 578));
+    }
 
     #[test]
     fn attribute_names_follow_the_1_16_rename() {
