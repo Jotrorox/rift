@@ -1249,3 +1249,59 @@ fn removals_split_for_1_17() {
         .unwrap();
     assert_eq!(back[0].data, [1, 5]);
 }
+
+fn particle_id(protocol: i32, name: &str) -> i32 {
+    data::version(protocol)
+        .expect_registry("particle_type")
+        .id(name)
+        .unwrap()
+}
+
+#[test]
+fn particles_a_receiver_shows_differently_keep_their_look() {
+    // A 1.17 colour transition is dust of its first colour for 1.16.
+    let mut down = Shared::new(754, 755);
+    let transition = particle::Particle {
+        id: particle_id(755, "dust_color_transition"),
+        options: particle::Options::DustTransition {
+            from: particle::Color::Floats([1.0, 0.5, 0.0]),
+            to: particle::Color::Floats([0.0, 0.0, 1.0]),
+            scale: 2.0,
+        },
+    };
+    let dust = particle::convert(&mut down, Direction::Clientbound, transition)
+        .unwrap()
+        .unwrap();
+    assert_eq!(dust.id, particle_id(754, "dust"));
+    assert_eq!(
+        dust.options,
+        particle::Options::Dust {
+            color: particle::Color::Floats([1.0, 0.5, 0.0]),
+            scale: 2.0,
+        }
+    );
+    // 1.17.1 barriers and lights are 1.18 block markers of that block, and
+    // back.
+    for name in ["barrier", "light"] {
+        let mut up = Shared::new(757, 756);
+        let sent = particle::Particle {
+            id: particle_id(756, name),
+            options: particle::Options::None,
+        };
+        let marker = particle::convert(&mut up, Direction::Clientbound, sent)
+            .unwrap()
+            .unwrap();
+        assert_eq!(marker.id, particle_id(757, "block_marker"));
+        let block = data::version(757).block_states.block(name).unwrap();
+        assert_eq!(
+            marker.options,
+            particle::Options::Block(block.default_state())
+        );
+        let mut down = Shared::new(756, 757);
+        let back = particle::convert(&mut down, Direction::Clientbound, marker)
+            .unwrap()
+            .unwrap();
+        assert_eq!(back.id, particle_id(756, "barrier"));
+        assert_eq!(back.options, particle::Options::None);
+    }
+}
