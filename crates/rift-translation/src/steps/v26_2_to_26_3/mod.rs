@@ -126,6 +126,10 @@ impl LevelEvent {
 
     /// Map a block-state payload to the receiver; `None` when it has no
     /// such state.
+    // INTEGRATION: event 1010 (a jukebox starts playing) carries a
+    // `jukebox_song` network ID; map it with `codec::registries::map(shared,
+    // direction, "jukebox_song", id)` once that codec is merged. Both
+    // versions' vanilla songs are the same list, so it is unchanged today.
     fn convert(mut self, shared: &mut Shared, direction: Direction) -> Option<Self> {
         if BLOCK_STATE_EVENTS.contains(&self.event) {
             self.data = shared.mapping(direction, "block_state").get(self.data)?;

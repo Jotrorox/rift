@@ -95,6 +95,8 @@ impl Down {
 
     /// Learn which clock is the overworld's. Only an observer: the
     /// registries codec checks the packet itself.
+    // INTEGRATION: `codec::registries::id_of(shared, Side::Backend,
+    // "world_clock", "overworld")` answers this once that codec is merged.
     fn registry_data(&mut self, _: State, packet: &Packet) -> io::Result<()> {
         if let Ok(Some(index)) = registry_entry(&packet.data, WORLD_CLOCK_REGISTRY, OVERWORLD_CLOCK)
         {

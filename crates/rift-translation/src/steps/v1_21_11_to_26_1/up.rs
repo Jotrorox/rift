@@ -188,9 +188,10 @@ impl Up {
 routed_step!(Up);
 
 /// The client's `world_clock` network IDs of the overworld and end clocks.
-// INTEGRATION: the registries codec synthesises the `world_clock` registry a
-// 26.1 client needs from a 1.21.11 backend; ask it for the IDs it gave the
-// client here. Until then: vanilla's order, overworld then the end.
+// INTEGRATION: the registries codec fills in the `world_clock` registry a
+// 26.1 client needs from a 1.21.11 backend; take the IDs it gave the client
+// from `codec::registries::id_of(shared, Side::Client, "world_clock",
+// "overworld")` (and `"the_end"`). Until then: vanilla's order.
 fn world_clocks(shared: &mut Shared) -> [i32; 2] {
     let _ = shared;
     [0, 1]

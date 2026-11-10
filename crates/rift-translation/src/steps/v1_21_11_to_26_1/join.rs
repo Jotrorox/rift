@@ -119,10 +119,10 @@ impl SpawnInfo {
 }
 
 /// The receiver's network ID of a dimension type.
-// INTEGRATION: the registries codec keeps the order of every synchronised
-// registry on both sides; ask it for `dimension_type` here once it exists.
-// Until then the IDs are unchanged, which holds while it neither adds nor
-// drops dimension types between these 26.x protocols.
+// INTEGRATION: `codec::registries::map(shared, direction, "dimension_type",
+// id)` (branch t3/registries-codec-sync), falling back to `id`. Until it is
+// merged the IDs are unchanged, which holds while the codec neither adds
+// nor drops dimension types between these 26.x protocols.
 fn dimension_type(shared: &mut Shared, direction: Direction, id: i32) -> i32 {
     let _ = (shared, direction);
     id
