@@ -11,7 +11,7 @@
 //!    configuration forms, and every other play packet is held back. The
 //!    configuration is finished as soon as the backend sends its tags or a
 //!    packet that is not part of the join preamble vanilla sends before
-//!    them (an empty tag list stands in when tags never came).
+//!    them (a vanilla 1.20.1 server's tags stand in when tags never came).
 //! 3. When the client acknowledges the finish, the held packets go out in
 //!    order as play packets, starting with the Join Game in its 1.20.2
 //!    layout.
@@ -25,11 +25,14 @@
 use super::{Held, NEWER, OLDER, convert, layout};
 use crate::{
     Direction, Packet, State,
-    codec::{HasShared, Shared},
+    codec::{
+        self, HasShared, Shared,
+        registries::{self, Side, form, login},
+    },
     data,
     step::{Cx, RouteBuilder, Routes, Step},
     steps::Make,
-    wire::{Writer, invalid},
+    wire::{Reader, Writer, invalid},
 };
 use std::{io, sync::OnceLock};
 
@@ -148,6 +151,8 @@ pub struct Up {
     last_tags: Option<Vec<u8>>,
     last_features: Option<Vec<u8>>,
     last_pack: Option<Packet>,
+    /// The registries the client was sent in the last configuration.
+    registries: Vec<registries::Registry>,
 }
 
 impl HasShared for Up {
@@ -172,6 +177,7 @@ impl Up {
             last_tags: None,
             last_features: None,
             last_pack: None,
+            registries: Vec::new(),
         }
     }
 
@@ -258,12 +264,18 @@ impl Up {
                 self.held.push(packet)?;
                 return self.finish(cx);
             }
-            let (_, mut codec) = layout::Join::read_older(&packet.data)?;
-            layout::convert_registries(&mut codec, true);
+            let sent = login::read_login(OLDER, &mut Reader::new(&packet.data))?
+                .codec
+                .ok_or_else(|| invalid("Join Game without registries"))?;
+            let converted = login::convert_codec(&mut self.shared, Direction::Clientbound, &sent)?;
             cx.to_client(
                 State::Configuration,
-                Packet::new(ids.registry_data, codec.to_bytes(false)),
+                Packet::new(
+                    ids.registry_data,
+                    form::write_codec_packet(NEWER, &converted)?,
+                ),
             );
+            self.registries = converted;
             self.configuration.joined = true;
             self.held.push(packet)
         } else if id == ids.features {
@@ -335,12 +347,19 @@ impl Up {
             );
         }
         if !self.configuration.tags {
-            // Later steps may need a tags packet to add to.
-            let tags = self.last_tags.clone().unwrap_or_else(|| vec![0]);
-            cx.to_client(
-                State::Configuration,
-                Packet::new(ids.configuration_tags, tags),
-            );
+            match self.last_tags.clone() {
+                Some(tags) => cx.to_client(
+                    State::Configuration,
+                    Packet::new(ids.configuration_tags, tags),
+                ),
+                // A client leaves configuration with the tags it was sent,
+                // and its game logic needs vanilla's: those of a vanilla
+                // 1.20.1 server stand in.
+                None => {
+                    let tags = codec::misc::tags::vanilla_update_tags(OLDER)?;
+                    self.send_configured(cx, Packet::new(ids.tags, tags))?;
+                }
+            }
         }
         // A 1.20.2 client forgets the server resource pack when it
         // re-enters configuration; later clients keep it.
@@ -537,6 +556,11 @@ impl Up {
 
     fn login(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
         let (join, _) = layout::Join::read_older(&packet.data)?;
+        // The codec's tap recorded the backend's registries for the client
+        // too; the client has the converted ones from configuration.
+        for registry in &self.registries {
+            registries::record(&mut self.shared, Side::Client, registry);
+        }
         cx.to_client(state, Packet::new(packet.id, join.write_newer()));
         Ok(())
     }

@@ -485,34 +485,3 @@ pub fn custom_payload_to_newer(body: &[u8]) -> io::Result<Vec<u8>> {
     }
     rw.finish()
 }
-
-/// Synchronised registry content: 1.20.2 trim patterns carry a `decal`
-/// flag (false unless set), which 1.20.1 does not know.
-///
-// INTEGRATION: `codec::registries` is to convert registry content between
-// every pair of protocols. Until it exposes that, this covers the only
-// difference between 763 and 764, found by comparing the official servers'
-// registries in the corpus entry by entry.
-pub fn convert_registries(codec: &mut Nbt, to_newer: bool) {
-    let Some(entries) = codec
-        .as_compound_mut()
-        .and_then(|codec| codec.compound_mut("minecraft:trim_pattern"))
-        .and_then(|registry| registry.get_mut("value"))
-        .and_then(Nbt::as_list_mut)
-    else {
-        return;
-    };
-    for element in entries
-        .iter_mut()
-        .filter_map(Nbt::as_compound_mut)
-        .filter_map(|entry| entry.compound_mut("element"))
-    {
-        if to_newer {
-            if !element.contains("decal") {
-                element.insert("decal", Nbt::Byte(0));
-            }
-        } else {
-            element.remove("decal");
-        }
-    }
-}
