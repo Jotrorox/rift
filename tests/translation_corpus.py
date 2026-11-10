@@ -296,6 +296,8 @@ def capture(name, output):
                 if not info:
                     # Wrap the socket helpers once, before the first packet.
                     receive, send = client.receive, client.send
+                    # 1.14 servers light their first chunks slowly.
+                    client.read_timeout = 90
 
                     def recording_receive():
                         packet_id, body = receive()
