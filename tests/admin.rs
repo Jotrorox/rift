@@ -184,6 +184,9 @@ fn config(backends: &[&TcpListener], options: &str, permissions: &str) -> String
         backends = {{ {backends} }}, routes = {{ public = 'b0' }},
         admin = {{ listen = '127.0.0.1:0', permissions = {{ {permissions} }} }},
         shutdown_timeout_ms = 3000,
+        -- The test backends accept only the players' own connections, not
+        -- the status requests that detect a backend's version.
+        translation = {{ detect = false }},
         {options}
     }}"
     )
