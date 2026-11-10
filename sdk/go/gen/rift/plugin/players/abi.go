@@ -63,3 +63,9 @@ func lower_OptionBossBarSpec(v cm.Option[BossBarSpec]) (f0 uint32, f1 *uint8, f2
 	}
 	return
 }
+
+// OptionStringShape is used for storage in variant or result types.
+type OptionStringShape struct {
+	_     cm.HostLayout
+	shape [unsafe.Sizeof(cm.Option[string]{})]byte
+}

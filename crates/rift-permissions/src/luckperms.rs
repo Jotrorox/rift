@@ -32,7 +32,7 @@ use crate::{
     subject::{Group, Track, User, Uuid, normalize_group},
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Most nodes one shorthand key or one context set may expand into.
 pub const MAX_EXPANSION: usize = 256;
@@ -214,6 +214,18 @@ pub fn expand_contexts(contexts: &ContextSet) -> Result<Vec<ContextSet>, Error> 
 
 /// Decode a LuckPerms node into Rift nodes with source `import`.
 pub fn parse_node(node: &ExportNode) -> Result<Vec<Node>, Error> {
+    parse_node_in(node, &BTreeSet::new())
+}
+
+/// [`parse_node`] on a network whose service groups are `service_groups`
+/// (lowercase). LuckPerms names a server per proxy entry, so a network that
+/// moved from fixed servers to scaled groups has `server=lobby` where Rift's
+/// instances are `lobby-1`, `lobby-2`, …: such a pair becomes `group=lobby`,
+/// which applies on every instance. Names that are not groups stay `server`.
+pub fn parse_node_in(
+    node: &ExportNode,
+    service_groups: &BTreeSet<String>,
+) -> Result<Vec<Node>, Error> {
     if node.kind.as_deref() == Some("regex_permission") {
         return Err(Error::RegexNode {
             key: node.key.clone(),
@@ -228,12 +240,49 @@ pub fn parse_node(node: &ExportNode) -> Result<Vec<Node>, Error> {
     let mut nodes = Vec::new();
     for payload in parse_key(&node.key, node.value)? {
         for contexts in expand_contexts(&contexts)? {
+            let contexts = server_to_group(contexts, service_groups)?;
             let mut built = Node::new(payload.clone())?.with_contexts(contexts)?;
             built.expires_at = node.expiry;
             nodes.push(built.with_source(Source::Import));
         }
     }
     Ok(nodes)
+}
+
+/// `server=<group>` becomes `group=<group>` in one expanded set.
+fn server_to_group(
+    contexts: ContextSet,
+    service_groups: &BTreeSet<String>,
+) -> Result<ContextSet, Error> {
+    match contexts.get(context::SERVER) {
+        Some(server)
+            if contexts.get(context::GROUP).is_none() && service_groups.contains(server) =>
+        {
+            let server = server.to_owned();
+            let mut contexts = contexts;
+            contexts.remove_key(context::SERVER);
+            contexts.insert(context::GROUP, &server)?;
+            Ok(contexts)
+        }
+        _ => Ok(contexts),
+    }
+}
+
+/// `group=<group>` written back as LuckPerms' `server=<group>`, the
+/// reverse of [`server_to_group`], so an export reads back the same way.
+fn group_to_server(contexts: &ContextSet) -> ContextSet {
+    match contexts.get(context::GROUP) {
+        Some(group) if contexts.get(context::SERVER).is_none() => {
+            let mut converted = contexts.clone();
+            let group = group.to_owned();
+            converted.remove_key(context::GROUP);
+            converted
+                .insert(context::SERVER, &group)
+                .map(|_| converted)
+                .unwrap_or_else(|_| contexts.clone())
+        }
+        _ => contexts.clone(),
+    }
 }
 
 /// The LuckPerms `type` of a node kind.
@@ -304,7 +353,7 @@ impl From<&Node> for ExportNode {
         // LuckPerms reads several values of a key as "any", Rift as "all";
         // only single-valued keys translate, so the first value is kept.
         let mut context = BTreeMap::new();
-        for (k, v) in node.contexts.iter() {
+        for (k, v) in group_to_server(&node.contexts).iter() {
             context
                 .entry(k.to_owned())
                 .or_insert_with(|| ContextValues::One(v.to_owned()));
@@ -384,10 +433,11 @@ fn import_nodes(
     list: &[ExportNode],
     skipped: &mut Vec<Skipped>,
     group: bool,
+    service_groups: &BTreeSet<String>,
 ) -> Vec<Node> {
     let mut out = Vec::new();
     for node in list {
-        let parsed = parse_node(node).and_then(|parsed| {
+        let parsed = parse_node_in(node, service_groups).and_then(|parsed| {
             if !group && parsed.iter().any(|n| n.kind().group_only()) {
                 Err(invalid(
                     "LuckPerms node",
@@ -416,6 +466,13 @@ impl Export {
     /// weight and display name come from its global `weight` and
     /// `displayname` nodes, which are also kept as nodes.
     pub fn import(&self) -> Import {
+        self.import_in(&BTreeSet::new())
+    }
+
+    /// [`Export::import`] on a network with these service groups (lowercase),
+    /// whose `server=<group>` pairs become `group=<group>` (see
+    /// [`parse_node_in`]).
+    pub fn import_in(&self, service_groups: &BTreeSet<String>) -> Import {
         let mut import = Import::default();
         for (name, data) in &self.groups {
             let label = format!("group:{name}");
@@ -427,7 +484,13 @@ impl Export {
                 });
                 continue;
             };
-            group.nodes = import_nodes(&label, &data.nodes, &mut import.skipped, true);
+            group.nodes = import_nodes(
+                &label,
+                &data.nodes,
+                &mut import.skipped,
+                true,
+                service_groups,
+            );
             for node in group.nodes.iter().filter(|n| n.contexts.is_empty()) {
                 match &node.payload {
                     Payload::Weight { weight } => group.weight = *weight,
@@ -451,7 +514,13 @@ impl Export {
                 uuid,
                 last_name: data.username.clone(),
                 primary_group: None,
-                nodes: import_nodes(&label, &data.nodes, &mut import.skipped, false),
+                nodes: import_nodes(
+                    &label,
+                    &data.nodes,
+                    &mut import.skipped,
+                    false,
+                    service_groups,
+                ),
             });
         }
         for (name, data) in &self.tracks {

@@ -130,6 +130,7 @@ rift.config.managed_servers.survival={{node='node1',directory='survival',
                     publish,
                     subscribe,
                     control: false,
+                    players: false,
                 }],
                 ..Default::default()
             },
@@ -379,6 +380,7 @@ async fn agents_refuse_unlisted_programs_and_paths_outside_their_root() {
             command,
             directory: directory.into(),
             port: fixture.port,
+            environment: Default::default(),
         })
     };
     let wait = Duration::from_secs(5);

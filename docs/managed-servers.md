@@ -89,12 +89,44 @@ rift.config.managed_servers.survival = {
 | `stop_timeout_ms` | `30000` | Grace period after sending `stop` to stdin, before killing and reaping the child. |
 | `restart_delay_ms` | `5000` | Delay after a failed start or unexpected process exit before an automatic restart. |
 | `restart_retries` | `3` | Maximum automatic restart attempts after the initial start; an explicit Start resets the budget. `0` disables automatic recovery. |
+| `env` | None | Extra environment variables, `{ NAME = "value" }`. Values are literal (integers are written as numbers); service groups expand `{name}`, `{group}` and `{port}` in them. They are set after inheritance and win over inherited variables. |
+| `inherit_env` | Everything | `false` inherits nothing from Rift; a list such as `{ "PATH", "HOME", "JAVA_HOME" }` inherits only those. Rift's own secrets are never inherited either way. |
 
 Commands run without a shell: arguments containing spaces remain single
 arguments, and `$VARIABLE`, `~`, redirection and shell operators are not expanded.
 Use a program available on `PATH` or an absolute executable path. The process
-inherits Rift's environment and operating-system identity; configuration authors
-who can change managed commands can run programs with that identity.
+runs with Rift's operating-system identity; configuration authors who can
+change managed commands can run programs with that identity.
+
+**Environment.** A server inherits Rift's environment except Rift's own
+secrets: the variables named by `admin.token_env`,
+`messaging.principals[].token_env`, `nodes.*.token_env`,
+`forwarding.secret_env` and `extensions.integrations.*.headers_env` are
+removed from every process Rift starts (see
+[operations](operations.md#secrets-and-the-processes-rift-starts)). Paper
+reads the forwarding secret from the `config/paper-global.yml` that
+provisioning writes, not from the environment. Everything else is inherited,
+because networks commonly hand database passwords to their server plugins
+that way:
+
+```lua
+rift.config.service_groups.lobby = {
+    -- ...
+    env = { LOBBY_DATABASE_URL = "jdbc:mariadb://10.0.0.5/lobby", SERVER_NAME = "{name}" },
+    inherit_env = { "PATH", "HOME", "LOBBY_DATABASE_PASSWORD" },
+}
+```
+
+`inherit_env` restricts inheritance to the names it lists (`false` to none). A
+restricted environment is built from scratch, so keep `PATH` in the list or
+use an absolute executable: without `PATH`, the program is looked up in the
+system's default path only. Listing one of Rift's secret variables is a
+configuration error. Names are letters, digits and `_`, not starting with a
+digit; there are at most 128 entries in each field and 32 KiB per value. `env`
+values are stored in the configuration like the rest of it, so put real
+secrets in an inherited variable rather than in `rift.lua` when the
+configuration is edited over HTTP or kept in version control. Changing `env`
+or `inherit_env` is a change of the process definition, like `command`.
 
 Timeouts accept whole milliseconds from `1` through `86400000` (24 hours), with
 the additional disabled value `0` for `idle_timeout_ms`. `restart_retries` accepts

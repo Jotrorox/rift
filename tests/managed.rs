@@ -230,6 +230,7 @@ impl Fixture {
                 restart_delay: Duration::from_millis(200),
                 restart_retries: 3,
                 node: None,
+                environment: Default::default(),
             },
         );
         Self {

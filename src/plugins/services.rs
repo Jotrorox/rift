@@ -43,7 +43,6 @@ const MAX_REQUEST_MS: u32 = 60_000;
 const STORE_WAIT: Duration = Duration::from_secs(5);
 /// How long `servers.*` waits for the control service's reply.
 const CONTROL_WAIT: Duration = Duration::from_secs(60);
-const MAX_TEXT: usize = 1024;
 const MAX_LOG: usize = 4096;
 const MAX_COMPONENT_BYTES: usize = 32 * 1024;
 
@@ -182,6 +181,14 @@ impl Services {
 }
 
 impl Inner {
+    /// The in-process sender this plugin's publications carry: its own name
+    /// on the subjects whose handlers audit callers, nothing elsewhere (see
+    /// [`crate::players_service::audited_subject`]).
+    fn sender(&self, subject: &str) -> Option<String> {
+        crate::players_service::audited_subject(subject)
+            .then(|| crate::players_service::plugin_sender(&self.spec.name))
+    }
+
     fn handle(&self) -> u64 {
         self.next.fetch_add(1, Ordering::Relaxed)
     }
@@ -212,13 +219,6 @@ impl Inner {
             }
         }
     }
-}
-
-fn text(value: &str, label: &str) -> Result<String, String> {
-    if value.is_empty() || value.len() > MAX_TEXT {
-        return Err(format!("{label} must contain 1..=1024 bytes"));
-    }
-    Ok(value.to_owned())
 }
 
 /// A JSON text component or plain text. Text starting with `{`, `[` or `"`
@@ -294,30 +294,7 @@ impl PlayersApi<'_> {
     }
 
     pub fn title(&self, target: &str, title: &TitleSpec) -> Result<bool, String> {
-        let subtitle = title
-            .subtitle
-            .as_deref()
-            .filter(|subtitle| !subtitle.is_empty())
-            .map(|subtitle| text(subtitle, "subtitle"))
-            .transpose()?;
-        if title.title.is_empty() && subtitle.is_none() {
-            return Err("title requires a title or subtitle".into());
-        }
-        if title.title.len() > MAX_TEXT {
-            return Err("title must contain at most 1024 bytes".into());
-        }
-        let times = [title.fade_in, title.stay, title.fade_out];
-        if times.iter().any(|ticks| !(0..=1200).contains(ticks)) {
-            return Err("title times must be 0..=1200 ticks".into());
-        }
-        self.send(
-            target,
-            PlayerAction::Title {
-                title: title.title.clone(),
-                subtitle,
-                times,
-            },
-        )
+        self.send(target, crate::players_service::title_action(title)?)
     }
 
     pub fn tab_list(
@@ -390,6 +367,12 @@ impl PlayersApi<'_> {
         self.players()
             .dialog(target, Some(dialog), owner)
             .map_err(|error| error.to_string())
+    }
+
+    /// `players.visible-to`: the node a viewer needs to see the player (the
+    /// resolved `rift.visible-to` meta), or `None` when everyone sees them.
+    pub fn visible_to(&self, target: &str) -> Result<Option<String>, String> {
+        Ok(self.get(target)?.and_then(|player| player.visible_to))
     }
 
     /// `players.clear-dialog`: close the dialog Rift showed, if still open.
@@ -589,6 +572,47 @@ impl PermissionsApi<'_> {
         self.apply(change).map(drop)
     }
 
+    /// `meta`: one meta value of the player in their current contexts, as
+    /// prefix and suffix resolve (the lowest rank, then more context pairs).
+    pub fn meta_value(&self, uuid: &str, key: &str) -> Option<String> {
+        let uuid = Uuid::parse(uuid).ok()?;
+        let active = self.authority().contexts(uuid);
+        self.authority()
+            .meta(uuid, &active)
+            .meta
+            .remove(&key.to_ascii_lowercase())
+    }
+
+    /// `set-meta`: the user's meta node `key` in exactly `contexts` (global
+    /// without), expiring at `expires_at` (Unix seconds) if given; `None`
+    /// removes the node in those contexts. Returns whether anything changed.
+    /// `rift.visible-to` is the key a vanish plugin sets (see
+    /// [`crate::players::VISIBLE_TO`]).
+    pub fn set_meta(
+        &self,
+        uuid: &str,
+        key: &str,
+        value: Option<&str>,
+        contexts: ContextSet,
+        expires_at: Option<u64>,
+    ) -> Result<bool, String> {
+        let subject = SubjectRef::User(Uuid::parse(uuid).map_err(|error| error.to_string())?);
+        let change = match value {
+            Some(value) => {
+                let mut node = self
+                    .node(Node::meta(key, value).and_then(|node| node.with_contexts(contexts)))?;
+                node.expires_at = expires_at;
+                Change::SetNode { subject, node }
+            }
+            None => Change::UnsetNode {
+                subject,
+                key: NodeKey::new(NodeKind::Meta, key, contexts)
+                    .map_err(|error| error.to_string())?,
+            },
+        };
+        self.apply(change)
+    }
+
     /// `add-group`: a global `inherit` node. Returns whether anything changed.
     pub fn add_group(&self, uuid: &str, group: &str) -> Result<bool, String> {
         let user = SubjectRef::User(Uuid::parse(uuid).map_err(|error| error.to_string())?);
@@ -661,7 +685,12 @@ impl BusApi<'_> {
         self.0
             .base
             .broker
-            .publish_with_reply(subject, reply, Bytes::copy_from_slice(payload))
+            .publish_as(
+                subject,
+                reply,
+                Bytes::copy_from_slice(payload),
+                self.0.sender(subject).as_deref(),
+            )
             .map(|report| u32::try_from(report.delivered).unwrap_or(u32::MAX))
             .map_err(|error| error.to_string())
     }
@@ -679,9 +708,15 @@ impl BusApi<'_> {
         }
         let broker = self.0.base.broker.clone();
         let payload = Bytes::copy_from_slice(payload);
+        let sender = self.0.sender(subject);
         self.0
             .handle
-            .block_on(broker.request(subject, payload, Duration::from_millis(timeout_ms.into())))
+            .block_on(broker.request_as(
+                subject,
+                payload,
+                Duration::from_millis(timeout_ms.into()),
+                sender.as_deref(),
+            ))
             .map(|message| message.payload.to_vec())
             .map_err(|error| error.to_string())
     }
@@ -821,13 +856,16 @@ impl ServersApi<'_> {
             return Err("servers.control: payload must be a JSON object of at most 64 KiB".into());
         }
         let broker = self.0.base.broker.clone();
+        let subject = format!("rift.control.{operation}");
+        let sender = self.0.sender(&subject);
         let reply = self
             .0
             .handle
-            .block_on(broker.request(
-                &format!("rift.control.{operation}"),
+            .block_on(broker.request_as(
+                &subject,
                 Bytes::copy_from_slice(payload_json.as_bytes()),
                 CONTROL_WAIT,
+                sender.as_deref(),
             ))
             .map_err(|error| match error {
                 BusError::NoResponders => "the control service is unavailable".to_owned(),

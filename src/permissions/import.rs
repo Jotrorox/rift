@@ -88,13 +88,15 @@ impl Authority {
     /// Import a LuckPerms export in one revision. Additive: nodes land in
     /// their slots with source `import` and nothing else is deleted, except
     /// that `replace` first removes every earlier `import` node.
+    /// `server=<name>` naming one of the configuration's service groups
+    /// becomes `group=<name>` (see [`Authority::set_service_groups`]).
     pub fn import_luckperms(
         &self,
         actor: Actor,
         reader: impl Read,
         replace: bool,
     ) -> Result<ImportReport, PermError> {
-        let import = read_export(reader)?.import();
+        let import = read_export(reader)?.import_in(&self.service_groups());
         let mut skipped = import.skipped.clone();
         let (counts, applied) = self.write(&actor, Some("LuckPerms import"), None, |work| {
             if replace {

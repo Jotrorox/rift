@@ -241,6 +241,14 @@ address.
 - The forwarding secret never crosses the network: Prepare commands only say
   whether to enable forwarding and which mode, and each agent writes the secret
   from its own environment.
+- Servers on a node do not inherit the agent's secrets: the variables named by
+  `--token-env` and `--forwarding-secret-env` are removed from every server's
+  environment. A server's `env` and `inherit_env` travel with its start
+  command and apply on the node as they would locally, against the agent's
+  environment. Agents older than the controller ignore them, so upgrade
+  agents together with the controller. On Linux the agent clears its
+  dumpable flag at startup, like the proxy (see
+  [operations](operations.md#secrets-and-the-processes-rift-starts)).
 
 ## Operate nodes
 
