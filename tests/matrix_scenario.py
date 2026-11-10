@@ -23,6 +23,7 @@ import struct
 import time
 
 from matrix_client import SessionError, text_of
+import matrix_registries
 
 
 class StepFailure(AssertionError):
@@ -577,11 +578,12 @@ class Context:
             self.fail(f"{what}: IDs outside the client's registries: {invalid[:5]}")
         remaining = list(translated)
         for name in reference:
-            if name in remaining:
-                remaining.remove(name)
+            target = matrix_registries.renamed(registry, name, self.ref.protocol, self.via.protocol)
+            if target in remaining:
+                remaining.remove(target)
             elif name.startswith("<"):
                 continue
-            elif not self.via_reg.knows(registry, name):
+            elif target is None or not self.via_reg.knows(registry, target):
                 self.info(f"{what}: {name} does not exist in the client's version; a stand-in is expected")
             else:
                 self.fail(f"{what}: the translated client did not receive {name} "
