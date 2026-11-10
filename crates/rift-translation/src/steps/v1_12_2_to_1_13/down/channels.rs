@@ -26,6 +26,10 @@ const RENAMED: &[(&str, &str)] = &[
     ("worldedit:cui", "WECUI"),
 ];
 
+/// Renamed client channels remembered; more are still renamed, but the
+/// backend's answers on them stay on the 1.13 identifier.
+const MAX_REMEMBERED: usize = 256;
+
 /// The longest channel name a 1.12 client reads.
 const MAX_LEGACY_CHANNEL: usize = 20;
 
@@ -79,7 +83,9 @@ impl Down {
         if !valid_identifier(&renamed) {
             return None;
         }
-        self.channels.insert(renamed.clone(), name.to_owned());
+        if self.channels.len() < MAX_REMEMBERED {
+            self.channels.insert(renamed.clone(), name.to_owned());
+        }
         Some(renamed)
     }
 

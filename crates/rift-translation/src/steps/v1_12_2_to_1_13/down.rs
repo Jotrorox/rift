@@ -55,6 +55,10 @@ const PUFFER_FISH_STING: u8 = 9;
 /// 1.13 server never uses (it counts up from zero and wraps to zero).
 const FIRST_OWN_TELEPORT: i32 = -1;
 
+/// Unconfirmed rotation-only teleports kept; a client that never confirms
+/// cannot grow the list further.
+const MAX_OWN_TELEPORTS: usize = 64;
+
 /// Where the player is, as far as this step has seen.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Position {
@@ -305,6 +309,9 @@ impl Down {
             .next_teleport
             .checked_sub(1)
             .unwrap_or(FIRST_OWN_TELEPORT);
+        if self.own_teleports.len() == MAX_OWN_TELEPORTS {
+            self.own_teleports.pop_front();
+        }
         self.own_teleports.push_back(id);
         let mut out = Writer::new();
         out.f64(0.0)
