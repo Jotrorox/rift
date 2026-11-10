@@ -3,7 +3,7 @@ use crate::{
     Direction, State,
     nbt::Nbt,
     steps::v1_21_2_to_1_21_4::harness::{Harness, hex, recorded, single},
-    wire::{Reader, Writer},
+    wire::Reader,
 };
 
 fn up() -> Harness {
@@ -111,10 +111,13 @@ fn player_commands_shift_around_the_sneak_actions() {
 #[test]
 fn shift_input_becomes_sneak_commands_for_1_21_5() {
     let mut step = up();
-    // The real 1.21.6 join names entity 1; take a different one.
-    let mut login = Writer::new();
-    login.i32(42).bool(false);
-    step.clientbound(State::Play, "login", &login.buf).unwrap();
+    // The real 1.21.5 server's `login`, for entity 42 instead of 1.
+    let login = hex(concat!(
+        "0000002a0003136d696e6563726166743a6f766572776f726c64116d696e6563726166743a7468655f656e",
+        "64146d696e6563726166743a7468655f6e657468657214020200010000136d696e6563726166743a6f7665",
+        "72776f726c6495926320a4a2567a01ff00010000c1ffffff0f00",
+    ));
+    step.clientbound(State::Play, "login", &login).unwrap();
     let out = step
         .serverbound(State::Play, "player_input", &[0x21])
         .unwrap();
@@ -139,7 +142,12 @@ fn shift_input_becomes_sneak_commands_for_1_21_5() {
     // After a respawn the server has a player that is not sneaking.
     step.serverbound(State::Play, "player_input", &[0x20])
         .unwrap();
-    step.clientbound(State::Play, "respawn", &[0]).unwrap();
+    // Back to the overworld with the login's spawn details, keeping nothing.
+    let respawn = hex(concat!(
+        "00136d696e6563726166743a6f766572776f726c6495926320a4a2567a01ff00010000c1ffffff0f",
+        "00",
+    ));
+    step.clientbound(State::Play, "respawn", &respawn).unwrap();
     let out = step
         .serverbound(State::Play, "player_input", &[0x20])
         .unwrap();

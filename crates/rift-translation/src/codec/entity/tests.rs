@@ -581,13 +581,19 @@ fn names(out: &[crate::codec::testing::Out]) -> Vec<&str> {
     out.iter().map(|out| out.name.as_str()).collect()
 }
 
+/// The `login` the official server of `protocol` sent in the recorded
+/// session (player entity 1, survival, overworld).
 fn login(step: &mut Defaults, protocol: i32) {
-    // Only the leading entity ID matters to this codec; the rest of a
-    // `login` passes through untouched.
-    let _ = protocol;
-    let mut body = Writer::new();
-    body.i32(1).bytes(&[0; 8]);
-    step.clientbound(Phase::Play, "login", &body.buf).unwrap();
+    let recorded = match protocol {
+        767 => {
+            "000000010003136d696e6563726166743a6f766572776f726c64116d696e6563726166743a7468655f656e\
+             64146d696e6563726166743a7468655f6e657468657214020200010000136d696e6563726166743a6f7665\
+             72776f726c643947aa214a8fe62d01ff0001000000"
+        }
+        other => panic!("no recorded login for protocol {other}"),
+    };
+    step.clientbound(Phase::Play, "login", &unhex(recorded))
+        .unwrap();
 }
 
 #[test]

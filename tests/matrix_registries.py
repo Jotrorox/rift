@@ -120,6 +120,10 @@ class Registries:
         for key in REGISTRIES:
             if f"minecraft:{key}" in registries:
                 self.names[key] = ordered(registries[f"minecraft:{key}"])
+        if self.protocol < 764 and "mob_effect" in self.names:
+            # Until 1.20.2 packets carried a mob effect's registry ID plus one
+            # (MobEffect.getId); the reports list the registry IDs.
+            self.names["mob_effect"] = [None] + self.names["mob_effect"]
         for block, data in blocks.items():
             for state in data["states"]:
                 self.states[state["id"]] = block

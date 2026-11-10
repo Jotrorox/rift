@@ -17,8 +17,13 @@ use super::{
 };
 use crate::{
     Direction,
-    codec::{Shared, item::ItemStack},
+    codec::{
+        Shared,
+        item::ItemStack,
+        registries::{self, Side},
+    },
     data,
+    mapping::Kind,
     nbt::Nbt,
     wire::{MAX_DEPTH, invalid},
 };
@@ -73,7 +78,14 @@ impl Conv<'_> {
     pub fn map_id(&mut self, registry: &'static str, id: i32) -> Option<i32> {
         let (source, target) = (data::version(self.source), data::version(self.target));
         match (source.registry(registry), target.registry(registry)) {
-            (Some(_), Some(_)) => self.shared.mapping(self.direction, registry).get(id),
+            (Some(_), Some(_)) => {
+                let mapping = self.shared.mapping(self.direction, registry);
+                // A stand-in shows something else: keep the original.
+                if matches!(mapping.kind(id), Some(Kind::StandIn | Kind::Closest)) {
+                    self.lossy = true;
+                }
+                mapping.get(id)
+            }
             _ => synced(self, registry, id),
         }
     }
@@ -134,23 +146,20 @@ impl Conv<'_> {
 }
 
 /// Map an ID of a registry that at least one side synchronises from the
-/// server instead of building it in.
-// INTEGRATION: the registries codec should expose, per connection, the entry
-// names of every synchronised registry on both sides of the step (from the
-// `registry_data` it sees, or the known-pack defaults) and map by name, as
-// the built-in mapping does. Until it does, such IDs pass unchanged.
+/// server instead of building it in, by entry name through what the
+/// registries codec saw on each side; IDs of registries it does not know
+/// pass unchanged.
 fn synced(cx: &mut Conv<'_>, registry: &'static str, id: i32) -> Option<i32> {
-    let _ = (cx, registry);
-    Some(id)
+    let sender = Side::sender(cx.direction);
+    if registries::size(cx.shared, sender, registry) == 0 {
+        return Some(id);
+    }
+    registries::map(cx.shared, cx.direction, registry, id)
 }
 
 /// The receiver's ID of the synchronised registry entry `name`.
-// INTEGRATION: as for `synced`; until the registries codec exposes the
-// receiver's synchronised entries, a value that names an entry the receiver
-// numbers cannot be converted and its component is dropped.
 fn synced_by_name(cx: &mut Conv<'_>, registry: &'static str, name: &str) -> Option<i32> {
-    let _ = (cx, registry, name);
-    None
+    registries::id_of(cx.shared, Side::receiver(cx.direction), registry, name)
 }
 
 /// Whether patches carry over between the adjacent protocols `a` and `b`
@@ -216,11 +225,8 @@ fn compute_identical(older: i32, newer: i32) -> bool {
 }
 
 /// The sender's name of a synchronised registry entry.
-// INTEGRATION: as for `synced`; until the registries codec exposes the
-// sender's synchronised entries, such names are unknown.
 fn synced_name(cx: &mut Conv<'_>, registry: &'static str, id: i32) -> Option<String> {
-    let _ = (cx, registry, id);
-    None
+    registries::name_of(cx.shared, Side::sender(cx.direction), registry, id).map(str::to_owned)
 }
 
 /// Whether values of `source` can be carried over to `target` by
