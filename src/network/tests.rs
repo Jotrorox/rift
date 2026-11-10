@@ -590,7 +590,7 @@ async fn initial_selection_skips_backends_that_cannot_serve_the_client_version()
         time::{Duration, timeout},
     };
     timeout(Duration::from_secs(5), async {
-        let modern = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ancient = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let legacy = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let backend = |listener: &TcpListener, release| {
             rift::routing::Backend::parse(&listener.local_addr().unwrap().to_string())
@@ -599,7 +599,7 @@ async fn initial_selection_skips_backends_that_cannot_serve_the_client_version()
         };
         let mut cfg = config();
         cfg.backends
-            .insert("modern".into(), backend(&modern, "1.21.11"));
+            .insert("ancient".into(), backend(&ancient, "1.11.2"));
         cfg.backends
             .insert("legacy".into(), backend(&legacy, "1.21.6"));
         let snapshot = Arc::new(Snapshot::new(cfg, None).unwrap());
@@ -638,7 +638,7 @@ async fn initial_selection_skips_backends_that_cannot_serve_the_client_version()
         let selected = network
             .connect_initial(
                 &mut session,
-                &["modern".into(), "legacy".into()],
+                &["ancient".into(), "legacy".into()],
                 &mut (Instant::now() + Duration::from_secs(1)),
                 &mut event,
             )
@@ -653,7 +653,7 @@ async fn initial_selection_skips_backends_that_cannot_serve_the_client_version()
             .unwrap();
         assert_eq!(Handshake::decode(&handshake).unwrap().protocol, 771);
         assert!(
-            timeout(Duration::from_millis(20), modern.accept())
+            timeout(Duration::from_millis(20), ancient.accept())
                 .await
                 .is_err()
         );
@@ -662,7 +662,7 @@ async fn initial_selection_skips_backends_that_cannot_serve_the_client_version()
         let error = network
             .connect_initial(
                 &mut session,
-                &["modern".into()],
+                &["ancient".into()],
                 &mut (Instant::now() + Duration::from_secs(1)),
                 &mut event,
             )
@@ -670,7 +670,7 @@ async fn initial_selection_skips_backends_that_cannot_serve_the_client_version()
             .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::Unsupported);
         assert!(
-            timeout(Duration::from_millis(20), modern.accept())
+            timeout(Duration::from_millis(20), ancient.accept())
                 .await
                 .is_err()
         );
