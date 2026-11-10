@@ -23,10 +23,39 @@
 //! Partial columns (before 1.17) going to 1.17 clients become section
 //! updates of every block plus block entity packets.
 //!
-//! Step authors: every handler is a plain generic function (`level_chunk`,
-//! `light_update`, `block_update`...) that a step's own rule can call
-//! before or after doing its own work, and [`packets::convert_chunk`]
-//! converts a parsed column with the step's mappings.
+//! Across the 1.13 flattening, beds, banners, skulls and flower pots keep
+//! their look: see [`flattening`].
+//!
+//! # For step authors
+//!
+//! Every handler is a plain generic function a step's own rule can call
+//! before or after its own work: [`packets::level_chunk`],
+//! [`packets::light_update`], [`packets::forget_level_chunk`],
+//! [`blocks::block_update`], [`blocks::section_blocks_update`],
+//! [`blocks::block_event`], [`blocks::level_event`],
+//! [`blocks::block_entity_data`], [`explode::explode`] and
+//! [`chunks_biomes`]. To change a column itself, read it with
+//! [`model::Chunk::read`], convert it with [`packets::convert_chunk`] (the
+//! step's mappings) or [`convert::convert`] (a [`convert::Plan`] of your
+//! own), adjust it and [`model::Chunk::write`] it. [`State::world`] is what
+//! the backend's `login` / `respawn` said; a step that learns more about the
+//! world (a 1.17+ dimension's height, the biome registry's size) can set it.
+//!
+//! # Integration points
+//!
+//! - Biome IDs from 1.16.2 index the biome registry the server sends; they
+//!   pass unchanged until the registries codec maps them
+//!   ([`packets::biome_ids`], [`chunks_biomes`]).
+//! - [`model::World::biome_bits`], the width of that registry's global
+//!   palette, is unknown until the registries codec sets it; without it a
+//!   1.17 column going to 1.18 keeps at most 8 biomes per section.
+//! - A 1.16.5 column going to a 1.17 client is placed at the world height
+//!   the step's `login` gives the client; Rift assumes 0 to 255.
+//! - Level event 1010 (a record starts) across 1.20.6 / 1.21 needs the
+//!   `jukebox_song` registry; until then the record stops instead.
+//! - Explosions from 1.20.3 carry particles, converted by
+//!   `codec::entity::particle::transcode`, and signs and names carry text
+//!   the text codec should convert ([`block_entity`]).
 pub mod block_entity;
 pub mod blocks;
 pub mod container;

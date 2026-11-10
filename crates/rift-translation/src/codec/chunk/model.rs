@@ -127,6 +127,8 @@ pub struct World {
     /// The lowest section, when known (1.17 and newer).
     pub min_section: Option<i32>,
     /// The bits of the biome registry's global palette (1.18 and newer).
+    // INTEGRATION: the registries codec knows the size of the biome
+    // registry it sends and should set this.
     pub biome_bits: Option<u8>,
 }
 
