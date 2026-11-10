@@ -301,7 +301,13 @@ fn challenge_response(
         Pkcs1PublicEncryptingKey::new(PublicEncryptingKey::from_der(&public_key).unwrap()).unwrap();
     let secret = [0x37; 16];
     let mut data = Vec::new();
-    for plaintext in [&vec![0x37; secret_length][..], &token] {
+    for (i, plaintext) in [&vec![0x37; secret_length][..], &token]
+        .into_iter()
+        .enumerate()
+    {
+        if i == 1 && matches!(version, 759..=760) {
+            data.push(1); // 1.19–1.19.2: the challenge is encrypted, not signed
+        }
         let mut ciphertext = vec![0; public.ciphertext_size()];
         let ciphertext = public.encrypt(plaintext, &mut ciphertext).unwrap();
         write_bytes(ciphertext, &mut data);
@@ -328,6 +334,7 @@ async fn captured_encryption_response_cannot_replay_an_authenticated_session() {
                 &mut CryptoStream::new(left),
                 ProtocolVersion::new(774).unwrap(),
                 "Notch",
+                None,
             )
             .await
         });
@@ -355,7 +362,9 @@ async fn captured_encryption_response_cannot_replay_an_authenticated_session() {
 
 #[tokio::test]
 async fn online_handshake_authenticates_profile_and_preserves_encrypted_pipelined_bytes() {
-    for version in [47, 761, 765, 766, 774, 775, 776, 777] {
+    for version in [
+        47, 107, 340, 393, 404, 578, 735, 754, 758, 759, 760, 761, 765, 766, 774, 775, 776, 777,
+    ] {
         let (url, http) = http_fixture(200, profile().to_string(), Duration::ZERO).await;
         let auth = Authenticator::for_test_session_server(url, Duration::from_secs(3));
         let (left, right) = tokio::io::duplex(4096);
@@ -363,7 +372,12 @@ async fn online_handshake_authenticates_profile_and_preserves_encrypted_pipeline
         let mut client = CryptoStream::new(right);
         let task = tokio::spawn(async move {
             let result = auth
-                .authenticate(&mut server, ProtocolVersion::new(version).unwrap(), "Notch")
+                .authenticate(
+                    &mut server,
+                    ProtocolVersion::new(version).unwrap(),
+                    "Notch",
+                    None,
+                )
                 .await
                 .unwrap();
             let packet = Reader::default()
@@ -425,7 +439,12 @@ async fn invalid_challenge_secret_and_packet_do_not_contact_authentication_servi
         let task = tokio::spawn(async move {
             let mut server = CryptoStream::new(left);
             let err = auth
-                .authenticate(&mut server, ProtocolVersion::new(774).unwrap(), "Notch")
+                .authenticate(
+                    &mut server,
+                    ProtocolVersion::new(774).unwrap(),
+                    "Notch",
+                    None,
+                )
                 .await
                 .unwrap_err();
             assert!(!server.is_encrypted());
@@ -476,7 +495,7 @@ async fn session_rejection_outage_and_mismatch_fail_closed_after_encryption() {
             let mut server = CryptoStream::new(left);
             let version = ProtocolVersion::new(774).unwrap();
             let err = auth
-                .authenticate(&mut server, version, "Notch")
+                .authenticate(&mut server, version, "Notch", None)
                 .await
                 .unwrap_err();
             assert!(server.is_encrypted());
@@ -566,7 +585,7 @@ async fn malformed_and_unexpected_encryption_response_frames_are_bounded() {
     for bytes in [
         vec![0],                // empty frame
         vec![0xff, 0xff, 0xff], // VarInt21 violation
-        vec![0x81, 0x08],       // 1025-byte frame, no body needed for rejection
+        vec![0x81, 0x10],       // 2049-byte frame, no body needed for rejection
         Codec::default().encode(&Packet::empty(0)).unwrap(),
         Codec::default().encode(&Packet::new(1, vec![0])).unwrap(),
     ] {
@@ -577,6 +596,7 @@ async fn malformed_and_unexpected_encryption_response_frames_are_bounded() {
                 &mut CryptoStream::new(left),
                 ProtocolVersion::new(774).unwrap(),
                 "Notch",
+                None,
             )
             .await
         });
@@ -593,5 +613,130 @@ async fn malformed_and_unexpected_encryption_response_frames_are_bounded() {
                 .unwrap()
                 .is_err()
         );
+    }
+}
+
+/// A 1.19–1.19.2 client with a profile key signs the challenge and a salt
+/// instead of encrypting the challenge.
+fn signed_response(
+    packet: Packet,
+    signer: &aws_lc_rs::rsa::KeyPair,
+    flag: u8,
+) -> (Packet, [u8; 16]) {
+    use aws_lc_rs::signature::RSA_PKCS1_SHA256;
+    let mut data = packet.data.as_slice();
+    read_string(&mut data, 20).unwrap();
+    let size = read_varint(&mut data).unwrap() as usize;
+    let public_key = data[..size].to_vec();
+    data = &data[size..];
+    let size = read_varint(&mut data).unwrap() as usize;
+    let token = data[..size].to_vec();
+    let public =
+        Pkcs1PublicEncryptingKey::new(PublicEncryptingKey::from_der(&public_key).unwrap()).unwrap();
+    let mut response = Vec::new();
+    let mut ciphertext = vec![0; public.ciphertext_size()];
+    write_bytes(
+        public.encrypt(&[0x37; 16], &mut ciphertext).unwrap(),
+        &mut response,
+    );
+    response.push(flag);
+    let salt = 0x0123_4567_89ab_cdef_i64.to_be_bytes();
+    response.extend_from_slice(&salt);
+    let mut message = token;
+    message.extend_from_slice(&salt);
+    let mut signature = vec![0; signer.public_modulus_len()];
+    signer
+        .sign(
+            &RSA_PKCS1_SHA256,
+            &aws_lc_rs::rand::SystemRandom::new(),
+            &message,
+            &mut signature,
+        )
+        .unwrap();
+    write_bytes(&signature, &mut response);
+    (Packet::new(1, response), [0x37; 16])
+}
+
+#[tokio::test]
+async fn profile_key_clients_sign_the_challenge_on_1_19_through_1_19_2() {
+    use aws_lc_rs::{
+        encoding::{AsDer, PublicKeyX509Der},
+        rsa::KeyPair,
+        signature::KeyPair as _,
+    };
+    let client_key = KeyPair::generate(KeySize::Rsa2048).unwrap();
+    let client_public = AsDer::<PublicKeyX509Der>::as_der(client_key.public_key())
+        .unwrap()
+        .as_ref()
+        .to_vec();
+    let other_key = KeyPair::generate(KeySize::Rsa2048).unwrap();
+    for version in [759, 760] {
+        // A valid signature by the key from Login Start authenticates.
+        let (url, http) = http_fixture(200, profile().to_string(), Duration::ZERO).await;
+        let auth = Arc::new(Authenticator::for_test_session_server(
+            url,
+            Duration::from_secs(3),
+        ));
+        let (left, mut right) = tokio::io::duplex(4096);
+        let key = client_public.clone();
+        let task = {
+            let auth = auth.clone();
+            tokio::spawn(async move {
+                auth.authenticate(
+                    &mut CryptoStream::new(left),
+                    ProtocolVersion::new(version).unwrap(),
+                    "Notch",
+                    Some(&key),
+                )
+                .await
+            })
+        };
+        let request = Reader::default()
+            .read(&mut right, Codec::default())
+            .await
+            .unwrap()
+            .unwrap();
+        let (response, _) = signed_response(request, &client_key, 0);
+        Codec::default().write(&mut right, &response).await.unwrap();
+        assert_eq!(task.await.unwrap().unwrap().name, "Notch");
+        http.await.unwrap();
+
+        // Another key's signature, a signature without a key, and an encrypted
+        // challenge from a client that sent a key all fail before hasJoined.
+        for case in ["other key", "no key", "unsigned", "bad flag"] {
+            let (left, mut right) = tokio::io::duplex(4096);
+            let key = (case != "no key").then(|| client_public.clone());
+            let auth = auth.clone();
+            let task = tokio::spawn(async move {
+                let mut server = CryptoStream::new(left);
+                let result = auth
+                    .authenticate(
+                        &mut server,
+                        ProtocolVersion::new(version).unwrap(),
+                        "Notch",
+                        key.as_deref(),
+                    )
+                    .await;
+                assert!(!server.is_encrypted());
+                result
+            });
+            let request = Reader::default()
+                .read(&mut right, Codec::default())
+                .await
+                .unwrap()
+                .unwrap();
+            let response = match case {
+                "other key" => signed_response(request, &other_key, 0).0,
+                "no key" => signed_response(request, &client_key, 0).0,
+                "bad flag" => signed_response(request, &client_key, 2).0,
+                _ => challenge_response(request, version, true, 16, false).0,
+            };
+            Codec::default().write(&mut right, &response).await.unwrap();
+            assert_eq!(
+                task.await.unwrap().unwrap_err().kind(),
+                io::ErrorKind::PermissionDenied,
+                "{case} on {version}"
+            );
+        }
     }
 }

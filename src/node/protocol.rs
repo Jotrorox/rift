@@ -291,11 +291,15 @@ pub struct Prepare {
     pub plugins: Vec<String>,
     pub map: Option<String>,
     pub accept_eula: bool,
-    /// `Some(online_mode)`: configure Velocity forwarding for Paper-family
+    /// `Some(online_mode)`: configure player forwarding for Paper-family
     /// software. The forwarding secret never crosses the bus; agents read
     /// their own copy from `--forwarding-secret-env`. (The one secret that
     /// does cross is an instance's bus token, in [`Start`].)
     pub forwarding: Option<bool>,
+    /// `bungeecord` or `bungeeguard`; absent means Velocity, which is all an
+    /// older controller sends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forwarding_mode: Option<String>,
     /// `(name, value, replace)`: replaced settings always win, others are defaults.
     pub properties: Vec<(String, String, bool)>,
 }
