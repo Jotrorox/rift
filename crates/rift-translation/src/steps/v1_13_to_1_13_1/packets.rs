@@ -225,7 +225,7 @@ pub(super) fn edit_book<S: HasShared>(
 
 /// A 1.13 `player_action` swapping the hands, as a 1.13 client sends it:
 /// no position, facing down.
-fn swap_hands() -> Vec<u8> {
+pub(super) fn swap_hands() -> Vec<u8> {
     let mut body = Writer::new();
     body.varint(SWAP_HANDS)
         .position_legacy(Position { x: 0, y: 0, z: 0 })

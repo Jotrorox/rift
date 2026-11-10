@@ -460,7 +460,7 @@ fn a_1_13_1_client_edits_an_off_hand_book_through_a_hand_swap() {
     let edit = [book(OLDER), vec![1]].concat();
     assert_eq!(out, [to_backend("edit_book", &edit)]);
     let off = [book(NEWER), vec![1, 1]].concat();
-    let swap = hex("0600000000000000000000");
+    let swap = hex(SWAP_HANDS);
     assert_eq!(
         session.serverbound("edit_book", &off).unwrap(),
         [
@@ -559,4 +559,19 @@ fn dead_coral_plants_stand_in_as_dead_coral_fans() {
             Some(item(OLDER, &format!("dead_{colour}_coral_fan")))
         );
     }
+}
+
+/// A 1.13 `player_action` swapping the hands: action 6, the origin, facing
+/// down; checked against minecraft-data's 1.13 schema.
+const SWAP_HANDS: &str = "06000000000000000000";
+
+#[test]
+fn the_hand_swap_is_a_1_13_player_action() {
+    assert_eq!(super::packets::swap_hands(), hex(SWAP_HANDS));
+    let id = data::version(OLDER).expect_packet(
+        crate::State::Play,
+        Direction::Serverbound,
+        "player_action",
+    );
+    assert_eq!(id, 0x18);
 }

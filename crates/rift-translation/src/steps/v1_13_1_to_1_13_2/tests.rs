@@ -80,3 +80,42 @@ fn other_plugin_messages_pass_unchanged() {
         }
     }
 }
+
+/// Across both 1.13 pairs only the 1.13/1.13.1 step converts boss bars and
+/// dispenser smoke; this one passes them on.
+#[test]
+fn chains_across_1_13_convert_once() {
+    use crate::wire::Position;
+    let smoke = |position: Position, data: i32| {
+        let mut body = Writer::new();
+        body.i32(2000)
+            .position_legacy(position)
+            .i32(data)
+            .bool(false);
+        body.into_inner()
+    };
+    let at = Position { x: 1, y: 70, z: -1 };
+    let mut up = Session::play(NEWER, 393);
+    assert_eq!(
+        up.clientbound("level_event", &smoke(at, 7)).unwrap(),
+        [to_client("level_event", &smoke(at, 3))]
+    );
+    let mut down = Session::play(393, NEWER);
+    assert_eq!(
+        down.clientbound("level_event", &smoke(at, 3)).unwrap(),
+        [to_client("level_event", &smoke(at, 7))]
+    );
+    let bar = |flags: u8| {
+        let mut body = vec![0x11; 16];
+        body.extend([5, flags]);
+        body
+    };
+    assert_eq!(
+        up.clientbound("boss_event", &bar(2)).unwrap(),
+        [to_client("boss_event", &bar(6))]
+    );
+    assert_eq!(
+        down.clientbound("boss_event", &bar(4)).unwrap(),
+        [to_client("boss_event", &bar(2))]
+    );
+}
