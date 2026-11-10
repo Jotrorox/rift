@@ -174,10 +174,10 @@ async function testWebAssets(appSource, statusSource) {
     h.model.intercept = (path) => path === "/api/groups/arena%20west/instances" ? h.response({ name: "arena-1", storage: "disposable" }, 201) : undefined;
     await h.element("refresh-status").emit("click"); await flush();
     const row = h.element("service-groups").children[0];
-    assert(row.children[2].textContent === "Disposable game", "Disposable group policy missing");
-    assert(row.children[3].textContent === "<script>arena</script>", "Template text was not preserved safely");
-    assert(row.children[1].textContent === "25600–25610", "Port range missing");
-    await row.children[5].children[0].emit("click"); await flush();
+    assert(row.children[3].textContent === "Disposable game", "Disposable group policy missing");
+    assert(row.children[4].textContent === "<script>arena</script>", "Template text was not preserved safely");
+    assert(row.children[2].textContent === "25600–25610", "Port range missing");
+    await row.children[6].children[0].emit("click"); await flush();
     const call = h.calls.find(({ path }) => path === "/api/groups/arena%20west/instances");
     assert(call && call.options.method === "POST" && call.options.body === "{}", "Instance creation request incorrect");
     assert(h.element("server-result").textContent.includes("arena-1"), "Created instance name missing");
@@ -199,9 +199,87 @@ async function testWebAssets(appSource, statusSource) {
     const wake = h.element("managed-servers").children.map((row) => row.children[3].textContent);
     assert(wake[0].includes("Paused by Stop") && wake[1].includes("retries exhausted"), "Paused wake reasons missing");
     assert(wake[2] === "Explicit start only" && wake[3] === "Enabled", "Wake policy labels incorrect");
-    const [full, open] = h.element("service-groups").children.map((row) => row.children[5].children[0]);
+    const [full, open] = h.element("service-groups").children.map((row) => row.children[6].children[0]);
     assert(full.disabled && full.title.includes("max_instances"), "Full group creation was enabled");
     assert(!open.disabled, "Group below its maximum was blocked");
+  });
+  await test("service groups show their state and start, stop and switch dev mode as a whole", async () => {
+    const h = fixture(appSource); await flush();
+    const summary = { running: 2, starting: 0, stopping: 0, stopped: 1, failed: 0, unknown: 0, players: 5, draining: 0 };
+    h.model.status.service_groups = [
+      { name: "lobby west", storage: "persistent", instances: ["lobby-1", "lobby-2", "lobby-3"], suspended: false, mode: "active", dev_permission: "rift.group.lobby west.dev", summary },
+      { name: "arena", storage: "disposable", instances: ["arena-1"], suspended: true, mode: "dev", dev_permission: "rift.group.arena.dev", summary: { ...summary, running: 1, stopped: 0, players: 2, draining: 1 } },
+    ];
+    const confirms = [];
+    h.window.confirm = (message) => { confirms.push(message); return true; };
+    h.model.intercept = (path, options) => {
+      if (path === "/api/groups/lobby%20west/stop") return h.response({ group: "lobby west", suspended: true, mode: "active", instances: [
+        { name: "lobby-1", result: "draining", message: "5 players; stops once they leave" }, { name: "lobby-2", result: "stopping" }, { name: "lobby-3", result: "failed", message: "queue full" }] }, 202);
+      if (path === "/api/groups/lobby%20west/mode") return h.response({ group: "lobby west", suspended: false, mode: JSON.parse(options.body).mode, dev_permission: "rift.group.lobby west.dev" });
+      if (path === "/api/groups/arena/start") return h.response({ group: "arena", suspended: false, mode: "dev", instances: [{ name: "arena-1", result: "running" }] }, 202);
+    };
+    await h.element("refresh-status").emit("click"); await flush();
+    const [lobby, arena] = h.element("service-groups").children;
+    assert(lobby.children[1].children.map((tag) => tag.textContent).join() === "Active", "Active badge missing");
+    assert(arena.children[1].children.map((tag) => tag.textContent).join() === "Stopping · 1 draining,Dev mode", "Stopped and dev badges missing");
+    assert(lobby.children[5].textContent === "2 running · 1 stopped · 5 players", `Instance summary wrong: ${lobby.children[5].textContent}`);
+    assert(lobby.children[5].title === "lobby-1, lobby-2, lobby-3", "Instance names missing from the summary title");
+    const labels = (row) => row.children[6].children.map((button) => button.textContent);
+    assert(labels(lobby).join() === "Create instance,Start all,Stop all,Dev mode,Edit", `Group actions wrong: ${labels(lobby)}`);
+    assert(labels(arena)[3] === "Leave dev mode", "Dev mode toggle label wrong");
+    const [create, start, stop] = arena.children[6].children;
+    assert(create.disabled && create.title.includes("stopped"), "Stopped group allowed instance creation");
+    assert(stop.disabled && !start.disabled, "Stopped group controls wrong");
+    assert(!lobby.children[6].children[2].disabled, "Running group could not be stopped");
+
+    await lobby.children[6].children[2].emit("click"); await flush();
+    assert(confirms[0].includes("lobby west") && confirms[0].includes("5 now"), "Stop confirmation does not mention players");
+    const call = h.calls.find(({ path }) => path === "/api/groups/lobby%20west/stop");
+    assert(call && call.options.method === "POST" && call.options.body === "{}", "Group stop request incorrect");
+    const message = h.element("group-result").textContent;
+    assert(message.includes("1 draining") && message.includes("1 stopping") && message.includes("lobby-3: queue full"), `Stop outcome wrong: ${message}`);
+    assert(h.element("group-result").className.includes("warning"), "Partial failure presented as success");
+
+    await h.element("service-groups").children[0].children[6].children[3].emit("click"); await flush();
+    assert(confirms[1].includes("rift.group.lobby west.dev"), "Dev mode confirmation does not name the permission");
+    const mode = h.calls.find(({ path }) => path === "/api/groups/lobby%20west/mode");
+    assert(mode && mode.options.method === "PUT" && mode.options.body === JSON.stringify({ mode: "dev" }), "Dev mode request incorrect");
+    assert(h.element("group-result").textContent.includes("Only players with rift.group.lobby west.dev"), "Dev mode outcome missing");
+
+    await h.element("service-groups").children[1].children[6].children[1].emit("click"); await flush();
+    assert(confirms.length === 2, "Starting a group asked for confirmation");
+    assert(h.element("group-result").textContent.includes("1 already running") && h.element("group-result").textContent.includes("dev mode"), "Start outcome wrong");
+    h.window.confirm = () => false;
+    await h.element("service-groups").children[0].children[6].children[2].emit("click"); await flush();
+    assert(h.calls.filter(({ path }) => path === "/api/groups/lobby%20west/stop").length === 1, "Declined stop was sent");
+  });
+  await test("servers filter by group and explain stopped and dev mode groups", async () => {
+    const h = fixture(appSource); await flush();
+    h.model.status.service_groups = [{ name: "lobby", instances: ["lobby-1"] }, { name: "arena", instances: ["arena-1"] }];
+    h.model.status.managed_servers = [
+      { name: "lobby-1", group: "lobby", state: "stopped", automatic_start: false, automatic_enabled: false, group_suspended: true, group_mode: "active" },
+      { name: "arena-1", group: "arena", state: "running", automatic_start: true, automatic_enabled: true, group_suspended: false, group_mode: "dev" },
+      { name: "static", group: null, state: "stopped", automatic_start: true, automatic_enabled: true },
+    ];
+    await h.element("refresh-status").emit("click"); await flush();
+    const wake = h.element("managed-servers").children.map((row) => row.children[3].textContent);
+    assert(wake[0].includes("group lobby stopped"), `Stopped group wake label missing: ${wake[0]}`);
+    assert(wake[1] === "Enabled · dev mode" && wake[2] === "Enabled", `Dev mode wake label wrong: ${wake}`);
+    assert(h.element("servers-group").children.map((option) => option.value).join() === ",lobby,arena", "Group filter options wrong");
+    h.element("servers-group").value = "arena"; await h.element("servers-group").emit("change");
+    const rows = h.element("managed-servers").children;
+    assert(rows.length === 1 && rows[0].children[0].textContent === "arena-1", "Group filter did not apply");
+    await h.element("refresh-status").emit("click"); await flush();
+    assert(h.element("managed-servers").children.length === 1 && h.element("servers-group").value === "arena", "Filter was lost on refresh");
+  });
+  await test("group controls need the servers permission and Edit needs config", async () => {
+    const h = fixture(appSource); await flush();
+    h.model.access = { name: "viewer", permissions: ["read"], groups: null };
+    h.model.status.service_groups = [{ name: "lobby", instances: [], suspended: false, mode: "active" }];
+    h.element("token").value = "viewer-token"; await h.element("auth-form").emit("submit"); await flush();
+    const actions = h.element("service-groups").children[0].children[6].children;
+    assert(actions.every((button) => button.disabled), "Ungrantable group mutation was enabled");
+    assert(!actions.some((button) => button.textContent === "Edit"), "Edit shown without config permission");
   });
   await test("instance removal distinguishes destructive games and persistent worlds", async () => {
     const h = fixture(appSource); await flush();
@@ -257,11 +335,11 @@ async function testWebAssets(appSource, statusSource) {
       if (path === "/api/operations/failed-create") return h.response({ status: "failed", http_status: 409, error: "No free ports" });
     };
     await h.element("refresh-status").emit("click"); await flush();
-    await h.element("service-groups").children[0].children[5].children[0].emit("click"); await flush();
+    await h.element("service-groups").children[0].children[6].children[0].emit("click"); await flush();
     assert(h.element("server-result").textContent.includes("failed-create failed: No free ports"), "Operation failure missing");
     assert(h.element("server-result").className.includes("error"), "Failure presented as success");
     assert(h.element("conflict").className.includes("hidden"), "Operation failure changed editor revision state");
-    assert(!h.element("service-groups").children[0].children[5].children[0].disabled, "Failure did not restore controls");
+    assert(!h.element("service-groups").children[0].children[6].children[0].disabled, "Failure did not restore controls");
   });
   await test("polling denial or expiry explains the unresolved operation without claiming failure", async () => {
     for (const status of [403, 404, 503]) {
@@ -272,7 +350,7 @@ async function testWebAssets(appSource, statusSource) {
         if (path === "/api/operations/unresolved") return h.response({ error: "Result unavailable" }, status);
       };
       await h.element("refresh-status").emit("click"); await flush();
-      await h.element("service-groups").children[0].children[5].children[0].emit("click"); await flush();
+      await h.element("service-groups").children[0].children[6].children[0].emit("click"); await flush();
       const message = h.element("server-result").textContent;
       assert(message.includes("Result unavailable") && message.includes("/api/operations/unresolved") && message.includes("may still be running"), "Unresolved operation guidance missing");
       if (status === 403) assert(h.element("auth-panel").open, "Polling denial did not expose token controls");
@@ -311,13 +389,13 @@ async function testWebAssets(appSource, statusSource) {
     h.model.status.service_groups = [{ name: "arena", port_range: [25600, 25610], storage: "disposable", template: "arena" }];
     h.model.intercept = (path) => path === "/api/groups/arena/instances" ? new Promise((resolve) => { release = resolve; }) : undefined;
     await h.element("refresh-status").emit("click"); await flush();
-    const create = h.element("service-groups").children[0].children[5].children[0];
+    const create = h.element("service-groups").children[0].children[6].children[0];
     await create.emit("click"); await flush();
     assert(create.disabled, "Pending creation control remains enabled");
     await create.emit("click"); await flush();
     assert(h.calls.filter(({ path }) => path === "/api/groups/arena/instances").length === 1, "Duplicate provisioning request");
     release(h.response({ name: "arena-1" }, 201)); await flush();
-    assert(!h.element("service-groups").children[0].children[5].children[0].disabled, "Creation controls were not restored");
+    assert(!h.element("service-groups").children[0].children[6].children[0].disabled, "Creation controls were not restored");
   });
   await test("removal cleanup failures warn without claiming files deleted or changing editor revision", async () => {
     const h = fixture(appSource); await flush();
@@ -667,6 +745,56 @@ async function testWebAssets(appSource, statusSource) {
     h.element("server-list-max-players").value = "-1"; const before = h.calls.length;
     await h.element("server-list-form").emit("submit"); await flush();
     assert(h.calls.length === before && h.element("server-list-result").textContent.includes("nonnegative"), "Invalid maximum reached the API");
+  });
+  await test("server icons upload as 64-pixel PNG data URLs, persist until saved and can be removed", async () => {
+    const h = fixture(appSource);
+    h.model.definitions.server_list = { motd: "Hi", favicon: null, hosts: {} };
+    await flush();
+    assert(h.element("server-list-favicon").hidden && h.element("server-list-favicon-remove").hidden, "Empty icon shown");
+    const png = (width, height, extra = 0) => {
+      const bytes = new Uint8Array(33 + extra), view = new DataView(bytes.buffer);
+      bytes.set([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82]); view.setUint32(16, width); view.setUint32(20, height);
+      return { type: "image/png", size: bytes.length, arrayBuffer: async () => bytes.buffer };
+    };
+    let submitted;
+    h.model.intercept = (path, options) => { if (options.method === "PUT") { submitted = JSON.parse(options.body).definition; return h.response({ revision: "rev-1" }); } return null; };
+    // An exact 64×64 PNG is kept byte for byte.
+    h.element("server-list-favicon-file").files = [png(64, 64)];
+    await h.element("server-list-favicon-file").emit("change"); await flush();
+    assert(h.element("server-list-favicon").src.startsWith("data:image/png;base64,iVBORw0KGgo") && !h.element("server-list-favicon").hidden, "Uploaded icon not previewed");
+    assert(h.element("server-list-favicon-state").textContent.includes("Save"), "Pending icon not explained");
+    h.model.definitions.server_list = { motd: "Elsewhere", favicon: null, hosts: {} }; await h.advance(5000);
+    assert(h.element("server-list-favicon-state").textContent.includes("Save"), "Refresh discarded the chosen icon");
+    await h.element("server-list-form").emit("submit"); await flush();
+    assert(submitted.favicon.startsWith("data:image/png;base64,iVBORw0KGgo") && submitted.motd === "Hi", "Icon not sent with the form");
+    // Other images are drawn onto a 64×64 canvas, keeping their aspect ratio.
+    let drawn;
+    h.window.createImageBitmap = async () => ({ width: 256, height: 128, close() {} });
+    const createElement = h.document.createElement;
+    h.document.createElement = (tag) => tag !== "canvas" ? createElement(tag) : { getContext: () => ({ drawImage: (...args) => { drawn = args.slice(1); } }), toDataURL: () => "data:image/png;base64,QUJD" };
+    h.element("server-list-favicon-file").files = [{ type: "image/jpeg", size: 9, arrayBuffer: async () => new ArrayBuffer(9) }];
+    await h.element("server-list-favicon-file").emit("change"); await flush();
+    assert(JSON.stringify(drawn) === "[0,16,64,32]", `Image not fitted inside the icon: ${drawn}`);
+    assert(h.element("server-list-favicon").src === "data:image/png;base64,QUJD", "Resized icon not previewed");
+    // Images the browser cannot read leave the chosen icon untouched.
+    h.window.createImageBitmap = async () => { throw new Error("decode"); };
+    h.element("server-list-favicon-file").files = [png(32, 32)];
+    await h.element("server-list-favicon-file").emit("change"); await flush();
+    assert(h.element("server-list-favicon-state").textContent.includes("isn’t an image"), "Unreadable image not reported");
+    assert(h.element("server-list-favicon").src === "data:image/png;base64,QUJD", "Failed upload replaced the chosen icon");
+    // Removing a configured icon sends false; with none configured, nothing.
+    h.model.definitions.server_list = { motd: "Hi", favicon: "data:image/png;base64,AAAA", hosts: {} };
+    await h.element("server-list-refresh").emit("click"); await flush();
+    assert(h.element("server-list-favicon-state").textContent === "Current icon", "Configured icon not shown");
+    await h.element("server-list-favicon-remove").emit("click");
+    assert(h.element("server-list-favicon").hidden && h.element("server-list-favicon-state").textContent.includes("removed"), "Removal not previewed");
+    await h.element("server-list-form").emit("submit"); await flush();
+    assert(submitted.favicon === false, "Removal not sent");
+    h.model.definitions.server_list = { motd: "Hi", favicon: null, hosts: {} };
+    await h.element("server-list-refresh").emit("click"); await flush();
+    await h.element("server-list-favicon-remove").emit("click");
+    await h.element("server-list-form").emit("submit"); await flush();
+    assert(!("favicon" in submitted), "Removing a missing icon was sent");
   });
   await test("turning the tab list off sends null and network listing is explicit", async () => {
     const h = fixture(appSource);

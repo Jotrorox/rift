@@ -149,6 +149,9 @@ The `servers` permission grants `rift admin servers`, `rift admin start <backend
 and `rift admin stop <backend>` for configured [managed servers](managed-servers.md).
 It also grants `rift admin groups`, `rift admin create <group>` and
 `rift admin remove <instance>` for [service groups](managed-servers.md#service-groups-and-dynamic-instances),
+`rift admin group start <group>`, `rift admin group stop <group>` and
+`rift admin group mode <group> active|dev` for
+[whole groups](managed-servers.md#start-stop-and-dev-mode-for-a-whole-group),
 and `rift admin nodes` for [node agents](nodes.md).
 Creation allocates a port and registers a stopped backend; removal waits for
 child cleanup and refuses players or pending attachments.
@@ -191,7 +194,7 @@ rift.config.server_list = {
     maintenance_motd = "Back soon. Follow @mynetwork for updates.",
     version = { mini = "<gold>My Network</gold> <gray>1.8-1.21" }, -- Shown when a client's version is incompatible.
     max_players = 500,               -- Defaults to limits.max_connections.
-    favicon = "icons/network.png",   -- 64x64 PNG up to 16 KiB, relative to rift.lua.
+    favicon = "icons/network.png",   -- 64x64 PNG up to 16 KiB, relative to rift.lua, or a data URL.
     sample = { { mini = "<green>Survival</green>, <aqua>Creative" }, "and Minigames" }, -- Hover text over the player count.
     hosts = {
         ["survival.example.com"] = { motd = "Survival", favicon = "icons/survival.png" },
@@ -215,9 +218,12 @@ written. The MOTD is rewritten for each pinging client like any component.
 Rift's default MOTDs and version name are the `status.*` entries of its
 [message catalogue](text.md#rifts-own-messages).
 Rift reads favicon files when it loads or reloads the configuration, so replace
-the file and reload to change the icon. It rejects missing files, images that
-are not 64×64 PNGs, and settings that would exceed the protocol's 32767-byte
-status limit.
+the file and reload to change the icon. A favicon can also be the image itself
+as a `data:image/png;base64,...` URL. That is how the dashboard's Server list
+page stores an uploaded icon: it accepts PNG, JPEG, WebP or GIF, scales the
+image to fit 64×64 and saves it in the configuration, so no file has to exist
+next to `rift.lua`. Rift rejects missing files, images that are not 64×64 PNGs,
+and settings that would exceed the protocol's 32767-byte status limit.
 
 For per-ping logic, register a `status` handler. It runs before Rift contacts
 any backend and receives `listener`, `hostname`, `protocol`, `peer_addr`,

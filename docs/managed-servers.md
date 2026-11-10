@@ -571,7 +571,8 @@ then stop it once the player and reservation counts reach zero. See the
 [maintenance workflow](operations.md) for drain and transfer commands. Explicit
 stop rejects an occupied server rather than disconnecting its players.
 
-The web dashboard also exposes service-group Create controls, server state,
+The web dashboard also exposes service-group Create, Start all, Stop all and
+Dev mode controls, a group filter for the server list, server state,
 start/stop controls and dynamic instance removal. It labels persistent worlds
 and disposable games separately, and indicates whether removal keeps or deletes
 files. Occupied and removing instances cannot be removed from the dashboard. Its API has
@@ -580,6 +581,42 @@ files. Occupied and removing instances cannot be removed from the dashboard. Its
 rules; operational `admin.permissions` apply to the separate admin TCP endpoint.
 Lifecycle mutation requests return HTTP `202` when accepted; poll the listing
 to observe completion. See [HTTP services](http.md) for authentication.
+
+### Start, stop and dev mode for a whole group
+
+Each service group can be operated as a unit from the dashboard's Service
+groups view, the HTTP API or the admin socket:
+
+```sh
+rift admin group stop arena
+rift admin group mode arena dev
+rift admin group start arena
+rift admin group mode arena active
+```
+
+**Stop** keeps new players out of the group's instances (they count as
+draining, so routing, fallbacks and transfers skip them), pauses automatic
+scaling, refuses new instances and stops every empty instance now. Instances
+with players keep running until the last one leaves, then stop; nobody is
+disconnected. Each stopped instance is explicitly stopped, exactly as if you had
+stopped it alone, so it does not wake on demand or after a restart.
+`drain <backend> off` cannot undo the drain of a stopped group's instance.
+
+**Start** resumes the group: scaling runs again and every instance that is not
+running is started. Like a single Start, it clears explicit stops and exhausted
+restart retries.
+
+**Dev mode** lets only players granted `rift.group.<group>.dev` (for example
+`rift.group.arena.dev`) join the group's instances, through routing, `/server`,
+queues, fallbacks and transfers alike, and freezes automatic scaling so the
+scaler neither creates nor removes instances and their files while you work on
+them. Manual creation, removal, start and stop still work. Players already
+connected stay when you switch modes. **Active** returns the group to normal.
+
+A group can be stopped and in dev mode at the same time; starting it keeps dev
+mode. Both states survive reloads and, with the instance database, restarts.
+They are not part of the Lua configuration and are forgotten when the group's
+definition is removed.
 
 Changing managed definitions, adding/removing a managed server, or changing its
 static backend address requires a Rift restart. Use service-group instance

@@ -50,6 +50,56 @@ impl InstanceStorage {
     }
 }
 
+/// Operator-controlled runtime state of a service group. It is not part of
+/// the Lua configuration: it survives reloads and, with an instance database,
+/// restarts, and is dropped when the group's definition is removed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GroupState {
+    /// Stopped as a whole: the scaler leaves the group alone, members take
+    /// no new players and each one stops once it is empty.
+    pub suspended: bool,
+    pub mode: GroupMode,
+}
+
+impl GroupState {
+    pub fn is_default(self) -> bool {
+        self == Self::default()
+    }
+}
+
+/// Who may join a service group's instances.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum GroupMode {
+    /// Everyone the network's access rules admit; scaling runs normally.
+    #[default]
+    Active,
+    /// Only players granted [`GroupMode::dev_permission`]; automatic scaling
+    /// is frozen so instances and their files stay as they are.
+    Dev,
+}
+
+impl GroupMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Dev => "dev",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "active" => Some(Self::Active),
+            "dev" => Some(Self::Dev),
+            _ => None,
+        }
+    }
+
+    /// The permission node that admits a player to `group` in dev mode.
+    pub fn dev_permission(group: &str) -> String {
+        format!("rift.group.{group}.dev")
+    }
+}
+
 /// Runtime metadata; instance definitions cannot be supplied by Lua configuration.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ServiceInstance {

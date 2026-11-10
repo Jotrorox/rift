@@ -18,7 +18,9 @@ pub use managed::ManagedServer;
 pub use messaging::{MessagingConfig, MessagingPrincipal, MessagingStream, MessagingSubscription};
 pub use nodes::{LOCAL_NODE, NodeConfig, NodeSelector, Placement, valid_node_directory};
 pub use permissions::PermissionsConfig;
-pub use services::{InstanceStorage, ServiceGroup, ServiceInstance, ServiceScaling};
+pub use services::{
+    GroupMode, GroupState, InstanceStorage, ServiceGroup, ServiceInstance, ServiceScaling,
+};
 pub use status::{
     StatusBackend, StatusConfig, StatusExposure, StatusLink, StatusPage, StatusPanels,
 };
