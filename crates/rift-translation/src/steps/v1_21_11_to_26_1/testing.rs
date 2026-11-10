@@ -147,3 +147,24 @@ pub(in crate::steps) fn corpus_through(
     }
     Some(out)
 }
+
+/// Print what a step between `client` and `backend` sent, for the schema
+/// check script, as `SCHEMA <protocol> <state> <direction> <id> <name>
+/// <hex>` lines.
+pub(in crate::steps) fn print_for_schema_check(client: i32, backend: i32, sent: Vec<Sent>) {
+    for Sent {
+        direction,
+        state,
+        name,
+        data,
+    } in sent
+    {
+        let protocol = match direction {
+            Direction::Clientbound => client,
+            Direction::Serverbound => backend,
+        };
+        let id = data::version(protocol).expect_packet(state, direction, &name);
+        let hex: String = data.iter().map(|byte| format!("{byte:02x}")).collect();
+        println!("SCHEMA {protocol} {state:?} {direction:?} {id} {name} {hex}");
+    }
+}

@@ -4,7 +4,7 @@ use super::{DOWN, NEWER, OLDER, UP};
 use crate::{
     Direction::{self, Clientbound, Serverbound},
     State, data,
-    steps::v1_21_11_to_26_1::testing::{Harness, corpus_through, hex},
+    steps::v1_21_11_to_26_1::testing::{Harness, corpus_through, hex, print_for_schema_check},
     wire::{Position, Reader, Writer},
 };
 
@@ -466,4 +466,118 @@ fn recorded_sessions_convert_and_round_trip() {
             }
         }
     }
+}
+
+/// Print what the steps make of packets the corpus lacks, for an
+/// independent schema check: `cargo test dump_for_schema_check --
+/// --ignored --nocapture`.
+#[test]
+#[ignore]
+fn dump_for_schema_check() {
+    let at = Position { x: 1, y: 64, z: 1 }.to_modern();
+    let mut step = up();
+    let print = |sent| print_for_schema_check(NEWER, OLDER, sent);
+    for body in [hex("07 00"), hex("07 03"), hex("07 04")] {
+        print(step.clientbound("animate", &body).unwrap());
+    }
+    let mut editor = Writer::new();
+    editor.i64(at).bool(true);
+    print(step.clientbound("open_sign_editor", &editor.buf).unwrap());
+    for event in [2002, 2007, 3003, 2001] {
+        print(
+            step.clientbound("level_event", &level_event(event, at, 1))
+                .unwrap(),
+        );
+    }
+    let mut respawn = Writer::new();
+    respawn.varint(0).string("minecraft:overworld").i64(9);
+    respawn
+        .u8(0)
+        .i8(1)
+        .bool(false)
+        .bool(false)
+        .bool(false)
+        .varint(0)
+        .varint(32)
+        .u8(3);
+    print(step.clientbound("respawn", &respawn.buf).unwrap());
+    let mut moved = Writer::new();
+    moved
+        .varint(9)
+        .i16(100)
+        .i16(-5)
+        .i16(0)
+        .u8(3)
+        .u8(4)
+        .bool(true);
+    print(step.clientbound("move_entity_pos_rot", &moved.buf).unwrap());
+    print(
+        step.clientbound("move_entity_rot", &hex("09 03 04 01"))
+            .unwrap(),
+    );
+    let mut action = Writer::new();
+    action.varint(0).i64(at).u8(1).varint(5);
+    step.serverbound("player_action", &action.buf).unwrap();
+    print(step.serverbound("client_tick_end", &[]).unwrap());
+    print(
+        step.serverbound("accept_teleportation", &hex(ACCEPT_26_3))
+            .unwrap(),
+    );
+    print(step.serverbound("punch", &[]).unwrap());
+    let mut action = Writer::new();
+    action.varint(5).i64(at).u8(1).varint(6);
+    print(step.serverbound("player_action", &action.buf).unwrap());
+    let mut sign = Writer::new();
+    sign.i64(at);
+    for line in ["a", "b", "c", "d"] {
+        sign.string(line);
+    }
+    sign.varint(1);
+    print(step.serverbound("sign_update", &sign.buf).unwrap());
+
+    let mut step = down();
+    let print = |sent| print_for_schema_check(OLDER, NEWER, sent);
+    print(
+        step.clientbound("swing_animation", &hex("07 01 02 0a"))
+            .unwrap(),
+    );
+    print(step.clientbound("animate", &hex("07 01")).unwrap());
+    let mut editor = Writer::new();
+    editor.i64(at).varint(1);
+    print(step.clientbound("open_sign_editor", &editor.buf).unwrap());
+    let mut stepped = Writer::new();
+    stepped.varint(9).varint(2 << 1 | 1);
+    stepped
+        .varint(2)
+        .i16(100)
+        .i16(0)
+        .i16(0)
+        .varint(1)
+        .i16(50)
+        .i16(0)
+        .i16(0);
+    stepped.u8(3).u8(4);
+    print(
+        step.clientbound("move_entity_pos_rot", &stepped.buf)
+            .unwrap(),
+    );
+    print(
+        step.clientbound("move_entity_rot", &hex("09 01 03 04"))
+            .unwrap(),
+    );
+    step.clientbound("player_position", &hex(TELEPORT)).unwrap();
+    print(
+        step.serverbound("accept_teleportation", &hex("01"))
+            .unwrap(),
+    );
+    print(step.serverbound("swing", &hex("00")).unwrap());
+    let mut action = Writer::new();
+    action.varint(4).i64(at).u8(1).varint(6);
+    print(step.serverbound("player_action", &action.buf).unwrap());
+    let mut sign = Writer::new();
+    sign.i64(at).bool(true);
+    for line in ["a", "b", "c", "d"] {
+        sign.string(line);
+    }
+    print(step.serverbound("sign_update", &sign.buf).unwrap());
 }
