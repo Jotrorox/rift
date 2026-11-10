@@ -1092,3 +1092,51 @@ fn malformed_packets_fail_without_panicking() {
     assert!(up.serverbound(Play, "use_item_on", &[0, 1]).is_err());
     assert!(down.serverbound(Play, "player_input", &[1, 2, 3]).is_err());
 }
+
+#[test]
+fn recipes_unlocked_later_reach_a_1_21_client_with_the_whole_list() {
+    let mut up = up();
+    let sets = up.one_clientbound(Play, "update_recipes", &older_recipes());
+    let init = up
+        .clientbound(Play, "recipe", &recipe_packet(0, &["minecraft:stick"], &[]))
+        .unwrap();
+    let add = up
+        .clientbound(Play, "recipe", &recipe_packet(1, &["minecraft:glass"], &[]))
+        .unwrap();
+    // Unlocked later: highlighted, with a toast.
+    assert_eq!(*add[1].data.last().unwrap(), 0); // Not a replacement.
+    assert_eq!(add[1].data[add[1].data.len() - 2], 3);
+
+    let mut down = down();
+    down.clientbound(Play, "update_recipes", &sets.data)
+        .unwrap();
+    down.clientbound(Play, "recipe_book_settings", &init[0].data)
+        .unwrap();
+    down.clientbound(Play, "recipe_book_add", &init[1].data)
+        .unwrap();
+    let out = down
+        .clientbound(Play, "recipe_book_add", &add[1].data)
+        .unwrap();
+    assert_eq!(names(&out), ["update_recipes", "recipe"]);
+    // The client keeps both book recipes and the stonecutter's.
+    assert_eq!(Reader::new(&out[0].data).varint().unwrap(), 3);
+    assert_eq!(out[1].data, recipe_packet(1, &["rift:recipe/1"], &[]));
+
+    // A ghost recipe is recognised by its display.
+    let ghost = up.one_clientbound(Play, "place_ghost_recipe", &{
+        let mut writer = Writer::new();
+        writer.i8(2).string("minecraft:glass");
+        writer.into_inner()
+    });
+    let out = down.one_clientbound(Play, "place_ghost_recipe", &ghost.data);
+    let mut expected = Writer::new();
+    expected.i8(2).string("rift:recipe/1");
+    assert_eq!(out.data, expected.buf);
+    let mut unknown = ghost.data.clone();
+    unknown.push(0);
+    assert!(
+        down.clientbound(Play, "place_ghost_recipe", &unknown)
+            .unwrap()
+            .is_empty()
+    );
+}
