@@ -230,6 +230,9 @@ fn components_era(shared: &mut Shared, direction: Direction, stack: &mut Stack) 
         if named {
             components.take("item_name");
         }
+        if stash.int("stacked") == Some(1) {
+            components.take("max_stack_size");
+        }
         item.id = original;
         return Ok(());
     }
@@ -243,6 +246,14 @@ fn components_era(shared: &mut Shared, direction: Direction, stack: &mut Stack) 
             let name = text::to_nbt(target, &text::Component::text(readable(original)));
             components.insert("item_name", components::Value::Nbt(name.to_bytes(false)));
             stash.insert("named", Nbt::Byte(1));
+        }
+        if item.count > 1 && components.get("max_stack_size").is_none() {
+            // The stand-in may stack less (a straw bed of 26.3 counts up to
+            // 64 as a 26.1 yellow bed, which stacks to 1); clients reject
+            // item templates beyond the item's stack size.
+            let size = if item.count > 64 { 99 } else { 64 };
+            components.insert("max_stack_size", components::Value::Int(size));
+            stash.insert("stacked", Nbt::Byte(1));
         }
         bridge::put_custom_data(components, &stash_key(source), Nbt::Compound(stash))?;
     }
@@ -275,6 +286,31 @@ mod tests {
         stack(&mut shared, Direction::Serverbound, &mut converted).unwrap();
         let back = converted.unwrap();
         assert_eq!(back.id, original);
+        assert!(back.components.unwrap().is_empty());
+    }
+
+    #[test]
+    fn stacked_stand_ins_keep_their_count() {
+        // 26.3's straw bed is a yellow bed (stack size 1) for 26.2 clients.
+        let original = item_id(777, "straw_bed").unwrap();
+        let mut shared = Shared::new(776, 777);
+        let mut converted = Some(ItemStack {
+            id: original,
+            count: 4,
+            damage: 0,
+            tag: None,
+            components: Some(Default::default()),
+        });
+        stack(&mut shared, Direction::Clientbound, &mut converted).unwrap();
+        let there = converted.clone().unwrap();
+        assert_eq!(item_name(776, there.id), Some("yellow_bed"));
+        assert_eq!(
+            there.components.as_ref().unwrap().get("max_stack_size"),
+            Some(&components::Value::Int(64))
+        );
+        stack(&mut shared, Direction::Serverbound, &mut converted).unwrap();
+        let back = converted.unwrap();
+        assert_eq!((back.id, back.count), (original, 4));
         assert!(back.components.unwrap().is_empty());
     }
 

@@ -1027,9 +1027,59 @@ fn enchantment(step: Boundary, element: &mut Compound) {
     {
         rename_attributes(effects, step.to, step.up());
     }
+    if step.crosses(777)
+        && let Some(effects) = element.get_mut("effects")
+    {
+        effect_requirements(effects, step.up());
+    }
     let known = enchantment_effects(step.to);
     if let Some(effects) = element.compound_mut("effects") {
         effects.0.retain(|(key, _)| known.contains(key));
+    }
+}
+
+/// Every `requirements` loot condition inside enchantment effects.
+fn effect_requirements(value: &mut Nbt, up: bool) {
+    match value {
+        Nbt::Compound(compound) => {
+            for (key, value) in compound.0.iter_mut() {
+                if key == "requirements" {
+                    loot_condition(value, up);
+                } else {
+                    effect_requirements(value, up);
+                }
+            }
+        }
+        Nbt::List(list) => list
+            .iter_mut()
+            .for_each(|value| effect_requirements(value, up)),
+        _ => {}
+    }
+}
+
+/// 26.3 names a loot condition's kind `type` where older versions name it
+/// `condition`; `inverted`, `all_of` and `any_of` nest more conditions.
+fn loot_condition(value: &mut Nbt, up: bool) {
+    match value {
+        Nbt::Compound(condition) => {
+            let (from, to) = if up {
+                ("condition", "type")
+            } else {
+                ("type", "condition")
+            };
+            for (key, _) in condition.0.iter_mut() {
+                if key == from {
+                    *key = to.to_owned();
+                }
+            }
+            for (key, value) in condition.0.iter_mut() {
+                if key == "term" || key == "terms" {
+                    loot_condition(value, up);
+                }
+            }
+        }
+        Nbt::List(list) => list.iter_mut().for_each(|value| loot_condition(value, up)),
+        _ => {}
     }
 }
 
