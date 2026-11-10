@@ -598,8 +598,9 @@ async fn initial_selection_skips_backends_that_cannot_serve_the_client_version()
                 .with_version(ProtocolVersion::from_release(release).unwrap())
         };
         let mut cfg = config();
+        // Translation covers 1.12 to 26.3: a 1.8.9 backend cannot serve 1.21.8.
         cfg.backends
-            .insert("modern".into(), backend(&modern, "1.21.11"));
+            .insert("modern".into(), backend(&modern, "1.8.9"));
         cfg.backends
             .insert("legacy".into(), backend(&legacy, "1.21.6"));
         let snapshot = Arc::new(Snapshot::new(cfg, None).unwrap());
