@@ -21,6 +21,9 @@ Requires Java 21+ (the fixtures' runtime). Usage:
 
     python3 scripts/translation_data.py              # regenerate everything
     python3 scripts/translation_data.py --check      # fail if files are stale
+
+`python3 scripts/translation_data.py crate [--check]` runs
+scripts/translation_crate.py, which generates crates/rift-translation/data.
 """
 
 import argparse
@@ -211,6 +214,11 @@ def outputs():
 
 
 def main():
+    if sys.argv[1:2] == ["crate"]:
+        # The rift-translation crate's data has its own generator.
+        sys.argv[1:2] = []
+        from translation_crate import main as crate
+        return crate()
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--check", action="store_true", help="fail if generated files differ")
     args = parser.parse_args()

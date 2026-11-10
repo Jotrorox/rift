@@ -1,9 +1,9 @@
-//! Packs data/*.json into one gzip archive so the binary does not carry
-//! megabytes of registry names as plain text. Layout of the unpacked archive:
-//! a JSON object mapping each file's stem ("340", "rules/393-401", ...) to
-//! its parsed content.
+//! Compresses each data/*.json file on its own so the binary does not carry
+//! megabytes of registry names as plain text, and so a program decompresses
+//! and parses only the versions it uses. Writes `files.rs`, a table of each
+//! file's stem ("340", "rules/393-401", ...) and its gzip bytes.
 use flate2::{Compression, write::GzEncoder};
-use std::{env, fs, io::Write, path::Path};
+use std::{env, fmt::Write as _, fs, io::Write, path::Path};
 
 fn collect(root: &Path, directory: &Path, entries: &mut Vec<(String, String)>) {
     println!("cargo:rerun-if-changed={}", directory.display());
@@ -34,18 +34,22 @@ fn collect(root: &Path, directory: &Path, entries: &mut Vec<(String, String)>) {
 
 fn main() {
     let root = Path::new(&env::var("CARGO_MANIFEST_DIR").unwrap()).join("data");
+    let out = Path::new(&env::var("OUT_DIR").unwrap()).to_path_buf();
     let mut entries = Vec::new();
     collect(&root, &root, &mut entries);
-    let mut archive = String::from("{");
+    let mut table = String::from("&[\n");
     for (index, (key, text)) in entries.iter().enumerate() {
-        if index > 0 {
-            archive.push(',');
-        }
-        archive.push_str(&format!("{key:?}:{}", text.trim()));
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
+        encoder.write_all(text.as_bytes()).unwrap();
+        let path = out.join(format!("data-{index}.json.gz"));
+        fs::write(&path, encoder.finish().unwrap()).unwrap();
+        writeln!(
+            table,
+            "    ({key:?}, include_bytes!({:?})),",
+            path.display()
+        )
+        .unwrap();
     }
-    archive.push('}');
-    let out = Path::new(&env::var("OUT_DIR").unwrap()).join("data.json.gz");
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
-    encoder.write_all(archive.as_bytes()).unwrap();
-    fs::write(out, encoder.finish().unwrap()).unwrap();
+    table.push(']');
+    fs::write(out.join("files.rs"), table).unwrap();
 }
