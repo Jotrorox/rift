@@ -527,7 +527,6 @@ async fn channel_requests_download_create_start_stop_and_remove_instances() {
     client.close();
 }
 
-#[cfg(unix)]
 /// One unchanged template for every instance: Rift issues each its own bus
 /// login, the process finds everything in `RIFT_*` variables and says hello
 /// as itself; after removal its token is refused.
@@ -620,6 +619,7 @@ async fn instances_connect_with_their_own_login_until_removed() {
     client.close();
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shutdown_cancels_a_download_without_publishing_a_jar() {
     let fixture = Fixture::new();
