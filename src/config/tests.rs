@@ -1945,3 +1945,47 @@ fn text_theme_and_messages_are_checked_at_load() {
         assert!(error.contains(expected), "{settings}: {error}");
     }
 }
+
+#[test]
+fn translation_is_on_with_detection_unless_configured_otherwise() {
+    use crate::config::Translation;
+    let defaults = Config::from_lua(&with_admin_options(""), "translation.lua").unwrap();
+    assert_eq!(
+        defaults.translation,
+        Translation {
+            enabled: true,
+            detect: true
+        }
+    );
+    for (options, enabled, detect) in [
+        ("translation = false", false, true),
+        ("translation = true", true, true),
+        ("translation = {}", true, true),
+        ("translation = { detect = false }", true, false),
+        (
+            "translation = { enabled = false, detect = false }",
+            false,
+            false,
+        ),
+    ] {
+        let config = Config::from_lua(&with_admin_options(options), "translation.lua").unwrap();
+        assert_eq!(
+            config.translation,
+            Translation { enabled, detect },
+            "{options}"
+        );
+    }
+    for (options, expected) in [
+        (
+            "translation = 'on'",
+            "translation: expected a boolean or a table",
+        ),
+        ("translation = { enable = true }", "translation"),
+        ("translation = { detect = 1 }", "translation"),
+    ] {
+        let error = Config::from_lua(&with_admin_options(options), "translation.lua")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(expected), "{options}: {error}");
+    }
+}

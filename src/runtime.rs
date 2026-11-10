@@ -1144,7 +1144,10 @@ pub async fn handle(
                     }
                     event.stage = "transfer";
                     event.failure = "transfer_failed";
-                    let protocol = request.snapshot.config.backends[target].version();
+                    let protocol = match session.version() {
+                        Ok(client) => rift::backend_version::protocol(&request.snapshot.config, target, client, target_network.addresses).await,
+                        Err(_) => None,
+                    };
                     target_network.push_permissions(&session, target);
                     let result = timeout_at(deadline, session.connect_backend_as(upstream, protocol)).await;
                     match result {

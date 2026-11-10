@@ -211,12 +211,7 @@ impl Network<'_> {
         let Ok(client) = session.version() else {
             return false;
         };
-        self.snapshot
-            .config
-            .backends
-            .get(name)
-            .and_then(|backend| backend.version())
-            .is_none_or(|backend| rift::protocol::translatable(client, backend))
+        rift::backend_version::serves(&self.snapshot.config, name, client)
     }
 
     pub fn initial_candidates(
@@ -379,12 +374,13 @@ impl Network<'_> {
                 upstream.set_nodelay(true)?;
                 event.stage = "handshake_write";
                 self.push_permissions(session, &current);
-                let protocol = self
-                    .snapshot
-                    .config
-                    .backends
-                    .get(&current)
-                    .and_then(|b| b.version());
+                let protocol = rift::backend_version::protocol(
+                    &self.snapshot.config,
+                    &current,
+                    session.version()?,
+                    self.addresses,
+                )
+                .await;
                 timeout_at(
                     Instant::now() + budget,
                     session.connect_backend_as(upstream, protocol),
@@ -496,7 +492,13 @@ impl Network<'_> {
                 upstream.set_nodelay(true)?;
                 event.stage = "backend_switch";
                 self.push_permissions(session, name);
-                let protocol = config.backends.get(name.as_str()).and_then(|b| b.version());
+                let protocol = rift::backend_version::protocol(
+                    config,
+                    name,
+                    session.version()?,
+                    self.addresses,
+                )
+                .await;
                 match timeout_at(
                     attempt_deadline,
                     session.connect_backend_as(upstream, protocol),

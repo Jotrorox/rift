@@ -96,11 +96,34 @@ pub struct Config {
     pub admin: Option<Admin>,
     pub maintenance: bool,
     pub draining: BTreeSet<String>,
+    /// Whether players may join backends that run another Minecraft version.
+    pub translation: Translation,
     pub web: Option<WebConfig>,
     pub status: Option<StatusConfig>,
     pub shutdown_timeout: Duration,
     /// The theme and Rift's own messages (`text = { theme, messages }`).
     pub text: std::sync::Arc<crate::text::catalog::Catalog>,
+}
+
+/// Protocol translation between players and backends on different Minecraft
+/// versions, like ViaVersion and ViaBackwards on other proxies. On unless
+/// configured otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Translation {
+    /// Off: every backend is spoken to in the player's own protocol and
+    /// accepts or refuses the player itself.
+    pub enabled: bool,
+    /// Ask backends without a declared `version` which one they run.
+    pub detect: bool,
+}
+
+impl Default for Translation {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            detect: true,
+        }
+    }
 }
 
 /// Gameplay destinations and access rules. An empty initial list retains the
@@ -455,6 +478,7 @@ impl Config {
             admin: None,
             maintenance: false,
             draining: BTreeSet::new(),
+            translation: Translation::default(),
             web: None,
             status: None,
             shutdown_timeout: Duration::from_secs(30),
@@ -624,6 +648,7 @@ impl Config {
                     "admin",
                     "maintenance",
                     "draining",
+                    "translation",
                     "web",
                     "status",
                     "shutdown_timeout_ms",
@@ -879,6 +904,25 @@ impl Config {
                 Value::Nil => BTreeSet::new(),
                 value => string_set(value, "draining")?,
             };
+            let translation = match root
+                .get::<Value>("translation")
+                .map_err(|e| e.to_string())?
+            {
+                Value::Nil => Translation::default(),
+                Value::Boolean(enabled) => Translation {
+                    enabled,
+                    ..Translation::default()
+                },
+                Value::Table(_) => {
+                    let t = options(&root, "translation", &["enabled", "detect"])?
+                        .expect("translation is a table");
+                    Translation {
+                        enabled: boolean(&t, "translation", "enabled", true)?,
+                        detect: boolean(&t, "translation", "detect", true)?,
+                    }
+                }
+                _ => return Err("translation: expected a boolean or a table".into()),
+            };
             let web = web_options(&root, directory)?;
             let status = status::parse(&root)?;
             let shutdown_timeout = Duration::from_millis(integer(
@@ -956,6 +1000,7 @@ impl Config {
                 admin,
                 maintenance,
                 draining,
+                translation,
                 web,
                 status,
                 shutdown_timeout,
