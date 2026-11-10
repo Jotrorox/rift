@@ -251,3 +251,64 @@ fn every_menu_converts_across_every_pair() {
         }
     }
 }
+
+/// Random bytes and every truncation of valid packets, through every
+/// handler of every pair: errors, never panics.
+#[test]
+fn malformed_input_fails_without_panicking() {
+    let mut seed = 0x2545_f491_4f6c_dd1du64;
+    let mut random = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let names = [
+        "update_tags",
+        "award_stats",
+        "commands",
+        "sound",
+        "custom_sound",
+        "sound_entity",
+        "stop_sound",
+        "open_screen",
+        "mount_screen_open",
+        "container_set_data",
+    ];
+    for (client, backend) in directions() {
+        let mut step = Defaults::new(client, backend);
+        let source = data::version(backend);
+        let mut samples: Vec<Vec<u8>> = (0..24)
+            .map(|_| {
+                let size = (random() % 48) as usize;
+                (0..size).map(|_| random() as u8).collect()
+            })
+            .collect();
+        if backend >= 393 {
+            let body = commands::write(backend, &every_parser(backend)).unwrap();
+            samples.extend((0..body.len()).step_by(61).map(|end| body[..end].to_vec()));
+            let tags = tags::vanilla_update_tags(backend).unwrap();
+            samples.extend((0..tags.len()).step_by(4093).map(|end| tags[..end].to_vec()));
+        }
+        for name in names {
+            if source
+                .packet_id(State::Play, Direction::Clientbound, name)
+                .is_none()
+            {
+                continue;
+            }
+            for sample in &samples {
+                let _ = step.clientbound(State::Play, name, sample);
+            }
+        }
+        if source
+            .packet_id(State::Play, Direction::Serverbound, "set_beacon")
+            .is_some()
+        {
+            let mut reverse = Defaults::new(backend, client);
+            for sample in &samples {
+                let _ = reverse.serverbound(State::Play, "set_beacon", sample);
+            }
+        }
+    }
+}
