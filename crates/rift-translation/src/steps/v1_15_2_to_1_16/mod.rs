@@ -7,18 +7,18 @@
 //! - `login` and `respawn` name dimensions by identifier, add the world name,
 //!   the previous game mode and the debug and flat flags in place of the
 //!   level type; `login` adds the world list and the dimension codec, and
-//!   `respawn` whether to keep the player's attributes.
-//! - Lightning loses its own packet (`add_global_entity`) and becomes an
-//!   `add_entity` of `lightning_bolt`.
-//! - `set_equipped_item` (one slot) becomes `set_equipment` (a list).
+//!   `respawn` whether to keep the player's attributes. The codec and the
+//!   dimension types it declares are the registries codec's to convert and
+//!   keep; the step chooses what a 1.15 client is shown.
 //! - Serverbound `interact` gains the sneaking flag, `player_abilities`
 //!   loses the speeds the client never controlled, and the jigsaw editor
 //!   gains names, a joint type and a "generate" button.
 //! - Enchantment IDs in the enchanting table's container data and the
 //!   colours of maps follow the new registries.
 //!
-//! Spawn data, chunks, text colours, recipes, tags, sounds and the rest are
-//! the shared codecs' part.
+//! Lightning losing its own packet (`add_global_entity`), equipment lists
+//! (`set_equipped_item` becoming `set_equipment`), spawn data, chunks, text
+//! colours, recipes, tags, sounds and the rest are the shared codecs' part.
 mod dimension;
 mod down;
 #[cfg(test)]
@@ -33,10 +33,6 @@ use crate::{
     wire::{Reader, Writer, invalid},
 };
 use std::io;
-
-/// The dimension codec of a vanilla 1.16 server, for the next step's tests.
-#[cfg(test)]
-pub(in crate::steps) use dimension::VANILLA_CODEC as VANILLA_CODEC_1_16;
 
 pub const OLDER: i32 = 578;
 pub const NEWER: i32 = 735;

@@ -2,12 +2,15 @@
 //! client and client packets downgraded for the backend.
 use super::{
     EnchantmentMenu, NEWER, OLDER,
-    dimension::{self, VANILLA_CODEC, VANILLA_WORLDS},
+    dimension::{self, VANILLA_WORLDS},
     parse_uuid,
 };
 use crate::{
     Direction, Packet, State,
-    codec::{self, HasShared, Shared},
+    codec::{
+        HasShared, Shared,
+        registries::{Dimension, login},
+    },
     routed_step,
     step::{Cx, RouteBuilder, Routes},
     steps::Make,
@@ -32,8 +35,6 @@ impl HasShared for Up {
 
 /// 1.16's `previous game mode` when there is none.
 const NO_GAME_MODE: u8 = 0xff;
-/// `add_global_entity`'s only type: a lightning bolt.
-const LIGHTNING: i8 = 1;
 
 impl Up {
     fn create() -> Box<dyn crate::step::Step> {
@@ -54,8 +55,6 @@ impl Up {
                 .clientbound(State::Login, "login_finished", Self::login_finished)
                 .clientbound(State::Play, "login", Self::login)
                 .clientbound(State::Play, "respawn", Self::respawn)
-                .clientbound(State::Play, "add_global_entity", Self::add_global_entity)
-                .clientbound(State::Play, "set_equipped_item", Self::set_equipped_item)
                 .clientbound(State::Play, "container_set_data", Self::container_set_data)
                 .tap(Clientbound, State::Play, "open_screen", Self::open_screen)
                 .tap(
@@ -84,6 +83,7 @@ impl Up {
     /// The vanilla dimension codec and world list: a 1.15 server has the
     /// three vanilla dimensions and nothing else.
     fn login(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
+        let shared = &mut self.shared;
         let mut rw = Rewriter::new(&packet.data);
         rw.i32()?; // Entity ID.
         rw.u8()?; // Game mode, with the hardcore bit.
@@ -92,9 +92,10 @@ impl Up {
         for world in VANILLA_WORLDS {
             rw.w.string(world);
         }
-        rw.w.bytes(VANILLA_CODEC);
-        let dimension = dimension::identifier(rw.r.i32()?);
-        rw.w.string(dimension).string(dimension);
+        let codec = login::convert_codec(shared, Direction::Clientbound, &[])?;
+        login::write_codec(NEWER, &codec, &mut rw.w)?;
+        let dimension = Self::dimension(shared, rw.r.i32()?)?;
+        rw.w.string(&dimension).string(&dimension);
         rw.i64()?; // Hashed seed.
         rw.u8()?; // Max players.
         let (debug, flat) = dimension::flags(rw.r.string(16)?);
@@ -106,17 +107,26 @@ impl Up {
         Ok(())
     }
 
+    /// The dimension type, and world, of a 1.15 dimension ID (the
+    /// registries codec has recorded it for the client already).
+    fn dimension(shared: &Shared, legacy: i32) -> io::Result<String> {
+        match login::convert_dimension(shared, Direction::Clientbound, Dimension::Legacy(legacy))? {
+            Dimension::Name(name) => Ok(name),
+            _ => Err(invalid("1.16 names dimensions")),
+        }
+    }
+
     fn respawn(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
         let mut reader = Reader::new(&packet.data);
-        let dimension = dimension::identifier(reader.i32()?);
+        let dimension = Self::dimension(&self.shared, reader.i32()?)?;
         let seed = reader.i64()?;
         let game_mode = reader.u8()?;
         let (debug, flat) = dimension::flags(reader.string(16)?);
         reader.finish()?;
         let mut writer = Writer::new();
         writer
-            .string(dimension)
-            .string(dimension)
+            .string(&dimension)
+            .string(&dimension)
             .i64(seed)
             .u8(game_mode)
             .u8(NO_GAME_MODE)
@@ -128,71 +138,6 @@ impl Up {
         cx.to_client(state, Packet::new(packet.id, writer.buf));
         Ok(())
     }
-
-    fn add_global_entity(
-        &mut self,
-        cx: &mut Cx<'_>,
-        state: State,
-        packet: Packet,
-    ) -> io::Result<()> {
-        let mut reader = Reader::new(&packet.data);
-        let entity = reader.varint()?;
-        let kind = reader.i8()?;
-        let (x, y, z) = (reader.f64()?, reader.f64()?, reader.f64()?);
-        reader.finish()?;
-        if kind != LIGHTNING {
-            return Ok(());
-        }
-        let client = Self::routes().client();
-        let lightning = client
-            .expect_registry("entity_type")
-            .id("lightning_bolt")
-            .ok_or_else(|| invalid("no lightning bolt entity"))?;
-        let mut writer = Writer::new();
-        writer
-            .varint(entity)
-            // The bolt never had a UUID; derive a stable one from its ID.
-            .uuid(0x5269_6674_0000_4000_8000_0000_0000_0000 | entity as u32 as u128)
-            .varint(lightning)
-            .f64(x)
-            .f64(y)
-            .f64(z)
-            .i8(0)
-            .i8(0)
-            .i32(0)
-            .i16(0)
-            .i16(0)
-            .i16(0);
-        let id = client.expect_packet(State::Play, Direction::Clientbound, "add_entity");
-        cx.to_client(state, Packet::new(id, writer.buf));
-        Ok(())
-    }
-
-    /// One slot becomes a list of one.
-    fn set_equipped_item(
-        &mut self,
-        cx: &mut Cx<'_>,
-        state: State,
-        packet: Packet,
-    ) -> io::Result<()> {
-        let mut rw = Rewriter::new(&packet.data);
-        rw.varint()?; // Entity ID.
-        let slot = rw.r.varint()?;
-        if !(0..=5).contains(&slot) {
-            return Err(invalid("invalid equipment slot"));
-        }
-        rw.w.i8(slot as i8);
-        // INTEGRATION: the item codec's stack conversion.
-        codec::item::transcode(&mut self.shared, Direction::Clientbound, &mut rw)?;
-        let id = Self::routes().client().expect_packet(
-            State::Play,
-            Direction::Clientbound,
-            "set_equipment",
-        );
-        cx.to_client(state, Packet::new(id, rw.finish()?));
-        Ok(())
-    }
-
     fn open_screen(&mut self, _: State, packet: &Packet) -> io::Result<()> {
         self.menu.observe(OLDER, packet)
     }

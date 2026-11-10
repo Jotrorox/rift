@@ -1,13 +1,14 @@
 //! A 1.15.2 client on a 1.16 backend: backend packets are downgraded for the
 //! client and client packets upgraded for the backend.
 use super::{
-    EnchantmentMenu, NEWER, OLDER,
-    dimension::{self, Types},
-    format_uuid, legacy_attribute, legacy_map_color,
+    EnchantmentMenu, NEWER, OLDER, dimension, format_uuid, legacy_attribute, legacy_map_color,
 };
 use crate::{
     Direction, Packet, State,
-    codec::{self, HasShared, Shared},
+    codec::{
+        self, HasShared, Shared,
+        registries::{self, Dimension, Side, login},
+    },
     routed_step,
     step::{Cx, RouteBuilder, Routes},
     steps::Make,
@@ -21,8 +22,8 @@ pub struct Down {
     /// Whether the client last said it started or stopped sneaking; 1.16
     /// servers want it with every `interact`.
     sneaking: bool,
-    dimensions: Types,
-    /// The world and 1.15 dimension the client is in.
+    /// The world and 1.15 dimension the client was last sent (the
+    /// registries codec follows the backend's).
     world: String,
     dimension: i32,
     /// The player's entity ID and its attributes as the backend last sent
@@ -46,8 +47,6 @@ impl HasShared for Down {
     }
 }
 
-/// `add_global_entity`'s type for a lightning bolt.
-const LIGHTNING: i8 = 1;
 /// Vanilla 1.16's default jigsaw name and joint, for what 1.15 cannot say.
 const EMPTY_JIGSAW_NAME: &str = "minecraft:empty";
 const ROLLABLE: &str = "rollable";
@@ -58,7 +57,6 @@ impl Down {
             shared: Shared::new(OLDER, NEWER),
             menu: EnchantmentMenu::default(),
             sneaking: false,
-            dimensions: Types::default(),
             world: String::new(),
             dimension: dimension::OVERWORLD,
             player: 0,
@@ -75,8 +73,6 @@ impl Down {
                 .clientbound(State::Login, "login_finished", Self::login_finished)
                 .clientbound(State::Play, "login", Self::login)
                 .clientbound(State::Play, "respawn", Self::respawn)
-                .clientbound(State::Play, "add_entity", Self::add_entity)
-                .clientbound(State::Play, "set_equipment", Self::set_equipment)
                 .clientbound(State::Play, "container_set_data", Self::container_set_data)
                 .clientbound(State::Play, "map_item_data", Self::map_item_data)
                 .tap(Clientbound, State::Play, "open_screen", Self::open_screen)
@@ -116,9 +112,12 @@ impl Down {
         for _ in 0..rw.r.count()? {
             rw.r.str()?; // World names.
         }
-        self.dimensions = Types::read(&mut rw.r)?;
-        self.dimension = self.dimensions.legacy(rw.r.str()?);
+        // Recorded for the backend side: 1.15 clients synchronise nothing.
+        let codec = login::read_codec(NEWER, &mut rw.r)?;
+        login::convert_codec(&mut self.shared, Direction::Clientbound, &codec)?;
+        let name = rw.r.str()?;
         self.world = rw.r.str()?.to_owned();
+        self.dimension = self.follow(name);
         rw.w.i32(self.dimension);
         rw.i64()?; // Hashed seed.
         rw.u8()?; // Max players.
@@ -134,12 +133,26 @@ impl Down {
         Ok(())
     }
 
+    /// The 1.15 dimension for the backend's dimension type `name`, recorded
+    /// as where the client now is.
+    fn follow(&mut self, name: &str) -> i32 {
+        let legacy = dimension::legacy(&self.shared, name);
+        let world = registries::world(&self.shared, Side::Backend).map(str::to_owned);
+        registries::record_dimension(
+            &mut self.shared,
+            Side::Client,
+            Dimension::Legacy(legacy),
+            world,
+        );
+        legacy
+    }
+
     /// A 1.15 client only reloads its world when the dimension changes, so
     /// moving between two worlds of the same dimension goes through
     /// another dimension first.
     fn respawn(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
         let mut reader = Reader::new(&packet.data);
-        let dimension = self.dimensions.legacy(reader.str()?);
+        let name = reader.str()?;
         let world = reader.str()?;
         let seed = reader.i64()?;
         let game_mode = reader.u8()?;
@@ -147,6 +160,7 @@ impl Down {
         let (debug, flat) = (reader.bool()?, reader.bool()?);
         let keep_attributes = reader.bool()?;
         reader.finish()?;
+        let dimension = self.follow(name);
         let respawn = |dimension: i32, level_type: &str| {
             let mut writer = Writer::new();
             writer
@@ -223,115 +237,6 @@ impl Down {
         }
         reader.finish()
     }
-
-    /// Lightning goes back to its own packet. Everything else is the
-    /// entity codec's.
-    fn add_entity(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
-        let backend = Self::routes().backend();
-        let types = backend.expect_registry("entity_type");
-        let mut reader = Reader::new(&packet.data);
-        let entity = reader.varint()?;
-        reader.uuid()?;
-        let kind = reader.varint()?;
-        if Some(kind) != types.id("lightning_bolt") {
-            return self.other_entity(
-                cx,
-                state,
-                packet,
-                kind == types.id("falling_block").unwrap_or(-1),
-            );
-        }
-        let (x, y, z) = (reader.f64()?, reader.f64()?, reader.f64()?);
-        reader.take(2 + 4 + 6)?; // Rotation, data, velocity.
-        reader.finish()?;
-        let mut writer = Writer::new();
-        writer.varint(entity).i8(LIGHTNING).f64(x).f64(y).f64(z);
-        let id = Self::routes().client().expect_packet(
-            State::Play,
-            Direction::Clientbound,
-            "add_global_entity",
-        );
-        cx.to_client(state, Packet::new(id, writer.buf));
-        Ok(())
-    }
-
-    /// INTEGRATION: hand the packet to the entity codec's `add_entity`
-    /// conversion once it is public. Until then: the entity type and a
-    /// falling block's state, the only registry IDs the packet carries.
-    fn other_entity(
-        &mut self,
-        cx: &mut Cx<'_>,
-        state: State,
-        packet: Packet,
-        falling_block: bool,
-    ) -> io::Result<()> {
-        let mut rw = Rewriter::new(&packet.data);
-        rw.varint()?; // Entity ID.
-        rw.copy(16)?; // UUID.
-        let kind = rw.r.varint()?;
-        let Some(kind) = self
-            .shared
-            .mapping(Direction::Clientbound, "entity_type")
-            .get(kind)
-        else {
-            return Ok(());
-        };
-        rw.w.varint(kind);
-        rw.copy(3 * 8 + 2)?; // Position, rotation.
-        let data = rw.r.i32()?;
-        rw.w.i32(if falling_block {
-            let stone = Self::routes()
-                .client()
-                .block_states
-                .parse("stone")
-                .unwrap_or(0);
-            self.shared
-                .mapping(Direction::Clientbound, "block_state")
-                .get_or(data, stone)
-        } else {
-            data
-        });
-        rw.copy(6)?; // Velocity.
-        cx.to_client(state, Packet::new(packet.id, rw.finish()?));
-        Ok(())
-    }
-
-    /// One packet per slot.
-    fn set_equipment(&mut self, cx: &mut Cx<'_>, state: State, packet: Packet) -> io::Result<()> {
-        let id = Self::routes().client().expect_packet(
-            State::Play,
-            Direction::Clientbound,
-            "set_equipped_item",
-        );
-        let mut rw = Rewriter::new(&packet.data);
-        let entity = rw.r.varint()?;
-        let mut packets = Vec::new();
-        loop {
-            let slot = rw.r.i8()?;
-            let index = i32::from(slot & 0x7f);
-            if index > 5 {
-                return Err(invalid("invalid equipment slot"));
-            }
-            let start = rw.w.buf.len();
-            // INTEGRATION: the item codec's stack conversion.
-            codec::item::transcode(&mut self.shared, Direction::Clientbound, &mut rw)?;
-            let mut writer = Writer::new();
-            writer
-                .varint(entity)
-                .varint(index)
-                .bytes(&rw.w.buf[start..]);
-            packets.push(Packet::new(id, writer.buf));
-            if slot >= 0 {
-                break;
-            }
-        }
-        rw.finish()?;
-        for packet in packets {
-            cx.to_client(state, packet);
-        }
-        Ok(())
-    }
-
     fn open_screen(&mut self, _: State, packet: &Packet) -> io::Result<()> {
         self.menu.observe(NEWER, packet)
     }
