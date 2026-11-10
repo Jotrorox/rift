@@ -1115,3 +1115,78 @@ mod layouts {
         let _ = Direction::Clientbound;
     }
 }
+
+mod trades {
+    use super::super::{
+        ItemStack, convert_offers,
+        merchant::{Offer, Offers},
+        transcode_trade_list,
+    };
+    use crate::{
+        Direction,
+        codec::Shared,
+        wire::{Reader, Rewriter, Writer},
+    };
+
+    fn wool(protocol: i32) -> Option<ItemStack> {
+        Some(ItemStack {
+            id: crate::data::version(protocol)
+                .registry("item")
+                .unwrap()
+                .id("red_wool")
+                .unwrap(),
+            count: 3,
+            damage: 0,
+            tag: None,
+            components: None,
+        })
+    }
+
+    fn offers(protocol: i32) -> Offers {
+        Offers {
+            container: 2,
+            offers: vec![Offer {
+                cost: wool(protocol),
+                result: wool(protocol),
+                second_cost: None,
+                disabled: false,
+                uses: 0,
+                max_uses: 7,
+                xp: 0,
+                special_price: 0,
+                price_multiplier: 0.0,
+                demand: 0,
+            }],
+            level: 0,
+            xp: 0,
+            regular: false,
+            can_restock: false,
+        }
+    }
+
+    #[test]
+    fn plugin_channel_trade_lists_convert_between_1_13_layouts() {
+        let mut body = Writer::new();
+        offers(401).write(401, &mut body).unwrap();
+        let mut shared = Shared::new(404, 401);
+        let mut rw = Rewriter::new(&body.buf);
+        transcode_trade_list(&mut shared, Direction::Clientbound, &mut rw).unwrap();
+        let converted = rw.finish().unwrap();
+        let mut reader = Reader::new(&converted);
+        assert_eq!(Offers::read(404, &mut reader).unwrap(), offers(404));
+        reader.finish().unwrap();
+    }
+
+    #[test]
+    fn the_1_14_step_turns_a_trade_list_into_merchant_offers() {
+        let mut shared = Shared::new(477, 404);
+        let mut list = offers(404);
+        convert_offers(&mut shared, Direction::Clientbound, &mut list).unwrap();
+        let mut packet = Writer::new();
+        list.write(477, &mut packet).unwrap();
+        let mut reader = Reader::new(&packet.buf);
+        let modern = Offers::read(477, &mut reader).unwrap();
+        reader.finish().unwrap();
+        assert_eq!(modern.offers[0].cost, wool(477));
+    }
+}
