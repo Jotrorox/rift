@@ -146,7 +146,8 @@ class Commands:
         """kind: heart, dust, block, item."""
         if self.legacy:
             name = {"heart": "heart", "dust": "reddust", "block": "blockcrack", "item": "iconcrack"}[kind]
-            extra = {"block": " 1", "item": " 264"}.get(kind, "")
+            # 1.12 reads data parameters only after the viewing players.
+            extra = {"block": " @a 1", "item": " @a 264"}.get(kind, "")
             return f"particle {name} {x} {y} {z} 0 0 0 0 1 force{extra}"
         if kind == "heart":
             spec = "minecraft:heart"
@@ -706,11 +707,17 @@ def step_blocks(cx):
     missing = [name for name, position in positions.items() if position not in ref]
     if missing:
         cx.scenario(f"no block updates for {missing}")
+    flattens = cx.server.protocol < 393 <= cx.via.protocol
     for name, position in positions.items():
         if position not in via:
             cx.fail(f"no block update for {name} at {position}")
             continue
-        cx.compare_names(f"block {name}", "block_state", [ref[position]], [via[position]])
+        expected = ref[position]
+        # 1.13 made the plant part of the block: a 1.12 pot with a poppy is a
+        # potted_poppy, and has no block entity any more.
+        if flattens and expected == "minecraft:flower_pot" and via[position].startswith("minecraft:potted_"):
+            expected = via[position]
+        cx.compare_names(f"block {name}", "block_state", [expected], [via[position]])
     entities = {"tile_entity_data", "block_entity_data"}
     ref_entities = cx.ref.packets(entities, cx.since("ref"))
     if not ref_entities:
@@ -725,6 +732,10 @@ def step_blocks(cx):
         if lacking:
             cx.info(f"{len(lacking)} block entity updates of types the client's version lacks")
         ref_entities = [record for record in ref_entities if known(record)]
+    if flattens:
+        pot = positions["flower_pot"]
+        ref_entities = [record for record in ref_entities
+                        if (record.value or {}).get("location") != dict(zip("xyz", pot))]
     if len(cx.via.packets(entities, cx.since("via"))) < len(ref_entities):
         cx.fail("the translated client received fewer block entity updates than the reference")
 
