@@ -8,6 +8,7 @@ import json
 import os
 import signal
 from pathlib import Path
+import random
 import socket
 import sys
 import tempfile
@@ -55,10 +56,14 @@ def api(port, method, path, wait=True):
 
 
 def available_range():
-    for _ in range(100):
-        first = unused_port()
-        if first > 65530:
-            continue
+    """Five consecutive free ports below every platform's ephemeral range.
+
+    A range found with port 0 sits among the ports the kernel hands to
+    outbound connections, so a client socket opened later in the test can
+    take one of them before Rift assigns it to an instance.
+    """
+    for _ in range(200):
+        first = random.randrange(20000, 32000 - 5)
         with ExitStack() as stack:
             try:
                 for port in range(first, first + 5):
