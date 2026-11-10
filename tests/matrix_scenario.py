@@ -436,6 +436,20 @@ def entity_types_seen(session, registries, since):
     return seen
 
 
+def diamonds_in_data(session, registries, since, kind, types):
+    """Whether the entity data of an entity of `kind` (by `types`, from
+    entity_types_seen) carried a diamond stack."""
+    ids = {entity for entity, name in types.items() if name == kind}
+    for record in session.packets("entity_metadata", since):
+        if record.value.get("entityId") not in ids:
+            continue
+        for entry in record.value.get("metadata", []):
+            item = slot_item(registries, entry.get("value"))
+            if item and item[0].endswith("diamond"):
+                return True
+    return False
+
+
 def block_updates(registries, name, value):
     """{(x, y, z): block name} of one block_change or multi_block_change."""
     if name == "block_change":
@@ -870,6 +884,14 @@ def step_entities(cx):
     for name in ("set_passengers", "entity_equipment", "entity_metadata"):
         if cx.ref.packets(name, cx.since("ref")) and not cx.via.packets(name, cx.since("via")):
             cx.fail(f"the translated client received no {name}")
+    # Entity data a type has beyond what every entity has: the diamond of the
+    # dropped item and of the item frame.
+    for kind in ("minecraft:item", "minecraft:item_frame"):
+        held = [diamonds_in_data(session, registries, since, kind, types)
+                for session, registries, since, types in ((cx.ref, cx.ref_reg, cx.since("ref"), ref),
+                                                         (cx.via, cx.via_reg, cx.since("via"), via))]
+        if held[0] and not held[1]:
+            cx.fail(f"the {kind}'s diamond never reached the translated client in its entity data")
 
 
 @step(software=ALL)
