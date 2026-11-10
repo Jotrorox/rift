@@ -14,6 +14,7 @@
 //! parse fails the connection rather than reaching the peer corrupted.
 pub mod codec;
 pub mod data;
+pub mod legacy;
 pub mod mapping;
 pub mod nbt;
 pub mod step;

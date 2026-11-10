@@ -1,0 +1,15 @@
+{
+  "game_event": {
+    "renames": {
+      "block_press": "block_activate",
+      "block_unpress": "block_deactivate",
+      "drinking_finish": "drink",
+      "elytra_free_fall": "elytra_glide",
+      "entity_damaged": "entity_damage",
+      "entity_killed": "entity_die",
+      "mob_interact": "entity_interact",
+      "ravager_roar": "entity_roar",
+      "wolf_shaking": "entity_shake"
+    }
+  }
+}
