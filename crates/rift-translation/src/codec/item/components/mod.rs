@@ -12,6 +12,8 @@
 //! mode, container clicks), the dropped component is stashed in the stack's
 //! `custom_data` and restored on the way back (see [`stash`]).
 mod convert;
+#[cfg(test)]
+mod crosscheck;
 pub mod display;
 pub mod hashed;
 pub mod layouts;
