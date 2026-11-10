@@ -35,8 +35,11 @@ Managed Minecraft processes need their own Java runtime and explicit EULA accept
 
 ## Quick start
 
-Download a native archive from [Releases](https://github.com/Jotrorox/rift/releases),
-extract it, then run:
+Download the archive for your platform (`rift-linux-x86_64.tar.gz`,
+`rift-macos-aarch64.tar.gz` or `rift-windows-x86_64.zip`) and `SHA256SUMS` from
+[Releases](https://github.com/Jotrorox/rift/releases). Check it
+([verification](docs/operations.md#verifying-a-download)), extract it into an
+empty directory, then run:
 
 ```sh
 ./rift init

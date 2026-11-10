@@ -168,6 +168,9 @@ async fn start(args: Vec<String>) -> io::Result<()> {
             for warning in check::instance_logins(&config) {
                 eprintln!("rift: warning: {warning}");
             }
+            for line in check::isolation(&config) {
+                println!("rift: {line}");
+            }
             let (plugins, warnings) = check::plugins(&config);
             for line in &plugins {
                 println!("rift: {line}");
