@@ -10,6 +10,9 @@ rift.config.listeners = {
 rift.config.backends = {
     lobby = "127.0.0.1:25566",
 }
+-- Players on another Minecraft version than a backend (1.12 to 26.3) are
+-- translated; Rift asks each backend which version it runs. See docs/translation.md.
+-- rift.config.translation = false -- Require every backend to run the player's version.
 rift.config.routes = {
     public = "lobby",
 }

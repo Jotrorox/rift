@@ -2,11 +2,12 @@
 
 Network commands and backend replacement support Java **1.8.9–26.3**
 (66 releases, 50 protocols).
-Clients and backends use the same protocol version unless a backend declares
-another one that Rift translates; see [protocol translation](translation.md)
-(1.21.6 ↔ 1.21.7/1.21.8). Online authentication works on every supported
-version. Velocity modern forwarding requires **1.13 or newer** (login plugin
-messages arrived in 1.13); BungeeCord and BungeeGuard forwarding work on all.
+A client and a backend on different versions between 1.12 and 26.3 are
+translated; see [protocol translation](translation.md). Outside that range, or
+with translation turned off, both use the same protocol. Online authentication
+works on every supported version. Velocity modern forwarding requires a backend
+on **1.13 or newer** (login plugin messages arrived in 1.13); BungeeCord and
+BungeeGuard forwarding work on all.
 With online authentication enabled, Rift encrypts the client connection, verifies
 the Mojang session and retains its UUID, canonical name and signed profile properties.
 Paper backends run `online-mode=false` with Velocity modern forwarding enabled
