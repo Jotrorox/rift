@@ -31,7 +31,7 @@ use std::{
 
 const DEFAULT_CONFIG_PATH: &str = "rift.lua";
 
-const USAGE: &str = "Usage: rift [<listen-ip:port> <backend-ip:port>]\n\
+const USAGE: &str = "Usage: rift [<listen-ip:port> <backend-ip:port> [--translation <on|off>]]\n\
     Backend may also be a DNS hostname with a port.\n\
     rift --config <path>\n\
     rift init [path] (generate configuration; default ./rift.lua)\n\
@@ -234,6 +234,15 @@ async fn start(args: Vec<String>) -> io::Result<()> {
             Some(PathBuf::from(path)),
         ),
         [listen, backend] => (Config::from_addresses(listen, backend)?, None),
+        [listen, backend, flag, value] if flag == "--translation" => {
+            let mut config = Config::from_addresses(listen, backend)?;
+            config.translation.enabled = match value.as_str() {
+                "on" => true,
+                "off" => false,
+                _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, USAGE)),
+            };
+            (config, None)
+        }
         [listen, options @ ..] if !options.is_empty() && options.len().is_multiple_of(2) => {
             let mut config = Config::from_addresses(listen, "127.0.0.1:0")?;
             config.backends.clear();

@@ -116,6 +116,13 @@ fn malformed_arguments_and_proxy_loops_are_rejected() {
         vec!["127.0.0.1:25565", "--unknown", "host:1"],
         vec![
             "127.0.0.1:25565",
+            "127.0.0.1:25566",
+            "--translation",
+            "maybe",
+        ],
+        vec!["127.0.0.1:25565", "127.0.0.1:25566", "--translation"],
+        vec![
+            "127.0.0.1:25565",
             "--default",
             "host:1",
             "--translation",

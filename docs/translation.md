@@ -91,8 +91,9 @@ Saving writes `translation` into the group's definition in the Lua script.
 | `service_groups.<name>.translation` | none | The client versions translated for every instance of this group. |
 | `backends.<name>.version` | none | The release the backend runs, by name from the [release matrix](network-protocol.md#release-matrix). Takes precedence over detection. |
 
-Without a configuration file, `rift <listen> --default <backend> --translation off`
-turns translation off; it is on otherwise, with detection.
+Without a configuration file, `rift <listen> <backend> --translation off` (or
+the same after `--route`/`--default` options) turns translation off; it is on
+otherwise, with detection.
 
 **Detection.** For a backend without `version`, Rift sends a status request
 with the player's own protocol in the handshake, as the player's client would,

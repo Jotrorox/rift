@@ -333,6 +333,8 @@ def network(binary, backends, initial=("lobby",), hubs=("lobby",), access=""):
         names = lambda values: ",".join(repr(item) for item in values)
         config.write_text("return {listeners={public='127.0.0.1:" + str(port)
                           + "'},backends={" + addresses + "},routes={public='lobby'},"
+                          # The backends are byte fixtures that answer no status request.
+                          + "translation={detect=false},"
                           + "limits={connect_timeout_ms=1500},network={initial={" + names(initial) + "},hubs={" + names(hubs)
                           + "},access={" + access + "}}}")
         log = directory / "proxy.log"
