@@ -365,7 +365,9 @@ impl Default for Registration {
 }
 
 impl CommandSpec {
-    /// A command without a permission node or suggestions.
+    /// A command without a permission node or suggestions. Without a
+    /// permission every player may see and run it (since 0.1.5; earlier
+    /// hosts reject the registration).
     ///
     /// Names are 1 to 64 bytes of `a-z0-9_-`; `server` and `hub` are
     /// reserved.
@@ -377,7 +379,8 @@ impl CommandSpec {
         }
     }
 
-    /// The permission node a player needs to see and run the command.
+    /// The permission node a player needs to see and run the command. An
+    /// empty node (since 0.1.5) opens the command to every player.
     pub fn permission(mut self, node: impl Into<String>) -> Self {
         self.permission = node.into();
         self

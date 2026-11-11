@@ -283,7 +283,7 @@ func (s SuggestKind) lower() types.SuggestKind {
 // CommandSpec registers a proxy command.
 type CommandSpec struct {
 	Name       string // 1..=64 bytes of a-z0-9_-; "server" and "hub" are reserved
-	Permission string // the node a player needs to see and run the command
+	Permission string // the node a player needs to see and run the command; empty (since 0.1.5) for every player
 	Suggest    SuggestKind
 }
 

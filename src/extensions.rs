@@ -67,10 +67,13 @@ struct Command {
 }
 
 impl ExtensionScript {
-    /// `(command, permission)` of every command, sorted by command.
+    /// `(command, permission)` of every command that needs a permission,
+    /// sorted by command. Commands with an empty permission are open to every
+    /// player and name no node.
     pub fn command_permissions(&self) -> Vec<(String, String)> {
         self.commands
             .iter()
+            .filter(|(_, command)| !command.permission.is_empty())
             .map(|(name, command)| (name.clone(), command.permission.clone()))
             .collect()
     }
@@ -328,9 +331,12 @@ impl ExtensionScript {
                     ));
                 }
                 let permission: String = command.raw_get("permission")?;
-                if !rift_permissions::node::valid_node(&permission) || permission.ends_with('*') {
+                if !permission.is_empty()
+                    && (!rift_permissions::node::valid_node(&permission)
+                        || permission.ends_with('*'))
+                {
                     return Err(mlua::Error::runtime(
-                        "command permission must be a lowercase permission node without wildcards",
+                        "command permission must be a lowercase permission node without wildcards, or empty for every player",
                     ));
                 }
                 command.raw_get::<Function>("run")?;
@@ -468,7 +474,7 @@ impl ExtensionScript {
             };
             // Recheck after worker scheduling/source evaluation, before executing user code.
             if (hook == "command" || hook == "suggest")
-                && !runtime.permits(
+                && !runtime.permits_command(
                     &input.uuid,
                     &self.commands[input.command.as_deref().unwrap()].permission,
                 )
@@ -1087,7 +1093,8 @@ impl Extensions {
         &self.permissions
     }
 
-    /// `(command, permission)` of every extension command.
+    /// `(command, permission)` of every extension command that needs a
+    /// permission.
     pub fn command_permissions(&self) -> Vec<(String, String)> {
         self.script
             .as_ref()
@@ -1117,6 +1124,13 @@ impl Extensions {
     fn permits(&self, uuid: &str, node: &str) -> bool {
         Uuid::parse(uuid)
             .is_ok_and(|uuid| self.permissions.check_active(uuid, node) == Tristate::True)
+    }
+
+    /// Whether the player may see and run a command with this `permission`.
+    /// An empty permission (contract 0.1.5) is open to every player and is
+    /// never looked up as a node.
+    fn permits_command(&self, uuid: &str, permission: &str) -> bool {
+        permission.is_empty() || self.permits(uuid, permission)
     }
 
     /// Whether authenticated sessions get player hooks: with extensions or
@@ -1319,14 +1333,14 @@ impl ExtensionSession {
     pub fn visible_commands(&self) -> Vec<(String, bool)> {
         let uuid = &self.context.uuid;
         self.script_commands()
-            .filter(|(_, command)| self.runtime.permits(uuid, &command.permission))
+            .filter(|(_, command)| self.runtime.permits_command(uuid, &command.permission))
             .map(|(name, command)| (name.clone(), command.suggest != Suggest::None))
             .chain(
                 self.runtime
                     .plugins
                     .plugin_commands()
                     .into_iter()
-                    .filter(|command| self.runtime.permits(uuid, &command.permission))
+                    .filter(|command| self.runtime.permits_command(uuid, &command.permission))
                     .map(|command| {
                         let suggests = command.suggest != crate::plugins::api::SuggestKind::None;
                         (command.name, suggests)
@@ -1357,7 +1371,7 @@ impl ExtensionSession {
             CommandOwner::Plugin(instance, command) => {
                 if !self
                     .runtime
-                    .permits(&self.context.uuid, &command.permission)
+                    .permits_command(&self.context.uuid, &command.permission)
                 {
                     return Ok(Vec::new());
                 }
@@ -1381,7 +1395,7 @@ impl ExtensionSession {
         };
         if !self
             .runtime
-            .permits(&self.context.uuid, &command.permission)
+            .permits_command(&self.context.uuid, &command.permission)
         {
             return Ok(Vec::new());
         }
@@ -1434,7 +1448,7 @@ impl ExtensionSession {
                 .ok_or_else(|| invalid("unknown extension command"))?,
             CommandOwner::Plugin(_, command) => command.permission.clone(),
         };
-        if !self.runtime.permits(&self.context.uuid, &permission) {
+        if !self.runtime.permits_command(&self.context.uuid, &permission) {
             return Ok(Action::Message(crate::text::catalog::notice(
                 Notice::CommandNoPermission,
             )));

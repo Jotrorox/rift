@@ -643,6 +643,41 @@ pub(crate) async fn commands_check_permissions(fixture: &dyn Fixture) {
     runtime.plugins().shutdown().await;
 }
 
+/// An empty permission opens a command to every player: one without any node
+/// sees, completes and runs it.
+pub(crate) async fn commands_without_permission_are_open(fixture: &dyn Fixture) {
+    let mut lab = Lab::new(fixture);
+    let plugins = vec![lab.plugin(
+        "greeter",
+        "",
+        json!({
+            "commands": [
+                {"name": "version", "permission": "", "suggest": ["alpha", "beta"]},
+                command("hello", json!("none")),
+            ],
+        }),
+    )];
+    let runtime = lab.runtime(&config("", plugins)).await;
+    let registration = runtime.plugins().active()[0].registration().unwrap();
+    assert_eq!(registration.commands[0].permission, "");
+    let stranger = session(&runtime, 2);
+    assert_eq!(stranger.visible_commands(), [("version".to_owned(), true)]);
+    let suggestions = stranger.suggest("version", "al", Vec::new).await.unwrap();
+    assert_eq!(suggestions.len(), 1);
+    assert_eq!(suggestions[0].text, "alpha");
+    assert_eq!(
+        stranger.command("version now").await.unwrap(),
+        Action::Message("hi now".into())
+    );
+    assert_eq!(
+        stranger.command("hello").await.unwrap(),
+        Action::Message("You do not have permission to use this command.".into()),
+        "commands with a permission still need it"
+    );
+    assert_eq!(lab.calls("command"), ["greeter:command"]);
+    runtime.plugins().shutdown().await;
+}
+
 pub(crate) async fn suggest_kinds_complete(fixture: &dyn Fixture) {
     let lab = Lab::new(fixture);
     let plugins = vec![lab.plugin(
@@ -1024,6 +1059,14 @@ macro_rules! conformance_tests {
                 return;
             }
             $crate::plugins::conformance::commands_check_permissions(&$fixture).await;
+        }
+
+        #[tokio::test]
+        async fn commands_without_permission_are_open() {
+            if !$ready {
+                return;
+            }
+            $crate::plugins::conformance::commands_without_permission_are_open(&$fixture).await;
         }
 
         #[tokio::test]

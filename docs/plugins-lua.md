@@ -118,7 +118,8 @@ What differs is the environment:
   decision events the first non-nil result wins; observers all run and must
   return nil.
 - `rift.command(name, { permission, run, suggest })` also accepts a list of
-  strings as `suggest`. A command name belongs to exactly one owner across the
+  strings as `suggest`. `permission` is required; `permission = ""` (contract
+  0.1.5) opens the command to every player. A command name belongs to exactly one owner across the
   configuration script and all plugins.
 - `rift.on` and `rift.command` work only while the entry script runs.
   `rift.every(name, every_ms, fn)`, `rift.subscribe(subject, [queue,] [fn])`

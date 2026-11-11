@@ -414,6 +414,48 @@ async fn command_suggestions_follow_permissions_and_complete_the_last_word() {
 }
 
 #[tokio::test]
+async fn commands_with_an_empty_permission_are_open_to_every_player() {
+    let runtime = runtime(
+        r#"api_version = 1,
+        commands = {
+            version = { permission = '', run = function(ctx)
+                return { message = 'v1 ' .. ctx.args }
+            end, suggest = function() return { 'short', 'long' } end },
+            staff = { permission = 'mod.staff', run = function() end },
+        },
+    "#,
+    );
+    // The player holds no node at all.
+    let player = runtime.session(context(2)).unwrap();
+    assert_eq!(player.visible_commands(), [("version".into(), true)]);
+    let suggestions = player.suggest("version", "sh", Vec::new).await.unwrap();
+    assert_eq!(suggestions.len(), 1);
+    assert_eq!(suggestions[0].text, "short");
+    assert_eq!(
+        player.command("version long").await.unwrap(),
+        Action::Message("v1 long".into())
+    );
+    assert!(matches!(
+        player.command("staff").await.unwrap(),
+        Action::Message(_)
+    ));
+    // The empty permission is no node: `/perms doctor` and `rift check` only
+    // hear about commands that need one, and nothing registers it.
+    assert_eq!(
+        runtime.command_permissions(),
+        [("staff".to_owned(), "mod.staff".to_owned())]
+    );
+    assert!(
+        runtime
+            .permissions()
+            .registered()
+            .unwrap()
+            .iter()
+            .all(|registered| !registered.permission.node.is_empty())
+    );
+}
+
+#[tokio::test]
 async fn declarative_player_suggestions_list_joined_players() {
     let runtime = runtime(
         r#"api_version = 1,

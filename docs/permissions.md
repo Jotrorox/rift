@@ -512,7 +512,8 @@ or written by the proxy process.
   with no `hello` since (run `/perms sync`), and principals that never said
   `hello`;
 - extension commands whose `permission` is neither registered by a backend nor
-  granted anywhere.
+  granted anywhere (commands with an empty permission need none and are
+  skipped).
 
 `rift check --strict` warns about the last kind as well, reading the store
 read-only and `extensions.groups`.

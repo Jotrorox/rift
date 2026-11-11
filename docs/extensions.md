@@ -177,14 +177,19 @@ nobody set denies. Grant nodes with groups (configured as above, or at runtime),
 with user nodes from `rift.permissions` in API v3, or in the dashboard. The
 `extensions.permissions` grant table of earlier versions is rejected; see
 [upgrading](permissions.md#upgrading-from-extensions-api-v2). A command
-permission is a lowercase node without wildcards.
+permission is a lowercase node without wildcards, or the empty string
+(`permission = ""`, plugin contract 0.1.5) for a command every player may see
+and run, such as a version command. An empty permission is not a node: nothing
+is looked up or registered for it, and `/perms doctor` and `rift check` skip the
+command.
 
 Register up to 64 lowercase command names using letters, digits, `_` or `-`
 (maximum 64 bytes). `server` and `hub` are reserved. Each registration must have
-an explicit permission and `run` function. The host checks permission **before**
+an explicit permission (which may be empty) and `run` function. The host checks permission **before**
 invoking it, even for manually crafted command packets. A registered name
 replaces the same backend command root in the advertised tree. Each player's tree
-only lists the commands they have permission for. Rift rebuilds it whenever a
+only lists the commands they have permission for and those with an empty
+permission. Rift rebuilds it whenever a
 backend sends its command tree (after every server switch, or when a plugin
 resends commands), so permission changes show in the tree from then on. Hiding a
 command is not an authorization check; the permission check above is.
@@ -220,7 +225,7 @@ under the usual 50 ms deadline, like every callback.
 
 Rift keeps entries that start with `word` (ignoring ASCII case), drops
 duplicates and sends at most 100. The client replaces `word` with the chosen
-entry. Players without the command's permission get no suggestions, and the
+entry. Players without the command's (non-empty) permission get no suggestions, and the
 function never runs for them. A failing function is logged and suggests
 nothing. Each session gets 10 answered requests per second; the client asks on
 every keystroke, and further requests get an empty answer. `/server <name>`

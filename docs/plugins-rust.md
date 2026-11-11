@@ -109,7 +109,7 @@ example and the host's conformance fixture.
 | --- | --- |
 | `handler` exports | Methods of the `Plugin` trait; each has a default. `rift_plugin::export!(T)` exports a `T: Plugin + Default`. |
 | plugin state | Fields of your type. The SDK creates one value with `Default` right before `init` and passes it to every hook as `&mut self`; `shutdown` runs last. |
-| `registration` | `Registration::new().command(...).hooks([...])`; `CommandSpec::new(name).permission(node).suggest(kind)`. |
+| `registration` | `Registration::new().command(...).hooks([...])`; `CommandSpec::new(name).permission(node).suggest(kind)`; without `permission`, or with an empty node, every player may see and run the command (since 0.1.5). |
 | `action` | `Action::Continue`, `Action::deny(..)`, `Action::deny_json(..)`, `Action::message(..)`, `Action::message_json(..)`, `Action::server(..)`, `Action::Queue(..)`, `Action::LeaveQueue`. The `_json` forms take a `serde_json::Value` or JSON text ([rich text](extensions.md#rich-text)). |
 | configuration JSON | `rift_plugin::config::<T>(json)` decodes with serde. |
 | `players`, `store`, `permissions`, `bus`, `servers`, `timers`, `meta` | Modules of the same names with the generated functions. `store::get_json`/`set_json` and `bus::reply(&message, payload)` are helpers. |

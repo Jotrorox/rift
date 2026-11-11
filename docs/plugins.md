@@ -242,7 +242,9 @@ chain, so a deny anywhere is final. Observers go to every plugin that wants
 them; the script's observers run separately, as before. Each command has
 exactly one owner: the configuration script or one persistent plugin. A name
 registered twice, by two plugins or by a plugin and the script, is a load
-error. `message` and `timer` go only to the plugin that made the subscription
+error. A command's `permission` is the node a player needs to see and run it;
+an empty permission (since 0.1.5) opens the command to every player, in every
+engine and in the configuration script. `message` and `timer` go only to the plugin that made the subscription
 or timer; `event` goes to every plugin that registered it. `dialog` goes only
 to whoever showed the dialog (the script or one plugin) and needs no entry in
 `registration.hooks`: the WIT `hook` enum has no case for it.

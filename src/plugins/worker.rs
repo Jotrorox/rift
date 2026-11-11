@@ -303,9 +303,10 @@ fn valid_command(name: &str) -> bool {
         && !matches!(name, "server" | "hub")
 }
 
+/// A command permission: a node, or empty for a command every player may
+/// see and run (contract 0.1.5).
 fn valid_permission(node: &str) -> bool {
-    !node.is_empty()
-        && node.len() <= 64
+    node.len() <= 64
         && node.bytes().all(|b| {
             b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'.' || b == b'-'
         })
@@ -352,7 +353,7 @@ pub(crate) fn validate_registration(registration: &Registration) -> Result<(), S
         }
         if !valid_permission(&command.permission) {
             return Err(format!(
-                "command {:?}: permission must be a nonempty permission node",
+                "command {:?}: permission must be a permission node, or empty for every player",
                 command.name
             ));
         }

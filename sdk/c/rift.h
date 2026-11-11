@@ -613,7 +613,9 @@ static inline void rift_registration_add_hook(rift_registration_t *reg, rift_hoo
 
 // `suggest` is one of the payload-free `RIFT_PLUGIN_TYPES_SUGGEST_KIND_*`
 // tags (none, players, servers, dynamic). Use
-// `rift_registration_add_command_fixed` for a fixed list.
+// `rift_registration_add_command_fixed` for a fixed list. `permission` is the
+// node a player needs to see and run the command; `""` or NULL (since 0.1.5)
+// opens it to every player.
 static inline rift_plugin_types_command_spec_t *rift_registration_add_command(
     rift_registration_t *reg, const char *name, const char *permission, uint8_t suggest) {
   reg->commands.ptr = (rift_plugin_types_command_spec_t *)rift_realloc(
