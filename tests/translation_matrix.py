@@ -171,9 +171,9 @@ def build(target):
 class Proxy:
     """The translating proxy in front of one server."""
 
-    def __init__(self, kind, server, directory, trace=False, binary=None):
+    def __init__(self, kind, server, directory, trace=False, binary=None, translation=None):
         self.kind, self.server, self.directory, self.trace = kind, server, Path(directory), trace
-        self.binary = binary
+        self.binary, self.translation = binary, translation
         self.log = self.directory / ("proxy.log" if kind == "proxy" else "rift.log")
         self.proc = self.port = None
 
@@ -190,8 +190,13 @@ class Proxy:
             config = self.directory / "rift.lua"
             address = f'"127.0.0.1:{self.server.port}"'
             # rift-detect declares no version: Rift asks the backend itself.
-            backend = (address if self.kind == "rift-detect"
-                       else f'{{ address = {address}, version = "{self.server.release}" }}')
+            fields = [f"address = {address}"]
+            if self.kind != "rift-detect":
+                fields.append(f'version = "{self.server.release}"')
+            if self.translation:
+                # The client versions the backend takes, as Lua: '"newer"' or '{ "1.20.*" }'.
+                fields.append(f"translation = {self.translation}")
+            backend = address if len(fields) == 1 else "{ " + ", ".join(fields) + " }"
             config.write_text(
                 'local config = require("rift.config")\n'
                 f'config.listeners.public = "127.0.0.1:{self.port}"\n'
@@ -421,7 +426,7 @@ def run_server(name, clients, args, steps):
         env.log(f"{server.name} ({server.release}, protocol {server.protocol}) ready in {server.started}s "
                 f"on port {server.port}")
         if args.via != "direct":
-            proxy = Proxy(args.via, server, workdir, args.trace, args.binary).start()
+            proxy = Proxy(args.via, server, workdir, args.trace, args.binary, args.translation).start()
         for cell, protocol in enumerate(clients or [server.protocol]):
             label = f"{server.name}-client-{release(protocol)}"
             directory = RUNS / f"{stamp}-{label}"
@@ -563,6 +568,9 @@ def main():
                         help="proxy: the rift-translation example; rift: the rift binary; "
                              "direct: no proxy (validates the decoder and scenario)")
     parser.add_argument("--binary", type=Path, help="use this proxy/rift binary instead of building")
+    parser.add_argument("--translation", metavar="LUA",
+                        help="with --via rift or rift-detect: the backend's translation setting as Lua, "
+                             "e.g. '\"newer\"' or '{ \"1.20.*\" }'; clients it leaves out are refused")
     parser.add_argument("--scenario", default="all", help="all, join, or comma-separated step names")
     parser.add_argument("--jobs", type=int, default=1, help="servers to run in parallel from this process")
     parser.add_argument("--keep", action="store_true", help="keep server directories")

@@ -13,6 +13,8 @@ rift.config.backends = {
 -- Players on another Minecraft version than a backend (1.12 to 26.3) are
 -- translated; Rift asks each backend which version it runs. See docs/translation.md.
 -- rift.config.translation = false -- Require every backend to run the player's version.
+-- A backend or service group can take only some versions besides its own:
+-- rift.config.backends.classic = { address = "127.0.0.1:25567", translation = { "1.12.*", ">=1.20" } }
 rift.config.routes = {
     public = "lobby",
 }

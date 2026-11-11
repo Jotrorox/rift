@@ -229,8 +229,10 @@ releases from 1.12 to 26.3 in both directions, including `/server` switches
 between backends of different versions. It is on by default and asks each
 backend for its version; `config.backends.survival = { address = "127.0.0.1:25567",
 version = "1.12.2" }` declares one, and `config.translation = false` turns it
-off. See [protocol translation](docs/translation.md) for what players on other
-versions see.
+off. Each backend or service group can choose which client versions it takes
+(`translation = "newer"`, `{ "1.20.*", ">=1.21.4" }`, or `false`), in Lua or
+in the web interface. See [protocol translation](docs/translation.md) for what
+players on other versions see.
 Online authentication and plugin player hooks work on every listed version.
 Velocity modern forwarding needs a backend on **1.13 or newer**; BungeeCord and
 BungeeGuard forwarding cover all of them (see [Authentication](#authentication)).

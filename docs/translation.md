@@ -24,11 +24,71 @@ config.network = { initial = { "lobby" }, hubs = { "lobby" } }
 -- config.translation = { detect = false }          -- Translate only for declared versions.
 ```
 
+### Which versions a backend takes
+
+Translation is all-or-nothing only if you leave it that way. The proxy, a
+backend or a [service group](managed-servers.md#service-groups-and-dynamic-instances)
+can each say which client versions are translated for it. Players on the
+version a backend runs can always join it; the setting decides who else can.
+
+```lua
+config.translation = { clients = "all" }             -- The default for everything below.
+
+config.backends.creative = { address = "127.0.0.1:25567", translation = "newer" }
+config.backends.anarchy  = { address = "127.0.0.1:25568", translation = false }
+config.backends.classic  = {
+    address = "127.0.0.1:25569", version = "1.12.2",
+    translation = { "1.12.*", "1.16.5", "1.20-1.21.4" },
+}
+config.service_groups.bedwars = {
+    template = "bedwars", port_range = { 25600, 25650 },
+    translation = { "1.20.*", ">=1.21.4" },
+}
+```
+
+| Value | Who can join besides the backend's own version |
+| --- | --- |
+| `"all"` or `true` | Every version Rift translates, 1.12 to 26.3. The default. |
+| `"newer"` | Newer clients only, as ViaVersion on the server would allow. |
+| `"older"` | Older clients only, as ViaBackwards would allow. |
+| `"none"` or `false` | Nobody: no translation for this backend. |
+| a pattern or a list of patterns | The versions the patterns name; `"newer"` and `"older"` may be listed too. |
+
+| Pattern | Covers |
+| --- | --- |
+| `"1.20.4"` | One release. Releases that share a protocol count as one: `"1.20.1"` also admits 1.20. |
+| `"1.20.*"` (or `"1.20.x"`) | Every release of a family: 1.20 through 1.20.6. `"26.*"` covers 26.1 through 26.3. |
+| `"1.16-1.18.2"` | A range, both ends included; either end may be a family (`"1.16.*-1.18.*"`). |
+| `">=1.19"`, `"1.19+"` | That release and everything newer. |
+| `"<=1.16.5"` | That release and everything older, down to 1.12. |
+
+A backend's or group's own `translation` replaces `translation.clients`; a
+service group's applies to all its instances and may be changed while they
+run. `rift check` rejects a pattern that names no known version or lies
+outside 1.12–26.3.
+
+A player whose version is left out is not sent to that backend: initial-server
+selection and fallbacks pass over it, `/server` reports "This server does not
+accept your Minecraft version.", and the server list shows the backend on the
+version it really runs. For a backend without a declared `version` Rift finds
+out when the player connects, and moves on to the next fallback then.
+
+**In the web interface**, *Groups & templates* has a **Minecraft versions**
+section on every service group: follow the proxy setting, all versions, same
+version or newer, same version or older, same version only, or chosen
+versions with one switch per release family and a field for other patterns. A
+line underneath lists the versions the choice covers before you save, and
+*Service groups* shows each group's setting in the *Player versions* column.
+Saving writes `translation` into the group's definition in the Lua script.
+
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `translation` | `true` | `false` turns translation off: Rift speaks each player's own protocol to every backend, which accepts or refuses the player itself, as before this feature. |
 | `translation.enabled` | `true` | The same switch in table form. |
 | `translation.detect` | `true` | Ask backends without a declared `version` which version they run. With `false`, only backends that declare a `version` are translated. |
+| `translation.clients` | `"all"` | The client versions translated for backends and service groups that do not set their own; see [below](#which-versions-a-backend-takes). |
+| `backends.<name>.translation` | none | The client versions translated for this backend. |
+| `service_groups.<name>.translation` | none | The client versions translated for every instance of this group. |
 | `backends.<name>.version` | none | The release the backend runs, by name from the [release matrix](network-protocol.md#release-matrix). Takes precedence over detection. |
 
 Without a configuration file, `rift <listen> --default <backend> --translation off`

@@ -581,6 +581,29 @@ async fn queue_command_waits_for_capacity_and_transfer_policy_runs_before_target
 
 #[tokio::test]
 async fn initial_selection_skips_backends_that_cannot_serve_the_client_version() {
+    // 1.11.2 is older than anything Rift translates.
+    selection_skips(|backend| {
+        backend.with_version(rift::protocol::ProtocolVersion::from_release("1.11.2").unwrap())
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn initial_selection_skips_backends_whose_translation_setting_leaves_the_client_out() {
+    // The 1.21.8 player is newer than this 1.21.6 backend, which takes only
+    // its own version and older ones.
+    selection_skips(|backend| {
+        backend
+            .with_version(rift::protocol::ProtocolVersion::from_release("1.21.6").unwrap())
+            .with_clients(rift::protocol::ClientVersions::parse(["older"]).unwrap())
+    })
+    .await;
+}
+
+/// A 1.21.8 player with the candidates `ancient`, which `unservable` makes a
+/// backend that cannot take them, and `legacy` on 1.21.6: the player lands on
+/// `legacy`, and `ancient` alone refuses them without being contacted.
+async fn selection_skips(unservable: impl Fn(rift::routing::Backend) -> rift::routing::Backend) {
     use rift::protocol::{
         Codec, Handshake, NextState, Packet, ProtocolVersion, Reader, write_string,
     };
@@ -592,16 +615,16 @@ async fn initial_selection_skips_backends_that_cannot_serve_the_client_version()
     timeout(Duration::from_secs(5), async {
         let ancient = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let legacy = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let backend = |listener: &TcpListener, release| {
-            rift::routing::Backend::parse(&listener.local_addr().unwrap().to_string())
-                .unwrap()
-                .with_version(ProtocolVersion::from_release(release).unwrap())
+        let backend = |listener: &TcpListener| {
+            rift::routing::Backend::parse(&listener.local_addr().unwrap().to_string()).unwrap()
         };
         let mut cfg = config();
         cfg.backends
-            .insert("ancient".into(), backend(&ancient, "1.11.2"));
-        cfg.backends
-            .insert("legacy".into(), backend(&legacy, "1.21.6"));
+            .insert("ancient".into(), unservable(backend(&ancient)));
+        cfg.backends.insert(
+            "legacy".into(),
+            backend(&legacy).with_version(ProtocolVersion::from_release("1.21.6").unwrap()),
+        );
         let snapshot = Arc::new(Snapshot::new(cfg, None).unwrap());
         let metrics = Metrics::default();
         let network = Network {

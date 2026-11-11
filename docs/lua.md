@@ -17,7 +17,9 @@ rift.plugin("greeting")
 A backend may run another Minecraft version than its players (1.12 to 26.3):
 Rift asks it for its version and translates. A table,
 `{ address = "127.0.0.1:25567", version = "1.12.2" }`, declares the version
-instead, and `config.translation = false` turns translation off; see
+instead, and `config.translation = false` turns translation off. A backend or
+service group can limit translation to some client versions with
+`translation = "newer"` or a list such as `{ "1.20.*", ">=1.21.4" }`; see
 [protocol translation](translation.md).
 
 `rift` is a global, like Neovim's `vim`; `local rift = require("rift")` returns
