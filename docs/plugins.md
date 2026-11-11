@@ -197,6 +197,35 @@ unless a manifest says so. Each plugin has a queue of 1024 undelivered calls;
 when it is full, awaited calls count as timeouts at once and observer events
 are dropped (a slow plugin stalls only itself).
 
+### Testing player hooks without Mojang
+
+Player hooks need `online_mode`, and `online_mode` asks Mojang's session server
+about every login, so an automated test has no account to log in with. For
+tests only, Rift can be built with the Cargo feature `test-session-server`:
+
+```sh
+cargo build --locked --features test-session-server
+RIFT_TEST_SESSION_URL=http://127.0.0.1:8080/session/minecraft/hasJoined target/debug/rift
+```
+
+Such a build asks the server in `RIFT_TEST_SESSION_URL` instead of Mojang. The
+test answers `GET <url>?username=<name>&serverId=<hash>` with status 200 and
+the profile to log in (`{"id": "<32 hex digits>", "name": "<name>",
+"properties": []}`), or with 204 to refuse the login.
+[`tests/session_server.rs`](../tests/session_server.rs) has a login bot and
+such a server.
+
+- The feature is off by default. Release and nightly binaries are built
+  without it and never read the variable; no configuration option exists.
+- The URL must be `http://` or `https://` on a loopback IP address
+  (`127.0.0.1`, `[::1]`; not `localhost`). Anything else stops Rift at startup.
+- Rift logs a warning at startup whenever the variable is in effect. Without
+  the variable, a build with the feature asks Mojang as usual.
+- The bot must still perform the encryption handshake, as a premium client
+  does. A real Minecraft client with an offline account (the headless harness
+  in [`tests/real_client.py`](../tests/real_client.py)) still cannot join: it
+  fails its own request to Mojang before Rift asks anyone.
+
 ## Dispatch order
 
 For `route`, `login`, `initial_server`, `before_transfer`, `status` and

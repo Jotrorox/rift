@@ -470,6 +470,28 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  test-session-server:
+    name: Local session server feature
+    # The only build with `test-session-server`. Release, nightly and every
+    # other job build the default features, which leave it out.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup show
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          prefix-key: v1-rust
+          shared-key: regression-ubuntu-24.04
+          cache-bin: false
+          # Only regression saves the shared cache.
+          save-if: false
+      - run: cargo clippy --locked --all-targets --features test-session-server -- -D warnings
+      - name: Test authentication with the override compiled in
+        run: cargo test --locked --features test-session-server --lib -- auth:: session:: --test-threads=1
+      - name: Log a bot in through a local session server
+        run: cargo test --locked --features test-session-server --test session_server
+
   build-linux:
     name: Build shared Linux test executable
     runs-on: ubuntu-24.04
@@ -933,7 +955,7 @@ jobs:
   ci-ready:
     name: CI ready
     if: always()
-    needs: [quality, plugin-sdk-rust, plugin-sdk-c, plugin-sdk-go, plugin-examples-wasm, audit, regression, java, build-linux, minecraft, compatibility, benchmark]
+    needs: [quality, plugin-sdk-rust, plugin-sdk-c, plugin-sdk-go, plugin-examples-wasm, audit, regression, test-session-server, java, build-linux, minecraft, compatibility, benchmark]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
