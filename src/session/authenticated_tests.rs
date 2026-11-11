@@ -36,8 +36,12 @@ fn chat_session(number: i32, generation: u8) -> Packet {
 }
 
 fn signed_chat(number: i32, generation: u8) -> Packet {
+    signed_chat_text(number, generation, "Authenticated wire fixture")
+}
+
+fn signed_chat_text(number: i32, generation: u8, text: &str) -> Packet {
     let mut data = Vec::new();
-    write_string("Authenticated wire fixture", &mut data);
+    write_string(text, &mut data);
     data.extend(1_800_000_000_000_i64.to_be_bytes());
     data.extend(i64::from(generation).to_be_bytes());
     data.push(1); // signature present
@@ -90,8 +94,12 @@ fn player_chat(number: i32, generation: u8) -> Packet {
 }
 
 fn signed_command(number: i32, signatures: bool) -> Packet {
+    signed_command_text(number, signatures, "server survival")
+}
+
+fn signed_command_text(number: i32, signatures: bool, command: &str) -> Packet {
     let mut data = Vec::new();
-    write_string("server survival", &mut data);
+    write_string(command, &mut data);
     data.extend(1_800_000_000_000_i64.to_be_bytes());
     data.extend(0x1234_5678_i64.to_be_bytes());
     data.push(u8::from(signatures));
@@ -108,8 +116,12 @@ fn signed_command(number: i32, signatures: bool) -> Packet {
 }
 
 fn acknowledgement(number: i32) -> Packet {
+    acknowledgement_of(number, 130)
+}
+
+fn acknowledgement_of(number: i32, offset: i32) -> Packet {
     let mut data = Vec::new();
-    write_varint(130, &mut data);
+    write_varint(offset, &mut data);
     Packet::new(
         if number < 766 {
             3
@@ -267,6 +279,244 @@ async fn unsigned_chat_withholds_the_chat_session_matrix() {
         })
         .await
         .unwrap_or_else(|_| panic!("unsigned chat protocol {number} timed out"));
+    }
+}
+
+/// A player's hooks from a configuration whose script handles `chat` when
+/// `chat` is set: it denies the message `muted` and the backend command
+/// `tell Alex muted`.
+fn chat_extension(chat: bool) -> crate::extensions::ExtensionSession {
+    let hook = if chat {
+        "chat = function(ctx) if ctx.text == 'muted' or (ctx.kind == 'command' and ctx.command == 'tell' and ctx.args == 'Alex muted') then return { deny = 'You are muted.' } end end,"
+    } else {
+        ""
+    };
+    let config = crate::config::Config::from_lua(
+        &format!(
+            "return {{ listeners={{public='127.0.0.1:0'}}, backends={{lobby='127.0.0.1:1'}}, routes={{public='lobby'}}, authentication={{online_mode=true, signed_chat=false}}, forwarding={{mode='velocity', secret_env='TEST_SECRET'}}, extensions={{api_version=2, {hook} login=function() end}} }}"
+        ),
+        "chat.lua",
+    )
+    .unwrap();
+    let runtime = crate::extensions::Extensions::new(
+        &config,
+        crate::messaging::Broker::new(Default::default()).unwrap(),
+        None,
+    )
+    .unwrap();
+    runtime
+        .session(crate::extensions::Context::authenticated(
+            1,
+            &AuthenticatedProfile {
+                uuid: [7; 16],
+                name: "Player".into(),
+                properties: vec![],
+            },
+        ))
+        .unwrap()
+}
+
+/// What the runtime does with a held chat packet: ask the hook, then release
+/// or drop.
+async fn answer_chat(session: &mut EncryptedSession, chat: &HeldChat) -> crate::extensions::Action {
+    let action = session
+        .extension
+        .as_ref()
+        .unwrap()
+        .chat(chat.kind, &chat.text)
+        .await
+        .unwrap();
+    if action == crate::extensions::Action::Continue {
+        session.release_chat().await.unwrap();
+    } else {
+        session.drop_chat().await.unwrap();
+    }
+    action
+}
+
+async fn held(
+    session: &mut EncryptedSession,
+    client: &mut EncryptedClient,
+    packet: &Packet,
+) -> HeldChat {
+    session.client.codec.write(client, packet).await.unwrap();
+    match session.forward().await.unwrap() {
+        SessionEvent::Chat(chat) => chat,
+        event => panic!("chat was not held: {event:?}"),
+    }
+}
+
+async fn nothing_reaches(backend: &mut DuplexStream, codec: Codec) {
+    assert!(
+        timeout(Duration::from_millis(10), receive(backend, codec))
+            .await
+            .is_err(),
+        "a packet reached the backend"
+    );
+}
+
+#[tokio::test]
+async fn chat_hook_drops_denied_chat_and_forwards_the_rest_unchanged_matrix() {
+    use crate::extensions::{Action, ChatKind};
+    for number in 761..=777 {
+        timeout(Duration::from_secs(10), async {
+            let (mut session, mut client, mut backend) = authenticated_session_for(number).await;
+            session.set_signed_chat(false);
+            assert!(!session.signed_chat());
+            session.set_extension(chat_extension(true));
+            compression(&mut session, &mut client, &mut backend, 256).await;
+            verified_play(&mut session, &mut client, &mut backend).await;
+            let codec = session.backend().unwrap().codec;
+
+            // A denied message never reaches the backend; the offset it
+            // acknowledged does, as a packet of its own.
+            let muted = signed_chat_text(number, 1, "muted");
+            let chat = held(&mut session, &mut client, &muted).await;
+            assert_eq!(
+                chat,
+                HeldChat {
+                    kind: ChatKind::Message,
+                    text: "muted".into()
+                }
+            );
+            nothing_reaches(&mut backend, codec).await;
+            assert_eq!(
+                answer_chat(&mut session, &chat).await,
+                Action::Deny("You are muted.".into())
+            );
+            assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+            assert_eq!(
+                receive(&mut backend, codec).await,
+                acknowledgement_of(number, 19)
+            );
+
+            // Several in a row, then an allowed one: it arrives as sent, and
+            // before the packet the client sent after it.
+            for generation in 2..=3 {
+                let muted = signed_chat_text(number, generation, "muted");
+                let chat = held(&mut session, &mut client, &muted).await;
+                assert_ne!(answer_chat(&mut session, &chat).await, Action::Continue);
+                assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+                assert_eq!(
+                    receive(&mut backend, codec).await,
+                    acknowledgement_of(number, 19)
+                );
+            }
+            let hello = signed_chat_text(number, 4, "hello");
+            let after = acknowledgement(number);
+            session
+                .client
+                .codec
+                .write(&mut client, &hello)
+                .await
+                .unwrap();
+            session
+                .client
+                .codec
+                .write(&mut client, &after)
+                .await
+                .unwrap();
+            let SessionEvent::Chat(chat) = session.forward().await.unwrap() else {
+                panic!("chat was not held");
+            };
+            assert_eq!(chat.text, "hello");
+            nothing_reaches(&mut backend, codec).await;
+            assert_eq!(answer_chat(&mut session, &chat).await, Action::Continue);
+            assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+            assert_eq!(receive(&mut backend, codec).await, hello);
+            assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+            assert_eq!(receive(&mut backend, codec).await, after);
+
+            // Backend commands come to the hook, with argument signatures too.
+            let tell = signed_command_text(number, true, "tell Alex muted");
+            let chat = held(&mut session, &mut client, &tell).await;
+            assert_eq!(
+                chat,
+                HeldChat {
+                    kind: ChatKind::Command,
+                    text: "tell Alex muted".into()
+                }
+            );
+            assert_ne!(answer_chat(&mut session, &chat).await, Action::Continue);
+            assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+            assert_eq!(receive(&mut backend, codec).await, acknowledgement(number));
+            let home = signed_command_text(number, true, "home");
+            let chat = held(&mut session, &mut client, &home).await;
+            assert_eq!(answer_chat(&mut session, &chat).await, Action::Continue);
+            assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+            assert_eq!(receive(&mut backend, codec).await, home);
+
+            // A held packet nobody answers is dropped, not let through.
+            let ignored = signed_chat_text(number, 5, "hello");
+            held(&mut session, &mut client, &ignored).await;
+            assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+            assert_eq!(
+                receive(&mut backend, codec).await,
+                acknowledgement_of(number, 19)
+            );
+            serverbound(&mut session, &mut client, &mut backend, &after).await;
+        })
+        .await
+        .unwrap_or_else(|_| panic!("chat hook protocol {number} timed out"));
+    }
+}
+
+#[tokio::test]
+async fn chat_hook_is_not_asked_where_dropping_is_unsafe_or_nobody_handles_chat_matrix() {
+    use crate::extensions::{Action, ChatKind};
+    for number in 761..=777 {
+        timeout(Duration::from_secs(10), async {
+            // Connected while chat was signed: the backend has the player's
+            // chat session, so a signed packet must not be withheld.
+            let (mut session, mut client, mut backend) = authenticated_session_for(number).await;
+            assert!(session.signed_chat());
+            session.set_extension(chat_extension(true));
+            compression(&mut session, &mut client, &mut backend, 256).await;
+            verified_play(&mut session, &mut client, &mut backend).await;
+            let codec = session.backend().unwrap().codec;
+            for packet in [
+                chat_session(number, 1),
+                signed_chat_text(number, 1, "muted"),
+                signed_command_text(number, true, "tell Alex muted"),
+            ] {
+                serverbound(&mut session, &mut client, &mut backend, &packet).await;
+            }
+            // A packet without a signature is safe to drop in any session.
+            let unsigned = signed_command_text(number, false, "tell Alex muted");
+            let chat = held(&mut session, &mut client, &unsigned).await;
+            assert_eq!(chat.kind, ChatKind::Command);
+            assert_ne!(answer_chat(&mut session, &chat).await, Action::Continue);
+            assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+            assert_eq!(receive(&mut backend, codec).await, acknowledgement(number));
+            // Rift's own commands never come to the hook.
+            session
+                .client
+                .codec
+                .write(&mut client, &signed_command(number, false))
+                .await
+                .unwrap();
+            assert_eq!(
+                session.forward().await.unwrap(),
+                SessionEvent::ProxyCommand("server survival".into())
+            );
+            assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+            assert_eq!(receive(&mut backend, codec).await, acknowledgement(number));
+
+            // Without a chat handler nothing is held, signed chat or not.
+            let (mut session, mut client, mut backend) = authenticated_session_for(number).await;
+            session.set_signed_chat(false);
+            session.set_extension(chat_extension(false));
+            compression(&mut session, &mut client, &mut backend, 256).await;
+            verified_play(&mut session, &mut client, &mut backend).await;
+            for packet in [
+                signed_chat_text(number, 1, "muted"),
+                signed_command_text(number, false, "tell Alex muted"),
+            ] {
+                serverbound(&mut session, &mut client, &mut backend, &packet).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("chat hook protocol {number} timed out"));
     }
 }
 

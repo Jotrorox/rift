@@ -62,6 +62,12 @@ impl Plan {
         self
     }
 
+    /// The plugin handles `chat`, as a component that exports it does.
+    fn chat(mut self) -> Self {
+        self.registration.chat = true;
+        self
+    }
+
     fn commands(mut self, names: &[&str]) -> Self {
         self.registration.commands = names
             .iter()
@@ -1482,6 +1488,174 @@ async fn without_online_mode_plugins_that_register_player_hooks_fail_to_start() 
     let runtime = runtime(&config, &mocks, &broker).await;
     assert_eq!(runtime.plugins().active()[0].status(), Status::Running);
     runtime.plugins().shutdown().await;
+}
+
+/// Answers `chat` by the message: `bad` and `rich` deny, `server` and
+/// `message` answer what the hook does not accept, `slow` takes 300 ms and
+/// `echo` denies with what the hook received.
+fn moderator(event: &Event, _: &services::Services) -> Result<Reply, CallError> {
+    let Event::Chat(context) = event else {
+        return Ok(Reply::default_for(event.hook()));
+    };
+    let chat = context.chat.as_ref().expect("chat input");
+    Ok(Reply::Action(match chat.text.split(' ').next().unwrap() {
+        "bad" => Action::Deny("no".into()),
+        "rich" => Action::Deny(crate::text::Text::Component(
+            serde_json::json!({"text": "no", "color": "red"}),
+        )),
+        "server" => Action::Server("game".into()),
+        "message" => Action::Message("hi".into()),
+        "slow" => {
+            std::thread::sleep(Duration::from_millis(300));
+            Action::Continue
+        }
+        "echo" => Action::Deny(
+            format!(
+                "{}|{}|{:?}|{}|{}",
+                context.name,
+                chat.kind.name(),
+                context.command,
+                context.args,
+                chat.text
+            )
+            .into(),
+        ),
+        _ => Action::Continue,
+    }))
+}
+
+fn unsigned(mut spec: PluginSpec) -> PluginSpec {
+    spec.signed_chat = false;
+    spec
+}
+
+#[tokio::test]
+async fn chat_reaches_only_plugins_that_handle_it_and_accepts_continue_and_deny() {
+    use crate::extensions::ChatKind;
+    let root = directory();
+    let mocks = Mocks::default();
+    // An empty hook list delivers every hook except chat.
+    mocks.plan("everything", Plan::new(action(Action::Continue)));
+    mocks.plan("mute", Plan::new(moderator).hooks(&[Hook::Timer]).chat());
+    mocks.plan("lenient", Plan::new(moderator).hooks(&[Hook::Timer]).chat());
+    let broker = Broker::default();
+    let plugins = vec![
+        unsigned(spec(&root, "everything", "", "{}")),
+        unsigned(spec(&root, "mute", "", "{}")),
+    ];
+    let runtime = runtime(&config("", plugins), &mocks, &broker).await;
+    assert!(runtime.plugins().may_handle(Hook::Chat));
+    let statuses = runtime.plugins().statuses();
+    assert!(!statuses[0].hooks.contains(&"chat"), "{statuses:?}");
+    assert_eq!(statuses[1].hooks, ["timer", "dialog", "chat"]);
+    let player = session(&runtime, 1);
+    assert!(player.handles_chat());
+    assert_eq!(
+        player.chat(ChatKind::Message, "hello").await.unwrap(),
+        Action::Continue
+    );
+    assert_eq!(mocks.calls("chat"), ["mute:chat"]);
+    assert_eq!(
+        player.chat(ChatKind::Message, "bad word").await.unwrap(),
+        Action::Deny("no".into())
+    );
+    assert_eq!(
+        player.chat(ChatKind::Message, "rich").await.unwrap(),
+        Action::Deny(crate::text::Text::Component(
+            serde_json::json!({"text": "no", "color": "red"})
+        ))
+    );
+    assert_eq!(
+        player.chat(ChatKind::Message, "echo  two").await.unwrap(),
+        Action::Deny("Player1|message|None||echo  two".into())
+    );
+    assert_eq!(
+        player
+            .chat(ChatKind::Command, "echo Alex  hi ")
+            .await
+            .unwrap(),
+        Action::Deny("Player1|command|Some(\"echo\")|Alex  hi|echo Alex  hi ".into())
+    );
+    // Every other answer is a failure of the plugin: on_failure denies.
+    for text in ["server", "message"] {
+        let error = player.chat(ChatKind::Message, text).await.unwrap_err();
+        assert!(
+            error.to_string().contains("invalid decision for chat"),
+            "{error}"
+        );
+    }
+    // 50 ms by default; on_timeout denies.
+    let started = Instant::now();
+    let error = player.chat(ChatKind::Message, "slow").await.unwrap_err();
+    assert!(error.to_string().contains("exceeded 50 ms"), "{error}");
+    assert!(started.elapsed() < Duration::from_millis(250));
+    runtime.plugins().shutdown().await;
+
+    // The manifest decides otherwise.
+    let policies =
+        "[deadlines]\nchat = 20\n[failure]\non_timeout = \"continue\"\non_failure = \"continue\"\n";
+    let plugins = vec![unsigned(spec(&root, "lenient", policies, "{}"))];
+    let runtime = self::runtime(&config("", plugins), &mocks, &broker).await;
+    let player = session(&runtime, 1);
+    for text in ["server", "slow"] {
+        assert_eq!(
+            player.chat(ChatKind::Message, text).await.unwrap(),
+            Action::Continue,
+            "{text}"
+        );
+    }
+    runtime.plugins().shutdown().await;
+}
+
+#[tokio::test]
+async fn chat_plugins_start_only_with_unsigned_chat_and_online_mode() {
+    let root = directory();
+    let mocks = Mocks::default();
+    mocks.plan("mute", Plan::new(moderator).hooks(&[Hook::Timer]).chat());
+    mocks.plan("timer", Plan::new(moderator).hooks(&[Hook::Timer]));
+    let broker = Broker::default();
+    // `signed_chat` is true unless the configuration says otherwise.
+    let signed = config("", vec![spec(&root, "mute", "", "{}")]);
+    let runtime = Extensions::with_engines(&signed, broker.clone(), None, mocks.engines()).unwrap();
+    let error = runtime.plugins().start().await.unwrap_err().to_string();
+    assert!(
+        error.contains("registration: the chat hook needs authentication.signed_chat = false"),
+        "{error}"
+    );
+    assert!(!runtime.plugins().may_handle(Hook::Chat));
+
+    let mut offline = unsigned(spec(&root, "mute", "", "{}"));
+    offline.online_mode = false;
+    let offline = config("", vec![offline]);
+    let runtime =
+        Extensions::with_engines(&offline, broker.clone(), None, mocks.engines()).unwrap();
+    let error = runtime.plugins().start().await.unwrap_err().to_string();
+    assert!(
+        error.contains("hook chat needs authentication.online_mode"),
+        "{error}"
+    );
+
+    // A plugin without a chat handler starts with signed chat and costs
+    // sessions nothing.
+    let plain = config("", vec![spec(&root, "timer", "", "{}")]);
+    let runtime = self::runtime(&plain, &mocks, &broker).await;
+    assert_eq!(runtime.plugins().active()[0].status(), Status::Running);
+    assert!(!runtime.plugins().may_handle(Hook::Chat));
+    let player = session(&runtime, 1);
+    assert!(!player.handles_chat());
+    assert_eq!(
+        player
+            .chat(crate::extensions::ChatKind::Message, "bad")
+            .await
+            .unwrap(),
+        Action::Continue
+    );
+    assert!(mocks.calls("chat").is_empty());
+    runtime.plugins().shutdown().await;
+
+    // Changing the setting restarts the plugin, so the check runs again.
+    let before = spec(&root, "mute", "", "{}");
+    assert!(!before.same_artifact(&unsigned(before.clone())));
 }
 
 #[tokio::test]

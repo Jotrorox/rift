@@ -38,6 +38,7 @@ use super::{
 use bindings::{
     Base as Core, BasePre,
     optional::{Optional, OptionalIndices},
+    optional_chat::{OptionalChat, OptionalChatIndices},
     optional_decisions::{OptionalDecisions, OptionalDecisionsIndices},
     optional_styled::{OptionalStyled, OptionalStyledIndices},
 };
@@ -159,6 +160,9 @@ struct CorePre {
     /// `None` for a component without the `styled` export (built against
     /// rift:plugin 0.1.0 to 0.1.3).
     styled: Option<OptionalStyledIndices>,
+    /// `None` for a component without the `chat` export: one built against
+    /// rift:plugin 0.1.0 to 0.1.4, or one that does not moderate chat.
+    chat: Option<OptionalChatIndices>,
 }
 
 /// One instance's exports: the required ones and the optional ones it has.
@@ -167,6 +171,7 @@ struct Instance {
     optional: Option<Optional>,
     decisions: Option<OptionalDecisions>,
     styled: Option<OptionalStyled>,
+    chat: Option<OptionalChat>,
 }
 
 impl CorePre {
@@ -185,11 +190,16 @@ impl CorePre {
             Some(indices) => Some(indices.load(&mut *store, &instance)?),
             None => None,
         };
+        let chat = match &self.chat {
+            Some(indices) => Some(indices.load(&mut *store, &instance)?),
+            None => None,
+        };
         Ok(Instance {
             core,
             optional,
             decisions,
             styled,
+            chat,
         })
     }
 }
@@ -209,11 +219,13 @@ fn prepare(spec: &PluginSpec, component: &Component) -> Result<CorePre, String> 
     let optional = OptionalIndices::new(base.instance_pre()).ok();
     let decisions = OptionalDecisionsIndices::new(base.instance_pre()).ok();
     let styled = OptionalStyledIndices::new(base.instance_pre()).ok();
+    let chat = OptionalChatIndices::new(base.instance_pre()).ok();
     Ok(CorePre {
         base,
         optional,
         decisions,
         styled,
+        chat,
     })
 }
 
@@ -256,7 +268,15 @@ pub fn precompile(spec: &PluginSpec) -> Result<String, String> {
     let started = Instant::now();
     let (wasm, key) = read(spec)?;
     let component = compile(spec, &wasm)?;
-    prepare(spec, &component)?;
+    let pre = prepare(spec, &component)?;
+    if pre.chat.is_some() && spec.signed_chat {
+        // What `init` would refuse, known here from the exports alone.
+        return Err(format!(
+            "{} exports chat: {}",
+            entry_name(spec),
+            super::worker::CHAT_NEEDS_UNSIGNED
+        ));
+    }
     let serialized = component
         .serialize()
         .map_err(|error| format!("cannot serialize the compiled component: {error}"))?;
@@ -308,6 +328,7 @@ pub(crate) fn create(
         optional,
         decisions,
         styled,
+        chat,
     } = match pre.instantiate(&mut store) {
         Ok(instance) => instance,
         Err(error) => {
@@ -323,6 +344,7 @@ pub(crate) fn create(
         optional,
         decisions,
         styled,
+        chat,
         manifest: spec.manifest.clone(),
         registration: None,
         broken: None,
@@ -348,6 +370,7 @@ struct WasmEngine {
     optional: Option<Optional>,
     decisions: Option<OptionalDecisions>,
     styled: Option<OptionalStyled>,
+    chat: Option<OptionalChat>,
     manifest: Manifest,
     registration: Option<Registration>,
     /// Set by the first trap: the instance's state is suspect from then on.
@@ -377,7 +400,10 @@ impl PluginEngine for WasmEngine {
         let guest = self.core.rift_plugin_handler();
         match guest.call_init(&mut self.store, config_json) {
             Ok(Ok(registration)) => {
-                let registration = bindings::registration(registration);
+                let mut registration = bindings::registration(registration);
+                // The export is the registration: the WIT record has no
+                // field for it and the `hook` enum no case.
+                registration.chat = self.chat.is_some();
                 self.registration = Some(registration.clone());
                 Ok(registration)
             }
@@ -419,6 +445,19 @@ impl PluginEngine for WasmEngine {
                 .call_dialog(store, &bindings::dialog_response(context))
                 .map(|()| Reply::None)
                 .map_err(|error| CallError::Fatal(self.fail(error)));
+        }
+        if let Event::Chat(context) = event {
+            // Only a component that exports `chat` wants the hook.
+            let Some(chat) = &self.chat else {
+                return Ok(Reply::default_for(hook));
+            };
+            let decision = chat
+                .rift_plugin_chat()
+                .call_chat(store, &bindings::chat_attempt(context))
+                .map_err(|error| CallError::Fatal(self.fail(error)))?;
+            return bindings::decision(decision)
+                .map(Reply::Action)
+                .map_err(|error| CallError::Handler(format!("invalid decision: {error}")));
         }
         // The `decisions` export, when the component has it, answers the
         // decision hooks with rich text instead of `handler`.
@@ -538,7 +577,7 @@ impl PluginEngine for WasmEngine {
             Event::Event(event) => guest
                 .call_event(store, &bindings::rift_event(event))
                 .map(|()| Reply::None),
-            Event::Dialog(_) => unreachable!("dispatched above"),
+            Event::Dialog(_) | Event::Chat(_) => unreachable!("dispatched above"),
         };
         result.map_err(|error| CallError::Fatal(self.fail(error)))
     }

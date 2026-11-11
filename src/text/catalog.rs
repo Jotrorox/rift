@@ -145,6 +145,8 @@ notices! {
         "Extension command failed.",
     CommandNoPermission => "command.no_permission" []
         "You do not have permission to use this command.",
+    ChatFailed => "chat.failed" []
+        "Your message could not be checked and was not sent.",
     // Queues.
     QueueJoined => "queue.joined" ["server", "position"]
         "Queued for <server>. Position: <position>.",

@@ -1110,6 +1110,13 @@ impl Config {
             if !self.authentication.online_mode {
                 return Err(invalid("extensions requires authentication.online_mode"));
             }
+            if self.authentication.signed_chat && extensions.hook_names().any(|hook| hook == "chat")
+            {
+                return Err(invalid(format!(
+                    "extensions.chat: {}",
+                    crate::plugins::worker::CHAT_NEEDS_UNSIGNED
+                )));
+            }
             if extensions.legacy_grants().is_some() {
                 return Err(invalid(
                     "extensions.permissions was removed: grant nodes with rift.permissions.user(uuid):set(node, true) in an extensions.api_version = 3 callback, with extensions.groups, or in the dashboard. Rift copies these grants into the permission store once when it starts (see docs/permissions.md); then delete the field",

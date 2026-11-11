@@ -354,7 +354,28 @@ pub enum SessionEvent {
     BungeeCord(crate::bungeecord::Request),
     /// A click on a plugin action of the dialog Rift showed.
     Dialog(DialogClick),
+    /// A chat message or backend command the session holds back for the
+    /// `chat` hook. Answer with [`Session::release_chat`] or
+    /// [`Session::drop_chat`] before forwarding again; a held packet nobody
+    /// answered is dropped.
+    Chat(HeldChat),
     Disconnected,
+}
+
+/// What a held chat packet says; the packet itself stays with the session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeldChat {
+    pub kind: crate::extensions::ChatKind,
+    /// The message, or the command line without the leading slash.
+    pub text: String,
+}
+
+/// A serverbound chat packet waiting for the `chat` hook's answer.
+struct HeldPacket {
+    packet: Packet,
+    raw: Option<RawFrame>,
+    /// What the backend must still receive if the packet is dropped.
+    acknowledgement: Option<Packet>,
 }
 
 /// A click on a plugin action of a dialog Rift showed, for its owner.
@@ -441,6 +462,9 @@ pub struct Session<C, B> {
     /// still be open: a backend dialog, a clear or a reconfiguration ends it.
     dialog: Option<(std::sync::Arc<crate::dialog::Dialog>, crate::dialog::Owner)>,
     suggestions: SuggestionBudget,
+    /// The chat packet reported as [`SessionEvent::Chat`], until its owner
+    /// releases or drops it.
+    held_chat: Option<HeldPacket>,
 }
 
 impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Session<C, B> {
@@ -485,6 +509,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             boss_bars: protocol::BossBars::default(),
             dialog: None,
             suggestions: SuggestionBudget::default(),
+            held_chat: None,
         })
     }
 
@@ -626,6 +651,50 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
     /// the player's chat as unsigned. Set before the first backend login.
     pub fn set_signed_chat(&mut self, signed_chat: bool) {
         self.signed_chat = signed_chat;
+    }
+
+    /// Whether backends learn this player's chat signing material. Fixed when
+    /// the session begins: a reload of the setting reaches new sessions only.
+    pub fn signed_chat(&self) -> bool {
+        self.signed_chat
+    }
+
+    /// Forward the chat packet held for [`SessionEvent::Chat`] to the backend
+    /// exactly as an unheld packet goes: the client's frame where nothing is
+    /// translated, in its place before every later client packet. A no-op
+    /// when nothing is held or the backend is gone.
+    pub async fn release_chat(&mut self) -> io::Result<()> {
+        if self.held_chat.is_none() {
+            return Ok(());
+        }
+        let version = self.version()?;
+        // Cancel-safe: the packet stays held until it can be queued.
+        if let Some(backend) = self.backend.as_mut() {
+            backend.flush_pending().await?;
+        }
+        if let (Some(held), Some(backend)) = (self.held_chat.take(), self.backend.as_mut()) {
+            backend.queue_forwarded(version, Direction::Serverbound, &held.packet, held.raw)?;
+        }
+        Ok(())
+    }
+
+    /// Drop the chat packet held for [`SessionEvent::Chat`]. The backend
+    /// still receives the acknowledgement the packet carried, so its count of
+    /// the messages the client has seen stays right.
+    pub async fn drop_chat(&mut self) -> io::Result<()> {
+        if self.held_chat.is_none() {
+            return Ok(());
+        }
+        let version = self.version()?;
+        if let Some(backend) = self.backend.as_mut() {
+            backend.flush_pending().await?;
+        }
+        if let (Some(held), Some(backend)) = (self.held_chat.take(), self.backend.as_mut())
+            && let Some(acknowledgement) = held.acknowledgement
+        {
+            backend.queue(version, Direction::Serverbound, &acknowledgement)?;
+        }
+        Ok(())
     }
 
     /// Reserve the BungeeCord compatibility channel for trusted backend requests.
@@ -873,6 +942,8 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                             // Dropped: the client asks again for its next keystroke.
                             // Dialog clicks are dropped like commands: the old world is going away.
                             SessionEvent::Packet | SessionEvent::ProxyCommand(_) | SessionEvent::Suggestions(_) | SessionEvent::BungeeCord(_) | SessionEvent::Dialog(_) => {}
+                            // Nobody can ask the hook here, so chat is not let through.
+                            SessionEvent::Chat(_) => self.drop_chat().await?,
                             SessionEvent::BackendClosed | SessionEvent::BackendFailed => {}
                             SessionEvent::ClientClosed => return Err(io::Error::new(
                                 io::ErrorKind::UnexpectedEof, "client closed during replacement login")),
@@ -1117,6 +1188,8 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                     | SessionEvent::BungeeCord(_)
                     | SessionEvent::Dialog(_),
                 )) => {}
+                // Nobody can ask the hook here, so chat is not let through.
+                Poll::Ready(Ok(SessionEvent::Chat(_))) => self.drop_chat().await?,
                 Poll::Ready(Ok(SessionEvent::BackendClosed | SessionEvent::BackendFailed)) => {
                     return Ok(());
                 }
@@ -1588,6 +1661,8 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
     /// A backend EOF returns to the owner to attach another backend or disconnect.
     pub async fn forward(&mut self) -> io::Result<SessionEvent> {
         let version = self.version()?;
+        // An owner that did not answer a held chat packet has not allowed it.
+        self.drop_chat().await?;
         loop {
             let backend = self
                 .backend
@@ -1745,6 +1820,34 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                             backend.queue(version, Direction::Serverbound, &acknowledgement)?;
                         }
                         return Ok(SessionEvent::ProxyCommand(command));
+                    }
+                    // What is left of chat is the backend's: messages, and
+                    // commands neither Rift nor a plugin owns. A `chat` hook
+                    // sees it first, on the client's own protocol, when
+                    // dropping it is safe: this session's signing material
+                    // was withheld, or the packet carries no signature.
+                    if phase == State::Play
+                        && let Some(caps) = version.switching()
+                        && caps.is_chat(&packet)
+                        && self
+                            .extension
+                            .as_ref()
+                            .is_some_and(|extension| extension.handles_chat())
+                        && let Some(attempt) = caps.parse_chat(&packet)?
+                        && (!self.signed_chat || !attempt.signed)
+                    {
+                        self.held_chat = Some(HeldPacket {
+                            packet,
+                            raw,
+                            acknowledgement: attempt.ack,
+                        });
+                        return Ok(SessionEvent::Chat(HeldChat {
+                            kind: match attempt.kind {
+                                protocol::ChatKind::Message => crate::extensions::ChatKind::Message,
+                                protocol::ChatKind::Command => crate::extensions::ChatKind::Command,
+                            },
+                            text: attempt.text,
+                        }));
                     }
                     // Untranslated packets reach the backend as the client framed them.
                     backend.queue_forwarded(version, Direction::Serverbound, &packet, raw)?;

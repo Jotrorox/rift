@@ -50,6 +50,16 @@ impl Drop for Process {
 /// An online-mode proxy in front of `backend`. BungeeCord forwarding puts the
 /// verified identity in the backend handshake, where the test can read it.
 fn proxy(backend: SocketAddr, session_url: Option<&str>) -> Process {
+    proxy_with(backend, session_url, "", "")
+}
+
+/// [`proxy`] with more `authentication` fields and top-level settings.
+fn proxy_with(
+    backend: SocketAddr,
+    session_url: Option<&str>,
+    authentication: &str,
+    settings: &str,
+) -> Process {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let path = std::env::temp_dir().join(format!(
         "rift-session-server-{}-{}",
@@ -64,8 +74,9 @@ fn proxy(backend: SocketAddr, session_url: Option<&str>) -> Process {
             "return {{
             listeners = {{ public = '127.0.0.1:0' }},
             backends = {{ paper = '{backend}' }}, routes = {{ public = 'paper' }},
-            authentication = {{ online_mode = true, timeout_ms = 5000 }},
+            authentication = {{ online_mode = true, timeout_ms = 5000, {authentication} }},
             forwarding = {{ mode = 'bungeecord' }},
+            {settings}
         }}"
         ),
     )
@@ -227,6 +238,32 @@ fn backend(listener: TcpListener) -> thread::JoinHandle<String> {
 
 /// A 1.8 client's login up to the first packet after encryption starts.
 async fn login(address: SocketAddr, name: &str) -> Packet {
+    connect(address, name).await.1
+}
+
+/// A logged-in 1.8 client's connection.
+struct Bot {
+    stream: CryptoStream<tokio::net::TcpStream>,
+    codec: Codec,
+    reader: Reader,
+}
+
+impl Bot {
+    async fn send(&mut self, packet: &Packet) {
+        self.codec.write(&mut self.stream, packet).await.unwrap();
+    }
+
+    async fn receive(&mut self) -> Packet {
+        self.reader
+            .read(&mut self.stream, self.codec)
+            .await
+            .unwrap()
+            .unwrap()
+    }
+}
+
+/// [`login`], keeping the connection.
+async fn connect(address: SocketAddr, name: &str) -> (Bot, Packet) {
     use aws_lc_rs::rsa::{Pkcs1PublicEncryptingKey, PublicEncryptingKey};
     let mut stream = CryptoStream::new(tokio::net::TcpStream::connect(address).await.unwrap());
     let mut codec = Codec::default();
@@ -270,10 +307,83 @@ async fn login(address: SocketAddr, name: &str) -> Packet {
     loop {
         let packet = reader.read(&mut stream, codec).await.unwrap().unwrap();
         if packet.id != 3 {
-            return packet;
+            let bot = Bot {
+                stream,
+                codec,
+                reader,
+            };
+            return (bot, packet);
         }
         codec.set_compression(read_varint(&mut packet.data.as_slice()).unwrap());
     }
+}
+
+/// [`backend`] that goes on to report the text of every 1.8 Chat packet the
+/// player's connection delivers.
+fn chat_backend(listener: TcpListener) -> mpsc::Receiver<String> {
+    let (sender, chat) = mpsc::channel();
+    thread::spawn(move || {
+        let mut socket = accept(&listener);
+        let handshake = read_packet(&mut socket);
+        let mut data = handshake.data.as_slice();
+        read_varint(&mut data).unwrap();
+        let hostname = read_string(&mut data, 32767).unwrap().to_owned();
+        let login = read_packet(&mut socket);
+        let name = read_string(&mut login.data.as_slice(), 16)
+            .unwrap()
+            .to_owned();
+        let id = hostname.split('\0').nth(2).expect(&hostname);
+        let mut success = Vec::new();
+        write_string(
+            &format!(
+                "{}-{}-{}-{}-{}",
+                &id[..8],
+                &id[8..12],
+                &id[12..16],
+                &id[16..20],
+                &id[20..]
+            ),
+            &mut success,
+        );
+        write_string(&name, &mut success);
+        socket
+            .write_all(&Codec::default().encode(&Packet::new(2, success)).unwrap())
+            .unwrap();
+        socket.set_read_timeout(None).unwrap();
+        loop {
+            let mut length = 0usize;
+            let mut shift = 0;
+            let mut byte = [0];
+            loop {
+                if socket.read_exact(&mut byte).is_err() {
+                    return;
+                }
+                length |= usize::from(byte[0] & 127) << shift;
+                shift += 7;
+                if byte[0] & 128 == 0 {
+                    break;
+                }
+            }
+            let mut body = vec![0; length];
+            if socket.read_exact(&mut body).is_err() {
+                return;
+            }
+            let packet = Packet::from_body(&body).unwrap();
+            if packet.id == 1 {
+                let text = read_string(&mut packet.data.as_slice(), 32767).unwrap();
+                if sender.send(text.to_owned()).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+    chat
+}
+
+fn chat(text: &str) -> Packet {
+    let mut data = Vec::new();
+    write_string(text, &mut data);
+    Packet::new(1, data)
 }
 
 fn block_on<T>(future: impl Future<Output = T>) -> T {
@@ -334,6 +444,66 @@ fn bot_logs_in_through_a_local_session_server() {
     let fields: Vec<_> = hostname.split('\0').collect();
     assert_eq!(fields[..3], ["localhost", "127.0.0.1", VERIFIED_ID]);
     assert!(fields[3].contains("fixture-skin"), "{hostname:?}");
+}
+
+/// The whole path of the `chat` hook, from the listener to the backend: a
+/// denied message and a denied backend command stop at the proxy and the
+/// player is told why; what the hook lets through arrives, in order.
+#[test]
+fn a_chat_hook_drops_what_it_denies_and_tells_the_player() {
+    let (sessions, session_address) = local_listener();
+    let (paper, paper_address) = local_listener();
+    let url = format!("http://{session_address}/session/minecraft/hasJoined");
+    let body = serde_json::json!({"id": VERIFIED_ID, "name": "Player", "properties": []});
+    let sessions = session_server(sessions, 200, body.to_string());
+    let delivered = chat_backend(paper);
+    let hook = "extensions = { api_version = 2, chat = function(ctx)
+        if ctx.kind == 'message' and ctx.text == 'muted' then return { deny = 'You are muted.' } end
+        if ctx.kind == 'command' and ctx.command == 'nick' then
+            return { deny = { text = 'No /nick ' .. ctx.args, color = 'red' } }
+        end
+    end },";
+    let process = proxy_with(paper_address, Some(&url), "signed_chat = false", hook);
+    let (listener, _) = process.listener();
+
+    let notices = block_on(async {
+        let (mut bot, success) = connect(listener, "Player").await;
+        assert_eq!(success.id, 2, "{success:?}");
+        let mut notices = Vec::new();
+        for text in ["before", "muted", "/nick Admin", "/home", "after"] {
+            bot.send(&chat(text)).await;
+        }
+        // 1.8 Chat Message: a JSON text and a position byte.
+        while notices.len() < 2 {
+            let packet = bot.receive().await;
+            if packet.id == 2 {
+                let json = read_string(&mut packet.data.as_slice(), 32767).unwrap();
+                notices.push(json.to_owned());
+            }
+        }
+        notices
+    });
+    sessions.join().unwrap();
+    assert!(notices[0].contains("You are muted."), "{notices:?}");
+    assert!(notices[1].contains("No /nick Admin"), "{notices:?}");
+    let arrived: Vec<_> = (0..3)
+        .map(|_| delivered.recv_timeout(Duration::from_secs(10)).unwrap())
+        .collect();
+    assert_eq!(arrived, ["before", "/home", "after"]);
+    assert!(delivered.recv_timeout(Duration::from_millis(200)).is_err());
+}
+
+/// A configuration whose script handles chat does not load while chat is
+/// signed.
+#[test]
+fn a_script_chat_hook_fails_startup_while_chat_is_signed() {
+    let (_paper, paper_address) = local_listener();
+    let hook = "extensions = { api_version = 2, chat = function(ctx) end },";
+    let output = proxy_with(paper_address, None, "", hook).failure();
+    assert!(
+        output.contains("extensions.chat: the chat hook needs authentication.signed_chat = false"),
+        "{output:?}"
+    );
 }
 
 #[test]

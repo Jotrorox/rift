@@ -29,6 +29,7 @@ pub(crate) use packets::{
 pub use packets::{disconnect_component, system_component, validate_component};
 pub use state::{ConnectionState, Direction, State};
 use std::io;
+pub(crate) use switching::ChatKind;
 pub use switching::{GameMode, PlayerWorld, Suggestion};
 pub(crate) use tab_list::TabList;
 pub use tab_list::{TabEntry, TabView};

@@ -200,6 +200,7 @@ carries, such as a backend's ban screen.
 | `hub.already` | – | You are already in a hub. |
 | `command.failed` | – | Extension command failed. |
 | `command.no_permission` | – | You do not have permission to use this command. |
+| `chat.failed` | – | Your message could not be checked and was not sent. |
 | `queue.joined` | `<server>`, `<position>` | Queued for <server>. Position: <position>. |
 | `queue.left` | – | Left the queue. |
 | `queue.no_access` | – | You do not have access to that server. |

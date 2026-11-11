@@ -6,8 +6,9 @@
 //!
 //! The host binds world `base` (every import and the `handler` export that
 //! every component has) and, separately, worlds `optional` (`dialogs`),
-//! `optional-decisions` (`decisions`) and `optional-styled` (`styled`), whose
-//! exports a component built against an older 0.1 lacks; see
+//! `optional-decisions` (`decisions`), `optional-styled` (`styled`) and
+//! `optional-chat` (`chat`), whose exports a component built against an older
+//! 0.1 lacks, and `chat` every component that does not moderate chat; see
 //! [`Optional::load`].
 use super::State;
 use crate::plugins::api;
@@ -44,6 +45,17 @@ pub(super) mod optional_styled {
     wasmtime::component::bindgen!({
         path: "wit",
         world: "rift:plugin/optional-styled",
+        with: {
+            "rift:plugin/types": super::rift::plugin::types,
+        },
+    });
+}
+
+/// The optional `chat` export (since 0.1.5), sharing `base`'s types.
+pub(super) mod optional_chat {
+    wasmtime::component::bindgen!({
+        path: "wit",
+        world: "rift:plugin/optional-chat",
         with: {
             "rift:plugin/types": super::rift::plugin::types,
         },
@@ -131,6 +143,8 @@ pub(super) fn registration(registration: types::Registration) -> api::Registrati
             })
             .collect(),
         hooks: registration.hooks.into_iter().map(hook).collect(),
+        // Set by the engine from the component's exports.
+        chat: false,
     }
 }
 
@@ -346,6 +360,22 @@ pub(super) fn dialog_response(mut context: api::Context) -> types::DialogRespons
         action: dialog.action,
         values_json: serde_json::Value::Object(dialog.values).to_string(),
         payload_json: dialog.payload.map(|payload| payload.to_string()),
+    }
+}
+
+/// A chat message or backend command: `context.chat` holds it.
+pub(super) fn chat_attempt(mut context: api::Context) -> types::ChatAttempt {
+    let chat = context.chat.take().unwrap_or(api::ChatInput {
+        kind: api::ChatKind::Message,
+        text: String::new(),
+    });
+    types::ChatAttempt {
+        ctx: self::context(context),
+        kind: match chat.kind {
+            api::ChatKind::Message => types::ChatKind::Message,
+            api::ChatKind::Command => types::ChatKind::Command,
+        },
+        text: chat.text,
     }
 }
 
@@ -674,9 +704,27 @@ mod tests {
         .into_iter()
         .map(hook)
         .collect();
-        // `dialog` has no WIT case, so 0.1.0 components keep loading.
-        assert_eq!(names, api::Hook::ALL[..api::Hook::ALL.len() - 1]);
-        assert_eq!(api::Hook::ALL.last(), Some(&api::Hook::Dialog));
+        // `dialog` and `chat` have no WIT case, so 0.1.0 components keep
+        // loading.
+        assert_eq!(names, api::Hook::ALL[..api::Hook::ALL.len() - 2]);
+        assert_eq!(
+            api::Hook::ALL[api::Hook::ALL.len() - 2..],
+            [api::Hook::Dialog, api::Hook::Chat]
+        );
+        let attempt = chat_attempt(api::Context {
+            id: 9,
+            command: Some("msg".into()),
+            args: "Alex hi".into(),
+            chat: Some(api::ChatInput {
+                kind: api::ChatKind::Command,
+                text: "msg Alex hi".into(),
+            }),
+            ..Default::default()
+        });
+        assert_eq!(attempt.kind, types::ChatKind::Command);
+        assert_eq!(attempt.text, "msg Alex hi");
+        assert_eq!(attempt.ctx.command.as_deref(), Some("msg"));
+        assert_eq!(attempt.ctx.args, "Alex hi");
         let converted = context(api::Context {
             id: 9,
             name: "Alex".into(),

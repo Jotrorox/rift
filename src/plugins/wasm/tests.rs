@@ -272,6 +272,7 @@ pub(crate) async fn hello_conformance(guest: &Guest) {
     assert_eq!(
         *plugin.registration().unwrap(),
         Registration {
+            chat: false,
             commands: vec![CommandSpec {
                 name: "hello".into(),
                 permission: "hello.use".into(),
@@ -430,6 +431,37 @@ fn conformance_guest() -> Option<PathBuf> {
         .clone()
 }
 
+/// The conformance guest built with its `chat` export
+/// (`tests/fixtures/plugins/conformance-chat-rs`).
+fn conformance_chat_guest() -> Option<PathBuf> {
+    static GUEST: OnceLock<Option<PathBuf>> = OnceLock::new();
+    GUEST
+        .get_or_init(|| {
+            let wasm = build(
+                "tests/fixtures/plugins/conformance-chat-rs/Cargo.toml",
+                "conformance_chat_rs.wasm",
+            );
+            if wasm.is_none() {
+                eprintln!(
+                    "skipping the shared conformance scenarios for wasm: conformance_chat_rs.wasm unavailable (install the wasm32-wasip2 target or put it in RIFT_TEST_PLUGIN_WASM_DIR)"
+                );
+            }
+            wasm
+        })
+        .clone()
+}
+
+fn install_conformance(wasm: PathBuf, folder: &Path, name: &str, extra: &str) {
+    std::fs::copy(wasm, folder.join("plugin.wasm")).unwrap();
+    std::fs::write(
+        folder.join("plugin.toml"),
+        format!(
+            "name = \"{name}\"\nversion = \"1\"\napi = \"0.1\"\nengine = \"wasm\"\nentry = \"plugin.wasm\"\n{extra}"
+        ),
+    )
+    .unwrap();
+}
+
 /// The conformance guest as a WebAssembly plugin folder.
 struct WasmFixture;
 
@@ -440,21 +472,22 @@ impl Fixture for WasmFixture {
 
     fn install(&self, folder: &Path, name: &str, extra: &str) {
         let wasm = conformance_guest().expect("conformance_rs.wasm");
-        std::fs::copy(wasm, folder.join("plugin.wasm")).unwrap();
-        std::fs::write(
-            folder.join("plugin.toml"),
-            format!(
-                "name = \"{name}\"\nversion = \"1\"\napi = \"0.1\"\nengine = \"wasm\"\nentry = \"plugin.wasm\"\n{extra}"
-            ),
-        )
-        .unwrap();
+        install_conformance(wasm, folder, name, extra);
+    }
+
+    fn install_chat(&self, folder: &Path, name: &str, extra: &str) {
+        let wasm = conformance_chat_guest().expect("conformance_chat_rs.wasm");
+        install_conformance(wasm, folder, name, extra);
     }
 }
 
 mod shared {
     use super::*;
 
-    conformance_tests!(WasmFixture, if conformance_guest().is_some());
+    conformance_tests!(
+        WasmFixture,
+        if conformance_guest().is_some() && conformance_chat_guest().is_some()
+    );
 }
 
 #[tokio::test]
@@ -696,6 +729,35 @@ async fn invalid_artifacts_fail_with_a_reason() {
     );
     runtime.plugins().shutdown().await;
     assert!(super::precompile(&config.plugins[0]).is_err());
+}
+
+/// `rift check --strict` refuses a component that exports `chat` while chat
+/// is signed, from its exports alone; the ordinary build passes either way.
+#[tokio::test]
+async fn precompiling_a_chat_component_needs_unsigned_chat() {
+    let (Some(chat), Some(plain)) = (conformance_chat_guest(), conformance_guest()) else {
+        return;
+    };
+    let root = directory();
+    let folder = root.join("plugins/mute");
+    std::fs::create_dir_all(&folder).unwrap();
+    install_conformance(chat, &folder, "mute", "");
+    let mut spec = conformance::installed(&folder, "{}");
+    assert!(spec.signed_chat);
+    let error = super::precompile(&spec).unwrap_err();
+    assert!(
+        error.contains(
+            "plugin.wasm exports chat: the chat hook needs authentication.signed_chat = false"
+        ),
+        "{error}"
+    );
+    spec.signed_chat = false;
+    super::precompile(&spec).unwrap();
+
+    let folder = root.join("plugins/plain");
+    std::fs::create_dir_all(&folder).unwrap();
+    install_conformance(plain, &folder, "plain", "");
+    super::precompile(&conformance::installed(&folder, "{}")).unwrap();
 }
 
 #[tokio::test]

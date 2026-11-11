@@ -36,6 +36,32 @@ impl Network<'_> {
     /// Deliver a click on a dialog's plugin action to whoever showed the
     /// dialog. A failing handler is logged; the session carries on, as after
     /// a failing `join` observer.
+    /// Ask the `chat` hooks about the chat packet `session` holds, then let
+    /// it through unchanged or drop it and tell the player why. A hook that
+    /// fails or times out under a `deny` policy drops the packet too.
+    pub async fn chat<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin>(
+        &self,
+        session: &mut Session<C, B>,
+        chat: rift::session::HeldChat,
+    ) -> io::Result<()> {
+        use rift::extensions::Action;
+        const WRITE: Duration = Duration::from_secs(5);
+        let verdict = match &session.extension {
+            Some(extension) => extension.chat(chat.kind, &chat.text).await,
+            None => Ok(Action::Continue),
+        };
+        let reason = match verdict {
+            Ok(Action::Deny(reason)) => reason,
+            Ok(_) => return timeout(WRITE, session.release_chat()).await?,
+            Err(error) => {
+                eprintln!("rift: {error}");
+                catalog::notice(Notice::ChatFailed)
+            }
+        };
+        timeout(WRITE, session.drop_chat()).await??;
+        timeout(WRITE, session.send_text(&reason)).await?
+    }
+
     pub async fn dialog<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin>(
         &self,
         session: &Session<C, B>,
@@ -184,6 +210,7 @@ impl Network<'_> {
                             }
                     }
                     SessionEvent::Dialog(click) => self.dialog(session, current, event, click).await,
+                    SessionEvent::Chat(chat) => self.chat(session, chat).await?,
                     SessionEvent::ClientClosed => return Err(io::Error::new(
                         io::ErrorKind::UnexpectedEof, "client closed while destination was starting",
                     )),

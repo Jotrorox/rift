@@ -2098,3 +2098,39 @@ fn client_versions_are_set_for_the_proxy_a_backend_and_a_service_group() {
         assert!(error.contains(expected), "{options}: {error}");
     }
 }
+
+#[test]
+fn a_script_chat_hook_needs_unsigned_chat() {
+    let source = |authentication: &str, chat: &str| {
+        format!(
+            "return {{ listeners = {{ public = '127.0.0.1:0' }}, backends = {{ lobby = '127.0.0.1:1' }}, routes = {{ public = 'lobby' }}, authentication = {{ online_mode = true{authentication} }}, forwarding = {{ mode = 'velocity', secret_env = 'TEST_SECRET' }}, extensions = {{ api_version = 2, chat = {chat} }} }}"
+        )
+    };
+    let handler = "function(ctx) return { deny = 'muted' } end";
+    for authentication in ["", ", signed_chat = true"] {
+        let error = Config::from_lua(&source(authentication, handler), "chat.lua")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(
+                "extensions.chat: the chat hook needs authentication.signed_chat = false"
+            ),
+            "{error}"
+        );
+    }
+    let config = Config::from_lua(&source(", signed_chat = false", handler), "chat.lua").unwrap();
+    let extensions = config.extensions.as_ref().unwrap();
+    assert!(extensions.hook_names().any(|hook| hook == "chat"));
+    assert!(
+        crate::plugins::script::ScriptPlugin::new(&config).handles(crate::plugins::api::Hook::Chat)
+    );
+    // Without the handler the setting is free.
+    Config::from_lua(&source("", "nil"), "chat.lua").unwrap();
+    let error = Config::from_lua(&source(", signed_chat = false", "'mute'"), "chat.lua")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("extensions.chat must be a function"),
+        "{error}"
+    );
+}

@@ -569,6 +569,15 @@ impl SwitchingCapabilities {
         self.chat_session >= 0 && packet.id == self.chat_session
     }
 
+    /// Whether this is a serverbound chat message or command packet, by its
+    /// ID alone.
+    pub(crate) fn is_chat(self, packet: &Packet) -> bool {
+        packet.id >= 0
+            && (packet.id == self.chat
+                || packet.id == self.command
+                || packet.id == self.signed_command)
+    }
+
     /// A serverbound chat message or command, checked to its last byte, or
     /// `None` for any other packet. Layouts per protocol are those of
     /// PrismarineJS minecraft-data (tests/minecraft_data.json):

@@ -171,6 +171,40 @@
 //! [`Plugin::suggest`] and [`Plugin::status`], so implement whichever form
 //! you need. Hosts before 0.1.4 call the plain hooks; the SDK then shows the
 //! rich text as its words.
+//!
+//! # Chat
+//!
+//! [`Plugin::chat`] sees every chat message, and every command that reaches
+//! the backend, before the backend does, and may drop it (since 0.1.5, on
+//! Rift hosts that implement 0.1.5). It is the one hook a plugin opts into
+//! when it is exported, with `chat` after the type:
+//!
+//! ```no_run
+//! use rift_plugin::{Action, ChatAttempt, ChatKind, Plugin};
+//!
+//! #[derive(Default)]
+//! struct Mute {
+//!     muted: Vec<String>,
+//! }
+//!
+//! impl Plugin for Mute {
+//!     fn chat(&mut self, attempt: ChatAttempt) -> Action {
+//!         if attempt.kind == ChatKind::Message && self.muted.contains(&attempt.ctx.uuid) {
+//!             return Action::Deny("You are muted.".into());
+//!         }
+//!         Action::Continue
+//!     }
+//! }
+//!
+//! rift_plugin::export!(Mute, chat);
+//! ```
+//!
+//! Without `chat` in [`export!`] the component has no `chat` export and Rift
+//! never asks it. With it, Rift asks the plugin about every message of every
+//! player, whatever [`Registration::hooks`] lists, and refuses to start the
+//! plugin unless the proxy sets `authentication.signed_chat = false`:
+//! dropping one signed message would break the player's signature chain.
+//! Hosts before 0.1.5 load such a component and never call the hook.
 
 #![warn(missing_docs)]
 
@@ -189,10 +223,28 @@ pub mod bindings {
     });
 }
 
+/// The raw generated bindings for the optional `chat` export, which only
+/// `export!(Type, chat)` links into a component.
+#[doc(hidden)]
+#[allow(missing_docs, clippy::all)]
+pub mod chat_bindings {
+    wit_bindgen::generate!({
+        path: "wit",
+        world: "rift:plugin/optional-chat@0.1.5",
+        pub_export_macro: true,
+        export_macro_name: "__export_rift_plugin_chat",
+        default_bindings_module: "rift_plugin::chat_bindings",
+        with: {
+            "rift:plugin/types@0.1.5": crate::bindings::rift::plugin::types,
+        },
+    });
+}
+
 pub use bindings::rift::plugin::types::{
-    BossBarSpec, BusMessage, CommandSpec, Connection, Context, DialogResponse, Hook, HttpRequest,
-    HttpResponse, Level, Ping, PlayerInfo, Registration, RichStatusOverride, RichSuggestion,
-    RiftEvent, RouteDecision, StatusOverride, SuggestKind, Suggestion, TitleJsonSpec, TitleSpec,
+    BossBarSpec, BusMessage, ChatAttempt, ChatKind, CommandSpec, Connection, Context,
+    DialogResponse, Hook, HttpRequest, HttpResponse, Level, Ping, PlayerInfo, Registration,
+    RichStatusOverride, RichSuggestion, RiftEvent, RouteDecision, StatusOverride, SuggestKind,
+    Suggestion, TitleJsonSpec, TitleSpec,
 };
 
 /// The answer to a decision hook: the contract's `decision` variant, which is
@@ -305,6 +357,20 @@ pub trait Plugin: Default + 'static {
     /// [`players::show_dialog`]. Delivered without being listed in
     /// [`Registration::hooks`].
     fn dialog(&mut self, response: DialogResponse) {}
+
+    /// A player sent a chat message, or a command that neither Rift nor a
+    /// plugin owns, and the backend has not seen it yet (since 0.1.5).
+    /// Accepts `continue`, which lets it through unchanged, and `deny`
+    /// ([`Action::Deny`], [`Action::deny_json`]), which drops it and shows
+    /// the player the text.
+    ///
+    /// Called only for a plugin exported with `export!(Type, chat)`; see the
+    /// [crate documentation](crate#chat) for what that requires of the
+    /// proxy. For a command, `attempt.ctx.command` is the root name and
+    /// `attempt.ctx.args` the rest.
+    fn chat(&mut self, attempt: ChatAttempt) -> Action {
+        Action::Continue
+    }
 }
 
 /// Exports a [`Plugin`] implementation as the component's
@@ -313,12 +379,22 @@ pub trait Plugin: Default + 'static {
 /// ```ignore
 /// rift_plugin::export!(MyPlugin);
 /// ```
+///
+/// `export!(MyPlugin, chat)` also exports [`Plugin::chat`] as the optional
+/// `rift:plugin/chat` interface. Rift asks a component with that export about
+/// every chat message and starts it only with
+/// `authentication.signed_chat = false`, so add it only to a plugin that
+/// moderates chat.
 #[macro_export]
 macro_rules! export {
     ($plugin:ty) => {
         #[doc(hidden)]
         type __RiftPluginExport = $crate::__private::Adapter<$plugin>;
         $crate::bindings::__export_rift_plugin!(__RiftPluginExport with_types_in $crate::bindings);
+    };
+    ($plugin:ty, chat) => {
+        $crate::export!($plugin);
+        $crate::chat_bindings::__export_rift_plugin_chat!(__RiftPluginExport with_types_in $crate::chat_bindings);
     };
 }
 
@@ -1166,6 +1242,12 @@ pub mod __private {
     impl<P: Plugin> crate::bindings::exports::rift::plugin::dialogs::Guest for Adapter<P> {
         fn dialog(response: DialogResponse) {
             with(|p: &mut P| p.dialog(response))
+        }
+    }
+
+    impl<P: Plugin> crate::chat_bindings::exports::rift::plugin::chat::Guest for Adapter<P> {
+        fn chat(attempt: ChatAttempt) -> Action {
+            with(|p: &mut P| p.chat(attempt))
         }
     }
 

@@ -1428,6 +1428,15 @@ pub async fn handle(
                         .dialog(&session, &current_backend, event, click)
                         .await;
                 }
+                Ok(SessionEvent::Chat(chat)) => {
+                    let live_snapshot = snapshot.latest();
+                    let network = Network {
+                        snapshot: &live_snapshot,
+                        addresses: &live_snapshot.addresses,
+                        metrics: &metrics,
+                    };
+                    network.chat(&mut session, chat).await?;
+                }
                 Ok(SessionEvent::Disconnected) => break,
                 Ok(SessionEvent::ClientClosed) => {
                     client_closed = true;
