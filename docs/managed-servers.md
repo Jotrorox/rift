@@ -176,6 +176,13 @@ may also omit `command`; Rift then runs
 `memory_mb` cannot be combined with an explicit `command`. `{name}`, `{group}` and `{port}`
 expand in the directory and command arguments for each instance.
 
+`translation` names the client versions Rift
+[translates](translation.md#which-versions-a-backend-takes) for the group's
+instances, for example `translation = "newer"`, `translation = false` or
+`translation = { "1.20.*", ">=1.21.4" }`. Without it the group follows
+`translation.clients`. It can be changed while instances run, here or under
+*Groups & templates* in the web interface.
+
 Without an asset template, creation makes a working directory when needed;
 prepare its jar, EULA acceptance, plugins and backend settings before starting.
 An absolute jar path can share a jar across these directories. This existing

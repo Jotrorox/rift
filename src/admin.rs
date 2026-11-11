@@ -365,7 +365,17 @@ pub(crate) fn service_groups(snapshot: &Snapshot) -> Value {
             })
             .collect();
         let phase = |phase: rift::managed::Phase| members.iter().filter(|server| server.state == phase).count();
+        // The client versions translated for the group's instances: its own
+        // setting, or the proxy-wide one it inherits.
+        let translation = &snapshot.config.translation;
+        let clients = group.translation.as_ref().unwrap_or(&translation.clients);
         json!({
+            "translation":{
+                "enabled":translation.enabled,
+                "inherited":group.translation.is_none(),
+                "clients":clients.to_json(),
+                "summary":if translation.enabled { clients.summary() } else { "Off for the whole proxy".to_owned() },
+            },
             "suspended":state.suspended,
             "mode":state.mode.as_str(),
             "dev_permission":rift::config::GroupMode::dev_permission(name),

@@ -677,5 +677,217 @@
     "algorithm": "sha1",
     "checksum": "145ff0858209bcfc164859ba735d4199aafa1eea",
     "filename": "vanilla-1.20.6.jar"
+  },
+  "paper-1.12.2": {
+    "version": "1.12.2-1620",
+    "protocol": 340,
+    "url": "https://fill-data.papermc.io/v1/objects/3a2041807f492dcdc34ebb324a287414946e3e05ec3df6fd03f5b5f7d9afc210/paper-1.12.2-1620.jar",
+    "algorithm": "sha256",
+    "checksum": "3a2041807f492dcdc34ebb324a287414946e3e05ec3df6fd03f5b5f7d9afc210",
+    "filename": "paper-1.12.2-1620.jar",
+    "java": 8
+  },
+  "paper-1.13.2": {
+    "version": "1.13.2-657",
+    "protocol": 404,
+    "url": "https://fill-data.papermc.io/v1/objects/11e828d0565ab76a0a0e180c056364a95de44958cfd6a6af3f9b1dc70b03e9cd/paper-1.13.2-657.jar",
+    "algorithm": "sha256",
+    "checksum": "11e828d0565ab76a0a0e180c056364a95de44958cfd6a6af3f9b1dc70b03e9cd",
+    "filename": "paper-1.13.2-657.jar",
+    "java": 8
+  },
+  "paper-1.14.4": {
+    "version": "1.14.4-245",
+    "protocol": 498,
+    "url": "https://fill-data.papermc.io/v1/objects/bd8ec5cdb22370d37816a6de26798df3d2b0d6f9c7c96c88ca45a1303fea50e8/paper-1.14.4-245.jar",
+    "algorithm": "sha256",
+    "checksum": "bd8ec5cdb22370d37816a6de26798df3d2b0d6f9c7c96c88ca45a1303fea50e8",
+    "filename": "paper-1.14.4-245.jar",
+    "java": 8
+  },
+  "paper-1.15.2": {
+    "version": "1.15.2-393",
+    "protocol": 578,
+    "url": "https://fill-data.papermc.io/v1/objects/bd2dd6f2cc489cf9e2bb800cb4fb6d63e9d293945d3ac10b09dd9c6098fa9f34/paper-1.15.2-393.jar",
+    "algorithm": "sha256",
+    "checksum": "bd2dd6f2cc489cf9e2bb800cb4fb6d63e9d293945d3ac10b09dd9c6098fa9f34",
+    "filename": "paper-1.15.2-393.jar",
+    "java": 8
+  },
+  "paper-1.16.5": {
+    "version": "1.16.5-794",
+    "protocol": 754,
+    "url": "https://fill-data.papermc.io/v1/objects/e67da4851d08cde378ab2b89be58849238c303351ed2482181a99c2c2b489276/paper-1.16.5-794.jar",
+    "algorithm": "sha256",
+    "checksum": "e67da4851d08cde378ab2b89be58849238c303351ed2482181a99c2c2b489276",
+    "filename": "paper-1.16.5-794.jar",
+    "java": 8
+  },
+  "paper-1.17.1": {
+    "version": "1.17.1-411",
+    "protocol": 756,
+    "url": "https://fill-data.papermc.io/v1/objects/6cc1ee2f94253ce10b5374ed85fffc735a97d8f1b64db293683dfa24dd3cc05f/paper-1.17.1-411.jar",
+    "algorithm": "sha256",
+    "checksum": "6cc1ee2f94253ce10b5374ed85fffc735a97d8f1b64db293683dfa24dd3cc05f",
+    "filename": "paper-1.17.1-411.jar",
+    "java": 17
+  },
+  "paper-1.18.2": {
+    "version": "1.18.2-388",
+    "protocol": 758,
+    "url": "https://fill-data.papermc.io/v1/objects/0578f18f4d632b494b468ec56b3b414b5b56fea087ee7d39cf6dcdf4c9d01f05/paper-1.18.2-388.jar",
+    "algorithm": "sha256",
+    "checksum": "0578f18f4d632b494b468ec56b3b414b5b56fea087ee7d39cf6dcdf4c9d01f05",
+    "filename": "paper-1.18.2-388.jar",
+    "java": 17
+  },
+  "paper-1.19.4": {
+    "version": "1.19.4-550",
+    "protocol": 762,
+    "url": "https://fill-data.papermc.io/v1/objects/e587d78cba3e99ef8c4bc24cf20cc3bdbbe89e33b0b572070446af4eb6be5ccf/paper-1.19.4-550.jar",
+    "algorithm": "sha256",
+    "checksum": "e587d78cba3e99ef8c4bc24cf20cc3bdbbe89e33b0b572070446af4eb6be5ccf",
+    "filename": "paper-1.19.4-550.jar",
+    "java": 17
+  },
+  "paper-1.20.1": {
+    "version": "1.20.1-196",
+    "protocol": 763,
+    "url": "https://fill-data.papermc.io/v1/objects/234a9b32098100c6fc116664d64e36ccdb58b5b649af0f80bcccb08b0255eaea/paper-1.20.1-196.jar",
+    "algorithm": "sha256",
+    "checksum": "234a9b32098100c6fc116664d64e36ccdb58b5b649af0f80bcccb08b0255eaea",
+    "filename": "paper-1.20.1-196.jar",
+    "java": 17
+  },
+  "paper-1.20.4": {
+    "version": "1.20.4-499",
+    "protocol": 765,
+    "url": "https://fill-data.papermc.io/v1/objects/cabed3ae77cf55deba7c7d8722bc9cfd5e991201c211665f9265616d9fe5c77b/paper-1.20.4-499.jar",
+    "algorithm": "sha256",
+    "checksum": "cabed3ae77cf55deba7c7d8722bc9cfd5e991201c211665f9265616d9fe5c77b",
+    "filename": "paper-1.20.4-499.jar",
+    "java": 17
+  },
+  "paper-1.20.6": {
+    "version": "1.20.6-151",
+    "protocol": 766,
+    "url": "https://fill-data.papermc.io/v1/objects/4b011f5adb5f6c72007686a223174fce82f31aeb4b34faf4652abc840b47e640/paper-1.20.6-151.jar",
+    "algorithm": "sha256",
+    "checksum": "4b011f5adb5f6c72007686a223174fce82f31aeb4b34faf4652abc840b47e640",
+    "filename": "paper-1.20.6-151.jar",
+    "java": 21
+  },
+  "paper-1.21.1": {
+    "version": "1.21.1-133",
+    "protocol": 767,
+    "url": "https://fill-data.papermc.io/v1/objects/39bd8c00b9e18de91dcabd3cc3dcfa5328685a53b7187a2f63280c22e2d287b9/paper-1.21.1-133.jar",
+    "algorithm": "sha256",
+    "checksum": "39bd8c00b9e18de91dcabd3cc3dcfa5328685a53b7187a2f63280c22e2d287b9",
+    "filename": "paper-1.21.1-133.jar",
+    "java": 21
+  },
+  "paper-1.21.4": {
+    "version": "1.21.4-232",
+    "protocol": 769,
+    "url": "https://fill-data.papermc.io/v1/objects/5ee4f542f628a14c644410b08c94ea42e772ef4d29fe92973636b6813d4eaffc/paper-1.21.4-232.jar",
+    "algorithm": "sha256",
+    "checksum": "5ee4f542f628a14c644410b08c94ea42e772ef4d29fe92973636b6813d4eaffc",
+    "filename": "paper-1.21.4-232.jar",
+    "java": 21
+  },
+  "paper-1.21.8": {
+    "version": "1.21.8-60",
+    "protocol": 772,
+    "url": "https://fill-data.papermc.io/v1/objects/8de7c52c3b02403503d16fac58003f1efef7dd7a0256786843927fa92ee57f1e/paper-1.21.8-60.jar",
+    "algorithm": "sha256",
+    "checksum": "8de7c52c3b02403503d16fac58003f1efef7dd7a0256786843927fa92ee57f1e",
+    "filename": "paper-1.21.8-60.jar",
+    "java": 21
+  },
+  "paper-1.21.11": {
+    "version": "1.21.11-132",
+    "protocol": 774,
+    "url": "https://fill-data.papermc.io/v1/objects/5ffef465eeeb5f2a3c23a24419d97c51afd7dbb4923ff42df9a3f58bba1ccfba/paper-1.21.11-132.jar",
+    "algorithm": "sha256",
+    "checksum": "5ffef465eeeb5f2a3c23a24419d97c51afd7dbb4923ff42df9a3f58bba1ccfba",
+    "filename": "paper-1.21.11-132.jar",
+    "java": 21
+  },
+  "paper-26.1.2": {
+    "version": "26.1.2-74",
+    "protocol": 775,
+    "url": "https://fill-data.papermc.io/v1/objects/1d70b1dab9cf4a6de615209a536f3a45a2186240253c428213ce2188ab95e5f7/paper-26.1.2-74.jar",
+    "algorithm": "sha256",
+    "checksum": "1d70b1dab9cf4a6de615209a536f3a45a2186240253c428213ce2188ab95e5f7",
+    "filename": "paper-26.1.2-74.jar",
+    "java": 25
+  },
+  "paper-26.2": {
+    "version": "26.2-135",
+    "protocol": 776,
+    "url": "https://fill-data.papermc.io/v1/objects/ef3dbc68b013deafdbbee3bebf1ba351671ebcda94a8f136809b7532d5ba2fe1/paper-26.2-135.jar",
+    "algorithm": "sha256",
+    "checksum": "ef3dbc68b013deafdbbee3bebf1ba351671ebcda94a8f136809b7532d5ba2fe1",
+    "filename": "paper-26.2-135.jar",
+    "java": 25
+  },
+  "paper-26.3": {
+    "version": "26.3-246",
+    "protocol": 777,
+    "url": "https://fill-data.papermc.io/v1/objects/d158542561e440c4026be7ccb32f551ee88313864792f38ea0ce5d1b88f1b27c/paper-26.3-246.jar",
+    "algorithm": "sha256",
+    "checksum": "d158542561e440c4026be7ccb32f551ee88313864792f38ea0ce5d1b88f1b27c",
+    "filename": "paper-26.3-246.jar",
+    "java": 25
+  },
+  "pumpkin-macos-arm64": {
+    "version": "0.2.0+26.3-26.51",
+    "protocol": 777,
+    "source_commit": "204a94ed895f041a845630d5a23c094705a0704e",
+    "url": "https://github.com/Pumpkin-MC/Pumpkin/releases/download/0.2.0%2B26.3-26.51/pumpkin-ARM64-macOS",
+    "algorithm": "sha256",
+    "checksum": "7c4e7d61ee31f83faa578b9969f12c29c74281a4129f6aefea0bd8de309a4226",
+    "filename": "pumpkin-0.2.0-macos-arm64",
+    "java": 25
+  },
+  "spigot-1.12.2": {
+    "version": "1.12.2",
+    "protocol": 340,
+    "build": "buildtools",
+    "url": "https://hub.spigotmc.org/jenkins/job/BuildTools/lastSuccessfulBuild/artifact/target/BuildTools.jar",
+    "filename": "spigot-1.12.2.jar",
+    "java": 8
+  },
+  "spigot-1.16.5": {
+    "version": "1.16.5",
+    "protocol": 754,
+    "build": "buildtools",
+    "url": "https://hub.spigotmc.org/jenkins/job/BuildTools/lastSuccessfulBuild/artifact/target/BuildTools.jar",
+    "filename": "spigot-1.16.5.jar",
+    "java": 8
+  },
+  "spigot-1.20.4": {
+    "version": "1.20.4",
+    "protocol": 765,
+    "build": "buildtools",
+    "url": "https://hub.spigotmc.org/jenkins/job/BuildTools/lastSuccessfulBuild/artifact/target/BuildTools.jar",
+    "filename": "spigot-1.20.4.jar",
+    "java": 17
+  },
+  "spigot-1.21.11": {
+    "version": "1.21.11",
+    "protocol": 774,
+    "build": "buildtools",
+    "url": "https://hub.spigotmc.org/jenkins/job/BuildTools/lastSuccessfulBuild/artifact/target/BuildTools.jar",
+    "filename": "spigot-1.21.11.jar",
+    "java": 21
+  },
+  "spigot-26.3": {
+    "version": "26.3",
+    "protocol": 777,
+    "build": "buildtools",
+    "url": "https://hub.spigotmc.org/jenkins/job/BuildTools/lastSuccessfulBuild/artifact/target/BuildTools.jar",
+    "filename": "spigot-26.3.jar",
+    "java": 25
   }
 }

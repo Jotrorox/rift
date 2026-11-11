@@ -791,6 +791,82 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  translation-matrix:
+    name: Translation across versions (${{ matrix.server }})
+    # Started by hand until it has proven itself on these runners; the cells
+    # pass on a developer machine (docs/translation.md).
+    if: github.event_name == 'workflow_dispatch'
+    needs: build-linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - server: vanilla-1.12.2
+            clients: 1.16.5,26.3
+          - server: vanilla-1.16.5
+            clients: 1.12.2,1.20.1
+          - server: vanilla-1.20.1
+            clients: 1.12.2,1.21.4
+          - server: vanilla-1.21.4
+            clients: 1.16.5,26.3
+          - server: vanilla-26.3
+            clients: 1.12.2,1.20.1,1.21.4
+    env:
+      RIFT_VIA_CACHE: ${{ github.workspace }}/target/rift-via
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Download this run's Linux executable
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: rift-linux-${{ github.sha }}
+          path: ${{ runner.temp }}
+      - name: Extract executable
+        run: |
+          mkdir -p target/release
+          tar -xzf "$RUNNER_TEMP/rift-linux.tar.gz" -C target/release
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      # The server runs on its own Java; naming registries needs the data
+      # generator of the server's and of each client's version.
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: temurin
+          java-version: |
+            8
+            17
+            21
+            25
+      - name: Point the harness at each Java runtime
+        run: |
+          {
+            echo "RIFT_JAVA_8=$JAVA_HOME_8_X64/bin/java"
+            echo "RIFT_JAVA_17=$JAVA_HOME_17_X64/bin/java"
+            echo "RIFT_JAVA_21=$JAVA_HOME_21_X64/bin/java"
+            echo "RIFT_JAVA_25=$JAVA_HOME_25_X64/bin/java"
+          } >> "$GITHUB_ENV"
+      - name: Play translated sessions on a real server through Rift
+        env:
+          SERVER: ${{ matrix.server }}
+          CLIENTS: ${{ matrix.clients }}
+        run: >-
+          python tests/translation_matrix.py --accept-eula
+          --server "$SERVER" --client "$CLIENTS"
+          --via rift --binary target/release/rift
+      - name: Preserve server, proxy and client logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: translation-matrix-${{ matrix.server }}
+          path: |
+            target/minecraft/runs/*/*.log
+            target/minecraft/runs/*/result.json
+            target/minecraft/runs/*/rift.lua
+          if-no-files-found: warn
+          retention-days: 14
+
   benchmark:
     name: Loopback performance report
     needs: build-linux

@@ -1,0 +1,203 @@
+{
+  "block": {
+    "down": {
+      "chiseled_cinnabar": "chiseled_red_sandstone",
+      "chiseled_sulfur": "chiseled_sandstone",
+      "cinnabar": "red_sandstone",
+      "cinnabar_brick_slab": "red_nether_brick_slab",
+      "cinnabar_brick_stairs": "red_nether_brick_stairs",
+      "cinnabar_brick_wall": "red_nether_brick_wall",
+      "cinnabar_bricks": "red_nether_bricks",
+      "cinnabar_slab": "red_sandstone_slab",
+      "cinnabar_stairs": "red_sandstone_stairs",
+      "cinnabar_wall": "red_sandstone_wall",
+      "polished_cinnabar": "smooth_red_sandstone",
+      "polished_cinnabar_slab": "smooth_red_sandstone_slab",
+      "polished_cinnabar_stairs": "smooth_red_sandstone_stairs",
+      "polished_cinnabar_wall": "red_sandstone_wall",
+      "polished_sulfur": "smooth_sandstone",
+      "polished_sulfur_slab": "smooth_sandstone_slab",
+      "polished_sulfur_stairs": "smooth_sandstone_stairs",
+      "polished_sulfur_wall": "sandstone_wall",
+      "potent_sulfur": "yellow_terracotta",
+      "sulfur": "sandstone",
+      "sulfur_brick_slab": "end_stone_brick_slab",
+      "sulfur_brick_stairs": "end_stone_brick_stairs",
+      "sulfur_brick_wall": "end_stone_brick_wall",
+      "sulfur_bricks": "end_stone_bricks",
+      "sulfur_slab": "sandstone_slab",
+      "sulfur_spike": "pointed_dripstone",
+      "sulfur_stairs": "sandstone_stairs",
+      "sulfur_wall": "sandstone_wall"
+    }
+  },
+  "block_state": {
+    "down": {
+      "chiseled_cinnabar": "chiseled_red_sandstone",
+      "chiseled_sulfur": "chiseled_sandstone",
+      "cinnabar": "red_sandstone",
+      "cinnabar_brick_slab": "red_nether_brick_slab",
+      "cinnabar_brick_stairs": "red_nether_brick_stairs",
+      "cinnabar_brick_wall": "red_nether_brick_wall",
+      "cinnabar_bricks": "red_nether_bricks",
+      "cinnabar_slab": "red_sandstone_slab",
+      "cinnabar_stairs": "red_sandstone_stairs",
+      "cinnabar_wall": "red_sandstone_wall",
+      "polished_cinnabar": "smooth_red_sandstone",
+      "polished_cinnabar_slab": "smooth_red_sandstone_slab",
+      "polished_cinnabar_stairs": "smooth_red_sandstone_stairs",
+      "polished_cinnabar_wall": "red_sandstone_wall",
+      "polished_sulfur": "smooth_sandstone",
+      "polished_sulfur_slab": "smooth_sandstone_slab",
+      "polished_sulfur_stairs": "smooth_sandstone_stairs",
+      "polished_sulfur_wall": "sandstone_wall",
+      "potent_sulfur": "yellow_terracotta",
+      "sulfur": "sandstone",
+      "sulfur_brick_slab": "end_stone_brick_slab",
+      "sulfur_brick_stairs": "end_stone_brick_stairs",
+      "sulfur_brick_wall": "end_stone_brick_wall",
+      "sulfur_bricks": "end_stone_bricks",
+      "sulfur_slab": "sandstone_slab",
+      "sulfur_spike": "pointed_dripstone",
+      "sulfur_stairs": "sandstone_stairs",
+      "sulfur_wall": "sandstone_wall"
+    }
+  },
+  "block_type": {
+    "renames": {
+      "weathering_copper_trap_door": "weathering_copper_trapdoor"
+    }
+  },
+  "command_argument_type": {
+    "renames": {
+      "color": "team_color"
+    }
+  },
+  "entity_type": {
+    "down": {
+      "sulfur_cube": "slime"
+    }
+  },
+  "game_event": {
+    "down": {
+      "bounce": "hit_ground"
+    }
+  },
+  "item": {
+    "down": {
+      "chiseled_cinnabar": "chiseled_red_sandstone",
+      "chiseled_sulfur": "chiseled_sandstone",
+      "cinnabar": "red_sandstone",
+      "cinnabar_brick_slab": "red_nether_brick_slab",
+      "cinnabar_brick_stairs": "red_nether_brick_stairs",
+      "cinnabar_brick_wall": "red_nether_brick_wall",
+      "cinnabar_bricks": "red_nether_bricks",
+      "cinnabar_slab": "red_sandstone_slab",
+      "cinnabar_stairs": "red_sandstone_stairs",
+      "cinnabar_wall": "red_sandstone_wall",
+      "music_disc_bounce": "music_disc_chirp",
+      "polished_cinnabar": "smooth_red_sandstone",
+      "polished_cinnabar_slab": "smooth_red_sandstone_slab",
+      "polished_cinnabar_stairs": "smooth_red_sandstone_stairs",
+      "polished_cinnabar_wall": "red_sandstone_wall",
+      "polished_sulfur": "smooth_sandstone",
+      "polished_sulfur_slab": "smooth_sandstone_slab",
+      "polished_sulfur_stairs": "smooth_sandstone_stairs",
+      "polished_sulfur_wall": "sandstone_wall",
+      "potent_sulfur": "yellow_terracotta",
+      "sulfur": "sandstone",
+      "sulfur_brick_slab": "end_stone_brick_slab",
+      "sulfur_brick_stairs": "end_stone_brick_stairs",
+      "sulfur_brick_wall": "end_stone_brick_wall",
+      "sulfur_bricks": "end_stone_bricks",
+      "sulfur_cube_bucket": "axolotl_bucket",
+      "sulfur_cube_spawn_egg": "slime_spawn_egg",
+      "sulfur_slab": "sandstone_slab",
+      "sulfur_spike": "pointed_dripstone",
+      "sulfur_stairs": "sandstone_stairs",
+      "sulfur_wall": "sandstone_wall"
+    }
+  },
+  "particle_type": {
+    "down": {
+      "geyser": "cloud",
+      "geyser_base": "poof",
+      "geyser_plume": "cloud",
+      "geyser_poof": "poof",
+      "noxious_gas": "smoke",
+      "noxious_gas_cloud": "large_smoke",
+      "sulfur_bubbles": "bubble",
+      "sulfur_cube_goo": "item_slime"
+    }
+  },
+  "sound_event": {
+    "down": {
+      "block.cinnabar.break": "block.stone.break",
+      "block.cinnabar.fall": "block.stone.fall",
+      "block.cinnabar.hit": "block.stone.hit",
+      "block.cinnabar.place": "block.stone.place",
+      "block.cinnabar.step": "block.stone.step",
+      "block.potent_sulfur.break": "block.stone.break",
+      "block.potent_sulfur.fall": "block.stone.fall",
+      "block.potent_sulfur.geyser_continuous_eruption": "block.lava.ambient",
+      "block.potent_sulfur.geyser_continuous_eruption_active": "block.lava.ambient",
+      "block.potent_sulfur.geyser_eruption": "block.lava.extinguish",
+      "block.potent_sulfur.geyser_eruption_active": "block.lava.extinguish",
+      "block.potent_sulfur.hit": "block.stone.hit",
+      "block.potent_sulfur.noxious_gas": "block.fire.extinguish",
+      "block.potent_sulfur.place": "block.stone.place",
+      "block.potent_sulfur.step": "block.stone.step",
+      "block.sulfur.break": "block.stone.break",
+      "block.sulfur.fall": "block.stone.fall",
+      "block.sulfur.hit": "block.stone.hit",
+      "block.sulfur.place": "block.stone.place",
+      "block.sulfur.step": "block.stone.step",
+      "block.sulfur_spike.break": "block.pointed_dripstone.break",
+      "block.sulfur_spike.fall": "block.pointed_dripstone.fall",
+      "block.sulfur_spike.hit": "block.pointed_dripstone.hit",
+      "block.sulfur_spike.land": "block.pointed_dripstone.land",
+      "block.sulfur_spike.place": "block.pointed_dripstone.place",
+      "block.sulfur_spike.step": "block.pointed_dripstone.step",
+      "entity.small_sulfur_cube.death": "entity.slime.death_small",
+      "entity.small_sulfur_cube.eat": "entity.generic.eat",
+      "entity.small_sulfur_cube.hurt": "entity.slime.hurt_small",
+      "entity.small_sulfur_cube.jump": "entity.slime.jump_small",
+      "entity.small_sulfur_cube.squish": "entity.slime.squish_small",
+      "entity.sulfur_cube.absorb": "entity.slime.attack",
+      "entity.sulfur_cube.bounce": "entity.slime.jump",
+      "entity.sulfur_cube.bouncy.hit": "entity.slime.squish",
+      "entity.sulfur_cube.bouncy.push": "entity.slime.squish",
+      "entity.sulfur_cube.death": "entity.slime.death",
+      "entity.sulfur_cube.eject": "entity.slime.attack",
+      "entity.sulfur_cube.explosive.hit": "entity.slime.squish",
+      "entity.sulfur_cube.explosive.push": "entity.slime.squish",
+      "entity.sulfur_cube.fast_flat.hit": "entity.slime.squish",
+      "entity.sulfur_cube.fast_flat.push": "entity.slime.squish",
+      "entity.sulfur_cube.fast_sliding.hit": "entity.slime.squish",
+      "entity.sulfur_cube.fast_sliding.push": "entity.slime.squish",
+      "entity.sulfur_cube.high_resistance.hit": "entity.slime.squish",
+      "entity.sulfur_cube.high_resistance.push": "entity.slime.squish",
+      "entity.sulfur_cube.hot.hit": "entity.slime.squish",
+      "entity.sulfur_cube.hot.push": "entity.slime.squish",
+      "entity.sulfur_cube.hurt": "entity.slime.hurt",
+      "entity.sulfur_cube.jump": "entity.slime.jump",
+      "entity.sulfur_cube.light.hit": "entity.slime.squish",
+      "entity.sulfur_cube.light.push": "entity.slime.squish",
+      "entity.sulfur_cube.regular.hit": "entity.slime.squish",
+      "entity.sulfur_cube.regular.push": "entity.slime.squish",
+      "entity.sulfur_cube.slow_bouncy.hit": "entity.slime.squish",
+      "entity.sulfur_cube.slow_bouncy.push": "entity.slime.squish",
+      "entity.sulfur_cube.slow_flat.hit": "entity.slime.squish",
+      "entity.sulfur_cube.slow_flat.push": "entity.slime.squish",
+      "entity.sulfur_cube.slow_sliding.hit": "entity.slime.squish",
+      "entity.sulfur_cube.slow_sliding.push": "entity.slime.squish",
+      "entity.sulfur_cube.squish": "entity.slime.squish",
+      "entity.sulfur_cube.sticky.hit": "entity.slime.squish",
+      "entity.sulfur_cube.sticky.push": "entity.slime.squish",
+      "item.bucket.empty_sulfur_cube": "item.bucket.empty_axolotl",
+      "item.bucket.fill_sulfur_cube": "item.bucket.fill_axolotl",
+      "music.overworld.sulfur_caves": "music.overworld.dripstone_caves",
+      "music_disc.bounce": "music_disc.chirp"
+    }
+  }
+}

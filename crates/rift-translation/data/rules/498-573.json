@@ -1,0 +1,83 @@
+{
+  "block": {
+    "down": {
+      "bee_nest": "hay_block",
+      "beehive": "barrel",
+      "honey_block": "slime_block",
+      "honeycomb_block": "yellow_terracotta"
+    }
+  },
+  "block_entity_type": {
+    "down": {
+      "beehive": "barrel"
+    }
+  },
+  "block_state": {
+    "down": {
+      "bee_nest": "hay_block",
+      "beehive": "barrel",
+      "honey_block": "slime_block",
+      "honeycomb_block": "yellow_terracotta"
+    }
+  },
+  "entity_type": {
+    "down": {
+      "bee": "parrot"
+    }
+  },
+  "item": {
+    "down": {
+      "bee_nest": "hay_block",
+      "bee_spawn_egg": "parrot_spawn_egg",
+      "beehive": "barrel",
+      "honey_block": "slime_block",
+      "honey_bottle": "potion",
+      "honeycomb": "orange_dye",
+      "honeycomb_block": "yellow_terracotta"
+    }
+  },
+  "menu": {
+    "renames": {
+      "cartography": "cartography_table"
+    }
+  },
+  "particle_type": {
+    "down": {
+      "dripping_honey": "dripping_lava",
+      "falling_honey": "falling_lava",
+      "falling_nectar": "falling_lava",
+      "landing_honey": "landing_lava"
+    }
+  },
+  "sound_event": {
+    "down": {
+      "block.beehive.drip": "entity.slime.squish_small",
+      "block.beehive.enter": "block.barrel.close",
+      "block.beehive.exit": "block.barrel.open",
+      "block.beehive.shear": "entity.sheep.shear",
+      "block.beehive.work": "block.wood.hit",
+      "block.honey_block.break": "block.slime_block.break",
+      "block.honey_block.fall": "block.slime_block.fall",
+      "block.honey_block.hit": "block.slime_block.hit",
+      "block.honey_block.place": "block.slime_block.place",
+      "block.honey_block.slide": "block.slime_block.step",
+      "block.honey_block.step": "block.slime_block.step",
+      "entity.bee.death": "entity.parrot.death",
+      "entity.bee.hurt": "entity.parrot.hurt",
+      "entity.bee.loop": "entity.parrot.fly",
+      "entity.bee.loop_aggressive": "entity.parrot.fly",
+      "entity.bee.pollinate": "entity.parrot.fly",
+      "entity.bee.sting": "entity.player.attack.weak",
+      "entity.iron_golem.damage": "entity.iron_golem.hurt",
+      "entity.iron_golem.repair": "block.anvil.use",
+      "item.honey_bottle.drink": "entity.generic.drink"
+    },
+    "up": {
+      "entity.parrot.imitate.enderman": "entity.parrot.ambient",
+      "entity.parrot.imitate.panda": "entity.parrot.ambient",
+      "entity.parrot.imitate.polar_bear": "entity.parrot.ambient",
+      "entity.parrot.imitate.wolf": "entity.parrot.ambient",
+      "entity.parrot.imitate.zombie_pigman": "entity.parrot.ambient"
+    }
+  }
+}

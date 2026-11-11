@@ -17,6 +17,9 @@ pub struct ServiceGroup {
     /// Nodes that run this group's instances; `None` runs them on this host.
     pub nodes: Option<NodeSelector>,
     pub placement: Placement,
+    /// The client versions translated for this group's instances; `None`
+    /// follows `translation.clients`.
+    pub translation: Option<ClientVersions>,
 }
 
 /// Occupancy and queue policy for automatically managed service instances.
@@ -128,6 +131,7 @@ pub(super) fn parse(
     let mut scaling_policies = BTreeMap::new();
     let mut defaults = BTreeMap::new();
     let mut placements = BTreeMap::new();
+    let mut translations = BTreeMap::new();
     for pair in values.pairs::<Value, Value>() {
         let (name, value) = pair.map_err(|e| e.to_string())?;
         let name = string(name, "service_groups key")?;
@@ -157,6 +161,14 @@ pub(super) fn parse(
             placement => nodes::parse_placement(placement, &format!("{path}.placement"))?,
         };
         placements.insert(name.clone(), (selector, placement));
+        let translation = match value
+            .raw_get::<Value>("translation")
+            .map_err(|e| e.to_string())?
+        {
+            Value::Nil => None,
+            clients => Some(client_versions(clients, &format!("{path}.translation"))?),
+        };
+        translations.insert(name.clone(), translation);
         let template = match value
             .raw_get::<Value>("template")
             .map_err(|e| e.to_string())?
@@ -248,6 +260,7 @@ pub(super) fn parse(
                         | b"memory_mb"
                         | b"nodes"
                         | b"placement"
+                        | b"translation"
                 )
             }) {
                 continue;
@@ -303,6 +316,7 @@ pub(super) fn parse(
             let scaling = scaling_policies.remove(&name).unwrap();
             let (memory_mb, default_directory) = defaults.remove(&name).unwrap();
             let (nodes, placement) = placements.remove(&name).unwrap();
+            let translation = translations.remove(&name).unwrap();
             (
                 name,
                 ServiceGroup {
@@ -316,6 +330,7 @@ pub(super) fn parse(
                     default_directory,
                     nodes,
                     placement,
+                    translation,
                 },
             )
         })

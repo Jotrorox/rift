@@ -139,8 +139,12 @@ async fn older_backend_is_translated_and_a_switch_to_the_client_protocol_stops_t
 
 #[tokio::test]
 async fn untranslatable_backend_protocols_are_rejected_before_connecting() {
-    let error = client_session(Some(774)).await.err().unwrap();
+    // 1.11.2 is older than the oldest version Rift translates.
+    let error = client_session(Some(316)).await.err().unwrap();
     assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+    // Any version from 1.12 to 26.3 is translated, across many steps too.
+    assert!(client_session(Some(774)).await.is_ok());
+    assert!(client_session(Some(335)).await.is_ok());
     // The same protocol, declared or not, needs no translation.
     assert!(client_session(Some(CLIENT)).await.is_ok());
     assert!(client_session(None).await.is_ok());

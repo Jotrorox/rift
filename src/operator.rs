@@ -370,7 +370,7 @@ pub fn edited_source(
                 // a reasonable size.
                 let mut result = String::from("\"");
                 for byte in value.bytes() {
-                    if byte.is_ascii_alphanumeric() || b"+/=:;,.-_".contains(&byte) {
+                    if byte.is_ascii_alphanumeric() || b"+/=:;,.-_*<>".contains(&byte) {
                         result.push(byte as char);
                     } else {
                         result.push_str(&format!("\\{byte:03}"));

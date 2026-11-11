@@ -211,12 +211,7 @@ impl Network<'_> {
         let Ok(client) = session.version() else {
             return false;
         };
-        self.snapshot
-            .config
-            .backends
-            .get(name)
-            .and_then(|backend| backend.version())
-            .is_none_or(|backend| rift::protocol::translatable(client, backend))
+        rift::backend_version::serves(&self.snapshot.config, name, client)
     }
 
     pub fn initial_candidates(
@@ -303,9 +298,9 @@ impl Network<'_> {
             .collect();
         let mut next = 0;
         if names.is_empty() && !candidates.is_empty() {
-            return Err(io::Error::new(
+            return Err(rift::text::notice_error(
                 io::ErrorKind::Unsupported,
-                "No server on this network supports your Minecraft version.",
+                Notice::LoginNoVersion,
             ));
         }
         if names.is_empty() {
@@ -379,12 +374,13 @@ impl Network<'_> {
                 upstream.set_nodelay(true)?;
                 event.stage = "handshake_write";
                 self.push_permissions(session, &current);
-                let protocol = self
-                    .snapshot
-                    .config
-                    .backends
-                    .get(&current)
-                    .and_then(|b| b.version());
+                let protocol = rift::backend_version::protocol(
+                    &self.snapshot.config,
+                    &current,
+                    session.version()?,
+                    self.addresses,
+                )
+                .await?;
                 timeout_at(
                     Instant::now() + budget,
                     session.connect_backend_as(upstream, protocol),
@@ -444,18 +440,27 @@ impl Network<'_> {
         let config = &self.snapshot.config;
         let uuid = expected_uuid(session);
         let expanded = self.snapshot.candidates(candidates);
-        let candidates: Vec<_> = expanded
+        let available: Vec<_> = expanded
             .iter()
             .filter(|server| {
                 server.as_str() != current
                     && self.snapshot.admits(server, &identity.name, uuid)
                     && self.snapshot.reachable(server)
-                    && self.serves(server, session)
             })
             .collect();
+        let candidates: Vec<_> = available
+            .iter()
+            .copied()
+            .filter(|server| self.serves(server, session))
+            .collect();
         let mut deadline = Instant::now() + config.limits.connect_timeout;
-        let mut last_error =
-            rift::text::notice_error(io::ErrorKind::NotConnected, Notice::SwitchNoServer);
+        // With every reachable target ruled out by the player's Minecraft
+        // version, that is the reason they are given.
+        let mut last_error = if candidates.is_empty() && !available.is_empty() {
+            rift::text::notice_error(io::ErrorKind::Unsupported, Notice::LoginVersion)
+        } else {
+            rift::text::notice_error(io::ErrorKind::NotConnected, Notice::SwitchNoServer)
+        };
         for (index, name) in candidates.iter().enumerate() {
             if let Some(extension) = &mut session.extension
                 && let Err(error) = extension.before_transfer(name, reason).await
@@ -496,7 +501,13 @@ impl Network<'_> {
                 upstream.set_nodelay(true)?;
                 event.stage = "backend_switch";
                 self.push_permissions(session, name);
-                let protocol = config.backends.get(name.as_str()).and_then(|b| b.version());
+                let protocol = rift::backend_version::protocol(
+                    config,
+                    name,
+                    session.version()?,
+                    self.addresses,
+                )
+                .await?;
                 match timeout_at(
                     attempt_deadline,
                     session.connect_backend_as(upstream, protocol),

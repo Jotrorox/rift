@@ -184,6 +184,7 @@ fn config(backends: &[&TcpListener], options: &str, permissions: &str) -> String
         backends = {{ {backends} }}, routes = {{ public = 'b0' }},
         admin = {{ listen = '127.0.0.1:0', permissions = {{ {permissions} }} }},
         shutdown_timeout_ms = 3000,
+        translation = {{ detect = false }}, -- The backends are fixtures that answer no status request.
         {options}
     }}"
     )

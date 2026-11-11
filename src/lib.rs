@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod backend_version;
 pub mod bungeecord;
 pub mod config;
 pub mod database;

@@ -1,0 +1,15 @@
+{
+  "entries": [
+    "{entries:[{data:\"minecraft:cave_vines_plant\",weight:4},{data:{id:\"minecraft:cave_vines_plant\",properties:{berries:\"true\"}},weight:1}],type:\"minecraft:weighted\"}",
+    "{values:{min_inclusive:23,max_inclusive:25,type:\"minecraft:uniform\"},property:\"age\",source:{entries:[{data:\"minecraft:cave_vines\",weight:4},{data:{id:\"minecraft:cave_vines\",properties:{berries:\"true\",age:\"0\"}},weight:1}],type:\"minecraft:weighted\"},type:\"minecraft:randomized_int\"}",
+    "{seed:2345L,noise:{base_amplitude:0.955388882960065d,base_octave:0},scale:0.020833334f,type:\"minecraft:noise\",states:[\"minecraft:dandelion\",\"minecraft:poppy\",\"minecraft:allium\",\"minecraft:azure_bluet\",\"minecraft:red_tulip\",\"minecraft:orange_tulip\",\"minecraft:white_tulip\",\"minecraft:pink_tulip\",\"minecraft:oxeye_daisy\",\"minecraft:cornflower\",\"minecraft:lily_of_the_valley\"]}",
+    "{seed:2345L,variety:[1,3],slow_scale:1.0f,noise:{base_amplitude:0.955388882960065d,base_octave:-3},scale:1.0f,type:\"minecraft:dual_noise\",slow_noise:{base_amplitude:0.955388882960065d,base_octave:-10},states:[\"minecraft:tall_grass\",\"minecraft:allium\",\"minecraft:poppy\",\"minecraft:azure_bluet\",\"minecraft:dandelion\",\"minecraft:cornflower\",\"minecraft:oxeye_daisy\",\"minecraft:short_grass\"]}",
+    "{high_chance:0.33333334f,seed:2345L,default_state:\"minecraft:dandelion\",high_states:[\"minecraft:poppy\",\"minecraft:azure_bluet\",\"minecraft:oxeye_daisy\",\"minecraft:cornflower\"],noise:{base_amplitude:0.955388882960065d,base_octave:0},scale:0.005f,threshold:-0.8f,low_states:[\"minecraft:orange_tulip\",\"minecraft:red_tulip\",\"minecraft:pink_tulip\",\"minecraft:white_tulip\"],type:\"minecraft:noise_threshold\"}",
+    "{values:{min_inclusive:0,max_inclusive:4,type:\"minecraft:uniform\"},property:\"age\",source:{id:\"minecraft:mangrove_propagule\",properties:{waterlogged:\"false\",stage:\"0\",hanging:\"true\",age:\"0\"}},type:\"minecraft:randomized_int\"}",
+    "{rules:[{then:{id:\"minecraft:podzol\",properties:{snowy:\"false\"}},if_true:{tag:\"minecraft:beneath_tree_podzol_replaceable\",type:\"minecraft:matching_block_tag\"}}],type:\"minecraft:rule_based\"}",
+    "{rules:[{then:{id:\"minecraft:dirt\"},if_true:{predicate:{tag:\"minecraft:cannot_replace_below_tree_trunk\",type:\"minecraft:matching_block_tag\"},type:\"minecraft:not\"}}],type:\"minecraft:rule_based\"}"
+  ],
+  "versions": [
+    {"protocols":[777],"names":["minecraft:cave_vines_body","minecraft:cave_vines_head","minecraft:flower_flower_forest","minecraft:flower_meadow","minecraft:flower_plain","minecraft:mangrove_propagule","minecraft:podzol_beneath_tree","minecraft:soil_beneath_tree"],"elements":[0,1,2,3,4,5,6,7]}
+  ]
+}

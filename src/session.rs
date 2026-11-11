@@ -2,13 +2,13 @@
 //! with their own framing, compression and protocol phases.
 use crate::protocol::{
     self, Codec, ConnectionState, Direction, Handshake, NextState, Packet, PacketKind,
-    PlayerIdentity, ProtocolVersion, Reader, State, read_varint, translation::Translator,
-    write_varint,
+    PlayerIdentity, ProtocolVersion, Reader, State, read_varint, write_varint,
 };
 use crate::{
     auth::{AuthenticatedProfile, Authenticator, CryptoStream},
     forwarding::{self, Forwarding, LoginPlugins},
 };
+use rift_translation::Translator;
 use std::{
     collections::VecDeque,
     future::{Future, poll_fn},
@@ -29,12 +29,30 @@ pub struct Connection<S> {
     pending: Option<PendingWrite>,
     login_plugins: LoginPlugins,
     bungeecord_registered: bool,
-    /// A backend's own protocol; `None` when it is the client's protocol.
-    version: Option<ProtocolVersion>,
-    /// Converts between the client's and this backend's protocol.
-    translator: Option<Translator>,
+    /// Converts between the client's protocol and a backend's own. With one,
+    /// this connection looks like a backend that speaks the client's
+    /// protocol: `state`, `received` and every packet the session reads or
+    /// queues are in the client's protocol, and only `codec` and the socket
+    /// carry the backend's.
+    translation: Option<Translation>,
     /// The frame of the packet `next` last read, for passing it on unchanged.
     raw: Option<RawFrame>,
+}
+
+struct Translation {
+    translator: Translator,
+    /// The backend's own protocol.
+    version: ProtocolVersion,
+    /// Velocity forwarding is answered here, in the backend's protocol: the
+    /// request is a login plugin message, which a client older than 1.13 has
+    /// no packet for, and it is never the client's to answer anyway.
+    forwarding: Option<Forwarding>,
+    /// Translated backend packets not yet handed to the session.
+    translated: VecDeque<Packet>,
+    /// Frames the translator answered the backend with on its own, such as
+    /// configuration acknowledgements an older client never sends.
+    replies: Vec<u8>,
+    replies_offset: usize,
 }
 
 /// A frame as read, valid for any connection with the same compression threshold.
@@ -65,24 +83,78 @@ impl<S> Connection<S> {
             pending: None,
             login_plugins: LoginPlugins::default(),
             bungeecord_registered: false,
-            version: None,
-            translator: None,
+            translation: None,
             raw: None,
         }
     }
 
-    /// The protocol this connection speaks; a backend may differ from the client.
-    fn version_or(&self, client: ProtocolVersion) -> ProtocolVersion {
-        self.version.unwrap_or(client)
+    /// The frames that carry `packet` to this connection's peer. A translated
+    /// backend may need several packets or none, and its answers for the
+    /// client join the translated packets waiting to be read.
+    fn encode(&mut self, packet: &Packet) -> io::Result<Vec<u8>> {
+        let Some(translation) = &mut self.translation else {
+            return self.codec.encode(packet);
+        };
+        let mut out = rift_translation::Output::default();
+        translation
+            .translator
+            .serverbound(translated(packet.clone()), &mut out)?;
+        translation
+            .translated
+            .extend(out.client.into_iter().map(|sent| untranslated(sent.packet)));
+        let mut frames = Vec::new();
+        for sent in out.backend {
+            frames.extend(self.codec.encode(&untranslated(sent.packet))?);
+        }
+        Ok(frames)
     }
 
-    /// Convert a client-format packet into this backend's protocol.
-    fn translate_serverbound(&mut self, state: State, packet: Packet) -> io::Result<Packet> {
-        match &mut self.translator {
-            Some(translator) => translator.serverbound(state, packet),
-            None => Ok(packet),
+    /// Run a packet read from a translated backend through its translator.
+    fn translate_received(&mut self, packet: Packet) -> io::Result<()> {
+        let translation = self.translation.as_mut().unwrap();
+        if translation.translator.backend_phase() == rift_translation::State::Login {
+            match translation
+                .version
+                .kind(State::Login, Direction::Clientbound, packet.id)
+            {
+                // The backend compresses from its own Set Compression on,
+                // whatever the session later does with the translated packet.
+                PacketKind::SetCompression => self
+                    .codec
+                    .set_compression(read_varint(&mut packet.data.as_slice())?),
+                PacketKind::LoginPluginRequest if forwarding::velocity_request(&packet) => {
+                    let response = self
+                        .login_plugins
+                        .request(&packet, translation.forwarding.as_ref())?
+                        .ok_or_else(|| protocol::invalid("unanswered Velocity forwarding"))?;
+                    translation.replies.extend(self.codec.encode(&response)?);
+                    return Ok(());
+                }
+                _ => {}
+            }
         }
+        let mut out = rift_translation::Output::default();
+        translation
+            .translator
+            .clientbound(translated(packet), &mut out)?;
+        translation
+            .translated
+            .extend(out.client.into_iter().map(|sent| untranslated(sent.packet)));
+        for sent in out.backend {
+            translation
+                .replies
+                .extend(self.codec.encode(&untranslated(sent.packet))?);
+        }
+        Ok(())
     }
+}
+
+fn translated(packet: Packet) -> rift_translation::Packet {
+    rift_translation::Packet::new(packet.id, packet.data)
+}
+
+fn untranslated(packet: rift_translation::Packet) -> Packet {
+    Packet::new(packet.id, packet.data)
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
@@ -109,13 +181,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
         let mut state = self.state.clone();
         let kind = state.observe(version, direction, packet)?;
         let frame = match raw {
-            Some(raw) if raw.threshold == self.codec.threshold() => {
+            Some(raw) if raw.threshold == self.codec.threshold() && self.translation.is_none() => {
                 let mut frame = Vec::with_capacity(raw.frame.len() + 3);
                 write_varint(raw.frame.len() as i32, &mut frame);
                 frame.extend_from_slice(&raw.frame);
                 frame
             }
-            _ => self.codec.encode(packet)?,
+            _ => self.encode(packet)?,
         };
         self.pending = Some(PendingWrite {
             frame,
@@ -130,7 +202,19 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
     // hostage to the other's backpressure. Each endpoint buffers one write.
     async fn next(&mut self, read: bool) -> io::Result<ConnectionEvent> {
         poll_fn(|cx| {
-            if let Some(pending) = &mut self.pending {
+            // The translator's own answers go out whole, between session
+            // frames: never inside one that is partly written.
+            let session_frame_started = self.pending.as_ref().is_some_and(|p| p.offset > 0);
+            if !session_frame_started && let Poll::Ready(Err(error)) = self.poll_replies(cx) {
+                return Poll::Ready(Err(error));
+            }
+            let replies_started = self
+                .translation
+                .as_ref()
+                .is_some_and(|translation| translation.replies_offset > 0);
+            if let Some(pending) = &mut self.pending
+                && !replies_started
+            {
                 while pending.offset < pending.frame.len() {
                     match Pin::new(&mut self.io).poll_write(cx, &pending.frame[pending.offset..]) {
                         Poll::Ready(Ok(0)) => {
@@ -158,25 +242,95 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Connection<S> {
                     self.raw = None;
                     return Poll::Ready(Ok(ConnectionEvent::Read(Some(packet))));
                 }
-                let read = self
-                    .reader
-                    .read_frame(&mut self.io, protocol::MAX_FRAME_SIZE);
-                let frame = match std::pin::pin!(read).poll(cx) {
-                    Poll::Pending => return Poll::Pending,
-                    Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-                    Poll::Ready(Ok(None)) => return Poll::Ready(Ok(ConnectionEvent::Read(None))),
-                    Poll::Ready(Ok(Some(frame))) => frame,
-                };
-                let packet = self.codec.decode(&frame)?;
-                self.raw = Some(RawFrame {
-                    frame,
-                    threshold: self.codec.threshold(),
-                });
-                return Poll::Ready(Ok(ConnectionEvent::Read(Some(packet))));
+                return self.poll_fresh(cx).map_ok(ConnectionEvent::Read);
             }
             Poll::Pending
         })
         .await
+    }
+
+    /// Write the translator's own answers as far as the socket accepts them.
+    fn poll_replies(&mut self, cx: &mut std::task::Context<'_>) -> Poll<io::Result<()>> {
+        let Some(translation) = &mut self.translation else {
+            return Poll::Ready(Ok(()));
+        };
+        while translation.replies_offset < translation.replies.len() {
+            let rest = &translation.replies[translation.replies_offset..];
+            match Pin::new(&mut self.io).poll_write(cx, rest) {
+                Poll::Ready(Ok(0)) => return Poll::Ready(Err(io::ErrorKind::WriteZero.into())),
+                Poll::Ready(Ok(size)) => translation.replies_offset += size,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+        translation.replies.clear();
+        translation.replies_offset = 0;
+        Poll::Ready(Ok(()))
+    }
+
+    /// The next packet from the socket, skipping `received`: translated when
+    /// the backend speaks another protocol, which can take several frames or
+    /// yield several packets from one.
+    fn poll_fresh(&mut self, cx: &mut std::task::Context<'_>) -> Poll<io::Result<Option<Packet>>> {
+        loop {
+            if let Some(translation) = &mut self.translation
+                && let Some(packet) = translation.translated.pop_front()
+            {
+                self.raw = None;
+                return Poll::Ready(Ok(Some(packet)));
+            }
+            let read = self
+                .reader
+                .read_frame(&mut self.io, protocol::MAX_FRAME_SIZE);
+            let frame = match std::pin::pin!(read).poll(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
+                Poll::Ready(Ok(None)) => return Poll::Ready(Ok(None)),
+                Poll::Ready(Ok(Some(frame))) => frame,
+            };
+            let packet = self.codec.decode(&frame)?;
+            if self.translation.is_some() {
+                self.translate_received(packet)?;
+                // Answers leave promptly unless a session frame is under way.
+                if self
+                    .pending
+                    .as_ref()
+                    .is_none_or(|pending| pending.offset == 0)
+                    && let Poll::Ready(Err(error)) = self.poll_replies(cx)
+                {
+                    return Poll::Ready(Err(error));
+                }
+                continue;
+            }
+            self.raw = Some(RawFrame {
+                frame,
+                threshold: self.codec.threshold(),
+            });
+            return Poll::Ready(Ok(Some(packet)));
+        }
+    }
+
+    /// Read the next packet from the socket itself, leaving `received` alone.
+    async fn read_fresh(&mut self) -> io::Result<Option<Packet>> {
+        poll_fn(|cx| self.poll_fresh(cx)).await
+    }
+
+    /// Whether a packet is partly read or translated packets are waiting.
+    fn has_unread(&self) -> bool {
+        self.reader.has_partial_frame()
+            || self
+                .translation
+                .as_ref()
+                .is_some_and(|translation| !translation.translated.is_empty())
+    }
+
+    /// Write `packet` at once, with any answers the translator still owes.
+    /// Not safe to cancel: for exchanges that close the connection on error.
+    async fn write(&mut self, packet: &Packet) -> io::Result<()> {
+        debug_assert!(self.pending.is_none());
+        poll_fn(|cx| self.poll_replies(cx)).await?;
+        let frames = self.encode(packet)?;
+        self.io.write_all(&frames).await
     }
 
     async fn flush_pending(&mut self) -> io::Result<()> {
@@ -505,9 +659,6 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             ));
         }
         let version = self.version()?;
-        if version.number() < mode.minimum_protocol() {
-            return Err(velocity_needs_1_13());
-        }
         let profile = self.authenticated_profile.clone().ok_or_else(|| {
             protocol::invalid("player forwarding requires an authenticated profile")
         })?;
@@ -611,7 +762,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
     ) -> io::Result<()> {
         let version = self.version()?;
         let backend_version = protocol.unwrap_or(version);
-        let translator = Translator::new(version, backend_version)?;
+        let translator = Translator::new(version.number(), backend_version.number())?;
         if self.authenticated_profile.is_some() && self.forwarding.is_none() {
             return Err(protocol::invalid(
                 "Authenticated backend login requires player forwarding.",
@@ -641,8 +792,17 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         }
         let mut backend = Connection::new(stream, State::Login);
         backend.reader.set_read_chunk_size(self.read_chunk_size);
-        backend.version = protocol.filter(|protocol| *protocol != version);
-        backend.translator = translator;
+        backend.translation = translator.map(|translator| Translation {
+            translator,
+            version: backend_version,
+            forwarding: self
+                .forwarding
+                .as_ref()
+                .map(|forwarding| forwarding.for_backend(backend_version)),
+            translated: VecDeque::new(),
+            replies: Vec::new(),
+            replies_offset: 0,
+        });
         let mut handshake = self.handshake.clone();
         handshake.protocol = backend_version.number();
         if replacing || self.authenticated_profile.is_some() {
@@ -658,11 +818,10 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             .write(&mut backend.io, &handshake.packet())
             .await?;
         if let Some(start) = self.login_start.clone() {
-            let start = backend.translate_serverbound(State::Login, start)?;
             backend
                 .state
-                .observe(backend_version, Direction::Serverbound, &start)?;
-            backend.codec.write(&mut backend.io, &start).await?;
+                .observe(version, Direction::Serverbound, &start)?;
+            backend.write(&start).await?;
         }
         if replacing {
             let expected = self.identity.clone().unwrap();
@@ -670,7 +829,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             let legacy_join = {
                 let login = Self::login_replacement(
                     &mut backend,
-                    backend_version,
+                    version,
                     &expected,
                     forwarding.as_ref(),
                     self.bungeecord,
@@ -752,9 +911,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                     {
                         let result = async {
                             old.flush_pending().await?;
-                            let old_version = old.version_or(version);
-                            let packet = old.translate_serverbound(State::Play, packet)?;
-                            old.queue(old_version, Direction::Serverbound, &packet)?;
+                            old.queue(version, Direction::Serverbound, &packet)?;
                             old.flush_pending().await
                         }
                         .await;
@@ -843,11 +1000,10 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
     }
 
     async fn check_legacy_cutover(&mut self) -> io::Result<()> {
-        let client_version = self.version()?;
+        let version = self.version()?;
         let Some(old) = self.backend.as_mut() else {
             return Ok(());
         };
-        let version = old.version_or(client_version);
         // Inspect late traffic without delivering it past the client barrier.
         // Keep packets unobserved for rollback; a successful cutover drops them
         // with the old attachment. Bound work, time and retained packet bytes.
@@ -862,7 +1018,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             && started.elapsed() < std::time::Duration::from_millis(20)
         {
             let ready = {
-                let read = tokio::task::unconstrained(old.reader.read(&mut old.io, old.codec));
+                let read = tokio::task::unconstrained(old.read_fresh());
                 tokio::pin!(read);
                 poll_fn(|cx| Poll::Ready(read.as_mut().poll(cx))).await
             };
@@ -872,12 +1028,8 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                     if kind == PacketKind::Disconnect {
                         old.state
                             .observe(version, Direction::Clientbound, &packet)?;
-                        let packet = match &mut old.translator {
-                            Some(translator) => translator.clientbound(State::Play, packet)?,
-                            None => packet,
-                        };
                         self.client
-                            .queue(client_version, Direction::Clientbound, &packet)?;
+                            .queue(version, Direction::Clientbound, &packet)?;
                         return Err(crate::text::notice_error(
                             io::ErrorKind::PermissionDenied,
                             crate::text::catalog::Notice::ConnectionBackendClosed,
@@ -896,7 +1048,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                     self.backend = None;
                     return Ok(());
                 }
-                Poll::Pending if !old.reader.has_partial_frame() => return Ok(()),
+                Poll::Pending if !old.has_unread() => return Ok(()),
                 Poll::Pending => break,
             }
         }
@@ -974,7 +1126,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                     if self
                         .backend
                         .as_ref()
-                        .is_some_and(|backend| backend.reader.has_partial_frame())
+                        .is_some_and(|backend| backend.has_unread())
                     {
                         // A partially received packet can itself be a ban. Leave
                         // it with the old attachment until the next attempt.
@@ -998,16 +1150,12 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         bungeecord: bool,
     ) -> io::Result<Option<Packet>> {
         loop {
-            let packet = backend
-                .reader
-                .read(&mut backend.io, backend.codec)
-                .await?
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        "replacement backend closed during login",
-                    )
-                })?;
+            let packet = backend.read_fresh().await?.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "replacement backend closed during login",
+                )
+            })?;
             let phase = backend.state.phase(Direction::Clientbound);
             let kind = backend
                 .state
@@ -1036,7 +1184,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                     backend
                         .state
                         .observe(version, Direction::Serverbound, &acknowledged)?;
-                    backend.codec.write(&mut backend.io, &acknowledged).await?;
+                    backend.write(&acknowledged).await?;
                     return Ok(None);
                 }
                 PacketKind::JoinGame if !version.has_configuration() => {
@@ -1071,7 +1219,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                         data.push(0);
                         Packet::new(2, data)
                     };
-                    backend.codec.write(&mut backend.io, &response).await?;
+                    backend.write(&response).await?;
                 }
                 PacketKind::EncryptionRequest => return Err(encryption_unsupported()),
                 _ => return Err(protocol::invalid("unsupported replacement login exchange")),
@@ -1089,8 +1237,8 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             .into_iter()
             .flatten()
         {
-            let packet = backend.translate_serverbound(state, packet.clone())?;
-            backend.codec.write(&mut backend.io, &packet).await?;
+            let _ = state;
+            backend.write(packet).await?;
         }
         Ok(())
     }
@@ -1322,13 +1470,12 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         if payload.len() > crate::bungeecord::MAX_PAYLOAD_SIZE {
             return Err(protocol::invalid("BungeeCord payload exceeds size limit"));
         }
-        let client_version = self.version()?;
+        let version = self.version()?;
         let backend = self
             .backend
             .as_mut()
             .filter(|backend| backend.state.settled(State::Play))
             .ok_or_else(|| protocol::invalid("BungeeCord responses require a playing backend"))?;
-        let version = backend.version_or(client_version);
         backend.flush_pending().await?;
         let packet =
             crate::bungeecord::packet(version, crate::bungeecord::channel(version), payload);
@@ -1406,16 +1553,15 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                 .backend
                 .as_mut()
                 .ok_or_else(|| protocol::invalid("no backend attached"))?;
-            let backend_version = backend.version_or(version);
             if self.bungeecord
                 && !backend.bungeecord_registered
                 && backend.pending.is_none()
                 && backend.state.settled(State::Play)
             {
                 backend.queue(
-                    backend_version,
+                    version,
                     Direction::Serverbound,
-                    &crate::bungeecord::registration(backend_version),
+                    &crate::bungeecord::registration(version),
                 )?;
                 backend.bungeecord_registered = true;
             }
@@ -1540,38 +1686,24 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                             })?
                     {
                         if let Some(acknowledgement) = acknowledgement {
-                            let acknowledgement =
-                                backend.translate_serverbound(phase, acknowledgement)?;
-                            backend.queue(
-                                backend_version,
-                                Direction::Serverbound,
-                                &acknowledgement,
-                            )?;
+                            backend.queue(version, Direction::Serverbound, &acknowledgement)?;
                         }
                         return Ok(SessionEvent::ProxyCommand(command));
                     }
                     // Untranslated packets reach the backend as the client framed them.
-                    let raw = raw.filter(|_| backend.translator.is_none());
-                    let packet = backend.translate_serverbound(phase, packet)?;
-                    backend.queue_forwarded(
-                        backend_version,
-                        Direction::Serverbound,
-                        &packet,
-                        raw,
-                    )?;
+                    backend.queue_forwarded(version, Direction::Serverbound, &packet, raw)?;
                 }
                 Incoming::Backend(Ok(ConnectionEvent::Read(Some(packet)))) => {
                     // Packets Rift neither translates nor rewrites reach the
                     // client as the backend framed them.
-                    let raw = backend.raw.take().filter(|_| backend.translator.is_none());
+                    let raw = backend.raw.take();
                     let phase = backend.state.phase(Direction::Clientbound);
-                    let kind =
-                        backend
-                            .state
-                            .observe(backend_version, Direction::Clientbound, &packet)?;
+                    let kind = backend
+                        .state
+                        .observe(version, Direction::Clientbound, &packet)?;
                     if self.bungeecord
                         && let Some(payload) = crate::bungeecord::payload(
-                            backend_version,
+                            version,
                             phase,
                             Direction::Clientbound,
                             &packet,
@@ -1591,17 +1723,6 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                     if kind == PacketKind::CookieRequest {
                         self.initial_retry_safe = false;
                     }
-                    // Backend-level handling reads `kind` and, during login, the
-                    // backend's own encoding. Everything the client sees,
-                    // including Rift's views of it, uses the client's protocol.
-                    let (packet, untranslated) = match &mut backend.translator {
-                        Some(translator) if phase == State::Login => {
-                            (translator.clientbound(phase, packet.clone())?, Some(packet))
-                        }
-                        Some(translator) => (translator.clientbound(phase, packet)?, None),
-                        None => (packet, None),
-                    };
-                    let backend_packet = untranslated.as_ref().unwrap_or(&packet);
                     // A backend dialog replaces Rift's; a backend clear closes it.
                     if self.dialog.is_some()
                         && protocol::dialog::backend(version, phase, &packet).is_some()
@@ -1626,13 +1747,9 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                         PacketKind::LoginPluginRequest => {
                             if let Some(response) = backend
                                 .login_plugins
-                                .request(backend_packet, self.forwarding.as_ref())?
+                                .request(&packet, self.forwarding.as_ref())?
                             {
-                                backend.queue(
-                                    backend_version,
-                                    Direction::Serverbound,
-                                    &response,
-                                )?;
+                                backend.queue(version, Direction::Serverbound, &response)?;
                             } else {
                                 self.initial_retry_safe = false;
                                 self.client
@@ -1657,8 +1774,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                             backend
                                 .login_plugins
                                 .require_forwarded(self.forwarding.as_ref())?;
-                            let identity =
-                                protocol::success_identity(backend_version, backend_packet)?;
+                            let identity = protocol::success_identity(version, &packet)?;
                             let requested = protocol::start_identity(
                                 version,
                                 self.login_start

@@ -7,7 +7,7 @@
     loaded: false, busy: false, polling: false, fetchingSource: false,
     session: 0, mutation: 0, remoteChanged: false, conflicted: false, online: false,
     serverButtons: [], groupButtons: [], managedServers: [], view: "overview",
-    permissions: null, groups: null, logServer: "", logCursor: null, logPolling: false, definitions: {}, definitionRevision: null, definitionDirty: false, definitionVersion: 0, definitionSection: "service_groups", definitionName: "", definitionInputs: new Map(),
+    permissions: null, groups: null, logServer: "", logCursor: null, logPolling: false, definitions: {}, definitionRevision: null, definitionDirty: false, definitionVersion: 0, definitionSection: "service_groups", definitionName: "", definitionInputs: new Map(), definitionVersions: { level: "inherit", families: new Set(), extra: "" }, versionFamilies: [],
     // Unsaved edits on the server list, tab list and permission group forms.
     settingsDirty: { serverList: false, tabList: false },
     // A server icon chosen on the server list form: a PNG data URL, false to
@@ -278,7 +278,7 @@
       td.append(span);
     });
     state.groupButtons = [];
-    table("service-groups", status.service_groups || [], 7, (tr, group) => {
+    table("service-groups", status.service_groups || [], 8, (tr, group) => {
       const names = group.instances || [], summary = group.summary || {}, enabled = (key) => number(summary[key]);
       cell(tr, group.name);
       const badges = cell(tr, "");
@@ -289,6 +289,9 @@
       cell(tr, group.storage === "disposable" ? "Disposable game" : "Persistent world");
       cell(tr, group.template || "Prepared directories");
       cell(tr, instanceSummary(group)).title = names.join(", ");
+      // Which client versions Rift translates for the group, and where that is set.
+      const versions = group.translation || {};
+      cell(tr, versions.summary || "All versions").title = versions.inherited === false ? "Set on this group. Choose Edit to change it." : "Follows the proxy setting (translation.clients). Choose Edit to set it for this group.";
       const actions = cell(tr, ""); actions.className = "action-group";
       const button = (label, aria, unavailable, title, click, className = "button subtle") => {
         const element = document.createElement("button");
@@ -476,6 +479,152 @@
     ["configs", "Template folders, overlaid in order (one per line)", "array"], ["map", "Map directory (optional)", "text"],
     ["accept_eula", "Accept the Minecraft EULA for new instances", "boolean"],
   ];
+  // Which client versions a service group is translated for. `translation` in
+  // a definition is absent (follow the proxy), a level, or a list of patterns.
+  const versionLevels = [
+    ["inherit", "Follow the proxy setting", "Use translation.clients from the Lua script."],
+    ["all", "All versions", "Players on any Minecraft version Rift translates can join."],
+    ["newer", "Same version or newer", "Players on a newer version than the servers can join too. What ViaVersion does."],
+    ["older", "Same version or older", "Players on an older version than the servers can join too. What ViaBackwards does."],
+    ["none", "Same version only", "No translation: only players on the exact version the servers run."],
+    ["custom", "Chosen versions", "Pick the versions yourself. The servers’ own version can always join."],
+  ];
+  // The releases a pattern list covers, as the server reads it
+  // (src/protocol/versions.rs). Only a preview: saving validates for real.
+  function versionCoverage(patterns, releases, [oldest, newest]) {
+    const named = (text) => {
+      const family = /\.[*x]$/.test(text) ? text.slice(0, -2) : null;
+      const hits = releases.filter(([name]) => family === null ? name === text : name === family || name.startsWith(`${family}.`)).map(([, protocol]) => protocol);
+      if (!hits.length) throw new Error(`“${text}” is not a Minecraft version Rift knows. Try 1.20.4, 1.20.* or 1.16-1.18.2.`);
+      return [Math.min(...hits), Math.max(...hits)];
+    };
+    const coverage = { all: false, newer: false, older: false, spans: [] };
+    for (const raw of patterns) {
+      const text = raw.trim().toLowerCase();
+      if (!text) continue;
+      if (text === "all" || text === "*") coverage.all = true;
+      else if (text === "newer" || text === "older") coverage[text] = true;
+      else if (text === "none") throw new Error("“none” stands alone: choose “Same version only” instead.");
+      else {
+        const range = text.includes("-") ? text.split("-") : null;
+        const [low, high] = text.startsWith(">=") ? [named(text.slice(2).trim())[0], newest]
+          : text.endsWith("+") ? [named(text.slice(0, -1).trim())[0], newest]
+          : text.startsWith("<=") ? [oldest, named(text.slice(2).trim())[1]]
+          : range ? [named(range[0].trim())[0], named(range.slice(1).join("-").trim())[1]]
+          : named(text);
+        if (high < oldest || low > newest) throw new Error(`“${text}” is outside the versions Rift translates.`);
+        if (low > high) throw new Error(`“${text}” is an empty range: write the older version first.`);
+        coverage.spans.push([low, high]);
+      }
+    }
+    coverage.releases = releases.filter(([, protocol]) => protocol >= oldest && protocol <= newest
+      && (coverage.all || coverage.spans.some(([low, high]) => protocol >= low && protocol <= high))).map(([name]) => name);
+    return coverage;
+  }
+  // "1.20–1.20.6, 1.21.4": runs of neighbouring releases, shortest readable form.
+  function versionRuns(names, releases) {
+    const order = releases.map(([name]) => name), runs = [];
+    for (const name of names) {
+      const last = runs[runs.length - 1];
+      if (last && order.indexOf(last[1]) + 1 === order.indexOf(name)) last[1] = name; else runs.push([name, name]);
+    }
+    return runs.map(([first, last]) => first === last ? first : `${first}–${last}`).join(", ");
+  }
+  function versionPatterns() {
+    const { families, extra } = state.definitionVersions;
+    return [...state.versionFamilies.filter((family) => families.has(family)).map((family) => `${family}.*`),
+      ...extra.split(/[,\n]/).map((pattern) => pattern.trim()).filter(Boolean)];
+  }
+  function versionsValue() {
+    const { level } = state.definitionVersions;
+    if (level === "inherit") return undefined;
+    if (level !== "custom") return level;
+    const patterns = versionPatterns(), info = state.definitions.translation || {};
+    if (!patterns.length) throw new Error("Choose at least one version for this group, or select “Same version only”.");
+    if (info.releases && info.range) versionCoverage(patterns, info.releases, info.range);
+    return patterns;
+  }
+  function versionsPreview() {
+    const { level } = state.definitionVersions, info = state.definitions.translation || {}, releases = info.releases || [], range = info.range || [0, 0];
+    const inRange = releases.filter(([, protocol]) => protocol >= range[0] && protocol <= range[1]).map(([name]) => name);
+    const span = inRange.length ? `${inRange[0]} to ${inRange[inRange.length - 1]}` : "every supported version";
+    const off = info.enabled === false ? " Translation is turned off for the whole proxy (translation = false in the Lua script), so only the servers’ own version can join until it is turned on." : "";
+    if (level === "inherit") return [`Follows the proxy setting, currently: ${info.summary || "All versions"}.${off}`, false];
+    if (level === "all") return [`Players on ${span} can join.${off}`, false];
+    if (level === "newer") return [`Players on the servers’ version and every newer one Rift translates can join. Older clients are turned away.${off}`, false];
+    if (level === "older") return [`Players on the servers’ version and every older one Rift translates can join. Newer clients are turned away.${off}`, false];
+    if (level === "none") return ["Only players on the servers’ own version can join. Everyone else is turned away or sent to a fallback server.", false];
+    const patterns = versionPatterns();
+    if (!patterns.length) return ["Nothing chosen yet: pick release families or write a pattern.", true];
+    try {
+      const coverage = versionCoverage(patterns, releases, range);
+      if (coverage.all) return [`Players on ${span} can join.${off}`, false];
+      const relative = [coverage.newer && "versions newer than the servers", coverage.older && "versions older than the servers"].filter(Boolean);
+      const listed = coverage.releases.length ? `${coverage.releases.length} version${coverage.releases.length === 1 ? "" : "s"}: ${versionRuns(coverage.releases, releases)}` : "";
+      return [`Translated for ${[listed, ...relative].filter(Boolean).join(", plus ")}. The servers’ own version can always join.${off}`, false];
+    } catch (error) { return [error.message, true]; }
+  }
+  function renderVersions(value) {
+    const info = state.definitions.translation || {}, releases = info.releases || [], range = info.range || [0, 0];
+    // Release families Rift translates, oldest first: 1.12 … 1.21, 26.1 …
+    state.versionFamilies = [...new Set(releases.filter(([, protocol]) => protocol >= range[0] && protocol <= range[1]).map(([name]) => name.split(".").slice(0, 2).join(".")))];
+    const chosen = { level: "inherit", families: new Set(), extra: "" };
+    const levels = { true: "all", false: "none", all: "all", none: "none", newer: "newer", older: "older" };
+    if (value !== undefined && value !== null) {
+      if (Object.hasOwn(levels, String(value))) chosen.level = levels[String(value)];
+      else {
+        chosen.level = "custom";
+        const extra = [];
+        for (const pattern of [value].flat().map(String)) {
+          const family = /\.[*x]$/.test(pattern) ? pattern.slice(0, -2) : null;
+          if (family && state.versionFamilies.includes(family)) chosen.families.add(family); else extra.push(pattern);
+        }
+        chosen.extra = extra.join(", ");
+      }
+    }
+    state.definitionVersions = chosen;
+    const make = (tag, className, textContent) => { const element = document.createElement(tag); if (className) element.className = className; if (textContent) element.textContent = textContent; return element; };
+    const box = make("fieldset", "versions"), custom = make("div", "versions-custom"), preview = make("p", "versions-preview");
+    box.id = "definition-versions"; preview.id = "definition-versions-preview"; preview.setAttribute("role", "status");
+    const radios = [], toggles = [];
+    const refresh = () => {
+      custom.hidden = chosen.level !== "custom";
+      for (const radio of radios) radio.checked = radio.value === chosen.level;
+      for (const toggle of toggles) toggle.setAttribute("aria-pressed", String(chosen.families.has(toggle.value)));
+      const [message, bad] = versionsPreview();
+      preview.textContent = message; preview.className = `versions-preview${bad ? " bad" : ""}`;
+    };
+    const edited = () => { state.definitionDirty = true; state.definitionVersion += 1; refresh(); };
+    const choices = make("div", "choice-list");
+    for (const [level, title, note] of versionLevels) {
+      const label = make("label", "choice"), radio = make("input"), words = make("span", "choice-text");
+      radio.type = "radio"; radio.name = "definition-versions-level"; radio.value = level; radio.id = `definition-versions-${level}`;
+      radio.addEventListener("change", () => { chosen.level = level; edited(); });
+      words.append(make("span", "choice-title", title), make("span", "choice-note", note));
+      label.append(radio, words); radios.push(radio); choices.append(label);
+    }
+    const families = make("div", "field"), familyList = make("div", "chip-list");
+    familyList.setAttribute("role", "group"); familyList.setAttribute("aria-label", "Release families");
+    for (const family of state.versionFamilies) {
+      const toggle = make("button", "toggle", family);
+      toggle.type = "button"; toggle.value = family; toggle.title = `Every ${family} release (${family}.*)`;
+      toggle.addEventListener("click", () => { if (chosen.families.has(family)) chosen.families.delete(family); else chosen.families.add(family); edited(); });
+      toggles.push(toggle); familyList.append(toggle);
+    }
+    families.append(make("span", "field-label", "Release families"), familyList);
+    const more = make("div", "field"), moreLabel = make("label", "", "More versions and ranges"), input = make("input"), help = make("p", "field-help");
+    input.id = "definition-versions-extra"; input.type = "text"; input.className = "mono"; input.value = chosen.extra;
+    input.placeholder = "1.20.4, 1.16-1.18.2, >=1.19"; input.setAttribute("autocomplete", "off"); input.setAttribute("spellcheck", "false");
+    input.setAttribute("aria-describedby", "definition-versions-help"); moreLabel.setAttribute("for", input.id); help.id = "definition-versions-help";
+    help.textContent = "Separate with commas. 1.20.4 is one version, 1.20.* every 1.20 release, 1.16-1.18.2 a range, >=1.19 and <=1.16.5 everything from or up to a version.";
+    input.addEventListener("input", () => { chosen.extra = input.value; edited(); });
+    more.append(moreLabel, input, help);
+    custom.append(families, more);
+    box.append(make("legend", "", "Minecraft versions"), make("p", "field-help", "Players on the version these servers run can always join. Choose which other versions Rift translates for this group."), choices, custom, preview);
+    state.definitionInputs.set("translation", { input: { value: "" }, type: "versions" });
+    $("definition-fields").append(box);
+    refresh();
+  }
   function renderDefinition() {
     const section = $("definition-section").value || "service_groups", name = $("definition-select").value;
     state.definitionSection = section; state.definitionName = name;
@@ -497,6 +646,7 @@
       input.addEventListener("input", () => { state.definitionDirty = true; state.definitionVersion += 1; });
       state.definitionInputs.set(key, { input, type }); wrapper.append(title, input); $("definition-fields").append(wrapper);
     }
+    if (section === "service_groups") renderVersions(value.translation);
     state.definitionDirty = false; controls();
     if (section === "templates") loadVersions(value.software?.type || "");
   }
@@ -528,7 +678,7 @@
     const value = {}, scaling = {}, software = {}, ports = [], scalingEnabled = state.definitionInputs.get("scaling_enabled")?.input.value === "true";
     const softwareEnabled = Boolean(state.definitionInputs.get("software.type")?.input.value);
     for (const [key, { input, type }] of state.definitionInputs) {
-      if (key === "scaling_enabled") continue;
+      if (key === "scaling_enabled" || type === "versions") continue;
       const raw = String(input.value);
       if (key.startsWith("scaling.") && !scalingEnabled) continue;
       if (key.startsWith("software.") && !softwareEnabled) continue;
@@ -542,7 +692,11 @@
     }
     if (scalingEnabled) value.scaling = scaling;
     if (softwareEnabled) value.software = software;
-    if ($("definition-section").value !== "templates") value.port_range = ports;
+    if ($("definition-section").value !== "templates") {
+      value.port_range = ports;
+      const versions = versionsValue();
+      if (versions !== undefined) value.translation = versions;
+    }
     return value;
   }
   async function saveDefinition(remove = false) {
