@@ -1406,7 +1406,8 @@ fn lua_extensions_see_which_operator_is_calling() {
     let source = fixture.source(
         &format!(
             "token = '{TOKEN}', operators = {{ \
-             viewer = {{ token = '{OPERATOR_TOKEN}', permissions = {{'read'}} }}, \
+             viewer = {{ token = '{OPERATOR_TOKEN}', permissions = {{'read','extensions'}} }}, \
+             reader = {{ token = 'test-read-only-operator', permissions = {{'read'}} }}, \
              lobby_staff = {{ token = 'test-scoped-lobby-operator', permissions = {{'read','logs'}}, groups = {{'lobby'}} }} }},"
         ),
         &format!(
@@ -1424,12 +1425,18 @@ fn lua_extensions_see_which_operator_is_calling() {
         .body
     };
     assert_eq!(call(TOKEN), "admin|all|all");
-    // A read-only token reaches the handler, which can tell it apart.
-    assert_eq!(call(OPERATOR_TOKEN), "viewer|read|all");
-    assert_eq!(
-        call("test-scoped-lobby-operator"),
-        "lobby_staff|logs,read|lobby"
-    );
+    // A token with little more than `extensions` reaches the handler, which
+    // can tell it apart from the full one.
+    assert_eq!(call(OPERATOR_TOKEN), "viewer|extensions,read|all");
+    // `/ext` needs `extensions`, which a group-scoped operator cannot hold.
+    for token in ["test-read-only-operator", "test-scoped-lobby-operator"] {
+        Client {
+            token: Some(token),
+            ..fixture.client()
+        }
+        .get("/ext/who")
+        .expect(403);
+    }
     fixture.client().get("/ext/who").expect(401);
 }
 

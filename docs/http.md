@@ -690,8 +690,9 @@ is refused with `403`. Node reads are not audited, like other reads.
 
 The optional `on_http` callback handles every HTTP method at `/ext` and `/ext/*`.
 It has the same web bearer authentication and browser-origin protections as the
-admin API, and any caller with the `read` permission reaches it: the handler
-decides what each caller may do from `request.context.operator` (below). Use it
+admin API, and a caller needs the `extensions` permission (or a full token) to
+reach it; the handler decides what each such caller may do from
+`request.context.operator` (below). Use it
 for network dashboards, maintenance information, deployment
 metadata, diagnostic pages and application-specific API responses. Paths outside
 this namespace remain owned by Rift.
@@ -729,8 +730,10 @@ list, message, kick and transfer players through `rift.players`.
 loopback token, otherwise the `web.operators` key), `permissions` and `groups`.
 `permissions` is absent (`nil`; JSON `null` for plugins) for full access and
 otherwise an array of permission names; `groups` is absent when the caller is
-not limited to service groups. Rift requires only `read` for `/ext`, so a
-handler that changes anything must check the caller itself:
+not limited to service groups (`extensions` cannot be combined with `groups`, so
+it is absent for every caller that reaches the handler). Rift requires only
+`extensions` for `/ext`, so a handler that changes anything must check the
+caller itself:
 
 ```lua
 local function allows(operator, permission)

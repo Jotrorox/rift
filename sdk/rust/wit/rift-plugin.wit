@@ -192,7 +192,7 @@ interface types {
         /// `operator`: the authenticated caller as `{name, permissions,
         /// groups}`. `permissions` is `null` for full access and `groups` is
         /// `null` when the caller is not limited to service groups. Any
-        /// caller with the `read` permission reaches this hook, so check
+        /// caller with the `extensions` permission reaches this hook, so check
         /// `operator` before acting for it.
         context-json: string,
     }

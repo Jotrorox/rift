@@ -542,7 +542,7 @@ type RichStatusOverride struct {
 
 // HTTPRequest represents the record "rift:plugin/types@0.1.5#http-request".
 //
-// An authenticated request to `/api/script/*` on the web server.
+// An authenticated request to `/ext` or `/ext/*` on the web server.
 //
 //	record http-request {
 //		method: string,
@@ -560,7 +560,12 @@ type HTTPRequest struct {
 	Body    string             `json:"body"`
 	Headers cm.List[[2]string] `json:"headers"`
 
-	// The authenticated principal and scopes, as a JSON object.
+	// The status object with operator detail, as a JSON object, plus
+	// `operator`: the authenticated caller as `{name, permissions,
+	// groups}`. `permissions` is `null` for full access and `groups` is
+	// `null` when the caller is not limited to service groups. Any
+	// caller with the `extensions` permission reaches this hook, so check
+	// `operator` before acting for it.
 	ContextJSON string `json:"context-json"`
 }
 
@@ -715,6 +720,8 @@ type CommandSpec struct {
 	Name string `json:"name"`
 
 	// The permission node a player needs to see and run the command.
+	// Empty (since 0.1.5) means every player may see and run it; hosts
+	// before 0.1.5 reject a registration with an empty permission.
 	Permission string      `json:"permission"`
 	Suggest    SuggestKind `json:"suggest"`
 }

@@ -2403,8 +2403,8 @@ async fn extension(
                 .map(|v| (name.to_string(), v.to_owned()))
         })
         .collect();
-    // `/ext` needs only `read`, so the handler is told who is calling and
-    // decides what that caller may do.
+    // `/ext` needs only `extensions`, so the handler is told who is calling
+    // and decides what that caller may do.
     let mut context = app.status_snapshot(&snapshot, View::Context);
     context["operator"] = access.describe();
     let request = HttpRequest {

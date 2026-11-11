@@ -233,14 +233,19 @@ typedef struct {
   size_t len;
 } rift_plugin_list_tuple2_string_string_t;
 
-// An authenticated request to `/api/script/*` on the web server.
+// An authenticated request to `/ext` or `/ext/*` on the web server.
 typedef struct rift_plugin_types_http_request_t {
   rift_plugin_string_t   method;
   rift_plugin_string_t   path;
   rift_plugin_string_t   query;
   rift_plugin_string_t   body;
   rift_plugin_list_tuple2_string_string_t   headers;
-  // The authenticated principal and scopes, as a JSON object.
+  // The status object with operator detail, as a JSON object, plus
+  // `operator`: the authenticated caller as `{name, permissions,
+  // groups}`. `permissions` is `null` for full access and `groups` is
+  // `null` when the caller is not limited to service groups. Any
+  // caller with the `extensions` permission reaches this hook, so check
+  // `operator` before acting for it.
   rift_plugin_string_t   context_json;
 } rift_plugin_types_http_request_t;
 
@@ -294,6 +299,8 @@ typedef struct rift_plugin_types_command_spec_t {
   // 1..=64 bytes of `a-z0-9_-`; `server` and `hub` are reserved.
   rift_plugin_string_t   name;
   // The permission node a player needs to see and run the command.
+  // Empty (since 0.1.5) means every player may see and run it; hosts
+  // before 0.1.5 reject a registration with an empty permission.
   rift_plugin_string_t   permission;
   rift_plugin_types_suggest_kind_t   suggest;
 } rift_plugin_types_command_spec_t;

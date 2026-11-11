@@ -178,9 +178,9 @@ and `legacy` [authoring objects](text.md) included, or text shown as written;
 clients see the version and sample lines as `§` codes. One invalid entry fails
 the whole answer.
 
-**Who is calling `http`.** Every web credential with the `read` permission
-reaches `/ext`, a read-only operator as much as the full token; Rift does not
-ask for more, the handler decides. The request's context (`context-json` in
+**Who is calling `http`.** Every web credential with the `extensions`
+permission reaches `/ext`, an operator holding little else as much as the full
+token; Rift does not ask for more, the handler decides. The request's context (`context-json` in
 WebAssembly) is the status object the configuration script's
 [`on_http`](http.md#lua-websites-and-endpoints) receives, including its
 `operator` member: `{name, permissions, groups}` as `GET /api/access` reports
