@@ -36,6 +36,7 @@ const HOOKS: &[&str] = &[
     "before_transfer",
     "after_transfer",
     "dialog",
+    "chat",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,10 +68,13 @@ struct Command {
 }
 
 impl ExtensionScript {
-    /// `(command, permission)` of every command, sorted by command.
+    /// `(command, permission)` of every command that needs a permission,
+    /// sorted by command. Commands with an empty permission are open to every
+    /// player and name no node.
     pub fn command_permissions(&self) -> Vec<(String, String)> {
         self.commands
             .iter()
+            .filter(|(_, command)| !command.permission.is_empty())
             .map(|(name, command)| (name.clone(), command.permission.clone()))
             .collect()
     }
@@ -250,6 +254,7 @@ impl ExtensionScript {
                 "before_transfer",
                 "after_transfer",
                 "dialog",
+                "chat",
                 "commands",
                 "permissions",
                 "groups",
@@ -328,9 +333,12 @@ impl ExtensionScript {
                     ));
                 }
                 let permission: String = command.raw_get("permission")?;
-                if !rift_permissions::node::valid_node(&permission) || permission.ends_with('*') {
+                if !permission.is_empty()
+                    && (!rift_permissions::node::valid_node(&permission)
+                        || permission.ends_with('*'))
+                {
                     return Err(mlua::Error::runtime(
-                        "command permission must be a lowercase permission node without wildcards",
+                        "command permission must be a lowercase permission node without wildcards, or empty for every player",
                     ));
                 }
                 command.raw_get::<Function>("run")?;
@@ -468,7 +476,7 @@ impl ExtensionScript {
             };
             // Recheck after worker scheduling/source evaluation, before executing user code.
             if (hook == "command" || hook == "suggest")
-                && !runtime.permits(
+                && !runtime.permits_command(
                     &input.uuid,
                     &self.commands[input.command.as_deref().unwrap()].permission,
                 )
@@ -504,6 +512,10 @@ impl ExtensionScript {
             }
             if let Some(dialog) = &input.dialog {
                 dialog_fields(&lua, &ctx, dialog, deadline)?;
+            }
+            if let Some(chat) = &input.chat {
+                ctx.set("kind", chat.kind.name())?;
+                ctx.set("text", chat.text.as_str())?;
             }
             let permissions = runtime.clone();
             let uuid = input.uuid.clone();
@@ -654,7 +666,7 @@ pub(crate) fn parse_action(hook: &str, value: Value) -> mlua::Result<Action> {
     }
     let (key, value) = &entries[0];
     let allowed = match hook {
-        "login" | "before_transfer" => &["deny"][..],
+        "login" | "before_transfer" | "chat" => &["deny"][..],
         "initial_server" => &["deny", "server"][..],
         "command" => &["message", "server", "queue", "leave_queue"][..],
         _ => &[][..],
@@ -812,6 +824,37 @@ pub struct Context {
     /// `dialog`: the click on a plugin action of a dialog the receiver showed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dialog: Option<crate::dialog::Response>,
+    /// `chat`: what the player sent. For a command, `command` and `args`
+    /// hold its root name and the rest.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chat: Option<ChatInput>,
+}
+
+/// What a player sent through the chat box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatKind {
+    Message,
+    /// A command neither Rift nor a plugin owns, on its way to the backend.
+    Command,
+}
+
+impl ChatKind {
+    /// `ctx.kind` in Lua.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Message => "message",
+            Self::Command => "command",
+        }
+    }
+}
+
+/// The input of a `chat` hook.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ChatInput {
+    pub kind: ChatKind,
+    /// The message, or the command line without the leading slash.
+    pub text: String,
 }
 impl Context {
     pub fn authenticated(id: u64, profile: &AuthenticatedProfile) -> Self {
@@ -1087,7 +1130,8 @@ impl Extensions {
         &self.permissions
     }
 
-    /// `(command, permission)` of every extension command.
+    /// `(command, permission)` of every extension command that needs a
+    /// permission.
     pub fn command_permissions(&self) -> Vec<(String, String)> {
         self.script
             .as_ref()
@@ -1117,6 +1161,13 @@ impl Extensions {
     fn permits(&self, uuid: &str, node: &str) -> bool {
         Uuid::parse(uuid)
             .is_ok_and(|uuid| self.permissions.check_active(uuid, node) == Tristate::True)
+    }
+
+    /// Whether the player may see and run a command with this `permission`.
+    /// An empty permission (contract 0.1.5) is open to every player and is
+    /// never looked up as a node.
+    fn permits_command(&self, uuid: &str, permission: &str) -> bool {
+        permission.is_empty() || self.permits(uuid, permission)
     }
 
     /// Whether authenticated sessions get player hooks: with extensions or
@@ -1186,6 +1237,8 @@ impl Extensions {
                 Some(script) => script.await?,
                 None => Action::Continue,
             },
+            // The script, then the plugins that handle chat; no bus responder.
+            "chat" => self.plugins.chat(input, script).await?,
             _ => self.plugins.decide(hook, input, script).await?,
         };
         self.known_destination(action)
@@ -1319,14 +1372,14 @@ impl ExtensionSession {
     pub fn visible_commands(&self) -> Vec<(String, bool)> {
         let uuid = &self.context.uuid;
         self.script_commands()
-            .filter(|(_, command)| self.runtime.permits(uuid, &command.permission))
+            .filter(|(_, command)| self.runtime.permits_command(uuid, &command.permission))
             .map(|(name, command)| (name.clone(), command.suggest != Suggest::None))
             .chain(
                 self.runtime
                     .plugins
                     .plugin_commands()
                     .into_iter()
-                    .filter(|command| self.runtime.permits(uuid, &command.permission))
+                    .filter(|command| self.runtime.permits_command(uuid, &command.permission))
                     .map(|command| {
                         let suggests = command.suggest != crate::plugins::api::SuggestKind::None;
                         (command.name, suggests)
@@ -1357,7 +1410,7 @@ impl ExtensionSession {
             CommandOwner::Plugin(instance, command) => {
                 if !self
                     .runtime
-                    .permits(&self.context.uuid, &command.permission)
+                    .permits_command(&self.context.uuid, &command.permission)
                 {
                     return Ok(Vec::new());
                 }
@@ -1381,7 +1434,7 @@ impl ExtensionSession {
         };
         if !self
             .runtime
-            .permits(&self.context.uuid, &command.permission)
+            .permits_command(&self.context.uuid, &command.permission)
         {
             return Ok(Vec::new());
         }
@@ -1434,7 +1487,10 @@ impl ExtensionSession {
                 .ok_or_else(|| invalid("unknown extension command"))?,
             CommandOwner::Plugin(_, command) => command.permission.clone(),
         };
-        if !self.runtime.permits(&self.context.uuid, &permission) {
+        if !self
+            .runtime
+            .permits_command(&self.context.uuid, &permission)
+        {
             return Ok(Action::Message(crate::text::catalog::notice(
                 Notice::CommandNoPermission,
             )));
@@ -1450,6 +1506,38 @@ impl ExtensionSession {
             }
         }
     }
+    /// Whether a `chat` hook would run for this player's next message: the
+    /// script of the session's configuration generation defines one, or a
+    /// running plugin handles chat. Asked per chat packet, like
+    /// [`ExtensionSession::intercepts`], and cheap: no plugin is called.
+    pub fn handles_chat(&self) -> bool {
+        self.runtime
+            .script
+            .as_ref()
+            .is_some_and(|script| script.hooks.contains("chat"))
+            || self
+                .runtime
+                .plugins
+                .may_handle(crate::plugins::api::Hook::Chat)
+    }
+
+    /// Ask the `chat` hooks about a message or backend command: `Continue`
+    /// lets it through, `Deny` carries the text for the player. An error is
+    /// a hook that failed or timed out under a `deny` policy.
+    pub async fn chat(&self, kind: ChatKind, text: &str) -> io::Result<Action> {
+        let mut input = self.context.clone();
+        if kind == ChatKind::Command {
+            let (name, args) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
+            input.command = Some(name.into());
+            input.args = args.trim().into();
+        }
+        input.chat = Some(ChatInput {
+            kind,
+            text: text.into(),
+        });
+        self.runtime.call("chat", &input, &self.jobs).await
+    }
+
     /// Deliver a dialog click for this player; see [`Extensions::dialog`].
     pub async fn dialog(
         &self,

@@ -44,6 +44,11 @@ pub(crate) struct SwitchingCapabilities {
     pub config_pack_pop: i32,
     command: i32,
     signed_command: i32,
+    /// Serverbound Chat Message. Before 1.19 it is `command` as well: a
+    /// leading `/` marks a command.
+    chat: i32,
+    /// Serverbound Player Session (chat session update); -1 before 1.19.3.
+    chat_session: i32,
     chat_acknowledgement: i32,
     system_chat: i32,
     /// Serverbound Command Suggestions Request and clientbound Response; -1
@@ -75,6 +80,8 @@ const V1_21_8: SwitchingCapabilities = SwitchingCapabilities {
     config_pack_pop: 0x08,
     command: 0x06,
     signed_command: 0x07,
+    chat: 0x08,
+    chat_session: 0x09,
     chat_acknowledgement: 0x05,
     system_chat: 0x72,
     suggestion_request: 0x0e,
@@ -96,6 +103,8 @@ const V1_21: SwitchingCapabilities = SwitchingCapabilities {
     respawn: 0x47,
     command: 0x04,
     signed_command: 0x05,
+    chat: 0x06,
+    chat_session: 0x07,
     chat_acknowledgement: 0x03,
     system_chat: 0x6c,
     suggestion_request: 0x0b,
@@ -117,6 +126,8 @@ const V1_21_2: SwitchingCapabilities = SwitchingCapabilities {
     game_event: 0x23,
     command: 0x05,
     signed_command: 0x06,
+    chat: 0x07,
+    chat_session: 0x08,
     chat_acknowledgement: 0x04,
     system_chat: 0x73,
     suggestion_request: 0x0d,
@@ -150,6 +161,8 @@ const V26_1: SwitchingCapabilities = SwitchingCapabilities {
     game_event: 0x26,
     command: 0x07,
     signed_command: 0x08,
+    chat: 0x09,
+    chat_session: 0x0a,
     chat_acknowledgement: 0x06,
     system_chat: 0x79,
     suggestion_request: 0x0f,
@@ -168,6 +181,33 @@ const V26_3: SwitchingCapabilities = SwitchingCapabilities {
     last_parser: 61,
     ..V26_2
 };
+
+/// What a serverbound chat packet asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ChatKind {
+    Message,
+    Command,
+}
+
+/// A chat message or command a client sent, read on the client's own protocol.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ChatAttempt {
+    pub kind: ChatKind,
+    /// The message, or the command line without its leading slash.
+    pub text: String,
+    /// Whether the packet carries a message signature or at least one
+    /// argument signature. A backend that verifies the player's chat counts
+    /// such a packet in the signature chain, so withholding it invalidates
+    /// everything the player signs afterwards. It may be dropped only when
+    /// the backend takes the player's chat as unsigned: with
+    /// `authentication.signed_chat = false`, or across a translation step
+    /// that removes signing. An unsigned packet may always be dropped.
+    pub signed: bool,
+    /// The acknowledgement the backend must still receive if the packet is
+    /// dropped: the packet's last-seen update, as a separate packet. `None`
+    /// where the packet acknowledges nothing.
+    pub ack: Option<Packet>,
+}
 
 const OVERWORLD: &str = "minecraft:overworld";
 const NETHER: &str = "minecraft:the_nether";
@@ -502,8 +542,9 @@ impl SwitchingCapabilities {
         if packet.id != self.command && packet.id != self.signed_command {
             return Ok(None);
         }
-        let mut bytes = packet.data.as_slice();
-        let raw = read_string(&mut bytes, 32767)?;
+        // Only the root name decides: every other command, and all chat,
+        // reaches the backend without Rift reading the rest of the packet.
+        let raw = read_string(&mut packet.data.as_slice(), 32767)?;
         let command = if self.protocol < 759 {
             let Some(command) = raw.strip_prefix('/') else {
                 return Ok(None);
@@ -516,20 +557,104 @@ impl SwitchingCapabilities {
         if !matches!(root, "server" | "hub") && !intercepts(root) {
             return Ok(None);
         }
-        let mut acknowledgement = None;
-        if packet.id == self.signed_command {
-            take(&mut bytes, 16)?; // timestamp and salt
-            let count = read_varint(&mut bytes)?;
-            if !(0..=8).contains(&count) {
-                return Err(invalid("invalid command signature count"));
+        Ok(self
+            .parse_chat(packet)?
+            .filter(|attempt| attempt.kind == ChatKind::Command && !attempt.signed)
+            .map(|attempt| (attempt.text, attempt.ack)))
+    }
+
+    /// Whether this is the client's Player Session packet, which gives the
+    /// backend the key to verify the player's chat with (1.19.3+).
+    pub(crate) fn chat_session_update(self, packet: &Packet) -> bool {
+        self.chat_session >= 0 && packet.id == self.chat_session
+    }
+
+    /// Whether this is a serverbound chat message or command packet, by its
+    /// ID alone.
+    pub(crate) fn is_chat(self, packet: &Packet) -> bool {
+        packet.id >= 0
+            && (packet.id == self.chat
+                || packet.id == self.command
+                || packet.id == self.signed_command)
+    }
+
+    /// A serverbound chat message or command, checked to its last byte, or
+    /// `None` for any other packet. Layouts per protocol are those of
+    /// PrismarineJS minecraft-data (tests/minecraft_data.json):
+    ///
+    /// - before 1.19, one Chat packet holding a string, a command when it
+    ///   starts with `/`;
+    /// - 1.19–1.19.2, Chat Command and Chat Message with a timestamp, a salt,
+    ///   variable-length signatures and a signed-preview flag, and from
+    ///   1.19.1 a last-seen update (seen messages and an optional rejected one);
+    /// - 1.19.3+, fixed 256-byte signatures and a last-seen update of an
+    ///   offset, a 20-bit set and, from 1.21.5, a checksum byte;
+    /// - 1.20.5+, also an unsigned Chat Command holding only its string.
+    ///
+    /// `ack` carries the last-seen update alone, as Velocity's
+    /// SessionCommandHandler.consumeCommand sends it for a consumed command:
+    /// the whole update in 1.19.1–1.19.2, a non-zero offset from 1.19.3.
+    pub(crate) fn parse_chat(self, packet: &Packet) -> io::Result<Option<ChatAttempt>> {
+        // An absent packet is -1 in the tables; no packet has that ID.
+        if packet.id < 0 {
+            return Ok(None);
+        }
+        let is_command = packet.id == self.command || packet.id == self.signed_command;
+        if !is_command && packet.id != self.chat {
+            return Ok(None);
+        }
+        let mut bytes = packet.data.as_slice();
+        let raw = read_string(&mut bytes, 32767)?;
+        if self.protocol < 759 {
+            if !bytes.is_empty() {
+                return Err(invalid("trailing command data"));
             }
-            for _ in 0..count {
-                read_string(&mut bytes, 16)?;
-                if self.protocol <= 760 {
-                    signature(&mut bytes)?;
-                } else {
-                    take(&mut bytes, 256)?;
+            let (kind, text) = match raw.strip_prefix('/') {
+                Some(command) => (ChatKind::Command, command),
+                None => (ChatKind::Message, raw),
+            };
+            return Ok(Some(ChatAttempt {
+                kind,
+                text: text.to_owned(),
+                signed: false,
+                ack: None,
+            }));
+        }
+        let mut attempt = ChatAttempt {
+            kind: if is_command {
+                ChatKind::Command
+            } else {
+                ChatKind::Message
+            },
+            text: raw.to_owned(),
+            signed: false,
+            ack: None,
+        };
+        // The unsigned Chat Command of 1.20.5+ is its string alone.
+        if packet.id != self.command {
+            take(&mut bytes, 16)?; // timestamp and salt
+            if is_command {
+                let count = read_varint(&mut bytes)?;
+                if !(0..=8).contains(&count) {
+                    return Err(invalid("invalid command signature count"));
                 }
+                for _ in 0..count {
+                    read_string(&mut bytes, 16)?;
+                    if self.protocol <= 760 {
+                        signature(&mut bytes)?;
+                    } else {
+                        take(&mut bytes, 256)?;
+                    }
+                }
+                attempt.signed = count != 0;
+            } else if self.protocol <= 760 {
+                // An unsigned message has an empty signature.
+                let before = bytes.len();
+                signature(&mut bytes)?;
+                attempt.signed = before - bytes.len() > 1;
+            } else if boolean(&mut bytes)? {
+                take(&mut bytes, 256)?;
+                attempt.signed = true;
             }
             if self.protocol <= 760 {
                 boolean(&mut bytes)?; // Signed preview.
@@ -547,38 +672,31 @@ impl SwitchingCapabilities {
                         take(&mut bytes, 16)?;
                         signature(&mut bytes)?;
                     }
-                    acknowledgement = Some(Packet::new(self.chat_acknowledgement, update.to_vec()));
+                    attempt.ack = Some(Packet::new(self.chat_acknowledgement, update.to_vec()));
                 }
-                if !bytes.is_empty() {
-                    return Err(invalid("trailing signed command data"));
+            } else {
+                let offset = read_varint(&mut bytes)?;
+                if offset < 0 {
+                    return Err(invalid("invalid chat acknowledgement offset"));
                 }
-                return if count == 0 {
-                    Ok(Some((command.to_owned(), acknowledgement)))
-                } else {
-                    Ok(None)
-                };
-            }
-            let offset = read_varint(&mut bytes)?;
-            if offset < 0 {
-                return Err(invalid("invalid chat acknowledgement offset"));
-            }
-            take(&mut bytes, if self.chat_checksum { 4 } else { 3 })?;
-            if !bytes.is_empty() {
-                return Err(invalid("trailing signed command data"));
-            }
-            if count != 0 {
-                return Ok(None);
-            }
-            if offset != 0 {
-                let mut data = Vec::new();
-                write_varint(offset, &mut data);
-                acknowledgement = Some(Packet::new(self.chat_acknowledgement, data));
+                take(&mut bytes, if self.chat_checksum { 4 } else { 3 })?;
+                if offset != 0 {
+                    let mut data = Vec::new();
+                    write_varint(offset, &mut data);
+                    attempt.ack = Some(Packet::new(self.chat_acknowledgement, data));
+                }
             }
         }
         if !bytes.is_empty() {
-            return Err(invalid("trailing command data"));
+            return Err(invalid(if packet.id == self.command {
+                "trailing command data"
+            } else if is_command {
+                "trailing signed command data"
+            } else {
+                "trailing chat data"
+            }));
         }
-        Ok(Some((command.to_owned(), acknowledgement)))
+        Ok(Some(attempt))
     }
 
     /// The transaction id and full text of a Command Suggestions Request for a

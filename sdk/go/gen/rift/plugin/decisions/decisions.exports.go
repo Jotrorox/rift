@@ -2,7 +2,7 @@
 
 package decisions
 
-// Exports represents the caller-defined exports from "rift:plugin/decisions@0.1.4".
+// Exports represents the caller-defined exports from "rift:plugin/decisions@0.1.5".
 var Exports struct {
 	// Login represents the caller-defined, exported function "login".
 	//

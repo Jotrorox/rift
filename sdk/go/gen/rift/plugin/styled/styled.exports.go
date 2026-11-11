@@ -6,7 +6,7 @@ import (
 	"go.bytecodealliance.org/cm"
 )
 
-// Exports represents the caller-defined exports from "rift:plugin/styled@0.1.4".
+// Exports represents the caller-defined exports from "rift:plugin/styled@0.1.5".
 var Exports struct {
 	// Suggest represents the caller-defined, exported function "suggest".
 	//

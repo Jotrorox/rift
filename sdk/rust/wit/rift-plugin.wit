@@ -19,11 +19,13 @@
 ///   other, so 0.1.1 adds the optional `dialogs` export and the dialog host
 ///   functions, 0.1.2 the optional `decisions` export and the rich text
 ///   host functions, 0.1.3 the visibility and permission meta host
-///   functions, and 0.1.4 `players.title-json` and the optional `styled`
-///   export (rich suggestion tooltips and server-list text), without
-///   breaking components built against 0.1.0.
+///   functions, 0.1.4 `players.title-json` and the optional `styled`
+///   export (rich suggestion tooltips and server-list text), and 0.1.5
+///   `players.locale`, command permissions that may be empty (every player
+///   may run the command) and the optional `chat` export, without breaking
+///   components built against 0.1.0.
 /// - Breaking changes move to 1.0.
-package rift:plugin@0.1.4;
+package rift:plugin@0.1.5;
 
 interface types {
     /// Log severity.
@@ -65,7 +67,8 @@ interface types {
         reason: option<string>,
         /// `after-transfer`: whether the transfer completed.
         success: option<bool>,
-        /// `command`/`suggest`: the command name and the text after it.
+        /// `command`/`suggest`, and `chat` for a command: the command name
+        /// and the text after it.
         command: option<string>,
         args: string,
         /// `suggest`: the argument being completed and its 1-based position.
@@ -108,7 +111,9 @@ interface types {
 
     /// `action` with rich text (since 0.1.2), the answer of the `decisions`
     /// export. The hooks accept the same subsets, with `deny-json` wherever
-    /// `deny` is accepted and `message-json` wherever `message` is.
+    /// `deny` is accepted and `message-json` wherever `message` is. It is
+    /// also the answer of the `chat` export (since 0.1.5), which accepts
+    /// continue, deny and deny-json.
     ///
     /// `deny` and `message` are plain text of 1..=1024 bytes. `deny-json`
     /// and `message-json` are JSON text components of at most 32 KiB, for
@@ -181,14 +186,19 @@ interface types {
         favicon: option<string>,
     }
 
-    /// An authenticated request to `/api/script/*` on the web server.
+    /// An authenticated request to `/ext` or `/ext/*` on the web server.
     record http-request {
         method: string,
         path: string,
         query: string,
         body: string,
         headers: list<tuple<string, string>>,
-        /// The authenticated principal and scopes, as a JSON object.
+        /// The status object with operator detail, as a JSON object, plus
+        /// `operator`: the authenticated caller as `{name, permissions,
+        /// groups}`. `permissions` is `null` for full access and `groups` is
+        /// `null` when the caller is not limited to service groups. Any
+        /// caller with the `extensions` permission reaches this hook, so check
+        /// `operator` before acting for it.
         context-json: string,
     }
 
@@ -232,6 +242,8 @@ interface types {
         /// 1..=64 bytes of `a-z0-9_-`; `server` and `hub` are reserved.
         name: string,
         /// The permission node a player needs to see and run the command.
+        /// Empty (since 0.1.5) means every player may see and run it; hosts
+        /// before 0.1.5 reject a registration with an empty permission.
         permission: string,
         suggest: suggest-kind,
     }
@@ -297,6 +309,26 @@ interface types {
         fade-in: s32,
         stay: s32,
         fade-out: s32,
+    }
+
+    /// What a player sent through the chat box (since 0.1.5).
+    enum chat-kind {
+        /// A chat message.
+        message,
+        /// A command that neither Rift nor a plugin owns, on its way to the
+        /// backend.
+        command,
+    }
+
+    /// A chat message or backend command a player sent, before the backend
+    /// sees it (since 0.1.5); the input of the `chat` export.
+    record chat-attempt {
+        /// The player. `server` is their current backend. For `command`,
+        /// `ctx.command` is the root name and `ctx.args` the rest.
+        ctx: context,
+        kind: chat-kind,
+        /// The message, or the command line without the leading slash.
+        text: string,
     }
 
     /// A click on a plugin action of a dialog this plugin showed with
@@ -367,6 +399,13 @@ interface players {
     visible-to: func(target: string) -> result<option<string>, string>;
     /// `title` with JSON text components (since 0.1.4).
     title-json: func(target: string, title: title-json-spec) -> result<bool, string>;
+    /// The language the player's client reported, as the client spells it
+    /// (`en_us`; old clients send `en_US`), or `none` while Rift does not
+    /// know it yet (since 0.1.5). The client sends it after login: during
+    /// configuration from 1.20.2, after Join Game before. So it is never
+    /// known in `login`, in `join` only for 1.20.2 and newer clients, and it
+    /// follows later changes of the client's language setting.
+    locale: func(target: string) -> result<option<string>, string>;
 }
 
 /// The durable key-value store. Namespaces are prefixed with
@@ -529,6 +568,29 @@ interface styled {
     status: func(ping: ping) -> option<rich-status-override>;
 }
 
+/// Chat messages and backend commands before the backend sees them (since
+/// 0.1.5), for mutes and filters. Optional, and unlike the other optional
+/// exports it is the registration: the host asks every component that exports
+/// it, about every message of every player, and no entry in the `hook` list
+/// is needed. So only components that moderate chat export it; the SDKs leave
+/// it out unless a plugin asks for it (worlds `plugin-chat` and `core-chat`).
+///
+/// Withholding one signed message breaks a player's signature chain, so a
+/// component that exports `chat` starts only with
+/// `authentication.signed_chat = false`, which makes backends take chat as
+/// unsigned. Commands that Rift or a plugin owns never come here. The
+/// deadline is 50 ms unless the manifest sets `deadlines.chat`; a missed
+/// deadline or a failure applies the manifest's policy, where `deny` drops
+/// the message.
+interface chat {
+    use types.{chat-attempt, decision};
+
+    /// Accepts `continue` (the backend receives the packet unchanged), and
+    /// `deny` and `deny-json` (the packet is dropped and the player sees the
+    /// text).
+    chat: func(attempt: chat-attempt) -> decision;
+}
+
 /// Every import and the exports every component has, without WASI: what the
 /// host requires. Exports added in later 0.1 releases are looked up
 /// separately.
@@ -558,6 +620,10 @@ world optional-styled {
     export styled;
 }
 
+world optional-chat {
+    export chat;
+}
+
 /// Imports and exports without WASI; the host links WASI separately.
 world core {
     include base;
@@ -566,9 +632,21 @@ world core {
     export styled;
 }
 
+/// `core` for a component that also exports `chat`.
+world core-chat {
+    include core;
+    export chat;
+}
+
 /// The world guests build against. TinyGo's `wasip2` target expects the
 /// WASI CLI import set even when a plugin does not use it.
 world plugin {
     include wasi:cli/imports@0.2.0;
     include core;
+}
+
+/// `plugin` for a component that also exports `chat`.
+world plugin-chat {
+    include plugin;
+    export chat;
 }

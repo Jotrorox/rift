@@ -26,6 +26,70 @@ on initial login and every replacement. Authentication service failures never
 fall back to offline identities. Omitted security settings retain the original
 offline mode, which requires forwarding disabled and `enforce-secure-profile=false`.
 
+### Unsigned chat
+
+`authentication.signed_chat` (default `true`) decides whether backends learn
+the material they verify a player's chat signatures with. With `false`, Rift
+withholds it on every backend attachment, translated or not:
+
+| Client | Withheld |
+| --- | --- |
+| 1.19–1.19.2 | The chat key: the backend's Login Start is rewritten without it, and Velocity forwarding answers with version 1, as for a player who has no key. Rift still checks the client's signature over the login challenge. |
+| 1.19.3 and newer | Every serverbound Player Session packet (chat session update), at login and whenever the client renews its key. |
+
+Chat messages, commands, their signatures and last-seen acknowledgements are
+forwarded as before. A backend without the key or session does not verify
+them and does not track a signature chain: it takes the player's chat as
+unsigned. That is what makes it safe for the proxy to drop a single chat
+message or command of a player; with signed chat, a backend that misses one
+signed message rejects every later one.
+
+The consequences, for every player on the network: their chat is shown to
+others as not secure (the client's unsigned-message marker), and chat
+reporting does not work, because nothing they say is signed towards the
+backend. Clients before 1.19 and offline-mode networks are unaffected; they
+sign nothing.
+
+Backends must not require signed chat:
+
+- **Vanilla** (and Spigot) enforce `enforce-secure-profile` only with
+  `online-mode=true`, which a backend behind a proxy does not have. From
+  1.19.1 on the setting has no effect there; a 1.19 backend must keep
+  `enforce-secure-profile=false` (see [translation](translation.md)).
+- **Paper** also enforces it when its proxy settings say the proxy is in
+  online mode (`proxies.velocity.online-mode: true`, or
+  `proxies.bungee-cord.online-mode` with `settings.bungeecord`). Set
+  `enforce-secure-profile=false` in `server.properties` on Paper backends,
+  or players cannot chat: the server answers each message with "Chat disabled
+  due to missing profile public key". Established from the bytecode of Paper
+  1.21.11 build 132 (`DedicatedServer.enforceSecureProfile` and
+  `SignedMessageChain.Decoder.unsigned`, `javap -c`), not from a run.
+- **Pumpkin** 0.2.0 accepts chat from a player with no chat session in its
+  default configuration (`allow_chat_reports = false`): it ignores Player
+  Session packets and message signatures altogether and broadcasts chat
+  unsigned, although it announces secure-chat enforcement. Established by a
+  run against the pinned release binary (`tests/servers.json`,
+  0.2.0+26.3-26.51, protocol 777): a player that never sent a Player Session
+  chatted with and without a 256-byte signature, and both messages reached
+  another player and the server log. With `allow_chat_reports = true`, which
+  Pumpkin permits only together with its own `online_mode`, the source at the
+  pinned commit (`net/java/play/chat_message.rs`) kicks a player whose message
+  has no signature, and one without a session for an expired key; that
+  configuration was not run and does not work with `signed_chat = false`.
+
+Changing the setting applies to connections made afterwards and restarts
+every persistent plugin, as a change of `online_mode` does.
+
+Unsigned chat is what the [`chat` hook](plugins.md#chat) builds on: a plugin
+or the configuration script sees each message and backend command first and
+may drop it. Rift holds the packet, and on a deny sends the backend only the
+last-seen acknowledgement the packet carried, as it does for a proxy command.
+A plugin or script with a chat handler is refused while `signed_chat` is
+`true`. A player who connected before the setting became `false` still has a
+signed chat session with their backend; until they reconnect, the hook is
+asked only about their packets without a signature, and signed ones pass
+unseen.
+
 Switching is an explicit capability in `src/protocol/switching.rs`, separate from
 relay and configuration-state support. Each protocol maps its control packet IDs,
 Join Game fields, signed-command checksum and Brigadier argument registry.

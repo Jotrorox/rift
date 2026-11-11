@@ -61,6 +61,9 @@ pub struct PluginSpec {
     /// `authentication.online_mode`: without it player hooks never run, so
     /// a plugin that registers one is refused at `init`.
     pub online_mode: bool,
+    /// `authentication.signed_chat`: `false` means backends see every
+    /// player's chat as unsigned, so dropping a message cannot break a chain.
+    pub signed_chat: bool,
 }
 
 impl PluginSpec {
@@ -113,14 +116,15 @@ impl PluginSpec {
     }
 
     /// Same code, manifest and folder; only the configuration table may differ.
-    /// A change of `online_mode` restarts the plugin, so its registration is
-    /// checked again.
+    /// A change of `online_mode` or `signed_chat` restarts the plugin, so its
+    /// registration is checked again.
     fn same_artifact(&self, other: &Self) -> bool {
         self.fingerprint == other.fingerprint
             && self.manifest == other.manifest
             && self.folder == other.folder
             && self.config_root == other.config_root
             && self.online_mode == other.online_mode
+            && self.signed_chat == other.signed_chat
     }
 }
 
@@ -875,6 +879,33 @@ impl Host {
         self.remote.decide(hook, input).await
     }
 
+    /// `chat`: the configuration script (when it defines the hook), then the
+    /// persistent plugins that handle chat, in order. The first deny wins.
+    /// There is no bus responder for chat.
+    pub(crate) async fn chat(
+        &self,
+        input: &Context,
+        script: Option<impl Future<Output = io::Result<Action>>>,
+    ) -> io::Result<Action> {
+        if let Some(script) = script {
+            let action = script.await?;
+            if action != Action::Continue {
+                return Ok(action);
+            }
+        }
+        for instance in self.active().iter() {
+            if let Some(action) = self
+                .action(instance, Hook::Chat, Event::Chat(input.clone()))
+                .await
+                .map_err(io::Error::other)?
+                && action != Action::Continue
+            {
+                return Ok(action);
+            }
+        }
+        Ok(Action::Continue)
+    }
+
     /// `join`, `after_transfer`, `disconnect` for every persistent plugin;
     /// fire-and-forget. The script's observer runs separately, as before.
     pub(crate) fn observe(&self, hook: &str, input: &Context) {
@@ -1138,7 +1169,10 @@ fn validate_action(hook: Hook, action: &Action) -> Result<(), String> {
     let allowed = matches!(
         (hook, action),
         (_, Action::Continue)
-            | (Hook::Login | Hook::BeforeTransfer, Action::Deny(_))
+            | (
+                Hook::Login | Hook::BeforeTransfer | Hook::Chat,
+                Action::Deny(_)
+            )
             | (Hook::InitialServer, Action::Deny(_) | Action::Server(_))
             | (
                 Hook::Command,

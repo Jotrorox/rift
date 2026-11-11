@@ -740,3 +740,36 @@ async fn profile_key_clients_sign_the_challenge_on_1_19_through_1_19_2() {
         }
     }
 }
+
+#[cfg(feature = "test-session-server")]
+#[test]
+fn test_session_url_accepts_only_loopback_ip_addresses() {
+    for url in [
+        "http://127.0.0.1:8080/session/minecraft/hasJoined",
+        "http://127.8.9.10/hasJoined",
+        "http://[::1]:8080/session/minecraft/hasJoined",
+        "https://127.0.0.1:8443/session/minecraft/hasJoined",
+    ] {
+        assert_eq!(test_session_url(url).unwrap(), url);
+    }
+    for url in [
+        "",
+        "127.0.0.1:8080",
+        "http://localhost:8080/hasJoined",
+        "http://example.com/hasJoined",
+        "http://127.0.0.1.example.com/hasJoined",
+        "http://127.0.0.1@example.com/hasJoined",
+        "http://user:password@127.0.0.1/hasJoined",
+        "http://0.0.0.0:8080/hasJoined",
+        "http://10.0.0.1/hasJoined",
+        "http://[::ffff:10.0.0.1]/hasJoined",
+        "http://[2001:db8::1]/hasJoined",
+        "ftp://127.0.0.1/hasJoined",
+        "file:///hasJoined",
+        "unix:/run/session.sock",
+    ] {
+        let error = test_session_url(url).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{url}");
+        assert!(error.to_string().starts_with(TEST_SESSION_URL_ENV), "{url}");
+    }
+}

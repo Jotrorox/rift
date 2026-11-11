@@ -78,6 +78,22 @@ func VisibleTo(target string) (string, bool, error) {
 	return "", false, nil
 }
 
+// Locale returns the language the player's client reported, as the client
+// spells it ("en_us"), and false while Rift does not know it (rift:plugin
+// 0.1.5). The client sends it after login: during configuration from
+// 1.20.2, after Join Game before. So it is never known in OnLogin and in
+// OnJoin only for 1.20.2 and newer clients.
+func Locale(target string) (string, bool, error) {
+	locale, err := unwrap(players.Locale(target))
+	if err != nil {
+		return "", false, err
+	}
+	if value := locale.Some(); value != nil {
+		return *value, true, nil
+	}
+	return "", false, nil
+}
+
 // PlayerNames lists joined player names starting with prefix, sorted.
 func PlayerNames(prefix string) []string {
 	return players.Names(optional(prefix)).Slice()

@@ -6,10 +6,10 @@ import (
 	"go.bytecodealliance.org/cm"
 )
 
-// This file contains wasmimport and wasmexport declarations for "rift:plugin@0.1.4".
+// This file contains wasmimport and wasmexport declarations for "rift:plugin@0.1.5".
 
-//go:wasmexport rift:plugin/styled@0.1.4#suggest
-//export rift:plugin/styled@0.1.4#suggest
+//go:wasmexport rift:plugin/styled@0.1.5#suggest
+//export rift:plugin/styled@0.1.5#suggest
 func wasmexport_Suggest(ctx *Context) (result *cm.List[RichSuggestion]) {
 	ctx_ := *ctx
 	result_ := Exports.Suggest(ctx_)
@@ -17,8 +17,8 @@ func wasmexport_Suggest(ctx *Context) (result *cm.List[RichSuggestion]) {
 	return
 }
 
-//go:wasmexport rift:plugin/styled@0.1.4#status
-//export rift:plugin/styled@0.1.4#status
+//go:wasmexport rift:plugin/styled@0.1.5#status
+//export rift:plugin/styled@0.1.5#status
 func wasmexport_Status(ping0 *uint8, ping1 uint32, ping2 *uint8, ping3 uint32, ping4 uint32, ping5 *uint8, ping6 uint32, ping7 uint32, ping8 *uint8, ping9 uint32, ping10 uint32, ping11 uint64, ping12 uint64) (result *cm.Option[RichStatusOverride]) {
 	ping := lift_Ping((*uint8)(ping0), (uint32)(ping1), (*uint8)(ping2), (uint32)(ping3), (uint32)(ping4), (*uint8)(ping5), (uint32)(ping6), (uint32)(ping7), (*uint8)(ping8), (uint32)(ping9), (uint32)(ping10), (uint64)(ping11), (uint64)(ping12))
 	result_ := Exports.Status(ping)

@@ -655,6 +655,7 @@ pub async fn handle(
         if snapshot.config.network.bungeecord {
             session.enable_bungeecord();
         }
+        session.set_signed_chat(snapshot.config.authentication.signed_chat);
         let mut login_name = if tracked_login {
             match timeout(HANDSHAKE_TIMEOUT, session.read_login_start()).await {
                 Ok(Ok(login)) => login.name,
@@ -843,6 +844,8 @@ pub async fn handle(
         let mut admin_registration = None;
         let mut transfers: Option<mpsc::Receiver<admin::Transfer>> = None;
         let mut directory = None;
+        // The locale the directory was last told, to tell it only changes.
+        let mut published_locale: Option<String> = None;
         let mut actions: Option<mpsc::Receiver<rift::extensions::PlayerAction>> = None;
         let mut transfer_reply: Option<admin::TransferReply> = None;
         // An administrator may select a backend added after this session's
@@ -1284,6 +1287,9 @@ pub async fn handle(
                                     session.handshake.protocol,
                                     &current_backend,
                                 );
+                                // 1.20.2+ clients said it during configuration.
+                                handle.set_locale(session.locale());
+                                published_locale = session.locale().map(str::to_owned);
                                 directory = Some(handle);
                                 actions = Some(receiver);
                                 // Joining set the proxy contexts to `server` alone.
@@ -1315,6 +1321,14 @@ pub async fn handle(
                     }
                     if playing && !ready {
                         phase_deadline = Deadline::now() + Duration::from_secs(30);
+                    }
+                    // Client Information arrives after Join Game on older
+                    // clients and again whenever the language setting changes.
+                    if let Some(directory) = &directory
+                        && session.locale() != published_locale.as_deref()
+                    {
+                        directory.set_locale(session.locale());
+                        published_locale = session.locale().map(str::to_owned);
                     }
                 }
                 Ok(SessionEvent::BungeeCord(request)) => {
@@ -1413,6 +1427,15 @@ pub async fn handle(
                     network
                         .dialog(&session, &current_backend, event, click)
                         .await;
+                }
+                Ok(SessionEvent::Chat(chat)) => {
+                    let live_snapshot = snapshot.latest();
+                    let network = Network {
+                        snapshot: &live_snapshot,
+                        addresses: &live_snapshot.addresses,
+                        metrics: &metrics,
+                    };
+                    network.chat(&mut session, chat).await?;
                 }
                 Ok(SessionEvent::Disconnected) => break,
                 Ok(SessionEvent::ClientClosed) => {

@@ -1,0 +1,30 @@
+[package]
+name = "conformance-chat-rs"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-2-Clause"
+publish = false
+
+# The conformance guest built with its `chat` export: the same source as
+# ../conformance-rs, as a crate of its own so that both builds exist side by
+# side. Standalone on purpose: a test fixture, never part of the proxy's build.
+[workspace]
+
+[lib]
+path = "../conformance-rs/src/lib.rs"
+crate-type = ["cdylib"]
+
+[features]
+default = ["chat"]
+chat = []
+
+[dependencies]
+rift-plugin = { path = "../../../../sdk/rust" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

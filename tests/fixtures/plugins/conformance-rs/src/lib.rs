@@ -9,10 +9,15 @@
 //!   guest answers with a decision the hook does not accept, carrying the
 //!   text `database down`. The host rejects it as an invalid reply, applies
 //!   `on_failure` and keeps the instance running, as for a Lua error.
+//!
+//! The `chat` export is the registration of the chat hook, so it cannot follow
+//! the configuration: the `chat` feature builds the guest with it, and
+//! `tests/fixtures/plugins/conformance-chat-rs` is this source with that
+//! feature on, for the scenarios that handle chat.
 use rift_plugin::{
-    Action, BusMessage, CommandSpec, Connection, Context, Hook, HttpRequest, HttpResponse, Ping,
-    Plugin, Registration, RouteDecision, StatusOverride, SuggestKind, Suggestion, bus, meta,
-    permissions, players, store, timers,
+    Action, BusMessage, ChatAttempt, ChatKind, CommandSpec, Connection, Context, Hook, HttpRequest,
+    HttpResponse, Ping, Plugin, Registration, RouteDecision, StatusOverride, SuggestKind,
+    Suggestion, bus, meta, permissions, players, store, timers,
 };
 use serde_json::Value;
 
@@ -281,6 +286,29 @@ impl Plugin for Guest {
             String::from_utf8_lossy(&message.payload)
         ));
     }
+
+    fn chat(&mut self, attempt: ChatAttempt) -> Action {
+        let kind = match attempt.kind {
+            ChatKind::Message => "message",
+            ChatKind::Command => "command",
+        };
+        report(&format!(
+            "chat {kind} {} {}",
+            attempt.ctx.command.as_deref().unwrap_or("-"),
+            attempt.text
+        ));
+        let blocked = self.config["chat"]["block"]
+            .as_str()
+            .is_some_and(|block| attempt.text.contains(block));
+        if blocked {
+            self.decide("chat")
+        } else {
+            Action::Continue
+        }
+    }
 }
 
+#[cfg(not(feature = "chat"))]
 rift_plugin::export!(Guest);
+#[cfg(feature = "chat")]
+rift_plugin::export!(Guest, chat);

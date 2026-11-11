@@ -212,6 +212,7 @@ impl LuaEngine {
         }
         Registration {
             commands,
+            chat: hooks.contains(&Hook::Chat),
             hooks: hooks.iter().copied().collect(),
         }
     }
@@ -266,6 +267,10 @@ impl LuaEngine {
             if let Some(payload) = &dialog.payload {
                 ctx.raw_set("payload", bind::to_lua(lua, payload)?)?;
             }
+        }
+        if let Some(chat) = &input.chat {
+            ctx.raw_set("kind", chat.kind.name())?;
+            ctx.raw_set("text", chat.text.as_str())?;
         }
         let services = self.state.services.clone();
         let uuid = input.uuid.clone();
@@ -330,7 +335,10 @@ impl LuaEngine {
             Event::Route(connection) => Reply::Route(crate::script::decision(
                 self.first(name, self.connection(&connection)?)?,
             )?),
-            Event::Login(ctx) | Event::InitialServer(ctx) | Event::BeforeTransfer(ctx) => {
+            Event::Login(ctx)
+            | Event::InitialServer(ctx)
+            | Event::BeforeTransfer(ctx)
+            | Event::Chat(ctx) => {
                 let value = self.first(name, self.context(&ctx, hook)?)?;
                 Reply::Action(crate::extensions::parse_action(name, value)?)
             }

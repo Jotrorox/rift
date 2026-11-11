@@ -105,6 +105,7 @@ func (d RouteDecision) lower() types.RouteDecision {
 //   - login, before-transfer: Continue, Deny, DenyJSON
 //   - initial-server: Continue, Deny, DenyJSON, Server
 //   - command: Continue, Message, MessageJSON, Server, Queue, LeaveQueue
+//   - chat (package chat): Continue, Deny, DenyJSON
 type Action struct {
 	kind  uint8
 	value string
@@ -191,6 +192,11 @@ func (a Action) lowerDecision() types.Decision {
 		return types.DecisionContinue()
 	}
 }
+
+// Decision is the action as the contract's decision variant. It is for
+// package chat, which answers the chat export with it; plugins return
+// Actions.
+func (a Action) Decision() types.Decision { return a.lowerDecision() }
 
 // componentWords is the visible text of a JSON text component, without
 // formatting; text that is not a valid component is returned as it is. It
@@ -283,7 +289,7 @@ func (s SuggestKind) lower() types.SuggestKind {
 // CommandSpec registers a proxy command.
 type CommandSpec struct {
 	Name       string // 1..=64 bytes of a-z0-9_-; "server" and "hub" are reserved
-	Permission string // the node a player needs to see and run the command
+	Permission string // the node a player needs to see and run the command; empty (since 0.1.5) for every player
 	Suggest    SuggestKind
 }
 
@@ -442,6 +448,34 @@ type DialogResponse struct {
 	// PayloadJSON is the action's payload or additions as the plugin wrote
 	// it, or nil. Rift keeps it, so the client can neither see nor change it.
 	PayloadJSON *string
+}
+
+// ChatKind tells a chat message from a command.
+type ChatKind = types.ChatKind
+
+const (
+	// ChatMessage is a chat message.
+	ChatMessage = types.ChatKindMessage
+	// ChatCommand is a command that neither Rift nor a plugin owns, on its
+	// way to the backend.
+	ChatCommand = types.ChatKindCommand
+)
+
+// ChatAttempt is a chat message or backend command a player sent, before
+// the backend sees it: the input of the chat hook (package chat,
+// rift:plugin 0.1.5).
+type ChatAttempt struct {
+	// Ctx is the player; Server is their current backend. For a command,
+	// Command is the root name and Args the rest.
+	Ctx  Context
+	Kind ChatKind
+	// Text is the message, or the command line without the leading slash.
+	Text string
+}
+
+// LiftChatAttempt converts the generated record. It is for package chat.
+func LiftChatAttempt(a types.ChatAttempt) ChatAttempt {
+	return ChatAttempt{Ctx: liftContext(a.Ctx), Kind: a.Kind, Text: a.Text}
 }
 
 // Event mirrors a rift.events.* publication.

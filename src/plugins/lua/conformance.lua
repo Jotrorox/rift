@@ -132,6 +132,19 @@ for _, command in ipairs(config.commands or {}) do
     })
 end
 
+-- With `chat`, the guest handles the chat hook: it reports every attempt and
+-- answers `decide.chat` for text that contains `chat.block`.
+if config.chat then
+    rift.on("chat", function(ctx)
+        report("chat " .. ctx.kind .. " " .. (ctx.command or "-") .. " " .. ctx.text)
+        local block = config.chat.block
+        if block and string.find(ctx.text, block, 1, true) then
+            behave("chat")
+            return decide("chat")
+        end
+    end)
+end
+
 for _, grant in ipairs(config.grant or {}) do
     rift.permissions.set(grant[1], grant[2], true)
 end
