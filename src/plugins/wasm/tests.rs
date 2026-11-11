@@ -5,7 +5,8 @@
 //! Guests:
 //! - `conformance-rs` (`tests/fixtures/plugins/conformance-rs`), the
 //!   WebAssembly build of the shared conformance guest, for
-//!   [`conformance_tests!`].
+//!   [`conformance_tests!`], and `conformance-chat-rs`, the same source
+//!   built with its `chat` export, for the scenarios that handle chat.
 //! - `hello-rs`, `hello-c` and `hello-go` (`examples/plugins/hello-*`), run
 //!   through the shared [`conformance::hello_example`] and the WebAssembly
 //!   specifics below. `hello-c` and `hello-go` need a toolchain this test
@@ -16,7 +17,8 @@
 //!   traps, deadlines, stop requests, capabilities and captured output.
 //!
 //! `RIFT_TEST_PLUGIN_WASM_DIR` may hold prebuilt `hello_rs.wasm`,
-//! `conformance_rs.wasm` and `probe_rs.wasm`. Otherwise the Rust guests are
+//! `conformance_rs.wasm`, `conformance_chat_rs.wasm` and `probe_rs.wasm`.
+//! Otherwise the Rust guests are
 //! built here with `cargo build --release --target wasm32-wasip2` into
 //! `target/plugin-fixtures`, when that target is installed; without it the
 //! scenarios print why they were skipped and pass.
