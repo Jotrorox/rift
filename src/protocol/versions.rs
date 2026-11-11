@@ -5,7 +5,17 @@
 //! clients only, or the versions a list of patterns names.
 use super::{ProtocolVersion, packets::RELEASES};
 
+/// Every release Rift knows, oldest first, with its protocol.
+pub fn releases() -> impl Iterator<Item = (&'static str, i32)> {
+    RELEASES.iter().copied()
+}
+
 /// The oldest and newest protocol translation reaches (1.12 and 26.3).
+pub fn translated_range() -> [i32; 2] {
+    let (oldest, newest) = translated();
+    [oldest, newest]
+}
+
 fn translated() -> (i32, i32) {
     let protocols = rift_translation::version::PROTOCOLS;
     (protocols[0].0, protocols[protocols.len() - 1].0)
@@ -93,14 +103,14 @@ fn rule(text: &str) -> Result<Rule, String> {
             }
         }
     };
-    if low > high {
-        return Err(format!(
-            "{text:?} is an empty range: the first version is the newer one"
-        ));
-    }
     if high < oldest || low > newest {
         return Err(format!(
             "{text:?} lies outside the versions Rift translates (1.12 to 26.3)"
+        ));
+    }
+    if low > high {
+        return Err(format!(
+            "{text:?} is an empty range: the first version is the newer one"
         ));
     }
     Ok(Rule::Span { low, high, text })
@@ -270,6 +280,7 @@ mod tests {
             (vec!["1.99"], "names no Minecraft version"),
             (vec!["1.20.4-1.16"], "empty range"),
             (vec!["1.8.*"], "outside the versions Rift translates"),
+            (vec!["<=1.11.2"], "outside the versions Rift translates"),
             (vec!["none", "1.20.*"], "stands alone"),
             (vec!["latest"], "names no Minecraft version"),
         ] {

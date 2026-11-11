@@ -31,7 +31,7 @@ use std::io;
 pub use switching::{GameMode, PlayerWorld, Suggestion};
 pub(crate) use tab_list::TabList;
 pub use tab_list::{TabEntry, TabView};
-pub use versions::{ClientVersions, translated_releases};
+pub use versions::{ClientVersions, releases, translated_range, translated_releases};
 
 /// Whether a client on `client` can play on a backend on `backend`, directly
 /// or through protocol translation.

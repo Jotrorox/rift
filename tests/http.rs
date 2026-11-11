@@ -2095,6 +2095,83 @@ fn structured_definitions_preserve_lua_and_apply_safe_group_and_template_edits()
         values["service_groups"]["lobby"]["scaling"]["capacity_per_instance"],
         20
     );
+    // Which client versions the group is translated for is edited the same
+    // way, applies to its live instance, and is absent until it is set.
+    assert_eq!(values["service_groups"]["lobby"].get("translation"), None);
+    assert_eq!(values["translation"]["clients"], "all");
+    assert_eq!(values["translation"]["range"], json!([335, 777]));
+    assert!(
+        values["translation"]["releases"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(["1.20.4", 765]))
+    );
+    let shown = |client: Client| {
+        let groups = client.get("/api/groups").expect(200).value();
+        groups["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|group| group["name"] == "lobby")
+            .unwrap()["translation"]
+            .clone()
+    };
+    assert_eq!(
+        shown(client),
+        json!({"enabled":true,"inherited":true,"clients":"all","summary":"All versions"})
+    );
+    for (setting, saved, summary) in [
+        (
+            json!(["1.20.*", ">=1.21.4"]),
+            json!(["1.20.*", ">=1.21.4"]),
+            "1.20.*, >=1.21.4",
+        ),
+        (json!("newer"), json!("newer"), "Own version and newer"),
+        (json!(false), json!("none"), "Own version only"),
+    ] {
+        let mut versions = changed.clone();
+        versions["translation"] = setting;
+        client
+            .json(
+                "PUT",
+                "/api/definitions/service_groups/lobby",
+                json!({"revision":revision(client),"definition":versions}),
+            )
+            .expect(200);
+        assert_eq!(
+            client.get("/api/definitions").expect(200).value()["service_groups"]["lobby"]["translation"],
+            saved
+        );
+        assert_eq!(
+            shown(client),
+            json!({"enabled":true,"inherited":false,"clients":saved,"summary":summary})
+        );
+    }
+    let mut unknown = changed.clone();
+    unknown["translation"] = json!(["1.99"]);
+    let rejected = client
+        .json(
+            "PUT",
+            "/api/definitions/service_groups/lobby",
+            json!({"revision":revision(client),"definition":unknown}),
+        )
+        .expect(400)
+        .value();
+    assert!(
+        rejected["error"]
+            .as_str()
+            .unwrap()
+            .contains("names no Minecraft version"),
+        "{rejected}"
+    );
+    client
+        .json(
+            "PUT",
+            "/api/definitions/service_groups/lobby",
+            json!({"revision":revision(client),"definition":changed}),
+        )
+        .expect(200);
+    assert_eq!(shown(client)["inherited"], true);
     let template = json!({"server_jar":"assets/server'\"é.jar","plugins":["assets/p.jar"]});
     client
         .json(

@@ -193,6 +193,26 @@ td.unlisted{color:var(--secondary)}
 
 /* Server list icon picker and chips (parent groups). */
 .favicon-picker{display:flex;align-items:center;gap:12px;padding:8px;border:1px dashed var(--border);border-radius:var(--control);background:var(--surface)}
+.versions{grid-column:1/-1;display:flex;flex-direction:column;gap:12px;min-width:0;margin:0;padding:16px 0 0;border:0;border-top:1px solid var(--separator)}
+.versions legend{float:left;width:100%;padding:0;color:var(--label);font-size:.875rem;font-weight:600}
+.versions legend+*{clear:both}
+.choice-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:8px}
+.choice{display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border:1px solid var(--border);border-radius:var(--control);background:var(--surface);cursor:pointer}
+.choice:hover{border-color:var(--secondary)}
+.choice:has(input:checked){border-color:var(--link);background:var(--accent-soft)}
+.choice:has(input:focus-visible){outline:3px solid var(--accent-soft)}
+.choice input[type=radio]{flex:none;width:16px;height:16px;min-height:0;margin:1px 0 0;padding:0;border:0;accent-color:var(--accent)}
+.choice-text{display:flex;flex-direction:column;gap:2px;min-width:0}
+.choice-title{color:var(--label);font-size:.8125rem;font-weight:600}
+.choice-note{color:var(--secondary);font-size:.75rem;font-weight:400;line-height:1.35}
+.versions-custom{display:flex;flex-direction:column;gap:12px;padding:12px;border:1px solid var(--separator);border-radius:var(--control);background:var(--surface)}
+.field-label{color:var(--secondary);font-size:.8125rem;font-weight:500}
+.toggle{min-height:26px;padding:2px 12px;border:1px solid var(--border);border-radius:999px;background:var(--surface);color:var(--label);font:inherit;font-size:.75rem;font-weight:500;cursor:pointer}
+.toggle:hover{border-color:var(--secondary)}
+.toggle[aria-pressed=true]{border-color:var(--accent);background:var(--accent);color:var(--on-accent)}
+.toggle:focus-visible{outline:3px solid var(--accent-soft);outline-offset:1px}
+.versions-preview{margin:0;padding:8px 12px;border-radius:var(--control);background:var(--fill);color:var(--label);font-size:.8125rem}
+.versions-preview.bad{background:var(--red-soft);color:var(--red)}
 .favicon-picker.dragging{border-color:var(--link);background:var(--accent-soft)}
 .favicon-preview{flex:none;display:grid;place-items:center;width:64px;height:64px;border-radius:6px;background:var(--fill)}
 .favicon-preview img{width:64px;height:64px;border-radius:6px;image-rendering:pixelated}
