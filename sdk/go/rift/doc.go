@@ -35,6 +35,12 @@
 // OnRichStatus answer with rich tooltips and server-list text through the
 // styled export of rift:plugin 0.1.4.
 //
+// Chat: importing the chat subpackage adds the chat hook (rift:plugin 0.1.5),
+// which sees chat messages and backend commands before the backend does and
+// may drop them. It is a package of its own because having the hook is its
+// registration: see its documentation for what it requires of the proxy and
+// of the build.
+//
 // Build with TinyGo 0.34 or newer:
 //
 //	tinygo build -target=wasip2 --wit-package <rift>/wit --wit-world plugin -no-debug -o plugin.wasm .

@@ -1140,6 +1140,11 @@ void rift_plugin_types_title_json_spec_free(rift_plugin_types_title_json_spec_t 
   rift_plugin_option_string_free(&ptr->subtitle_json);
 }
 
+void rift_plugin_types_chat_attempt_free(rift_plugin_types_chat_attempt_t *ptr) {
+  rift_plugin_types_context_free(&ptr->ctx);
+  rift_plugin_string_free(&ptr->text);
+}
+
 void rift_plugin_types_dialog_response_free(rift_plugin_types_dialog_response_t *ptr) {
   rift_plugin_types_context_free(&ptr->ctx);
   rift_plugin_string_free(&ptr->action);

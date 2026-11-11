@@ -35,6 +35,13 @@ against a flat 2 MB heap with 0.42.0.
 tinygo build -target=wasip2 --wit-package path/to/rift/wit --wit-world plugin -no-debug -o plugin.wasm .
 ```
 
+A plugin that imports [`rift/chat`](rift/chat/chat.go) handles the chat hook
+(`chat.OnChat`, since 0.1.5; see
+[docs/plugins-go.md](../../docs/plugins-go.md#chat)) and is built with
+`--wit-world plugin-chat` instead. A component with that export is asked about
+every chat message and starts only with `authentication.signed_chat = false`,
+so the `rift` package alone never exports it.
+
 `--wit-package` also accepts a packaged WIT (`wasm-tools component wit
 --wasm -o rift-plugin.wasm wit`). Check the result with
 `wasm-tools component wit plugin.wasm`: it must export

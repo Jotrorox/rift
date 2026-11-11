@@ -123,7 +123,8 @@ type Context struct {
 	// `after-transfer`: whether the transfer completed.
 	Success cm.Option[bool] `json:"success"`
 
-	// `command`/`suggest`: the command name and the text after it.
+	// `command`/`suggest`, and `chat` for a command: the command name
+	// and the text after it.
 	Command cm.Option[string] `json:"command"`
 	Args    string            `json:"args"`
 
@@ -309,7 +310,9 @@ func (v Action) String() string {
 //
 // `action` with rich text (since 0.1.2), the answer of the `decisions`
 // export. The hooks accept the same subsets, with `deny-json` wherever
-// `deny` is accepted and `message-json` wherever `message` is.
+// `deny` is accepted and `message-json` wherever `message` is. It is
+// also the answer of the `chat` export (since 0.1.5), which accepts
+// continue, deny and deny-json.
 //
 // `deny` and `message` are plain text of 1..=1024 bytes. `deny-json`
 // and `message-json` are JSON text components of at most 32 KiB, for
@@ -890,6 +893,69 @@ type TitleJSONSpec struct {
 	FadeIn       int32             `json:"fade-in"`
 	Stay         int32             `json:"stay"`
 	FadeOut      int32             `json:"fade-out"`
+}
+
+// ChatKind represents the enum "rift:plugin/types@0.1.5#chat-kind".
+//
+// What a player sent through the chat box (since 0.1.5).
+//
+//	enum chat-kind {
+//		message,
+//		command
+//	}
+type ChatKind uint8
+
+const (
+	// A chat message.
+	ChatKindMessage ChatKind = iota
+
+	// A command that neither Rift nor a plugin owns, on its way to the
+	// backend.
+	ChatKindCommand
+)
+
+var _ChatKindStrings = [2]string{
+	"message",
+	"command",
+}
+
+// String implements [fmt.Stringer], returning the enum case name of e.
+func (e ChatKind) String() string {
+	return _ChatKindStrings[e]
+}
+
+// MarshalText implements [encoding.TextMarshaler].
+func (e ChatKind) MarshalText() ([]byte, error) {
+	return []byte(e.String()), nil
+}
+
+// UnmarshalText implements [encoding.TextUnmarshaler], unmarshaling into an enum
+// case. Returns an error if the supplied text is not one of the enum cases.
+func (e *ChatKind) UnmarshalText(text []byte) error {
+	return _ChatKindUnmarshalCase(e, text)
+}
+
+var _ChatKindUnmarshalCase = cm.CaseUnmarshaler[ChatKind](_ChatKindStrings[:])
+
+// ChatAttempt represents the record "rift:plugin/types@0.1.5#chat-attempt".
+//
+// A chat message or backend command a player sent, before the backend
+// sees it (since 0.1.5); the input of the `chat` export.
+//
+//	record chat-attempt {
+//		ctx: context,
+//		kind: chat-kind,
+//		text: string,
+//	}
+type ChatAttempt struct {
+	_ cm.HostLayout `json:"-"`
+	// The player. `server` is their current backend. For `command`,
+	// `ctx.command` is the root name and `ctx.args` the rest.
+	Ctx  Context  `json:"ctx"`
+	Kind ChatKind `json:"kind"`
+
+	// The message, or the command line without the leading slash.
+	Text string `json:"text"`
 }
 
 // DialogResponse represents the record "rift:plugin/types@0.1.5#dialog-response".

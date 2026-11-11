@@ -301,8 +301,8 @@ jobs:
             echo "gofmt needed: $unformatted" >&2
             exit 1
           fi
-          go vet ./rift/
-          go test ./rift/
+          go vet ./rift/...
+          go test ./rift/...
       - name: Check the committed Go bindings match wit/
         run: sdk/go/regenerate.sh --check
       - name: Build hello-go

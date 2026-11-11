@@ -1,8 +1,10 @@
 // Weak no-op implementations of every `rift:plugin/handler` export and of
 // `rift:plugin/dialogs` (dialog clicks, since 0.1.1), weak
 // `rift:plugin/decisions` exports (since 0.1.2) that answer with the
-// handler's decision hooks, and weak `rift:plugin/styled` exports (since
-// 0.1.4) that answer with the handler's `suggest` and `status`.
+// handler's decision hooks, weak `rift:plugin/styled` exports (since
+// 0.1.4) that answer with the handler's `suggest` and `status`, and, in a
+// plugin built with RIFT_CHAT, a weak `rift:plugin/chat` export (since 0.1.5)
+// that lets everything through.
 //
 // Link this file next to the generated `rift_plugin.c` and define only the
 // hooks your plugin needs; a strong definition in your own source replaces
@@ -171,3 +173,13 @@ RIFT_WEAK bool exports_rift_plugin_styled_status(exports_rift_plugin_styled_ping
   ret->favicon = plain.favicon;
   return true;
 }
+
+#ifdef RIFT_CHAT
+// Only a plugin built with RIFT_CHAT has the `chat` export, and it defines
+// this hook itself; the default lets every message through.
+RIFT_WEAK void exports_rift_plugin_chat_chat(exports_rift_plugin_chat_chat_attempt_t *attempt,
+                                             exports_rift_plugin_chat_decision_t *ret) {
+  rift_chat_attempt_free(attempt);
+  rift_decision_continue(ret);
+}
+#endif

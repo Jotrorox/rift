@@ -63,7 +63,8 @@ typedef struct rift_plugin_types_context_t {
   rift_plugin_option_string_t   reason;
   // `after-transfer`: whether the transfer completed.
   rift_plugin_option_bool_t   success;
-  // `command`/`suggest`: the command name and the text after it.
+  // `command`/`suggest`, and `chat` for a command: the command name
+  // and the text after it.
   rift_plugin_option_string_t   command;
   rift_plugin_string_t   args;
   // `suggest`: the argument being completed and its 1-based position.
@@ -120,7 +121,9 @@ typedef struct rift_plugin_types_action_t {
 
 // `action` with rich text (since 0.1.2), the answer of the `decisions`
 // export. The hooks accept the same subsets, with `deny-json` wherever
-// `deny` is accepted and `message-json` wherever `message` is.
+// `deny` is accepted and `message-json` wherever `message` is. It is
+// also the answer of the `chat` export (since 0.1.5), which accepts
+// continue, deny and deny-json.
 // 
 // `deny` and `message` are plain text of 1..=1024 bytes. `deny-json`
 // and `message-json` are JSON text components of at most 32 KiB, for
@@ -377,6 +380,26 @@ typedef struct rift_plugin_types_title_json_spec_t {
   int32_t   stay;
   int32_t   fade_out;
 } rift_plugin_types_title_json_spec_t;
+
+// What a player sent through the chat box (since 0.1.5).
+typedef uint8_t rift_plugin_types_chat_kind_t;
+
+// A chat message.
+#define RIFT_PLUGIN_TYPES_CHAT_KIND_MESSAGE 0
+// A command that neither Rift nor a plugin owns, on its way to the
+// backend.
+#define RIFT_PLUGIN_TYPES_CHAT_KIND_COMMAND 1
+
+// A chat message or backend command a player sent, before the backend
+// sees it (since 0.1.5); the input of the `chat` export.
+typedef struct rift_plugin_types_chat_attempt_t {
+  // The player. `server` is their current backend. For `command`,
+  // `ctx.command` is the root name and `ctx.args` the rest.
+  rift_plugin_types_context_t   ctx;
+  rift_plugin_types_chat_kind_t   kind;
+  // The message, or the command line without the leading slash.
+  rift_plugin_string_t   text;
+} rift_plugin_types_chat_attempt_t;
 
 // A click on a plugin action of a dialog this plugin showed with
 // `players.dialog` (since 0.1.1).
@@ -841,6 +864,8 @@ void rift_plugin_types_boss_bar_spec_free(rift_plugin_types_boss_bar_spec_t *ptr
 void rift_plugin_types_title_spec_free(rift_plugin_types_title_spec_t *ptr);
 
 void rift_plugin_types_title_json_spec_free(rift_plugin_types_title_json_spec_t *ptr);
+
+void rift_plugin_types_chat_attempt_free(rift_plugin_types_chat_attempt_t *ptr);
 
 void rift_plugin_types_dialog_response_free(rift_plugin_types_dialog_response_t *ptr);
 
