@@ -14,6 +14,7 @@ use crate::{
 };
 use std::{
     collections::HashMap,
+    io,
     net::SocketAddr,
     sync::{Mutex, OnceLock},
     time::{Duration, Instant},
@@ -103,25 +104,47 @@ async fn ask(backend: &Backend, listeners: &[SocketAddr], client: i32) -> Option
     tokio::time::timeout(TIMEOUT, exchange).await.ok().flatten()
 }
 
+/// What a player on a version the backend's `translation` setting leaves out
+/// is told.
+fn not_translated() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        "This server does not accept your Minecraft version.",
+    )
+}
+
 /// The protocol to speak to backend `name` for a player on `client`: the
 /// version its configuration declares, else the one it reports, else `None`
 /// for the player's own. A reported version Rift cannot translate to is
-/// ignored, leaving the backend to accept or refuse the player itself.
+/// ignored, leaving the backend to accept or refuse the player itself. A
+/// backend on another version whose `translation` setting leaves the
+/// player's version out refuses the player here.
 pub async fn protocol(
     config: &Config,
     name: &str,
     client: ProtocolVersion,
     listeners: &[SocketAddr],
-) -> Option<ProtocolVersion> {
-    let backend = config.backends.get(name)?;
+) -> io::Result<Option<ProtocolVersion>> {
+    let Some(backend) = config.backends.get(name) else {
+        return Ok(None);
+    };
     if !config.translation.enabled {
-        return None;
+        return Ok(None);
     }
+    let allowed = |backend: ProtocolVersion| config.client_versions(name).allows(client, backend);
     if let Some(declared) = backend.version() {
-        return Some(declared);
+        return if declared == client
+            || !crate::protocol::translatable(client, declared)
+            || allowed(declared)
+        {
+            // An untranslatable pair is refused where the backend connects.
+            Ok(Some(declared))
+        } else {
+            Err(not_translated())
+        };
     }
     if !config.translation.detect {
-        return None;
+        return Ok(None);
     }
     let key = (backend.address().to_owned(), client.number());
     let reported = match cached(&key) {
@@ -132,8 +155,17 @@ pub async fn protocol(
             reported
         }
     };
-    let reported = ProtocolVersion::new(reported?).ok()?;
-    (reported != client && crate::protocol::translatable(client, reported)).then_some(reported)
+    let Some(reported) = reported.and_then(|reported| ProtocolVersion::new(reported).ok()) else {
+        return Ok(None);
+    };
+    if reported == client || !crate::protocol::translatable(client, reported) {
+        return Ok(None);
+    }
+    if allowed(reported) {
+        Ok(Some(reported))
+    } else {
+        Err(not_translated())
+    }
 }
 
 /// Whether backend `name` can take a player on `client` at all, going by its
@@ -145,7 +177,9 @@ pub fn serves(config: &Config, name: &str, client: ProtocolVersion) -> bool {
         .and_then(Backend::version)
         .is_none_or(|backend| {
             backend == client
-                || (config.translation.enabled && crate::protocol::translatable(client, backend))
+                || (config.translation.enabled
+                    && crate::protocol::translatable(client, backend)
+                    && config.client_versions(name).allows(client, backend))
         })
 }
 
@@ -153,8 +187,9 @@ pub fn serves(config: &Config, name: &str, client: ProtocolVersion) -> bool {
 /// the server list: where Rift translates between the two versions, the
 /// backend's protocol number is replaced by the player's, so the client does
 /// not show a server it can join as incompatible. Anything else, including a
-/// response that does not parse, is returned unchanged.
-pub fn status_for_client(config: &Config, client: i32, response: Packet) -> Packet {
+/// version backend `name` does not translate for and a response that does not
+/// parse, is returned unchanged.
+pub fn status_for_client(config: &Config, name: &str, client: i32, response: Packet) -> Packet {
     let rewritten = || {
         if !config.translation.enabled {
             return None;
@@ -164,7 +199,10 @@ pub fn status_for_client(config: &Config, client: i32, response: Packet) -> Pack
         let mut document: serde_json::Value = serde_json::from_str(document).ok()?;
         let reported = document.get("version")?.get("protocol")?.as_i64()?;
         let backend = ProtocolVersion::new(i32::try_from(reported).ok()?).ok()?;
-        if backend == client || !crate::protocol::translatable(client, backend) {
+        if backend == client
+            || !crate::protocol::translatable(client, backend)
+            || !config.client_versions(name).allows(client, backend)
+        {
             return None;
         }
         document["version"]["protocol"] = client.number().into();
@@ -220,12 +258,12 @@ mod tests {
     async fn a_backend_on_another_version_is_detected_asked_as_the_client_and_cached() {
         let (address, server) = status_server(771).await;
         let config = config(address);
-        let detected = protocol(&config, "lobby", version(772), &[]).await;
+        let detected = protocol(&config, "lobby", version(772), &[]).await.unwrap();
         assert_eq!(detected, Some(version(771)));
         assert_eq!(server.await.unwrap(), 772);
         // The server is gone; the cached answer still holds.
         assert_eq!(
-            protocol(&config, "lobby", version(772), &[]).await,
+            protocol(&config, "lobby", version(772), &[]).await.unwrap(),
             Some(version(771))
         );
     }
@@ -234,20 +272,26 @@ mod tests {
     async fn same_version_untranslatable_and_silent_backends_use_the_client_protocol() {
         let (address, _server) = status_server(772).await;
         assert_eq!(
-            protocol(&config(address), "lobby", version(772), &[]).await,
+            protocol(&config(address), "lobby", version(772), &[])
+                .await
+                .unwrap(),
             None
         );
         // 1.8 is outside the translated range: leave the decision to the backend.
         let (address, _server) = status_server(47).await;
         assert_eq!(
-            protocol(&config(address), "lobby", version(772), &[]).await,
+            protocol(&config(address), "lobby", version(772), &[])
+                .await
+                .unwrap(),
             None
         );
         let unused = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = unused.local_addr().unwrap();
         drop(unused);
         assert_eq!(
-            protocol(&config(address), "lobby", version(772), &[]).await,
+            protocol(&config(address), "lobby", version(772), &[])
+                .await
+                .unwrap(),
             None
         );
     }
@@ -263,29 +307,32 @@ mod tests {
         };
         let mut config = Config::default();
         assert_eq!(
-            protocol_of(&status_for_client(&config, 772, status(771))),
+            protocol_of(&status_for_client(&config, "lobby", 772, status(771))),
             772
         );
         assert_eq!(
-            protocol_of(&status_for_client(&config, 772, status(772))),
+            protocol_of(&status_for_client(&config, "lobby", 772, status(772))),
             772
         );
         // Not translatable, an unknown client, or translation off: unchanged.
         assert_eq!(
-            protocol_of(&status_for_client(&config, 772, status(47))),
+            protocol_of(&status_for_client(&config, "lobby", 772, status(47))),
             47
         );
         assert_eq!(
-            protocol_of(&status_for_client(&config, 5, status(771))),
+            protocol_of(&status_for_client(&config, "lobby", 5, status(771))),
             771
         );
         config.translation.enabled = false;
         assert_eq!(
-            protocol_of(&status_for_client(&config, 772, status(771))),
+            protocol_of(&status_for_client(&config, "lobby", 772, status(771))),
             771
         );
         let garbage = Packet::new(0, vec![1, 2, 3]);
-        assert_eq!(status_for_client(&config, 772, garbage.clone()), garbage);
+        assert_eq!(
+            status_for_client(&config, "lobby", 772, garbage.clone()),
+            garbage
+        );
     }
 
     #[tokio::test]
@@ -293,18 +340,115 @@ mod tests {
         let (address, _server) = status_server(771).await;
         let mut config = config(address);
         config.translation.detect = false;
-        assert_eq!(protocol(&config, "lobby", version(772), &[]).await, None);
+        assert_eq!(
+            protocol(&config, "lobby", version(772), &[]).await.unwrap(),
+            None
+        );
         let declared = config.backends["lobby"].clone().with_version(version(771));
         config.backends.insert("lobby".into(), declared);
         assert_eq!(
-            protocol(&config, "lobby", version(772), &[]).await,
+            protocol(&config, "lobby", version(772), &[]).await.unwrap(),
             Some(version(771))
         );
         assert!(serves(&config, "lobby", version(772)));
         assert!(!serves(&config, "lobby", version(47)));
         config.translation.enabled = false;
-        assert_eq!(protocol(&config, "lobby", version(772), &[]).await, None);
+        assert_eq!(
+            protocol(&config, "lobby", version(772), &[]).await.unwrap(),
+            None
+        );
         assert!(!serves(&config, "lobby", version(772)));
         assert!(serves(&config, "lobby", version(771)));
+    }
+
+    fn clients(patterns: &[&str]) -> crate::protocol::ClientVersions {
+        crate::protocol::ClientVersions::parse(patterns.iter().copied()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_declared_backend_takes_only_the_client_versions_its_setting_names() {
+        let mut config = Config::default();
+        let backend = |patterns: &[&str]| {
+            Backend::parse("127.0.0.1:1")
+                .unwrap()
+                .with_version(version(765))
+                .with_clients(clients(patterns))
+        };
+        // 1.20.4 backend (765); clients 1.21.8 (772), 1.19.4 (762), 1.12.2 (340).
+        for (patterns, newer, older, oldest) in [
+            (&["all"][..], true, true, true),
+            (&["none"], false, false, false),
+            (&["newer"], true, false, false),
+            (&["older"], false, true, true),
+            (&["1.19.*", "1.21.*"], true, true, false),
+            (&["<=1.12.2"], false, false, true),
+        ] {
+            config.backends.insert("game".into(), backend(patterns));
+            for (client, expected) in [(772, newer), (762, older), (340, oldest)] {
+                assert_eq!(
+                    serves(&config, "game", version(client)),
+                    expected,
+                    "{patterns:?} {client}"
+                );
+                let asked = protocol(&config, "game", version(client), &[]).await;
+                match expected {
+                    true => assert_eq!(asked.unwrap(), Some(version(765))),
+                    false => assert_eq!(asked.unwrap_err().kind(), io::ErrorKind::Unsupported),
+                }
+            }
+            // Its own version needs no translation and is always served.
+            assert!(serves(&config, "game", version(765)), "{patterns:?}");
+            assert_eq!(
+                protocol(&config, "game", version(765), &[]).await.unwrap(),
+                Some(version(765))
+            );
+        }
+        // A backend without its own setting follows the proxy-wide one.
+        config.backends.insert(
+            "game".into(),
+            Backend::parse("127.0.0.1:1")
+                .unwrap()
+                .with_version(version(765)),
+        );
+        config.translation.clients = clients(&["newer"]);
+        assert!(serves(&config, "game", version(772)));
+        assert!(!serves(&config, "game", version(762)));
+    }
+
+    #[tokio::test]
+    async fn a_detected_backend_refuses_versions_its_setting_leaves_out() {
+        let (address, _server) = status_server(771).await;
+        let mut config = config(address);
+        let limited = config.backends["lobby"]
+            .clone()
+            .with_clients(clients(&["older"]));
+        config.backends.insert("lobby".into(), limited);
+        // Undeclared: selection cannot know yet, the connection attempt does.
+        assert!(serves(&config, "lobby", version(772)));
+        let refused = protocol(&config, "lobby", version(772), &[])
+            .await
+            .unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::Unsupported);
+        assert!(
+            refused
+                .to_string()
+                .contains("does not accept your Minecraft version")
+        );
+
+        let status = crate::protocol::status_response(771, 3, 20, "hello");
+        let shown = |config: &Config| {
+            let packet = status_for_client(config, "lobby", 772, status.clone());
+            let text = read_string(&mut packet.data.as_slice(), MAX_STATUS).unwrap();
+            serde_json::from_str::<serde_json::Value>(text).unwrap()["version"]["protocol"]
+                .as_i64()
+                .unwrap()
+        };
+        // The server list shows such a backend as the other version it is.
+        assert_eq!(shown(&config), 771);
+        let open = config.backends["lobby"]
+            .clone()
+            .with_clients(clients(&["newer"]));
+        config.backends.insert("lobby".into(), open);
+        assert_eq!(shown(&config), 772);
     }
 }

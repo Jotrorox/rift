@@ -7,6 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub use crate::protocol::ClientVersions;
 use crate::routing::{Backend, Mode, Routes};
 use mlua::{Table, Value};
 use tokio::sync::Semaphore;
@@ -108,13 +109,16 @@ pub struct Config {
 /// Protocol translation between players and backends on different Minecraft
 /// versions, like ViaVersion and ViaBackwards on other proxies. On unless
 /// configured otherwise.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Translation {
     /// Off: every backend is spoken to in the player's own protocol and
     /// accepts or refuses the player itself.
     pub enabled: bool,
     /// Ask backends without a declared `version` which one they run.
     pub detect: bool,
+    /// The client versions translated for backends and service groups that
+    /// do not set their own `translation`.
+    pub clients: ClientVersions,
 }
 
 impl Default for Translation {
@@ -122,6 +126,7 @@ impl Default for Translation {
         Self {
             enabled: true,
             detect: true,
+            clients: ClientVersions::all(),
         }
     }
 }
@@ -914,11 +919,15 @@ impl Config {
                     ..Translation::default()
                 },
                 Value::Table(_) => {
-                    let t = options(&root, "translation", &["enabled", "detect"])?
+                    let t = options(&root, "translation", &["enabled", "detect", "clients"])?
                         .expect("translation is a table");
                     Translation {
                         enabled: boolean(&t, "translation", "enabled", true)?,
                         detect: boolean(&t, "translation", "detect", true)?,
+                        clients: match t.get::<Value>("clients").map_err(|e| e.to_string())? {
+                            Value::Nil => ClientVersions::all(),
+                            clients => client_versions(clients, "translation.clients")?,
+                        },
                     }
                 }
                 _ => return Err("translation: expected a boolean or a table".into()),
@@ -1481,6 +1490,19 @@ impl Config {
             })
     }
 
+    /// The client versions translated for backend `name`: its own setting,
+    /// its service group's, or the proxy-wide `translation.clients`.
+    pub fn client_versions(&self, name: &str) -> &ClientVersions {
+        self.backends
+            .get(name)
+            .and_then(Backend::clients)
+            .or_else(|| {
+                let group = &self.instances.get(name)?.group;
+                self.service_groups.get(group)?.translation.as_ref()
+            })
+            .unwrap_or(&self.translation.clients)
+    }
+
     pub fn mode(&self, listener: &str) -> io::Result<Mode> {
         let backend = |name: &str| {
             self.backends
@@ -1943,8 +1965,41 @@ fn fields(table: &Table, allowed: &[&str], path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The client versions a backend, a service group or the proxy translates
+/// for: `true` or `"all"`, `false` or `"none"`, `"newer"`, `"older"`, one
+/// version pattern, or a list of patterns.
+pub(crate) fn client_versions(value: Value, path: &str) -> Result<ClientVersions, String> {
+    let patterns = match value {
+        Value::Boolean(true) => return Ok(ClientVersions::all()),
+        Value::Boolean(false) => return Ok(ClientVersions::none()),
+        Value::String(pattern) => vec![pattern.to_string_lossy()],
+        Value::Table(list) => {
+            let mut patterns = Vec::new();
+            for pair in list.pairs::<Value, Value>() {
+                let (key, pattern) = pair.map_err(|e| e.to_string())?;
+                if !matches!(key, Value::Integer(_)) {
+                    return Err(format!(
+                        "{path}: expected a list of version patterns such as {{ \"1.20.*\", \"1.21.4\" }}"
+                    ));
+                }
+                patterns.push(string(pattern, path)?);
+            }
+            patterns
+        }
+        value => {
+            return Err(format!(
+                "{path}: expected true, false, \"all\", \"none\", \"newer\", \"older\" or version patterns, got {}",
+                value.type_name()
+            ));
+        }
+    };
+    ClientVersions::parse(patterns.iter().map(String::as_str))
+        .map_err(|error| format!("{path}: {error}"))
+}
+
 /// Backends are `"host:port"`, or `{ address = "host:port", version = "1.21.6" }`
-/// for a server on another Minecraft version than its players.
+/// for a server on another Minecraft version than its players; `translation`
+/// there names the client versions translated for it.
 fn backends(value: Value) -> Result<BTreeMap<String, Backend>, String> {
     let mut result = BTreeMap::new();
     for pair in table(value, "backends")?.pairs::<Value, Value>() {
@@ -1956,14 +2011,14 @@ fn backends(value: Value) -> Result<BTreeMap<String, Backend>, String> {
         let path = format!("backends.{name}");
         let backend = match value {
             Value::Table(entry) => {
-                fields(&entry, &["address", "version"], &path)?;
+                fields(&entry, &["address", "version", "translation"], &path)?;
                 let address = string(
                     entry.get("address").map_err(|e| e.to_string())?,
                     &format!("{path}.address"),
                 )?;
                 let backend =
                     Backend::parse(&address).map_err(|error| format!("{path}: {error}"))?;
-                match entry.get::<Value>("version").map_err(|e| e.to_string())? {
+                let backend = match entry.get::<Value>("version").map_err(|e| e.to_string())? {
                     Value::Nil => backend,
                     version => {
                         let version = string(version, &format!("{path}.version"))?;
@@ -1973,6 +2028,14 @@ fn backends(value: Value) -> Result<BTreeMap<String, Backend>, String> {
                             })?;
                         backend.with_version(protocol)
                     }
+                };
+                match entry
+                    .get::<Value>("translation")
+                    .map_err(|e| e.to_string())?
+                {
+                    Value::Nil => backend,
+                    clients => backend
+                        .with_clients(client_versions(clients, &format!("{path}.translation"))?),
                 }
             }
             value => Backend::parse(&string(value, &path)?)

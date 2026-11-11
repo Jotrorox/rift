@@ -1954,7 +1954,8 @@ fn translation_is_on_with_detection_unless_configured_otherwise() {
         defaults.translation,
         Translation {
             enabled: true,
-            detect: true
+            detect: true,
+            clients: ClientVersions::all(),
         }
     );
     for (options, enabled, detect) in [
@@ -1971,7 +1972,11 @@ fn translation_is_on_with_detection_unless_configured_otherwise() {
         let config = Config::from_lua(&with_admin_options(options), "translation.lua").unwrap();
         assert_eq!(
             config.translation,
-            Translation { enabled, detect },
+            Translation {
+                enabled,
+                detect,
+                clients: ClientVersions::all(),
+            },
             "{options}"
         );
     }
@@ -1986,6 +1991,91 @@ fn translation_is_on_with_detection_unless_configured_otherwise() {
         let error = Config::from_lua(&with_admin_options(options), "translation.lua")
             .unwrap_err()
             .to_string();
+        assert!(error.contains(expected), "{options}: {error}");
+    }
+}
+
+#[test]
+fn client_versions_are_set_for_the_proxy_a_backend_and_a_service_group() {
+    let parse = |options: &str| {
+        Config::from_lua(
+            &format!(
+                "return {{
+                listeners = {{ public = '0.0.0.0:25565' }},
+                routes = {{ public = 'lobby' }},
+                {options}
+            }}"
+            ),
+            "translation.lua",
+        )
+    };
+    let config = parse(
+        "translation = { clients = { '1.20.*', '1.21.*' } },
+        backends = {
+            lobby = '127.0.0.1:25566',
+            classic = { address = '127.0.0.1:25567', version = '1.12.2', translation = 'newer' },
+            vanilla = { address = '127.0.0.1:25568', translation = false },
+            open = { address = '127.0.0.1:25569', translation = true },
+            one = { address = '127.0.0.1:25570', translation = '1.16.5' },
+        },
+        service_groups = {
+            bedwars = { command = {'java'}, port_range = {25600, 25601}, translation = { '1.8.9-1.12.2', '>=1.21' } },
+            lobbies = { command = {'java'}, port_range = {25610, 25611} },
+        }",
+    )
+    .unwrap();
+    let json = |name: &str| config.client_versions(name).to_json();
+    assert_eq!(json("lobby"), serde_json::json!(["1.20.*", "1.21.*"]));
+    assert_eq!(json("classic"), "newer");
+    assert_eq!(json("vanilla"), "none");
+    assert_eq!(json("open"), "all");
+    assert_eq!(json("one"), serde_json::json!(["1.16.5"]));
+    assert_eq!(
+        config.service_groups["bedwars"]
+            .translation
+            .as_ref()
+            .unwrap()
+            .to_json(),
+        serde_json::json!(["1.8.9-1.12.2", ">=1.21"])
+    );
+    assert_eq!(config.service_groups["lobbies"].translation, None);
+
+    // Instances take their group's setting, or the proxy's without one.
+    let mut config = config;
+    config.add_instance("bedwars", "bedwars-1", 25600).unwrap();
+    config.add_instance("lobbies", "lobbies-1", 25610).unwrap();
+    assert_eq!(
+        config.client_versions("bedwars-1").to_json(),
+        serde_json::json!(["1.8.9-1.12.2", ">=1.21"])
+    );
+    assert_eq!(
+        config.client_versions("lobbies-1").to_json(),
+        serde_json::json!(["1.20.*", "1.21.*"])
+    );
+
+    for (options, expected) in [
+        (
+            "translation = { clients = 5 }, backends = { lobby = '127.0.0.1:25566' }",
+            "translation.clients: expected true, false",
+        ),
+        (
+            "translation = { clients = {} }, backends = { lobby = '127.0.0.1:25566' }",
+            "translation.clients: expected at least one version pattern",
+        ),
+        (
+            "backends = { lobby = { address = '127.0.0.1:25566', translation = '1.99' } }",
+            "backends.lobby.translation: \"1.99\" names no Minecraft version",
+        ),
+        (
+            "backends = { lobby = { address = '127.0.0.1:25566', translation = { only = '1.20' } } }",
+            "backends.lobby.translation: expected a list of version patterns",
+        ),
+        (
+            "backends = { lobby = '127.0.0.1:25566' }, service_groups = { game = { command = {'java'}, port_range = {25600, 25601}, translation = '1.8.*' } }",
+            "service_groups.game.translation: \"1.8.*\" lies outside the versions Rift translates",
+        ),
+    ] {
+        let error = parse(options).unwrap_err().to_string();
         assert!(error.contains(expected), "{options}: {error}");
     }
 }

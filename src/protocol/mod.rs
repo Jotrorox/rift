@@ -11,6 +11,7 @@ mod packets;
 mod state;
 mod switching;
 mod tab_list;
+mod versions;
 
 pub(crate) use boss_bar::BossBars;
 pub use boss_bar::{
@@ -30,6 +31,7 @@ use std::io;
 pub use switching::{GameMode, PlayerWorld, Suggestion};
 pub(crate) use tab_list::TabList;
 pub use tab_list::{TabEntry, TabView};
+pub use versions::{ClientVersions, translated_releases};
 
 /// Whether a client on `client` can play on a backend on `backend`, directly
 /// or through protocol translation.

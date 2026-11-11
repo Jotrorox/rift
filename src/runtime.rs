@@ -591,6 +591,7 @@ pub async fn handle(
                 Ok(cached) => {
                     response = rift::backend_version::status_for_client(
                         &snapshot.config,
+                        &primary,
                         session.handshake.protocol,
                         status::response_packet(&cached)?,
                     )
@@ -1155,7 +1156,16 @@ pub async fn handle(
                     event.failure = "transfer_failed";
                     let protocol = match session.version() {
                         Ok(client) => rift::backend_version::protocol(&request.snapshot.config, target, client, target_network.addresses).await,
-                        Err(_) => None,
+                        Err(_) => Ok(None),
+                    };
+                    let protocol = match protocol {
+                        Ok(protocol) => protocol,
+                        Err(error) => {
+                            if let Some(extension) = &mut session.extension { extension.transfer_failed().await; }
+                            metrics.transfer_failures.inc();
+                            let _ = request.reply.send(Err(format!("target backend does not take the player's Minecraft version; player remains on the original backend: {error}")));
+                            continue;
+                        }
                     };
                     target_network.push_permissions(&session, target);
                     let result = timeout_at(deadline, session.connect_backend_as(upstream, protocol)).await;

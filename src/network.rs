@@ -380,7 +380,7 @@ impl Network<'_> {
                     session.version()?,
                     self.addresses,
                 )
-                .await;
+                .await?;
                 timeout_at(
                     Instant::now() + budget,
                     session.connect_backend_as(upstream, protocol),
@@ -498,7 +498,7 @@ impl Network<'_> {
                     session.version()?,
                     self.addresses,
                 )
-                .await;
+                .await?;
                 match timeout_at(
                     attempt_deadline,
                     session.connect_backend_as(upstream, protocol),
