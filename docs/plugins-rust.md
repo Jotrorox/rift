@@ -109,7 +109,7 @@ example and the host's conformance fixture.
 | --- | --- |
 | `handler` exports | Methods of the `Plugin` trait; each has a default. `rift_plugin::export!(T)` exports a `T: Plugin + Default`. |
 | plugin state | Fields of your type. The SDK creates one value with `Default` right before `init` and passes it to every hook as `&mut self`; `shutdown` runs last. |
-| `registration` | `Registration::new().command(...).hooks([...])`; `CommandSpec::new(name).permission(node).suggest(kind)`. |
+| `registration` | `Registration::new().command(...).hooks([...])`; `CommandSpec::new(name).permission(node).suggest(kind)`; without `permission`, or with an empty node, every player may see and run the command (since 0.1.5). |
 | `action` | `Action::Continue`, `Action::deny(..)`, `Action::deny_json(..)`, `Action::message(..)`, `Action::message_json(..)`, `Action::server(..)`, `Action::Queue(..)`, `Action::LeaveQueue`. The `_json` forms take a `serde_json::Value` or JSON text ([rich text](extensions.md#rich-text)). |
 | configuration JSON | `rift_plugin::config::<T>(json)` decodes with serde. |
 | `players`, `store`, `permissions`, `bus`, `servers`, `timers`, `meta` | Modules of the same names with the generated functions. `store::get_json`/`set_json` and `bus::reply(&message, payload)` are helpers. |
@@ -118,8 +118,44 @@ example and the host's conformance fixture.
 | WASI | `std::fs` on the granted directories (`/data`, `/host`), clocks and random through the standard library. |
 | `dialogs` export, `players.dialog` | [Dialogs](dialogs.md): `players::show_dialog(target, &serde_json::Value)` (or `players::dialog` with JSON text) and `players::clear_dialog`; clicks reach `Plugin::dialog(DialogResponse)`, whose `values::<T>()` and `payload::<T>()` decode the JSON. No registration needed. |
 | `players.title-json` | `players::title_json(target, &TitleJsonSpec::new(title).subtitle(sub).times(10, 70, 20))` (since 0.1.4); title and subtitle take anything `ToString`, such as a `text` builder or a `serde_json::Value`. |
+| `players.locale` | `players::locale(target) -> Result<Option<String>, String>` (since 0.1.5): the client's language (`en_us`), or `None` while Rift does not know it, which is always the case in `login` and, for clients before 1.20.2, in `join` ([timing](plugins.md#host-api)). |
 | `styled` export | `Plugin::suggest_rich(ctx) -> Vec<RichSuggestion>` and `Plugin::status_rich(ping) -> Option<RichStatusOverride>` (since 0.1.4). Their defaults call `suggest` and `status`; hosts before 0.1.4 get the rich text's words. |
+| `chat` export | `Plugin::chat(ChatAttempt) -> Action` (since 0.1.5), exported only by `rift_plugin::export!(T, chat)`; see [chat](#chat). |
 | rich text | The `text` module: `text::mini`, `text::legacy`, `text::Component` (below). |
+
+## Chat
+
+`Plugin::chat` sees chat messages, and the commands that reach the backend,
+before the backend does ([the hook](plugins.md#chat)). It is the one export
+the SDK does not add by itself, because exporting it is the registration: name
+it in `export!`.
+
+```rust
+use rift_plugin::{Action, ChatAttempt, ChatKind, Plugin};
+
+#[derive(Default)]
+struct Mute {
+    muted: Vec<String>,
+}
+
+impl Plugin for Mute {
+    fn chat(&mut self, attempt: ChatAttempt) -> Action {
+        if attempt.kind == ChatKind::Message && self.muted.contains(&attempt.ctx.uuid) {
+            return Action::deny("You are muted.");
+        }
+        Action::Continue
+    }
+}
+
+rift_plugin::export!(Mute, chat);
+```
+
+`attempt.text` is the message, or the command line without its slash; for a
+command, `attempt.ctx.command` is the root name and `attempt.ctx.args` the
+rest. Answer `Action::Continue`, `Action::deny` or `Action::deny_json`. With
+`export!(Mute)` the component has no `chat` export and the method is never
+called. With `export!(Mute, chat)` Rift asks the plugin about every message
+and starts it only when the proxy sets `authentication.signed_chat = false`.
 
 ## Rich text builders
 

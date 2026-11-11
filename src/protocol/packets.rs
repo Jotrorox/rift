@@ -622,6 +622,27 @@ pub(crate) fn start_profile_key(
     start(version, packet).map(|(_, key)| key)
 }
 
+/// A 1.19–1.19.2 Login Start without the profile key it carries, or `None`
+/// when it carries none. Without a key the backend has nothing to check the
+/// player's chat signatures against and treats the chat as unsigned.
+pub(crate) fn without_profile_key(
+    version: ProtocolVersion,
+    packet: &Packet,
+) -> io::Result<Option<Packet>> {
+    let (identity, key) = start(version, packet)?;
+    if key.is_none() {
+        return Ok(None);
+    }
+    let mut data = Vec::new();
+    write_string(&identity.name, &mut data);
+    data.push(0); // no profile key
+    if version.number() == 760 {
+        data.push(u8::from(identity.uuid.is_some()));
+        data.extend(identity.uuid.iter().flatten());
+    }
+    Ok(Some(Packet::new(packet.id, data)))
+}
+
 fn start(
     version: ProtocolVersion,
     packet: &Packet,

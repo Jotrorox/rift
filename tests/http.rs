@@ -1388,6 +1388,59 @@ fn lua_extensions_receive_requests_and_bound_failures_without_harming_admin() {
 }
 
 #[test]
+fn lua_extensions_see_which_operator_is_calling() {
+    let fixture = Fixture::new();
+    // `permissions` and `groups` are nil for an unrestricted caller.
+    let hook = r#"
+        on_http = function(req)
+            local operator = req.context.operator
+            local function list(values)
+                return values and table.concat(values, ',') or 'all'
+            end
+            assert(type(req.context.version) == 'string')
+            assert(type(req.context.metrics.active) == 'number')
+            return { body = operator.name .. '|' .. list(operator.permissions)
+                .. '|' .. list(operator.groups) }
+        end,
+    "#;
+    let source = fixture.source(
+        &format!(
+            "token = '{TOKEN}', operators = {{ \
+             viewer = {{ token = '{OPERATOR_TOKEN}', permissions = {{'read','extensions'}} }}, \
+             reader = {{ token = 'test-read-only-operator', permissions = {{'read'}} }}, \
+             lobby_staff = {{ token = 'test-scoped-lobby-operator', permissions = {{'read','logs'}}, groups = {{'lobby'}} }} }},"
+        ),
+        &format!(
+            "service_groups = {{ lobby = {{ command = {{'unused'}}, directory = 'lobby/{{name}}', port_range = {{26320,26322}} }} }},{hook}"
+        ),
+    );
+    let _process = fixture.start(&source);
+    let call = |token: &'static str| {
+        Client {
+            token: Some(token),
+            ..fixture.client()
+        }
+        .get("/ext/who")
+        .expect(200)
+        .body
+    };
+    assert_eq!(call(TOKEN), "admin|all|all");
+    // A token with little more than `extensions` reaches the handler, which
+    // can tell it apart from the full one.
+    assert_eq!(call(OPERATOR_TOKEN), "viewer|extensions,read|all");
+    // `/ext` needs `extensions`, which a group-scoped operator cannot hold.
+    for token in ["test-read-only-operator", "test-scoped-lobby-operator"] {
+        Client {
+            token: Some(token),
+            ..fixture.client()
+        }
+        .get("/ext/who")
+        .expect(403);
+    }
+    fixture.client().get("/ext/who").expect(401);
+}
+
+#[test]
 fn disabled_api_leaves_ui_and_lua_extensions_available() {
     let fixture = Fixture::new();
     let source = fixture.source(

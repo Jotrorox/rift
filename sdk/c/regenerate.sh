@@ -4,7 +4,12 @@
 #   sdk/c/regenerate.sh          # rewrite rift_plugin.{c,h} and the type object
 #   sdk/c/regenerate.sh --check  # fail if the committed bindings are stale
 #
-# The bindings target world `core` (the Rift imports and the handler export).
+# Two sets with the same names: the bindings here target world `core` (the
+# Rift imports and the handler export), and those in chat/ world `core-chat`,
+# which adds the `chat` export. A component that exports `chat` is asked about
+# every chat message and starts only with unsigned chat, so a plugin links the
+# chat/ set only when it handles chat (RIFT_CHAT, see build.sh).
+#
 # wasi-libc already carries its own WASI bindings, and a plugin built with
 # wasi-sdk satisfies world `plugin`: its WASI imports are the subset libc uses.
 # Generating world `plugin` would also duplicate every WASI binding, and with
@@ -26,8 +31,9 @@ if [[ "$version" != "wit-bindgen-cli $WIT_BINDGEN_VERSION" ]]; then
     exit 1
 fi
 
-args=(c --world core --rename-world rift_plugin --out-dir "$sdk")
+check=()
 if [[ "${1:-}" == "--check" ]]; then
-    args+=(--check)
+    check=(--check)
 fi
-wit-bindgen "${args[@]}" "$wit"
+wit-bindgen c --world core --rename-world rift_plugin --out-dir "$sdk" ${check[@]+"${check[@]}"} "$wit"
+wit-bindgen c --world core-chat --rename-world rift_plugin --out-dir "$sdk/chat" ${check[@]+"${check[@]}"} "$wit"

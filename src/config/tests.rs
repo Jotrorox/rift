@@ -14,11 +14,21 @@ fn online_authentication_and_velocity_are_validated_together() {
     ), "online.lua").unwrap();
     assert!(config.authentication.online_mode);
     assert_eq!(config.authentication.timeout, Duration::from_millis(2500));
+    assert!(config.authentication.signed_chat);
     let forwarding = config.forwarding.unwrap();
     assert_eq!(forwarding.mode, ForwardingMode::Velocity);
     assert_eq!(forwarding.secret_env.as_deref(), Some("PAPER_SECRET"));
     let defaults = Config::from_lua(VALID, "offline.lua").unwrap();
     assert!(!defaults.authentication.online_mode);
+    assert!(defaults.authentication.signed_chat);
+    // Unsigned chat is its own switch, with or without online mode.
+    for settings in [
+        "authentication = { signed_chat = false }",
+        "authentication = { online_mode = true, signed_chat = false }, forwarding = { mode = 'velocity' }",
+    ] {
+        let config = Config::from_lua(&with_security(settings), "unsigned.lua").unwrap();
+        assert!(!config.authentication.signed_chat, "{settings}");
+    }
     assert!(defaults.forwarding.is_none());
     // Validation does not read environment secrets or contact authentication services.
     let config = Config::from_lua(
@@ -80,6 +90,15 @@ fn insecure_or_misspelled_authentication_settings_are_rejected() {
             "authentication = { online_mode = 'true' }",
             "authentication.online_mode",
         ),
+        (
+            "authentication = { signed_chat = 'false' }",
+            "authentication.signed_chat",
+        ),
+        (
+            "authentication = { signed_chat = 0 }",
+            "authentication.signed_chat",
+        ),
+        ("authentication = { signedchat = false }", "unknown field"),
         (
             "authentication = { timeout_ms = 0 }",
             "authentication.timeout_ms",
@@ -2078,4 +2097,40 @@ fn client_versions_are_set_for_the_proxy_a_backend_and_a_service_group() {
         let error = parse(options).unwrap_err().to_string();
         assert!(error.contains(expected), "{options}: {error}");
     }
+}
+
+#[test]
+fn a_script_chat_hook_needs_unsigned_chat() {
+    let source = |authentication: &str, chat: &str| {
+        format!(
+            "return {{ listeners = {{ public = '127.0.0.1:0' }}, backends = {{ lobby = '127.0.0.1:1' }}, routes = {{ public = 'lobby' }}, authentication = {{ online_mode = true{authentication} }}, forwarding = {{ mode = 'velocity', secret_env = 'TEST_SECRET' }}, extensions = {{ api_version = 2, chat = {chat} }} }}"
+        )
+    };
+    let handler = "function(ctx) return { deny = 'muted' } end";
+    for authentication in ["", ", signed_chat = true"] {
+        let error = Config::from_lua(&source(authentication, handler), "chat.lua")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(
+                "extensions.chat: the chat hook needs authentication.signed_chat = false"
+            ),
+            "{error}"
+        );
+    }
+    let config = Config::from_lua(&source(", signed_chat = false", handler), "chat.lua").unwrap();
+    let extensions = config.extensions.as_ref().unwrap();
+    assert!(extensions.hook_names().any(|hook| hook == "chat"));
+    assert!(
+        crate::plugins::script::ScriptPlugin::new(&config).handles(crate::plugins::api::Hook::Chat)
+    );
+    // Without the handler the setting is free.
+    Config::from_lua(&source("", "nil"), "chat.lua").unwrap();
+    let error = Config::from_lua(&source(", signed_chat = false", "'mute'"), "chat.lua")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("extensions.chat must be a function"),
+        "{error}"
+    );
 }

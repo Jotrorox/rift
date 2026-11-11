@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 pub use crate::{
-    extensions::{Action, Context},
+    extensions::{Action, ChatInput, ChatKind, Context},
     hooks::RouteDecision,
     http_script::{HttpRequest, HttpResponse},
     protocol::Suggestion,
@@ -51,6 +51,11 @@ pub struct PlayerInfo {
     /// record has no such field, so components ask `players.visible-to`.
     #[serde(default)]
     pub visible_to: Option<String>,
+    /// The client's language as it reported it (`en_us`), or `None` until
+    /// its Client Information arrives: never at `login`, and at `join` only
+    /// for 1.20.2 and newer clients. Components ask `players.locale`.
+    #[serde(default)]
+    pub locale: Option<String>,
 }
 
 /// Metadata available right after TCP accept (`route`).
@@ -186,10 +191,15 @@ pub enum Hook {
     /// WIT `hook` enum has no case for it, so WebAssembly plugins built
     /// against 0.1.0 keep loading.
     Dialog,
+    /// A chat message or backend command before the backend sees it. The
+    /// WIT `hook` enum has no case for it either: a plugin registers by
+    /// having a handler (the `chat` export, or `rift.on("chat", ...)`), see
+    /// [`Registration::chat`].
+    Chat,
 }
 
 impl Hook {
-    pub const ALL: [Hook; 15] = [
+    pub const ALL: [Hook; 16] = [
         Hook::Route,
         Hook::Login,
         Hook::InitialServer,
@@ -205,6 +215,7 @@ impl Hook {
         Hook::Timer,
         Hook::Event,
         Hook::Dialog,
+        Hook::Chat,
     ];
 
     /// The snake_case name used by manifests, Lua and the bus.
@@ -225,6 +236,7 @@ impl Hook {
             Self::Timer => "timer",
             Self::Event => "event",
             Self::Dialog => "dialog",
+            Self::Chat => "chat",
         }
     }
 
@@ -260,6 +272,7 @@ impl Hook {
                 | Self::Join
                 | Self::AfterTransfer
                 | Self::Disconnect
+                | Self::Chat
         )
     }
 }
@@ -272,13 +285,23 @@ pub struct Registration {
     pub commands: Vec<CommandSpec>,
     /// Events to deliver. An empty list delivers every hook.
     pub hooks: Vec<Hook>,
+    /// Whether the plugin handles `chat`: a component that exports it, a Lua
+    /// plugin with a `chat` handler. Set by the engine, not by the guest's
+    /// registration record, which has no field for it; an empty hook list
+    /// does not imply it.
+    pub chat: bool,
 }
 
 impl Registration {
     /// Dialog clicks reach the plugin that showed the dialog whatever it
-    /// listed (see [`Hook::Dialog`]).
+    /// listed (see [`Hook::Dialog`]); chat only a plugin with a handler
+    /// (see [`Registration::chat`]).
     pub fn wants(&self, hook: Hook) -> bool {
-        hook == Hook::Dialog || self.hooks.is_empty() || self.hooks.contains(&hook)
+        match hook {
+            Hook::Dialog => true,
+            Hook::Chat => self.chat,
+            _ => self.hooks.is_empty() || self.hooks.contains(&hook),
+        }
     }
 }
 
@@ -328,6 +351,8 @@ pub enum Event {
     Event(RiftEvent),
     /// A dialog click; `Context::dialog` holds the action and values.
     Dialog(Context),
+    /// A chat message or backend command; `Context::chat` holds it.
+    Chat(Context),
 }
 
 impl Event {
@@ -348,6 +373,7 @@ impl Event {
             Self::Timer(_) => Hook::Timer,
             Self::Event(_) => Hook::Event,
             Self::Dialog(_) => Hook::Dialog,
+            Self::Chat(_) => Hook::Chat,
         }
     }
 }
@@ -372,9 +398,11 @@ impl Reply {
     pub fn default_for(hook: Hook) -> Self {
         match hook {
             Hook::Route => Self::Route(RouteDecision::Default),
-            Hook::Login | Hook::InitialServer | Hook::BeforeTransfer | Hook::Command => {
-                Self::Action(Action::Continue)
-            }
+            Hook::Login
+            | Hook::InitialServer
+            | Hook::BeforeTransfer
+            | Hook::Command
+            | Hook::Chat => Self::Action(Action::Continue),
             Hook::Suggest => Self::Suggestions(Vec::new()),
             Hook::Status => Self::Status(None),
             Hook::Http => Self::Http(None),
@@ -429,6 +457,8 @@ mod tests {
         )
         .unwrap();
         assert!(registration.wants(Hook::Login));
+        assert!(registration.wants(Hook::Dialog));
+        assert!(!registration.wants(Hook::Chat), "chat needs a handler");
         assert_eq!(
             registration.commands[0].suggest,
             SuggestKind::Fixed(vec!["a".into()])

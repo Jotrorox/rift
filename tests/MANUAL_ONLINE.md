@@ -189,3 +189,82 @@ corrupt plugin downloads and disabled/wrong-version plugins. These deterministic
 checks cannot establish real Mojang authentication or client rendering. A new
 plugin or version needs a fresh full authenticated run; adding a pin alone is not
 compatibility evidence.
+
+## Chat hook with a signed-in client: NOT YET RUN
+
+**Status: not run. Nobody has done this with a real client; there are no
+results to report.** The `chat` hook ([docs/plugins.md](../docs/plugins.md#chat))
+is covered by automated tests only: the session tests drive synthetic encrypted
+clients of 1.19.3 to 26.3 with made-up signatures against a byte-level backend,
+and `tests/session_server.rs` drives a 1.8 bot through a whole Rift process.
+None of them runs a real server, so none shows that Paper or Pumpkin accepts a
+player's later chat after Rift dropped some of it. That needs the run below,
+by a person with a licensed, signed-in Minecraft Java client, once against
+**Paper** and once against **Pumpkin**. `tests/manual_online.py` does not
+automate it: its backends keep `enforce-secure-profile=true` and its Rift
+keeps signed chat.
+
+Setup, per server:
+
+1. Start one backend that Rift reaches with Velocity forwarding, as in
+   [`examples/online.lua`](../examples/online.lua).
+   - Paper (the pinned 1.21.11 build 132): `online-mode=false` and
+     **`enforce-secure-profile=false`** in `server.properties`; Velocity
+     forwarding with `online-mode: true` in `config/paper-global.yml`.
+   - Pumpkin (the pinned 0.2.0, `tests/servers.json`): its default
+     configuration (`allow_chat_reports = false`) with Velocity forwarding
+     and the same secret ([setup](../docs/permissions-pumpkin.md)).
+2. Start Rift with this configuration (`RIFT_FORWARDING_SECRET` set to the
+   forwarding secret). `rift check` accepts it, and refuses it with
+   `signed_chat = true`:
+
+   ```lua
+   rift.config.listeners = { public = "127.0.0.1:25565" }
+   rift.config.backends = { paper = "127.0.0.1:25566" }
+   rift.config.routes = { public = "paper" }
+   rift.config.authentication = { online_mode = true, signed_chat = false }
+   rift.config.forwarding = { mode = "velocity", secret_env = "RIFT_FORWARDING_SECRET" }
+   rift.config.network = { initial = { "paper" }, hubs = { "paper" } }
+   rift.config.plugins = {
+       api_version = 2,
+       chat = function(ctx)
+           if ctx.kind == "message" and rift.store.get("muted", ctx.uuid) then
+               return { deny = "You are muted." }
+           end
+       end,
+       commands = {
+           muteme = { permission = "", run = function(ctx)
+               rift.store.set("muted", ctx.uuid, "1")
+               return { message = "Muted." }
+           end },
+           unmuteme = { permission = "", run = function(ctx)
+               rift.store.delete("muted", ctx.uuid)
+               return { message = "Unmuted." }
+           end },
+       },
+   }
+   ```
+
+3. Join through Rift with the signed-in client, and with a second client or
+   the server console to watch what arrives.
+
+Steps and what to record for each server:
+
+1. Send a chat message. Expected: the backend shows it, marked as not secure
+   on other clients.
+2. Run `/muteme`, then send **at least five** chat messages in a row.
+   Expected: each one answers `You are muted.` to the sender only; the server
+   console and the second client show none of them.
+3. Run `/unmuteme` and send several more chat messages, then a backend command
+   (`/list` or `/me test`). Expected: all of them arrive, in order, and **the
+   player is not kicked**. This is the step the automated tests cannot stand
+   in for: a server that still tracked a signature chain or a last-seen count
+   would disconnect the player here (`Chat message validation failure`,
+   `Out-of-order chat packet`, or similar).
+4. Keep playing for a minute and chat again; switch servers and back if a
+   second backend is configured.
+
+Record the Rift commit, the server build, the client version, and for every
+step what the sender, the second client and the server log showed, including
+the exact disconnect text if there was one. Until that record exists for both
+servers, treat the hook's behaviour against real servers as unverified.

@@ -1,7 +1,7 @@
 // Package rift is the Go SDK for Rift WebAssembly plugins.
 //
 // It wraps the bindings that wit-bindgen-go generates for the
-// rift:plugin@0.1.4 contract (see the gen directory) with plain Go types,
+// rift:plugin@0.1.5 contract (see the gen directory) with plain Go types,
 // registers a no-op default for every hook, and exposes setters for the hooks
 // a plugin implements:
 //
@@ -34,6 +34,12 @@
 // docs/text.md). SendTitleJSON shows a title, and OnRichSuggest and
 // OnRichStatus answer with rich tooltips and server-list text through the
 // styled export of rift:plugin 0.1.4.
+//
+// Chat: importing the chat subpackage adds the chat hook (rift:plugin 0.1.5),
+// which sees chat messages and backend commands before the backend does and
+// may drop them. It is a package of its own because having the hook is its
+// registration: see its documentation for what it requires of the proxy and
+// of the build.
 //
 // Build with TinyGo 0.34 or newer:
 //

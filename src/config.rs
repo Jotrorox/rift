@@ -160,6 +160,9 @@ pub struct ServerAccess {
 pub struct Authentication {
     pub online_mode: bool,
     pub timeout: Duration,
+    /// `false` withholds players' chat signing keys and sessions from
+    /// backends, so that every backend treats their chat as unsigned.
+    pub signed_chat: bool,
 }
 
 impl Default for Authentication {
@@ -167,6 +170,7 @@ impl Default for Authentication {
         Self {
             online_mode: false,
             timeout: Duration::from_secs(10),
+            signed_chat: true,
         }
     }
 }
@@ -755,6 +759,7 @@ impl Config {
                         config_json,
                         // Set below, once `authentication` is parsed.
                         online_mode: false,
+                        signed_chat: true,
                     };
                     spec.check_grants()
                         .map_err(|error| format!("plugin {}: {error}", spec.name))?;
@@ -971,6 +976,7 @@ impl Config {
             let authentication = authentication(&root)?;
             for plugin in &mut plugins {
                 plugin.online_mode = authentication.online_mode;
+                plugin.signed_chat = authentication.signed_chat;
             }
             let forwarding = forwarding(&root)?;
             Ok(Self {
@@ -1103,6 +1109,13 @@ impl Config {
         if let Some(extensions) = &self.extensions {
             if !self.authentication.online_mode {
                 return Err(invalid("extensions requires authentication.online_mode"));
+            }
+            if self.authentication.signed_chat && extensions.hook_names().any(|hook| hook == "chat")
+            {
+                return Err(invalid(format!(
+                    "extensions.chat: {}",
+                    crate::plugins::worker::CHAT_NEEDS_UNSIGNED
+                )));
             }
             if extensions.legacy_grants().is_some() {
                 return Err(invalid(
@@ -1531,7 +1544,12 @@ impl Config {
 }
 
 fn authentication(root: &Table) -> Result<Authentication, String> {
-    let Some(values) = options(root, "authentication", &["online_mode", "timeout_ms"])? else {
+    let Some(values) = options(
+        root,
+        "authentication",
+        &["online_mode", "timeout_ms", "signed_chat"],
+    )?
+    else {
         return Ok(Authentication::default());
     };
     Ok(Authentication {
@@ -1543,6 +1561,7 @@ fn authentication(root: &Table) -> Result<Authentication, String> {
             10_000,
             60_000,
         )? as u64),
+        signed_chat: boolean(&values, "authentication", "signed_chat", true)?,
     })
 }
 

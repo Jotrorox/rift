@@ -168,7 +168,7 @@ rift.command("hello", {
 Authenticated event and command registration creates `extensions` and defaults
 its `api_version` to 1 when absent. Explicit versions are still validated.
 `rift.command(name, definition)` uses the existing command schema and permission
-checks. Duplicate names, including collisions with `extensions.commands`, fail
+checks, including `permission = ""` for a command open to every player. Duplicate names, including collisions with `extensions.commands`, fail
 validation. Settings and registrations belong in initialization, outside runtime
 callbacks. `rift.on`, `rift.command` and `rift.setup` reject late registration.
 

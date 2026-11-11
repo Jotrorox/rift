@@ -524,6 +524,47 @@ end)
     assert!(actions.try_recv().is_err());
 }
 
+/// A player table carries the client's `locale` once the session published
+/// it; before that it is nil.
+#[tokio::test]
+async fn player_tables_carry_the_client_locale_once_it_is_known() {
+    let root = folder(
+        "",
+        &[(
+            "init.lua",
+            r#"
+rift.on("login", function(ctx)
+    local player = rift.players.get(ctx.uuid)
+    assert(rift.players.list()[1].locale == player.locale)
+    return { deny = "locale=" .. tostring(player.locale) }
+end)
+"#,
+        )],
+    );
+    let broker = Broker::default();
+    let runtime = started(&root, "{}", &broker).await;
+    let (handle, _actions) = runtime
+        .players()
+        .register(7, &[7; 16], "Alex", 774, "lobby");
+    let player = session(&runtime, 7, "Alex");
+    assert_eq!(
+        player.decision("login").await.unwrap(),
+        Action::Deny("locale=nil".into())
+    );
+    for locale in ["de_de", "en_us"] {
+        handle.set_locale(Some(locale));
+        assert_eq!(
+            player.decision("login").await.unwrap(),
+            Action::Deny(format!("locale={locale}").as_str().into())
+        );
+    }
+    assert_eq!(
+        runtime.players().list(None).unwrap()[0].locale.as_deref(),
+        Some("en_us")
+    );
+    runtime.plugins().shutdown().await;
+}
+
 /// `examples/plugins/vanish-lua`: `/vanish` sets the `rift.visible-to` meta
 /// key; the directory's watcher resolves it onto both records, publishes a
 /// `visibility` event, and every viewer without the node loses the player.

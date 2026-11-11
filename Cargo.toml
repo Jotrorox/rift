@@ -82,6 +82,9 @@ wasmtime-wasi-http = { version = "50.0.1", optional = true, default-features = f
 default = ["wasm"]
 # WebAssembly plugins (engine = "wasm") through wasmtime.
 wasm = ["dep:http", "dep:http-body-util", "dep:wasmtime", "dep:wasmtime-wasi", "dep:wasmtime-wasi-http"]
+# Tests only: lets RIFT_TEST_SESSION_URL replace Mojang's session server with a
+# loopback one (docs/plugins.md). Never part of the default set or a release.
+test-session-server = []
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

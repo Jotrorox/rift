@@ -27,7 +27,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+// With RIFT_CHAT the plugin handles the chat hook (see "Chat" below): the
+// bindings in chat/ are the same ones plus the `chat` export. Build every
+// source of the plugin, and link chat/rift_plugin.c and
+// chat/rift_plugin_component_type.o, with RIFT_CHAT defined.
+#ifdef RIFT_CHAT
+#include "chat/rift_plugin.h"
+#else
 #include "rift_plugin.h"
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -266,6 +274,52 @@ static inline void rift_decision_from_action(rift_decision_t *ret, rift_action_t
   if (action->tag != RIFT_PLUGIN_TYPES_ACTION_CONTINUE && action->tag != RIFT_PLUGIN_TYPES_ACTION_LEAVE_QUEUE) {
     ret->val.deny = action->val.deny;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Chat (since 0.1.5)
+//
+// `exports_rift_plugin_chat_chat` sees every chat message, and every command
+// that reaches the backend, before the backend does. It answers `continue`
+// (`rift_decision_continue`), which lets the packet through unchanged, or
+// `deny` (`rift_decision_deny`, `rift_decision_deny_json`), which drops it
+// and shows the player the text. `attempt->kind` tells a message from a
+// command; for a command `attempt->ctx.command` is the root name and
+// `attempt->ctx.args` the rest, and `attempt->text` is the whole line without
+// its slash.
+//
+// The export exists only in a plugin built with RIFT_CHAT (`RIFT_CHAT=1
+// sdk/c/build.sh ...`, or `rift_add_chat_plugin()` in CMake). It is the
+// registration: Rift asks such a plugin about every message of every player,
+// whatever its hook list says, and starts it only with
+// `authentication.signed_chat = false`, because dropping one signed message
+// would break the player's signature chain. A plugin built without RIFT_CHAT
+// has no `chat` export and is never asked.
+//
+//   void exports_rift_plugin_chat_chat(rift_chat_attempt_t *attempt, rift_decision_t *ret) {
+//     if (attempt->kind == RIFT_PLUGIN_TYPES_CHAT_KIND_MESSAGE && is_muted(&attempt->ctx.uuid)) {
+//       rift_decision_deny(ret, "You are muted.");
+//     } else {
+//       rift_decision_continue(ret);
+//     }
+//     rift_chat_attempt_free(attempt);
+//   }
+
+typedef rift_plugin_types_chat_attempt_t rift_chat_attempt_t;
+typedef rift_plugin_types_chat_kind_t rift_chat_kind_t;
+
+static inline void rift_chat_attempt_free(rift_chat_attempt_t *attempt) {
+  rift_plugin_types_chat_attempt_free(attempt);
+}
+
+static inline void rift_decision_continue(rift_decision_t *ret) {
+  memset(ret, 0, sizeof *ret);
+  ret->tag = RIFT_PLUGIN_TYPES_DECISION_CONTINUE;
+}
+
+// `deny`: plain text of 1..=1024 bytes. The text is copied.
+static inline void rift_decision_deny(rift_decision_t *ret, const char *reason) {
+  rift_decision_with(ret, RIFT_PLUGIN_TYPES_DECISION_DENY, reason);
 }
 
 // ---------------------------------------------------------------------------
@@ -613,7 +667,9 @@ static inline void rift_registration_add_hook(rift_registration_t *reg, rift_hoo
 
 // `suggest` is one of the payload-free `RIFT_PLUGIN_TYPES_SUGGEST_KIND_*`
 // tags (none, players, servers, dynamic). Use
-// `rift_registration_add_command_fixed` for a fixed list.
+// `rift_registration_add_command_fixed` for a fixed list. `permission` is the
+// node a player needs to see and run the command; `""` or NULL (since 0.1.5)
+// opens it to every player.
 static inline rift_plugin_types_command_spec_t *rift_registration_add_command(
     rift_registration_t *reg, const char *name, const char *permission, uint8_t suggest) {
   reg->commands.ptr = (rift_plugin_types_command_spec_t *)rift_realloc(
@@ -720,6 +776,29 @@ static inline bool rift_title_json(const rift_string_t *target, const char *titl
     return false;
   }
   return online;
+}
+
+// Reads the language `target`'s client reported into `out`, as the client
+// spells it (`en_us`), and returns true (since 0.1.5). Returns false, with
+// `out` empty, while Rift does not know it: the player is offline or their
+// client has not sent its settings yet, which it does after login (during
+// configuration from 1.20.2, after Join Game before), so never in `login`.
+// A host error is logged and reported as false. Free `out` with
+// `rift_string_free`.
+static inline bool rift_locale(const rift_string_t *target, rift_string_t *out) {
+  rift_string_t t = *target, err = {NULL, 0};
+  rift_plugin_option_string_t locale;
+  memset(&locale, 0, sizeof locale);
+  out->ptr = NULL;
+  out->len = 0;
+  if (!rift_plugin_players_locale(&t, &locale, &err)) {
+    rift_log(RIFT_WARN, "players.locale failed: " RIFT_STR_FMT, RIFT_STR_ARG(err));
+    rift_string_free(&err);
+    return false;
+  }
+  if (!locale.is_some) return false;
+  *out = locale.val;
+  return true;
 }
 
 // ---------------------------------------------------------------------------

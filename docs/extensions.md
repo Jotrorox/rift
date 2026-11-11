@@ -49,6 +49,7 @@ server names are errors; Rift never treats an error as permission to proceed.
 | `after_transfer(ctx)` | When an admitted transfer attempt completes or fails | `server` (source), `target`, `reason`, `success` | `nil` |
 | `disconnect(ctx)` | Session teardown, including an authenticated login that never joined | Last committed `server`, or nil; `reason = "session_closed"` | `nil` |
 | `dialog(ctx)` | A click on a plugin action of a [dialog](dialogs.md) the script showed (API v2+) | `server`, `action`, `values`, `payload` | `nil` |
+| `chat(ctx)` | A chat message, or a command on its way to the backend, before the backend sees it. Needs `authentication.signed_chat = false`; see [chat](plugins.md#chat) | `server`, `kind` (`"message"` or `"command"`), `text`; for a command also `command` and `args` | `{ deny = "reason" }` drops it and shows the player the reason |
 
 Common player context fields are `api_version` (1, 2 or 3), `authenticated = true`, `uuid`
 (lowercase 32-digit hex, no hyphens), canonical Mojang `name`, `connection_id`
@@ -177,14 +178,19 @@ nobody set denies. Grant nodes with groups (configured as above, or at runtime),
 with user nodes from `rift.permissions` in API v3, or in the dashboard. The
 `extensions.permissions` grant table of earlier versions is rejected; see
 [upgrading](permissions.md#upgrading-from-extensions-api-v2). A command
-permission is a lowercase node without wildcards.
+permission is a lowercase node without wildcards, or the empty string
+(`permission = ""`, plugin contract 0.1.5) for a command every player may see
+and run, such as a version command. An empty permission is not a node: nothing
+is looked up or registered for it, and `/perms doctor` and `rift check` skip the
+command.
 
 Register up to 64 lowercase command names using letters, digits, `_` or `-`
 (maximum 64 bytes). `server` and `hub` are reserved. Each registration must have
-an explicit permission and `run` function. The host checks permission **before**
+an explicit permission (which may be empty) and `run` function. The host checks permission **before**
 invoking it, even for manually crafted command packets. A registered name
 replaces the same backend command root in the advertised tree. Each player's tree
-only lists the commands they have permission for. Rift rebuilds it whenever a
+only lists the commands they have permission for and those with an empty
+permission. Rift rebuilds it whenever a
 backend sends its command tree (after every server switch, or when a plugin
 resends commands), so permission changes show in the tree from then on. Hiding a
 command is not an authorization check; the permission check above is.
@@ -220,7 +226,7 @@ under the usual 50 ms deadline, like every callback.
 
 Rift keeps entries that start with `word` (ignoring ASCII case), drops
 duplicates and sends at most 100. The client replaces `word` with the chosen
-entry. Players without the command's permission get no suggestions, and the
+entry. Players without the command's (non-empty) permission get no suggestions, and the
 function never runs for them. A failing function is logged and suggests
 nothing. Each session gets 10 answered requests per second; the client asks on
 every keystroke, and further requests get an empty answer. `/server <name>`
@@ -539,9 +545,19 @@ names a configured backend or service group; a group matches all its instances.
 | `rift.players.broadcast(text, server)` | Number of players a chat message (a string or a chat component table) was queued for; `server` is optional |
 
 Player tables contain `uuid`, `name`, `server` (the last committed backend),
-`connection_id` (a decimal string, matching `ctx.connection_id`) and `protocol`.
+`connection_id` (a decimal string, matching `ctx.connection_id`), `protocol`,
+`visible_to` (the node a viewer needs to see the player, or nil; see
+[visibility](permissions.md#visibility)) and `locale`.
 Players appear after their first usable Join Game and disappear when the session
 closes. Pending logins and players on other Rift processes are not listed.
+
+`locale` is the language the player's client reported, as the client spells it
+(`en_us`; old clients send `en_US`), or nil while Rift does not know it
+yet. The client sends its settings after login: during configuration from
+1.20.2, after Join Game before. So `login` never has a locale (the player is
+not listed yet either), `join` has one only for 1.20.2 and newer clients, and
+nil means "not known yet", not "no language". The value follows later changes
+of the client's language setting and survives server switches.
 
 Title options are `title` and `subtitle` (at least one), plus `fade_in_ms`,
 `stay_ms` and `fade_out_ms` (integers from 0 to 60000; defaults 500, 3500 and

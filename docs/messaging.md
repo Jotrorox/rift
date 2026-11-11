@@ -183,7 +183,7 @@ snake_case; `target` is a player name, a UUID or a connection id.
 
 | Subject | JSON payload | `data` |
 | --- | --- | --- |
-| `rift.players.list` | `{}` or `{"server":"lobby"}` (a server or service group) | `[{"connection_id":7,"uuid":"…","name":"Alice","server":"lobby-1","protocol":774}]` |
+| `rift.players.list` | `{}` or `{"server":"lobby"}` (a server or service group) | `[{"connection_id":7,"uuid":"…","name":"Alice","server":"lobby-1","protocol":774,"visible_to":null,"locale":"en_us"}]` |
 | `rift.players.get` | `{"target":"Alice"}` | one player, or `null` |
 | `rift.players.names` | `{}` or `{"prefix":"Al"}` | sorted names |
 | `rift.players.message` | `{"target":"Alice","text":"Hello"}` | whether the player was online |
@@ -264,7 +264,9 @@ A `switch` also carries the `previous` server, and a `quit` names the last one.
 `visible_to` is the node a viewer needs to see the player
 ([visibility](permissions.md#visibility)), or `null`; a `visibility` event
 reports a change of it, with the old value in `previous_visible_to`.
-`rift.players.list` and `get` include `visible_to` for every player.
+`rift.players.list` and `get` include `visible_to` for every player, and
+`locale`, the language the client reported (`null` until its settings arrive;
+see [online players](extensions.md#online-players)).
 `uuid` is lowercase 32-digit hex without hyphens. Events for one player arrive in order.
 `rift.events.permissions` carries every committed [permission](permissions.md)
 change, the same JSON as `rift.perms.update`.

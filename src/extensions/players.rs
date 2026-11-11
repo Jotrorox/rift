@@ -78,6 +78,8 @@ struct Entry {
     name: String,
     /// The node a viewer needs to see this player; `None` is everyone.
     visible_to: Option<Arc<str>>,
+    /// The client's language, once its Client Information arrived.
+    locale: Option<String>,
     server: String,
     protocol: i32,
     actions: mpsc::Sender<PlayerAction>,
@@ -134,6 +136,15 @@ impl PlayerHandle {
             .event("switch", self.id, entry, Some(&previous));
         drop(sessions);
         self.players.publish(event);
+    }
+
+    /// The language the client reported, as the session last read it.
+    pub fn set_locale(&self, locale: Option<&str>) {
+        if let Some(entry) = self.players.lock().get_mut(&self.id)
+            && entry.locale.as_deref() != locale
+        {
+            entry.locale = locale.map(str::to_owned);
+        }
     }
 }
 
@@ -403,6 +414,7 @@ impl Players {
             uuid: uuid.iter().map(|b| format!("{b:02x}")).collect(),
             key: *uuid,
             visible_to,
+            locale: None,
             name: name.to_owned(),
             server: server.to_owned(),
             protocol,
@@ -648,6 +660,7 @@ impl Players {
             server: entry.server.clone(),
             protocol: entry.protocol,
             visible_to: entry.visible_to.as_deref().map(str::to_owned),
+            locale: entry.locale.clone(),
         }
     }
 
@@ -790,6 +803,7 @@ impl Players {
         player.raw_set("connection_id", id.to_string())?;
         player.raw_set("protocol", entry.protocol)?;
         player.raw_set("visible_to", entry.visible_to.as_deref())?;
+        player.raw_set("locale", entry.locale.as_deref())?;
         Ok(player)
     }
 
