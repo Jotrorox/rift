@@ -24,6 +24,7 @@ pub use packets::{Handshake, NextState, PacketKind, ProtocolVersion, disconnect,
 pub use packets::{PlayerIdentity, action_bar, action_bar_component, system_message, title};
 pub(crate) use packets::{
     ProfileKey, login_identity, start_identity, start_profile_key, success_identity,
+    without_profile_key,
 };
 pub use packets::{disconnect_component, system_component, validate_component};
 pub use state::{ConnectionState, Direction, State};

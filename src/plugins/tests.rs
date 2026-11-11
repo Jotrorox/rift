@@ -190,6 +190,7 @@ fn spec(root: &Path, name: &str, extra: &str, config_json: &str) -> PluginSpec {
         config_json: config_json.into(),
         fingerprint: "one".into(),
         online_mode: true,
+        signed_chat: true,
     }
 }
 

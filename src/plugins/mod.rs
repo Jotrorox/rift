@@ -61,6 +61,9 @@ pub struct PluginSpec {
     /// `authentication.online_mode`: without it player hooks never run, so
     /// a plugin that registers one is refused at `init`.
     pub online_mode: bool,
+    /// `authentication.signed_chat`: `false` means backends see every
+    /// player's chat as unsigned, so dropping a message cannot break a chain.
+    pub signed_chat: bool,
 }
 
 impl PluginSpec {
@@ -113,14 +116,15 @@ impl PluginSpec {
     }
 
     /// Same code, manifest and folder; only the configuration table may differ.
-    /// A change of `online_mode` restarts the plugin, so its registration is
-    /// checked again.
+    /// A change of `online_mode` or `signed_chat` restarts the plugin, so its
+    /// registration is checked again.
     fn same_artifact(&self, other: &Self) -> bool {
         self.fingerprint == other.fingerprint
             && self.manifest == other.manifest
             && self.folder == other.folder
             && self.config_root == other.config_root
             && self.online_mode == other.online_mode
+            && self.signed_chat == other.signed_chat
     }
 }
 

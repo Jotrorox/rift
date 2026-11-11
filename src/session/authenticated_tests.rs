@@ -221,6 +221,55 @@ async fn encrypted_signed_chat_session_and_command_matrix() {
     }
 }
 
+#[tokio::test]
+async fn unsigned_chat_withholds_the_chat_session_matrix() {
+    for number in 761..=777 {
+        timeout(Duration::from_secs(5), async {
+            let (mut session, mut client, mut backend) = authenticated_session_for(number).await;
+            session.set_signed_chat(false);
+            compression(&mut session, &mut client, &mut backend, 256).await;
+            verified_play(&mut session, &mut client, &mut backend).await;
+            // Initial and renewed sessions alike stop at the proxy.
+            for generation in [1, 2] {
+                session
+                    .client
+                    .codec
+                    .write(&mut client, &chat_session(number, generation))
+                    .await
+                    .unwrap();
+                assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+                // Chat, signed commands and acknowledgements pass as before;
+                // each arriving next proves that no session was queued.
+                for packet in [
+                    signed_chat(number, generation),
+                    signed_command(number, true),
+                    acknowledgement(number),
+                ] {
+                    serverbound(&mut session, &mut client, &mut backend, &packet).await;
+                }
+            }
+            // A consumed proxy command still owes the backend its offset.
+            session
+                .client
+                .codec
+                .write(&mut client, &signed_command(number, false))
+                .await
+                .unwrap();
+            assert_eq!(
+                session.forward().await.unwrap(),
+                SessionEvent::ProxyCommand("server survival".into())
+            );
+            assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+            assert_eq!(
+                receive(&mut backend, session.backend().unwrap().codec).await,
+                acknowledgement(number)
+            );
+        })
+        .await
+        .unwrap_or_else(|_| panic!("unsigned chat protocol {number} timed out"));
+    }
+}
+
 fn pack_push(number: i32, generation: u8, required: bool) -> Packet {
     let mut data = if number >= 765 {
         vec![generation; 16]

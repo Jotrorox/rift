@@ -100,6 +100,13 @@ Restart Paper after changing these settings. Rift verifies accounts with Mojang,
 handles client encryption, and forwards player identities to Paper. Failed
 verification never falls back to offline authentication.
 
+`authentication.signed_chat` (default `true`) can be set to `false` to keep
+players' chat signing keys and sessions from every backend, so that backends
+treat all chat as unsigned and the proxy may drop single messages. Players'
+chat then shows as not secure and chat reporting stops working, and Paper
+backends need `enforce-secure-profile=false`; see
+[unsigned chat](docs/network-protocol.md#unsigned-chat).
+
 Online mode works on every supported version, 1.8.9 through 26.3. Velocity
 forwarding needs 1.13 or newer backends, so a network with older versions uses
 BungeeCord forwarding instead, which every Spigot derivative reads:

@@ -1222,6 +1222,21 @@ async fn authenticated_client(
     Handshake,
     Option<protocol::ProfileKey>,
 ) {
+    authenticated_client_with(number, mode, signer, true).await
+}
+
+/// The same with `authentication.signed_chat` as given.
+async fn authenticated_client_with(
+    number: i32,
+    mode: ForwardingMode,
+    signer: Option<&aws_lc_rs::rsa::KeyPair>,
+    signed_chat: bool,
+) -> (
+    Session<DuplexStream, DuplexStream>,
+    CryptoStream<DuplexStream>,
+    Handshake,
+    Option<protocol::ProfileKey>,
+) {
     let key = signer.map(|signer| {
         use aws_lc_rs::{
             encoding::{AsDer, PublicKeyX509Der},
@@ -1251,6 +1266,7 @@ async fn authenticated_client(
     let claimed = client_login_start(number, [99; 16], key.as_ref());
     Codec::default().write(&mut client, &claimed).await.unwrap();
     let mut session = Session::accept(input).await.unwrap();
+    session.set_signed_chat(signed_chat);
     assert_eq!(
         session.read_login_start().await.unwrap().uuid,
         (number >= 760).then_some([99; 16])
@@ -2515,6 +2531,103 @@ async fn signed_1_19_logins_forward_the_chat_key() {
             })
             .await
             .unwrap_or_else(|_| panic!("signed login {number} with {mode:?} timed out"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn unsigned_chat_withholds_the_1_19_login_key_from_backends() {
+    let signer = aws_lc_rs::rsa::KeyPair::generate(aws_lc_rs::rsa::KeySize::Rsa2048).unwrap();
+    for number in [759, 760] {
+        for mode in [ForwardingMode::Velocity, ForwardingMode::BungeeGuard] {
+            timeout(Duration::from_secs(5), async {
+                // The client logs in with its key, and Rift checks it as ever.
+                let (mut session, mut client, handshake, key) =
+                    authenticated_client_with(number, mode, Some(&signer), false).await;
+                assert_eq!(session.profile_key, key);
+                assert!(key.is_some());
+                session.enable_network().unwrap();
+                let (server, mut backend) = tokio::io::duplex(65536);
+                session.connect_backend(server).await.unwrap();
+                let codec = Codec::default();
+                let received = forwarded_handshake(&receive(&mut backend, codec).await);
+                // The backend's Login Start names the player and no key.
+                assert_eq!(
+                    receive(&mut backend, codec).await,
+                    client_login_start(number, [7; 16], None)
+                );
+                if mode == ForwardingMode::Velocity {
+                    assert_eq!(received, handshake);
+                    // Paper asks for the keyed versions; without a key the
+                    // answer is version 1, as for a player who has none.
+                    codec
+                        .write(&mut backend, &velocity_request_for(9, 3))
+                        .await
+                        .unwrap();
+                    session.forward().await.unwrap();
+                    assert_eq!(
+                        velocity_payload(&receive(&mut backend, codec).await, 9),
+                        (1, Vec::new())
+                    );
+                } else {
+                    assert_bungeecord_handshake(&received, number, mode);
+                }
+                codec
+                    .write(&mut backend, &backend_login_success(number))
+                    .await
+                    .unwrap();
+                session.forward().await.unwrap();
+                assert_verified_login_success(number, &receive(&mut client, codec).await);
+            })
+            .await
+            .unwrap_or_else(|_| panic!("unsigned login {number} with {mode:?} timed out"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn unsigned_chat_strips_the_key_from_an_offline_1_19_login_start() {
+    let key = protocol::ProfileKey {
+        expiry: 1_800_000_000_000,
+        public_key: vec![1, 2, 3],
+        signature: vec![4, 5],
+    };
+    for number in [759, 760] {
+        for signed_chat in [true, false] {
+            // Login Start read before a backend is chosen, and after.
+            for early in [true, false] {
+                let (mut client, input) = tokio::io::duplex(65536);
+                let handshake = Handshake {
+                    protocol: number,
+                    address: "play.test".into(),
+                    port: 25565,
+                    next_state: NextState::Login,
+                };
+                let codec = Codec::default();
+                codec.write(&mut client, &handshake.packet()).await.unwrap();
+                let start = client_login_start(number, [9; 16], Some(&key));
+                codec.write(&mut client, &start).await.unwrap();
+                let mut session = Session::accept(input).await.unwrap();
+                session.set_signed_chat(signed_chat);
+                if early {
+                    session.read_login_start().await.unwrap();
+                }
+                let (server, mut backend) = tokio::io::duplex(65536);
+                session.connect_backend(server).await.unwrap();
+                assert_eq!(receive(&mut backend, codec).await, handshake.packet());
+                if !early {
+                    session.forward().await.unwrap();
+                }
+                assert_eq!(
+                    receive(&mut backend, codec).await,
+                    if signed_chat {
+                        start
+                    } else {
+                        client_login_start(number, [9; 16], None)
+                    },
+                    "protocol {number} signed_chat {signed_chat} early {early}"
+                );
+            }
         }
     }
 }

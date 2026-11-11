@@ -164,7 +164,8 @@ messages and events, but a plugin whose registration lists a player hook,
 registers a command or has an empty hook list fails to start (it is not
 retried), so a ban list cannot silently allow everyone; `rift check` and `rift
 check --strict` warn when persistent plugins are configured without it.
-Turning `online_mode` on or off restarts every persistent plugin. Answers are
+Turning `online_mode` or `signed_chat` on or off restarts every persistent
+plugin. Answers are
 validated exactly like Lua results and bus replies: strings are 1–1024 bytes,
 JSON text components (the `deny-json` and `message-json` answers of the
 optional `decisions` export, which a WebAssembly component that has it answers

@@ -82,6 +82,14 @@ fn persistent_plugins_are_recorded_with_their_configuration_and_never_evaluated(
         serde_json::json!({"database_env": "RELAXOBAN_DSN", "limits": [1, 2], "nested": {}})
     );
     assert_eq!(spec.fingerprint.len(), 64);
+    // The authentication settings a registration is checked against.
+    assert!(!spec.online_mode);
+    assert!(spec.signed_chat);
+    let unsigned = fixture
+        .load("config.authentication = { signed_chat = false }\nrift.plugin('relaxoban')")
+        .unwrap();
+    assert!(!unsigned.authentication.signed_chat);
+    assert!(!unsigned.plugins[0].signed_chat);
     // Without a table the plugin gets `{}`; the data directory is not part of
     // the fingerprint, the artifact is.
     fixture.write("plugins/relaxoban/data/state.lua", "changed");

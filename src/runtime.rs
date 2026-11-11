@@ -655,6 +655,7 @@ pub async fn handle(
         if snapshot.config.network.bungeecord {
             session.enable_bungeecord();
         }
+        session.set_signed_chat(snapshot.config.authentication.signed_chat);
         let mut login_name = if tracked_login {
             match timeout(HANDSHAKE_TIMEOUT, session.read_login_start()).await {
                 Ok(Ok(login)) => login.name,

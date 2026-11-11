@@ -149,6 +149,8 @@ Where a version lacks something, the player gets the closest thing it has:
   0.2.0 announces secure-chat enforcement whatever its configuration: it works
   as a single backend, but Rift refuses it as a backend of an offline-mode
   [network](network-protocol.md), with or without translation.
+  `authentication.signed_chat = false` makes every backend's chat unsigned,
+  translated or not; see [unsigned chat](network-protocol.md#unsigned-chat).
 - **Features one side lacks** are answered or emulated where a player would
   notice, and dropped otherwise. Examples: the configuration phase a 1.20.2+
   client needs is built from what an older backend sends at join, and answered

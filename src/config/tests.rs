@@ -14,11 +14,21 @@ fn online_authentication_and_velocity_are_validated_together() {
     ), "online.lua").unwrap();
     assert!(config.authentication.online_mode);
     assert_eq!(config.authentication.timeout, Duration::from_millis(2500));
+    assert!(config.authentication.signed_chat);
     let forwarding = config.forwarding.unwrap();
     assert_eq!(forwarding.mode, ForwardingMode::Velocity);
     assert_eq!(forwarding.secret_env.as_deref(), Some("PAPER_SECRET"));
     let defaults = Config::from_lua(VALID, "offline.lua").unwrap();
     assert!(!defaults.authentication.online_mode);
+    assert!(defaults.authentication.signed_chat);
+    // Unsigned chat is its own switch, with or without online mode.
+    for settings in [
+        "authentication = { signed_chat = false }",
+        "authentication = { online_mode = true, signed_chat = false }, forwarding = { mode = 'velocity' }",
+    ] {
+        let config = Config::from_lua(&with_security(settings), "unsigned.lua").unwrap();
+        assert!(!config.authentication.signed_chat, "{settings}");
+    }
     assert!(defaults.forwarding.is_none());
     // Validation does not read environment secrets or contact authentication services.
     let config = Config::from_lua(
@@ -80,6 +90,15 @@ fn insecure_or_misspelled_authentication_settings_are_rejected() {
             "authentication = { online_mode = 'true' }",
             "authentication.online_mode",
         ),
+        (
+            "authentication = { signed_chat = 'false' }",
+            "authentication.signed_chat",
+        ),
+        (
+            "authentication = { signed_chat = 0 }",
+            "authentication.signed_chat",
+        ),
+        ("authentication = { signedchat = false }", "unknown field"),
         (
             "authentication = { timeout_ms = 0 }",
             "authentication.timeout_ms",

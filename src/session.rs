@@ -413,6 +413,9 @@ pub struct Session<C, B> {
     authenticated_profile: Option<AuthenticatedProfile>,
     /// The chat key a 1.19–1.19.2 client logged in with.
     profile_key: Option<protocol::ProfileKey>,
+    /// `authentication.signed_chat`: when false, no backend learns the
+    /// player's chat key (1.19–1.19.2) or chat session (1.19.3+).
+    signed_chat: bool,
     forwarding: Option<Forwarding>,
     network: bool,
     bungeecord: bool,
@@ -457,6 +460,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             identity: None,
             authenticated_profile: None,
             profile_key: None,
+            signed_chat: true,
             forwarding: None,
             network: false,
             bungeecord: false,
@@ -603,6 +607,13 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         Ok(())
     }
 
+    /// `authentication.signed_chat`. With `false`, backends receive neither a
+    /// 1.19–1.19.2 login chat key nor a 1.19.3+ chat session, so they treat
+    /// the player's chat as unsigned. Set before the first backend login.
+    pub fn set_signed_chat(&mut self, signed_chat: bool) {
+        self.signed_chat = signed_chat;
+    }
+
     /// Reserve the BungeeCord compatibility channel for trusted backend requests.
     pub fn enable_bungeecord(&mut self) {
         self.bungeecord = true;
@@ -674,13 +685,14 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                     .into(),
             },
         };
-        self.forwarding = Some(Forwarding::new(
-            method,
-            address,
-            profile,
-            self.profile_key.clone(),
-            version,
-        )?);
+        let forwarding =
+            Forwarding::new(method, address, profile, self.profile_key.clone(), version)?;
+        self.forwarding = Some(if self.signed_chat {
+            forwarding
+        } else {
+            // The same path that keeps the key from translated backends.
+            forwarding.for_backend(version)
+        });
         Ok(())
     }
 
@@ -817,7 +829,12 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             .codec
             .write(&mut backend.io, &handshake.packet())
             .await?;
-        if let Some(start) = self.login_start.clone() {
+        if let Some(mut start) = self.login_start.clone() {
+            if !self.signed_chat
+                && let Some(keyless) = protocol::without_profile_key(version, &start)?
+            {
+                start = keyless;
+            }
             backend
                 .state
                 .observe(version, Direction::Serverbound, &start)?;
@@ -1608,8 +1625,8 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                     self.backend = None;
                     return Ok(SessionEvent::BackendClosed);
                 }
-                Incoming::Client(Ok(ConnectionEvent::Read(Some(packet)))) => {
-                    let raw = self.client.raw.take();
+                Incoming::Client(Ok(ConnectionEvent::Read(Some(mut packet)))) => {
+                    let mut raw = self.client.raw.take();
                     let phase = self.client.state.phase(Direction::Serverbound);
                     let kind =
                         self.client
@@ -1617,6 +1634,22 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                             .observe(version, Direction::Serverbound, &packet)?;
                     if kind == PacketKind::LoginStart {
                         self.login_start = Some(packet.clone());
+                        if !self.signed_chat
+                            && let Some(keyless) = protocol::without_profile_key(version, &packet)?
+                        {
+                            packet = keyless;
+                            raw = None;
+                        }
+                    }
+                    if !self.signed_chat
+                        && phase == State::Play
+                        && version
+                            .switching()
+                            .is_some_and(|caps| caps.chat_session_update(&packet))
+                    {
+                        // Without a chat session the backend cannot verify
+                        // signatures and takes the player's chat as unsigned.
+                        return Ok(SessionEvent::Packet);
                     }
                     if self.bungeecord
                         && crate::bungeecord::payload(
