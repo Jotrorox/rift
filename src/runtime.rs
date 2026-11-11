@@ -844,6 +844,8 @@ pub async fn handle(
         let mut admin_registration = None;
         let mut transfers: Option<mpsc::Receiver<admin::Transfer>> = None;
         let mut directory = None;
+        // The locale the directory was last told, to tell it only changes.
+        let mut published_locale: Option<String> = None;
         let mut actions: Option<mpsc::Receiver<rift::extensions::PlayerAction>> = None;
         let mut transfer_reply: Option<admin::TransferReply> = None;
         // An administrator may select a backend added after this session's
@@ -1285,6 +1287,9 @@ pub async fn handle(
                                     session.handshake.protocol,
                                     &current_backend,
                                 );
+                                // 1.20.2+ clients said it during configuration.
+                                handle.set_locale(session.locale());
+                                published_locale = session.locale().map(str::to_owned);
                                 directory = Some(handle);
                                 actions = Some(receiver);
                                 // Joining set the proxy contexts to `server` alone.
@@ -1316,6 +1321,14 @@ pub async fn handle(
                     }
                     if playing && !ready {
                         phase_deadline = Deadline::now() + Duration::from_secs(30);
+                    }
+                    // Client Information arrives after Join Game on older
+                    // clients and again whenever the language setting changes.
+                    if let Some(directory) = &directory
+                        && session.locale() != published_locale.as_deref()
+                    {
+                        directory.set_locale(session.locale());
+                        published_locale = session.locale().map(str::to_owned);
                     }
                 }
                 Ok(SessionEvent::BungeeCord(request)) => {

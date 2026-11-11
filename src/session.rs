@@ -371,6 +371,9 @@ pub struct SuggestionRequest {
     pub text: String,
 }
 
+/// Characters vanilla allows in a Client Information locale.
+const MAX_LOCALE: usize = 16;
+
 /// Suggestion requests answered per session and second. Clients send one per
 /// keystroke; extra requests get an empty answer without running Lua.
 const SUGGESTIONS_PER_SECOND: u32 = 10;
@@ -424,6 +427,8 @@ pub struct Session<C, B> {
     switch_in_progress: bool,
     backend_error: Option<io::Error>,
     client_information: Option<Packet>,
+    /// The language the client last reported in Client Information.
+    locale: Option<String>,
     client_brand: Option<Packet>,
     bundle_open: bool,
     initial_retry_safe: bool,
@@ -469,6 +474,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             switch_in_progress: false,
             backend_error: None,
             client_information: None,
+            locale: None,
             client_brand: None,
             bundle_open: false,
             initial_retry_safe: true,
@@ -579,6 +585,14 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
 
     pub fn backend(&self) -> Option<&Connection<B>> {
         self.backend.as_ref()
+    }
+
+    /// The client's language as its last Client Information packet spelled
+    /// it (`en_us`; old clients send `en_US`), or `None` until one arrives:
+    /// during configuration from 1.20.2, after Join Game before. It survives
+    /// backend switches.
+    pub fn locale(&self) -> Option<&str> {
+        self.locale.as_deref()
     }
 
     /// Mojang's account name after authentication, otherwise the client claim.
@@ -1277,6 +1291,15 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                 },
                 packet.data.clone(),
             ));
+            // The locale leads the packet in every protocol; vanilla allows
+            // 16 characters (7 before 1.12). A value Rift cannot read stays
+            // the backend's to judge and leaves the known locale alone.
+            let mut bytes = packet.data.as_slice();
+            if let Ok(locale) = protocol::read_string(&mut bytes, MAX_LOCALE)
+                && !locale.is_empty()
+            {
+                self.locale = Some(locale.to_owned());
+            }
         }
         if (state == State::Configuration && packet.id == caps.config_payload)
             || (state == State::Play && packet.id == caps.play_payload)

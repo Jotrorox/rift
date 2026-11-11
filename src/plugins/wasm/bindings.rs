@@ -1,4 +1,4 @@
-//! Host bindings for `rift:plugin@0.1.4`: generated types and traits, the
+//! Host bindings for `rift:plugin@0.1.5`: generated types and traits, the
 //! trait implementations that forward every import to
 //! [`Services`](crate::plugins::services::Services), and conversions between
 //! the generated types and the engine-neutral [`api`] types. WASI is linked
@@ -456,6 +456,10 @@ impl players::Host for State {
 
     fn visible_to(&mut self, target: String) -> Result<Option<String>, String> {
         self.services.players().visible_to(&target)
+    }
+
+    fn locale(&mut self, target: String) -> Result<Option<String>, String> {
+        self.services.players().locale(&target)
     }
 }
 

@@ -51,6 +51,11 @@ pub struct PlayerInfo {
     /// record has no such field, so components ask `players.visible-to`.
     #[serde(default)]
     pub visible_to: Option<String>,
+    /// The client's language as it reported it (`en_us`), or `None` until
+    /// its Client Information arrives: never at `login`, and at `join` only
+    /// for 1.20.2 and newer clients. Components ask `players.locale`.
+    #[serde(default)]
+    pub locale: Option<String>,
 }
 
 /// Metadata available right after TCP accept (`route`).

@@ -2,7 +2,7 @@
 
 Rift has one plugin system. A plugin is anything that receives Rift's events
 and calls Rift's host API, and every plugin uses the same contract,
-[`wit/rift-plugin.wit`](../wit/rift-plugin.wit) (`rift:plugin@0.1.4`): one
+[`wit/rift-plugin.wit`](../wit/rift-plugin.wit) (`rift:plugin@0.1.5`): one
 event schema, one set of answers, one host API. What differs is where the code
 runs:
 
@@ -328,7 +328,7 @@ and the SDK guides map it to each language.
 
 | Interface | Functions | Notes |
 | --- | --- | --- |
-| `players` | `list(server?)`, `get(target)`, `names(prefix?)`, `message`, `action-bar`, `title`, `tab-list`, `boss-bar`, `dialog`, `clear-dialog`, `kick`, `transfer`, `broadcast`, `message-json`, `action-bar-json`, `kick-json`, `broadcast-json`, `title-json` | `target` is a name, a UUID or a connection id. Actions return whether the player was online. Transfers pass `before_transfer`. `dialog` and `clear-dialog` (since 0.1.1) show and close [dialogs](dialogs.md). The `-json` functions (since 0.1.2) take a JSON text component for colours, hover text and click events ([rich text](extensions.md#rich-text)); Lua takes a chat component table in place of the string. `list` and `get` include hidden players; `visible-to(target)` (since 0.1.3; `visible_to` in Lua player tables and bus replies) returns the node a viewer needs to see one ([visibility](permissions.md#visibility)). `title-json` (since 0.1.4) takes a `title-json-spec`: title and optional subtitle as JSON text components (an empty title shows only the subtitle) and times in ticks. Components may contain the authoring objects `{"mini": "<red>Hi <player>", "args": {...}}` and `{"legacy": "&cHi", "marker": "&"}` ([text](text.md)); a bare string is never read as markup. Every SDK has builders that write them. |
+| `players` | `list(server?)`, `get(target)`, `names(prefix?)`, `message`, `action-bar`, `title`, `tab-list`, `boss-bar`, `dialog`, `clear-dialog`, `kick`, `transfer`, `broadcast`, `message-json`, `action-bar-json`, `kick-json`, `broadcast-json`, `title-json`, `locale` | `target` is a name, a UUID or a connection id. Actions return whether the player was online. Transfers pass `before_transfer`. `dialog` and `clear-dialog` (since 0.1.1) show and close [dialogs](dialogs.md). The `-json` functions (since 0.1.2) take a JSON text component for colours, hover text and click events ([rich text](extensions.md#rich-text)); Lua takes a chat component table in place of the string. `list` and `get` include hidden players; `visible-to(target)` (since 0.1.3; `visible_to` in Lua player tables and bus replies) returns the node a viewer needs to see one ([visibility](permissions.md#visibility)). `title-json` (since 0.1.4) takes a `title-json-spec`: title and optional subtitle as JSON text components (an empty title shows only the subtitle) and times in ticks. Components may contain the authoring objects `{"mini": "<red>Hi <player>", "args": {...}}` and `{"legacy": "&cHi", "marker": "&"}` ([text](text.md)); a bare string is never read as markup. Every SDK has builders that write them. `locale(target)` (since 0.1.5; `locale` in Lua player tables and bus replies) returns the language the player's client reported, as the client spells it (`en_us`; old clients send `en_US`), or `none`. The client sends its settings after login: during configuration from 1.20.2, after Join Game before. So the `login` hook never has a locale, `join` has one only for 1.20.2 and newer clients, and a missing value means "not known yet", not "no language". It follows later changes of the client's language setting and survives server switches. |
 | `store` | `get`, `set`, `delete`, `increment`, `list(namespace, prefix)` | The durable store shared with API v2. Namespaces are private: `plugin.<name>.<namespace>`, which the configuration script's `rift.store` cannot read or write. |
 | `permissions` | `has`, `set`, `add-group`, `remove-group`, `groups`, `list-groups`, `meta`, `set-meta` | Rift's [permission store](permissions.md#persistent-plugins): user nodes, group memberships and (since 0.1.3) meta values with contexts and expiry, checked in the player's current contexts. |
 | `bus` | `publish`, `request(subject, payload, timeout_ms)`, `subscribe(subject, queue_group?)`, `unsubscribe`, `stream-publish` | Messages arrive through the `message` hook. At most 256 subscriptions; requests wait at most 60 s. |
@@ -484,7 +484,7 @@ same without WASI.
 
 Additions keep compiled components loading. Wasmtime matches interface
 versions on the `0.1` track, so a component built against `0.1.0` links
-against this `0.1.4` host and the other way round. An addition may bring new
+against this `0.1.5` host and the other way round. An addition may bring new
 host functions, types and interfaces, but never changes an existing type or
 adds a case to an existing enum or variant, since exports are checked exactly.
 A new export lives in its own interface, which the host looks up when it
@@ -492,7 +492,8 @@ loads a component and treats as optional: world `base` holds what every
 component has, worlds `optional`, `optional-decisions` and `optional-styled`
 what later releases added (`dialogs` in 0.1.1, `decisions` in 0.1.2, `styled`
 in 0.1.4). The rich text host functions came in 0.1.2, the visibility and
-permission meta host functions in 0.1.3 and `players.title-json` in 0.1.4. A
+permission meta host functions in 0.1.3, `players.title-json` in 0.1.4 and
+`players.locale` in 0.1.5. A
 host function a component calls needs a host that has it; a
 component that only exports something new still loads on older 0.1 hosts.
 Breaking changes move to 1.0.

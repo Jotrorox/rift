@@ -375,6 +375,139 @@ async fn backend_switch_relogs_backend_and_retains_client_socket_and_compression
     .unwrap();
 }
 
+/// Client Information with `locale` first, as every protocol has it.
+fn client_information(id: i32, locale: &str) -> Packet {
+    let mut data = Vec::new();
+    write_string(locale, &mut data);
+    // View distance, chat mode and colours, skin parts, main hand, text
+    // filtering, server listing, particles.
+    data.extend([8, 0, 1, 0x7f, 1, 0, 1, 0]);
+    Packet::new(id, data)
+}
+
+#[tokio::test]
+async fn client_locale_is_read_updated_and_kept_across_a_backend_switch() {
+    timeout(Duration::from_secs(3), async {
+        let (mut session, mut client, mut backend) = session().await;
+        let codec = Codec::default();
+        let caps = session.version().unwrap().switching().unwrap();
+        codec.write(&mut backend, &login_success()).await.unwrap();
+        session.forward().await.unwrap();
+        assert_eq!(receive(&mut client, codec).await, login_success());
+        codec.write(&mut client, &Packet::empty(3)).await.unwrap();
+        session.forward().await.unwrap();
+        assert_eq!(receive(&mut backend, codec).await, Packet::empty(3));
+        // Nothing is known through login.
+        assert_eq!(session.locale(), None);
+
+        // 1.20.2+ clients send it during configuration.
+        let configured = client_information(caps.config_information, "de_de");
+        codec.write(&mut client, &configured).await.unwrap();
+        session.forward().await.unwrap();
+        assert_eq!(receive(&mut backend, codec).await, configured);
+        assert_eq!(session.locale(), Some("de_de"));
+
+        codec.write(&mut backend, &Packet::empty(3)).await.unwrap();
+        session.forward().await.unwrap();
+        assert_eq!(receive(&mut client, codec).await, Packet::empty(3));
+        codec.write(&mut client, &Packet::empty(3)).await.unwrap();
+        session.forward().await.unwrap();
+        assert_eq!(receive(&mut backend, codec).await, Packet::empty(3));
+        let join = join_game(1);
+        codec.write(&mut backend, &join).await.unwrap();
+        session.forward().await.unwrap();
+        assert_eq!(receive(&mut client, codec).await, join);
+        assert_eq!(session.locale(), Some("de_de"));
+
+        // Changing the language in the options sends it again, in play.
+        let changed = client_information(caps.play_information, "fr_fr");
+        codec.write(&mut client, &changed).await.unwrap();
+        session.forward().await.unwrap();
+        assert_eq!(receive(&mut backend, codec).await, changed);
+        assert_eq!(session.locale(), Some("fr_fr"));
+
+        // A locale longer than vanilla allows is the backend's to judge and
+        // leaves the known one alone.
+        let overlong = client_information(caps.play_information, "x".repeat(17).as_str());
+        codec.write(&mut client, &overlong).await.unwrap();
+        session.forward().await.unwrap();
+        assert_eq!(receive(&mut backend, codec).await, overlong);
+        assert_eq!(session.locale(), Some("fr_fr"));
+        codec.write(&mut client, &changed).await.unwrap();
+        session.forward().await.unwrap();
+        assert_eq!(receive(&mut backend, codec).await, changed);
+
+        // A switch replays the options to the new backend and keeps the locale.
+        let (replacement, mut second) = tokio::io::duplex(65536);
+        let switch = session.connect_backend(replacement);
+        let peers = async {
+            receive(&mut second, codec).await;
+            assert_eq!(receive(&mut second, codec).await, login_start());
+            codec.write(&mut second, &login_success()).await.unwrap();
+            assert_eq!(receive(&mut second, codec).await, Packet::empty(3));
+            assert_eq!(receive(&mut client, codec).await, Packet::empty(0x74));
+            codec
+                .write(&mut client, &Packet::empty(0x0f))
+                .await
+                .unwrap();
+            assert_eq!(
+                receive(&mut second, codec).await,
+                Packet::new(caps.config_information, changed.data.clone())
+            );
+            assert_eq!(receive(&mut client, codec).await, Packet::new(8, vec![0]));
+        };
+        let (result, ()) = tokio::join!(switch, peers);
+        result.unwrap();
+        assert_eq!(session.locale(), Some("fr_fr"));
+
+        // The new configuration may bring a new answer.
+        let reconfigured = client_information(caps.config_information, "en_us");
+        codec.write(&mut client, &reconfigured).await.unwrap();
+        session.forward().await.unwrap();
+        assert_eq!(receive(&mut second, codec).await, reconfigured);
+        assert_eq!(session.locale(), Some("en_us"));
+    })
+    .await
+    .unwrap();
+}
+
+/// Clients before 1.20.2 have no configuration: the locale comes in play,
+/// after Join Game, and old clients spell it `en_US`.
+#[tokio::test]
+async fn legacy_client_locale_arrives_in_play() {
+    for (number, locale) in [(47, "en_US"), (340, "de_DE"), (763, "en_us")] {
+        let (mut client, input) = tokio::io::duplex(65536);
+        let handshake = Handshake {
+            protocol: number,
+            address: "play.test".into(),
+            port: 25565,
+            next_state: NextState::Login,
+        };
+        let codec = Codec::default();
+        codec.write(&mut client, &handshake.packet()).await.unwrap();
+        let mut session: Session<DuplexStream, DuplexStream> =
+            Session::accept(input).await.unwrap();
+        let caps = session.version().unwrap().switching().unwrap();
+        assert_eq!(caps.config_information, -1);
+        assert_eq!(session.locale(), None);
+        session
+            .remember_client_packet(
+                State::Play,
+                &client_information(caps.play_information, locale),
+            )
+            .unwrap();
+        assert_eq!(session.locale(), Some(locale), "protocol {number}");
+        // Another packet with the same shape is not Client Information.
+        session
+            .remember_client_packet(
+                State::Play,
+                &client_information(caps.play_information + 1, "zz_zz"),
+            )
+            .unwrap();
+        assert_eq!(session.locale(), Some(locale), "protocol {number}");
+    }
+}
+
 #[tokio::test]
 async fn encrypted_backend_is_rejected_before_the_client_enters_encryption() {
     let (mut session, mut client, mut backend) = session().await;

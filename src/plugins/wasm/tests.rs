@@ -969,3 +969,35 @@ async fn styled_components_answer_with_rich_text_and_titles() {
     );
     runtime.plugins().shutdown().await;
 }
+
+/// `players.locale` (rift:plugin 0.1.5): `none` until the session publishes
+/// the client's language, then what the client last said.
+#[tokio::test]
+async fn components_read_the_client_locale_once_it_is_known() {
+    let Some(guest) = probe() else { return };
+    let root = directory();
+    let config = configure(&root, &guest, "", "{}");
+    let runtime = start(&config, &Broker::default()).await;
+    let (handle, _actions) = runtime
+        .players()
+        .register(42, &[42; 16], "Locale", 774, "lobby");
+    let player = session(&runtime, 42, "Locale");
+    assert_eq!(
+        player.decision("login").await.unwrap(),
+        Action::Deny("locale=unknown".into())
+    );
+    for locale in ["de_de", "en_us"] {
+        handle.set_locale(Some(locale));
+        assert_eq!(
+            player.decision("login").await.unwrap(),
+            Action::Deny(format!("locale={locale}").as_str().into())
+        );
+    }
+    // Offline players have none either.
+    drop(handle);
+    assert_eq!(
+        player.decision("login").await.unwrap(),
+        Action::Deny("locale=unknown".into())
+    );
+    runtime.plugins().shutdown().await;
+}

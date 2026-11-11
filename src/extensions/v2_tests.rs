@@ -935,6 +935,7 @@ async fn players_api_lists_and_queues_actions_for_joined_players() {
         assert(list[1].connection_id == '9' and list[1].protocol == 774)
         assert(#players.list('game') == 1 and players.list('game')[1].name == 'Bob')
         assert(players.get('aLiCe').name == 'Alice' and players.get('Nobody') == nil)
+        assert(players.get('Alice').locale == 'de_de' and players.get('Bob').locale == nil)
         local names = players.names()
         assert(#names == 2 and names[1] == 'Alice' and names[2] == 'Bob')
         assert(#players.names('b') == 1 and players.names('b')[1] == 'Bob')
@@ -952,7 +953,8 @@ async fn players_api_lists_and_queues_actions_for_joined_players() {
         assert(players.broadcast('lobby only', 'lobby') == 1)
     end"#,
     );
-    let (_alice, mut alice) = joined(&runtime, 9, "Alice", "lobby");
+    let (alice_handle, mut alice) = joined(&runtime, 9, "Alice", "lobby");
+    alice_handle.set_locale(Some("de_de"));
     let (bob_handle, mut bob) = joined(&runtime, 10, "Bob", "lobby");
     bob_handle.set_server("game");
     runtime

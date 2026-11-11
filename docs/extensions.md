@@ -539,9 +539,19 @@ names a configured backend or service group; a group matches all its instances.
 | `rift.players.broadcast(text, server)` | Number of players a chat message (a string or a chat component table) was queued for; `server` is optional |
 
 Player tables contain `uuid`, `name`, `server` (the last committed backend),
-`connection_id` (a decimal string, matching `ctx.connection_id`) and `protocol`.
+`connection_id` (a decimal string, matching `ctx.connection_id`), `protocol`,
+`visible_to` (the node a viewer needs to see the player, or nil; see
+[visibility](permissions.md#visibility)) and `locale`.
 Players appear after their first usable Join Game and disappear when the session
 closes. Pending logins and players on other Rift processes are not listed.
+
+`locale` is the language the player's client reported, as the client spells it
+(`en_us`; old clients send `en_US`), or nil while Rift does not know it
+yet. The client sends its settings after login: during configuration from
+1.20.2, after Join Game before. So `login` never has a locale (the player is
+not listed yet either), `join` has one only for 1.20.2 and newer clients, and
+nil means "not known yet", not "no language". The value follows later changes
+of the client's language setting and survives server switches.
 
 Title options are `title` and `subtitle` (at least one), plus `fade_in_ms`,
 `stay_ms` and `fade_out_ms` (integers from 0 to 60000; defaults 500, 3500 and

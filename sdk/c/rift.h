@@ -722,6 +722,29 @@ static inline bool rift_title_json(const rift_string_t *target, const char *titl
   return online;
 }
 
+// Reads the language `target`'s client reported into `out`, as the client
+// spells it (`en_us`), and returns true (since 0.1.5). Returns false, with
+// `out` empty, while Rift does not know it: the player is offline or their
+// client has not sent its settings yet, which it does after login (during
+// configuration from 1.20.2, after Join Game before), so never in `login`.
+// A host error is logged and reported as false. Free `out` with
+// `rift_string_free`.
+static inline bool rift_locale(const rift_string_t *target, rift_string_t *out) {
+  rift_string_t t = *target, err = {NULL, 0};
+  rift_plugin_option_string_t locale;
+  memset(&locale, 0, sizeof locale);
+  out->ptr = NULL;
+  out->len = 0;
+  if (!rift_plugin_players_locale(&t, &locale, &err)) {
+    rift_log(RIFT_WARN, "players.locale failed: " RIFT_STR_FMT, RIFT_STR_ARG(err));
+    rift_string_free(&err);
+    return false;
+  }
+  if (!locale.is_some) return false;
+  *out = locale.val;
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // JSON configuration
 //

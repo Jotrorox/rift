@@ -118,6 +118,7 @@ example and the host's conformance fixture.
 | WASI | `std::fs` on the granted directories (`/data`, `/host`), clocks and random through the standard library. |
 | `dialogs` export, `players.dialog` | [Dialogs](dialogs.md): `players::show_dialog(target, &serde_json::Value)` (or `players::dialog` with JSON text) and `players::clear_dialog`; clicks reach `Plugin::dialog(DialogResponse)`, whose `values::<T>()` and `payload::<T>()` decode the JSON. No registration needed. |
 | `players.title-json` | `players::title_json(target, &TitleJsonSpec::new(title).subtitle(sub).times(10, 70, 20))` (since 0.1.4); title and subtitle take anything `ToString`, such as a `text` builder or a `serde_json::Value`. |
+| `players.locale` | `players::locale(target) -> Result<Option<String>, String>` (since 0.1.5): the client's language (`en_us`), or `None` while Rift does not know it, which is always the case in `login` and, for clients before 1.20.2, in `join` ([timing](plugins.md#host-api)). |
 | `styled` export | `Plugin::suggest_rich(ctx) -> Vec<RichSuggestion>` and `Plugin::status_rich(ping) -> Option<RichStatusOverride>` (since 0.1.4). Their defaults call `suggest` and `status`; hosts before 0.1.4 get the rich text's words. |
 | rich text | The `text` module: `text::mini`, `text::legacy`, `text::Component` (below). |
 

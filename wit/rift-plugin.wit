@@ -19,11 +19,11 @@
 ///   other, so 0.1.1 adds the optional `dialogs` export and the dialog host
 ///   functions, 0.1.2 the optional `decisions` export and the rich text
 ///   host functions, 0.1.3 the visibility and permission meta host
-///   functions, and 0.1.4 `players.title-json` and the optional `styled`
-///   export (rich suggestion tooltips and server-list text), without
-///   breaking components built against 0.1.0.
+///   functions, 0.1.4 `players.title-json` and the optional `styled`
+///   export (rich suggestion tooltips and server-list text), and 0.1.5
+///   `players.locale`, without breaking components built against 0.1.0.
 /// - Breaking changes move to 1.0.
-package rift:plugin@0.1.4;
+package rift:plugin@0.1.5;
 
 interface types {
     /// Log severity.
@@ -372,6 +372,13 @@ interface players {
     visible-to: func(target: string) -> result<option<string>, string>;
     /// `title` with JSON text components (since 0.1.4).
     title-json: func(target: string, title: title-json-spec) -> result<bool, string>;
+    /// The language the player's client reported, as the client spells it
+    /// (`en_us`; old clients send `en_US`), or `none` while Rift does not
+    /// know it yet (since 0.1.5). The client sends it after login: during
+    /// configuration from 1.20.2, after Join Game before. So it is never
+    /// known in `login`, in `join` only for 1.20.2 and newer clients, and it
+    /// follows later changes of the client's language setting.
+    locale: func(target: string) -> result<option<string>, string>;
 }
 
 /// The durable key-value store. Namespaces are prefixed with

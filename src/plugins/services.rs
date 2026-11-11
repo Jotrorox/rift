@@ -399,6 +399,12 @@ impl PlayersApi<'_> {
         Ok(self.get(target)?.and_then(|player| player.visible_to))
     }
 
+    /// `players.locale`: the language the player's client reported, or
+    /// `None` while Rift has not seen its Client Information yet.
+    pub fn locale(&self, target: &str) -> Result<Option<String>, String> {
+        Ok(self.get(target)?.and_then(|player| player.locale))
+    }
+
     /// `players.clear-dialog`: close the dialog Rift showed, if still open.
     pub fn clear_dialog(&self, target: &str) -> Result<bool, String> {
         let owner = crate::dialog::Owner::Plugin(self.0.spec.name.clone());

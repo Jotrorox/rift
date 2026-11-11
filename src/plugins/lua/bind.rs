@@ -297,6 +297,8 @@ fn player(lua: &Lua, info: &PlayerInfo) -> mlua::Result<Table> {
     player.raw_set("protocol", info.protocol)?;
     // nil when everyone sees the player.
     player.raw_set("visible_to", info.visible_to.as_deref())?;
+    // nil until the client's Client Information arrives.
+    player.raw_set("locale", info.locale.as_deref())?;
     Ok(player)
 }
 

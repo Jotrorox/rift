@@ -1,7 +1,7 @@
 //! Guest SDK for Rift WebAssembly plugins.
 //!
 //! A Rift plugin is a WebAssembly component built for `wasm32-wasip2` against
-//! the `plugin` world of `rift:plugin@0.1.4`. This crate ships that WIT,
+//! the `plugin` world of `rift:plugin@0.1.5`. This crate ships that WIT,
 //! generates the bindings and wraps them, so a plugin is an ordinary
 //! `cdylib` crate:
 //!
@@ -181,7 +181,7 @@
 pub mod bindings {
     wit_bindgen::generate!({
         path: "wit",
-        world: "rift:plugin/plugin@0.1.4",
+        world: "rift:plugin/plugin@0.1.5",
         pub_export_macro: true,
         export_macro_name: "__export_rift_plugin",
         default_bindings_module: "rift_plugin::bindings",
@@ -543,11 +543,18 @@ impl TitleJsonSpec {
 /// `&serde_json::json!({...}).to_string()` or
 /// `&text::mini("<red>Hi").to_string()`; see [rich text](crate#rich-text).
 /// `title_json` (since 0.1.4) takes a [`TitleJsonSpec`].
+///
+/// `locale` (since 0.1.5) is the language the player's client reported, as
+/// the client spells it (`en_us`), or `None` while Rift does not know it.
+/// The client sends it after login: during configuration from 1.20.2, after
+/// Join Game before. So it is never known in [`Plugin::login`](crate::Plugin::login)
+/// and in [`Plugin::join`](crate::Plugin::join) only for 1.20.2 and newer
+/// clients.
 pub mod players {
     pub use crate::bindings::rift::plugin::players::{
         action_bar, action_bar_json, boss_bar, broadcast, broadcast_json, clear_dialog, dialog,
-        get, kick, kick_json, list, message, message_json, names, tab_list, title, title_json,
-        transfer, visible_to,
+        get, kick, kick_json, list, locale, message, message_json, names, tab_list, title,
+        title_json, transfer, visible_to,
     };
 
     /// Show a dialog in the vanilla JSON format (Minecraft 1.21.6+). Returns

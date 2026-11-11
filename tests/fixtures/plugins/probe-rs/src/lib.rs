@@ -10,7 +10,8 @@
 //!   a text input `answer` and a `dynamic/custom` action `reply` (additions
 //!   `{"round": 1}`) and continues, name `Title` is shown a `title-json`
 //!   title (markup) and subtitle (legacy codes) for 5/40/10 ticks and
-//!   continues, anyone else continues.
+//!   continues, name `Locale` is denied with `locale=<players.locale>`
+//!   (`locale=unknown` for `none`), anyone else continues.
 //! - `suggest_rich(ctx)` (the `styled` export): `rich` with the tooltip
 //!   markup `<red>Hi <p>` (argument `p` the player's name) and `plain`
 //!   without a tooltip; for the word `bad`, a tooltip that is not JSON.
@@ -103,6 +104,10 @@ impl Plugin for Probe {
                     .times(5, 40, 10);
                 assert_eq!(players::title_json(&ctx.uuid, &title), Ok(true));
                 Action::Continue
+            }
+            "Locale" => {
+                let locale = players::locale(&ctx.uuid).expect("players.locale");
+                Action::Deny(format!("locale={}", locale.as_deref().unwrap_or("unknown")))
             }
             _ => Action::Continue,
         }
