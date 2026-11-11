@@ -453,6 +453,14 @@ pub fn denied(reason: Text) -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, Denied(reason))
 }
 
+/// The text `error` was made to show the player, if it was made with one.
+pub fn shown(error: &io::Error) -> Option<Text> {
+    error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<Denied>())
+        .map(|denied| denied.0.clone())
+}
+
 /// What to show the player for `error`: a hook's reason as it was given,
 /// otherwise the error's message.
 pub fn reason(error: &io::Error) -> Text {

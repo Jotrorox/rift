@@ -815,11 +815,12 @@ pub async fn handle(
         {
             Ok(name) => name,
             Err(error) => {
-                let _ = timeout(
-                    HANDSHAKE_TIMEOUT,
-                    session.disconnect_text(&catalog::notice(Notice::LoginUnavailable)),
-                )
-                .await;
+                // A player turned away for their Minecraft version is told so;
+                // an outage keeps its details to the log.
+                let reason = rift::text::shown(&error)
+                    .filter(|_| error.kind() == io::ErrorKind::Unsupported)
+                    .unwrap_or_else(|| catalog::notice(Notice::LoginUnavailable));
+                let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect_text(&reason)).await;
                 return Err(error);
             }
         };

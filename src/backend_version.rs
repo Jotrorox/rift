@@ -107,9 +107,9 @@ async fn ask(backend: &Backend, listeners: &[SocketAddr], client: i32) -> Option
 /// What a player on a version the backend's `translation` setting leaves out
 /// is told.
 fn not_translated() -> io::Error {
-    io::Error::new(
+    crate::text::notice_error(
         io::ErrorKind::Unsupported,
-        "This server does not accept your Minecraft version.",
+        crate::text::catalog::Notice::LoginVersion,
     )
 }
 

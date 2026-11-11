@@ -180,6 +180,8 @@ carries, such as a backend's ban screen.
 | `login.already_connected` | – | This player is already connected. |
 | `login.unsupported_version` | – | Unsupported Minecraft version. Rift supports Java 1.8.9–26.3. |
 | `login.transfer_version` | – | Transfer requires Minecraft 1.20.5 or newer. |
+| `login.version` | – | This server does not accept your Minecraft version. |
+| `login.no_version` | – | No server on this network supports your Minecraft version. |
 | `decision.unavailable` | – | Unable to check your access, please try again later. |
 | `connection.lost_no_fallback` | – | The server connection was lost and no fallback was available. |
 | `connection.lost` | – | The server connection was lost. Please reconnect. |

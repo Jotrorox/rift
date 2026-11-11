@@ -485,6 +485,10 @@ async fn queue_command_waits_for_capacity_and_transfer_policy_runs_before_target
         let mut cfg = config();
         cfg.backends.insert("lobby".into(), rift::routing::Backend::parse(&lobby.local_addr().unwrap().to_string()).unwrap());
         cfg.backends.insert("survival".into(), rift::routing::Backend::parse(&game.local_addr().unwrap().to_string()).unwrap());
+        // A 1.12.2 backend that takes only its own version and older ones.
+        cfg.backends.insert("classic".into(), rift::routing::Backend::parse("127.0.0.1:1").unwrap()
+            .with_version(ProtocolVersion::from_release("1.12.2").unwrap())
+            .with_clients(rift::protocol::ClientVersions::parse(["older"]).unwrap()));
         let snapshot = Arc::new(Snapshot::new(cfg.clone(), None).unwrap());
         let extension_config = Config::from_lua(r#"return {
             listeners={public='127.0.0.1:0'}, backends={lobby='127.0.0.1:1',survival='127.0.0.1:2'}, routes={public='lobby'},
@@ -538,6 +542,13 @@ async fn queue_command_waits_for_capacity_and_transfer_policy_runs_before_target
         session.forward().await.unwrap(); read(&mut client).await;
         session.extension.as_mut().unwrap().ready("lobby").await;
         assert!(session.can_switch());
+
+        // A target whose translation setting leaves this 1.21.11 player out
+        // says so instead of reporting an outage.
+        assert!(network.command(&mut session,"lobby","server classic",&mut event).await.unwrap().is_none());
+        let refused = read(&mut client).await;
+        let reason = b"This server does not accept your Minecraft version.";
+        assert!(refused.data.windows(reason.len()).any(|window| window == reason), "{refused:?}");
 
         // A manually typed built-in route cannot bypass the extension policy,
         // and the player sees the hook's reason with its formatting.

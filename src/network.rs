@@ -298,9 +298,9 @@ impl Network<'_> {
             .collect();
         let mut next = 0;
         if names.is_empty() && !candidates.is_empty() {
-            return Err(io::Error::new(
+            return Err(rift::text::notice_error(
                 io::ErrorKind::Unsupported,
-                "No server on this network supports your Minecraft version.",
+                Notice::LoginNoVersion,
             ));
         }
         if names.is_empty() {
@@ -440,18 +440,27 @@ impl Network<'_> {
         let config = &self.snapshot.config;
         let uuid = expected_uuid(session);
         let expanded = self.snapshot.candidates(candidates);
-        let candidates: Vec<_> = expanded
+        let available: Vec<_> = expanded
             .iter()
             .filter(|server| {
                 server.as_str() != current
                     && self.snapshot.admits(server, &identity.name, uuid)
                     && self.snapshot.reachable(server)
-                    && self.serves(server, session)
             })
             .collect();
+        let candidates: Vec<_> = available
+            .iter()
+            .copied()
+            .filter(|server| self.serves(server, session))
+            .collect();
         let mut deadline = Instant::now() + config.limits.connect_timeout;
-        let mut last_error =
-            rift::text::notice_error(io::ErrorKind::NotConnected, Notice::SwitchNoServer);
+        // With every reachable target ruled out by the player's Minecraft
+        // version, that is the reason they are given.
+        let mut last_error = if candidates.is_empty() && !available.is_empty() {
+            rift::text::notice_error(io::ErrorKind::Unsupported, Notice::LoginVersion)
+        } else {
+            rift::text::notice_error(io::ErrorKind::NotConnected, Notice::SwitchNoServer)
+        };
         for (index, name) in candidates.iter().enumerate() {
             if let Some(extension) = &mut session.extension
                 && let Err(error) = extension.before_transfer(name, reason).await
