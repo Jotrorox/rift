@@ -49,6 +49,7 @@ server names are errors; Rift never treats an error as permission to proceed.
 | `after_transfer(ctx)` | When an admitted transfer attempt completes or fails | `server` (source), `target`, `reason`, `success` | `nil` |
 | `disconnect(ctx)` | Session teardown, including an authenticated login that never joined | Last committed `server`, or nil; `reason = "session_closed"` | `nil` |
 | `dialog(ctx)` | A click on a plugin action of a [dialog](dialogs.md) the script showed (API v2+) | `server`, `action`, `values`, `payload` | `nil` |
+| `chat(ctx)` | A chat message, or a command on its way to the backend, before the backend sees it. Needs `authentication.signed_chat = false`; see [chat](plugins.md#chat) | `server`, `kind` (`"message"` or `"command"`), `text`; for a command also `command` and `args` | `{ deny = "reason" }` drops it and shows the player the reason |
 
 Common player context fields are `api_version` (1, 2 or 3), `authenticated = true`, `uuid`
 (lowercase 32-digit hex, no hyphens), canonical Mojang `name`, `connection_id`

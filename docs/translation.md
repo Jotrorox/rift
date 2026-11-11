@@ -143,9 +143,14 @@ Where a version lacks something, the player gets the closest thing it has:
   across 1.18.2, 1.19, 1.19.1 and 1.19.3 chat reaches players as unsigned
   system chat and backends receive unsigned messages; from 1.19.3 on, both
   sides share one format and signatures are passed on as they are. A backend behind a
-  proxy runs with `online-mode=false`, where `enforce-secure-profile` has no
-  effect from 1.19.1 on; a 1.19 backend must keep its default
-  `enforce-secure-profile=false`, or it refuses translated players. Pumpkin
+  proxy runs with `online-mode=false`, where vanilla and Spigot ignore
+  `enforce-secure-profile` from 1.19.1 on; a 1.19 backend must keep its default
+  `enforce-secure-profile=false`, or it refuses translated players. Paper is
+  the exception: it also enforces the setting when its proxy settings say the
+  proxy is in online mode, so a Paper backend that receives unsigned chat
+  (across a translated signing format, or with
+  `authentication.signed_chat = false`) needs `enforce-secure-profile=false`;
+  see [unsigned chat](network-protocol.md#unsigned-chat). Pumpkin
   0.2.0 announces secure-chat enforcement whatever its configuration: it works
   as a single backend, but Rift refuses it as a backend of an offline-mode
   [network](network-protocol.md), with or without translation.

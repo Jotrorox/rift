@@ -76,12 +76,51 @@ Rust, Go and Lua examples.
 | `decisions` export | `exports_rift_plugin_decisions_<hook>` answers with `rift_decision_deny_json` or `rift_decision_message_json`, a JSON text component ([rich text](extensions.md#rich-text)); the weak defaults forward to the handler hooks. |
 | `styled` export | `exports_rift_plugin_styled_suggest` (build the list with `rift_rich_suggestions_add(ret, text, tooltip_json)`) and `exports_rift_plugin_styled_status` answer with JSON text tooltips, version and sample lines (since 0.1.4). The weak defaults forward to the handler's `suggest` and `status`; hosts before 0.1.4 call only those. |
 | host functions | `rift_plugin_<interface>_<function>`, for example `rift_plugin_players_message`, `rift_plugin_players_message_json`, `rift_plugin_store_increment`, `rift_plugin_bus_publish`, `rift_plugin_timers_every`. `rift_message` and `rift_message_json` wrap the chat message calls; `rift_title_json(&target, title_json, subtitle_json_or_NULL, fade_in, stay, fade_out)` (since 0.1.4) wraps `players.title-json`; `rift_locale(&target, &out)` (since 0.1.5) wraps `players.locale` and returns false while the client's language is not known, which is always the case in `login` and, for clients before 1.20.2, in `join` ([timing](plugins.md#host-api)). |
+| `chat` export | `exports_rift_plugin_chat_chat(rift_chat_attempt_t *, rift_decision_t *)` (since 0.1.5), only in a plugin built with `RIFT_CHAT`; see [chat](#chat). |
 | rich text | `rift_mini`, `rift_legacy`, `rift_component` builders (below). |
 | `result<T, string>` | The function returns `bool` and fills a `ret` and an `err` out-parameter. |
 | `option<T>` parameters | Pointers; `NULL` is `none`. |
 | `log` | `rift_log(RIFT_INFO, "format %d", value)`. |
 | configuration JSON | `rift_json_get_string(&config, "key", &out)` reads one top-level string; use cJSON or jsmn for more. |
 | `dialogs` export, `players.dialog` | [Dialogs](dialogs.md): `rift_show_dialog(&target, json)` and `rift_plugin_players_clear_dialog`; clicks reach `exports_rift_plugin_dialogs_dialog(rift_dialog_response_t *)`, which owns its argument (free it with `rift_dialog_response_free`). The weak default ignores clicks. No registration needed. |
+
+## Chat
+
+`exports_rift_plugin_chat_chat` sees chat messages, and the commands that
+reach the backend, before the backend does ([the hook](plugins.md#chat)).
+Exporting it is the registration, so the default build has no such export.
+Build the plugin with `RIFT_CHAT` to get it:
+
+```sh
+RIFT_CHAT=1 sdk/c/build.sh -o mute.wasm mute.c
+```
+
+`RIFT_CHAT=1` defines `RIFT_CHAT` for every source and links the bindings in
+`sdk/c/chat/` (the same bindings generated for world `core-chat`) in place of
+the default ones; with CMake, use `rift_add_chat_plugin(mute mute.c)`. By hand:
+`-DRIFT_CHAT`, `sdk/c/chat/rift_plugin.c` and
+`sdk/c/chat/rift_plugin_component_type.o` instead of the files in `sdk/c/`.
+
+```c
+#include "rift.h"
+
+void exports_rift_plugin_chat_chat(rift_chat_attempt_t *attempt, rift_decision_t *ret) {
+  if (attempt->kind == RIFT_PLUGIN_TYPES_CHAT_KIND_MESSAGE && is_muted(&attempt->ctx.uuid)) {
+    rift_decision_deny(ret, "You are muted.");
+  } else {
+    rift_decision_continue(ret);
+  }
+  rift_chat_attempt_free(attempt);
+}
+```
+
+`attempt->text` is the message, or the command line without its slash; for a
+command, `attempt->ctx.command` is the root name and `attempt->ctx.args` the
+rest. Answer with `rift_decision_continue`, `rift_decision_deny` or
+`rift_decision_deny_json`. The weak default lets everything through. Rift asks
+a plugin built with `RIFT_CHAT` about every message and starts it only when
+the proxy sets `authentication.signed_chat = false`; the same source built
+without `RIFT_CHAT` is never asked.
 
 ## Rich text builders
 

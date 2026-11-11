@@ -117,6 +117,12 @@ What differs is the environment:
   `shutdown` (called with the reason). Handlers run in registration order: for
   decision events the first non-nil result wins; observers all run and must
   return nil.
+- `rift.on("chat", fn)` (contract 0.1.5) registers the plugin for
+  [chat](plugins.md#chat): the handler receives every chat message and backend
+  command as `ctx` with `ctx.kind` (`"message"` or `"command"`) and `ctx.text`
+  (for a command also `ctx.command` and `ctx.args`), and returns nil or
+  `{ deny = "reason" }`, which drops it. A plugin with this handler starts
+  only with `authentication.signed_chat = false`.
 - `rift.command(name, { permission, run, suggest })` also accepts a list of
   strings as `suggest`. `permission` is required; `permission = ""` (contract
   0.1.5) opens the command to every player. A command name belongs to exactly one owner across the

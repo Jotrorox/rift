@@ -80,6 +80,16 @@ Backends must not require signed chat:
 Changing the setting applies to connections made afterwards and restarts
 every persistent plugin, as a change of `online_mode` does.
 
+Unsigned chat is what the [`chat` hook](plugins.md#chat) builds on: a plugin
+or the configuration script sees each message and backend command first and
+may drop it. Rift holds the packet, and on a deny sends the backend only the
+last-seen acknowledgement the packet carried, as it does for a proxy command.
+A plugin or script with a chat handler is refused while `signed_chat` is
+`true`. A player who connected before the setting became `false` still has a
+signed chat session with their backend; until they reconnect, the hook is
+asked only about their packets without a signature, and signed ones pass
+unseen.
+
 Switching is an explicit capability in `src/protocol/switching.rs`, separate from
 relay and configuration-state support. Each protocol maps its control packet IDs,
 Join Game fields, signed-command checksum and Brigadier argument registry.

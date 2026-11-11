@@ -94,6 +94,7 @@ Lua examples.
 | `players` | `rift.Players`, `rift.Player`, `rift.PlayerNames`, `rift.Locale` (since 0.1.5; the client's language, and false while Rift does not know it, which is always the case in `OnLogin` and, for clients before 1.20.2, in `OnJoin`; see [timing](plugins.md#host-api)), `rift.SendMessage`, `rift.SendMessageJSON`, `rift.SendActionBar`, `rift.SendActionBarJSON`, `rift.SendTitle`, `rift.SendTitleJSON` (since 0.1.4), `rift.SetTabList`, `rift.SetBossBar`, `rift.ShowDialog`, `rift.ClearDialog`, `rift.Kick`, `rift.KickJSON`, `rift.Transfer`, `rift.Broadcast`, `rift.BroadcastJSON`. |
 | `dialogs` export | `rift.OnDialog(func(rift.DialogResponse))` receives clicks on the plugin's [dialogs](dialogs.md); it needs no hook in the registration. |
 | `styled` export | `rift.OnRichSuggest(func(rift.Context) []rift.RichSuggestion)` and `rift.OnRichStatus(func(rift.Ping) *rift.RichStatusOverride)` (since 0.1.4) replace `OnSuggest` and `OnStatus` with JSON text tooltips, version and sample lines. Without them the SDK answers `styled` with the plain handlers; hosts before 0.1.4 get the rich text's words. |
+| `chat` export | `chat.OnChat(func(rift.ChatAttempt) rift.Action)` in package `sdk/go/rift/chat` (since 0.1.5), for a plugin built with `--wit-world plugin-chat`; see [chat](#chat). |
 | rich text | `rift.Mini`, `rift.Legacy`, `rift.Component`, `rift.Plain`, `rift.RawJSON` (below); `rift.Ptr(v)` for optional fields. |
 | `store` | `rift.StoreGet`, `StoreSet`, `StoreDelete`, `StoreIncrement`, `StoreList`. |
 | `permissions` | `rift.HasPermission`, `SetPermission`, `AddGroup`, `RemoveGroup`, `Groups`, `ListGroupsJSON`. |
@@ -103,6 +104,43 @@ Lua examples.
 | `log`, `meta` | `rift.Log(level, msg)` and `Tracef` ... `Errorf`; `rift.Name`, `Version`, `DataDir`, `ConfigDir`, `Clock`, `Time`. |
 | `result<T, string>` | `(T, error)` with a `rift.HostError`. |
 | configuration JSON | `rift.ConfigString(json, "key")` returns `(value, ok, err)` with a built-in parser; `rift.DecodeConfig(json, &cfg)` uses `encoding/json`, which adds about 850 KB. |
+
+
+## Chat
+
+The chat hook sees chat messages, and the commands that reach the backend,
+before the backend does ([the hook](plugins.md#chat)). Exporting it is the
+registration, so it lives in a package of its own: a plugin that imports
+`sdk/go/rift/chat` exports `rift:plugin/chat`, and one that does not is never
+asked.
+
+```go
+import (
+	"github.com/Jotrorox/rift/sdk/go/rift"
+	"github.com/Jotrorox/rift/sdk/go/rift/chat"
+)
+
+func init() {
+	chat.OnChat(func(attempt rift.ChatAttempt) rift.Action {
+		if attempt.Kind == rift.ChatMessage && muted[attempt.Ctx.UUID] {
+			return rift.Deny("You are muted.")
+		}
+		return rift.Continue()
+	})
+}
+```
+
+Build such a plugin against world `plugin-chat`, which has the export:
+
+```sh
+tinygo build -target=wasip2 --wit-package path/to/rift/wit --wit-world plugin-chat -no-debug -o mute.wasm .
+```
+
+`attempt.Text` is the message, or the command line without its slash; for a
+command, `attempt.Ctx.Command` is the root name and `attempt.Ctx.Args` the
+rest. Answer `rift.Continue()`, `rift.Deny` or `rift.DenyJSON`. Rift asks the
+plugin about every message and starts it only when the proxy sets
+`authentication.signed_chat = false`.
 
 ## Rich text builders
 

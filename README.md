@@ -102,7 +102,8 @@ verification never falls back to offline authentication.
 
 `authentication.signed_chat` (default `true`) can be set to `false` to keep
 players' chat signing keys and sessions from every backend, so that backends
-treat all chat as unsigned and the proxy may drop single messages. Players'
+treat all chat as unsigned and the proxy may drop single messages, which the
+plugin [`chat` hook](docs/plugins.md#chat) needs for mutes and filters. Players'
 chat then shows as not secure and chat reporting stops working, and Paper
 backends need `enforce-secure-profile=false`; see
 [unsigned chat](docs/network-protocol.md#unsigned-chat).
