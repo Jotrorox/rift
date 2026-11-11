@@ -690,7 +690,9 @@ is refused with `403`. Node reads are not audited, like other reads.
 
 The optional `on_http` callback handles every HTTP method at `/ext` and `/ext/*`.
 It has the same web bearer authentication and browser-origin protections as the
-admin API. Use it for network dashboards, maintenance information, deployment
+admin API, and any caller with the `read` permission reaches it: the handler
+decides what each caller may do from `request.context.operator` (below). Use it
+for network dashboards, maintenance information, deployment
 metadata, diagnostic pages and application-specific API responses. Paths outside
 this namespace remain owned by Rift.
 
@@ -721,6 +723,33 @@ removed. JSON arrays become one-based Lua arrays. The context is an isolated
 snapshot; modifying it cannot change the live runtime. With API v2 in
 [`rift.config.plugins`](extensions.md#online-players), the handler can also
 list, message, kick and transfer players through `rift.players`.
+
+`context.operator` is the authenticated caller, in the shape of
+`GET /api/access`: `name` (`admin` for `web.token`, `local` for the generated
+loopback token, otherwise the `web.operators` key), `permissions` and `groups`.
+`permissions` is absent (`nil`; JSON `null` for plugins) for full access and
+otherwise an array of permission names; `groups` is absent when the caller is
+not limited to service groups. Rift requires only `read` for `/ext`, so a
+handler that changes anything must check the caller itself:
+
+```lua
+local function allows(operator, permission)
+    if operator.permissions == nil then return true end -- Full access.
+    for _, held in ipairs(operator.permissions) do
+        if held == permission then return true end
+    end
+    return false
+end
+
+on_http = function(request)
+    if request.method == "POST" and request.path == "/ext/announce" then
+        if not allows(request.context.operator, "console") then
+            return { status = 403, body = "console permission required" }
+        end
+        -- ...
+    end
+end,
+```
 
 Return `nil`, or `{body = "...", status = 200, content_type = "text/plain"}`.
 Only `body` is required. Status must be an integer from 200 to 599; 204, 205 and

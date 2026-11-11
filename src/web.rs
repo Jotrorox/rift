@@ -579,6 +579,11 @@ struct Access {
     groups: Option<BTreeSet<String>>,
 }
 impl Access {
+    /// The caller as `GET /api/access` and the `on_http` context report it;
+    /// `null` permissions or groups mean unrestricted.
+    fn describe(&self) -> Value {
+        json!({"name":self.name,"permissions":self.permissions,"groups":self.groups})
+    }
     fn allows(&self, permission: &str) -> bool {
         self.permissions
             .as_ref()
@@ -1205,7 +1210,7 @@ async fn nodes(State(app): State<App>) -> Json<Value> {
 }
 
 async fn operator_access(Extension(access): Extension<Access>) -> Json<Value> {
-    Json(json!({"name":access.name,"permissions":access.permissions,"groups":access.groups}))
+    Json(access.describe())
 }
 async fn server_logs(
     State(app): State<App>,
@@ -2357,7 +2362,11 @@ async fn reload(
     }
     submit(app, control::Operation::Reload, operator.name).await
 }
-async fn extension(State(app): State<App>, request: Request) -> Response {
+async fn extension(
+    State(app): State<App>,
+    Extension(access): Extension<Access>,
+    request: Request,
+) -> Response {
     let snapshot = app.snapshot();
     let script = snapshot.config.on_http.clone();
     let plugins = snapshot.extensions.plugins();
@@ -2394,13 +2403,17 @@ async fn extension(State(app): State<App>, request: Request) -> Response {
                 .map(|v| (name.to_string(), v.to_owned()))
         })
         .collect();
+    // `/ext` needs only `read`, so the handler is told who is calling and
+    // decides what that caller may do.
+    let mut context = app.status_snapshot(&snapshot, View::Context);
+    context["operator"] = access.describe();
     let request = HttpRequest {
         method: parts.method.to_string(),
         path: parts.uri.path().into(),
         query: parts.uri.query().unwrap_or("").into(),
         body,
         headers,
-        context: app.status_snapshot(&snapshot, View::Context),
+        context,
     };
     // The configuration script first, then persistent plugins in order.
     let result = match script {

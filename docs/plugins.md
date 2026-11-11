@@ -148,7 +148,7 @@ list from `rift.on`, `rift.command`, timers and subscriptions.
 | `command` | awaited, owner only | message, server, queue, leave-queue or continue | 1000 ms | deny (the command reports an error) |
 | `suggest` | awaited, owner only | completions | 50 ms | continue (no completions) |
 | `status` | awaited | fields to replace in one server-list ping | 50 ms | continue |
-| `http` | awaited | a response for `/ext/*`, or none | 5000 ms | continue |
+| `http` | awaited | a response for `/ext` and `/ext/*`, or none | 5000 ms | continue |
 | `join`, `after_transfer`, `disconnect` | observer | none | none (queued; interrupted after 60 s) | – |
 | `message` | observer | a message on a subscription the plugin made | none (queued; interrupted after 60 s) | – |
 | `timer` | observer | a tick of a timer the plugin started | none (queued; interrupted after 60 s) | – |
@@ -176,6 +176,16 @@ component that has it answers `suggest` and `status` with instead of
 and `legacy` [authoring objects](text.md) included, or text shown as written;
 clients see the version and sample lines as `§` codes. One invalid entry fails
 the whole answer.
+
+**Who is calling `http`.** Every web credential with the `read` permission
+reaches `/ext`, a read-only operator as much as the full token; Rift does not
+ask for more, the handler decides. The request's context (`context-json` in
+WebAssembly) is the status object the configuration script's
+[`on_http`](http.md#lua-websites-and-endpoints) receives, including its
+`operator` member: `{name, permissions, groups}` as `GET /api/access` reports
+the caller, with `permissions` `null` (absent in Lua) for full access and
+`groups` `null` when the caller is not limited to service groups. Check it
+before a handler changes anything.
 
 **Deny or continue.** When a plugin misses its deadline, `on_timeout` applies;
 when it fails (a handler error, a trap, an invalid answer, or the plugin is

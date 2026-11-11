@@ -695,10 +695,15 @@ mod tests {
             query: String::new(),
             body: String::new(),
             headers: [("a".to_owned(), "b".to_owned())].into(),
-            context: serde_json::json!({"scopes": []}),
+            context: serde_json::json!({
+                "operator": {"name": "viewer", "permissions": ["read"], "groups": null},
+            }),
         });
         assert_eq!(request.headers, [("a".to_owned(), "b".to_owned())]);
-        assert_eq!(request.context_json, r#"{"scopes":[]}"#);
+        assert_eq!(
+            request.context_json,
+            r#"{"operator":{"groups":null,"name":"viewer","permissions":["read"]}}"#
+        );
     }
 
     #[test]

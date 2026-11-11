@@ -181,14 +181,19 @@ interface types {
         favicon: option<string>,
     }
 
-    /// An authenticated request to `/api/script/*` on the web server.
+    /// An authenticated request to `/ext` or `/ext/*` on the web server.
     record http-request {
         method: string,
         path: string,
         query: string,
         body: string,
         headers: list<tuple<string, string>>,
-        /// The authenticated principal and scopes, as a JSON object.
+        /// The status object with operator detail, as a JSON object, plus
+        /// `operator`: the authenticated caller as `{name, permissions,
+        /// groups}`. `permissions` is `null` for full access and `groups` is
+        /// `null` when the caller is not limited to service groups. Any
+        /// caller with the `read` permission reaches this hook, so check
+        /// `operator` before acting for it.
         context-json: string,
     }
 
