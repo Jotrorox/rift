@@ -488,7 +488,7 @@ jobs:
           save-if: false
       - run: cargo clippy --locked --all-targets --features test-session-server -- -D warnings
       - name: Test authentication with the override compiled in
-        run: cargo test --locked --features test-session-server --lib -- auth:: session:: --test-threads=1
+        run: 'cargo test --locked --features test-session-server --lib -- auth:: session:: --test-threads=1'
       - name: Log a bot in through a local session server
         run: cargo test --locked --features test-session-server --test session_server
 
