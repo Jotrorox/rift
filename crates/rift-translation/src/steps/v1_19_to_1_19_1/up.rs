@@ -34,7 +34,9 @@ impl Up {
     fn new() -> Self {
         Self {
             shared: Shared::new(NEWER, OLDER),
-            chat_types: ChatTypes::default(),
+            // A backend's chat types arrive with `login`; until then, the
+            // ones a vanilla server of its version sends.
+            chat_types: ChatTypes::vanilla(OLDER),
         }
     }
 

@@ -42,7 +42,9 @@ impl Down {
     fn new() -> Self {
         Self {
             shared: Shared::new(OLDER, NEWER),
-            chat_types: ChatTypes::default(),
+            // A backend's chat types arrive with `login`; until then, the
+            // ones a vanilla server of its version sends.
+            chat_types: ChatTypes::vanilla(NEWER),
             unacknowledged: 0,
         }
     }
