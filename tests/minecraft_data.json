@@ -1,13 +1,205 @@
 {
-  "commit": "1df9432c07c81b47326e4fb1e06d3c8d723bf4aa",
+  "commit": "9b995542ab4a17837dee785439954e43d031b33e",
   "protocols": {
+    "1.12": {
+      "protocol": 335,
+      "path": "1.12",
+      "sha256": "b0afab8d60980ea28e35e29ed562863b979c9f640f40455abe4defd1d747b737"
+    },
+    "1.12.1": {
+      "protocol": 338,
+      "path": "1.12.1",
+      "sha256": "ef6a8c995dcd4ed6b7be302e8273716e543f9663f23c7cfc2167971880b61ad8"
+    },
+    "1.12.2": {
+      "protocol": 340,
+      "path": "1.12.2",
+      "sha256": "2dad4c918f6bd4492bfa8159b4db6ffbbf8f088b628258f03d437b0c0b760af9"
+    },
+    "1.13": {
+      "protocol": 393,
+      "path": "1.13",
+      "sha256": "364e31f23df094fe4a3c3ab298106dbad4d086c5ba841369c2476e631c6a95dd"
+    },
+    "1.13.1": {
+      "protocol": 401,
+      "path": "1.13.1",
+      "sha256": "f166c4e355bd7c1508c9907cdba0a0cfc03058bfc4f1b3682b5e56c16f3ed2ab"
+    },
+    "1.13.2": {
+      "protocol": 404,
+      "path": "1.13.2",
+      "sha256": "f5ee4fb3e32c8e281fd7ab83c6a32d1c382b8bcf764776594a0cb53702518547"
+    },
+    "1.14": {
+      "protocol": 477,
+      "path": "1.14",
+      "sha256": "df013d78291fd36bd0bb0fcdfc78669540ab2c444fc528ebe993472b79110065"
+    },
+    "1.14.1": {
+      "protocol": 480,
+      "path": "1.14.1",
+      "sha256": "df013d78291fd36bd0bb0fcdfc78669540ab2c444fc528ebe993472b79110065"
+    },
+    "1.14.2": {
+      "protocol": 485,
+      "path": "1.14.1",
+      "sha256": "df013d78291fd36bd0bb0fcdfc78669540ab2c444fc528ebe993472b79110065"
+    },
+    "1.14.3": {
+      "protocol": 490,
+      "path": "1.14.3",
+      "sha256": "2bce5cd98f1f08191ca1a6c613ee137ba5d558d680999a0d7ab262f0fbf6c550"
+    },
+    "1.14.4": {
+      "protocol": 498,
+      "path": "1.14.4",
+      "sha256": "9da6f2c819123aee8afe16b1396ecaa57d89ae90d6ff77fd83bec5f2465554d2"
+    },
+    "1.15": {
+      "protocol": 573,
+      "path": "1.15",
+      "sha256": "b29e0a4f55606cdc86f9cef4d919f8fab7fed647e213e0d1da6256274be6dc09"
+    },
+    "1.15.1": {
+      "protocol": 575,
+      "path": "1.15.1",
+      "sha256": "b29e0a4f55606cdc86f9cef4d919f8fab7fed647e213e0d1da6256274be6dc09"
+    },
+    "1.15.2": {
+      "protocol": 578,
+      "path": "1.15.2",
+      "sha256": "b29e0a4f55606cdc86f9cef4d919f8fab7fed647e213e0d1da6256274be6dc09"
+    },
+    "1.16": {
+      "protocol": 735,
+      "path": "1.16",
+      "sha256": "f2c7e37cde952c29e8b9d92866dbef8ab67c61b2c4101df582b3c43b57dbbc4e"
+    },
+    "1.16.1": {
+      "protocol": 736,
+      "path": "1.16.1",
+      "sha256": "f2c7e37cde952c29e8b9d92866dbef8ab67c61b2c4101df582b3c43b57dbbc4e"
+    },
+    "1.16.2": {
+      "protocol": 751,
+      "path": "1.16.2",
+      "sha256": "c25e99d506fa129b10a49ab9c587d33b673096517fb34fb7ad7ddd28e648782b"
+    },
+    "1.16.3": {
+      "protocol": 753,
+      "path": "1.16.2",
+      "sha256": "c25e99d506fa129b10a49ab9c587d33b673096517fb34fb7ad7ddd28e648782b"
+    },
+    "1.16.5": {
+      "protocol": 754,
+      "path": "1.16.2",
+      "sha256": "c25e99d506fa129b10a49ab9c587d33b673096517fb34fb7ad7ddd28e648782b"
+    },
+    "1.17": {
+      "protocol": 755,
+      "path": "1.17",
+      "sha256": "9ccf2916c184561bc21ecf0c867d639051d8036a19855ecfcedeef9532dfe520"
+    },
+    "1.17.1": {
+      "protocol": 756,
+      "path": "1.17.1",
+      "sha256": "695099fb813c72b54180bd9cfea002f2243c28d0be9beb87e03b405cfa2abb31"
+    },
+    "1.18.1": {
+      "protocol": 757,
+      "path": "1.18",
+      "sha256": "ee4de5facecd95cfea07f7a2b2a6bda579f92fa45bbbafa4405806f049ac11a3"
+    },
+    "1.18.2": {
+      "protocol": 758,
+      "path": "1.18.2",
+      "sha256": "ccc0da0598fc2d704dc1beac311ee8cbb98950baa813c1cf4e56377b8eb3b244"
+    },
+    "1.19": {
+      "protocol": 759,
+      "path": "1.19",
+      "sha256": "3a56e1b0b4e91bd7526f736254141e757a560286532d029849d3d651723bc7b6"
+    },
+    "1.19.2": {
+      "protocol": 760,
+      "path": "1.19.2",
+      "sha256": "d326e3f674b03f49744dccfeeb006edb9c2714406af64dc388d301040ed7a90e"
+    },
+    "1.19.3": {
+      "protocol": 761,
+      "path": "1.19.3",
+      "sha256": "654f81c325321dbaf70e6883fa62816dec887803320f21fce65d60905caa3444"
+    },
+    "1.19.4": {
+      "protocol": 762,
+      "path": "1.19.4",
+      "sha256": "183041dd54a8fc66909abc6a6772b86d59fdcc69be4f4fffe6fee2d19ebfe552"
+    },
+    "1.20.1": {
+      "protocol": 763,
+      "path": "1.20",
+      "sha256": "3b4fb2620f5d08927f94509ae028b475f7ef3bf2e7eb987af499d3ad632765ad"
+    },
+    "1.20.2": {
+      "protocol": 764,
+      "path": "1.20.2",
+      "sha256": "e038fd10ee94a8395062034e6ad8aff6c989e7206b74906c3a04daebc7c004fc"
+    },
+    "1.20.4": {
+      "protocol": 765,
+      "path": "1.20.3",
+      "sha256": "ea8e6d9712cd0d8122c7830a6bd23f91251b4cd5c4526486a0ac4c7f7784ed52"
+    },
+    "1.20.6": {
+      "protocol": 766,
+      "path": "1.20.5",
+      "sha256": "4204f6f1d4f5aa7ab0936fe0cb78fac3d249a06e534e4903d1937614667be241"
+    },
+    "1.21.1": {
+      "protocol": 767,
+      "path": "1.21.1",
+      "sha256": "e037db1c735c82f0c919c9f89f3286e6f7055dab6ba8947048d7fb5b9ad229da"
+    },
+    "1.21.3": {
+      "protocol": 768,
+      "path": "1.21.3",
+      "sha256": "9eb7b33d4b1b9a146ec8be67672aaf9e89879bd098de8ca0bb79542e662e4f9b"
+    },
+    "1.21.4": {
+      "protocol": 769,
+      "path": "1.21.4",
+      "sha256": "94a9b1557ca432cfa175b4e512ba7b18bda68cd9ae8fa123a98e4ba02e636b93"
+    },
+    "1.21.5": {
+      "protocol": 770,
+      "path": "1.21.5",
+      "sha256": "dbb950b83dac7f844a4d8b836ec682fa1de5e357d795b4488af36888536f8db1"
+    },
     "1.21.6": {
+      "protocol": 771,
       "path": "1.21.6",
       "sha256": "3c1f3071c20e22face100fee775841aff78394dfebb78de5b8f1e01ab32301a2"
     },
     "1.21.8": {
+      "protocol": 772,
       "path": "1.21.8",
       "sha256": "3c1f3071c20e22face100fee775841aff78394dfebb78de5b8f1e01ab32301a2"
+    },
+    "1.21.10": {
+      "protocol": 773,
+      "path": "1.21.9",
+      "sha256": "ae25e140c226738ebce2dedc3c3c6f86afec3a053d485de293c3cca47e7a5509"
+    },
+    "1.21.11": {
+      "protocol": 774,
+      "path": "1.21.11",
+      "sha256": "070bd9c18a10806eca1aea83ebc2671a644203b216fb2e37b87a663b63b6bf2b"
+    },
+    "26.1.2": {
+      "protocol": 775,
+      "path": "26.1",
+      "sha256": "0bb4f020fa45cc6629748f09546ec2bfd645f1843cccac9da2cab9d0539ab7e3"
     }
   }
 }

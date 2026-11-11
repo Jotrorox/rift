@@ -102,6 +102,10 @@ notices! {
         "Unsupported Minecraft version. Rift supports Java 1.8.9–26.3.",
     LoginTransferVersion => "login.transfer_version" []
         "Transfer requires Minecraft 1.20.5 or newer.",
+    LoginVersion => "login.version" []
+        "This server does not accept your Minecraft version.",
+    LoginNoVersion => "login.no_version" []
+        "No server on this network supports your Minecraft version.",
     DecisionUnavailable => "decision.unavailable" []
         "Unable to check your access, please try again later.",
     // Connections in play.

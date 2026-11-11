@@ -107,7 +107,7 @@ impl Handshake {
 
 /// Java releases accepted by name in configuration, oldest first, with their
 /// protocols. Each has a pinned server fixture in tests/servers.json.
-const RELEASES: &[(&str, i32)] = &[
+pub(super) const RELEASES: &[(&str, i32)] = &[
     ("1.8.9", 47),
     ("1.9", 107),
     ("1.9.1", 108),

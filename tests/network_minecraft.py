@@ -84,7 +84,15 @@ class RealClient(NetworkClient):
                     and (self.protocol >= 764 or self.respawns >= generation - 1)
                     and (self.protocol < 393 or self.command_trees >= generation)):
                 return
-            event, body = self.next_packet()
+            try:
+                event, body = self.next_packet()
+            except TimeoutError as error:
+                # Say which part of the new world never arrived.
+                raise AssertionError(
+                    f"world {generation} is incomplete: joins {len(self.joins)}, "
+                    f"chunks {self.chunks} (before {previous_chunks}), "
+                    f"positions {self.positions} (before {previous_positions}), "
+                    f"respawns {self.respawns}, command trees {self.command_trees}") from error
             assert event != "disconnect", body
         raise AssertionError("backend did not deliver a new world, teleport and chunks")
 

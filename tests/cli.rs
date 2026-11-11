@@ -46,6 +46,7 @@ fn help_is_successful_and_describes_the_interface() {
         assert!(text.contains("25565"));
         assert!(text.contains("--route"));
         assert!(text.contains("--default"));
+        assert!(text.contains("--translation <on|off>"));
         assert!(text.contains("--version"));
         assert!(text.contains("--license"));
         assert!(text.contains("rift init"));
@@ -113,6 +114,20 @@ fn malformed_arguments_and_proxy_loops_are_rejected() {
             "other:2",
         ],
         vec!["127.0.0.1:25565", "--unknown", "host:1"],
+        vec![
+            "127.0.0.1:25565",
+            "127.0.0.1:25566",
+            "--translation",
+            "maybe",
+        ],
+        vec!["127.0.0.1:25565", "127.0.0.1:25566", "--translation"],
+        vec![
+            "127.0.0.1:25565",
+            "--default",
+            "host:1",
+            "--translation",
+            "maybe",
+        ],
         vec!["127.0.0.1:25565", "host:1", "--route", "example.com=host:2"],
     ] {
         let output = run(&args);

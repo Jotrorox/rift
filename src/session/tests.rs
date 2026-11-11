@@ -1195,6 +1195,33 @@ async fn authenticated_session_with(
     DuplexStream,
     Handshake,
 ) {
+    let (mut session, client, handshake, key) = authenticated_client(number, mode, signer).await;
+    session.enable_network().unwrap();
+    let (server, mut backend) = tokio::io::duplex(65536);
+    session.connect_backend(server).await.unwrap();
+    let received = forwarded_handshake(&receive(&mut backend, Codec::default()).await);
+    if mode == ForwardingMode::Velocity {
+        assert_eq!(received, handshake);
+    }
+    // The backend learns the Mojang UUID, never the claimed one.
+    assert_eq!(
+        receive(&mut backend, Codec::default()).await,
+        client_login_start(number, [7; 16], key.as_ref())
+    );
+    (session, client, backend, received)
+}
+
+/// An authenticated client with forwarding set and no backend yet.
+async fn authenticated_client(
+    number: i32,
+    mode: ForwardingMode,
+    signer: Option<&aws_lc_rs::rsa::KeyPair>,
+) -> (
+    Session<DuplexStream, DuplexStream>,
+    CryptoStream<DuplexStream>,
+    Handshake,
+    Option<protocol::ProfileKey>,
+) {
     let key = signer.map(|signer| {
         use aws_lc_rs::{
             encoding::{AsDer, PublicKeyX509Der},
@@ -1327,19 +1354,7 @@ async fn authenticated_session_with(
             "203.0.113.9".parse().unwrap(),
         )
         .unwrap();
-    session.enable_network().unwrap();
-    let (server, mut backend) = tokio::io::duplex(65536);
-    session.connect_backend(server).await.unwrap();
-    let received = forwarded_handshake(&receive(&mut backend, Codec::default()).await);
-    if mode == ForwardingMode::Velocity {
-        assert_eq!(received, handshake);
-    }
-    // The backend learns the Mojang UUID, never the claimed one.
-    assert_eq!(
-        receive(&mut backend, Codec::default()).await,
-        client_login_start(number, [7; 16], key.as_ref())
-    );
-    (session, client, backend, received)
+    (session, client, handshake, key)
 }
 
 fn validate_velocity_response(packet: &Packet, id: i32, secret: &[u8]) -> bool {
@@ -2525,29 +2540,55 @@ async fn bungeecord_backend_that_ignores_forwarding_is_named() {
 }
 
 #[tokio::test]
-async fn velocity_forwarding_refuses_versions_before_1_13() {
+async fn velocity_forwarding_refuses_backends_before_1_13() {
+    // Login plugin messages arrived in 1.13. The backend's version decides:
+    // an older client is fine when translation puts it on a newer backend.
     for number in [47, 340] {
-        let (mut client, input) = tokio::io::duplex(4096);
-        let handshake = Handshake {
-            protocol: number,
-            address: "play.test".into(),
-            port: 25565,
-            next_state: NextState::Login,
-        };
-        Codec::default()
-            .write(&mut client, &handshake.packet())
-            .await
-            .unwrap();
-        let mut session: Session<DuplexStream, DuplexStream> =
-            Session::accept(input).await.unwrap();
-        let error = session
-            .set_forwarding(
-                ForwardingMode::Velocity,
-                Some(Arc::from(&b"shared-secret"[..])),
-                "203.0.113.9".parse().unwrap(),
-            )
-            .unwrap_err();
+        let (mut session, _client, _, _) =
+            authenticated_client(number, ForwardingMode::Velocity, None).await;
+        let (server, _backend) = tokio::io::duplex(4096);
+        let error = session.connect_backend(server).await.unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::Unsupported);
         assert!(error.to_string().contains("1.13"), "{error}");
     }
+}
+
+#[tokio::test]
+async fn a_translated_backend_gets_velocity_forwarding_in_its_own_protocol() {
+    timeout(Duration::from_secs(10), async {
+        let (mut session, mut client, _, _) =
+            authenticated_client(772, ForwardingMode::Velocity, None).await;
+        let (server, mut backend) = tokio::io::duplex(65536);
+        session
+            .connect_backend_as(server, Some(ProtocolVersion::new(771).unwrap()))
+            .await
+            .unwrap();
+        let codec = Codec::default();
+        let handshake = Handshake::decode(&receive(&mut backend, codec).await).unwrap();
+        assert_eq!(handshake.protocol, 771);
+        assert_eq!(
+            receive(&mut backend, codec).await,
+            client_login_start(771, [7; 16], None)
+        );
+        codec
+            .write(&mut backend, &velocity_request_for(-5, 4))
+            .await
+            .unwrap();
+        // The answer comes from the connection itself: the session, and so
+        // the client, never see the request.
+        let answer = tokio::select! {
+            answer = receive(&mut backend, codec) => answer,
+            _ = async { loop { session.forward().await.unwrap(); } } => unreachable!(),
+        };
+        assert_eq!(velocity_payload(&answer, -5), (4, Vec::new()));
+        codec
+            .write(&mut backend, &backend_login_success(771))
+            .await
+            .unwrap();
+        session.forward().await.unwrap();
+        assert_verified_login_success(772, &receive(&mut client, codec).await);
+        assert_eq!(session.identity().unwrap().uuid, Some([7; 16]));
+    })
+    .await
+    .unwrap();
 }

@@ -1361,6 +1361,10 @@ fn definition_values(config: &Config) -> Value {
             if let Some(scaling) = &group.scaling {
                 value["scaling"] = admin::scaling_values(scaling);
             }
+            // Present only when the group sets it; absent follows the proxy.
+            if let Some(clients) = &group.translation {
+                value["translation"] = clients.to_json();
+            }
             (name, value)
         })
         .collect();
@@ -1416,7 +1420,20 @@ fn definition_values(config: &Config) -> Value {
         .extensions
         .as_ref()
         .and_then(|extensions| extensions.permission_groups());
+    // What a group without its own `translation` follows, and the releases
+    // the editor previews patterns against.
+    let translation = json!({
+        "enabled": config.translation.enabled,
+        "clients": config.translation.clients.to_json(),
+        "summary": config.translation.clients.summary(),
+        // Every release a pattern may name, and the protocols translated.
+        "releases": rift::protocol::releases()
+            .map(|(release, protocol)| json!([release, protocol]))
+            .collect::<Vec<_>>(),
+        "range": rift::protocol::translated_range(),
+    });
     json!({
+        "translation": translation,
         "service_groups": groups,
         "templates": templates,
         "permission_groups": permission_groups,

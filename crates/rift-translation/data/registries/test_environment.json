@@ -1,0 +1,8 @@
+{
+  "entries": [
+    "{type:\"minecraft:all_of\",definitions:[]}"
+  ],
+  "versions": [
+    {"protocols":[770,771,772,773,774,775,776,777],"names":["minecraft:default"],"elements":[0]}
+  ]
+}

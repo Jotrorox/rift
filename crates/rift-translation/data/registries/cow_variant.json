@@ -1,0 +1,14 @@
+{
+  "entries": [
+    "{model:\"cold\",asset_id:\"minecraft:entity/cow/cold_cow\"}",
+    "{asset_id:\"minecraft:entity/cow/temperate_cow\"}",
+    "{model:\"warm\",asset_id:\"minecraft:entity/cow/warm_cow\"}",
+    "{baby_asset_id:\"minecraft:entity/cow/cow_cold_baby\",model:\"cold\",asset_id:\"minecraft:entity/cow/cow_cold\"}",
+    "{baby_asset_id:\"minecraft:entity/cow/cow_temperate_baby\",asset_id:\"minecraft:entity/cow/cow_temperate\"}",
+    "{baby_asset_id:\"minecraft:entity/cow/cow_warm_baby\",model:\"warm\",asset_id:\"minecraft:entity/cow/cow_warm\"}"
+  ],
+  "versions": [
+    {"protocols":[770,771,772,773,774],"names":["minecraft:cold","minecraft:temperate","minecraft:warm"],"elements":[0,1,2]},
+    {"protocols":[775,776,777],"names":["minecraft:cold","minecraft:temperate","minecraft:warm"],"elements":[3,4,5]}
+  ]
+}

@@ -79,7 +79,9 @@ def check(binary):
         backend.listen()
         backend.settimeout(10)
         proxy = subprocess.Popen(
-            [str(binary), "127.0.0.1:0", f"127.0.0.1:{backend.getsockname()[1]}"],
+            # The backend is a byte fixture: it answers no status request, which
+            # is how Rift would ask a server for its version.
+            [str(binary), "127.0.0.1:0", f"127.0.0.1:{backend.getsockname()[1]}", "--translation", "off"],
             stderr=subprocess.PIPE, text=True,
         )
         try:

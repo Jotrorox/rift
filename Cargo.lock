@@ -1799,6 +1799,7 @@ dependencies = [
  "rift-messaging",
  "rift-permissions",
  "rift-permissions-client",
+ "rift-translation",
  "rusqlite",
  "rustls",
  "serde",
@@ -1869,6 +1870,15 @@ dependencies = [
  "rift-permissions",
  "rift-permissions-client",
  "tokio",
+]
+
+[[package]]
+name = "rift-translation"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

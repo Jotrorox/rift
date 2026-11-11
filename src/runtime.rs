@@ -588,7 +588,14 @@ pub async fn handle(
             }
             .await;
             match cached {
-                Ok(cached) => response = status::response_packet(&cached)?,
+                Ok(cached) => {
+                    response = rift::backend_version::status_for_client(
+                        &snapshot.config,
+                        &primary,
+                        session.handshake.protocol,
+                        status::response_packet(&cached)?,
+                    )
+                }
                 Err(error) if error.kind() != io::ErrorKind::InvalidData => {
                     response = Document::new(
                         session.handshake.protocol,
@@ -619,9 +626,12 @@ pub async fn handle(
         }
         if let Some(forwarding) = &snapshot.config.forwarding
             && session.handshake.protocol < forwarding.mode.minimum_protocol()
+            && !snapshot.config.translation.enabled
         {
             // Velocity forwarding answers a login plugin request, which
             // arrived in 1.13; Velocity itself turns older clients away too.
+            // With translation an older client can still join a backend that
+            // is new enough, so the backend's version decides when it attaches.
             let reason = catalog::notice(Notice::LoginForwardingVersion);
             let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect_text(&reason)).await;
             return Err(rift::text::error(io::ErrorKind::Unsupported, reason));
@@ -805,11 +815,12 @@ pub async fn handle(
         {
             Ok(name) => name,
             Err(error) => {
-                let _ = timeout(
-                    HANDSHAKE_TIMEOUT,
-                    session.disconnect_text(&catalog::notice(Notice::LoginUnavailable)),
-                )
-                .await;
+                // A player turned away for their Minecraft version is told so;
+                // an outage keeps its details to the log.
+                let reason = rift::text::shown(&error)
+                    .filter(|_| error.kind() == io::ErrorKind::Unsupported)
+                    .unwrap_or_else(|| catalog::notice(Notice::LoginUnavailable));
+                let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect_text(&reason)).await;
                 return Err(error);
             }
         };
@@ -1144,7 +1155,19 @@ pub async fn handle(
                     }
                     event.stage = "transfer";
                     event.failure = "transfer_failed";
-                    let protocol = request.snapshot.config.backends[target].version();
+                    let protocol = match session.version() {
+                        Ok(client) => rift::backend_version::protocol(&request.snapshot.config, target, client, target_network.addresses).await,
+                        Err(_) => Ok(None),
+                    };
+                    let protocol = match protocol {
+                        Ok(protocol) => protocol,
+                        Err(error) => {
+                            if let Some(extension) = &mut session.extension { extension.transfer_failed().await; }
+                            metrics.transfer_failures.inc();
+                            let _ = request.reply.send(Err(format!("target backend does not take the player's Minecraft version; player remains on the original backend: {error}")));
+                            continue;
+                        }
+                    };
                     target_network.push_permissions(&session, target);
                     let result = timeout_at(deadline, session.connect_backend_as(upstream, protocol)).await;
                     match result {

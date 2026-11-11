@@ -64,6 +64,7 @@ def config(port, buffer_size=None, max_connections=None, shutdown_ms=None):
     listeners = {{ public = '127.0.0.1:0' }},
     backends = {{ main = '127.0.0.1:{port}' }},
     routes = {{ public = 'main' }},
+    translation = {{ detect = false }}, -- The backend is a byte fixture that answers no status request.
     limits = {{ {', '.join(limits)} }},
     metrics = '127.0.0.1:0',
     {shutdown}

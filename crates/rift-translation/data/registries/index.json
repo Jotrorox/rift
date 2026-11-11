@@ -1,0 +1,32 @@
+{
+  "protocols": {
+    "735": ["dimension_type"],
+    "736": ["dimension_type"],
+    "751": ["dimension_type", "worldgen/biome"],
+    "753": ["dimension_type", "worldgen/biome"],
+    "754": ["dimension_type", "worldgen/biome"],
+    "755": ["dimension_type", "worldgen/biome"],
+    "756": ["dimension_type", "worldgen/biome"],
+    "757": ["dimension_type", "worldgen/biome"],
+    "758": ["dimension_type", "worldgen/biome"],
+    "759": ["chat_type", "dimension_type", "worldgen/biome"],
+    "760": ["chat_type", "dimension_type", "worldgen/biome"],
+    "761": ["chat_type", "dimension_type", "worldgen/biome"],
+    "762": ["trim_pattern", "trim_material", "chat_type", "dimension_type", "damage_type", "worldgen/biome"],
+    "763": ["trim_pattern", "trim_material", "chat_type", "dimension_type", "damage_type", "worldgen/biome"],
+    "764": ["trim_pattern", "trim_material", "chat_type", "dimension_type", "damage_type", "worldgen/biome"],
+    "765": ["trim_pattern", "trim_material", "chat_type", "dimension_type", "damage_type", "worldgen/biome"],
+    "766": ["worldgen/biome", "chat_type", "trim_pattern", "trim_material", "wolf_variant", "dimension_type", "damage_type", "banner_pattern"],
+    "767": ["worldgen/biome", "chat_type", "trim_pattern", "trim_material", "wolf_variant", "painting_variant", "dimension_type", "damage_type", "banner_pattern", "enchantment", "jukebox_song"],
+    "768": ["worldgen/biome", "chat_type", "trim_pattern", "trim_material", "wolf_variant", "painting_variant", "dimension_type", "damage_type", "banner_pattern", "enchantment", "jukebox_song", "instrument"],
+    "769": ["worldgen/biome", "chat_type", "trim_pattern", "trim_material", "wolf_variant", "painting_variant", "dimension_type", "damage_type", "banner_pattern", "enchantment", "jukebox_song", "instrument"],
+    "770": ["worldgen/biome", "chat_type", "trim_pattern", "trim_material", "wolf_variant", "wolf_sound_variant", "pig_variant", "frog_variant", "cat_variant", "cow_variant", "chicken_variant", "painting_variant", "dimension_type", "damage_type", "banner_pattern", "enchantment", "jukebox_song", "instrument", "test_environment", "test_instance"],
+    "771": ["worldgen/biome", "chat_type", "trim_pattern", "trim_material", "wolf_variant", "wolf_sound_variant", "pig_variant", "frog_variant", "cat_variant", "cow_variant", "chicken_variant", "painting_variant", "dimension_type", "damage_type", "banner_pattern", "enchantment", "jukebox_song", "instrument", "test_environment", "test_instance", "dialog"],
+    "772": ["worldgen/biome", "chat_type", "trim_pattern", "trim_material", "wolf_variant", "wolf_sound_variant", "pig_variant", "frog_variant", "cat_variant", "cow_variant", "chicken_variant", "painting_variant", "dimension_type", "damage_type", "banner_pattern", "enchantment", "jukebox_song", "instrument", "test_environment", "test_instance", "dialog"],
+    "773": ["worldgen/biome", "chat_type", "trim_pattern", "trim_material", "wolf_variant", "wolf_sound_variant", "pig_variant", "frog_variant", "cat_variant", "cow_variant", "chicken_variant", "painting_variant", "dimension_type", "damage_type", "banner_pattern", "enchantment", "jukebox_song", "instrument", "test_environment", "test_instance", "dialog"],
+    "774": ["worldgen/biome", "chat_type", "trim_pattern", "trim_material", "wolf_variant", "wolf_sound_variant", "pig_variant", "frog_variant", "cat_variant", "cow_variant", "chicken_variant", "zombie_nautilus_variant", "painting_variant", "dimension_type", "damage_type", "banner_pattern", "enchantment", "jukebox_song", "instrument", "test_environment", "test_instance", "dialog", "timeline"],
+    "775": ["worldgen/biome", "chat_type", "trim_pattern", "trim_material", "wolf_variant", "wolf_sound_variant", "pig_variant", "pig_sound_variant", "frog_variant", "cat_variant", "cat_sound_variant", "cow_sound_variant", "cow_variant", "chicken_sound_variant", "chicken_variant", "zombie_nautilus_variant", "painting_variant", "dimension_type", "damage_type", "banner_pattern", "enchantment", "jukebox_song", "instrument", "test_environment", "test_instance", "dialog", "world_clock", "timeline"],
+    "776": ["worldgen/biome", "chat_type", "trim_pattern", "trim_material", "wolf_variant", "wolf_sound_variant", "pig_variant", "pig_sound_variant", "frog_variant", "cat_variant", "cat_sound_variant", "cow_sound_variant", "cow_variant", "chicken_sound_variant", "chicken_variant", "zombie_nautilus_variant", "painting_variant", "sulfur_cube_archetype", "dimension_type", "damage_type", "banner_pattern", "enchantment", "jukebox_song", "instrument", "test_environment", "test_instance", "dialog", "world_clock", "timeline"],
+    "777": ["worldgen/biome", "chat_type", "trim_pattern", "trim_material", "wolf_variant", "wolf_sound_variant", "pig_variant", "pig_sound_variant", "frog_variant", "cat_variant", "cat_sound_variant", "cow_sound_variant", "cow_variant", "chicken_sound_variant", "chicken_variant", "zombie_nautilus_variant", "painting_variant", "sulfur_cube_archetype", "dimension_type", "damage_type", "banner_pattern", "enchantment", "jukebox_song", "instrument", "test_environment", "test_instance", "dialog", "world_clock", "timeline", "decorated_pot_pattern", "block_transformer", "worldgen/block_state_provider"]
+  }
+}

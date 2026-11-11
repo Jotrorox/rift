@@ -79,6 +79,7 @@ def check(binary):
           listeners={{public='127.0.0.1:{front}'}},
           backends={{sleepy='127.0.0.1:{backend_port}',lobby='127.0.0.1:{lobby.port}'}}, routes={{public='sleepy'}},
           network={{hubs={{'lobby'}}}},
+          translation={{detect=false}}, -- The backends are byte fixtures that answer no status request.
           limits={{connect_timeout_ms=500}}, shutdown_timeout_ms=1000,
           health_check={{interval_ms=100,timeout_ms=50,unhealthy_threshold=1}},
           status_cache={{ttl_ms=100}},

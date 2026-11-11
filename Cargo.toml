@@ -6,6 +6,7 @@ members = [
     "crates/rift-permissions-testing",
     "crates/rift-permissions-ffi",
     "crates/rift-messaging",
+    "crates/rift-translation",
 ]
 # Plain `cargo build/test/clippy` in the root covers every crate, as CI expects.
 default-members = [
@@ -15,6 +16,7 @@ default-members = [
     "crates/rift-permissions-testing",
     "crates/rift-permissions-ffi",
     "crates/rift-messaging",
+    "crates/rift-translation",
 ]
 # The Pumpkin plugin pulls in Pumpkin from git; it builds on its own (see
 # adapters/pumpkin and docs/permissions-pumpkin.md).
@@ -34,6 +36,7 @@ rcgen = "0.14"
 rift = { path = ".", version = "0.1.0" }
 rift-messaging = { path = "crates/rift-messaging", version = "0.1.0" }
 rift-permissions = { path = "crates/rift-permissions", version = "0.1.0" }
+rift-translation = { path = "crates/rift-translation", version = "0.1.0" }
 rift-permissions-client = { path = "crates/rift-permissions-client", version = "0.1.0" }
 rustls = { version = "0.23", default-features = false, features = ["std", "aws_lc_rs"] }
 serde = { version = "1", features = ["derive"] }
@@ -49,6 +52,7 @@ license.workspace = true
 [dependencies]
 mlua = { version = "0.12", features = ["luajit", "vendored"] }
 rift-permissions.workspace = true
+rift-translation.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal", "process", "fs"] }
 serde_json.workspace = true
 serde = { workspace = true, features = ["rc"] }

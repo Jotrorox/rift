@@ -564,6 +564,7 @@ def configuration(scenario, backend, init_iterations):
     listeners = {{ public = "127.0.0.1:0" }},
     backends = {{ backend = "127.0.0.1:{backend}" }},
     routes = {{ public = {policy} }},
+    translation = {{ detect = false }}, -- The backend is a byte fixture that answers no status request.
     metrics = "127.0.0.1:0",
     {hook}
     {cache}

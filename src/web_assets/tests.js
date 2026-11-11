@@ -177,7 +177,7 @@ async function testWebAssets(appSource, statusSource) {
     assert(row.children[3].textContent === "Disposable game", "Disposable group policy missing");
     assert(row.children[4].textContent === "<script>arena</script>", "Template text was not preserved safely");
     assert(row.children[2].textContent === "25600–25610", "Port range missing");
-    await row.children[6].children[0].emit("click"); await flush();
+    await row.children[7].children[0].emit("click"); await flush();
     const call = h.calls.find(({ path }) => path === "/api/groups/arena%20west/instances");
     assert(call && call.options.method === "POST" && call.options.body === "{}", "Instance creation request incorrect");
     assert(h.element("server-result").textContent.includes("arena-1"), "Created instance name missing");
@@ -199,7 +199,7 @@ async function testWebAssets(appSource, statusSource) {
     const wake = h.element("managed-servers").children.map((row) => row.children[3].textContent);
     assert(wake[0].includes("Paused by Stop") && wake[1].includes("retries exhausted"), "Paused wake reasons missing");
     assert(wake[2] === "Explicit start only" && wake[3] === "Enabled", "Wake policy labels incorrect");
-    const [full, open] = h.element("service-groups").children.map((row) => row.children[6].children[0]);
+    const [full, open] = h.element("service-groups").children.map((row) => row.children[7].children[0]);
     assert(full.disabled && full.title.includes("max_instances"), "Full group creation was enabled");
     assert(!open.disabled, "Group below its maximum was blocked");
   });
@@ -224,15 +224,15 @@ async function testWebAssets(appSource, statusSource) {
     assert(arena.children[1].children.map((tag) => tag.textContent).join() === "Stopping · 1 draining,Dev mode", "Stopped and dev badges missing");
     assert(lobby.children[5].textContent === "2 running · 1 stopped · 5 players", `Instance summary wrong: ${lobby.children[5].textContent}`);
     assert(lobby.children[5].title === "lobby-1, lobby-2, lobby-3", "Instance names missing from the summary title");
-    const labels = (row) => row.children[6].children.map((button) => button.textContent);
+    const labels = (row) => row.children[7].children.map((button) => button.textContent);
     assert(labels(lobby).join() === "Create instance,Start all,Stop all,Dev mode,Edit", `Group actions wrong: ${labels(lobby)}`);
     assert(labels(arena)[3] === "Leave dev mode", "Dev mode toggle label wrong");
-    const [create, start, stop] = arena.children[6].children;
+    const [create, start, stop] = arena.children[7].children;
     assert(create.disabled && create.title.includes("stopped"), "Stopped group allowed instance creation");
     assert(stop.disabled && !start.disabled, "Stopped group controls wrong");
-    assert(!lobby.children[6].children[2].disabled, "Running group could not be stopped");
+    assert(!lobby.children[7].children[2].disabled, "Running group could not be stopped");
 
-    await lobby.children[6].children[2].emit("click"); await flush();
+    await lobby.children[7].children[2].emit("click"); await flush();
     assert(confirms[0].includes("lobby west") && confirms[0].includes("5 now"), "Stop confirmation does not mention players");
     const call = h.calls.find(({ path }) => path === "/api/groups/lobby%20west/stop");
     assert(call && call.options.method === "POST" && call.options.body === "{}", "Group stop request incorrect");
@@ -240,17 +240,17 @@ async function testWebAssets(appSource, statusSource) {
     assert(message.includes("1 draining") && message.includes("1 stopping") && message.includes("lobby-3: queue full"), `Stop outcome wrong: ${message}`);
     assert(h.element("group-result").className.includes("warning"), "Partial failure presented as success");
 
-    await h.element("service-groups").children[0].children[6].children[3].emit("click"); await flush();
+    await h.element("service-groups").children[0].children[7].children[3].emit("click"); await flush();
     assert(confirms[1].includes("rift.group.lobby west.dev"), "Dev mode confirmation does not name the permission");
     const mode = h.calls.find(({ path }) => path === "/api/groups/lobby%20west/mode");
     assert(mode && mode.options.method === "PUT" && mode.options.body === JSON.stringify({ mode: "dev" }), "Dev mode request incorrect");
     assert(h.element("group-result").textContent.includes("Only players with rift.group.lobby west.dev"), "Dev mode outcome missing");
 
-    await h.element("service-groups").children[1].children[6].children[1].emit("click"); await flush();
+    await h.element("service-groups").children[1].children[7].children[1].emit("click"); await flush();
     assert(confirms.length === 2, "Starting a group asked for confirmation");
     assert(h.element("group-result").textContent.includes("1 already running") && h.element("group-result").textContent.includes("dev mode"), "Start outcome wrong");
     h.window.confirm = () => false;
-    await h.element("service-groups").children[0].children[6].children[2].emit("click"); await flush();
+    await h.element("service-groups").children[0].children[7].children[2].emit("click"); await flush();
     assert(h.calls.filter(({ path }) => path === "/api/groups/lobby%20west/stop").length === 1, "Declined stop was sent");
   });
   await test("servers filter by group and explain stopped and dev mode groups", async () => {
@@ -277,7 +277,7 @@ async function testWebAssets(appSource, statusSource) {
     h.model.access = { name: "viewer", permissions: ["read"], groups: null };
     h.model.status.service_groups = [{ name: "lobby", instances: [], suspended: false, mode: "active" }];
     h.element("token").value = "viewer-token"; await h.element("auth-form").emit("submit"); await flush();
-    const actions = h.element("service-groups").children[0].children[6].children;
+    const actions = h.element("service-groups").children[0].children[7].children;
     assert(actions.every((button) => button.disabled), "Ungrantable group mutation was enabled");
     assert(!actions.some((button) => button.textContent === "Edit"), "Edit shown without config permission");
   });
@@ -335,11 +335,11 @@ async function testWebAssets(appSource, statusSource) {
       if (path === "/api/operations/failed-create") return h.response({ status: "failed", http_status: 409, error: "No free ports" });
     };
     await h.element("refresh-status").emit("click"); await flush();
-    await h.element("service-groups").children[0].children[6].children[0].emit("click"); await flush();
+    await h.element("service-groups").children[0].children[7].children[0].emit("click"); await flush();
     assert(h.element("server-result").textContent.includes("failed-create failed: No free ports"), "Operation failure missing");
     assert(h.element("server-result").className.includes("error"), "Failure presented as success");
     assert(h.element("conflict").className.includes("hidden"), "Operation failure changed editor revision state");
-    assert(!h.element("service-groups").children[0].children[6].children[0].disabled, "Failure did not restore controls");
+    assert(!h.element("service-groups").children[0].children[7].children[0].disabled, "Failure did not restore controls");
   });
   await test("polling denial or expiry explains the unresolved operation without claiming failure", async () => {
     for (const status of [403, 404, 503]) {
@@ -350,7 +350,7 @@ async function testWebAssets(appSource, statusSource) {
         if (path === "/api/operations/unresolved") return h.response({ error: "Result unavailable" }, status);
       };
       await h.element("refresh-status").emit("click"); await flush();
-      await h.element("service-groups").children[0].children[6].children[0].emit("click"); await flush();
+      await h.element("service-groups").children[0].children[7].children[0].emit("click"); await flush();
       const message = h.element("server-result").textContent;
       assert(message.includes("Result unavailable") && message.includes("/api/operations/unresolved") && message.includes("may still be running"), "Unresolved operation guidance missing");
       if (status === 403) assert(h.element("auth-panel").open, "Polling denial did not expose token controls");
@@ -389,13 +389,13 @@ async function testWebAssets(appSource, statusSource) {
     h.model.status.service_groups = [{ name: "arena", port_range: [25600, 25610], storage: "disposable", template: "arena" }];
     h.model.intercept = (path) => path === "/api/groups/arena/instances" ? new Promise((resolve) => { release = resolve; }) : undefined;
     await h.element("refresh-status").emit("click"); await flush();
-    const create = h.element("service-groups").children[0].children[6].children[0];
+    const create = h.element("service-groups").children[0].children[7].children[0];
     await create.emit("click"); await flush();
     assert(create.disabled, "Pending creation control remains enabled");
     await create.emit("click"); await flush();
     assert(h.calls.filter(({ path }) => path === "/api/groups/arena/instances").length === 1, "Duplicate provisioning request");
     release(h.response({ name: "arena-1" }, 201)); await flush();
-    assert(!h.element("service-groups").children[0].children[6].children[0].disabled, "Creation controls were not restored");
+    assert(!h.element("service-groups").children[0].children[7].children[0].disabled, "Creation controls were not restored");
   });
   await test("removal cleanup failures warn without claiming files deleted or changing editor revision", async () => {
     const h = fixture(appSource); await flush();
@@ -638,6 +638,68 @@ async function testWebAssets(appSource, statusSource) {
     await h.element("definition-form").emit("submit"); await flush();
     assert(submitted.revision === "rev-1", "Definition revision check was omitted");
     assert(submitted.definition.server_jar === "assets/paper.jar" && submitted.definition.plugins.length === 2, "Fields were not serialized as a structured definition");
+  });
+  await test("a service group chooses the client versions it is translated for", async () => {
+    const h = fixture(appSource);
+    const releases = [["1.11.2", 316], ["1.12", 335], ["1.12.2", 340], ["1.16", 735], ["1.16.5", 754], ["1.17", 755], ["1.18.2", 758], ["1.19", 759], ["1.20", 763], ["1.20.1", 763], ["1.20.6", 766], ["1.21", 767], ["1.21.11", 774], ["26.1", 775], ["26.3", 777]];
+    h.model.definitions = { revision: "rev-1", templates: {}, translation: { enabled: true, clients: "all", summary: "All versions", releases, range: [335, 777] },
+      service_groups: { bedwars: { port_range: [25600, 25610], storage: "persistent", translation: ["1.20.*", "1.16-1.18.2", "newer"] }, lobby: { port_range: [25700, 25710], storage: "persistent" } } };
+    await flush();
+    const select = async (name) => { h.element("definition-select").value = name; await h.element("definition-select").emit("change"); await flush(); };
+    const parts = () => {
+      const [, , choices, custom, preview] = h.element("definition-fields").children.find((child) => child.id === "definition-versions").children;
+      const radios = Object.fromEntries(choices.children.map((label) => [label.children[0].value, label.children[0]]));
+      return { radios, custom, preview, toggles: custom.children[0].children[1].children, extra: custom.children[1].children[1] };
+    };
+    let submitted;
+    h.model.intercept = (path, options) => {
+      if (options.method === "PUT" && path.includes("/definitions/")) { submitted = JSON.parse(options.body).definition; return h.response({ revision: "rev-1" }); } return null;
+    };
+    const save = async () => { submitted = undefined; await h.element("definition-form").emit("submit"); await flush(); return submitted; };
+
+    await select("lobby");
+    let form = parts();
+    assert(form.radios.inherit.checked && !form.radios.all.checked && form.custom.hidden, "A group without a setting does not follow the proxy");
+    assert(form.preview.textContent.includes("All versions"), "The inherited proxy setting is not shown");
+    assert(!Object.hasOwn(await save(), "translation"), "Following the proxy wrote a setting");
+    form = parts(); // Saving reloads and re-renders the form.
+    await form.radios.older.emit("change");
+    assert(form.radios.older.checked && !form.radios.inherit.checked, "The chosen level is not selected");
+    assert((await save()).translation === "older", "A level was not saved as its name");
+
+    await select("bedwars");
+    form = parts();
+    assert(form.radios.custom.checked && !form.custom.hidden, "Patterns did not open the chosen versions");
+    assert(form.toggles.map((toggle) => toggle.textContent).join(" ") === "1.12 1.16 1.17 1.18 1.19 1.20 1.21 26.1 26.3", "Release families are not the translated ones");
+    const pressed = () => form.toggles.filter((toggle) => toggle["aria-pressed"] === "true").map((toggle) => toggle.textContent).join(" ");
+    assert(pressed() === "1.20" && form.extra.value === "1.16-1.18.2, newer", "Patterns were not split into families and the rest");
+    assert(form.preview.textContent.includes("7 versions: 1.16–1.18.2, 1.20–1.20.6") && form.preview.textContent.includes("newer than the servers"), `Preview is wrong: ${form.preview.textContent}`);
+    await form.toggles.find((toggle) => toggle.textContent === "1.21").emit("click");
+    assert(pressed() === "1.20 1.21" && form.preview.textContent.includes("9 versions"), "A family toggle did not update the preview");
+    assert(JSON.stringify((await save()).translation) === JSON.stringify(["1.20.*", "1.21.*", "1.16-1.18.2", "newer"]), "Chosen versions were not saved as patterns");
+
+    // Mistakes are explained in the preview and never sent.
+    form = parts();
+    form.extra.value = "1.99"; await form.extra.emit("input");
+    assert(form.preview.className.includes("bad") && form.preview.textContent.includes("“1.99” is not a Minecraft version"), "An unknown version was not explained");
+    assert(await save() === undefined && h.element("definition-result").textContent.includes("1.99"), "An unknown version was submitted");
+    for (const [pattern, message] of [["1.20-1.16", "empty range"], ["<=1.11.2", "outside the versions Rift translates"], ["none", "stands alone"]]) {
+      form.extra.value = pattern; await form.extra.emit("input");
+      assert(form.preview.textContent.includes(message), `${pattern}: ${form.preview.textContent}`);
+    }
+    form.extra.value = ">=1.21, <=1.12.2"; await form.extra.emit("input");
+    assert(form.preview.textContent.includes("1.12–1.12.2, 1.20–26.3"), `Open ranges: ${form.preview.textContent}`);
+    form.extra.value = ""; await form.extra.emit("input");
+    for (const toggle of form.toggles) if (toggle["aria-pressed"] === "true") await toggle.emit("click");
+    assert(form.preview.className.includes("bad") && await save() === undefined, "An empty choice was submitted");
+    await form.radios.none.emit("change");
+    assert(form.custom.hidden && form.radios.none.checked, "Same version only did not close the chosen versions");
+    assert((await save()).translation === "none", "Same version only was not saved");
+
+    // With translation off for the proxy, the form says the setting waits.
+    h.model.definitions.translation.enabled = false; await h.element("definitions-refresh").emit("click"); await flush();
+    await select("bedwars");
+    assert(parts().preview.textContent.includes("turned off for the whole proxy"), "The proxy-wide switch is not mentioned");
   });
   await test("software templates serialize a nested software table and suggest versions", async () => {
     const h = fixture(appSource); await flush();

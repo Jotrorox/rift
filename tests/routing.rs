@@ -18,6 +18,9 @@ impl Proxy {
         let child = Command::new(env!("CARGO_BIN_EXE_rift"))
             .arg("127.0.0.1:0")
             .args(options)
+            // These backends are byte fixtures, not servers that answer the
+            // status request Rift asks a backend's version with.
+            .args(["--translation", "off"])
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
