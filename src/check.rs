@@ -92,6 +92,15 @@ pub fn isolation(config: &Config) -> Vec<String> {
     lines
 }
 
+/// The warning for a configuration that does not authenticate players, which
+/// is the default: anyone who can reach a listener can join under any name,
+/// including an operator's.
+pub fn offline_mode(config: &Config) -> Option<&'static str> {
+    (!config.authentication.online_mode).then_some(
+        "players are not authenticated (authentication.online_mode is off, the default): anyone who can reach a listener can join under any name, including an operator's. Set rift.config.authentication = { online_mode = true }, or allow only trusted clients to connect",
+    )
+}
+
 /// Warnings about instance bus logins (see [`rift::instance_login`]):
 /// a group whose template ships RiftPerms but that issues no login (its
 /// instances would need a principal and token each, or fail to start the

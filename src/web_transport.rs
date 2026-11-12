@@ -15,11 +15,18 @@ use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
     net::{TcpListener, TcpStream},
     sync::{OwnedSemaphorePermit, Semaphore, watch},
-    time::{Sleep, sleep},
+    time::{Instant, Sleep, sleep},
 };
 
 const MAX_CONNECTIONS: usize = 64;
-const SOCKET_LIFETIME: Duration = Duration::from_secs(10);
+/// A socket that moved fewer than [`WINDOW_BYTES`] in one window is closed:
+/// idle keep-alive connections and trickled headers last one window at most.
+const SOCKET_WINDOW: Duration = Duration::from_secs(10);
+/// 256 KiB per window (about 26 KiB/s) keeps a transfer alive, so the largest
+/// upload, 64 MiB, has roughly 43 minutes on the slowest accepted link.
+const WINDOW_BYTES: u64 = 256 * 1024;
+/// No socket outlives this, however steadily it transfers.
+const SOCKET_LIFETIME: Duration = Duration::from_secs(60 * 60);
 
 pub struct Listener {
     socket: TcpListener,
@@ -53,7 +60,7 @@ impl axum::serve::Listener for Listener {
                         continue;
                     };
                     return (
-                        Stream::new(socket, permit, self.force.clone(), SOCKET_LIFETIME),
+                        Stream::new(socket, permit, self.force.clone(), Limits::default()),
                         address,
                     );
                 }
@@ -70,10 +77,32 @@ impl axum::serve::Listener for Listener {
     }
 }
 
+#[derive(Clone, Copy)]
+struct Limits {
+    window: Duration,
+    window_bytes: u64,
+    lifetime: Duration,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            window: SOCKET_WINDOW,
+            window_bytes: WINDOW_BYTES,
+            lifetime: SOCKET_LIFETIME,
+        }
+    }
+}
+
 pub struct Stream {
     socket: TcpStream,
     _permit: OwnedSemaphorePermit,
+    limits: Limits,
+    /// End of the current window.
     deadline: Pin<Box<Sleep>>,
+    /// Bytes read and written in the current window.
+    moved: u64,
+    expires: Instant,
     forced: Pin<Box<dyn Future<Output = ()> + Send>>,
     closed: bool,
 }
@@ -83,12 +112,15 @@ impl Stream {
         socket: TcpStream,
         permit: OwnedSemaphorePermit,
         mut force: watch::Receiver<bool>,
-        lifetime: Duration,
+        limits: Limits,
     ) -> Self {
         Self {
             socket,
             _permit: permit,
-            deadline: Box::pin(sleep(lifetime)),
+            limits,
+            deadline: Box::pin(sleep(limits.window)),
+            moved: 0,
+            expires: Instant::now() + limits.lifetime,
             forced: Box::pin(async move {
                 while !*force.borrow_and_update() {
                     if force.changed().await.is_err() {
@@ -101,17 +133,30 @@ impl Stream {
     }
 
     fn available(&mut self, context: &mut Context<'_>) -> io::Result<()> {
-        if self.closed
-            || self.deadline.as_mut().poll(context).is_ready()
-            || self.forced.as_mut().poll(context).is_ready()
-        {
+        // A window that moved enough data starts the next one; polling the
+        // reset timer again registers this task for its new deadline.
+        while !self.closed && self.deadline.as_mut().poll(context).is_ready() {
+            let now = Instant::now();
+            if self.moved < self.limits.window_bytes || now >= self.expires {
+                self.closed = true;
+                break;
+            }
+            self.moved = 0;
+            let next = (now + self.limits.window).min(self.expires);
+            self.deadline.as_mut().reset(next);
+        }
+        if self.closed || self.forced.as_mut().poll(context).is_ready() {
             self.closed = true;
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
-                "HTTP socket lifetime or shutdown deadline exceeded",
+                "HTTP socket stalled, or its lifetime or shutdown deadline was exceeded",
             ));
         }
         Ok(())
+    }
+
+    fn moved(&mut self, bytes: usize) {
+        self.moved = self.moved.saturating_add(bytes as u64);
     }
 }
 
@@ -123,7 +168,10 @@ impl AsyncRead for Stream {
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         this.available(context)?;
-        Pin::new(&mut this.socket).poll_read(context, buffer)
+        let before = buffer.filled().len();
+        let result = Pin::new(&mut this.socket).poll_read(context, buffer);
+        this.moved(buffer.filled().len() - before);
+        result
     }
 }
 
@@ -135,7 +183,11 @@ impl AsyncWrite for Stream {
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
         this.available(context)?;
-        Pin::new(&mut this.socket).poll_write(context, buffer)
+        let result = Pin::new(&mut this.socket).poll_write(context, buffer);
+        if let Poll::Ready(Ok(written)) = &result {
+            this.moved(*written);
+        }
+        result
     }
 
     fn poll_flush(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -157,7 +209,11 @@ impl AsyncWrite for Stream {
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
         this.available(context)?;
-        Pin::new(&mut this.socket).poll_write_vectored(context, buffers)
+        let result = Pin::new(&mut this.socket).poll_write_vectored(context, buffers);
+        if let Poll::Ready(Ok(written)) = &result {
+            this.moved(*written);
+        }
+        result
     }
 
     fn is_write_vectored(&self) -> bool {
@@ -174,7 +230,15 @@ mod tests {
         time::timeout,
     };
 
-    async fn pair(lifetime: Duration) -> (Stream, TcpStream, watch::Sender<bool>, Arc<Semaphore>) {
+    async fn pair(window: Duration) -> (Stream, TcpStream, watch::Sender<bool>, Arc<Semaphore>) {
+        pair_with(Limits {
+            window,
+            ..Limits::default()
+        })
+        .await
+    }
+
+    async fn pair_with(limits: Limits) -> (Stream, TcpStream, watch::Sender<bool>, Arc<Semaphore>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let peer = TcpStream::connect(listener.local_addr().unwrap())
             .await
@@ -184,7 +248,7 @@ mod tests {
         let permit = slots.clone().try_acquire_owned().unwrap();
         let (force, forced) = watch::channel(false);
         (
-            Stream::new(socket, permit, forced, lifetime),
+            Stream::new(socket, permit, forced, limits),
             peer,
             force,
             slots,
@@ -207,6 +271,62 @@ mod tests {
         );
         drop(stream);
         assert_eq!(slots.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn steady_transfers_outlive_a_window_but_trickles_and_long_lives_do_not() {
+        let limits = Limits {
+            window: Duration::from_millis(250),
+            window_bytes: 16,
+            lifetime: Duration::from_secs(60),
+        };
+        // Sixteen bytes per window keep the socket open across many windows.
+        let (mut stream, mut peer, _force, _slots) = pair_with(limits).await;
+        let sender = tokio::spawn(async move {
+            for _ in 0..40 {
+                if peer.write_all(&[7; 16]).await.is_err() {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+            peer
+        });
+        let mut received = [0; 40 * 16];
+        timeout(Duration::from_secs(5), stream.read_exact(&mut received))
+            .await
+            .unwrap()
+            .unwrap();
+        // The same socket is closed one window after the transfer slows to a trickle.
+        let mut peer = sender.await.unwrap();
+        peer.write_all(b"x").await.unwrap();
+        let mut rest = Vec::new();
+        let error = timeout(Duration::from_secs(2), stream.read_to_end(&mut rest))
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+
+        // The absolute lifetime ends even a transfer that is fast enough.
+        let (mut stream, mut peer, _force, _slots) = pair_with(Limits {
+            lifetime: Duration::from_millis(600),
+            ..limits
+        })
+        .await;
+        tokio::spawn(async move {
+            while peer.write_all(&[7; 64]).await.is_ok() {
+                sleep(Duration::from_millis(5)).await;
+            }
+        });
+        let error = timeout(Duration::from_secs(5), async {
+            loop {
+                if let Err(error) = stream.read(&mut [0; 64]).await {
+                    return error;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
     }
 
     #[tokio::test]

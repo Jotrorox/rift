@@ -286,6 +286,16 @@ impl Client {
         expect_ok(self.command(frame.freeze(), Bytes::new()).await?)
     }
 
+    /// Delete a durable consumer owned by the authenticated identity,
+    /// discarding its position and pending deliveries.
+    pub async fn delete_consumer(&self, stream: &str, name: &str) -> Result<()> {
+        let mut frame = BytesMut::new();
+        frame.put_u8(CONSUMER_DELETE);
+        put_string(&mut frame, stream)?;
+        put_string(&mut frame, name)?;
+        expect_ok(self.command(frame.freeze(), Bytes::new()).await?)
+    }
+
     async fn command(&self, header: Bytes, payload: Bytes) -> Result<Bytes> {
         timeout(CLIENT_TIMEOUT, async {
             let (mut send, mut recv) = self.inner.connection.open_bi().await.map_err(other)?;

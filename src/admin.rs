@@ -260,12 +260,16 @@ async fn read_line(stream: &mut TcpStream, limit: usize) -> io::Result<Vec<u8>> 
     }
 }
 
-fn request(value: &Value, settings: &Admin, secret: &str) -> Result<Vec<String>, String> {
-    if !value
+/// Whether the request carries the administrator token.
+fn holds_token(value: &Value, secret: &str) -> bool {
+    value
         .get("token")
         .and_then(Value::as_str)
         .is_some_and(|s| authenticated(secret, s))
-    {
+}
+
+fn request(value: &Value, settings: &Admin, secret: &str) -> Result<Vec<String>, String> {
+    if !holds_token(value, secret) {
         return Err("authentication failed; supply RIFT_ADMIN_TOKEN".into());
     }
     let args = value
@@ -657,7 +661,9 @@ pub async fn serve(
                 handlers.spawn(async move {
                     let _ = async {
                         let bytes = timeout(Duration::from_secs(2), read_line(&mut stream, 8192)).await??;
-                        let parsed = serde_json::from_slice::<Value>(&bytes).map_err(|_| "invalid JSON request".to_owned()).and_then(|value| request(&value, &settings, &secret));
+                        let value = serde_json::from_slice::<Value>(&bytes).map_err(|_| "invalid JSON request".to_owned());
+                        let trusted = value.as_ref().is_ok_and(|value| holds_token(value, &secret));
+                        let parsed = value.and_then(|value| request(&value, &settings, &secret));
                         let mut permission = String::new();
                         let mut target = String::new();
                         let mut shutdown_ack = None;
@@ -697,9 +703,16 @@ pub async fn serve(
                             }
                             Err(error) => Err(error),
                         };
-                        let actor = if permission.is_empty() { "anonymous" } else { "local-admin" };
                         let (outcome, status) = if result.is_ok() { ("accepted", 200) } else { ("rejected", 400) };
-                        if let Err(error) = workflows.audit_async(actor, &permission, &target, outcome, status).await {
+                        // Any local process can send requests without the
+                        // token. Those are counted as denial summaries, apart
+                        // from operator records, so they cannot flush them.
+                        let audit = if trusted {
+                            workflows.audit_async("local-admin", &permission, &target, outcome, status).await
+                        } else {
+                            workflows.deny_async(401).await
+                        };
+                        if let Err(error) = audit {
                             eprintln!("rift: local administrator audit failed: {error}");
                         }
                         let response = match result {

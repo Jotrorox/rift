@@ -217,7 +217,7 @@ rift.config.web = {
 | `console` | Send commands with the managed server's console privileges, and message or kick players who are on a server within scope (`/api/players/{player}/…`) |
 | `servers` | Start/stop servers and whole groups, switch group modes and create/remove instances within scope |
 | `config` | Read, validate, edit and reload complete Lua source and structured definitions |
-| `deploy` | View configuration deployment metadata and restore retained deployments |
+| `deploy` | View configuration deployment metadata. Restoring a retained deployment also needs `config`, because the restored source replaces the whole configuration, including its tokens and operators |
 | `audit` | View operator records; group-scoped operators see only their own records |
 | `extensions` | Invoke configured Lua `/ext` handlers |
 | `files` | Browse, download, upload, edit and delete files in template folders (unrestricted scope only) and managed server directories within scope |
@@ -277,7 +277,7 @@ Errors use `{"error":"description"}`. `GET /api` provides endpoint discovery.
 | `POST /api/permissions/members/{player}/{group}` | Add a player (UUID, or a known player name) to an existing permission group with `{}`; returns `{changed, revision}` |
 | `DELETE /api/permissions/members/{player}/{group}` | Remove a player from a permission group with `{}`; returns `{changed, revision}` |
 | `GET /api/deployments` | Retained deployment metadata, active revision, retention limit and durability flag; never includes source |
-| `POST /api/deployments/{id}/rollback` | Validate and restore a retained configuration with `{revision}` |
+| `POST /api/deployments/{id}/rollback` | Validate and restore a retained configuration with `{revision}`; needs `deploy` and `config` |
 | `GET /api/audit` | Latest operator records and durability flag |
 | `GET /api/groups` | `{groups: [...]}` with group names, inclusive port ranges, instance names, template and storage policy, `nodes`/`placement` for groups on [nodes](nodes.md), the operator state `suspended` and `mode` (`active` or `dev`) with its `dev_permission`, `translation` (`clients` as in the definition, a readable `summary`, `inherited` when it follows the proxy and the proxy-wide `enabled`), and a `summary` of instance states (`running`, `starting`, `stopping`, `stopped`, `failed`, `unknown`), `players`, and `draining` (occupied instances of a stopped group still waiting to stop) |
 | `GET /api/plugins` | `{plugins: [...]}`: every [plugin](plugins.md#operator-surface) in dispatch order with `name`, `mode`, `engine`, `version`, `status`, `restarts`, `calls`, `last_error`, `hooks`, `commands`, `capabilities` and `restartable`; unrestricted operators only |
@@ -600,7 +600,8 @@ by one: the first in each minute writes an `authentication` record by
 `anonymous` whose `count` is the number of such requests since the previous
 one, and `GET /api/audit` reports the requests not yet written as
 `unrecorded_denials`. The latest 64 of these summaries are kept apart from
-operator records, so a flood of bad requests cannot push operator actions out. Bodies, console text, authorization headers and query strings
+operator records, so a flood of bad requests cannot push operator actions out. Requests
+to the local administrator port without its token are summarised the same way. Bodies, console text, authorization headers and query strings
 are excluded. Lifecycle `accepted` means queued; follow server state for completion.
 An intent record precedes HTTP/CLI mutation execution; a timeout can leave an
 intent without a final result. HTTP/CLI operations are refused if that intent
@@ -650,8 +651,11 @@ is canonicalized at startup, so a symlink selects its target. Source size is
 limited to 256 KiB; the JSON envelope allows escaped source bytes. Saves and
 signal, HTTP API and `rift admin reload` requests share one serialized
 transaction path with a bounded queue.
-Each HTTP server admits at most 64 open connections, with a 10-second socket
-lifetime covering headers, request bodies and response writes. Retiring servers
+Each HTTP server admits at most 64 open connections. A socket is closed when
+it moves less than 256 KiB of headers, request body and response in any
+10-second window, so idle and trickling connections last at most ten seconds
+while a file upload or import on a slow link (from about 26 KiB/s) can finish.
+No socket lives longer than one hour. Retiring servers
 allow up to three seconds for existing responses to finish. Gameplay admission
 and Lua routing capacity remain independent of these HTTP limits.
 

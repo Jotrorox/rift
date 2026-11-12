@@ -248,6 +248,7 @@ pub(crate) fn spawn(
             "managed server command is empty",
         )
     })?;
+    super::rotate_log_reporting(directory);
     let log = open_log(directory)?;
     let mut command = Command::new(program);
     command
@@ -775,6 +776,48 @@ mod tests {
             .unwrap();
         let state = String::from_utf8_lossy(&output.stdout);
         state.trim().is_empty() || state.trim_start().starts_with('Z')
+    }
+
+    #[test]
+    fn full_logs_rotate_in_place_for_an_appending_writer() {
+        use std::io::Write as _;
+        let directory =
+            std::env::temp_dir().join(format!("rift-log-rotation-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let (log, rotated) = (
+            directory.join(LOG_FILE),
+            directory.join(crate::managed::ROTATED_LOG_FILE),
+        );
+        assert!(!crate::managed::rotate_log(&directory, 8).unwrap());
+        // The child keeps appending through the descriptor it was given.
+        let mut child = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log)
+            .unwrap();
+        child.write_all(b"short").unwrap();
+        assert!(!crate::managed::rotate_log(&directory, 8).unwrap());
+        child.write_all(b" and long").unwrap();
+        assert!(crate::managed::rotate_log(&directory, 8).unwrap());
+        assert_eq!(std::fs::read(&rotated).unwrap(), b"short and long");
+        assert_eq!(std::fs::metadata(&log).unwrap().len(), 0);
+        child.write_all(b"second file").unwrap();
+        assert_eq!(std::fs::read(&log).unwrap(), b"second file");
+        // The next rotation replaces the previous copy.
+        assert!(crate::managed::rotate_log(&directory, 8).unwrap());
+        assert_eq!(std::fs::read(&rotated).unwrap(), b"second file");
+        // A link planted where the log belongs is never followed or emptied.
+        #[cfg(unix)]
+        {
+            let outside = directory.join("outside");
+            std::fs::write(&outside, b"not a server log").unwrap();
+            std::fs::remove_file(&log).unwrap();
+            std::os::unix::fs::symlink(&outside, &log).unwrap();
+            assert!(crate::managed::rotate_log(&directory, 8).is_err());
+            assert_eq!(std::fs::read(&outside).unwrap(), b"not a server log");
+        }
+        std::fs::remove_dir_all(&directory).unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

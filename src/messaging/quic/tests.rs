@@ -491,6 +491,71 @@ async fn remote_consumer_names_are_isolated_by_authenticated_identity() {
 }
 
 #[tokio::test]
+async fn one_identity_cannot_fill_a_stream_and_can_delete_its_own_consumers() {
+    let (server_tls, client_tls) = configs();
+    let mut second_identity = identity();
+    second_identity.name = "other_plugin".into();
+    second_identity.token = "second-test-token".into();
+    let stream = Stream::memory(StreamConfig {
+        subjects: vec!["game.>".into()],
+        max_consumers: 8,
+        ..Default::default()
+    })
+    .unwrap();
+    // A consumer stored under the name used before scopes existed.
+    let legacy = identity().legacy_consumer_name("old").unwrap();
+    stream
+        .consumer(
+            &legacy,
+            ConsumerConfig {
+                filter_subject: "game.>".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let server = Server::bind_with_streams(
+        "127.0.0.1:0".parse().unwrap(),
+        server_tls,
+        Broker::default(),
+        AuthConfig {
+            identities: vec![identity(), second_identity.clone()],
+            ..Default::default()
+        },
+        HashMap::from([("events".into(), stream.clone())]),
+    )
+    .unwrap();
+    let address = server.local_addr().unwrap();
+    let first = Client::connect(address, "localhost", client_tls.clone(), &identity().token)
+        .await
+        .unwrap();
+    let second = Client::connect(address, "localhost", client_tls, &second_identity.token)
+        .await
+        .unwrap();
+    let config = || ConsumerConfig {
+        filter_subject: "game.>".into(),
+        ..Default::default()
+    };
+    // A quarter of eight: two consumers each.
+    first.consumer("events", "one", config()).await.unwrap();
+    first.consumer("events", "two", config()).await.unwrap();
+    assert!(first.consumer("events", "three", config()).await.is_err());
+    first.consumer("events", "one", config()).await.unwrap();
+    // The existing consumer keeps working without counting as a new one.
+    first.consumer("events", "old", config()).await.unwrap();
+    first.fetch("events", "old", 1).await.unwrap();
+    // Another identity is unaffected and cannot delete the first's consumers.
+    second.consumer("events", "one", config()).await.unwrap();
+    assert!(second.delete_consumer("events", "two").await.is_err());
+    first.delete_consumer("events", "two").await.unwrap();
+    assert!(first.fetch("events", "two", 1).await.is_err());
+    first.consumer("events", "three", config()).await.unwrap();
+    first.delete_consumer("events", "old").await.unwrap();
+    assert!(stream.get_consumer(&legacy).await.is_err());
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn plugin_connections_are_capped_per_identity_and_never_crowd_out_nodes() {
     let (server_tls, client_tls) = configs();
     let other = Identity {

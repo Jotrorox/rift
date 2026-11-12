@@ -586,6 +586,16 @@ async fn instances_connect_with_their_own_login_until_removed() {
     let holder = quic::Client::connect(process.address, "localhost", fixture.tls.clone(), &token)
         .await
         .unwrap();
+    // An instance reads replies only in its own namespace, never every
+    // identity's request/reply traffic.
+    assert!(holder.subscribe("_INBOX.>", None).await.is_err());
+    assert!(holder.subscribe("_INBOX.*", None).await.is_err());
+    assert!(
+        holder
+            .subscribe(&format!("_INBOX.server.{name}.>"), None)
+            .await
+            .is_ok()
+    );
 
     let stopped = control(&client, "rift.control.stop", json!({"name": name})).await;
     assert_eq!(stopped["ok"], true, "{stopped}");

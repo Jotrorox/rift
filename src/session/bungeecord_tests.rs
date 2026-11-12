@@ -127,7 +127,7 @@ async fn every_supported_protocol_reserves_aliases_registers_and_replies_to_back
 }
 
 #[tokio::test]
-async fn disabled_compatibility_keeps_both_directions_opaque() {
+async fn disabled_compatibility_still_drops_client_forgeries() {
     timeout(Duration::from_secs(2), async {
         let (mut session, mut client, mut backend) = playing(774).await;
         let codec = Codec::default();
@@ -136,10 +136,15 @@ async fn disabled_compatibility_keeps_both_directions_opaque() {
             codec.write(&mut backend, &request).await.unwrap();
             assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
             assert_eq!(receive(&mut client, codec).await, request);
-            let request = custom(0x15, alias, &fields(&["Connect", "lobby"]));
-            codec.write(&mut client, &request).await.unwrap();
+            // A client must never speak as the proxy, bridge or not: the
+            // forgery is consumed and the next packet is what the backend sees.
+            let forged = custom(0x15, alias, &fields(&["Connect", "lobby"]));
+            codec.write(&mut client, &forged).await.unwrap();
             assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
-            assert_eq!(receive(&mut backend, codec).await, request);
+            let other = custom(0x15, "example:other", b"payload");
+            codec.write(&mut client, &other).await.unwrap();
+            assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+            assert_eq!(receive(&mut backend, codec).await, other);
         }
         assert!(
             session

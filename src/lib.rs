@@ -1,3 +1,16 @@
+// Every `eprintln!` in this crate resolves to this macro instead of the
+// standard one, because it is defined before any `mod`. The standard macro
+// panics when stderr cannot be written: a log pipe whose reader died, or a
+// full disk behind a redirect. A diagnostic is never worth that. In the
+// control loop such a panic would skip the connection drain and leave managed
+// servers running without their supervisor. Keep in step with main.rs.
+macro_rules! eprintln {
+    ($($arg:tt)*) => {{
+        use ::std::io::Write as _;
+        let _ = ::std::writeln!(::std::io::stderr().lock(), $($arg)*);
+    }};
+}
+
 pub mod auth;
 pub mod backend_version;
 pub mod bungeecord;

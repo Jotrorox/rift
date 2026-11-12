@@ -86,6 +86,7 @@ in fixed-layout frames terminate that operation stream with ERROR when possible.
 | 13 | CONSUMER_FETCH | stream:str, name:str, limit:u32 | zero or more DELIVERY frames, then OK |
 | 14 | DELIVERY | sequence:u64, timestamp_millis:u64, delivery_count:u32, subject:str, reply:str, payload | server response |
 | 15 | ACK | stream:str, name:str, sequence:u64 | OK |
+| 16 | CONSUMER_DELETE | stream:str, name:str | OK |
 
 PUBLISH, PUBLISH_ACK and PING can be repeated on one ordered stream. A client
 must not wait for a response to PUBLISH; use PING as a barrier after a batch. A
@@ -108,7 +109,11 @@ are explicit: STREAM_PUBLISH does not also publish to the live broker.
 
 STORED acknowledges the stream's configured durability boundary. Durable
 consumers deliver at least once: acknowledge only after processing. Reopen the
-same consumer with the same configuration to resume. Fetch returns currently
+same consumer with the same configuration to resume. One identity may hold at
+most a quarter of a stream's `max_consumers` (at least one); CONSUMER_OPEN for a
+new consumer beyond that is rejected. CONSUMER_DELETE removes one of the
+caller's own consumers with its position and pending deliveries, which frees
+its place. Fetch returns currently
 available messages without waiting; unacknowledged deliveries become eligible
 for redelivery after ack wait. Retention may remove old records. This standalone
 store does not implement distributed replication, consensus or clustered

@@ -85,7 +85,10 @@ def check(binary):
             stderr=subprocess.PIPE, text=True,
         )
         try:
+            # Startup warnings may precede the listener line.
             ready = proxy.stderr.readline()
+            while ready.startswith("rift: warning: "):
+                ready = proxy.stderr.readline()
             assert ready.startswith("rift: listening on "), ready
             port = int(ready.split(" -> ")[0].rsplit(":", 1)[1])
             with ThreadPoolExecutor(max_workers=1) as pool:

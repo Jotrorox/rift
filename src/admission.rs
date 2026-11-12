@@ -1,4 +1,9 @@
-use std::{collections::HashMap, net::IpAddr, time::Instant};
+use std::{
+    collections::HashMap,
+    net::{IpAddr, Ipv6Addr},
+    sync::{Arc, Mutex, PoisonError},
+    time::Instant,
+};
 
 use rift::config::RateLimit;
 
@@ -29,6 +34,63 @@ pub struct Admission {
     global: Option<Bucket>,
     ips: HashMap<IpAddr, Bucket>,
     last_prune: Option<Instant>,
+    /// Open connections per IPv4 address or IPv6 /64.
+    open: HashMap<IpAddr, usize>,
+}
+
+/// One open connection counted against its address; released on drop.
+pub struct AddressSlot {
+    admission: Arc<Mutex<Admission>>,
+    key: IpAddr,
+}
+
+impl AddressSlot {
+    /// Count a connection from `ip`, unless its address already holds
+    /// `maximum`. Without this one host could take every connection slot.
+    pub fn claim(admission: &Arc<Mutex<Admission>>, ip: IpAddr, maximum: usize) -> Option<Self> {
+        let key = address_key(ip);
+        let mut state = admission.lock().unwrap_or_else(PoisonError::into_inner);
+        let open = state.open.entry(key).or_insert(0);
+        if *open >= maximum {
+            if *open == 0 {
+                state.open.remove(&key);
+            }
+            return None;
+        }
+        *open += 1;
+        Some(Self {
+            admission: admission.clone(),
+            key,
+        })
+    }
+}
+
+impl Drop for AddressSlot {
+    fn drop(&mut self) {
+        let mut state = self
+            .admission
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(open) = state.open.get_mut(&self.key) {
+            *open -= 1;
+            if *open == 0 {
+                state.open.remove(&self.key);
+            }
+        }
+    }
+}
+
+/// An IPv4 address (mapped ones included) or the /64 of an IPv6 address: a
+/// single host usually controls a whole /64.
+fn address_key(ip: IpAddr) -> IpAddr {
+    match ip.to_canonical() {
+        IpAddr::V6(ip) => {
+            let mut segments = ip.segments();
+            segments[4..].fill(0);
+            IpAddr::V6(Ipv6Addr::from(segments))
+        }
+        ip => ip,
+    }
 }
 
 impl Admission {
@@ -133,6 +195,24 @@ mod tests {
         assert!(!limiter.allow(a, settings, now + Duration::from_millis(500)));
         assert!(limiter.allow(b, settings, now + Duration::from_secs(2)));
         assert_eq!(limiter.ips.len(), 1);
+    }
+
+    #[test]
+    fn open_connections_are_capped_per_address_and_released() {
+        let admission = Arc::new(Mutex::new(Admission::default()));
+        let a: IpAddr = "192.0.2.1".parse().unwrap();
+        let first = AddressSlot::claim(&admission, a, 2).unwrap();
+        let _second =
+            AddressSlot::claim(&admission, "::ffff:192.0.2.1".parse().unwrap(), 2).unwrap();
+        assert!(AddressSlot::claim(&admission, a, 2).is_none());
+        // Another address is unaffected; one /64 is a single address.
+        let _other = AddressSlot::claim(&admission, "192.0.2.2".parse().unwrap(), 2).unwrap();
+        let _v6 = AddressSlot::claim(&admission, "2001:db8::1".parse().unwrap(), 1).unwrap();
+        assert!(AddressSlot::claim(&admission, "2001:db8::2".parse().unwrap(), 1).is_none());
+        assert!(AddressSlot::claim(&admission, "2001:db8:0:1::2".parse().unwrap(), 1).is_some());
+        drop(first);
+        assert!(AddressSlot::claim(&admission, a, 2).is_some());
+        assert_eq!(admission.lock().unwrap().open.len(), 3);
     }
 
     #[test]

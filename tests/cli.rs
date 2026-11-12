@@ -237,7 +237,14 @@ fn check_validates_without_binding_or_resolving_admin_secrets() {
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert!(output.stderr.is_empty());
+        // The only output is the warning that this configuration does not
+        // authenticate players.
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(stderr.lines().count(), 1, "{stderr}");
+        assert!(
+            stderr.starts_with("rift: warning: players are not authenticated"),
+            "{stderr}"
+        );
     }
     fs::write(
         fixture.0.join("rift.lua"),

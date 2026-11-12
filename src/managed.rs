@@ -83,6 +83,13 @@ pub struct ManagedServerSnapshot {
 
 /// Child stdout and stderr, appended in the server's working directory.
 pub(crate) const LOG_FILE: &str = "rift-server.log";
+/// The previous log, replaced at each rotation.
+pub(crate) const ROTATED_LOG_FILE: &str = "rift-server.log.1";
+/// A server log at least this large is rotated, so one server keeps at most
+/// about twice this much output.
+pub(crate) const LOG_ROTATE_BYTES: u64 = 32 * 1024 * 1024;
+/// How often a running server's log size is checked.
+pub(crate) const LOG_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
 pub struct ManagedServers(Arc<Inner>);
@@ -883,6 +890,67 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|error| error.into_inner())
 }
 
+/// Rotate the server log in `directory` once it holds `limit` bytes: copy it
+/// to [`ROTATED_LOG_FILE`], then empty it. The running child appends through
+/// its own descriptor, so the file is truncated in place and never renamed;
+/// output written between the copy and the truncation is lost. Returns whether
+/// the log was rotated.
+pub(crate) fn rotate_log(directory: &Path, limit: u64) -> io::Result<bool> {
+    use std::fs::OpenOptions;
+    let path = directory.join(LOG_FILE);
+    // The server can write its own directory: never follow a planted link.
+    let open = |options: &mut OpenOptions, path: &Path| {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // Non-blocking so a planted FIFO cannot stall the check.
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        options.open(path)
+    };
+    let source = match open(OpenOptions::new().read(true).write(true), &path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let metadata = source.metadata()?;
+    if !metadata.is_file() {
+        return Err(io::Error::other("server log must be a regular file"));
+    }
+    if metadata.len() < limit {
+        return Ok(false);
+    }
+    let temporary = directory.join("rift-server.log.rotating");
+    match std::fs::remove_file(&temporary) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    let mut target = open(OpenOptions::new().write(true).create_new(true), &temporary)?;
+    let copied = io::copy(&mut io::Read::take(&source, metadata.len()), &mut target);
+    drop(target);
+    if let Err(error) =
+        copied.and_then(|_| std::fs::rename(&temporary, directory.join(ROTATED_LOG_FILE)))
+    {
+        // Without a copy the log still has to stop growing.
+        let _ = std::fs::remove_file(&temporary);
+        source.set_len(0)?;
+        return Err(error);
+    }
+    source.set_len(0)?;
+    Ok(true)
+}
+
+/// [`rotate_log`] at the standard size, reporting failures instead of
+/// returning them: a log that cannot be rotated never stops its server.
+pub(crate) fn rotate_log_reporting(directory: &Path) {
+    if let Err(error) = rotate_log(directory, LOG_ROTATE_BYTES) {
+        eprintln!(
+            "rift: cannot rotate {}: {error}",
+            directory.join(LOG_FILE).display()
+        );
+    }
+}
+
 pub(crate) fn read_log(path: &Path, cursor: Option<u64>) -> io::Result<serde_json::Value> {
     use std::io::{Read, Seek, SeekFrom};
     const LIMIT: u64 = 64 * 1024;
@@ -1035,6 +1103,7 @@ async fn worker<B: ProcessBackend>(
     }
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut log_checked = Instant::now();
     loop {
         if server.shutdown.load(Ordering::Acquire) {
             break;
@@ -1059,6 +1128,12 @@ async fn worker<B: ProcessBackend>(
                     }
                 }
                 supervise(&server, &players, &mut backend).await;
+                // A node agent rotates the logs of the servers it runs.
+                if server.config.node.is_none() && log_checked.elapsed() >= LOG_CHECK_INTERVAL {
+                    log_checked = Instant::now();
+                    let directory = server.config.directory.clone();
+                    let _ = tokio::task::spawn_blocking(move || rotate_log_reporting(&directory)).await;
+                }
             }
         }
     }

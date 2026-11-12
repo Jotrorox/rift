@@ -21,6 +21,10 @@ destinations through `initial` or `hubs`.
 Changing the option during reload affects new client connections; existing
 sessions retain the setting they accepted at login.
 
+Whatever the setting, Rift drops every message a client sends on the
+`BungeeCord` or `bungeecord:main` channel. Backend plugins treat that channel
+as the proxy's voice, so a client's message never reaches a backend.
+
 Rift supports `BungeeCord` on legacy connections and `bungeecord:main` on modern
 connections, accepting either spelling for incoming messages. Replies and backend
 channel registration use the name appropriate to the connection's Minecraft

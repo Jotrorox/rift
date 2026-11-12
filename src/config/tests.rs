@@ -148,12 +148,17 @@ fn lua_expressions_produce_typed_config_with_release_defaults() {
     assert_eq!(Config::default().limits, config.limits);
     let source = VALID
         .replace("max_connections = 1024", "max_connections = 7")
+        .replace(
+            "max_connections_per_address = 256",
+            "max_connections_per_address = 3",
+        )
         .replace("connect_timeout_ms = 5000", "connect_timeout_ms = 123")
         .replace("buffer_size = 32 * 1024", "buffer_size = 1024");
     assert_eq!(
         Config::from_lua(&source, "test.lua").unwrap().limits,
         Limits {
             max_connections: 7,
+            max_connections_per_address: 3,
             connect_timeout: Duration::from_millis(123),
             buffer_size: 1024,
         }

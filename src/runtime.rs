@@ -1,6 +1,6 @@
 use crate::{
     admin::{self, Control},
-    admission::Admission,
+    admission::{AddressSlot, Admission},
     events::Connection,
     health::{self, Health},
     metrics::{Active, Metered, Metrics, Player},
@@ -1628,6 +1628,17 @@ pub(crate) async fn accept(
                     event.reject("rate_limited", "connection rate limit exceeded");
                     continue;
                 }
+                // Behind PROXY protocol the address is known only once the
+                // header is read; `proxied_client` claims the slot then.
+                let mut address_slot = None;
+                if !proxied {
+                    address_slot = AddressSlot::claim(&admission, peer.ip(), snapshot.config.limits.max_connections_per_address);
+                    if address_slot.is_none() {
+                        metrics.capacity_rejected.inc();
+                        event.reject("address_capacity_exhausted", "too many open connections from this address");
+                        continue;
+                    }
+                }
                 let Some(active) = Active::new(metrics.clone(), snapshot.config.limits.max_connections) else {
                     metrics.capacity_rejected.inc();
                     event.reject("capacity_exhausted", "connection capacity exhausted");
@@ -1640,7 +1651,7 @@ pub(crate) async fn accept(
                 sessions.spawn(async move {
                     let mut client = client;
                     let result = if proxied {
-                        proxied_client(&mut client, &snapshot, &metrics, &admission, &mut event).await
+                        proxied_client(&mut client, &snapshot, &metrics, &admission, &mut event, &mut address_slot).await
                     } else {
                         Ok(true)
                     };
@@ -1652,6 +1663,7 @@ pub(crate) async fn accept(
                     // Make capacity available before the peer can observe EOF and
                     // reconnect. The handler borrows the socket until it returns.
                     drop(active);
+                    drop(address_slot);
                     drop(client);
                     if let Err(error) = result {
                         metrics.errors.inc();
@@ -1673,8 +1685,9 @@ async fn proxied_client(
     client: &mut TcpStream,
     snapshot: &Snapshot,
     metrics: &Metrics,
-    admission: &Mutex<Admission>,
+    admission: &Arc<Mutex<Admission>>,
     event: &mut Connection,
+    address_slot: &mut Option<AddressSlot>,
 ) -> io::Result<bool> {
     event.stage = "proxy_header";
     event.failure = "proxy_header";
@@ -1704,6 +1717,19 @@ async fn proxied_client(
     {
         metrics.rate_rejected.inc();
         event.reject("rate_limited", "connection rate limit exceeded");
+        return Ok(false);
+    }
+    *address_slot = AddressSlot::claim(
+        admission,
+        peer,
+        snapshot.config.limits.max_connections_per_address,
+    );
+    if address_slot.is_none() {
+        metrics.capacity_rejected.inc();
+        event.reject(
+            "address_capacity_exhausted",
+            "too many open connections from this address",
+        );
         return Ok(false);
     }
     Ok(true)
@@ -2661,6 +2687,10 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         .plugins()
         .set_streams(snapshot.messaging_streams.clone());
     snapshot.extensions.plugins().start().await?;
+    // Before the listener lines: connection diagnostics follow those.
+    if let Some(warning) = crate::check::offline_mode(&snapshot.config) {
+        eprintln!("rift: warning: {warning}");
+    }
     for (name, listener) in listeners {
         eprintln!("rift: listening on {}", listener.local_addr()?);
         tasks.spawn(accept(
@@ -2809,6 +2839,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
             _ => "save",
         };
         let result = reconfigure(operation, &app, &snapshot, &services).await;
+        let mut applied_without_plugins = false;
         let response = match result {
             Ok((next, prepared)) => {
                 extension_jobs.shutdown().await;
@@ -2816,17 +2847,23 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                 extension_jobs = next.extensions.scheduler();
                 // The plugin diff applies only now that the reload committed;
                 // stopping and hot-reloading instances finishes in the background.
-                match next.extensions.plugins().activate() {
+                let plugin_failure = match next.extensions.plugins().activate() {
                     Ok(work) => {
                         tokio::spawn(work);
+                        None
                     }
-                    Err(error) => eprintln!("rift: plugins not updated: {error}"),
-                }
+                    Err(error) => Some(error.to_string()),
+                };
                 // Keep subscriptions and queued messages across script reloads.
                 if let (Some(updates), Some(script)) = (&message_updates, &next.config.on_message) {
                     updates.send_replace(script.clone());
                 }
+                // Turning authentication off deserves the startup warning too.
+                let was_online = snapshot.config.authentication.online_mode;
                 publish(&mut snapshot, next, &current, &mut health, &metrics).await;
+                if was_online && let Some(warning) = crate::check::offline_mode(&snapshot.config) {
+                    eprintln!("rift: warning: {warning}");
+                }
                 snapshot.prune_groups();
                 services.commit(&snapshot.config, prepared, &app);
                 // Reconfiguration always reads a source; never record an empty one.
@@ -2838,13 +2875,33 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                     );
                 }
                 metrics.reloads.inc();
-                eprintln!("rift: configuration reloaded");
                 crate::messaging_runtime::emit(
                     &snapshot.messaging,
                     "rift.events.reload",
                     serde_json::json!({"revision":snapshot.revision}),
                 );
-                Ok(snapshot.revision.clone())
+                match plugin_failure {
+                    None => {
+                        eprintln!("rift: configuration reloaded");
+                        Ok(snapshot.revision.clone())
+                    }
+                    // The configuration is committed and cannot be taken
+                    // back, so say exactly what did and did not happen
+                    // instead of reporting a clean reload.
+                    Some(error) => {
+                        applied_without_plugins = true;
+                        metrics.reload_failures.inc();
+                        let message = format!(
+                            "configuration applied as revision {}, but plugins were not updated and the previous plugins keep running: {error}",
+                            snapshot.revision
+                        );
+                        eprintln!("rift: {message}");
+                        Err(control::Error {
+                            status: 500,
+                            message,
+                        })
+                    }
+                }
             }
             Err(error) => {
                 metrics.reload_failures.inc();
@@ -2855,6 +2912,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         if actor == "signal" {
             let (outcome, status) = match &response {
                 Ok(_) => ("accepted", 200),
+                Err(error) if applied_without_plugins => ("failed", error.status),
                 Err(error) => ("rejected", error.status),
             };
             if let Err(error) = app
@@ -2868,7 +2926,11 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         if let Some(reply) = admin_reply {
             let response = response.as_ref()
                 .map(|revision| serde_json::json!({"reloaded":true,"revision":revision,"existing_sessions":"preserved"}))
-                .map_err(|error| format!("reload rejected; previous configuration retained: {}", error.message));
+                .map_err(|error| if applied_without_plugins {
+                    error.message.clone()
+                } else {
+                    format!("reload rejected; previous configuration retained: {}", error.message)
+                });
             let _ = reply.send(response);
         }
         if let Some(reply) = reply {
