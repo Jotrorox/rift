@@ -182,7 +182,7 @@ impl ExtensionScript {
     }
 
     /// Whether a reload can replace `old` with `new`: enablement, API version,
-    /// storage path and queue capacities are fixed until a restart.
+    /// storage path and quotas, and queue capacities are fixed until a restart.
     pub fn live_compatible(old: Option<&Self>, new: Option<&Self>) -> Result<(), String> {
         match (old, new) {
             (Some(old), Some(new))
@@ -194,7 +194,7 @@ impl ExtensionScript {
             }
             (None, None) => Ok(()),
             _ => Err(
-                "extension enablement, API version, storage path and queue capacities require a restart"
+                "extension enablement, API version, storage path and quotas, and queue capacities require a restart"
                     .into(),
             ),
         }
