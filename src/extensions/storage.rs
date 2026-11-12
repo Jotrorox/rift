@@ -47,35 +47,91 @@ const SCHEMA: &str = "CREATE TABLE entries (
 ) STRICT, WITHOUT ROWID;";
 /// Namespaces beginning with this prefix belong to the host, e.g. group memberships.
 const HOST_PREFIX: &str = "rift.";
-/// Persistent plugins' private namespaces, `plugin.<name>.<namespace>`. They
-/// count toward the plugin quota but, like host data, are out of reach of
-/// the configuration script's `rift.store`.
+/// Persistent plugins' private namespaces, `plugin.<name>.<namespace>`. Each
+/// plugin has its own quota and, like host data, is out of reach of the
+/// configuration script's `rift.store`.
 const PLUGIN_PREFIX: &str = "plugin.";
+/// Configurable quota bounds. Memory mirrors every entry, so the totals stay finite.
+const MAX_QUOTA_ENTRIES: usize = 1 << 20;
+const MAX_QUOTA_BYTES: usize = 1 << 30;
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 pub(crate) type Key = (String, String);
 pub(super) type Entries = BTreeMap<Key, Vec<u8>>;
 
-/// Limits for one class of data. Host data has its own, so plugins filling the
-/// store cannot block permission group changes, and memberships cannot use up
-/// plugin space.
-struct Quota {
-    owner: &'static str,
-    entries: usize,
-    bytes: usize,
+/// Limits for one owner's data. Host data, the configuration script and each
+/// persistent plugin have their own, so one plugin filling its space cannot
+/// block another plugin, `rift.store` or permission group changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Quota {
+    pub entries: usize,
+    pub bytes: usize,
 }
-const PLUGIN_QUOTA: Quota = Quota {
-    owner: "plugin",
+const DEFAULT_QUOTA: Quota = Quota {
     entries: 4096,
     bytes: 1024 * 1024,
 };
 const HOST_QUOTA: Quota = Quota {
-    owner: "host",
     entries: 65536,
     bytes: 8 * 1024 * 1024,
 };
 
+/// Quotas for data other than the host's: `default` for the configuration
+/// script and every plugin, unless `plugins` names one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Quotas {
+    pub default: Quota,
+    pub plugins: BTreeMap<String, Quota>,
+}
+
+impl Default for Quotas {
+    fn default() -> Self {
+        Self {
+            default: DEFAULT_QUOTA,
+            plugins: BTreeMap::new(),
+        }
+    }
+}
+
+impl Quotas {
+    fn get(&self, owner: &Owner) -> Quota {
+        match owner {
+            Owner::Script => self.default,
+            Owner::Plugin(name) => self.plugins.get(name).copied().unwrap_or(self.default),
+        }
+    }
+}
+
+/// Who a non-host namespace's data counts against.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum Owner {
+    /// `rift.store` namespaces of the configuration script.
+    Script,
+    /// `plugin.<name>.<namespace>`. Plugin names contain no dots.
+    Plugin(String),
+}
+
+impl std::fmt::Display for Owner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Script => f.write_str("configuration script"),
+            Self::Plugin(name) => write!(f, "plugin {name:?}"),
+        }
+    }
+}
+
 fn host_namespace(namespace: &str) -> bool {
     namespace.starts_with(HOST_PREFIX)
+}
+
+/// The owner of a namespace, or `None` for host data.
+fn owner(namespace: &str) -> Option<Owner> {
+    if host_namespace(namespace) {
+        return None;
+    }
+    Some(match namespace.strip_prefix(PLUGIN_PREFIX) {
+        Some(rest) => Owner::Plugin(rest.split('.').next().unwrap_or_default().to_owned()),
+        None => Owner::Script,
+    })
 }
 
 /// Bytes an entry counts toward its quota: 8 bytes of overhead plus its contents.
@@ -86,6 +142,85 @@ fn entry_size((namespace, key): &Key, value: &[u8]) -> usize {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct StorageConfig {
     pub path: PathBuf,
+    pub quotas: Quotas,
+}
+
+/// Reject keys of `table` outside `allowed`.
+fn only_fields(table: &Table, allowed: &[&str], name: &str) -> mlua::Result<()> {
+    for pair in table.clone().pairs::<Value, Value>() {
+        let (key, _) = pair?;
+        let known = matches!(&key, Value::String(key)
+            if allowed.iter().any(|field| key.as_bytes().as_ref() == field.as_bytes()));
+        if !known {
+            return Err(mlua::Error::runtime(format!("unknown {name} field")));
+        }
+    }
+    Ok(())
+}
+
+fn quota_limit(table: &Table, field: &str, name: &str, max: usize) -> mlua::Result<Option<usize>> {
+    match table.raw_get::<Value>(field)? {
+        Value::Nil => Ok(None),
+        Value::Integer(value) if value >= 1 && value as u64 <= max as u64 => {
+            Ok(Some(value as usize))
+        }
+        _ => Err(mlua::Error::runtime(format!(
+            "{name}.{field} must be an integer from 1 to {max}"
+        ))),
+    }
+}
+
+/// `{ entries = N, bytes = N }`; a missing field keeps `base`'s.
+fn parse_quota(value: Value, name: &str, base: Quota) -> mlua::Result<Quota> {
+    let Value::Table(table) = value else {
+        return Err(mlua::Error::runtime(format!("{name} must be a table")));
+    };
+    only_fields(&table, &["entries", "bytes"], name)?;
+    Ok(Quota {
+        entries: quota_limit(&table, "entries", name, MAX_QUOTA_ENTRIES)?.unwrap_or(base.entries),
+        bytes: quota_limit(&table, "bytes", name, MAX_QUOTA_BYTES)?.unwrap_or(base.bytes),
+    })
+}
+
+fn parse_quotas(value: Value) -> mlua::Result<Quotas> {
+    const NAME: &str = "extensions.storage.quota";
+    let mut quotas = Quotas::default();
+    let table = match value {
+        Value::Nil => return Ok(quotas),
+        Value::Table(table) => table,
+        _ => return Err(mlua::Error::runtime(format!("{NAME} must be a table"))),
+    };
+    only_fields(&table, &["entries", "bytes", "plugins"], NAME)?;
+    quotas.default = Quota {
+        entries: quota_limit(&table, "entries", NAME, MAX_QUOTA_ENTRIES)?
+            .unwrap_or(DEFAULT_QUOTA.entries),
+        bytes: quota_limit(&table, "bytes", NAME, MAX_QUOTA_BYTES)?.unwrap_or(DEFAULT_QUOTA.bytes),
+    };
+    match table.raw_get::<Value>("plugins")? {
+        Value::Nil => {}
+        Value::Table(plugins) => {
+            for pair in plugins.pairs::<Value, Value>() {
+                let (name, quota) = pair?;
+                let name = match &name {
+                    Value::String(name) => name.to_str()?.to_owned(),
+                    _ => String::new(),
+                };
+                if !crate::plugins::manifest::valid_name(&name) {
+                    return Err(mlua::Error::runtime(format!(
+                        "{NAME}.plugins keys must be plugin names"
+                    )));
+                }
+                let quota = parse_quota(quota, &format!("{NAME}.plugins.{name}"), quotas.default)?;
+                quotas.plugins.insert(name, quota);
+            }
+        }
+        _ => {
+            return Err(mlua::Error::runtime(format!(
+                "{NAME}.plugins must be a table"
+            )));
+        }
+    }
+    Ok(quotas)
 }
 
 pub(super) fn parse(value: Value) -> mlua::Result<Option<StorageConfig>> {
@@ -94,12 +229,7 @@ pub(super) fn parse(value: Value) -> mlua::Result<Option<StorageConfig>> {
         Value::Table(table) => table,
         _ => return Err(mlua::Error::runtime("extensions.storage must be a table")),
     };
-    for pair in table.clone().pairs::<Value, Value>() {
-        let (key, _) = pair?;
-        if !matches!(key, Value::String(key) if key.as_bytes().as_ref() == b"path") {
-            return Err(mlua::Error::runtime("unknown extensions.storage field"));
-        }
-    }
+    only_fields(&table, &["path", "quota"], "extensions.storage")?;
     let Value::String(path) = table.raw_get::<Value>("path")? else {
         return Err(mlua::Error::runtime(
             "extensions.storage.path must be a string",
@@ -113,6 +243,7 @@ pub(super) fn parse(value: Value) -> mlua::Result<Option<StorageConfig>> {
     }
     Ok(Some(StorageConfig {
         path: PathBuf::from(path.as_ref()),
+        quotas: parse_quotas(table.raw_get("quota")?)?,
     }))
 }
 
@@ -126,49 +257,58 @@ struct Usage {
 #[derive(Default)]
 struct Memory {
     entries: Entries,
-    plugin: Usage,
+    /// Usage of each owner with at least one entry.
+    owners: BTreeMap<Owner, Usage>,
     host: Usage,
 }
 
 impl Memory {
+    /// Host data must fit its fixed quota. Owners may exceed theirs, e.g.
+    /// after the configuration lowers one; they can then only shrink.
     fn new(entries: Entries) -> io::Result<Self> {
         let mut memory = Self::default();
         for (key, value) in &entries {
             validate_entry(key, value)?;
-            let usage = memory.usage(&key.0);
+            let usage = match owner(&key.0) {
+                None => &mut memory.host,
+                Some(owner) => memory.owners.entry(owner).or_default(),
+            };
             usage.entries += 1;
             usage.bytes += entry_size(key, value);
         }
-        check(&memory.plugin, &PLUGIN_QUOTA)?;
-        check(&memory.host, &HOST_QUOTA)?;
+        check(&memory.host, &HOST_QUOTA, "host")?;
         memory.entries = entries;
         Ok(memory)
     }
-
-    fn usage(&mut self, namespace: &str) -> &mut Usage {
-        if host_namespace(namespace) {
-            &mut self.host
-        } else {
-            &mut self.plugin
-        }
-    }
 }
 
-fn check(usage: &Usage, quota: &Quota) -> io::Result<()> {
+fn check(usage: &Usage, quota: &Quota, owner: impl std::fmt::Display) -> io::Result<()> {
     if usage.entries > quota.entries {
         return Err(invalid(format!(
-            "extension store {} data exceeds {} entries",
-            quota.owner, quota.entries
+            "extension store {owner} data exceeds {} entries",
+            quota.entries
         )));
     }
     if usage.bytes > quota.bytes {
         return Err(invalid(format!(
-            "extension store {} data exceeds {} KiB",
-            quota.owner,
-            quota.bytes / 1024
+            "extension store {owner} data exceeds {} KiB",
+            quota.bytes.div_ceil(1024)
         )));
     }
     Ok(())
+}
+
+/// Like [`check`], but a measure already over its quota may stay or shrink.
+fn check_growth(old: &Usage, new: &Usage, quota: &Quota, owner: &Owner) -> io::Result<()> {
+    let capped = |old: usize, new: usize, max: usize| if new <= old { max.max(new) } else { max };
+    check(
+        new,
+        &Quota {
+            entries: capped(old.entries, new.entries, quota.entries),
+            bytes: capped(old.bytes, new.bytes, quota.bytes),
+        },
+        owner,
+    )
 }
 
 /// Pending changes over the committed entries, applied only after they commit.
@@ -201,6 +341,7 @@ impl Transaction<'_> {
 
 struct Inner {
     memory: RwLock<Memory>,
+    quotas: Quotas,
     /// Serializes writers; `None` for a memory-only store.
     writer: Mutex<Option<Connection>>,
 }
@@ -273,17 +414,19 @@ fn validate_entry((namespace, key): &Key, value: &[u8]) -> io::Result<()> {
 }
 
 impl Store {
-    fn new(memory: Memory, connection: Option<Connection>) -> Self {
+    fn new(memory: Memory, quotas: Quotas, connection: Option<Connection>) -> Self {
         Self(Arc::new(Inner {
             memory: RwLock::new(memory),
+            quotas,
             writer: Mutex::new(connection),
         }))
     }
 
     pub(crate) fn open(config: Option<&StorageConfig>) -> io::Result<Self> {
-        let Some(path) = config.map(|config| config.path.as_path()) else {
-            return Ok(Self::new(Memory::default(), None));
+        let Some(config) = config else {
+            return Ok(Self::new(Memory::default(), Quotas::default(), None));
         };
+        let path = config.path.as_path();
         // Inspect before opening: opening a named pipe can block indefinitely.
         // Check the open descriptor again below in case the path was replaced.
         match fs::metadata(path) {
@@ -316,7 +459,11 @@ impl Store {
             Err(error) => return Err(error),
         }
         let (connection, entries) = open_database(path)?;
-        Ok(Self::new(Memory::new(entries)?, Some(connection)))
+        Ok(Self::new(
+            Memory::new(entries)?,
+            config.quotas.clone(),
+            Some(connection),
+        ))
     }
 
     fn lock(&self, deadline: Instant) -> io::Result<MutexGuard<'_, Option<Connection>>> {
@@ -401,7 +548,7 @@ impl Store {
         let mut writer = self.lock(deadline)?;
         // Only writers change memory and they hold `writer`, so these entries
         // stay current until this mutation applies its own changes.
-        let (result, changes, plugin, host) = {
+        let (result, changes, owners, host) = {
             let memory = self.memory();
             let mut transaction = Transaction {
                 base: &memory.entries,
@@ -410,12 +557,16 @@ impl Store {
             let result = change(&mut transaction)?;
             let mut changes = transaction.changes;
             changes.retain(|key, value| memory.entries.get(key) != value.as_ref());
-            let (mut plugin, mut host) = (memory.plugin, memory.host);
+            let mut host = memory.host;
+            // Old and new usage of each owner this mutation touches.
+            let mut owners: BTreeMap<Owner, (Usage, Usage)> = BTreeMap::new();
             for (key, value) in &changes {
-                let usage = if host_namespace(&key.0) {
-                    &mut host
-                } else {
-                    &mut plugin
+                let usage = match owner(&key.0) {
+                    None => &mut host,
+                    Some(owner) => {
+                        let current = memory.owners.get(&owner).copied().unwrap_or_default();
+                        &mut owners.entry(owner).or_insert((current, current)).1
+                    }
                 };
                 if let Some(old) = memory.entries.get(key) {
                     usage.entries -= 1;
@@ -427,9 +578,11 @@ impl Store {
                     usage.bytes += entry_size(key, value);
                 }
             }
-            check(&plugin, &PLUGIN_QUOTA)?;
-            check(&host, &HOST_QUOTA)?;
-            (result, changes, plugin, host)
+            check(&host, &HOST_QUOTA, "host")?;
+            for (owner, (old, new)) in &owners {
+                check_growth(old, new, &self.0.quotas.get(owner), owner)?;
+            }
+            (result, changes, owners, host)
         };
         if !changes.is_empty() {
             check_deadline(deadline)?;
@@ -450,7 +603,13 @@ impl Store {
                     None => memory.entries.remove(&key),
                 };
             }
-            memory.plugin = plugin;
+            for (owner, (_, usage)) in owners {
+                if usage == Usage::default() {
+                    memory.owners.remove(&owner);
+                } else {
+                    memory.owners.insert(owner, usage);
+                }
+            }
             memory.host = host;
         }
         committed(&result);
@@ -823,7 +982,7 @@ fn decode(bytes: &[u8]) -> io::Result<Entries> {
     let mut bytes = &bytes[MAGIC.len()..];
     let count = u32::from_le_bytes(take(&mut bytes, 4)?.try_into().unwrap()) as usize;
     // Version 1 shared one 4096-entry limit between plugin and host data.
-    if count > PLUGIN_QUOTA.entries {
+    if count > DEFAULT_QUOTA.entries {
         return Err(invalid("extension store exceeds 4096 entries"));
     }
     let mut entries = Entries::new();
@@ -931,6 +1090,7 @@ mod tests {
         fn config(&self) -> StorageConfig {
             StorageConfig {
                 path: self.0.join("state"),
+                quotas: Quotas::default(),
             }
         }
     }
@@ -968,9 +1128,59 @@ mod tests {
         assert_eq!(
             parse(lua.load("{path='state.bin'}").eval().unwrap()).unwrap(),
             Some(StorageConfig {
-                path: "state.bin".into()
+                path: "state.bin".into(),
+                quotas: Quotas::default(),
             })
         );
+    }
+
+    #[test]
+    fn quota_config_sets_a_default_and_per_plugin_overrides() {
+        let lua = Lua::new();
+        for source in [
+            "{path='a', quota=1}",
+            "{path='a', quota={typo=1}}",
+            "{path='a', quota={entries=0}}",
+            "{path='a', quota={entries=1.5}}",
+            "{path='a', quota={bytes=2^31}}",
+            "{path='a', quota={plugins=1}}",
+            "{path='a', quota={plugins={['bad.name']={entries=1}}}}",
+            "{path='a', quota={plugins={[1]={entries=1}}}}",
+            "{path='a', quota={plugins={p=1}}}",
+            "{path='a', quota={plugins={p={plugins={}}}}}",
+        ] {
+            assert!(parse(lua.load(source).eval().unwrap()).is_err(), "{source}");
+        }
+        let config = parse(
+            lua.load(
+                "{path='a', quota={entries=10, plugins={big={bytes=4096}, small={entries=2}}}}",
+            )
+            .eval()
+            .unwrap(),
+        )
+        .unwrap()
+        .unwrap();
+        let default = Quota {
+            entries: 10,
+            bytes: DEFAULT_QUOTA.bytes,
+        };
+        assert_eq!(config.quotas.default, default);
+        assert_eq!(
+            config.quotas.get(&Owner::Plugin("big".into())),
+            Quota {
+                entries: 10,
+                bytes: 4096
+            }
+        );
+        assert_eq!(
+            config.quotas.get(&Owner::Plugin("small".into())),
+            Quota {
+                entries: 2,
+                bytes: DEFAULT_QUOTA.bytes
+            }
+        );
+        assert_eq!(config.quotas.get(&Owner::Plugin("other".into())), default);
+        assert_eq!(config.quotas.get(&Owner::Script), default);
     }
 
     #[test]
@@ -1062,7 +1272,7 @@ mod tests {
         assert!(
             store
                 .mutate(deadline(), |entries| {
-                    for i in 0..PLUGIN_QUOTA.entries {
+                    for i in 0..DEFAULT_QUOTA.entries {
                         entries.insert(("n".into(), i.to_string()), vec![]);
                     }
                     Ok(())
@@ -1217,7 +1427,7 @@ mod tests {
             Ok(())
         });
         assert!(result.unwrap_err().to_string().contains("injected"));
-        let usage = (store.memory().plugin, store.memory().host);
+        let usage = store.memory().owners[&Owner::Script];
         assert_eq!(
             store.get("n".into(), "k".into(), deadline()).unwrap(),
             Some(b"old".to_vec())
@@ -1226,7 +1436,7 @@ mod tests {
             .load("rift.store.set('n', 'other', 'v')")
             .exec()
             .unwrap();
-        assert_eq!(usage.0.entries, 1);
+        assert_eq!(usage.entries, 1);
         drop(store);
         let reopened = Store::open(Some(&config)).unwrap();
         assert_eq!(
@@ -1275,7 +1485,15 @@ mod tests {
         assert_eq!(fs::read(backup_path(&config.path)).unwrap(), snapshot);
         let reopened = Store::open(Some(&config)).unwrap();
         assert_eq!(reopened.memory().entries, entries);
-        assert_eq!(reopened.memory().plugin.entries, 2);
+        assert_eq!(
+            reopened
+                .memory()
+                .owners
+                .values()
+                .map(|usage| usage.entries)
+                .sum::<usize>(),
+            2
+        );
         assert_eq!(reopened.memory().host.entries, 1);
     }
 
@@ -1373,11 +1591,85 @@ mod tests {
     }
 
     #[test]
+    fn each_plugin_and_the_script_have_their_own_quota() {
+        let temp = Temporary::new();
+        let mut config = temp.config();
+        config.quotas.default.entries = 2;
+        config.quotas.plugins.insert(
+            "big".into(),
+            Quota {
+                entries: 3,
+                bytes: DEFAULT_QUOTA.bytes,
+            },
+        );
+        let store = Store::open(Some(&config)).unwrap();
+        let fill = |store: &Store, namespace: &str, count: usize| {
+            store.mutate(deadline(), |entries| {
+                for i in 0..count {
+                    entries.insert((namespace.into(), i.to_string()), vec![]);
+                }
+                Ok(())
+            })
+        };
+        fill(&store, "plugin.a.one", 1).unwrap();
+        fill(&store, "plugin.a.two", 1).unwrap();
+        // Namespaces of one plugin share its quota.
+        let error = fill(&store, "plugin.a.three", 1).unwrap_err().to_string();
+        assert!(
+            error.contains("plugin \"a\" data exceeds 2 entries"),
+            "{error}"
+        );
+        // Another plugin, the script and an overridden plugin are unaffected.
+        fill(&store, "plugin.b.one", 2).unwrap();
+        fill(&store, "script", 2).unwrap();
+        assert!(
+            fill(&store, "other", 1)
+                .unwrap_err()
+                .to_string()
+                .contains("configuration script")
+        );
+        fill(&store, "plugin.big.one", 3).unwrap();
+        assert!(fill(&store, "plugin.big.two", 1).is_err());
+        assert_eq!(store.memory().owners.len(), 4);
+        // Removing an owner's last entry forgets it.
+        store
+            .mutate(deadline(), |entries| {
+                entries.remove(&("plugin.b.one".into(), "0".into()));
+                entries.remove(&("plugin.b.one".into(), "1".into()));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(store.memory().owners.len(), 3);
+        drop(store);
+
+        // A lowered quota does not fail startup; the owner can only shrink.
+        config.quotas.default.entries = 1;
+        let store = Store::open(Some(&config)).unwrap();
+        // Replacing a value keeps the entry count, so it is still allowed.
+        store
+            .mutate(deadline(), |entries| {
+                entries.insert(("plugin.a.one".into(), "0".into()), b"larger".to_vec());
+                Ok(())
+            })
+            .unwrap();
+        assert!(fill(&store, "plugin.a.three", 1).is_err());
+        store
+            .mutate(deadline(), |entries| {
+                Ok(entries.remove(&("plugin.a.one".into(), "0".into())))
+            })
+            .unwrap();
+        assert!(
+            fill(&store, "plugin.a.three", 1).is_err(),
+            "still at the lowered limit"
+        );
+    }
+
+    #[test]
     fn host_data_has_its_own_quota() {
         let store = Store::open(None).unwrap();
         store
             .mutate(deadline(), |entries| {
-                for i in 0..PLUGIN_QUOTA.entries {
+                for i in 0..DEFAULT_QUOTA.entries {
                     entries.insert(("n".into(), i.to_string()), vec![]);
                 }
                 Ok(())
@@ -1394,21 +1686,21 @@ mod tests {
         plugin("0").unwrap();
         store
             .mutate(deadline(), |entries| {
-                for i in 0..PLUGIN_QUOTA.entries {
+                for i in 0..DEFAULT_QUOTA.entries {
                     entries.insert((MEMBER_NAMESPACE.into(), i.to_string()), vec![]);
                 }
                 Ok(())
             })
             .unwrap();
-        assert_eq!(store.memory().host.entries, PLUGIN_QUOTA.entries);
+        assert_eq!(store.memory().host.entries, DEFAULT_QUOTA.entries);
         let host = store.mutate(deadline(), |entries| {
-            for i in 0..=HOST_QUOTA.entries - PLUGIN_QUOTA.entries {
+            for i in 0..=HOST_QUOTA.entries - DEFAULT_QUOTA.entries {
                 entries.insert(("rift.other".into(), i.to_string()), vec![]);
             }
             Ok(())
         });
         assert!(host.unwrap_err().to_string().contains("host data"));
-        assert_eq!(store.memory().host.entries, PLUGIN_QUOTA.entries);
+        assert_eq!(store.memory().host.entries, DEFAULT_QUOTA.entries);
         // Freeing plugin space does not depend on host data.
         store
             .mutate(deadline(), |entries| {

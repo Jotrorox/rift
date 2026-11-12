@@ -374,10 +374,34 @@ integers in −(2^53−1) through 2^53−1, ensuring exact LuaJIT numbers; inval
 or overflow fail without mutation.
 A read followed by a write is not atomic; use increment for concurrent counters.
 Namespaces and keys are UTF-8 strings of 1–128 bytes. Values have a 64 KiB limit.
-Plugin data, everything in `rift.store` namespaces, is limited to 4096 entries
-and 1 MiB, counting each entry as its namespace, key and value plus 8 bytes.
-Host-owned data has a separate limit of 65536 entries and 8 MiB. Exceeding a
-limit fails without changing committed state.
+Quotas apply per owner, counting each entry as its namespace, key and value
+plus 8 bytes. The configuration script's `rift.store` data is one owner, and
+each persistent plugin's `plugin.<name>.*` namespaces are another, so one plugin
+filling its space cannot block another or the script. By default each owner may
+hold 4096 entries and 1 MiB; `storage.quota` changes this:
+
+```lua
+storage = {
+    path = "extensions.state",
+    quota = {
+        entries = 8192,             -- every owner, default 4096
+        bytes = 2 * 1024 * 1024,    -- every owner, default 1048576
+        plugins = {
+            -- per plugin; a missing field keeps the value above
+            relaxoban = { entries = 100000, bytes = 32 * 1024 * 1024 },
+        },
+    },
+}
+```
+
+`entries` may be 1 to 1048576 and `bytes` 1 to 1073741824 (1 GiB). Memory
+mirrors the whole store, so the sum of what owners actually use is kept in RAM.
+Host-owned data has a fixed, separate limit of 65536 entries and 8 MiB.
+Exceeding a limit fails without changing committed state. Lowering a quota below
+what an owner already stores does not fail startup: its existing entries stay,
+and deletes and writes that do not add entries or bytes keep working, but writes
+that would grow it are refused until it is back under the limit. Changing `storage` (path or quotas)
+requires a restart.
 
 Each mutation commits only the entries it changes, in one SQLite transaction
 that is synced to disk (WAL mode, `synchronous=FULL`) before the call returns.
