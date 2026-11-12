@@ -297,9 +297,12 @@ async fn wait_state(manager: &ManagedServers, expected: &str) {
 /// only delays failing runs; passing ones return as soon as the event happens.
 const EVENT_DEADLINE: Duration = Duration::from_secs(10);
 
+/// Waits until the helper has written `path`, not merely created it: the
+/// helper opens a file before writing its line, and a test that stops the
+/// process in between would read an empty file.
 async fn wait_file(path: &Path) {
     let deadline = Instant::now() + EVENT_DEADLINE;
-    while !path.exists() {
+    while !fs::metadata(path).is_ok_and(|file| file.len() > 0) {
         assert!(Instant::now() < deadline, "missing {}", path.display());
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
