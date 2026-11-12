@@ -14,7 +14,7 @@
 //! | Key | Behaviour |
 //! | --- | --- |
 //! | `tag` (string) | `init` reports `init <tag>`; a hot reload adopts the new configuration and reports `reload <tag>` (`-` without a tag). `shutdown(reason)` reports `shutdown <reason>`. |
-//! | `decide` | Object from `login`, `initial_server`, `before_transfer` to the action that hook returns, in the serde form of [`Action`]: `"continue"`, `{"deny": "..."}`, `{"server": "..."}`. Missing hooks continue. |
+//! | `decide` | Object from `login`, `initial_server`, `before_transfer` (and `command`, which then answers this instead of `hi <args>`) to the action that hook returns, in the serde form of [`Action`]: `"continue"`, `{"deny": "..."}`, `{"server": "..."}`. A `deny` or `message` holding an object or a list is a JSON text component, returned through the `-json` form. Missing hooks continue. |
 //! | `slow` | Hooks that busy-wait 300 ms (calling the host clock) before answering. |
 //! | `fail` | Object from hook name to `"handler"` (the handler fails with an error containing `database down`) or `"fatal"` (a trap: the instance fails; the Lua guest exhausts its memory limit, the WebAssembly guest panics). WebAssembly hooks have no error result, so its "handler" failure answers a decision the hook rejects, carrying `database down`. |
 //! | `commands` | List of `{name, permission, suggest}`; `suggest` is `"none"`, `"players"`, `"servers"`, `"dynamic"` or a list of strings. Every command answers `{"message": "hi <args>"}`; a dynamic `suggest` returns `alpha`, `beta`, `gamma`. |
@@ -25,6 +25,8 @@
 //! | `route_reject` | `{ip, reason}`: `route` rejects connections from `ip` with `reason`. |
 //! | `status_motd` | `status` replaces the MOTD with this text. |
 //! | `http` | `{path, body}`: `http` answers that path with status 200, `text/plain` and `body`. |
+//! | `chat` | Object: the guest handles the `chat` hook (installed with [`Fixture::install_chat`]). Every attempt reports `chat <kind> <command or -> <text>`. Text containing `chat.block` (a string) then goes through `slow` and `fail` as hook `chat` (reporting `chat`) and answers `decide.chat`; other text continues. |
+//! | `rich` | A JSON text component. `join` sends it to the joining player with `players.message-json`, `action-bar-json`, `broadcast-json` and `kick-json`, in that order, and reports `rich <message> <action bar> <broadcast> <kick>` (each result, or `error(<message>)`). |
 //!
 //! Every hook the guest handles reports its name (`login`, `command`, `join`,
 //! ...) before acting. The guest registers route, status, http, login,
@@ -45,6 +47,7 @@ use crate::{
     config::Config,
     extensions::{ExtensionSession, Extensions, PlayerAction},
     messaging::{Broker, Subscription},
+    text::Text,
 };
 use serde_json::json;
 use std::{
@@ -69,6 +72,14 @@ pub(crate) trait Fixture: Sync {
     /// top-level keys such as `hot_reload` and `[deadlines]`/`[failure]`
     /// tables), then any tables of the engine's own, and the guest itself.
     fn install(&self, folder: &Path, name: &str, extra: &str);
+
+    /// [`Fixture::install`] for a guest that handles the `chat` hook. Where
+    /// the handler is registered when the guest starts, as in Lua, that is
+    /// the same guest; a WebAssembly component registers by exporting
+    /// `chat`, so it is another build.
+    fn install_chat(&self, folder: &Path, name: &str, extra: &str) {
+        self.install(folder, name, extra);
+    }
 }
 
 fn directory() -> PathBuf {
@@ -91,6 +102,20 @@ fn config(extra: &str, plugins: Vec<PluginSpec>) -> Config {
     config
 }
 
+/// [`config`] with `authentication.signed_chat = false`, which `chat` hooks
+/// need. The plugins carry the setting themselves, as `Config` gives it to
+/// the ones it loads.
+fn unsigned_config(extra: &str, plugins: Vec<PluginSpec>) -> Config {
+    let base = BASE.replace(
+        "online_mode = true",
+        "online_mode = true, signed_chat = false",
+    );
+    let mut config =
+        Config::from_lua(&format!("return {{ {base}, {extra} }}"), "conformance.lua").unwrap();
+    config.plugins = plugins;
+    config
+}
+
 /// A spec for a plugin folder that already holds its `plugin.toml`.
 pub(crate) fn installed(folder: &Path, config_json: &str) -> PluginSpec {
     let name = folder.file_name().unwrap().to_str().unwrap().to_owned();
@@ -103,6 +128,7 @@ pub(crate) fn installed(folder: &Path, config_json: &str) -> PluginSpec {
         config_json: config_json.into(),
         fingerprint: "one".into(),
         online_mode: true,
+        signed_chat: true,
     }
 }
 
@@ -154,6 +180,17 @@ impl<'a> Lab<'a> {
         std::fs::create_dir_all(&folder).unwrap();
         self.fixture.install(&folder, name, extra);
         installed(&folder, &config.to_string())
+    }
+
+    /// A guest that handles `chat`, as configured with
+    /// `authentication.signed_chat = false`.
+    fn chat_plugin(&self, name: &str, extra: &str, config: serde_json::Value) -> PluginSpec {
+        let folder = self.root.join("plugins").join(name);
+        std::fs::create_dir_all(&folder).unwrap();
+        self.fixture.install_chat(&folder, name, extra);
+        let mut spec = installed(&folder, &config.to_string());
+        spec.signed_chat = false;
+        spec
     }
 
     fn extensions(&self, config: &Config) -> std::io::Result<Extensions> {
@@ -523,6 +560,79 @@ pub(crate) async fn command_names_have_one_owner(fixture: &dyn Fixture) {
     );
 }
 
+pub(crate) async fn rich_text_reaches_players(fixture: &dyn Fixture) {
+    let mut lab = Lab::new(fixture);
+    let banned = json!({
+        "text": "Banned",
+        "color": "red",
+        "extra": [{"text": "\nReason: spam", "color": "gray", "italic": true}],
+    });
+    let invite = json!([
+        {"text": "Alex invited you. "},
+        {
+            "text": "[Accept]",
+            "color": "green",
+            "click_event": {"action": "run_command", "command": "/party accept Alex"},
+            "hover_event": {"action": "show_text", "value": {"text": "Join", "bold": true}},
+        },
+    ]);
+    let plugins = vec![
+        lab.plugin(
+            "rich",
+            "",
+            json!({
+                "decide": {"login": {"deny": banned}, "command": {"message": invite}},
+                "commands": [command("party", json!("none"))],
+                "grant": [[uuid(1), "test.command"]],
+                "rich": invite,
+            }),
+        ),
+        // An empty component is not a valid decision: on_failure applies.
+        lab.plugin(
+            "empty",
+            "",
+            json!({"decide": {"initial_server": {"deny": {}}}}),
+        ),
+    ];
+    let runtime = lab.runtime(&config("", plugins)).await;
+    assert_eq!(
+        session(&runtime, 1).decision("login").await.unwrap(),
+        Action::Deny(Text::Component(banned))
+    );
+    let error = session(&runtime, 1)
+        .decision("initial_server")
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("must not be empty"), "{error}");
+    assert_eq!(
+        session(&runtime, 1).command("party").await.unwrap(),
+        Action::Message(Text::Component(invite.clone()))
+    );
+
+    let (_presence, mut actions) = runtime
+        .players()
+        .register(1, &[1; 16], "Player1", 774, "lobby");
+    session(&runtime, 1).ready("lobby").await;
+    lab.wait(|entry| entry == "rich:rich true true 1 true")
+        .await;
+    let mut received = Vec::new();
+    for _ in 0..4 {
+        let action = timeout(Duration::from_secs(5), actions.recv());
+        received.push(action.await.unwrap().unwrap());
+    }
+    let text = Text::Component(invite);
+    assert_eq!(
+        received,
+        [
+            PlayerAction::Message(text.clone()),
+            PlayerAction::ActionBar(text.clone()),
+            PlayerAction::Message(text.clone()),
+            PlayerAction::Kick(text),
+        ]
+    );
+    runtime.plugins().shutdown().await;
+}
+
 pub(crate) async fn commands_check_permissions(fixture: &dyn Fixture) {
     let mut lab = Lab::new(fixture);
     let plugins = vec![lab.plugin(
@@ -564,6 +674,41 @@ pub(crate) async fn commands_check_permissions(fixture: &dyn Fixture) {
         ["greeter:command"],
         "denied commands never reach the plugin"
     );
+    runtime.plugins().shutdown().await;
+}
+
+/// An empty permission opens a command to every player: one without any node
+/// sees, completes and runs it.
+pub(crate) async fn commands_without_permission_are_open(fixture: &dyn Fixture) {
+    let mut lab = Lab::new(fixture);
+    let plugins = vec![lab.plugin(
+        "greeter",
+        "",
+        json!({
+            "commands": [
+                {"name": "version", "permission": "", "suggest": ["alpha", "beta"]},
+                command("hello", json!("none")),
+            ],
+        }),
+    )];
+    let runtime = lab.runtime(&config("", plugins)).await;
+    let registration = runtime.plugins().active()[0].registration().unwrap();
+    assert_eq!(registration.commands[0].permission, "");
+    let stranger = session(&runtime, 2);
+    assert_eq!(stranger.visible_commands(), [("version".to_owned(), true)]);
+    let suggestions = stranger.suggest("version", "al", Vec::new).await.unwrap();
+    assert_eq!(suggestions.len(), 1);
+    assert_eq!(suggestions[0].text, "alpha");
+    assert_eq!(
+        stranger.command("version now").await.unwrap(),
+        Action::Message("hi now".into())
+    );
+    assert_eq!(
+        stranger.command("hello").await.unwrap(),
+        Action::Message("You do not have permission to use this command.".into()),
+        "commands with a permission still need it"
+    );
+    assert_eq!(lab.calls("command"), ["greeter:command"]);
     runtime.plugins().shutdown().await;
 }
 
@@ -760,6 +905,204 @@ pub(crate) async fn route_status_and_http_follow_the_script(fixture: &dyn Fixtur
     runtime.plugins().shutdown().await;
 }
 
+fn chat_config(block: &str, answer: serde_json::Value) -> serde_json::Value {
+    json!({"chat": {"block": block}, "decide": {"chat": answer}})
+}
+
+/// The chat hook: the configuration script, then the plugins that handle
+/// chat, in order; the first deny wins and plugins without a handler are
+/// never asked.
+pub(crate) async fn chat_hooks_follow_the_chain(fixture: &dyn Fixture) {
+    use crate::extensions::ChatKind;
+    let mut lab = Lab::new(fixture);
+    let rich = json!({"text": "Muted", "color": "red"});
+    let mut bystander = lab.plugin("bystander", "", json!({}));
+    bystander.signed_chat = false;
+    let plugins = vec![
+        lab.chat_plugin("first", "", chat_config("spam", json!({"deny": "no spam"}))),
+        bystander,
+        lab.chat_plugin(
+            "second",
+            "",
+            chat_config("mute", json!({"deny": rich.clone()})),
+        ),
+    ];
+    let script = "extensions = { api_version = 2, chat = function(ctx) if ctx.kind == 'message' and ctx.text == 'script' then return { deny = 'script says no' } end end }";
+    let runtime = lab.runtime(&unsigned_config(script, plugins)).await;
+    let active = runtime.plugins().active();
+    assert!(active[0].registration().unwrap().wants(Hook::Chat));
+    assert!(
+        !active[1].registration().unwrap().wants(Hook::Chat),
+        "a plugin without a chat handler is not registered for chat"
+    );
+    assert!(runtime.plugins().may_handle(Hook::Chat));
+    let mut player = session(&runtime, 1);
+    player.context.server = Some("lobby".into());
+    assert!(player.handles_chat());
+
+    assert_eq!(
+        player.chat(ChatKind::Message, "hello").await.unwrap(),
+        Action::Continue
+    );
+    let asked: Vec<_> = lab
+        .reports()
+        .into_iter()
+        .filter(|entry| !entry.contains(":init "))
+        .collect();
+    assert_eq!(
+        asked,
+        ["first:chat message - hello", "second:chat message - hello"],
+        "every chat plugin is asked, the bystander never"
+    );
+    assert_eq!(
+        player.chat(ChatKind::Message, "spam!").await.unwrap(),
+        Action::Deny("no spam".into())
+    );
+    assert_eq!(
+        lab.calls("chat message - spam!"),
+        ["first:chat message - spam!"],
+        "a deny stops the chain"
+    );
+    assert_eq!(
+        player.chat(ChatKind::Message, "mute me").await.unwrap(),
+        Action::Deny(Text::Component(rich))
+    );
+    // A backend command: its root name and the rest, as for `command`.
+    assert_eq!(
+        player
+            .chat(ChatKind::Command, "msg Alex  spam")
+            .await
+            .unwrap(),
+        Action::Deny("no spam".into())
+    );
+    assert_eq!(
+        lab.calls("chat command msg msg Alex  spam"),
+        ["first:chat command msg msg Alex  spam"]
+    );
+    assert_eq!(
+        player.chat(ChatKind::Message, "script").await.unwrap(),
+        Action::Deny("script says no".into())
+    );
+    assert!(
+        lab.calls("chat message - script").is_empty(),
+        "a script deny stops the chain"
+    );
+    runtime.plugins().shutdown().await;
+}
+
+/// An answer `chat` does not accept, a failure and a missed deadline apply
+/// the manifest's policies: by default the message is not let through.
+pub(crate) async fn chat_failures_and_deadlines_apply_the_policy(fixture: &dyn Fixture) {
+    use crate::extensions::ChatKind;
+    let lab = Lab::new(fixture);
+    let invalid = chat_config("x", json!({"server": "game"}));
+    let mut slow = chat_config("x", json!({"deny": "late"}));
+    slow["slow"] = json!(["chat"]);
+
+    let strict = lab
+        .runtime(&unsigned_config(
+            "",
+            vec![lab.chat_plugin("strict", "", invalid.clone())],
+        ))
+        .await;
+    let player = session(&strict, 1);
+    let error = player.chat(ChatKind::Message, "x").await.unwrap_err();
+    assert!(error.to_string().contains("strict: chat:"), "{error}");
+    assert_eq!(
+        strict.plugins().active()[0].status(),
+        Status::Running,
+        "an invalid answer is not fatal"
+    );
+    assert_eq!(
+        player.chat(ChatKind::Message, "fine").await.unwrap(),
+        Action::Continue
+    );
+    strict.plugins().shutdown().await;
+
+    let tolerant = lab
+        .runtime(&unsigned_config(
+            "",
+            vec![lab.chat_plugin(
+                "tolerant",
+                "[failure]\non_failure = \"continue\"\n",
+                invalid,
+            )],
+        ))
+        .await;
+    assert_eq!(
+        session(&tolerant, 1)
+            .chat(ChatKind::Message, "x")
+            .await
+            .unwrap(),
+        Action::Continue
+    );
+    tolerant.plugins().shutdown().await;
+
+    // The default deadline is 50 ms; the guest takes 300 ms.
+    let late = lab
+        .runtime(&unsigned_config(
+            "",
+            vec![lab.chat_plugin("late", "", slow.clone())],
+        ))
+        .await;
+    let started = Instant::now();
+    let error = session(&late, 1)
+        .chat(ChatKind::Message, "x")
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("exceeded 50 ms"), "{error}");
+    assert!(started.elapsed() < Duration::from_millis(250));
+    late.plugins().shutdown().await;
+
+    let patient = lab
+        .runtime(&unsigned_config(
+            "",
+            vec![
+                lab.chat_plugin(
+                    "skipped",
+                    "[deadlines]\nchat = 20\n[failure]\non_timeout = \"continue\"\n",
+                    slow.clone(),
+                ),
+                lab.chat_plugin("patient", "[deadlines]\nchat = 2000\n", slow),
+            ],
+        ))
+        .await;
+    assert_eq!(
+        session(&patient, 1)
+            .chat(ChatKind::Message, "x")
+            .await
+            .unwrap(),
+        Action::Deny("late".into())
+    );
+    patient.plugins().shutdown().await;
+}
+
+/// A plugin that handles chat starts only with
+/// `authentication.signed_chat = false`; one that does not starts either way
+/// and is never asked.
+pub(crate) async fn chat_hooks_need_unsigned_chat(fixture: &dyn Fixture) {
+    let lab = Lab::new(fixture);
+    let mut signed = lab.chat_plugin("mute", "", chat_config("x", json!({"deny": "no"})));
+    signed.signed_chat = true;
+    let runtime = lab.extensions(&config("", vec![signed])).unwrap();
+    let error = runtime.plugins().start().await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("the chat hook needs authentication.signed_chat = false"),
+        "{error}"
+    );
+    assert!(runtime.plugins().active().is_empty());
+
+    // The ordinary guest has no chat handler, whatever its configuration.
+    let plain = lab.plugin("plain", "", json!({}));
+    let runtime = lab.runtime(&config("", vec![plain])).await;
+    assert!(!runtime.plugins().active()[0].registration().unwrap().chat);
+    assert!(!runtime.plugins().may_handle(Hook::Chat));
+    assert!(!session(&runtime, 1).handles_chat());
+    runtime.plugins().shutdown().await;
+}
+
 fn copy(from: &Path, to: &Path) {
     std::fs::create_dir_all(to).unwrap();
     for entry in std::fs::read_dir(from).unwrap() {
@@ -935,11 +1278,27 @@ macro_rules! conformance_tests {
         }
 
         #[tokio::test]
+        async fn rich_text_reaches_players() {
+            if !$ready {
+                return;
+            }
+            $crate::plugins::conformance::rich_text_reaches_players(&$fixture).await;
+        }
+
+        #[tokio::test]
         async fn commands_check_permissions() {
             if !$ready {
                 return;
             }
             $crate::plugins::conformance::commands_check_permissions(&$fixture).await;
+        }
+
+        #[tokio::test]
+        async fn commands_without_permission_are_open() {
+            if !$ready {
+                return;
+            }
+            $crate::plugins::conformance::commands_without_permission_are_open(&$fixture).await;
         }
 
         #[tokio::test]
@@ -967,6 +1326,31 @@ macro_rules! conformance_tests {
                 &$fixture,
             )
             .await;
+        }
+
+        #[tokio::test]
+        async fn chat_hooks_follow_the_chain() {
+            if !$ready {
+                return;
+            }
+            $crate::plugins::conformance::chat_hooks_follow_the_chain(&$fixture).await;
+        }
+
+        #[tokio::test]
+        async fn chat_failures_and_deadlines_apply_the_policy() {
+            if !$ready {
+                return;
+            }
+            $crate::plugins::conformance::chat_failures_and_deadlines_apply_the_policy(&$fixture)
+                .await;
+        }
+
+        #[tokio::test]
+        async fn chat_hooks_need_unsigned_chat() {
+            if !$ready {
+                return;
+            }
+            $crate::plugins::conformance::chat_hooks_need_unsigned_chat(&$fixture).await;
         }
 
         #[tokio::test]

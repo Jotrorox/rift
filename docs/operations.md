@@ -1,17 +1,29 @@
 # Operating a Rift release
 
-Releases provide standalone executables for Linux x86_64, macOS ARM64 and Windows
-x86_64. Run `rift --license` to view the embedded licenses. Documentation and
-examples are available in the repository. The [README](../README.md) covers
-protocol support and backend configuration; this guide covers daily administration.
+Each release provides these assets for Linux x86_64, macOS ARM64 and Windows x86_64:
+
+| Asset | Contents |
+| --- | --- |
+| `rift-linux-x86_64.tar.gz`, `rift-macos-aarch64.tar.gz`, `rift-windows-x86_64.zip` | `rift` (`rift.exe` on Windows), `README.md`, `LICENSE`, `THIRD_PARTY_NOTICES`, `docs/` and `examples/` |
+| `rift-linux-x86_64`, `rift-macos-aarch64`, `rift-windows-x86_64.exe` | The same executable on its own, for scripted installs |
+| `SHA256SUMS` | SHA-256 checksums of every other asset |
+
+Every asset also has a signed [build provenance attestation](#verifying-a-download).
+Keep the archive's files together so relative links between the guides and
+examples keep working; the raw benchmark samples and the SDK sources stay
+online. Run `rift --license` to view the embedded licenses. The
+[README](../README.md) covers protocol support and backend configuration; this
+guide covers daily administration.
 
 ## First start
 
-Download the executable for your OS/CPU. On Linux, rename it and make it executable:
+Download the archive for your OS/CPU and `SHA256SUMS` from the same release,
+[verify](#verifying-a-download) it, and extract it into an empty directory.
+On Linux:
 
 ```sh
-mv rift-linux-x86_64 rift
-chmod +x rift
+sha256sum --check --ignore-missing SHA256SUMS
+tar xzf rift-linux-x86_64.tar.gz
 ./rift --version
 ./rift init
 # Edit listener and backend addresses for your server.
@@ -36,7 +48,7 @@ environment as the service (for example `sudo -u rift --preserve-env=...` or
 `systemd-run --property=EnvironmentFile=...`), since it reads that environment:
 
 - **Secrets:** every variable the configuration names is set and has the length
-  startup requires: `forwarding.secret_env` (1–1024 bytes), `admin.token_env`,
+  startup requires: `forwarding.secret_env` (1–1024 bytes, for `velocity` and `bungeeguard`), `admin.token_env`,
   `messaging.principals[].token_env` and `nodes.*.token_env` (32–1024 bytes),
   and `extensions.integrations.*.headers_env` (a valid header value). Output
   names the variables, never their values.
@@ -62,17 +74,37 @@ applies everything. Strict checks create nothing; testing whether a directory is
 writable creates a temporary file and removes it at once. Exit status is
 non-zero when any strict check fails.
 
-On macOS, rename `rift-macos-aarch64` to `rift`, run `chmod +x rift`, then use the
-same commands. On Windows, rename `rift-windows-x86_64.exe` to `rift.exe` and
-run it with `.\rift.exe`.
+On macOS, check with `shasum -a 256 --check --ignore-missing SHA256SUMS`,
+extract with `tar xzf rift-macos-aarch64.tar.gz`, then use the same commands.
+On Windows, compare `Get-FileHash .\rift-windows-x86_64.zip -Algorithm SHA256`
+with the file's line in `SHA256SUMS`, extract it with
+`Expand-Archive .\rift-windows-x86_64.zip -DestinationPath rift`, and run
+`.\rift.exe` inside the `rift` folder. If you use a standalone executable, rename
+it to `rift` (`rift.exe` on Windows) and, outside Windows, run `chmod +x rift`.
 `--version` identifies the Cargo package version; nightly builds may share that
 version, so retain the release tag when reporting issues.
+
+### Verifying a download
+
+`SHA256SUMS` detects a corrupted or incomplete download. Provenance
+attestations also prove that GitHub Actions built the file from this
+repository's release workflow. With the [GitHub CLI](https://cli.github.com/),
+verify any asset before running it:
+
+```sh
+gh attestation verify rift-linux-x86_64.tar.gz --repo Jotrorox/rift \
+  --signer-workflow Jotrorox/rift/.github/workflows/release.yml
+```
+
+The output names the source commit and the workflow run that built the file.
+For a nightly build, use `--signer-workflow Jotrorox/rift/.github/workflows/nightly.yml`.
 
 The generated configuration forwards port 25565 to loopback port 25566.
 Configure that backend as described in the README. For public Paper networks,
 enable online authentication and Velocity modern forwarding using
 [`examples/online.lua`](../examples/online.lua). Rift verifies accounts; private
-Paper backends run `online-mode=false` with `proxies.velocity.online-mode=true`.
+Paper backends run `online-mode=false` with `proxies.velocity.online-mode=true`
+(or BungeeGuard forwarding for networks with versions older than 1.13).
 The generated starter retains unauthenticated offline behavior until these
 settings are enabled.
 [`examples/network.lua`](../examples/network.lua) adds hostname routing, fallback,
@@ -149,6 +181,9 @@ The `servers` permission grants `rift admin servers`, `rift admin start <backend
 and `rift admin stop <backend>` for configured [managed servers](managed-servers.md).
 It also grants `rift admin groups`, `rift admin create <group>` and
 `rift admin remove <instance>` for [service groups](managed-servers.md#service-groups-and-dynamic-instances),
+`rift admin group start <group>`, `rift admin group stop <group>` and
+`rift admin group mode <group> active|dev` for
+[whole groups](managed-servers.md#start-stop-and-dev-mode-for-a-whole-group),
 and `rift admin nodes` for [node agents](nodes.md).
 Creation allocates a port and registers a stopped backend; removal waits for
 child cleanup and refuses players or pending attachments.
@@ -179,7 +214,8 @@ names are unauthenticated and cannot establish account ownership.
 
 ## Server list: MOTD, favicon and player count
 
-By default Rift answers server-list pings itself with the network's player count,
+By default Rift answers server-list pings itself with the network's player count
+(without players a [visibility rule](permissions.md#visibility) hides),
 `limits.max_connections` as the maximum and the description `Rift`. With
 `status_cache` it instead relays the routed backend's response. To set the
 network's own entry, configure `server_list`:
@@ -189,10 +225,10 @@ rift.config.server_list = {
     -- A string (section-sign codes such as "\u{00A7}6" work) or a chat component table.
     motd = { text = "My Network", color = "gold", extra = { { text = "\nNow on 1.21", color = "gray" } } },
     maintenance_motd = "Back soon. Follow @mynetwork for updates.",
-    version = "My Network 1.8-1.21", -- Shown when a client's version is incompatible.
+    version = { mini = "<gold>My Network</gold> <gray>1.8-1.21" }, -- Shown when a client's version is incompatible.
     max_players = 500,               -- Defaults to limits.max_connections.
-    favicon = "icons/network.png",   -- 64x64 PNG up to 16 KiB, relative to rift.lua.
-    sample = { "Survival, Creative", "and Minigames" }, -- Hover text over the player count.
+    favicon = "icons/network.png",   -- 64x64 PNG up to 16 KiB, relative to rift.lua, or a data URL.
+    sample = { { mini = "<green>Survival</green>, <aqua>Creative" }, "and Minigames" }, -- Hover text over the player count.
     hosts = {
         ["survival.example.com"] = { motd = "Survival", favicon = "icons/survival.png" },
         ["*.minigames.example.com"] = { motd = "Minigames", max_players = 200 },
@@ -207,10 +243,20 @@ backends. Rift answers each ping directly and never contacts a backend, so
 then the longest `*.` suffix), and inherit any unset field from the top level.
 During maintenance, `maintenance_motd` replaces `motd`. Pings for a hostname
 with no route keep the reply "No server is configured for this hostname."
+Each text field is a string or a chat component table, including the
+`{ mini = ... }` and `{ legacy = ... }` forms of [styled text](text.md). Clients
+read `version` and `sample` as strings, so Rift writes components there as `§`
+codes, with hex colours as the nearest named colour; a plain string is sent as
+written. The MOTD is rewritten for each pinging client like any component.
+Rift's default MOTDs and version name are the `status.*` entries of its
+[message catalogue](text.md#rifts-own-messages).
 Rift reads favicon files when it loads or reloads the configuration, so replace
-the file and reload to change the icon. It rejects missing files, images that
-are not 64×64 PNGs, and settings that would exceed the protocol's 32767-byte
-status limit.
+the file and reload to change the icon. A favicon can also be the image itself
+as a `data:image/png;base64,...` URL. That is how the dashboard's Server list
+page stores an uploaded icon: it accepts PNG, JPEG, WebP or GIF, scales the
+image to fit 64×64 and saves it in the configuration, so no file has to exist
+next to `rift.lua`. Rift rejects missing files, images that are not 64×64 PNGs,
+and settings that would exceed the protocol's 32767-byte status limit.
 
 For per-ping logic, register a `status` handler. It runs before Rift contacts
 any backend and receives `listener`, `hostname`, `protocol`, `peer_addr`,
@@ -271,8 +317,10 @@ display names from their plugins; Rift only adds players the current backend
 does not list, so a player is never listed twice and moving between servers
 needs no cleanup. Entries Rift adds show the player's skin when authentication
 is enabled and the default skin otherwise, with full signal bars and no game
-mode or display name. Vanished players remain hidden from their own server's list,
-but Rift lists them to players on other servers.
+mode or display name. A player whose
+[visibility rule](permissions.md#visibility) hides them from a viewer is not
+listed to that viewer, nor counted in `{online}` and `{server_online}`; their
+own server's list is the backend's (a vanish plugin there hides them).
 
 Configuration reloads apply to connected players. Removing `tab_list` removes
 Rift's entries and blanks the header and footer, after which backends' own
@@ -371,9 +419,9 @@ results without logging credentials.
 ## Linux systemd service
 
 The supplied [unit](../examples/rift.service) uses an unprivileged `rift` account
-and root-owned configuration. Run these commands from a repository checkout on
-a systemd host, with the downloaded executable saved as `rift` and a generated
-`rift.lua`. Create the account only if it does not exist:
+and root-owned configuration. Run these commands on a systemd host from the
+extracted Linux archive, after generating `rift.lua` there. Create the account
+only if it does not exist:
 
 ```sh
 sudo useradd --system --user-group --no-create-home --shell /usr/sbin/nologin rift
@@ -410,6 +458,50 @@ without opening the database; run `sudo -u rift rift check --strict
 /etc/rift/rift.lua` to verify that the database opens or can be created. LuaJIT uses
 executable memory, so do not add `MemoryDenyWriteExecute=true` to this unit.
 
+## Secrets and the processes Rift starts
+
+Rift reads its secrets from environment variables: `admin.token_env`, every
+`messaging.principals[].token_env`, every `nodes.*.token_env`,
+`forwarding.secret_env` and the `headers_env` of
+`extensions.integrations`. A `rift node` agent reads `--token-env` and
+`--forwarding-secret-env`. Rift removes exactly these variables from the
+environment of every managed server it starts, locally and through agents,
+and from the default environment of WebAssembly plugins. Everything else is
+still inherited, so a database password you export for a server plugin
+keeps working; `env` and `inherit_env` on a managed server or service group
+narrow that further (see [managed servers](managed-servers.md#configuration)).
+A variable once used for a secret stays removed until Rift restarts, even if a
+reload stops naming it, because its value is still in Rift's environment.
+
+On Linux Rift also clears its dumpable flag (`PR_SET_DUMPABLE`) as the first
+thing it does, in every mode (`rift`, `rift node`, `rift dev`, `rift admin`).
+Processes of the same user, such as the Minecraft servers Rift starts, then
+cannot read `/proc/<rift pid>/environ` or `/proc/<rift pid>/mem`, or attach
+with `ptrace`, so they cannot recover the secrets from outside either. This has
+two side effects:
+
+- **No core dumps.** A crashing Rift writes no core file, because it would
+  contain every secret. Debug a crash with a build run under a debugger
+  started by root, or reproduce it on a host without production secrets.
+- **No same-user debugging or descriptor inspection.** `gdb -p`, `strace -p`,
+  `perf`, `lsof -p` and monitoring that lists `/proc/<pid>/fd` (open-file
+  counts in process exporters) are refused when they run as Rift's user; run
+  them as root (which has `CAP_SYS_PTRACE`) instead. `/proc/<pid>/status` and
+  `stat` stay readable, so CPU and memory monitoring keeps working.
+
+For a debugging session, start Rift with `RIFT_DUMPABLE=1` to skip this; Rift
+logs a warning at startup. It is read once, before anything else, so a reload
+cannot change it.
+
+This is hygiene, not isolation. Managed servers still run as Rift's user: they
+can read every file Rift can (the configuration, `rift.sqlite3`, the
+messaging private key and anything under `local/`), write Rift's plugins and
+templates, and signal Rift. On Linux, set
+[`isolation`](managed-servers.md#isolation) on groups and managed servers to
+confine them to their own directory; elsewhere, keep untrusted server plugins
+off the host, or run servers on [nodes](nodes.md) under a separate account. macOS and Windows have no equivalent flag; there, a process
+of the same user can read Rift's environment.
+
 ## Container example
 
 The supplied [Dockerfile](../examples/Dockerfile) packages the Linux release
@@ -417,8 +509,7 @@ binary using the release runner's Ubuntu 24.04 runtime baseline. The
 [Compose example](../examples/compose.yaml) runs as UID/GID 65532 with a read-only
 root filesystem, no Linux capabilities, a read-only config directory, a writable
 `rift-state` volume at `/var/lib/rift` and a 40-second stop deadline.
-Download the Linux x86_64 executable as `rift` into a repository
-checkout, make it executable with `chmod +x rift`, then run from that checkout:
+Run from the extracted Linux x86_64 archive:
 
 ```sh
 mkdir config
@@ -599,9 +690,8 @@ during the drain. **Keep the supervisor stop deadline longer than Rift's drain**
 40 seconds in the examples. Apply systemd edits with `systemctl daemon-reload`.
 See systemd's [`ExecReload` and `TimeoutStopSec` documentation](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html).
 
-Download the new executable into a separate directory, rename it to `rift` and
-run `chmod +x rift`. Record both release tags and retain the previous executable.
-From the candidate directory:
+Verify and extract the new release archive into a separate directory. Record
+both release tags and retain the previous archive. From the candidate directory:
 
 ```sh
 # Validate compatibility before touching the running installation.

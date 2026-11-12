@@ -14,7 +14,7 @@ use log::{info, warn};
 use rift_messaging::{Client as Bus, RemoteSubscription};
 use rift_permissions::{
     Applied, Change, ChangeEvent, CompiledSubject, ContextSet, MetaView, Replica, Tristate, Uuid,
-    context::SERVER,
+    context::{GROUP, SERVER},
     replica::{EVICT_AFTER, UpdateOutcome},
     unix_now,
     wire::{
@@ -89,6 +89,8 @@ struct Players {
 
 struct Shared {
     server: String,
+    /// The `group` context filled in with `server`; `None` outside a group.
+    group: Option<String>,
     join_timeout: Duration,
     request_timeout: Duration,
     snapshot_path: Option<PathBuf>,
@@ -131,7 +133,11 @@ impl Client {
     /// Start with the token from the environment variable `config.token_env`.
     /// Must be called inside a tokio runtime. Fails only on unusable
     /// configuration; an unreachable proxy is retried in the background.
+    /// Unset connection fields come from the `RIFT_*` variables first (see
+    /// [`Config::with_environment`]).
     pub fn start(config: Config) -> Result<Self, Error> {
+        let config = config.with_environment();
+        config.check_complete()?;
         let token = std::env::var(&config.token_env).map_err(|_| {
             Error::Config(format!(
                 "environment variable {} is not set",
@@ -149,6 +155,15 @@ impl Client {
             .get(SERVER)
             .expect("just inserted")
             .to_owned();
+        let group = config
+            .group
+            .as_deref()
+            .map(|group| {
+                ContextSet::of(GROUP, group)
+                    .map_err(config_error)
+                    .map(|set| set.get(GROUP).expect("just inserted").to_owned())
+            })
+            .transpose()?;
         for wait in [config.join_timeout, config.request_timeout] {
             if wait.is_zero() || wait > MAX_REQUEST_WAIT {
                 return Err(Error::Config("timeouts must be 1 ms to 120 s".into()));
@@ -166,6 +181,7 @@ impl Client {
         };
         let shared = Arc::new(Shared {
             server,
+            group,
             join_timeout: config.join_timeout,
             request_timeout: config.request_timeout,
             snapshot_path,
@@ -346,16 +362,29 @@ impl Client {
         }
     }
 
-    /// `contexts` with this backend's `server` when it names none.
+    /// `contexts` with this backend's `server` when it names none, and its
+    /// `group` when it names neither: a check for another server is not
+    /// about this server's group.
     fn active<'a>(&self, contexts: &'a ContextSet) -> Cow<'a, ContextSet> {
         if contexts.get(SERVER).is_some() {
             return Cow::Borrowed(contexts);
         }
+        let shared = self.shared();
         let mut active = contexts.clone();
         active
-            .insert(SERVER, &self.shared().server)
+            .insert(SERVER, &shared.server)
             .expect("validated on start");
+        if let Some(group) = &shared.group
+            && contexts.get(GROUP).is_none()
+        {
+            active.insert(GROUP, group).expect("validated on start");
+        }
         Cow::Owned(active)
+    }
+
+    /// This backend's service group, the `group` context, if it has one.
+    pub fn group(&self) -> Option<&str> {
+        self.shared().group.as_deref()
     }
 }
 

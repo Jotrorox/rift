@@ -240,6 +240,22 @@ pub struct Authority {
     notifications: broadcast::Sender<Notification>,
     /// What `GET /api/perms/backends` reports; the bus layer installs it.
     backends: RwLock<Arc<dyn BackendDirectory>>,
+    /// The configuration's service group names, lowercase, for the LuckPerms
+    /// import's `server=<group>` → `group=<group>` mapping.
+    service_groups: RwLock<BTreeSet<String>>,
+}
+
+/// The proxy's own contexts on arrival: `server`, and `group` for an
+/// instance of a service group. `None` when the server name is not a valid
+/// context value; a group name that is not is left out.
+fn server_contexts(server: &str, group: Option<&str>) -> Option<ContextSet> {
+    let mut set = ContextSet::of(context::SERVER, server).ok()?;
+    if let Some(group) = group
+        && let Err(error) = set.insert(context::GROUP, group)
+    {
+        eprintln!("rift: leaving out the group context {group:?}: {error}");
+    }
+    Some(set)
 }
 
 impl Authority {
@@ -274,7 +290,27 @@ impl Authority {
             config: RwLock::new(config.clone()),
             notifications: broadcast::channel(NOTIFICATIONS).0,
             backends: RwLock::new(Arc::new(NoBackends)),
+            service_groups: RwLock::new(BTreeSet::new()),
         })
+    }
+
+    /// The live configuration's service groups, after every committed reload.
+    pub fn set_service_groups<'a>(&self, names: impl IntoIterator<Item = &'a String>) {
+        *self
+            .service_groups
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = names
+            .into_iter()
+            .map(|name| name.to_ascii_lowercase())
+            .collect();
+    }
+
+    /// See [`Authority::set_service_groups`].
+    pub fn service_groups(&self) -> BTreeSet<String> {
+        self.service_groups
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// An authority over a private in-memory database.
@@ -960,16 +996,17 @@ impl Authority {
 
     // Presence and contexts.
 
-    /// A player joined on `server`: mark them online, record their name and
-    /// compile them eagerly. The name write and compilation run on a
-    /// blocking worker when called from the async runtime.
-    pub fn join(self: &Arc<Self>, uuid: Uuid, name: &str, server: &str) {
+    /// A player joined on `server`, an instance of service `group` if it is
+    /// one: mark them online, record their name and compile them eagerly.
+    /// The name write and compilation run on a blocking worker when called
+    /// from the async runtime.
+    pub fn join(self: &Arc<Self>, uuid: Uuid, name: &str, server: &str, group: Option<&str>) {
         {
             let mut state = self.state_mut();
             let online = state.online.entry(uuid).or_default();
             online.sessions += 1;
             online.name = name.to_owned();
-            if let Ok(set) = ContextSet::of(context::SERVER, server) {
+            if let Some(set) = server_contexts(server, group) {
                 online.proxy = set;
             }
             if let Some(arriving) = state.arriving.remove(&uuid)
@@ -995,19 +1032,19 @@ impl Authority {
         }
     }
 
-    /// The player moved to `server`: the proxy contexts restart from the
-    /// server alone (the new backend's Join Game or Respawn refills
+    /// The player moved to `server` (of service `group`, if any): the proxy
+    /// contexts restart from the server and its group alone (the new backend's Join Game or Respawn refills
     /// `dimension` and `gamemode` through
     /// [`Authority::set_session_contexts`]), and backend-reported and
     /// Lua-provided contexts are cleared until they are reported again.
-    pub fn switch_server(&self, uuid: Uuid, server: &str) {
+    pub fn switch_server(&self, uuid: Uuid, server: &str, group: Option<&str>) {
         let mut state = self.state_mut();
         let arriving = state
             .arriving
             .remove(&uuid)
             .filter(|arriving| arriving.server.eq_ignore_ascii_case(server));
         if let Some(online) = state.online.get_mut(&uuid) {
-            online.proxy = ContextSet::of(context::SERVER, server).unwrap_or_default();
+            online.proxy = server_contexts(server, group).unwrap_or_default();
             online.external = arriving.map(|a| a.external).unwrap_or_default();
             online.provided = ContextSet::new();
         }
@@ -1142,7 +1179,7 @@ impl Authority {
         }
     }
 
-    /// Set or clear one of the reserved contexts (`server`, `world`,
+    /// Set or clear one of the reserved contexts (`server`, `group`, `world`,
     /// `dimension`, `gamemode`) the proxy knows for an online player.
     pub fn set_proxy_context(
         &self,

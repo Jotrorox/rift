@@ -321,15 +321,15 @@ async fn player_directory_publishes_joins_switches_and_quits() {
     let uuid = "ab".repeat(16);
     assert_eq!(
         next().await,
-        serde_json::json!({"event": "join", "connection_id": "9", "uuid": uuid, "name": "Alice", "server": "lobby"})
+        serde_json::json!({"event": "join", "connection_id": "9", "uuid": uuid, "name": "Alice", "server": "lobby", "visible_to": null})
     );
     assert_eq!(
         next().await,
-        serde_json::json!({"event": "switch", "connection_id": "9", "uuid": uuid, "name": "Alice", "server": "game", "previous": "lobby"})
+        serde_json::json!({"event": "switch", "connection_id": "9", "uuid": uuid, "name": "Alice", "server": "game", "previous": "lobby", "visible_to": null})
     );
     assert_eq!(
         next().await,
-        serde_json::json!({"event": "quit", "connection_id": "9", "uuid": uuid, "name": "Alice", "server": "game"})
+        serde_json::json!({"event": "quit", "connection_id": "9", "uuid": uuid, "name": "Alice", "server": "game", "visible_to": null})
     );
     assert!(events.try_recv().unwrap().is_none());
 }

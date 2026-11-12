@@ -109,14 +109,97 @@ example and the host's conformance fixture.
 | --- | --- |
 | `handler` exports | Methods of the `Plugin` trait; each has a default. `rift_plugin::export!(T)` exports a `T: Plugin + Default`. |
 | plugin state | Fields of your type. The SDK creates one value with `Default` right before `init` and passes it to every hook as `&mut self`; `shutdown` runs last. |
-| `registration` | `Registration::new().command(...).hooks([...])`; `CommandSpec::new(name).permission(node).suggest(kind)`. |
-| `action` | `Action::Continue`, `Action::deny(..)`, `Action::message(..)`, `Action::server(..)`, `Action::Queue(..)`, `Action::LeaveQueue`. |
+| `registration` | `Registration::new().command(...).hooks([...])`; `CommandSpec::new(name).permission(node).suggest(kind)`; without `permission`, or with an empty node, every player may see and run the command (since 0.1.5). |
+| `action` | `Action::Continue`, `Action::deny(..)`, `Action::deny_json(..)`, `Action::message(..)`, `Action::message_json(..)`, `Action::server(..)`, `Action::Queue(..)`, `Action::LeaveQueue`. The `_json` forms take a `serde_json::Value` or JSON text ([rich text](extensions.md#rich-text)). |
 | configuration JSON | `rift_plugin::config::<T>(json)` decodes with serde. |
 | `players`, `store`, `permissions`, `bus`, `servers`, `timers`, `meta` | Modules of the same names with the generated functions. `store::get_json`/`set_json` and `bus::reply(&message, payload)` are helpers. |
 | `log` | `log::info!` and friends: the SDK installs a logger before `init`. Also re-exported as `rift_plugin::log::info!`. |
 | `result<T, string>` | `Result<T, String>` with the host's message. |
 | WASI | `std::fs` on the granted directories (`/data`, `/host`), clocks and random through the standard library. |
 | `dialogs` export, `players.dialog` | [Dialogs](dialogs.md): `players::show_dialog(target, &serde_json::Value)` (or `players::dialog` with JSON text) and `players::clear_dialog`; clicks reach `Plugin::dialog(DialogResponse)`, whose `values::<T>()` and `payload::<T>()` decode the JSON. No registration needed. |
+| `players.title-json` | `players::title_json(target, &TitleJsonSpec::new(title).subtitle(sub).times(10, 70, 20))` (since 0.1.4); title and subtitle take anything `ToString`, such as a `text` builder or a `serde_json::Value`. |
+| `players.locale` | `players::locale(target) -> Result<Option<String>, String>` (since 0.1.5): the client's language (`en_us`), or `None` while Rift does not know it, which is always the case in `login` and, for clients before 1.20.2, in `join` ([timing](plugins.md#host-api)). |
+| `styled` export | `Plugin::suggest_rich(ctx) -> Vec<RichSuggestion>` and `Plugin::status_rich(ping) -> Option<RichStatusOverride>` (since 0.1.4). Their defaults call `suggest` and `status`; hosts before 0.1.4 get the rich text's words. |
+| `chat` export | `Plugin::chat(ChatAttempt) -> Action` (since 0.1.5), exported only by `rift_plugin::export!(T, chat)`; see [chat](#chat). |
+| rich text | The `text` module: `text::mini`, `text::legacy`, `text::Component` (below). |
+
+## Chat
+
+`Plugin::chat` sees chat messages, and the commands that reach the backend,
+before the backend does ([the hook](plugins.md#chat)). It is the one export
+the SDK does not add by itself, because exporting it is the registration: name
+it in `export!`.
+
+```rust
+use rift_plugin::{Action, ChatAttempt, ChatKind, Plugin};
+
+#[derive(Default)]
+struct Mute {
+    muted: Vec<String>,
+}
+
+impl Plugin for Mute {
+    fn chat(&mut self, attempt: ChatAttempt) -> Action {
+        if attempt.kind == ChatKind::Message && self.muted.contains(&attempt.ctx.uuid) {
+            return Action::deny("You are muted.");
+        }
+        Action::Continue
+    }
+}
+
+rift_plugin::export!(Mute, chat);
+```
+
+`attempt.text` is the message, or the command line without its slash; for a
+command, `attempt.ctx.command` is the root name and `attempt.ctx.args` the
+rest. Answer `Action::Continue`, `Action::deny` or `Action::deny_json`. With
+`export!(Mute)` the component has no `chat` export and the method is never
+called. With `export!(Mute, chat)` Rift asks the plugin about every message
+and starts it only when the proxy sets `authentication.signed_chat = false`.
+
+## Rich text builders
+
+The `-json` functions and answers take a JSON text component. The `text`
+module writes them, with every string escaped:
+
+```rust
+use rift_plugin::{Action, RichSuggestion, TitleJsonSpec, players, text};
+
+// Rift markup, written as {"mini": "...", "args": {...}}; see docs/text.md.
+let welcome = text::mini("<gold>Welcome, <player>!</gold> <gray><click:run_command:/spawn>[Spawn]")
+    .arg("player", &ctx.name)                                // shown as written, never parsed
+    .arg_component("rank", text::legacy("&c[Admin]"));       // a component argument
+players::message_json(&ctx.uuid, &welcome.to_string())?;
+
+// Legacy codes, written as {"legacy": "...", "marker": "&"}; `.marker('§')` for another marker.
+players::title_json(
+    &ctx.uuid,
+    &TitleJsonSpec::new(text::mini("<green>Lobby")).subtitle(text::legacy("&7Have fun")),
+)?;
+
+// A component field by field (1.21.5 spellings; Rift converts for older clients).
+let accept = text::Component::text("[Accept]")
+    .color("green")
+    .bold()
+    .run_command("/party accept Alex")
+    .hover_text("Join Alex's party")
+    .extra(" or ignore it");
+let reply = Action::message_json(accept);
+
+// Rich tooltips through the `styled` export.
+let tip = RichSuggestion::new("lobby").tooltip(text::mini("<gray>The <aqua>main</aqua> lobby"));
+```
+
+`text::Component` has `color`, `bold`, `italic`, `underlined`,
+`strikethrough`, `obfuscated`, `run_command`, `suggest_command`, `open_url`,
+`copy_to_clipboard`, `hover_text` (plain), `hover` (a component), `insertion`,
+`extra` (a child) and `field` (any other key). Every builder implements
+`Display` (its JSON) and converts into `serde_json::Value`, so builders nest.
+
+Markup is only read from an explicit `mini` object: a bare string, as in
+`Action::message_json("<red>hi")`, is shown as written. Pass player input as
+`arg`, never by formatting it into the markup. The tags are listed in
+[Text and markup](text.md).
 
 ## Gotchas
 

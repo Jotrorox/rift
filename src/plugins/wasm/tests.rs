@@ -5,7 +5,8 @@
 //! Guests:
 //! - `conformance-rs` (`tests/fixtures/plugins/conformance-rs`), the
 //!   WebAssembly build of the shared conformance guest, for
-//!   [`conformance_tests!`].
+//!   [`conformance_tests!`], and `conformance-chat-rs`, the same source
+//!   built with its `chat` export, for the scenarios that handle chat.
 //! - `hello-rs`, `hello-c` and `hello-go` (`examples/plugins/hello-*`), run
 //!   through the shared [`conformance::hello_example`] and the WebAssembly
 //!   specifics below. `hello-c` and `hello-go` need a toolchain this test
@@ -16,7 +17,8 @@
 //!   traps, deadlines, stop requests, capabilities and captured output.
 //!
 //! `RIFT_TEST_PLUGIN_WASM_DIR` may hold prebuilt `hello_rs.wasm`,
-//! `conformance_rs.wasm` and `probe_rs.wasm`. Otherwise the Rust guests are
+//! `conformance_rs.wasm`, `conformance_chat_rs.wasm` and `probe_rs.wasm`.
+//! Otherwise the Rust guests are
 //! built here with `cargo build --release --target wasm32-wasip2` into
 //! `target/plugin-fixtures`, when that target is installed; without it the
 //! scenarios print why they were skipped and pass.
@@ -272,6 +274,7 @@ pub(crate) async fn hello_conformance(guest: &Guest) {
     assert_eq!(
         *plugin.registration().unwrap(),
         Registration {
+            chat: false,
             commands: vec![CommandSpec {
                 name: "hello".into(),
                 permission: "hello.use".into(),
@@ -430,6 +433,37 @@ fn conformance_guest() -> Option<PathBuf> {
         .clone()
 }
 
+/// The conformance guest built with its `chat` export
+/// (`tests/fixtures/plugins/conformance-chat-rs`).
+fn conformance_chat_guest() -> Option<PathBuf> {
+    static GUEST: OnceLock<Option<PathBuf>> = OnceLock::new();
+    GUEST
+        .get_or_init(|| {
+            let wasm = build(
+                "tests/fixtures/plugins/conformance-chat-rs/Cargo.toml",
+                "conformance_chat_rs.wasm",
+            );
+            if wasm.is_none() {
+                eprintln!(
+                    "skipping the shared conformance scenarios for wasm: conformance_chat_rs.wasm unavailable (install the wasm32-wasip2 target or put it in RIFT_TEST_PLUGIN_WASM_DIR)"
+                );
+            }
+            wasm
+        })
+        .clone()
+}
+
+fn install_conformance(wasm: PathBuf, folder: &Path, name: &str, extra: &str) {
+    std::fs::copy(wasm, folder.join("plugin.wasm")).unwrap();
+    std::fs::write(
+        folder.join("plugin.toml"),
+        format!(
+            "name = \"{name}\"\nversion = \"1\"\napi = \"0.1\"\nengine = \"wasm\"\nentry = \"plugin.wasm\"\n{extra}"
+        ),
+    )
+    .unwrap();
+}
+
 /// The conformance guest as a WebAssembly plugin folder.
 struct WasmFixture;
 
@@ -440,21 +474,22 @@ impl Fixture for WasmFixture {
 
     fn install(&self, folder: &Path, name: &str, extra: &str) {
         let wasm = conformance_guest().expect("conformance_rs.wasm");
-        std::fs::copy(wasm, folder.join("plugin.wasm")).unwrap();
-        std::fs::write(
-            folder.join("plugin.toml"),
-            format!(
-                "name = \"{name}\"\nversion = \"1\"\napi = \"0.1\"\nengine = \"wasm\"\nentry = \"plugin.wasm\"\n{extra}"
-            ),
-        )
-        .unwrap();
+        install_conformance(wasm, folder, name, extra);
+    }
+
+    fn install_chat(&self, folder: &Path, name: &str, extra: &str) {
+        let wasm = conformance_chat_guest().expect("conformance_chat_rs.wasm");
+        install_conformance(wasm, folder, name, extra);
     }
 }
 
 mod shared {
     use super::*;
 
-    conformance_tests!(WasmFixture, if conformance_guest().is_some());
+    conformance_tests!(
+        WasmFixture,
+        if conformance_guest().is_some() && conformance_chat_guest().is_some()
+    );
 }
 
 #[tokio::test]
@@ -588,7 +623,7 @@ async fn probe_report(runtime: &Extensions, args: &str) -> Report {
     else {
         panic!("probe did not reply with a message");
     };
-    serde_json::from_str(&text).unwrap()
+    serde_json::from_str(&text.to_string()).unwrap()
 }
 
 #[tokio::test]
@@ -696,6 +731,35 @@ async fn invalid_artifacts_fail_with_a_reason() {
     );
     runtime.plugins().shutdown().await;
     assert!(super::precompile(&config.plugins[0]).is_err());
+}
+
+/// `rift check --strict` refuses a component that exports `chat` while chat
+/// is signed, from its exports alone; the ordinary build passes either way.
+#[tokio::test]
+async fn precompiling_a_chat_component_needs_unsigned_chat() {
+    let (Some(chat), Some(plain)) = (conformance_chat_guest(), conformance_guest()) else {
+        return;
+    };
+    let root = directory();
+    let folder = root.join("plugins/mute");
+    std::fs::create_dir_all(&folder).unwrap();
+    install_conformance(chat, &folder, "mute", "");
+    let mut spec = conformance::installed(&folder, "{}");
+    assert!(spec.signed_chat);
+    let error = super::precompile(&spec).unwrap_err();
+    assert!(
+        error.contains(
+            "plugin.wasm exports chat: the chat hook needs authentication.signed_chat = false"
+        ),
+        "{error}"
+    );
+    spec.signed_chat = false;
+    super::precompile(&spec).unwrap();
+
+    let folder = root.join("plugins/plain");
+    std::fs::create_dir_all(&folder).unwrap();
+    install_conformance(plain, &folder, "plain", "");
+    super::precompile(&conformance::installed(&folder, "{}")).unwrap();
 }
 
 #[tokio::test]
@@ -873,5 +937,131 @@ async fn components_show_dialogs_and_receive_clicks_without_registering_a_hook()
         PlayerAction::Message(r#"reply {"answer":"42"} {"round":1}"#.into())
     );
     assert_eq!(instance(&runtime).status(), Status::Running);
+    runtime.plugins().shutdown().await;
+}
+
+#[tokio::test]
+async fn styled_components_answer_with_rich_text_and_titles() {
+    use crate::text::Text;
+    let Some(guest) = probe() else { return };
+    let root = directory();
+    let config = configure(&root, &guest, "", "{}");
+    let runtime = start(&config, &Broker::default()).await;
+    grant(&runtime, 1, "probe.use");
+
+    // `styled.suggest` replaces `handler.suggest`; tooltips are components.
+    let suggestions = session(&runtime, 1, "Alex")
+        .suggest("probe", "", Vec::new)
+        .await
+        .unwrap();
+    let texts: Vec<_> = suggestions.iter().map(|s| s.text.as_str()).collect();
+    assert_eq!(texts, ["rich", "plain"]);
+    let Some(Text::Component(tooltip)) = &suggestions[0].tooltip else {
+        panic!("expected a component tooltip: {:?}", suggestions[0].tooltip);
+    };
+    let tooltip = tooltip.to_string();
+    assert!(
+        tooltip.contains("Alex") && !tooltip.contains("mini"),
+        "{tooltip}"
+    );
+    assert_eq!(suggestions[1].tooltip, None);
+    let bad = session(&runtime, 1, "Alex")
+        .suggest("probe", "bad", Vec::new)
+        .await;
+    assert!(
+        bad.as_ref().map_or(true, Vec::is_empty),
+        "an invalid tooltip offers nothing: {bad:?}"
+    );
+
+    // `styled.status` replaces `handler.status`.
+    let ping = |hostname: &str| crate::server_list::Ping {
+        listener: "public".into(),
+        hostname: hostname.into(),
+        protocol: 774,
+        peer_addr: "127.0.0.1:5000".parse().unwrap(),
+        backend: None,
+        maintenance: false,
+        online: 0,
+        max_players: 20,
+    };
+    let status = runtime
+        .plugins()
+        .status(&ping("rich.example"))
+        .await
+        .unwrap()
+        .expect("an override");
+    let Some(Text::Component(version)) = &status.version else {
+        panic!("expected a component version: {:?}", status.version);
+    };
+    assert!(version.to_string().contains("Probe"), "{version}");
+    assert_eq!(status.sample.as_ref().map(Vec::len), Some(2));
+    assert_eq!(
+        runtime
+            .plugins()
+            .status(&ping("other.example"))
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(
+        !matches!(
+            runtime.plugins().status(&ping("bad.example")).await,
+            Ok(Some(_))
+        ),
+        "an invalid version is not applied"
+    );
+
+    // `players.title-json` with markup and legacy codes.
+    let (_handle, mut actions) = runtime
+        .players()
+        .register(41, &[41; 16], "Title", 774, "lobby");
+    let player = session(&runtime, 41, "Title");
+    assert_eq!(player.decision("login").await.unwrap(), Action::Continue);
+    let Ok(PlayerAction::Title {
+        title: Some(title),
+        subtitle: Some(subtitle),
+        times,
+    }) = actions.try_recv()
+    else {
+        panic!("expected a title");
+    };
+    assert_eq!(times, [5, 40, 10]);
+    assert!(format!("{title:?}").contains("Welcome"), "{title:?}");
+    assert!(
+        format!("{subtitle:?}").contains("to the probe"),
+        "{subtitle:?}"
+    );
+    runtime.plugins().shutdown().await;
+}
+
+/// `players.locale` (rift:plugin 0.1.5): `none` until the session publishes
+/// the client's language, then what the client last said.
+#[tokio::test]
+async fn components_read_the_client_locale_once_it_is_known() {
+    let Some(guest) = probe() else { return };
+    let root = directory();
+    let config = configure(&root, &guest, "", "{}");
+    let runtime = start(&config, &Broker::default()).await;
+    let (handle, _actions) = runtime
+        .players()
+        .register(42, &[42; 16], "Locale", 774, "lobby");
+    let player = session(&runtime, 42, "Locale");
+    assert_eq!(
+        player.decision("login").await.unwrap(),
+        Action::Deny("locale=unknown".into())
+    );
+    for locale in ["de_de", "en_us"] {
+        handle.set_locale(Some(locale));
+        assert_eq!(
+            player.decision("login").await.unwrap(),
+            Action::Deny(format!("locale={locale}").as_str().into())
+        );
+    }
+    // Offline players have none either.
+    drop(handle);
+    assert_eq!(
+        player.decision("login").await.unwrap(),
+        Action::Deny("locale=unknown".into())
+    );
     runtime.plugins().shutdown().await;
 }

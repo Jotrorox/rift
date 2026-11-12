@@ -38,6 +38,9 @@ use super::{
 use bindings::{
     Base as Core, BasePre,
     optional::{Optional, OptionalIndices},
+    optional_chat::{OptionalChat, OptionalChatIndices},
+    optional_decisions::{OptionalDecisions, OptionalDecisionsIndices},
+    optional_styled::{OptionalStyled, OptionalStyledIndices},
 };
 use std::{
     collections::HashMap,
@@ -151,17 +154,53 @@ struct CorePre {
     /// `None` for a component without the `dialogs` export (built against
     /// rift:plugin 0.1.0).
     optional: Option<OptionalIndices>,
+    /// `None` for a component without the `decisions` export (built against
+    /// rift:plugin 0.1.0 or 0.1.1).
+    decisions: Option<OptionalDecisionsIndices>,
+    /// `None` for a component without the `styled` export (built against
+    /// rift:plugin 0.1.0 to 0.1.3).
+    styled: Option<OptionalStyledIndices>,
+    /// `None` for a component without the `chat` export: one built against
+    /// rift:plugin 0.1.0 to 0.1.4, or one that does not moderate chat.
+    chat: Option<OptionalChatIndices>,
+}
+
+/// One instance's exports: the required ones and the optional ones it has.
+struct Instance {
+    core: Core,
+    optional: Option<Optional>,
+    decisions: Option<OptionalDecisions>,
+    styled: Option<OptionalStyled>,
+    chat: Option<OptionalChat>,
 }
 
 impl CorePre {
-    fn instantiate(&self, store: &mut Store<State>) -> wasmtime::Result<(Core, Option<Optional>)> {
+    fn instantiate(&self, store: &mut Store<State>) -> wasmtime::Result<Instance> {
         let instance = self.base.instance_pre().instantiate(&mut *store)?;
         let core = Core::new(&mut *store, &instance)?;
         let optional = match &self.optional {
             Some(indices) => Some(indices.load(&mut *store, &instance)?),
             None => None,
         };
-        Ok((core, optional))
+        let decisions = match &self.decisions {
+            Some(indices) => Some(indices.load(&mut *store, &instance)?),
+            None => None,
+        };
+        let styled = match &self.styled {
+            Some(indices) => Some(indices.load(&mut *store, &instance)?),
+            None => None,
+        };
+        let chat = match &self.chat {
+            Some(indices) => Some(indices.load(&mut *store, &instance)?),
+            None => None,
+        };
+        Ok(Instance {
+            core,
+            optional,
+            decisions,
+            styled,
+            chat,
+        })
     }
 }
 
@@ -178,7 +217,16 @@ fn prepare(spec: &PluginSpec, component: &Component) -> Result<CorePre, String> 
             )
         })?;
     let optional = OptionalIndices::new(base.instance_pre()).ok();
-    Ok(CorePre { base, optional })
+    let decisions = OptionalDecisionsIndices::new(base.instance_pre()).ok();
+    let styled = OptionalStyledIndices::new(base.instance_pre()).ok();
+    let chat = OptionalChatIndices::new(base.instance_pre()).ok();
+    Ok(CorePre {
+        base,
+        optional,
+        decisions,
+        styled,
+        chat,
+    })
 }
 
 /// The plugin's component, ready to instantiate: from memory, from the disk
@@ -220,7 +268,15 @@ pub fn precompile(spec: &PluginSpec) -> Result<String, String> {
     let started = Instant::now();
     let (wasm, key) = read(spec)?;
     let component = compile(spec, &wasm)?;
-    prepare(spec, &component)?;
+    let pre = prepare(spec, &component)?;
+    if pre.chat.is_some() && spec.signed_chat {
+        // What `init` would refuse, known here from the exports alone.
+        return Err(format!(
+            "{} exports chat: {}",
+            entry_name(spec),
+            super::worker::CHAT_NEEDS_UNSIGNED
+        ));
+    }
     let serialized = component
         .serialize()
         .map_err(|error| format!("cannot serialize the compiled component: {error}"))?;
@@ -267,7 +323,13 @@ pub(crate) fn create(
         "instantiation",
         Some(spec.manifest.init_deadline()),
     );
-    let (core, optional) = match pre.instantiate(&mut store) {
+    let Instance {
+        core,
+        optional,
+        decisions,
+        styled,
+        chat,
+    } = match pre.instantiate(&mut store) {
         Ok(instance) => instance,
         Err(error) => {
             let reason = describe(&mut store, error);
@@ -280,6 +342,9 @@ pub(crate) fn create(
         store,
         core,
         optional,
+        decisions,
+        styled,
+        chat,
         manifest: spec.manifest.clone(),
         registration: None,
         broken: None,
@@ -303,6 +368,9 @@ struct WasmEngine {
     core: Core,
     /// The optional exports this component has.
     optional: Option<Optional>,
+    decisions: Option<OptionalDecisions>,
+    styled: Option<OptionalStyled>,
+    chat: Option<OptionalChat>,
     manifest: Manifest,
     registration: Option<Registration>,
     /// Set by the first trap: the instance's state is suspect from then on.
@@ -332,7 +400,10 @@ impl PluginEngine for WasmEngine {
         let guest = self.core.rift_plugin_handler();
         match guest.call_init(&mut self.store, config_json) {
             Ok(Ok(registration)) => {
-                let registration = bindings::registration(registration);
+                let mut registration = bindings::registration(registration);
+                // The export is the registration: the WIT record has no
+                // field for it and the `hook` enum no case.
+                registration.chat = self.chat.is_some();
                 self.registration = Some(registration.clone());
                 Ok(registration)
             }
@@ -375,6 +446,95 @@ impl PluginEngine for WasmEngine {
                 .map(|()| Reply::None)
                 .map_err(|error| CallError::Fatal(self.fail(error)));
         }
+        if let Event::Chat(context) = event {
+            // Only a component that exports `chat` wants the hook.
+            let Some(chat) = &self.chat else {
+                return Ok(Reply::default_for(hook));
+            };
+            let decision = chat
+                .rift_plugin_chat()
+                .call_chat(store, &bindings::chat_attempt(context))
+                .map_err(|error| CallError::Fatal(self.fail(error)))?;
+            return bindings::decision(decision)
+                .map(Reply::Action)
+                .map_err(|error| CallError::Handler(format!("invalid decision: {error}")));
+        }
+        // The `decisions` export, when the component has it, answers the
+        // decision hooks with rich text instead of `handler`.
+        let mut invalid = None;
+        if let Some(decisions) = &self.decisions {
+            let guest = decisions.rift_plugin_decisions();
+            let mut decide = |decision| match bindings::decision(decision) {
+                Ok(action) => Reply::Action(action),
+                Err(error) => {
+                    invalid = Some(error);
+                    Reply::Action(crate::extensions::Action::Continue)
+                }
+            };
+            let result = match &event {
+                Event::Login(context) => Some(
+                    guest
+                        .call_login(&mut *store, &bindings::context(context.clone()))
+                        .map(&mut decide),
+                ),
+                Event::InitialServer(context) => Some(
+                    guest
+                        .call_initial_server(&mut *store, &bindings::context(context.clone()))
+                        .map(&mut decide),
+                ),
+                Event::BeforeTransfer(context) => Some(
+                    guest
+                        .call_before_transfer(&mut *store, &bindings::context(context.clone()))
+                        .map(&mut decide),
+                ),
+                Event::Command(context) => Some(
+                    guest
+                        .call_command(&mut *store, &bindings::context(context.clone()))
+                        .map(&mut decide),
+                ),
+                _ => None,
+            };
+            if let Some(result) = result {
+                let reply = result.map_err(|error| CallError::Fatal(self.fail(error)))?;
+                return match invalid {
+                    Some(error) => Err(CallError::Handler(format!("invalid decision: {error}"))),
+                    None => Ok(reply),
+                };
+            }
+        }
+        // The `styled` export, when the component has it, answers `suggest`
+        // and `status` with rich text instead of `handler`.
+        if let Some(styled) = &self.styled {
+            let guest = styled.rift_plugin_styled();
+            let result = match &event {
+                Event::Suggest(context) => Some(
+                    guest
+                        .call_suggest(&mut *store, &bindings::context(context.clone()))
+                        .map(|list| {
+                            bindings::rich_suggestions(list)
+                                .map(Reply::Suggestions)
+                                .map_err(|error| format!("invalid suggestions: {error}"))
+                        }),
+                ),
+                Event::Status(ping) => Some(
+                    guest
+                        .call_status(&mut *store, &bindings::ping(ping.clone()))
+                        .map(|status| {
+                            status
+                                .map(bindings::rich_status_override)
+                                .transpose()
+                                .map(Reply::Status)
+                                .map_err(|error| format!("invalid status: {error}"))
+                        }),
+                ),
+                _ => None,
+            };
+            if let Some(result) = result {
+                let reply = result.map_err(|error| CallError::Fatal(self.fail(error)))?;
+                return reply.map_err(CallError::Handler);
+            }
+        }
+        let decide = |action| Reply::Action(bindings::action(action));
         let guest = self.core.rift_plugin_handler();
         let result = match event {
             Event::Route(connection) => guest
@@ -382,16 +542,16 @@ impl PluginEngine for WasmEngine {
                 .map(|decision| Reply::Route(bindings::route_decision(decision))),
             Event::Login(context) => guest
                 .call_login(store, &bindings::context(context))
-                .map(|action| Reply::Action(bindings::action(action))),
+                .map(decide),
             Event::InitialServer(context) => guest
                 .call_initial_server(store, &bindings::context(context))
-                .map(|action| Reply::Action(bindings::action(action))),
+                .map(decide),
             Event::BeforeTransfer(context) => guest
                 .call_before_transfer(store, &bindings::context(context))
-                .map(|action| Reply::Action(bindings::action(action))),
+                .map(decide),
             Event::Command(context) => guest
                 .call_command(store, &bindings::context(context))
-                .map(|action| Reply::Action(bindings::action(action))),
+                .map(decide),
             Event::Suggest(context) => guest
                 .call_suggest(store, &bindings::context(context))
                 .map(|list| Reply::Suggestions(bindings::suggestions(list))),
@@ -417,7 +577,7 @@ impl PluginEngine for WasmEngine {
             Event::Event(event) => guest
                 .call_event(store, &bindings::rift_event(event))
                 .map(|()| Reply::None),
-            Event::Dialog(_) => unreachable!("dispatched above"),
+            Event::Dialog(_) | Event::Chat(_) => unreachable!("dispatched above"),
         };
         result.map_err(|error| CallError::Fatal(self.fail(error)))
     }

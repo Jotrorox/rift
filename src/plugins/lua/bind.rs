@@ -12,6 +12,7 @@ use crate::plugins::{
     api::{BossBarSpec, CommandSpec, Hook, Level, PlayerInfo, SuggestKind, TitleSpec},
     services::Services,
 };
+use crate::text::Text;
 use mlua::{Function, Lua, LuaString, MultiValue, Table, Value};
 use std::{
     cell::{Cell, RefCell},
@@ -36,6 +37,7 @@ const EVENTS: &[(&str, Option<Hook>)] = &[
     ("timer", Some(Hook::Timer)),
     ("event", Some(Hook::Event)),
     ("dialog", Some(Hook::Dialog)),
+    ("chat", Some(Hook::Chat)),
     ("reload", None),
     ("shutdown", None),
 ];
@@ -294,6 +296,10 @@ fn player(lua: &Lua, info: &PlayerInfo) -> mlua::Result<Table> {
     player.raw_set("server", info.server.as_str())?;
     player.raw_set("connection_id", info.connection_id.to_string())?;
     player.raw_set("protocol", info.protocol)?;
+    // nil when everyone sees the player.
+    player.raw_set("visible_to", info.visible_to.as_deref())?;
+    // nil until the client's Client Information arrives.
+    player.raw_set("locale", info.locale.as_deref())?;
     Ok(player)
 }
 
@@ -339,6 +345,7 @@ pub(super) fn install(lua: &Lua, state: &Rc<State>, spec: &PluginSpec) -> mlua::
 
     registration(lua, &rift, state)?;
     helpers(lua, &rift, state)?;
+    crate::text::lua::install(lua, &rift)?;
     rift.raw_set("players", players(lua, state)?)?;
     rift.raw_set("store", store(lua, state)?)?;
     rift.raw_set("permissions", permissions(lua, state)?)?;
@@ -359,6 +366,7 @@ pub(super) fn install(lua: &Lua, state: &Rc<State>, spec: &PluginSpec) -> mlua::
         "players",
         "servers",
         "timers",
+        "text",
     ] {
         loaded.raw_set(format!("rift.{module}"), rift.raw_get::<Table>(module)?)?;
     }
@@ -695,24 +703,26 @@ fn players(lua: &Lua, state: &Rc<State>) -> mlua::Result<Table> {
             lua.create_sequence_from(services.players().names(prefix.as_deref()))
         })?,
     )?;
-    type Send = fn(&Services, &str, &str) -> Result<bool, String>;
-    let texts: [(&str, Send); 3] = [
-        ("message", |services, target, text| {
-            services.players().message(target, text)
+    // A string is plain text and a table a chat component.
+    type Send = fn(&Services, &str, Text) -> Result<bool, String>;
+    let texts: [(&str, &str, Send); 3] = [
+        ("message", "message", |services, target, text| {
+            services.players().message_text(target, text)
         }),
-        ("action_bar", |services, target, text| {
-            services.players().action_bar(target, text)
+        ("action_bar", "action bar text", |services, target, text| {
+            services.players().action_bar_text(target, text)
         }),
-        ("kick", |services, target, text| {
-            services.players().kick(target, text)
+        ("kick", "kick reason", |services, target, text| {
+            services.players().kick_text(target, text)
         }),
     ];
-    for (name, send) in texts {
+    for (name, label, send) in texts {
         let services = state.services.clone();
         api.raw_set(
             name,
-            function(lua, state, move |_, (target, text): (String, String)| {
-                send(&services, &target, &text).map_err(runtime)
+            function(lua, state, move |_, (target, text): (String, Value)| {
+                let text = Text::lua(text, label).map_err(runtime)?;
+                send(&services, &target, text).map_err(runtime)
             })?,
         )?;
     }
@@ -733,7 +743,7 @@ fn players(lua: &Lua, state: &Rc<State>) -> mlua::Result<Table> {
                 .title(
                     &target,
                     &TitleSpec {
-                        title,
+                        title: title.unwrap_or_else(|| Text::Plain(String::new())),
                         subtitle,
                         fade_in: times[0],
                         stay: times[1],
@@ -830,10 +840,11 @@ fn players(lua: &Lua, state: &Rc<State>) -> mlua::Result<Table> {
         function(
             lua,
             state,
-            move |_, (message, server): (String, Option<String>)| {
+            move |_, (message, server): (Value, Option<String>)| {
+                let message = Text::lua(message, "message").map_err(runtime)?;
                 services
                     .players()
-                    .broadcast_to(&message, server.as_deref())
+                    .broadcast_text(message, server.as_deref())
                     .map_err(runtime)
             },
         )?,
@@ -1014,7 +1025,55 @@ fn permissions(lua: &Lua, state: &Rc<State>) -> mlua::Result<Table> {
             decoded(lua, &meta)
         })?,
     )?;
+    // `set_meta(uuid, key, value_or_nil, options?)`, with the write options
+    // of extensions API v3: `contexts`, `expires_in` (seconds from now) and
+    // `expires_at` (Unix seconds). `nil` removes the node in those contexts.
+    let services = state.services.clone();
+    api.raw_set(
+        "set_meta",
+        function(
+            lua,
+            state,
+            move |_, (uuid, key, value, options): (String, String, Option<String>, Value)| {
+                let (contexts, expires_at) = meta_options(&options)?;
+                services
+                    .permissions()
+                    .set_meta(&uuid, &key, value.as_deref(), contexts, expires_at)
+                    .map_err(runtime)
+            },
+        )?,
+    )?;
     Ok(api)
+}
+
+/// The options table of `set_meta`.
+fn meta_options(options: &Value) -> mlua::Result<(rift_permissions::ContextSet, Option<u64>)> {
+    let Value::Table(options) = options else {
+        return match options {
+            Value::Nil => Ok((rift_permissions::ContextSet::new(), None)),
+            _ => Err(runtime("set_meta options must be a table")),
+        };
+    };
+    for pair in options.pairs::<String, Value>() {
+        let (key, _) = pair?;
+        if !matches!(key.as_str(), "contexts" | "expires_in" | "expires_at") {
+            return Err(runtime(format!("unknown set_meta option {key:?}")));
+        }
+    }
+    let contexts = match options.raw_get::<Value>("contexts")? {
+        Value::Nil => rift_permissions::ContextSet::new(),
+        value => crate::permissions::lua::contexts(&value)?,
+    };
+    let expires_at = match (
+        options.raw_get::<Option<u64>>("expires_at")?,
+        options.raw_get::<Option<u64>>("expires_in")?,
+    ) {
+        (Some(_), Some(_)) => return Err(runtime("give expires_at or expires_in, not both")),
+        (Some(at), None) => Some(at),
+        (None, Some(seconds)) => Some(rift_permissions::unix_now().saturating_add(seconds)),
+        (None, None) => None,
+    };
+    Ok((contexts, expires_at))
 }
 
 /// `nil` for the player's current contexts, or a context table.

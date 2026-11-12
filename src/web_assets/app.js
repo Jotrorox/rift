@@ -6,10 +6,13 @@
     token: "", revision: null, baseline: "", writable: false,
     loaded: false, busy: false, polling: false, fetchingSource: false,
     session: 0, mutation: 0, remoteChanged: false, conflicted: false, online: false,
-    serverButtons: [], view: "overview",
-    permissions: null, groups: null, logServer: "", logCursor: null, logPolling: false, definitions: {}, definitionRevision: null, definitionDirty: false, definitionVersion: 0, definitionSection: "service_groups", definitionName: "", definitionInputs: new Map(),
+    serverButtons: [], groupButtons: [], managedServers: [], view: "overview",
+    permissions: null, groups: null, logServer: "", logCursor: null, logPolling: false, definitions: {}, definitionRevision: null, definitionDirty: false, definitionVersion: 0, definitionSection: "service_groups", definitionName: "", definitionInputs: new Map(), definitionVersions: { level: "inherit", families: new Set(), extra: "" }, versionFamilies: [],
     // Unsaved edits on the server list, tab list and permission group forms.
     settingsDirty: { serverList: false, tabList: false },
+    // A server icon chosen on the server list form: a PNG data URL, false to
+    // remove the icon, or undefined to keep the configured one.
+    serverListFavicon: undefined,
     // The permission views: loaded groups, tracks, the selected group and player.
     perms: permsState(),
     // Template downloads and the file browser.
@@ -68,7 +71,7 @@
     $("edit-state").className = `tag ${dirty() ? "warning" : state.loaded ? "good" : ""}`;
     text("source-size", `${$("source").value.split("\n").length.toLocaleString()} lines`);
     $("conflict").classList.toggle("hidden", !state.remoteChanged);
-    for (const { button, unavailable } of state.serverButtons) button.disabled = state.busy || unavailable || !allowed("servers");
+    for (const { button, unavailable } of [...state.serverButtons, ...state.groupButtons]) button.disabled = state.busy || unavailable || !allowed("servers");
     $("console-send").disabled = state.busy || !state.logServer || !allowed("console");
     $("definition-save").disabled = state.busy || !state.definitionRevision || !allowed("config");
     $("definition-delete").disabled = state.busy || !state.definitionRevision || !$("definition-select").value || !allowed("config");
@@ -84,7 +87,8 @@
     for (const id of ["perm-group-weight", "perm-group-display"]) $(id).disabled = !permsWrite();
     $("perm-group-save").classList.toggle("hidden", !permsWrite());
     // Fields that only matter while their setting is on.
-    for (const id of ["server-list-motd", "server-list-maintenance-motd", "server-list-version", "server-list-max-players", "server-list-sample"]) $(id).disabled = !$("server-list-enabled").checked;
+    for (const id of ["server-list-motd", "server-list-maintenance-motd", "server-list-version", "server-list-max-players", "server-list-sample", "server-list-favicon-choose", "server-list-favicon-remove"]) $(id).disabled = !$("server-list-enabled").checked;
+    $("server-list-favicon-picker").classList.toggle("disabled", !$("server-list-enabled").checked);
     for (const id of ["tab-list-header", "tab-list-footer", "tab-list-players"]) $(id).disabled = !$("tab-list-enabled").checked;
     for (const [id, permission] of [["config-panel", "config"], ["definitions-panel", "config"], ["server-list-panel", "config"], ["server-list-lua-panel", "config"], ["tab-list-panel", "config"], ["deployments-panel", "deploy"], ["audit-panel", "audit"], ["extensions-panel", "extensions"]]) $(id).classList.toggle("hidden", !allowed(permission));
     $("live-console-panel").classList.toggle("hidden", !allowed("logs") && !allowed("console"));
@@ -204,60 +208,11 @@
     td.textContent = value ?? "—"; td.className = className; row.append(td);
     return td;
   }
-  function renderStatus(status) {
-    const metrics = status.metrics || {}, listeners = status.listeners || [], backends = status.backends || [];
-    const checks = status.health_checks_enabled !== false;
-    const healthy = checks ? backends.filter((backend) => backend.healthy === true).length : 0;
-    const unknown = checks ? backends.filter((backend) => typeof backend.healthy !== "boolean").length : backends.length;
-    text("version", status.version ? `v${status.version}` : "");
-    text("metric-active", count(metrics.active));
-    text("metric-accepted", `${count(metrics.accepted)} accepted since startup`);
-    text("metric-backends", unknown === backends.length && backends.length ? "Unmonitored" : `${healthy} / ${backends.length}`);
-    text("metric-health", unknown ? `${unknown} without a health result` : "Healthy backends / total");
-    text("metric-traffic", bytes(number(metrics.sent) + number(metrics.received)));
-    text("metric-directions", `${bytes(metrics.sent)} sent · ${bytes(metrics.received)} received`);
-    text("metric-uptime", uptime(status.uptime_seconds));
-    text("metric-errors", `${count(metrics.errors)} errors · ${count(metrics.reloads)} reloads`);
-    text("listener-count", `${listeners.length} configured`);
-    text("backend-count", `${backends.length} configured`);
-    text("last-update", `Updated ${new Date().toLocaleTimeString()}`);
-    if (status.config_path) text("config-path", status.config_path);
-    table("listeners", listeners, 2, (tr, listener) => { cell(tr, listener.name); cell(tr, listener.address, "address"); });
-    table("backends", backends, 3, (tr, backend) => {
-      cell(tr, backend.name); cell(tr, backend.address, "address");
-      const td = cell(tr, ""), span = document.createElement("span");
-      span.className = `health ${!checks ? "unknown" : backend.healthy === false ? "bad" : backend.healthy === true ? "" : "unknown"}`;
-      span.textContent = !checks ? "Checks disabled" : backend.healthy === false ? "Unhealthy" : backend.healthy === true ? "Healthy" : "Unknown";
-      td.append(span);
-    });
+  function renderServers() {
+    const group = $("servers-group").value;
+    const servers = state.managedServers.filter((server) => !group || server.group === group);
     state.serverButtons = [];
-    table("service-groups", status.service_groups || [], 6, (tr, group) => {
-      cell(tr, group.name);
-      cell(tr, (group.port_range || []).join("–"));
-      cell(tr, group.storage === "disposable" ? "Disposable game" : "Persistent world");
-      cell(tr, group.template || "Prepared directories");
-      cell(tr, (group.instances || []).join(", ") || "None created");
-      const actions = cell(tr, ""), button = document.createElement("button");
-      button.type = "button"; button.className = "button secondary"; button.textContent = "Create instance";
-      button.setAttribute("aria-label", `Create instance in ${group.name}`);
-      const full = Boolean(group.scaling) && (group.instances || []).length >= number(group.scaling.max_instances);
-      if (full) button.title = "This group has reached its scaling maximum. Remove an instance or raise max_instances first.";
-      state.serverButtons.push({ button, unavailable: full });
-      button.addEventListener("click", () => { if (!button.disabled) instanceOperation(group.name, "create", group.storage); });
-      actions.append(button);
-    });
-    const nodes = status.nodes || [];
-    $("nodes-panel").hidden = !nodes.length;
-    text("node-count", `${nodes.filter((node) => node.state === "online").length} of ${nodes.length} online`);
-    table("nodes", nodes, 6, (tr, node) => {
-      cell(tr, node.name);
-      cell(tr, node.state === "never_connected" ? "never connected" : node.state, `state ${node.state === "online" ? "running" : node.state === "unreachable" ? "failed" : "stopped"}`);
-      cell(tr, node.address, "address");
-      cell(tr, (node.labels || []).join(", ") || "—");
-      cell(tr, `${count(node.instances)} of ${count(node.max_instances)}`);
-      cell(tr, node.memory_mb ? `${count(node.allocated_memory_mb)} of ${count(node.memory_mb)} MiB` : `${count(node.allocated_memory_mb)} MiB, no limit`);
-    }, "No nodes configured.");
-    table("managed-servers", status.managed_servers || [], 10, (tr, server) => {
+    table("managed-servers", servers, 10, (tr, server) => {
       cell(tr, server.name); cell(tr, server.state, `state ${server.state}`);
       cell(tr, `${count(server.players)} players · ${count(server.reservations)} attachments`);
       cell(tr, wakeLabel(server));
@@ -294,7 +249,111 @@
         });
         actions.append(button);
       }
-    }, "No managed servers yet. Create one from a service group.");
+    }, group ? `No instances in ${group} yet.` : "No managed servers yet. Create one from a service group.");
+  }
+  function renderStatus(status) {
+    const metrics = status.metrics || {}, listeners = status.listeners || [], backends = status.backends || [];
+    const checks = status.health_checks_enabled !== false;
+    const healthy = checks ? backends.filter((backend) => backend.healthy === true).length : 0;
+    const unknown = checks ? backends.filter((backend) => typeof backend.healthy !== "boolean").length : backends.length;
+    text("version", status.version ? `v${status.version}` : "");
+    text("metric-active", count(metrics.active));
+    text("metric-accepted", `${count(metrics.accepted)} accepted since startup`);
+    text("metric-backends", unknown === backends.length && backends.length ? "Unmonitored" : `${healthy} / ${backends.length}`);
+    text("metric-health", unknown ? `${unknown} without a health result` : "Healthy backends / total");
+    text("metric-traffic", bytes(number(metrics.sent) + number(metrics.received)));
+    text("metric-directions", `${bytes(metrics.sent)} sent · ${bytes(metrics.received)} received`);
+    text("metric-uptime", uptime(status.uptime_seconds));
+    text("metric-errors", `${count(metrics.errors)} errors · ${count(metrics.reloads)} reloads`);
+    text("listener-count", `${listeners.length} configured`);
+    text("backend-count", `${backends.length} configured`);
+    text("last-update", `Updated ${new Date().toLocaleTimeString()}`);
+    if (status.config_path) text("config-path", status.config_path);
+    table("listeners", listeners, 2, (tr, listener) => { cell(tr, listener.name); cell(tr, listener.address, "address"); });
+    table("backends", backends, 3, (tr, backend) => {
+      cell(tr, backend.name); cell(tr, backend.address, "address");
+      const td = cell(tr, ""), span = document.createElement("span");
+      span.className = `health ${!checks ? "unknown" : backend.healthy === false ? "bad" : backend.healthy === true ? "" : "unknown"}`;
+      span.textContent = !checks ? "Checks disabled" : backend.healthy === false ? "Unhealthy" : backend.healthy === true ? "Healthy" : "Unknown";
+      td.append(span);
+    });
+    state.groupButtons = [];
+    table("service-groups", status.service_groups || [], 8, (tr, group) => {
+      const names = group.instances || [], summary = group.summary || {}, enabled = (key) => number(summary[key]);
+      cell(tr, group.name);
+      const badges = cell(tr, "");
+      for (const [label, kind] of groupStatus(group)) {
+        const tag = document.createElement("span"); tag.className = `tag ${kind}`; tag.textContent = label; badges.append(tag);
+      }
+      cell(tr, (group.port_range || []).join("–"));
+      cell(tr, group.storage === "disposable" ? "Disposable game" : "Persistent world");
+      cell(tr, group.template || "Prepared directories");
+      cell(tr, instanceSummary(group)).title = names.join(", ");
+      // Which client versions Rift translates for the group, and where that is set.
+      const versions = group.translation || {};
+      cell(tr, versions.summary || "All versions").title = versions.inherited === false ? "Set on this group. Choose Edit to change it." : "Follows the proxy setting (translation.clients). Choose Edit to set it for this group.";
+      const actions = cell(tr, ""); actions.className = "action-group";
+      const button = (label, aria, unavailable, title, click, className = "button subtle") => {
+        const element = document.createElement("button");
+        element.type = "button"; element.className = className; element.textContent = label;
+        element.setAttribute("aria-label", aria);
+        if (title) element.title = title;
+        state.groupButtons.push({ button: element, unavailable });
+        element.addEventListener("click", () => { if (!element.disabled) click(); });
+        actions.append(element);
+        return element;
+      };
+      const full = Boolean(group.scaling) && names.length >= number(group.scaling.max_instances);
+      button("Create instance", `Create instance in ${group.name}`, full || Boolean(group.suspended),
+        group.suspended ? "This group is stopped. Start it before creating instances."
+          : full ? "This group has reached its scaling maximum. Remove an instance or raise max_instances first." : "",
+        () => instanceOperation(group.name, "create", group.storage), "button secondary");
+      // Without a summary (older servers) every action stays available.
+      const allUp = Boolean(group.summary) && names.length > 0 && enabled("running") + enabled("starting") === names.length;
+      button("Start all", `Start every instance of ${group.name}`, !group.suspended && allUp,
+        group.suspended ? "Resume scaling and start every instance." : "Start every instance that is not running.",
+        () => groupOperation(group, "start"));
+      button("Stop all", `Stop every instance of ${group.name}`, Boolean(group.suspended),
+        group.suspended ? "This group is already stopped." : "Keep new players out, pause scaling and stop every instance once it is empty.",
+        () => {
+          const players = enabled("players");
+          if (!window.confirm(`Stop every instance of ${group.name}? New players can't join and scaling pauses until you start the group.${players ? ` Instances with players (${count(players)} now) keep running until they leave.` : ""}`)) return;
+          groupOperation(group, "stop");
+        });
+      const dev = group.mode === "dev";
+      button(dev ? "Leave dev mode" : "Dev mode", `${dev ? "Leave dev mode for" : "Put into dev mode:"} ${group.name}`, false,
+        dev ? "Let everyone join again and resume scaling." : `Only players with ${group.dev_permission || "the group's dev permission"} can join; scaling pauses.`,
+        () => {
+          if (!dev && !window.confirm(`Put ${group.name} into dev mode? Only players with the permission ${group.dev_permission || `rift.group.${group.name}.dev`} can join, and automatic scaling pauses. Players already connected stay.`)) return;
+          groupOperation(group, "mode", dev ? "active" : "dev");
+        });
+      if (allowed("config")) {
+        const edit = document.createElement("button");
+        edit.type = "button"; edit.className = "button subtle"; edit.textContent = "Edit";
+        edit.setAttribute("aria-label", `Edit the ${group.name} definition`);
+        edit.addEventListener("click", () => editGroup(group.name));
+        actions.append(edit);
+      }
+    });
+    const groupFilter = $("servers-group"), filtered = groupFilter.value;
+    groupFilter.replaceChildren();
+    for (const [value, label] of [["", "All groups"], ...(status.service_groups || []).map((group) => [group.name, group.name])]) {
+      const option = document.createElement("option"); option.value = value; option.textContent = label; groupFilter.append(option);
+    }
+    groupFilter.value = (status.service_groups || []).some((group) => group.name === filtered) ? filtered : "";
+    const nodes = status.nodes || [];
+    $("nodes-panel").hidden = !nodes.length;
+    text("node-count", `${nodes.filter((node) => node.state === "online").length} of ${nodes.length} online`);
+    table("nodes", nodes, 6, (tr, node) => {
+      cell(tr, node.name);
+      cell(tr, node.state === "never_connected" ? "never connected" : node.state, `state ${node.state === "online" ? "running" : node.state === "unreachable" ? "failed" : "stopped"}`);
+      cell(tr, node.address, "address");
+      cell(tr, (node.labels || []).join(", ") || "—");
+      cell(tr, `${count(node.instances)} of ${count(node.max_instances)}`);
+      cell(tr, node.memory_mb ? `${count(node.allocated_memory_mb)} of ${count(node.memory_mb)} MiB` : `${count(node.allocated_memory_mb)} MiB, no limit`);
+    }, "No nodes configured.");
+    state.managedServers = status.managed_servers || [];
+    renderServers();
     const root = $("files-root").value || state.files.root;
     $("files-root").replaceChildren();
     for (const [value, label] of [["templates", "Templates"], ...(status.managed_servers || []).map((server) => [`server:${server.name}`, `Server · ${server.name}`])]) {
@@ -420,6 +479,152 @@
     ["configs", "Template folders, overlaid in order (one per line)", "array"], ["map", "Map directory (optional)", "text"],
     ["accept_eula", "Accept the Minecraft EULA for new instances", "boolean"],
   ];
+  // Which client versions a service group is translated for. `translation` in
+  // a definition is absent (follow the proxy), a level, or a list of patterns.
+  const versionLevels = [
+    ["inherit", "Follow the proxy setting", "Use translation.clients from the Lua script."],
+    ["all", "All versions", "Players on any Minecraft version Rift translates can join."],
+    ["newer", "Same version or newer", "Players on a newer version than the servers can join too. What ViaVersion does."],
+    ["older", "Same version or older", "Players on an older version than the servers can join too. What ViaBackwards does."],
+    ["none", "Same version only", "No translation: only players on the exact version the servers run."],
+    ["custom", "Chosen versions", "Pick the versions yourself. The servers’ own version can always join."],
+  ];
+  // The releases a pattern list covers, as the server reads it
+  // (src/protocol/versions.rs). Only a preview: saving validates for real.
+  function versionCoverage(patterns, releases, [oldest, newest]) {
+    const named = (text) => {
+      const family = /\.[*x]$/.test(text) ? text.slice(0, -2) : null;
+      const hits = releases.filter(([name]) => family === null ? name === text : name === family || name.startsWith(`${family}.`)).map(([, protocol]) => protocol);
+      if (!hits.length) throw new Error(`“${text}” is not a Minecraft version Rift knows. Try 1.20.4, 1.20.* or 1.16-1.18.2.`);
+      return [Math.min(...hits), Math.max(...hits)];
+    };
+    const coverage = { all: false, newer: false, older: false, spans: [] };
+    for (const raw of patterns) {
+      const text = raw.trim().toLowerCase();
+      if (!text) continue;
+      if (text === "all" || text === "*") coverage.all = true;
+      else if (text === "newer" || text === "older") coverage[text] = true;
+      else if (text === "none") throw new Error("“none” stands alone: choose “Same version only” instead.");
+      else {
+        const range = text.includes("-") ? text.split("-") : null;
+        const [low, high] = text.startsWith(">=") ? [named(text.slice(2).trim())[0], newest]
+          : text.endsWith("+") ? [named(text.slice(0, -1).trim())[0], newest]
+          : text.startsWith("<=") ? [oldest, named(text.slice(2).trim())[1]]
+          : range ? [named(range[0].trim())[0], named(range.slice(1).join("-").trim())[1]]
+          : named(text);
+        if (high < oldest || low > newest) throw new Error(`“${text}” is outside the versions Rift translates.`);
+        if (low > high) throw new Error(`“${text}” is an empty range: write the older version first.`);
+        coverage.spans.push([low, high]);
+      }
+    }
+    coverage.releases = releases.filter(([, protocol]) => protocol >= oldest && protocol <= newest
+      && (coverage.all || coverage.spans.some(([low, high]) => protocol >= low && protocol <= high))).map(([name]) => name);
+    return coverage;
+  }
+  // "1.20–1.20.6, 1.21.4": runs of neighbouring releases, shortest readable form.
+  function versionRuns(names, releases) {
+    const order = releases.map(([name]) => name), runs = [];
+    for (const name of names) {
+      const last = runs[runs.length - 1];
+      if (last && order.indexOf(last[1]) + 1 === order.indexOf(name)) last[1] = name; else runs.push([name, name]);
+    }
+    return runs.map(([first, last]) => first === last ? first : `${first}–${last}`).join(", ");
+  }
+  function versionPatterns() {
+    const { families, extra } = state.definitionVersions;
+    return [...state.versionFamilies.filter((family) => families.has(family)).map((family) => `${family}.*`),
+      ...extra.split(/[,\n]/).map((pattern) => pattern.trim()).filter(Boolean)];
+  }
+  function versionsValue() {
+    const { level } = state.definitionVersions;
+    if (level === "inherit") return undefined;
+    if (level !== "custom") return level;
+    const patterns = versionPatterns(), info = state.definitions.translation || {};
+    if (!patterns.length) throw new Error("Choose at least one version for this group, or select “Same version only”.");
+    if (info.releases && info.range) versionCoverage(patterns, info.releases, info.range);
+    return patterns;
+  }
+  function versionsPreview() {
+    const { level } = state.definitionVersions, info = state.definitions.translation || {}, releases = info.releases || [], range = info.range || [0, 0];
+    const inRange = releases.filter(([, protocol]) => protocol >= range[0] && protocol <= range[1]).map(([name]) => name);
+    const span = inRange.length ? `${inRange[0]} to ${inRange[inRange.length - 1]}` : "every supported version";
+    const off = info.enabled === false ? " Translation is turned off for the whole proxy (translation = false in the Lua script), so only the servers’ own version can join until it is turned on." : "";
+    if (level === "inherit") return [`Follows the proxy setting, currently: ${info.summary || "All versions"}.${off}`, false];
+    if (level === "all") return [`Players on ${span} can join.${off}`, false];
+    if (level === "newer") return [`Players on the servers’ version and every newer one Rift translates can join. Older clients are turned away.${off}`, false];
+    if (level === "older") return [`Players on the servers’ version and every older one Rift translates can join. Newer clients are turned away.${off}`, false];
+    if (level === "none") return ["Only players on the servers’ own version can join. Everyone else is turned away or sent to a fallback server.", false];
+    const patterns = versionPatterns();
+    if (!patterns.length) return ["Nothing chosen yet: pick release families or write a pattern.", true];
+    try {
+      const coverage = versionCoverage(patterns, releases, range);
+      if (coverage.all) return [`Players on ${span} can join.${off}`, false];
+      const relative = [coverage.newer && "versions newer than the servers", coverage.older && "versions older than the servers"].filter(Boolean);
+      const listed = coverage.releases.length ? `${coverage.releases.length} version${coverage.releases.length === 1 ? "" : "s"}: ${versionRuns(coverage.releases, releases)}` : "";
+      return [`Translated for ${[listed, ...relative].filter(Boolean).join(", plus ")}. The servers’ own version can always join.${off}`, false];
+    } catch (error) { return [error.message, true]; }
+  }
+  function renderVersions(value) {
+    const info = state.definitions.translation || {}, releases = info.releases || [], range = info.range || [0, 0];
+    // Release families Rift translates, oldest first: 1.12 … 1.21, 26.1 …
+    state.versionFamilies = [...new Set(releases.filter(([, protocol]) => protocol >= range[0] && protocol <= range[1]).map(([name]) => name.split(".").slice(0, 2).join(".")))];
+    const chosen = { level: "inherit", families: new Set(), extra: "" };
+    const levels = { true: "all", false: "none", all: "all", none: "none", newer: "newer", older: "older" };
+    if (value !== undefined && value !== null) {
+      if (Object.hasOwn(levels, String(value))) chosen.level = levels[String(value)];
+      else {
+        chosen.level = "custom";
+        const extra = [];
+        for (const pattern of [value].flat().map(String)) {
+          const family = /\.[*x]$/.test(pattern) ? pattern.slice(0, -2) : null;
+          if (family && state.versionFamilies.includes(family)) chosen.families.add(family); else extra.push(pattern);
+        }
+        chosen.extra = extra.join(", ");
+      }
+    }
+    state.definitionVersions = chosen;
+    const make = (tag, className, textContent) => { const element = document.createElement(tag); if (className) element.className = className; if (textContent) element.textContent = textContent; return element; };
+    const box = make("fieldset", "versions"), custom = make("div", "versions-custom"), preview = make("p", "versions-preview");
+    box.id = "definition-versions"; preview.id = "definition-versions-preview"; preview.setAttribute("role", "status");
+    const radios = [], toggles = [];
+    const refresh = () => {
+      custom.hidden = chosen.level !== "custom";
+      for (const radio of radios) radio.checked = radio.value === chosen.level;
+      for (const toggle of toggles) toggle.setAttribute("aria-pressed", String(chosen.families.has(toggle.value)));
+      const [message, bad] = versionsPreview();
+      preview.textContent = message; preview.className = `versions-preview${bad ? " bad" : ""}`;
+    };
+    const edited = () => { state.definitionDirty = true; state.definitionVersion += 1; refresh(); };
+    const choices = make("div", "choice-list");
+    for (const [level, title, note] of versionLevels) {
+      const label = make("label", "choice"), radio = make("input"), words = make("span", "choice-text");
+      radio.type = "radio"; radio.name = "definition-versions-level"; radio.value = level; radio.id = `definition-versions-${level}`;
+      radio.addEventListener("change", () => { chosen.level = level; edited(); });
+      words.append(make("span", "choice-title", title), make("span", "choice-note", note));
+      label.append(radio, words); radios.push(radio); choices.append(label);
+    }
+    const families = make("div", "field"), familyList = make("div", "chip-list");
+    familyList.setAttribute("role", "group"); familyList.setAttribute("aria-label", "Release families");
+    for (const family of state.versionFamilies) {
+      const toggle = make("button", "toggle", family);
+      toggle.type = "button"; toggle.value = family; toggle.title = `Every ${family} release (${family}.*)`;
+      toggle.addEventListener("click", () => { if (chosen.families.has(family)) chosen.families.delete(family); else chosen.families.add(family); edited(); });
+      toggles.push(toggle); familyList.append(toggle);
+    }
+    families.append(make("span", "field-label", "Release families"), familyList);
+    const more = make("div", "field"), moreLabel = make("label", "", "More versions and ranges"), input = make("input"), help = make("p", "field-help");
+    input.id = "definition-versions-extra"; input.type = "text"; input.className = "mono"; input.value = chosen.extra;
+    input.placeholder = "1.20.4, 1.16-1.18.2, >=1.19"; input.setAttribute("autocomplete", "off"); input.setAttribute("spellcheck", "false");
+    input.setAttribute("aria-describedby", "definition-versions-help"); moreLabel.setAttribute("for", input.id); help.id = "definition-versions-help";
+    help.textContent = "Separate with commas. 1.20.4 is one version, 1.20.* every 1.20 release, 1.16-1.18.2 a range, >=1.19 and <=1.16.5 everything from or up to a version.";
+    input.addEventListener("input", () => { chosen.extra = input.value; edited(); });
+    more.append(moreLabel, input, help);
+    custom.append(families, more);
+    box.append(make("legend", "", "Minecraft versions"), make("p", "field-help", "Players on the version these servers run can always join. Choose which other versions Rift translates for this group."), choices, custom, preview);
+    state.definitionInputs.set("translation", { input: { value: "" }, type: "versions" });
+    $("definition-fields").append(box);
+    refresh();
+  }
   function renderDefinition() {
     const section = $("definition-section").value || "service_groups", name = $("definition-select").value;
     state.definitionSection = section; state.definitionName = name;
@@ -441,6 +646,7 @@
       input.addEventListener("input", () => { state.definitionDirty = true; state.definitionVersion += 1; });
       state.definitionInputs.set(key, { input, type }); wrapper.append(title, input); $("definition-fields").append(wrapper);
     }
+    if (section === "service_groups") renderVersions(value.translation);
     state.definitionDirty = false; controls();
     if (section === "templates") loadVersions(value.software?.type || "");
   }
@@ -472,7 +678,7 @@
     const value = {}, scaling = {}, software = {}, ports = [], scalingEnabled = state.definitionInputs.get("scaling_enabled")?.input.value === "true";
     const softwareEnabled = Boolean(state.definitionInputs.get("software.type")?.input.value);
     for (const [key, { input, type }] of state.definitionInputs) {
-      if (key === "scaling_enabled") continue;
+      if (key === "scaling_enabled" || type === "versions") continue;
       const raw = String(input.value);
       if (key.startsWith("scaling.") && !scalingEnabled) continue;
       if (key.startsWith("software.") && !softwareEnabled) continue;
@@ -486,7 +692,11 @@
     }
     if (scalingEnabled) value.scaling = scaling;
     if (softwareEnabled) value.software = software;
-    if ($("definition-section").value !== "templates") value.port_range = ports;
+    if ($("definition-section").value !== "templates") {
+      value.port_range = ports;
+      const versions = versionsValue();
+      if (versions !== undefined) value.translation = versions;
+    }
     return value;
   }
   async function saveDefinition(remove = false) {
@@ -538,10 +748,7 @@
     $("server-list-version").value = list?.version ?? "";
     $("server-list-max-players").value = list?.max_players ?? "";
     $("server-list-sample").value = (list?.sample || []).join("\n");
-    const favicon = typeof list?.favicon === "string" && list.favicon.startsWith("data:image/png;base64,") ? list.favicon : "";
-    $("server-list-favicon").hidden = !favicon;
-    if (favicon) $("server-list-favicon").src = favicon;
-    text("server-list-favicon-state", favicon ? "Favicon configured in Lua" : "No favicon configured");
+    state.serverListFavicon = undefined; renderFavicon();
     table("server-list-hosts", Object.entries(list?.hosts || {}), 4, (tr, [host, entry]) => {
       cell(tr, host, "address"); cell(tr, componentSummary(entry.motd)); cell(tr, entry.version ?? "—"); cell(tr, entry.max_players ?? "—", "metric-value");
     }, "No hostname-specific entries.");
@@ -561,7 +768,63 @@
     }
     const sample = $("server-list-sample").value.split("\n").filter((line) => line.trim());
     if (sample.length) value.sample = sample;
+    const favicon = state.serverListFavicon;
+    if (favicon || (favicon === false && configuredFavicon())) value.favicon = favicon;
     return value;
+  }
+  // Server icons: Minecraft shows a 64×64 PNG of at most 16 KiB.
+  const FAVICON_PREFIX = "data:image/png;base64,", FAVICON_SIZE = 64, FAVICON_BYTES = 16 * 1024;
+  const configuredFavicon = () => {
+    const favicon = state.definitions.server_list?.favicon;
+    return typeof favicon === "string" && favicon.startsWith(FAVICON_PREFIX) ? favicon : "";
+  };
+  function renderFavicon() {
+    const pending = state.serverListFavicon, configured = configuredFavicon();
+    const shown = pending === undefined ? configured : pending || "";
+    $("server-list-favicon").hidden = !shown;
+    if (shown) $("server-list-favicon").src = shown;
+    $("server-list-favicon-remove").hidden = !shown;
+    text("server-list-favicon-state", pending ? "New icon. Save to apply it."
+      : pending === false && configured ? "The icon is removed when you save."
+      : shown ? "Current icon" : "No icon. Players see the default.");
+  }
+  const base64 = (bytes) => {
+    let binary = "";
+    for (let index = 0; index < bytes.length; index += 0x8000) binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+    return btoa(binary);
+  };
+  // A PNG data URL for any image the browser can decode. A 64×64 PNG within
+  // the limit is kept byte for byte; anything else is scaled to fit 64×64,
+  // keeping its aspect ratio on a transparent background.
+  async function faviconFromFile(file) {
+    if (file.size > 32 * 1024 * 1024) throw new Error("That image is larger than 32 MiB. Choose a smaller one.");
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const png = bytes.length >= 24 && [137, 80, 78, 71, 13, 10, 26, 10].every((byte, index) => bytes[index] === byte) && String.fromCharCode(...bytes.subarray(12, 16)) === "IHDR";
+    if (png && bytes.length <= FAVICON_BYTES && view.getUint32(16) === FAVICON_SIZE && view.getUint32(20) === FAVICON_SIZE) return FAVICON_PREFIX + base64(bytes);
+    let image;
+    try { image = await window.createImageBitmap(new Blob([bytes], { type: file.type })); } catch { throw new Error("That file isn’t an image this browser can read. Use a PNG, JPEG, WebP or GIF."); }
+    try {
+      const canvas = document.createElement("canvas"); canvas.width = canvas.height = FAVICON_SIZE;
+      const context = canvas.getContext("2d"), scale = Math.min(FAVICON_SIZE / image.width, FAVICON_SIZE / image.height);
+      const width = Math.max(1, Math.round(image.width * scale)), height = Math.max(1, Math.round(image.height * scale));
+      // Enlarged pixel art stays crisp; reduced images are smoothed.
+      context.imageSmoothingEnabled = scale < 1; context.imageSmoothingQuality = "high";
+      context.drawImage(image, Math.floor((FAVICON_SIZE - width) / 2), Math.floor((FAVICON_SIZE - height) / 2), width, height);
+      const url = canvas.toDataURL("image/png"), encoded = url.slice(FAVICON_PREFIX.length);
+      if (!url.startsWith(FAVICON_PREFIX)) throw new Error("This browser couldn’t create a PNG icon.");
+      if (encoded.length * 3 / 4 - (encoded.match(/=*$/)[0].length) > FAVICON_BYTES) throw new Error("That image has too much detail for Minecraft’s 16 KiB icon limit. Try a simpler image.");
+      return url;
+    } finally { image.close?.(); }
+  }
+  async function chooseFavicon(file) {
+    if (!file || !$("server-list-enabled").checked) return;
+    text("server-list-favicon-state", "Preparing icon…");
+    try {
+      state.serverListFavicon = await faviconFromFile(file);
+      markSettings("serverList");
+      renderFavicon();
+    } catch (error) { renderFavicon(); text("server-list-favicon-state", error.message); }
   }
   function renderTabList() {
     const list = state.definitions.tab_list || null;
@@ -1396,6 +1659,11 @@
     } finally { state.busy = false; controls(); }
   }
   function wakeLabel(server) {
+    if (server.group_suspended) return `Paused · group ${server.group} stopped; start the group to resume`;
+    const label = baseWakeLabel(server);
+    return server.group_mode === "dev" ? `${label} · dev mode` : label;
+  }
+  function baseWakeLabel(server) {
     if (server.restart_exhausted) return "Paused · restart retries exhausted; Start to retry";
     if (server.automatic_enabled === false) return "Paused by Stop; Start to resume";
     return server.automatic_start ? "Enabled" : "Explicit start only";
@@ -1452,6 +1720,65 @@
       handleError(error, true);
       if (!error.status) result(`${error.message} Reloading may have moved or disabled this service. Check the configured address.`, "warning");
     } finally { state.busy = false; controls(); }
+  }
+  // The status badges of a service group row, most important first.
+  function groupStatus(group) {
+    const draining = number(group.summary?.draining), badges = [];
+    if (group.suspended) badges.push(draining ? [`Stopping · ${count(draining)} draining`, "warning"] : ["Stopped", ""]);
+    if (group.mode === "dev") badges.push(["Dev mode", "accent"]);
+    if (!badges.length) badges.push(["Active", "good"]);
+    return badges;
+  }
+  function instanceSummary(group) {
+    const names = group.instances || [], summary = group.summary;
+    if (!names.length) return "None created";
+    if (!summary) return names.join(", ");
+    const parts = [["running", "running"], ["starting", "starting"], ["stopping", "stopping"], ["stopped", "stopped"], ["failed", "failed"], ["unknown", "unreachable"]]
+      .filter(([key]) => number(summary[key])).map(([key, label]) => `${count(summary[key])} ${label}`);
+    return [...parts, `${count(summary.players)} ${number(summary.players) === 1 ? "player" : "players"}`].join(" · ");
+  }
+  function groupOutcome(group, action, outcome) {
+    if (action === "mode") return outcome.mode === "dev"
+      ? `${group} is in dev mode. Only players with ${outcome.dev_permission} can join and scaling is paused; players already connected stay.`
+      : `${group} is active again. Everyone can join${outcome.suspended ? " once the group is started" : " and scaling resumes"}.`;
+    const tally = new Map(), failures = [];
+    for (const instance of outcome.instances || []) {
+      tally.set(instance.result, (tally.get(instance.result) || 0) + 1);
+      if (instance.result === "failed") failures.push(`${instance.name}: ${instance.message}`);
+    }
+    const labels = { starting: "starting", running: "already running", stopping: "stopping", stopped: "already stopped", draining: "draining until their players leave", failed: "failed" };
+    const parts = [...tally].map(([result, total]) => `${total} ${labels[result] || result}`);
+    const counted = parts.length ? ` ${parts.join(", ")}.` : " It has no instances yet.";
+    const lead = action === "start"
+      ? `Started ${group}.${counted} Scaling resumes${outcome.mode === "dev" ? ", except while the group is in dev mode" : ""}.`
+      : `Stopped ${group}.${counted} New players are kept out and scaling is paused until you start the group.`;
+    return failures.length ? `${lead} ${failures.join("; ")}` : lead;
+  }
+  async function groupOperation(group, action, mode) {
+    if (state.busy) return;
+    state.busy = true; controls();
+    const name = group.name, path = `/api/groups/${encodeURIComponent(name)}/${action}`;
+    text("group-result", action === "mode" ? `Switching ${name} to ${mode === "dev" ? "dev mode" : "active"}…` : `${action === "start" ? "Starting" : "Stopping"} ${name}…`);
+    $("group-result").className = "operation-result";
+    try {
+      const outcome = await request(path, action === "mode" ? { method: "PUT", body: JSON.stringify({ mode }) } : { method: "POST", body: "{}" });
+      const failed = (outcome.instances || []).some((instance) => instance.result === "failed");
+      text("group-result", groupOutcome(name, action, outcome));
+      $("group-result").className = `operation-result ${failed ? "warning" : "success"}`;
+      await refreshStatus({ syncSource: false });
+    } catch (error) {
+      if (error.status === 401 || error.status === 403) $("auth-panel").open = true;
+      text("group-result", error.message || "The group request failed.");
+      $("group-result").className = "operation-result error";
+    } finally { state.busy = false; controls(); }
+  }
+  async function editGroup(name) {
+    if (state.definitionDirty && !window.confirm("Discard unsaved definition fields?")) return;
+    window.location.hash = "#definitions";
+    try {
+      if ($("definition-section").value !== "service_groups") { $("definition-section").value = "service_groups"; await loadDefinitions(); }
+      $("definition-select").value = name; renderDefinition();
+    } catch (error) { text("definition-result", error.message); }
   }
   async function serverOperation(name, action) {
     if (state.busy) return;
@@ -1515,6 +1842,7 @@
       $("server-result").className = "operation-result error";
     } finally { state.busy = false; controls(); }
   }
+  $("servers-group").addEventListener("change", () => { renderServers(); controls(); });
   $("source").addEventListener("input", controls);
   $("source").addEventListener("keydown", (event) => {
     if ((event.ctrlKey || event.metaKey) && event.key === "Enter") { event.preventDefault(); validate(); }
@@ -1603,7 +1931,7 @@
   }
   $("server-list-form").addEventListener("submit", (event) => {
     event.preventDefault();
-    if (!$("server-list-enabled").checked && state.definitions.server_list && !window.confirm("Turn off the proxy-owned server list? Its favicon and hostname entries are removed too, and backends answer pings again.")) return;
+    if (!$("server-list-enabled").checked && state.definitions.server_list && !window.confirm("Turn off the proxy-owned server list? Its icon and hostname entries are removed too, and backends answer pings again.")) return;
     applySetting({ path: "/api/definitions/server_list", value: serverListValue, result: "server-list-result", key: "serverList",
       saved: (value) => value ? "Server list saved and applied." : "Server list turned off; backends answer pings again." });
   });
@@ -1613,6 +1941,23 @@
       saved: (value) => value ? "Tab list saved; players see it within half a second." : "Tab list turned off; backends control it again." });
   });
   $("server-list-refresh").addEventListener("click", () => refreshSettings("serverList", "server-list-result"));
+  $("server-list-favicon-choose").addEventListener("click", () => $("server-list-favicon-file").click());
+  $("server-list-favicon-file").addEventListener("change", async () => {
+    const file = $("server-list-favicon-file").files?.[0];
+    $("server-list-favicon-file").value = "";
+    await chooseFavicon(file);
+  });
+  $("server-list-favicon-remove").addEventListener("click", () => { state.serverListFavicon = false; markSettings("serverList"); renderFavicon(); });
+  const picker = $("server-list-favicon-picker");
+  picker.addEventListener("dragover", (event) => {
+    if (!$("server-list-enabled").checked) return;
+    event.preventDefault(); picker.classList.toggle("dragging", true);
+  });
+  picker.addEventListener("dragleave", () => picker.classList.toggle("dragging", false));
+  picker.addEventListener("drop", async (event) => {
+    event.preventDefault(); picker.classList.toggle("dragging", false);
+    await chooseFavicon(event.dataTransfer?.files?.[0]);
+  });
   $("tab-list-refresh").addEventListener("click", () => refreshSettings("tabList", "tab-list-result"));
   $("deployments-refresh").addEventListener("click", async () => { try { await loadDeployments(); } catch (error) { text("deployment-result", error.message); } });
   $("audit-refresh").addEventListener("click", async () => { try { await loadAudit(); } catch (error) { text("audit-result", error.message); } });

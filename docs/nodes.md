@@ -85,10 +85,11 @@ public CAs plus the certificates in its `--ca` file, so the proxy may use a
 certificate from the same private CA as the message bus. Plain `http://` is
 accepted only for loopback addresses, for an agent on the controller's host.
 
-Agents never receive the Velocity forwarding secret from the controller. If
-`forwarding` is enabled and nodes run Paper-family templates, set the same secret
-on every node, in `RIFT_FORWARDING_SECRET` or the variable named by
-`--forwarding-secret-env`.
+Agents never receive the forwarding secret (the Velocity secret or BungeeGuard
+token) from the controller. If `forwarding` uses either and nodes run
+Paper-family templates, set the same value on every node, in
+`RIFT_FORWARDING_SECRET` or the variable named by `--forwarding-secret-env`.
+`mode = "bungeecord"` has no secret.
 
 ## Run an agent
 
@@ -111,7 +112,7 @@ RIFT_NODE_TOKEN=... RIFT_FORWARDING_SECRET=... rift node \
 | `--token-env` | Variable holding this node's token (default `RIFT_NODE_TOKEN`) |
 | `--server-name` | TLS name of the controller certificate (default: the controller host) |
 | `--web` | The controller's web API, needed for templates; `https://` unless loopback |
-| `--forwarding-secret-env` | Variable holding the Velocity forwarding secret (default `RIFT_FORWARDING_SECRET`); required only for Paper-family templates with `forwarding` |
+| `--forwarding-secret-env` | Variable holding the Velocity forwarding secret or BungeeGuard token (default `RIFT_FORWARDING_SECRET`); required only for Paper-family templates with `velocity` or `bungeeguard` forwarding |
 | `--allow-program` | A program servers may run; repeatable (default: `java`) |
 
 The agent reconnects with backoff when the controller is unreachable. In a
@@ -181,8 +182,8 @@ so `bedwars-1` on node1 and `bedwars-7` on node2 can both use port 30000. The
 backend address is the node's address plus the port, registered live like a
 local instance. New instances on nodes write `server-ip=<node address>` to
 `server.properties`. Allow these ports from the proxy only: Paper's Velocity
-forwarding rejects direct connections, but other software runs offline behind
-Rift.
+forwarding and BungeeGuard reject direct connections, but plain BungeeCord
+forwarding and other software run offline behind Rift.
 
 ## Templates and software
 
@@ -196,7 +197,7 @@ new instance it:
    SHA-256) and downloads only files whose hash differs from its cache, deleting
    cached files that were removed from the template;
 3. builds the instance with the same code as local provisioning: config layers
-   in order, `server.jar`, plugins, map, EULA, Velocity forwarding and
+   in order, `server.jar`, plugins, map, EULA, forwarding and
    `server.properties`, staged and then published atomically.
 
 Template folders, plugins and jars used on nodes must live in
@@ -237,9 +238,28 @@ address.
 - The node token only travels over TLS: the QUIC bus, and `--web`, which must
   be `https://` unless it is a loopback address. The agent does not follow
   redirects, so the token cannot be forwarded elsewhere.
-- The Velocity forwarding secret never crosses the network: Prepare commands
-  only say whether to enable forwarding, and each agent writes the secret from
-  its own environment.
+- The forwarding secret never crosses the network: Prepare commands only say
+  whether to enable forwarding and which mode, and each agent writes the secret
+  from its own environment.
+- One secret does cross the bus, deliberately: a server with a
+  [bus login](managed-servers.md#bus-logins-for-instances) gets its token in
+  every start command (and so after a crash recovery or an agent restart,
+  since the controller starts it again). The token is scoped to that one
+  instance and dies with it; the key that derives tokens stays on the
+  controller. The start command also carries the bus certificate, which the
+  agent writes to `rift-bus.pem` in the server directory.
+- A server's [`isolation`](managed-servers.md#isolation) is applied by the
+  agent on the node's kernel; `rift check` on the controller cannot tell what
+  that kernel offers. Agents older than the controller start every server
+  unconfined.
+- Servers on a node do not inherit the agent's secrets: the variables named by
+  `--token-env` and `--forwarding-secret-env` are removed from every server's
+  environment. A server's `env` and `inherit_env` travel with its start
+  command and apply on the node as they would locally, against the agent's
+  environment. Agents older than the controller ignore them, so upgrade
+  agents together with the controller. On Linux the agent clears its
+  dumpable flag at startup, like the proxy (see
+  [operations](operations.md#secrets-and-the-processes-rift-starts)).
 
 ## Operate nodes
 

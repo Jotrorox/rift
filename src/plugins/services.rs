@@ -16,6 +16,7 @@ use crate::{
     extensions::{PlayerAction, Players, storage::Store},
     messaging::{Broker, Error as BusError, Stream},
     permissions::Authority,
+    text::Text,
 };
 use bytes::Bytes;
 use rift_permissions::{
@@ -42,9 +43,7 @@ const MAX_REQUEST_MS: u32 = 60_000;
 const STORE_WAIT: Duration = Duration::from_secs(5);
 /// How long `servers.*` waits for the control service's reply.
 const CONTROL_WAIT: Duration = Duration::from_secs(60);
-const MAX_TEXT: usize = 1024;
 const MAX_LOG: usize = 4096;
-const MAX_COMPONENT_BYTES: usize = 32 * 1024;
 
 /// What every instance shares: the process-wide directory, store,
 /// permissions and bus. Lives across reload generations.
@@ -181,6 +180,14 @@ impl Services {
 }
 
 impl Inner {
+    /// The in-process sender this plugin's publications carry: its own name
+    /// on the subjects whose handlers audit callers, nothing elsewhere (see
+    /// [`crate::players_service::audited_subject`]).
+    fn sender(&self, subject: &str) -> Option<String> {
+        crate::players_service::audited_subject(subject)
+            .then(|| crate::players_service::plugin_sender(&self.spec.name))
+    }
+
     fn handle(&self) -> u64 {
         self.next.fetch_add(1, Ordering::Relaxed)
     }
@@ -213,29 +220,14 @@ impl Inner {
     }
 }
 
-fn text(value: &str, label: &str) -> Result<String, String> {
-    if value.is_empty() || value.len() > MAX_TEXT {
-        return Err(format!("{label} must contain 1..=1024 bytes"));
-    }
-    Ok(value.to_owned())
-}
-
 /// A JSON text component or plain text. Text starting with `{`, `[` or `"`
-/// must be valid JSON; anything else is shown as written.
+/// must be valid JSON (markup objects included); anything else is shown as
+/// written.
 fn component(text: &str, label: &str) -> Result<serde_json::Value, String> {
-    if text.len() > MAX_COMPONENT_BYTES {
-        return Err(format!("{label} exceeds 32 KiB"));
-    }
-    if !text.starts_with(['{', '[', '"']) {
-        if text.is_empty() {
-            return Err(format!("{label} must not be empty"));
-        }
-        return Ok(serde_json::Value::String(text.to_owned()));
-    }
-    let value: serde_json::Value =
-        serde_json::from_str(text).map_err(|error| format!("{label}: invalid JSON: {error}"))?;
-    crate::protocol::validate_component(&value).map_err(|error| format!("{label}: {error}"))?;
-    Ok(value)
+    Ok(match Text::json(text, label)? {
+        Text::Component(component) => component,
+        Text::Plain(text) => serde_json::Value::String(text),
+    })
 }
 
 /// `players`: the joined players. `target` is a lowercase UUID or a name.
@@ -265,39 +257,66 @@ impl PlayersApi<'_> {
     }
 
     pub fn message(&self, target: &str, message: &str) -> Result<bool, String> {
-        self.send(target, PlayerAction::Message(text(message, "message")?))
+        self.message_text(target, Text::plain(message, "message")?)
+    }
+
+    /// `players.message-json`: a JSON text component.
+    pub fn message_json(&self, target: &str, message: &str) -> Result<bool, String> {
+        self.message_text(target, Text::json(message, "message")?)
+    }
+
+    /// A message already checked by [`Text`].
+    pub fn message_text(&self, target: &str, message: Text) -> Result<bool, String> {
+        self.send(target, PlayerAction::Message(message))
     }
 
     pub fn action_bar(&self, target: &str, message: &str) -> Result<bool, String> {
-        self.send(
-            target,
-            PlayerAction::ActionBar(text(message, "action bar text")?),
-        )
+        self.action_bar_text(target, Text::plain(message, "action bar text")?)
     }
 
+    /// `players.action-bar-json`: a JSON text component.
+    pub fn action_bar_json(&self, target: &str, message: &str) -> Result<bool, String> {
+        self.action_bar_text(target, Text::json(message, "action bar text")?)
+    }
+
+    /// An action bar already checked by [`Text`].
+    pub fn action_bar_text(&self, target: &str, message: Text) -> Result<bool, String> {
+        self.send(target, PlayerAction::ActionBar(message))
+    }
+
+    /// `players.title`: plain or rich text; an empty plain title or
+    /// subtitle is left out.
     pub fn title(&self, target: &str, title: &TitleSpec) -> Result<bool, String> {
-        let subtitle = title
-            .subtitle
-            .as_deref()
-            .filter(|subtitle| !subtitle.is_empty())
-            .map(|subtitle| text(subtitle, "subtitle"))
-            .transpose()?;
-        if title.title.is_empty() && subtitle.is_none() {
-            return Err("title requires a title or subtitle".into());
-        }
-        if title.title.len() > MAX_TEXT {
-            return Err("title must contain at most 1024 bytes".into());
-        }
-        let times = [title.fade_in, title.stay, title.fade_out];
-        if times.iter().any(|ticks| !(0..=1200).contains(ticks)) {
-            return Err("title times must be 0..=1200 ticks".into());
-        }
-        self.send(
+        self.send(target, crate::players_service::title_action(title)?)
+    }
+
+    /// `players.title-json`: like `title`, with JSON text components (or
+    /// markup objects); text that does not start with `{`, `[` or `"` is
+    /// shown as written, and an empty title or subtitle is left out.
+    pub fn title_json(
+        &self,
+        target: &str,
+        title_json: &str,
+        subtitle_json: Option<&str>,
+        times: [i32; 3],
+    ) -> Result<bool, String> {
+        let rich = |text: &str, label: &str| -> Result<Text, String> {
+            if text.is_empty() {
+                Ok(Text::Plain(String::new()))
+            } else {
+                Text::json(text, label)
+            }
+        };
+        self.title(
             target,
-            PlayerAction::Title {
-                title: title.title.clone(),
-                subtitle,
-                times,
+            &TitleSpec {
+                title: rich(title_json, "title")?,
+                subtitle: subtitle_json
+                    .map(|text| rich(text, "subtitle"))
+                    .transpose()?,
+                fade_in: times[0],
+                stay: times[1],
+                fade_out: times[2],
             },
         )
     }
@@ -374,6 +393,18 @@ impl PlayersApi<'_> {
             .map_err(|error| error.to_string())
     }
 
+    /// `players.visible-to`: the node a viewer needs to see the player (the
+    /// resolved `rift.visible-to` meta), or `None` when everyone sees them.
+    pub fn visible_to(&self, target: &str) -> Result<Option<String>, String> {
+        Ok(self.get(target)?.and_then(|player| player.visible_to))
+    }
+
+    /// `players.locale`: the language the player's client reported, or
+    /// `None` while Rift has not seen its Client Information yet.
+    pub fn locale(&self, target: &str) -> Result<Option<String>, String> {
+        Ok(self.get(target)?.and_then(|player| player.locale))
+    }
+
     /// `players.clear-dialog`: close the dialog Rift showed, if still open.
     pub fn clear_dialog(&self, target: &str) -> Result<bool, String> {
         let owner = crate::dialog::Owner::Plugin(self.0.spec.name.clone());
@@ -383,7 +414,17 @@ impl PlayersApi<'_> {
     }
 
     pub fn kick(&self, target: &str, reason: &str) -> Result<bool, String> {
-        self.send(target, PlayerAction::Kick(text(reason, "kick reason")?))
+        self.kick_text(target, Text::plain(reason, "kick reason")?)
+    }
+
+    /// `players.kick-json`: a JSON text component.
+    pub fn kick_json(&self, target: &str, reason: &str) -> Result<bool, String> {
+        self.kick_text(target, Text::json(reason, "kick reason")?)
+    }
+
+    /// A kick reason already checked by [`Text`].
+    pub fn kick_text(&self, target: &str, reason: Text) -> Result<bool, String> {
+        self.send(target, PlayerAction::Kick(reason))
     }
 
     pub fn transfer(&self, target: &str, server: &str) -> Result<bool, String> {
@@ -395,11 +436,22 @@ impl PlayersApi<'_> {
         self.broadcast_to(message, None)
     }
 
+    /// `players.broadcast-json`: a JSON text component.
+    pub fn broadcast_json(&self, message: &str) -> Result<u32, String> {
+        self.broadcast_text(Text::json(message, "message")?, None)
+    }
+
     /// Like [`PlayersApi::broadcast`], only to the players on one server or
     /// service group when `server` is set.
     pub fn broadcast_to(&self, message: &str, server: Option<&str>) -> Result<u32, String> {
+        self.broadcast_text(Text::plain(message, "message")?, server)
+    }
+
+    /// A message already checked by [`Text`], to everyone or to the players
+    /// on one server or service group.
+    pub fn broadcast_text(&self, message: Text, server: Option<&str>) -> Result<u32, String> {
         self.players()
-            .broadcast(message, server)
+            .broadcast(&message, server)
             .map(|count| u32::try_from(count).unwrap_or(u32::MAX))
     }
 }
@@ -550,6 +602,47 @@ impl PermissionsApi<'_> {
         self.apply(change).map(drop)
     }
 
+    /// `meta`: one meta value of the player in their current contexts, as
+    /// prefix and suffix resolve (the lowest rank, then more context pairs).
+    pub fn meta_value(&self, uuid: &str, key: &str) -> Option<String> {
+        let uuid = Uuid::parse(uuid).ok()?;
+        let active = self.authority().contexts(uuid);
+        self.authority()
+            .meta(uuid, &active)
+            .meta
+            .remove(&key.to_ascii_lowercase())
+    }
+
+    /// `set-meta`: the user's meta node `key` in exactly `contexts` (global
+    /// without), expiring at `expires_at` (Unix seconds) if given; `None`
+    /// removes the node in those contexts. Returns whether anything changed.
+    /// `rift.visible-to` is the key a vanish plugin sets (see
+    /// [`crate::players::VISIBLE_TO`]).
+    pub fn set_meta(
+        &self,
+        uuid: &str,
+        key: &str,
+        value: Option<&str>,
+        contexts: ContextSet,
+        expires_at: Option<u64>,
+    ) -> Result<bool, String> {
+        let subject = SubjectRef::User(Uuid::parse(uuid).map_err(|error| error.to_string())?);
+        let change = match value {
+            Some(value) => {
+                let mut node = self
+                    .node(Node::meta(key, value).and_then(|node| node.with_contexts(contexts)))?;
+                node.expires_at = expires_at;
+                Change::SetNode { subject, node }
+            }
+            None => Change::UnsetNode {
+                subject,
+                key: NodeKey::new(NodeKind::Meta, key, contexts)
+                    .map_err(|error| error.to_string())?,
+            },
+        };
+        self.apply(change)
+    }
+
     /// `add-group`: a global `inherit` node. Returns whether anything changed.
     pub fn add_group(&self, uuid: &str, group: &str) -> Result<bool, String> {
         let user = SubjectRef::User(Uuid::parse(uuid).map_err(|error| error.to_string())?);
@@ -622,7 +715,12 @@ impl BusApi<'_> {
         self.0
             .base
             .broker
-            .publish_with_reply(subject, reply, Bytes::copy_from_slice(payload))
+            .publish_as(
+                subject,
+                reply,
+                Bytes::copy_from_slice(payload),
+                self.0.sender(subject).as_deref(),
+            )
             .map(|report| u32::try_from(report.delivered).unwrap_or(u32::MAX))
             .map_err(|error| error.to_string())
     }
@@ -640,9 +738,15 @@ impl BusApi<'_> {
         }
         let broker = self.0.base.broker.clone();
         let payload = Bytes::copy_from_slice(payload);
+        let sender = self.0.sender(subject);
         self.0
             .handle
-            .block_on(broker.request(subject, payload, Duration::from_millis(timeout_ms.into())))
+            .block_on(broker.request_as(
+                subject,
+                payload,
+                Duration::from_millis(timeout_ms.into()),
+                sender.as_deref(),
+            ))
             .map(|message| message.payload.to_vec())
             .map_err(|error| error.to_string())
     }
@@ -782,13 +886,16 @@ impl ServersApi<'_> {
             return Err("servers.control: payload must be a JSON object of at most 64 KiB".into());
         }
         let broker = self.0.base.broker.clone();
+        let subject = format!("rift.control.{operation}");
+        let sender = self.0.sender(&subject);
         let reply = self
             .0
             .handle
-            .block_on(broker.request(
-                &format!("rift.control.{operation}"),
+            .block_on(broker.request_as(
+                &subject,
                 Bytes::copy_from_slice(payload_json.as_bytes()),
                 CONTROL_WAIT,
+                sender.as_deref(),
             ))
             .map_err(|error| match error {
                 BusError::NoResponders => "the control service is unavailable".to_owned(),

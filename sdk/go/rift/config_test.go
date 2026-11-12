@@ -60,3 +60,20 @@ func TestDecodeConfig(t *testing.T) {
 		t.Fatal("accepted a non-string deny")
 	}
 }
+
+func TestComponentWords(t *testing.T) {
+	for _, c := range []struct{ json, words string }{
+		{`{"extra":[{"text":": spam"}],"text":"Banned","color":"red"}`, "Banned: spam"},
+		{`["a",{"text":"b","bold":true},{"translate":"k","fallback":"f"}]`, "abf"},
+		{`"plain"`, "plain"},
+		{`not json`, "not json"},
+		{`{"text":"x"} trailing`, `{"text":"x"} trailing`},
+	} {
+		if got := componentWords(c.json); got != c.words {
+			t.Errorf("componentWords(%q) = %q, want %q", c.json, got, c.words)
+		}
+	}
+	if a := DenyJSON(`{"text":"No"}`).lower(); a.Deny() == nil || *a.Deny() != "No" {
+		t.Errorf("DenyJSON lowers to %v for older hosts", a)
+	}
+}

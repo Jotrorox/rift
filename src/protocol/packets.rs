@@ -107,7 +107,7 @@ impl Handshake {
 
 /// Java releases accepted by name in configuration, oldest first, with their
 /// protocols. Each has a pinned server fixture in tests/servers.json.
-const RELEASES: &[(&str, i32)] = &[
+pub(super) const RELEASES: &[(&str, i32)] = &[
     ("1.8.9", 47),
     ("1.9", 107),
     ("1.9.1", 108),
@@ -216,9 +216,9 @@ impl ProtocolVersion {
             | 757
             | 758
             | 759..=777 => Ok(Self(protocol)),
-            _ => Err(io::Error::new(
+            _ => Err(crate::text::notice_error(
                 io::ErrorKind::Unsupported,
-                "Unsupported Minecraft version. Rift supports Java 1.8.9–26.3.",
+                crate::text::catalog::Notice::LoginUnsupportedVersion,
             )),
         }
     }
@@ -464,12 +464,18 @@ pub fn disconnect(
 }
 
 /// Disconnect with a JSON text component, as validated by [`validate_component`].
+/// Hover and click events are spelled the way the client reads them.
 pub fn disconnect_component(
     version: Option<ProtocolVersion>,
     state: State,
     reason: &serde_json::Value,
 ) -> io::Result<Packet> {
-    disconnect_text(version, state, Text::Component(reason))
+    let converted = crate::text::for_client(reason, version);
+    disconnect_text(
+        version,
+        state,
+        Text::Component(converted.as_ref().unwrap_or(reason)),
+    )
 }
 
 pub(crate) fn disconnect_text(
@@ -580,22 +586,88 @@ pub struct PlayerIdentity {
     pub uuid: Option<[u8; 16]>,
 }
 
+/// The chat signing key a 1.19–1.19.2 client sends in Login Start: its
+/// expiry in epoch milliseconds, an X.509 RSA public key and Mojang's
+/// signature over them. Rift checks only that the client holds the private
+/// key; backends that enforce secure profiles check Mojang's signature.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ProfileKey {
+    pub expiry: i64,
+    pub public_key: Vec<u8>,
+    pub signature: Vec<u8>,
+}
+
+impl ProfileKey {
+    pub(crate) fn write(&self, data: &mut Vec<u8>) {
+        data.extend_from_slice(&self.expiry.to_be_bytes());
+        for bytes in [&self.public_key, &self.signature] {
+            write_varint(bytes.len() as i32, data);
+            data.extend_from_slice(bytes);
+        }
+    }
+}
+
 pub(crate) fn start_identity(
     version: ProtocolVersion,
     packet: &Packet,
 ) -> io::Result<PlayerIdentity> {
+    start(version, packet).map(|(identity, _)| identity)
+}
+
+/// The profile key of a 1.19–1.19.2 Login Start, if the client sent one.
+pub(crate) fn start_profile_key(
+    version: ProtocolVersion,
+    packet: &Packet,
+) -> io::Result<Option<ProfileKey>> {
+    start(version, packet).map(|(_, key)| key)
+}
+
+/// A 1.19–1.19.2 Login Start without the profile key it carries, or `None`
+/// when it carries none. Without a key the backend has nothing to check the
+/// player's chat signatures against and treats the chat as unsigned.
+pub(crate) fn without_profile_key(
+    version: ProtocolVersion,
+    packet: &Packet,
+) -> io::Result<Option<Packet>> {
+    let (identity, key) = start(version, packet)?;
+    if key.is_none() {
+        return Ok(None);
+    }
+    let mut data = Vec::new();
+    write_string(&identity.name, &mut data);
+    data.push(0); // no profile key
+    if version.number() == 760 {
+        data.push(u8::from(identity.uuid.is_some()));
+        data.extend(identity.uuid.iter().flatten());
+    }
+    Ok(Some(Packet::new(packet.id, data)))
+}
+
+fn start(
+    version: ProtocolVersion,
+    packet: &Packet,
+) -> io::Result<(PlayerIdentity, Option<ProfileKey>)> {
     let mut bytes = packet.data.as_slice();
     let name = read_string(&mut bytes, 16)?.to_owned();
-    if matches!(version.number(), 759..=760) && boolean(&mut bytes)? {
-        take(&mut bytes, 8)?; // Expiry of the client's optional profile key.
-        for _ in 0..2 {
+    let key = if matches!(version.number(), 759..=760) && boolean(&mut bytes)? {
+        let expiry = i64::from_be_bytes(take(&mut bytes, 8)?.try_into().unwrap());
+        let mut field = || -> io::Result<Vec<u8>> {
             let length = read_varint(&mut bytes)?;
             if !(0..=8192).contains(&length) {
                 return Err(invalid("invalid profile key length"));
             }
-            take(&mut bytes, length as usize)?;
-        }
-    }
+            Ok(take(&mut bytes, length as usize)?.to_vec())
+        };
+        let public_key = field()?;
+        let signature = field()?;
+        Some(ProfileKey {
+            expiry,
+            public_key,
+            signature,
+        })
+    } else {
+        None
+    };
     let uuid = if version.number() >= 764 || (version.number() >= 760 && boolean(&mut bytes)?) {
         Some(take(&mut bytes, 16)?.try_into().unwrap())
     } else {
@@ -604,7 +676,7 @@ pub(crate) fn start_identity(
     if name.is_empty() || !bytes.is_empty() {
         return Err(invalid("invalid login identity"));
     }
-    Ok(PlayerIdentity { name, uuid })
+    Ok((PlayerIdentity { name, uuid }, key))
 }
 
 pub(crate) fn success_identity(
@@ -660,24 +732,58 @@ pub fn system_message(version: ProtocolVersion, message: &str) -> io::Result<Pac
     switching(version)?.system_message(version, Text::Literal(message))
 }
 
-/// A system chat message from a JSON text component, as validated by [`validate_component`].
+/// A system chat message from a JSON text component, as validated by
+/// [`validate_component`]. Hover and click events are spelled the way the
+/// client reads them.
 pub fn system_component(
     version: ProtocolVersion,
     message: &serde_json::Value,
 ) -> io::Result<Packet> {
-    switching(version)?.system_message(version, Text::Component(message))
+    let converted = crate::text::for_client(message, Some(version));
+    switching(version)?.system_message(
+        version,
+        Text::Component(converted.as_ref().unwrap_or(message)),
+    )
 }
 
 pub fn action_bar(version: ProtocolVersion, message: &str) -> io::Result<Packet> {
     switching(version)?.action_bar(version, Text::Literal(message))
 }
 
+/// An action bar from a JSON text component, as validated by [`validate_component`].
+pub fn action_bar_component(
+    version: ProtocolVersion,
+    message: &serde_json::Value,
+) -> io::Result<Packet> {
+    let converted = crate::text::for_client(message, Some(version));
+    switching(version)?.action_bar(
+        version,
+        Text::Component(converted.as_ref().unwrap_or(message)),
+    )
+}
+
 /// Title packets in send order; `times` are fade-in, stay and fade-out ticks.
 pub fn title(
     version: ProtocolVersion,
-    title: &str,
-    subtitle: Option<&str>,
+    title: Option<&crate::text::Text>,
+    subtitle: Option<&crate::text::Text>,
     times: [i32; 3],
 ) -> io::Result<Vec<Packet>> {
     switching(version)?.title(version, title, subtitle, times)
+}
+
+/// Rift text as the client reads it: plain text stays literal and
+/// components are rewritten by [`crate::text::for_client`].
+pub(crate) fn with_text<R>(
+    text: &crate::text::Text,
+    version: Option<ProtocolVersion>,
+    write: impl FnOnce(Text<'_>) -> R,
+) -> R {
+    match text {
+        crate::text::Text::Plain(text) => write(Text::Literal(text)),
+        crate::text::Text::Component(component) => {
+            let converted = crate::text::for_client(component, version);
+            write(Text::Component(converted.as_ref().unwrap_or(component)))
+        }
+    }
 }

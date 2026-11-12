@@ -641,7 +641,7 @@ fn action_bars_and_titles_use_verified_play_packets() {
         let version = ProtocolVersion::new(number).unwrap();
         let component = |text| disconnect(Some(version), State::Play, text).unwrap().data;
         assert_eq!(
-            title(version, "Hello", None, [10, 70, 20]).unwrap(),
+            title(version, Some(&"Hello".into()), None, [10, 70, 20]).unwrap(),
             [
                 Packet::new(times, vec![0, 0, 0, 10, 0, 0, 0, 70, 0, 0, 0, 20]),
                 Packet::new(subtitle, component("")),
@@ -650,7 +650,7 @@ fn action_bars_and_titles_use_verified_play_packets() {
             "protocol {number}"
         );
         assert_eq!(
-            title(version, "", Some("Sub"), [0, 1, 2]).unwrap()[1],
+            title(version, None, Some(&"Sub".into()), [0, 1, 2]).unwrap()[1],
             Packet::new(subtitle, component("Sub"))
         );
         // Session state tracking must treat these as ordinary play packets.
@@ -666,15 +666,70 @@ fn action_bars_and_titles_use_verified_play_packets() {
         let (overlay, text) = bar.data.split_last().unwrap();
         assert_eq!((*overlay, text), (1, chat.data.split_last().unwrap().1));
     }
-    for number in [47, 340, 758, 760] {
+    // Before 1.17, one Title packet per action: times, subtitle, title.
+    for (number, id, times_action) in [
+        (47, 0x45, 2),
+        (210, 0x45, 2),
+        (315, 0x45, 3),
+        (335, 0x47, 3),
+        (340, 0x48, 3),
+        (404, 0x4b, 3),
+        (498, 0x4f, 3),
+        (578, 0x50, 3),
+        (736, 0x4f, 3),
+        (754, 0x4f, 3),
+    ] {
         let version = ProtocolVersion::new(number).unwrap();
+        let action = |action: u8, body: &[u8]| {
+            let mut data = vec![action];
+            data.extend(body);
+            Packet::new(id, data)
+        };
+        let json = |text: &str| {
+            let mut data = Vec::new();
+            write_string(&serde_json::json!({ "text": text }).to_string(), &mut data);
+            data
+        };
         assert_eq!(
-            title(version, "Hello", None, [10, 70, 20])
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::Unsupported
+            title(version, Some(&"Hello".into()), None, [10, 70, 20]).unwrap(),
+            [
+                action(times_action, &[0, 0, 0, 10, 0, 0, 0, 70, 0, 0, 0, 20]),
+                action(1, &json("")),
+                action(0, &json("Hello")),
+            ],
+            "protocol {number}"
         );
     }
+    // 1.17 to 1.19.2: separate packets, JSON text.
+    for (number, subtitle, heading, times) in [
+        (755, 0x57, 0x59, 0x5a),
+        (756, 0x57, 0x59, 0x5a),
+        (757, 0x58, 0x5a, 0x5b),
+        (758, 0x58, 0x5a, 0x5b),
+        (759, 0x58, 0x5a, 0x5b),
+        (760, 0x5b, 0x5d, 0x5e),
+    ] {
+        let version = ProtocolVersion::new(number).unwrap();
+        let packets = title(
+            version,
+            Some(&"Hello".into()),
+            Some(&"Sub".into()),
+            [1, 2, 3],
+        )
+        .unwrap();
+        let ids: Vec<_> = packets.iter().map(|packet| packet.id).collect();
+        assert_eq!(ids, [times, subtitle, heading], "protocol {number}");
+        let mut expected = Vec::new();
+        write_string(r#"{"text":"Hello"}"#, &mut expected);
+        assert_eq!(packets[2].data, expected, "protocol {number}");
+    }
+    // Components are rendered for the client: hex becomes a named colour on 1.8.
+    let version = ProtocolVersion::new(47).unwrap();
+    let rich = crate::text::Text::Component(serde_json::json!({"text": "Hi", "color": "#ff8800"}));
+    let packets = title(version, Some(&rich), None, [1, 2, 3]).unwrap();
+    let mut expected = vec![0];
+    write_string(r#"{"color":"gold","text":"Hi"}"#, &mut expected);
+    assert_eq!(packets[2].data, expected);
 }
 
 #[test]
@@ -840,6 +895,40 @@ fn proxy_suggestion_requests_are_taken_only_for_proxy_command_arguments() {
 }
 
 #[test]
+fn rich_tooltips_and_titles_are_rendered_for_the_client() {
+    let component = serde_json::json!({"text": "Chill", "color": "#ff8800"});
+    let rich = crate::text::Text::Component(component.clone());
+    let matches = [Suggestion {
+        text: "lounge".into(),
+        tooltip: Some(rich.clone()),
+    }];
+    for number in [764, 770] {
+        let version = ProtocolVersion::new(number).unwrap();
+        let packet = version
+            .switching()
+            .unwrap()
+            .suggestions(version, 1, 0, 0, &matches)
+            .unwrap();
+        let mut expected = Vec::new();
+        write_varint(1, &mut expected);
+        expected.extend([0, 0, 1]);
+        write_string("lounge", &mut expected);
+        expected.push(1);
+        if version.nbt_components() {
+            crate::protocol::nbt::component(&component, &mut expected).unwrap();
+        } else {
+            write_string(&component.to_string(), &mut expected);
+        }
+        assert_eq!(packet.data, expected, "protocol {number}");
+    }
+    let version = ProtocolVersion::new(770).unwrap();
+    let packets = title(version, Some(&rich), None, [1, 2, 3]).unwrap();
+    let mut expected = Vec::new();
+    crate::protocol::nbt::component(&component, &mut expected).unwrap();
+    assert_eq!(packets[2].data, expected);
+}
+
+#[test]
 fn suggestion_responses_use_each_versions_id_and_tooltip_encoding() {
     for number in 761..=777 {
         let version = ProtocolVersion::new(number).unwrap();
@@ -992,6 +1081,40 @@ fn command_parser_properties_follow_each_registry() {
             );
         }
     }
+}
+
+#[test]
+fn components_spell_hover_and_click_events_for_the_client() {
+    let typed = serde_json::json!({
+        "text": "[Accept]",
+        "click_event": {"action": "run_command", "command": "/party accept"},
+    });
+    let legacy = serde_json::json!({
+        "text": "[Accept]",
+        "clickEvent": {"action": "run_command", "value": "/party accept"},
+    });
+    let json = |packet: Packet| {
+        let text = read_string(&mut packet.data.as_slice(), 262144).unwrap();
+        serde_json::from_str::<serde_json::Value>(text).unwrap()
+    };
+    // 1.20.2 reads JSON in play; it gets the legacy spelling.
+    let old = ProtocolVersion::new(764).unwrap();
+    assert_eq!(json(system_component(old, &typed).unwrap()), legacy);
+    assert_eq!(json(action_bar_component(old, &typed).unwrap()), legacy);
+    assert_eq!(
+        json(disconnect_component(Some(old), State::Play, &typed).unwrap()),
+        legacy
+    );
+    // Login is JSON in every version: 1.21.5 gets the typed spelling.
+    let new = ProtocolVersion::new(770).unwrap();
+    assert_eq!(
+        json(disconnect_component(Some(new), State::Login, &legacy).unwrap()),
+        typed
+    );
+    assert_eq!(
+        json(disconnect_component(Some(new), State::Login, &typed).unwrap()),
+        typed
+    );
 }
 
 #[test]
@@ -1349,4 +1472,269 @@ fn player_world_reports_only_real_changes() {
     }));
     assert_eq!(world, PlayerWorld::default());
     assert_eq!(GameMode::Spectator.name(), "spectator");
+}
+
+/// Serverbound Chat (Message), unsigned Chat Command, signed Chat Command,
+/// Message Acknowledgement and Player Session IDs; -1 where a protocol has
+/// no such packet. From PrismarineJS minecraft-data at the commit pinned in
+/// tests/minecraft_data.json for 335 (1.12) to 775 (26.1); 776 and 777 as
+/// tests/schema_patches.py derives them. minecraft-data is not pinned below
+/// 1.12: 47 to 316 are the Chat IDs Rift already reads commands from.
+fn chat_ids(number: i32) -> [i32; 5] {
+    match number {
+        47 => [0x01, 0x01, -1, -1, -1],
+        107..=316 | 338 | 340 | 393 | 401 | 404 => [0x02, 0x02, -1, -1, -1],
+        335 | 477..=758 => [0x03, 0x03, -1, -1, -1],
+        759 => [0x04, -1, 0x03, -1, -1],
+        760 => [0x05, -1, 0x04, 0x03, -1],
+        761 => [0x05, -1, 0x04, 0x03, 0x20],
+        762..=765 => [0x05, -1, 0x04, 0x03, 0x06],
+        766 | 767 => [0x06, 0x04, 0x05, 0x03, 0x07],
+        768..=770 => [0x07, 0x05, 0x06, 0x04, 0x08],
+        771..=774 => [0x08, 0x06, 0x07, 0x05, 0x09],
+        775..=777 => [0x09, 0x07, 0x08, 0x06, 0x0a],
+        _ => panic!("unmapped test protocol"),
+    }
+}
+
+/// Every protocol `ProtocolVersion::new` accepts.
+fn every_protocol() -> impl Iterator<Item = i32> {
+    (0..=777).filter(|number| ProtocolVersion::new(*number).is_ok())
+}
+
+/// A 1.19+ Chat Message or signed Chat Command as minecraft-data lays it
+/// out, and the acknowledgement Rift owes the backend when it drops it.
+/// `signatures` is the number of argument signatures of a command, or
+/// whether a message is signed. `seen` is the last-seen offset from 1.19.3
+/// and the number of last-seen entries in 1.19.1.
+fn signed_chat_packet(
+    number: i32,
+    command: bool,
+    text: &str,
+    signatures: u8,
+    seen: u8,
+) -> (Packet, Option<Packet>) {
+    let [chat, _, signed_command, acknowledgement, _] = chat_ids(number);
+    let mut data = Vec::new();
+    write_string(text, &mut data);
+    data.extend(1_i64.to_be_bytes()); // timestamp
+    data.extend(2_i64.to_be_bytes()); // salt
+    if command {
+        data.push(signatures);
+        for _ in 0..signatures {
+            write_string("arg", &mut data);
+            if number <= 760 {
+                data.extend([3, 1, 2, 3]); // length-prefixed signature
+            } else {
+                data.extend([42; 256]);
+            }
+        }
+    } else if number <= 760 {
+        data.extend(if signatures == 0 {
+            vec![0]
+        } else {
+            vec![3, 1, 2, 3]
+        });
+    } else {
+        data.push(u8::from(signatures != 0));
+        if signatures != 0 {
+            data.extend([42; 256]);
+        }
+    }
+    let mut owed = None;
+    if number <= 760 {
+        data.push(0); // signed preview
+        if number == 760 {
+            let mut update = vec![seen];
+            for _ in 0..seen {
+                update.extend([7; 16]); // sender
+                update.extend([2, 8, 9]); // signature
+            }
+            update.push(1); // a last rejected message
+            update.extend([6; 16]);
+            update.extend([1, 5]);
+            data.extend(&update);
+            owed = Some(Packet::new(acknowledgement, update));
+        }
+    } else {
+        data.push(seen); // offset
+        data.extend([0xff, 0xff, 0x0f]); // acknowledged
+        if number >= 770 {
+            data.push(9); // checksum
+        }
+        if seen != 0 {
+            owed = Some(Packet::new(acknowledgement, vec![seen]));
+        }
+    }
+    (
+        Packet::new(if command { signed_command } else { chat }, data),
+        owed,
+    )
+}
+
+#[test]
+fn chat_parser_reads_messages_and_commands_on_every_protocol() {
+    use switching::{ChatAttempt, ChatKind};
+    let mut tested = 0;
+    for number in every_protocol() {
+        tested += 1;
+        let caps = ProtocolVersion::new(number).unwrap().switching().unwrap();
+        let [chat, command, signed_command, acknowledgement, session] = chat_ids(number);
+        let attempt = |kind, text: &str, signed, ack| {
+            Some(ChatAttempt {
+                kind,
+                text: text.into(),
+                signed,
+                ack,
+            })
+        };
+        // No other packet is chat, least of all its neighbours.
+        for id in -1..0x40 {
+            if ![chat, command, signed_command].contains(&id) {
+                let mut data = Vec::new();
+                write_string("hello", &mut data);
+                assert_eq!(
+                    caps.parse_chat(&Packet::new(id, data)).unwrap(),
+                    None,
+                    "protocol {number} packet {id:#x}"
+                );
+            }
+            assert_eq!(
+                caps.chat_session_update(&Packet::new(id, Vec::new())),
+                id >= 0 && id == session,
+                "protocol {number} packet {id:#x}"
+            );
+        }
+
+        if number < 759 {
+            // One packet for both; a leading slash marks a command.
+            assert_eq!(chat, command);
+            for (text, kind, expected) in [
+                ("hello there", ChatKind::Message, "hello there"),
+                ("/msg Alex hi", ChatKind::Command, "msg Alex hi"),
+                ("/", ChatKind::Command, ""),
+                ("", ChatKind::Message, ""),
+            ] {
+                let mut data = Vec::new();
+                write_string(text, &mut data);
+                let packet = Packet::new(chat, data);
+                assert_eq!(
+                    caps.parse_chat(&packet).unwrap(),
+                    attempt(kind, expected, false, None),
+                    "protocol {number}"
+                );
+                for cut in 0..packet.data.len() {
+                    assert!(
+                        caps.parse_chat(&Packet::new(chat, packet.data[..cut].to_vec()))
+                            .is_err()
+                    );
+                }
+                let mut long = packet.data.clone();
+                long.push(0);
+                assert!(caps.parse_chat(&Packet::new(chat, long)).is_err());
+            }
+            continue;
+        }
+
+        assert_eq!(acknowledgement >= 0, number >= 760, "protocol {number}");
+        for is_command in [false, true] {
+            let kind = if is_command {
+                ChatKind::Command
+            } else {
+                ChatKind::Message
+            };
+            let text = if is_command { "msg Alex hi" } else { "hello" };
+            for signatures in [0, 1, 2] {
+                for seen in [0, 3] {
+                    let (packet, owed) =
+                        signed_chat_packet(number, is_command, text, signatures, seen);
+                    assert_eq!(
+                        caps.parse_chat(&packet).unwrap(),
+                        attempt(kind, text, signatures != 0, owed.clone()),
+                        "protocol {number} command {is_command} signatures {signatures}"
+                    );
+                    // 1.19 has no acknowledgements; 1.19.1 always carries a
+                    // whole last-seen update; later an offset of zero owes none.
+                    assert_eq!(
+                        owed.is_some(),
+                        number == 760 || (number > 760 && seen != 0),
+                        "protocol {number}"
+                    );
+                    // The layout is checked to its last byte.
+                    for cut in 0..packet.data.len() {
+                        assert!(
+                            caps.parse_chat(&Packet::new(packet.id, packet.data[..cut].to_vec()))
+                                .is_err(),
+                            "protocol {number} cut {cut}"
+                        );
+                    }
+                    let mut long = packet.data.clone();
+                    long.push(0);
+                    assert!(caps.parse_chat(&Packet::new(packet.id, long)).is_err());
+
+                    // The proxy's own commands keep their path: taken without
+                    // argument signatures, left to the backend with them.
+                    if is_command {
+                        let (packet, owed) =
+                            signed_chat_packet(number, true, "server lobby", signatures, seen);
+                        let taken = caps.proxy_command(&packet).unwrap();
+                        if signatures == 0 {
+                            assert_eq!(taken, Some(("server lobby".into(), owed)));
+                        } else {
+                            assert_eq!(taken, None);
+                            assert!(caps.parse_chat(&packet).unwrap().unwrap().signed);
+                        }
+                    } else {
+                        // A message that reads like a proxy command is chat.
+                        let (packet, _) =
+                            signed_chat_packet(number, false, "server lobby", signatures, seen);
+                        assert_eq!(caps.proxy_command(&packet).unwrap(), None);
+                    }
+                }
+            }
+        }
+
+        // 1.20.5 added an unsigned Chat Command that is its string alone.
+        assert_eq!(command >= 0, number >= 766, "protocol {number}");
+        if command >= 0 {
+            let mut data = Vec::new();
+            write_string("msg Alex hi", &mut data);
+            assert_eq!(
+                caps.parse_chat(&Packet::new(command, data.clone()))
+                    .unwrap(),
+                attempt(ChatKind::Command, "msg Alex hi", false, None),
+                "protocol {number}"
+            );
+            data.push(0);
+            assert!(caps.parse_chat(&Packet::new(command, data)).is_err());
+        }
+    }
+    assert_eq!(tested, 50);
+}
+
+#[test]
+fn chat_parser_bounds_signature_and_last_seen_counts() {
+    for number in [759, 760, 761, 767, 772, 777] {
+        let caps = ProtocolVersion::new(number).unwrap().switching().unwrap();
+        let [_, _, signed_command, _, _] = chat_ids(number);
+        let mut data = Vec::new();
+        write_string("msg", &mut data);
+        data.extend([0; 16]);
+        data.push(9); // more argument signatures than a command can carry
+        assert!(caps.parse_chat(&Packet::new(signed_command, data)).is_err());
+    }
+    let caps = ProtocolVersion::new(760).unwrap().switching().unwrap();
+    let mut data = Vec::new();
+    write_string("hello", &mut data);
+    data.extend([0; 16]);
+    data.extend([0, 0, 6]); // no signature, no preview, six last-seen entries
+    assert!(caps.parse_chat(&Packet::new(0x05, data)).is_err());
+    let caps = ProtocolVersion::new(765).unwrap().switching().unwrap();
+    let mut data = Vec::new();
+    write_string("hello", &mut data);
+    data.extend([0; 16]);
+    data.push(0);
+    write_varint(-1, &mut data); // negative offset
+    data.extend([0; 3]);
+    assert!(caps.parse_chat(&Packet::new(0x05, data)).is_err());
 }

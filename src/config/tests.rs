@@ -1,4 +1,5 @@
 use super::*;
+use crate::text::Text;
 
 const VALID: &str = include_str!("../../examples/rift.lua");
 
@@ -13,9 +14,21 @@ fn online_authentication_and_velocity_are_validated_together() {
     ), "online.lua").unwrap();
     assert!(config.authentication.online_mode);
     assert_eq!(config.authentication.timeout, Duration::from_millis(2500));
-    assert_eq!(config.forwarding.unwrap().secret_env, "PAPER_SECRET");
+    assert!(config.authentication.signed_chat);
+    let forwarding = config.forwarding.unwrap();
+    assert_eq!(forwarding.mode, ForwardingMode::Velocity);
+    assert_eq!(forwarding.secret_env.as_deref(), Some("PAPER_SECRET"));
     let defaults = Config::from_lua(VALID, "offline.lua").unwrap();
     assert!(!defaults.authentication.online_mode);
+    assert!(defaults.authentication.signed_chat);
+    // Unsigned chat is its own switch, with or without online mode.
+    for settings in [
+        "authentication = { signed_chat = false }",
+        "authentication = { online_mode = true, signed_chat = false }, forwarding = { mode = 'velocity' }",
+    ] {
+        let config = Config::from_lua(&with_security(settings), "unsigned.lua").unwrap();
+        assert!(!config.authentication.signed_chat, "{settings}");
+    }
     assert!(defaults.forwarding.is_none());
     // Validation does not read environment secrets or contact authentication services.
     let config = Config::from_lua(
@@ -26,8 +39,39 @@ fn online_authentication_and_velocity_are_validated_together() {
     )
     .unwrap();
     assert_eq!(
-        config.forwarding.unwrap().secret_env,
-        "RIFT_FORWARDING_SECRET"
+        config.forwarding.unwrap().secret_env.as_deref(),
+        Some("RIFT_FORWARDING_SECRET")
+    );
+    // BungeeCord forwarding has no secret; BungeeGuard's token has the same default.
+    for (mode, expected, secret_env) in [
+        ("bungeecord", ForwardingMode::BungeeCord, None),
+        (
+            "bungeeguard",
+            ForwardingMode::BungeeGuard,
+            Some("RIFT_FORWARDING_SECRET"),
+        ),
+    ] {
+        let config = Config::from_lua(
+            &with_security(&format!(
+                "authentication = {{ online_mode = true }}, forwarding = {{ mode = '{mode}' }}"
+            )),
+            "online.lua",
+        )
+        .unwrap();
+        let forwarding = config.forwarding.unwrap();
+        assert_eq!(forwarding.mode, expected);
+        assert_eq!(forwarding.secret_env.as_deref(), secret_env);
+    }
+    let config = Config::from_lua(
+        &with_security(
+            "authentication = { online_mode = true }, forwarding = { mode = 'bungeeguard', secret_env = 'GUARD_TOKEN' }",
+        ),
+        "online.lua",
+    )
+    .unwrap();
+    assert_eq!(
+        config.forwarding.unwrap().secret_env.as_deref(),
+        Some("GUARD_TOKEN")
     );
 }
 
@@ -47,6 +91,15 @@ fn insecure_or_misspelled_authentication_settings_are_rejected() {
             "authentication.online_mode",
         ),
         (
+            "authentication = { signed_chat = 'false' }",
+            "authentication.signed_chat",
+        ),
+        (
+            "authentication = { signed_chat = 0 }",
+            "authentication.signed_chat",
+        ),
+        ("authentication = { signedchat = false }", "unknown field"),
+        (
             "authentication = { timeout_ms = 0 }",
             "authentication.timeout_ms",
         ),
@@ -63,6 +116,14 @@ fn insecure_or_misspelled_authentication_settings_are_rejected() {
             "unknown field",
         ),
         ("forwarding = { mode = 'legacy' }", "forwarding.mode"),
+        (
+            "authentication = { online_mode = true }, forwarding = { mode = 'bungeecord', secret_env = 'TOKEN' }",
+            "has no secret",
+        ),
+        (
+            "forwarding = { mode = 'bungeecord' }",
+            "must be enabled together",
+        ),
         (
             "forwarding = { mode = 'velocity', secret = 'literal' }",
             "unknown field",
@@ -1634,7 +1695,10 @@ fn server_list_parses_components_hosts_and_favicon_files() {
         serde_json::json!({ "text": "Welcome", "color": "gold", "extra": [{ "text": "!" }] })
     );
     assert_eq!(list.defaults.max_players, Some(500));
-    assert_eq!(list.defaults.sample.unwrap(), ["line one", "line two"]);
+    assert_eq!(
+        list.defaults.sample.unwrap(),
+        [Text::from("line one"), Text::from("line two")]
+    );
     assert!(
         list.defaults
             .favicon
@@ -1826,4 +1890,247 @@ fn release_names_map_to_their_protocols() {
     }
     assert_eq!(ProtocolVersion::new(772).unwrap().release(), "1.21.8");
     assert_eq!(ProtocolVersion::from_release("1.21.99"), None);
+}
+
+#[test]
+fn text_theme_and_messages_are_checked_at_load() {
+    use crate::text::{Args, Text, catalog::Notice};
+    let config = Config::from_lua(
+        &with_security(
+            "text = { theme = { accent = '<#ffaa00><bold>' }, \
+             messages = { ['queue.joined'] = '<accent><server></accent> #<position>' } }, \
+             tab_list = { header = { mini = '<accent>Hi' } }",
+        ),
+        "text.lua",
+    )
+    .unwrap();
+    assert_eq!(
+        config.text.render(
+            Notice::QueueJoined,
+            &Args::new().text("server", "lobby").text("position", "2")
+        ),
+        Text::Component(serde_json::json!({"text": "", "extra": [
+            {"text": "lobby", "color": "#ffaa00", "bold": true},
+            {"text": " #2"},
+        ]}))
+    );
+    assert_eq!(
+        config.text.render(Notice::QueueLeft, &Args::new()),
+        Text::Plain("Left the queue.".into())
+    );
+    // Markup elsewhere in the configuration uses its own theme.
+    assert_eq!(
+        config.tab_list.unwrap().header,
+        Some(serde_json::json!({"text": "Hi", "color": "#ffaa00", "bold": true}))
+    );
+    assert_eq!(
+        Config::from_lua(VALID, "text.lua").unwrap().text,
+        std::sync::Arc::default()
+    );
+    for (settings, expected) in [
+        (
+            "text = { messages = { ['queue.nope'] = 'x' } }",
+            "unknown message \"queue.nope\"",
+        ),
+        (
+            "text = { messages = { ['queue.left'] = '<bolt>' } }",
+            "text.messages[\"queue.left\"]: <bolt> at byte 0: unknown tag",
+        ),
+        (
+            "text = { messages = { ['queue.joined'] = 'Queued for <player>' } }",
+            "<player> at byte 11: unknown tag",
+        ),
+        (
+            "text = { theme = { bold = '<red>' } }",
+            "<bold> is a built-in tag",
+        ),
+        (
+            "text = { theme = { accent = '<red>words' } }",
+            "only formatting tags are allowed",
+        ),
+        ("text = { colours = {} }", "unknown field"),
+        (
+            "text = { messages = { ['queue.left'] = 3 } }",
+            "expected a string",
+        ),
+        (
+            "server_list = { motd = { mini = '<color:orange>x' } }",
+            "\"orange\" is not a colour name",
+        ),
+    ] {
+        let error = Config::from_lua(&with_security(settings), "text.lua")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(expected), "{settings}: {error}");
+    }
+}
+
+#[test]
+fn translation_is_on_with_detection_unless_configured_otherwise() {
+    use crate::config::Translation;
+    let defaults = Config::from_lua(&with_admin_options(""), "translation.lua").unwrap();
+    assert_eq!(
+        defaults.translation,
+        Translation {
+            enabled: true,
+            detect: true,
+            clients: ClientVersions::all(),
+        }
+    );
+    for (options, enabled, detect) in [
+        ("translation = false", false, true),
+        ("translation = true", true, true),
+        ("translation = {}", true, true),
+        ("translation = { detect = false }", true, false),
+        (
+            "translation = { enabled = false, detect = false }",
+            false,
+            false,
+        ),
+    ] {
+        let config = Config::from_lua(&with_admin_options(options), "translation.lua").unwrap();
+        assert_eq!(
+            config.translation,
+            Translation {
+                enabled,
+                detect,
+                clients: ClientVersions::all(),
+            },
+            "{options}"
+        );
+    }
+    for (options, expected) in [
+        (
+            "translation = 'on'",
+            "translation: expected a boolean or a table",
+        ),
+        ("translation = { enable = true }", "translation"),
+        ("translation = { detect = 1 }", "translation"),
+    ] {
+        let error = Config::from_lua(&with_admin_options(options), "translation.lua")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(expected), "{options}: {error}");
+    }
+}
+
+#[test]
+fn client_versions_are_set_for_the_proxy_a_backend_and_a_service_group() {
+    let parse = |options: &str| {
+        Config::from_lua(
+            &format!(
+                "return {{
+                listeners = {{ public = '0.0.0.0:25565' }},
+                routes = {{ public = 'lobby' }},
+                {options}
+            }}"
+            ),
+            "translation.lua",
+        )
+    };
+    let config = parse(
+        "translation = { clients = { '1.20.*', '1.21.*' } },
+        backends = {
+            lobby = '127.0.0.1:25566',
+            classic = { address = '127.0.0.1:25567', version = '1.12.2', translation = 'newer' },
+            vanilla = { address = '127.0.0.1:25568', translation = false },
+            open = { address = '127.0.0.1:25569', translation = true },
+            one = { address = '127.0.0.1:25570', translation = '1.16.5' },
+        },
+        service_groups = {
+            bedwars = { command = {'java'}, port_range = {25600, 25601}, translation = { '1.8.9-1.12.2', '>=1.21' } },
+            lobbies = { command = {'java'}, port_range = {25610, 25611} },
+        }",
+    )
+    .unwrap();
+    let json = |name: &str| config.client_versions(name).to_json();
+    assert_eq!(json("lobby"), serde_json::json!(["1.20.*", "1.21.*"]));
+    assert_eq!(json("classic"), "newer");
+    assert_eq!(json("vanilla"), "none");
+    assert_eq!(json("open"), "all");
+    assert_eq!(json("one"), serde_json::json!(["1.16.5"]));
+    assert_eq!(
+        config.service_groups["bedwars"]
+            .translation
+            .as_ref()
+            .unwrap()
+            .to_json(),
+        serde_json::json!(["1.8.9-1.12.2", ">=1.21"])
+    );
+    assert_eq!(config.service_groups["lobbies"].translation, None);
+
+    // Instances take their group's setting, or the proxy's without one.
+    let mut config = config;
+    config.add_instance("bedwars", "bedwars-1", 25600).unwrap();
+    config.add_instance("lobbies", "lobbies-1", 25610).unwrap();
+    assert_eq!(
+        config.client_versions("bedwars-1").to_json(),
+        serde_json::json!(["1.8.9-1.12.2", ">=1.21"])
+    );
+    assert_eq!(
+        config.client_versions("lobbies-1").to_json(),
+        serde_json::json!(["1.20.*", "1.21.*"])
+    );
+
+    for (options, expected) in [
+        (
+            "translation = { clients = 5 }, backends = { lobby = '127.0.0.1:25566' }",
+            "translation.clients: expected true, false",
+        ),
+        (
+            "translation = { clients = {} }, backends = { lobby = '127.0.0.1:25566' }",
+            "translation.clients: expected at least one version pattern",
+        ),
+        (
+            "backends = { lobby = { address = '127.0.0.1:25566', translation = '1.99' } }",
+            "backends.lobby.translation: \"1.99\" names no Minecraft version",
+        ),
+        (
+            "backends = { lobby = { address = '127.0.0.1:25566', translation = { only = '1.20' } } }",
+            "backends.lobby.translation: expected a list of version patterns",
+        ),
+        (
+            "backends = { lobby = '127.0.0.1:25566' }, service_groups = { game = { command = {'java'}, port_range = {25600, 25601}, translation = '1.8.*' } }",
+            "service_groups.game.translation: \"1.8.*\" lies outside the versions Rift translates",
+        ),
+    ] {
+        let error = parse(options).unwrap_err().to_string();
+        assert!(error.contains(expected), "{options}: {error}");
+    }
+}
+
+#[test]
+fn a_script_chat_hook_needs_unsigned_chat() {
+    let source = |authentication: &str, chat: &str| {
+        format!(
+            "return {{ listeners = {{ public = '127.0.0.1:0' }}, backends = {{ lobby = '127.0.0.1:1' }}, routes = {{ public = 'lobby' }}, authentication = {{ online_mode = true{authentication} }}, forwarding = {{ mode = 'velocity', secret_env = 'TEST_SECRET' }}, extensions = {{ api_version = 2, chat = {chat} }} }}"
+        )
+    };
+    let handler = "function(ctx) return { deny = 'muted' } end";
+    for authentication in ["", ", signed_chat = true"] {
+        let error = Config::from_lua(&source(authentication, handler), "chat.lua")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(
+                "extensions.chat: the chat hook needs authentication.signed_chat = false"
+            ),
+            "{error}"
+        );
+    }
+    let config = Config::from_lua(&source(", signed_chat = false", handler), "chat.lua").unwrap();
+    let extensions = config.extensions.as_ref().unwrap();
+    assert!(extensions.hook_names().any(|hook| hook == "chat"));
+    assert!(
+        crate::plugins::script::ScriptPlugin::new(&config).handles(crate::plugins::api::Hook::Chat)
+    );
+    // Without the handler the setting is free.
+    Config::from_lua(&source("", "nil"), "chat.lua").unwrap();
+    let error = Config::from_lua(&source(", signed_chat = false", "'mute'"), "chat.lua")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("extensions.chat must be a function"),
+        "{error}"
+    );
 }

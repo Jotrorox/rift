@@ -1,0 +1,36 @@
+{
+  "entries": [
+    "{wild_texture:\"minecraft:entity/wolf/wolf_ashen\",angry_texture:\"minecraft:entity/wolf/wolf_ashen_angry\",biomes:\"minecraft:snowy_taiga\",tame_texture:\"minecraft:entity/wolf/wolf_ashen_tame\"}",
+    "{wild_texture:\"minecraft:entity/wolf/wolf_black\",angry_texture:\"minecraft:entity/wolf/wolf_black_angry\",biomes:\"minecraft:old_growth_pine_taiga\",tame_texture:\"minecraft:entity/wolf/wolf_black_tame\"}",
+    "{wild_texture:\"minecraft:entity/wolf/wolf_chestnut\",angry_texture:\"minecraft:entity/wolf/wolf_chestnut_angry\",biomes:\"minecraft:old_growth_spruce_taiga\",tame_texture:\"minecraft:entity/wolf/wolf_chestnut_tame\"}",
+    "{wild_texture:\"minecraft:entity/wolf/wolf\",angry_texture:\"minecraft:entity/wolf/wolf_angry\",biomes:\"minecraft:taiga\",tame_texture:\"minecraft:entity/wolf/wolf_tame\"}",
+    "{wild_texture:\"minecraft:entity/wolf/wolf_rusty\",angry_texture:\"minecraft:entity/wolf/wolf_rusty_angry\",biomes:\"#minecraft:is_jungle\",tame_texture:\"minecraft:entity/wolf/wolf_rusty_tame\"}",
+    "{wild_texture:\"minecraft:entity/wolf/wolf_snowy\",angry_texture:\"minecraft:entity/wolf/wolf_snowy_angry\",biomes:\"minecraft:grove\",tame_texture:\"minecraft:entity/wolf/wolf_snowy_tame\"}",
+    "{wild_texture:\"minecraft:entity/wolf/wolf_spotted\",angry_texture:\"minecraft:entity/wolf/wolf_spotted_angry\",biomes:\"#minecraft:is_savanna\",tame_texture:\"minecraft:entity/wolf/wolf_spotted_tame\"}",
+    "{wild_texture:\"minecraft:entity/wolf/wolf_striped\",angry_texture:\"minecraft:entity/wolf/wolf_striped_angry\",biomes:\"#minecraft:is_badlands\",tame_texture:\"minecraft:entity/wolf/wolf_striped_tame\"}",
+    "{wild_texture:\"minecraft:entity/wolf/wolf_woods\",angry_texture:\"minecraft:entity/wolf/wolf_woods_angry\",biomes:\"minecraft:forest\",tame_texture:\"minecraft:entity/wolf/wolf_woods_tame\"}",
+    "{assets:{tame:\"minecraft:entity/wolf/wolf_ashen_tame\",angry:\"minecraft:entity/wolf/wolf_ashen_angry\",wild:\"minecraft:entity/wolf/wolf_ashen\"}}",
+    "{assets:{tame:\"minecraft:entity/wolf/wolf_black_tame\",angry:\"minecraft:entity/wolf/wolf_black_angry\",wild:\"minecraft:entity/wolf/wolf_black\"}}",
+    "{assets:{tame:\"minecraft:entity/wolf/wolf_chestnut_tame\",angry:\"minecraft:entity/wolf/wolf_chestnut_angry\",wild:\"minecraft:entity/wolf/wolf_chestnut\"}}",
+    "{assets:{tame:\"minecraft:entity/wolf/wolf_tame\",angry:\"minecraft:entity/wolf/wolf_angry\",wild:\"minecraft:entity/wolf/wolf\"}}",
+    "{assets:{tame:\"minecraft:entity/wolf/wolf_rusty_tame\",angry:\"minecraft:entity/wolf/wolf_rusty_angry\",wild:\"minecraft:entity/wolf/wolf_rusty\"}}",
+    "{assets:{tame:\"minecraft:entity/wolf/wolf_snowy_tame\",angry:\"minecraft:entity/wolf/wolf_snowy_angry\",wild:\"minecraft:entity/wolf/wolf_snowy\"}}",
+    "{assets:{tame:\"minecraft:entity/wolf/wolf_spotted_tame\",angry:\"minecraft:entity/wolf/wolf_spotted_angry\",wild:\"minecraft:entity/wolf/wolf_spotted\"}}",
+    "{assets:{tame:\"minecraft:entity/wolf/wolf_striped_tame\",angry:\"minecraft:entity/wolf/wolf_striped_angry\",wild:\"minecraft:entity/wolf/wolf_striped\"}}",
+    "{assets:{tame:\"minecraft:entity/wolf/wolf_woods_tame\",angry:\"minecraft:entity/wolf/wolf_woods_angry\",wild:\"minecraft:entity/wolf/wolf_woods\"}}",
+    "{assets:{tame:\"minecraft:entity/wolf/wolf_ashen_tame\",angry:\"minecraft:entity/wolf/wolf_ashen_angry\",wild:\"minecraft:entity/wolf/wolf_ashen\"},baby_assets:{tame:\"minecraft:entity/wolf/wolf_ashen_tame_baby\",angry:\"minecraft:entity/wolf/wolf_ashen_angry_baby\",wild:\"minecraft:entity/wolf/wolf_ashen_baby\"}}",
+    "{assets:{tame:\"minecraft:entity/wolf/wolf_black_tame\",angry:\"minecraft:entity/wolf/wolf_black_angry\",wild:\"minecraft:entity/wolf/wolf_black\"},baby_assets:{tame:\"minecraft:entity/wolf/wolf_black_tame_baby\",angry:\"minecraft:entity/wolf/wolf_black_angry_baby\",wild:\"minecraft:entity/wolf/wolf_black_baby\"}}",
+    "{assets:{tame:\"minecraft:entity/wolf/wolf_chestnut_tame\",angry:\"minecraft:entity/wolf/wolf_chestnut_angry\",wild:\"minecraft:entity/wolf/wolf_chestnut\"},baby_assets:{tame:\"minecraft:entity/wolf/wolf_chestnut_tame_baby\",angry:\"minecraft:entity/wolf/wolf_chestnut_angry_baby\",wild:\"minecraft:entity/wolf/wolf_chestnut_baby\"}}",
+    "{assets:{tame:\"minecraft:entity/wolf/wolf_tame\",angry:\"minecraft:entity/wolf/wolf_angry\",wild:\"minecraft:entity/wolf/wolf\"},baby_assets:{tame:\"minecraft:entity/wolf/wolf_tame_baby\",angry:\"minecraft:entity/wolf/wolf_angry_baby\",wild:\"minecraft:entity/wolf/wolf_baby\"}}",
+    "{assets:{tame:\"minecraft:entity/wolf/wolf_rusty_tame\",angry:\"minecraft:entity/wolf/wolf_rusty_angry\",wild:\"minecraft:entity/wolf/wolf_rusty\"},baby_assets:{tame:\"minecraft:entity/wolf/wolf_rusty_tame_baby\",angry:\"minecraft:entity/wolf/wolf_rusty_angry_baby\",wild:\"minecraft:entity/wolf/wolf_rusty_baby\"}}",
+    "{assets:{tame:\"minecraft:entity/wolf/wolf_snowy_tame\",angry:\"minecraft:entity/wolf/wolf_snowy_angry\",wild:\"minecraft:entity/wolf/wolf_snowy\"},baby_assets:{tame:\"minecraft:entity/wolf/wolf_snowy_tame_baby\",angry:\"minecraft:entity/wolf/wolf_snowy_angry_baby\",wild:\"minecraft:entity/wolf/wolf_snowy_baby\"}}",
+    "{assets:{tame:\"minecraft:entity/wolf/wolf_spotted_tame\",angry:\"minecraft:entity/wolf/wolf_spotted_angry\",wild:\"minecraft:entity/wolf/wolf_spotted\"},baby_assets:{tame:\"minecraft:entity/wolf/wolf_spotted_tame_baby\",angry:\"minecraft:entity/wolf/wolf_spotted_angry_baby\",wild:\"minecraft:entity/wolf/wolf_spotted_baby\"}}",
+    "{assets:{tame:\"minecraft:entity/wolf/wolf_striped_tame\",angry:\"minecraft:entity/wolf/wolf_striped_angry\",wild:\"minecraft:entity/wolf/wolf_striped\"},baby_assets:{tame:\"minecraft:entity/wolf/wolf_striped_tame_baby\",angry:\"minecraft:entity/wolf/wolf_striped_angry_baby\",wild:\"minecraft:entity/wolf/wolf_striped_baby\"}}",
+    "{assets:{tame:\"minecraft:entity/wolf/wolf_woods_tame\",angry:\"minecraft:entity/wolf/wolf_woods_angry\",wild:\"minecraft:entity/wolf/wolf_woods\"},baby_assets:{tame:\"minecraft:entity/wolf/wolf_woods_tame_baby\",angry:\"minecraft:entity/wolf/wolf_woods_angry_baby\",wild:\"minecraft:entity/wolf/wolf_woods_baby\"}}"
+  ],
+  "versions": [
+    {"protocols":[766,767,768,769],"names":["minecraft:ashen","minecraft:black","minecraft:chestnut","minecraft:pale","minecraft:rusty","minecraft:snowy","minecraft:spotted","minecraft:striped","minecraft:woods"],"elements":[0,1,2,3,4,5,6,7,8]},
+    {"protocols":[770,771,772,773,774],"names":["minecraft:ashen","minecraft:black","minecraft:chestnut","minecraft:pale","minecraft:rusty","minecraft:snowy","minecraft:spotted","minecraft:striped","minecraft:woods"],"elements":[9,10,11,12,13,14,15,16,17]},
+    {"protocols":[775,776,777],"names":["minecraft:ashen","minecraft:black","minecraft:chestnut","minecraft:pale","minecraft:rusty","minecraft:snowy","minecraft:spotted","minecraft:striped","minecraft:woods"],"elements":[18,19,20,21,22,23,24,25,26]}
+  ]
+}

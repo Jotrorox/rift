@@ -131,6 +131,8 @@ def network(binary, backends, enabled=True, omit=False, draining=()):
         config.write_text("return {listeners={public='127.0.0.1:" + str(port)
                           + "'},backends={" + addresses + ",dns='localhost:25565',"
                           + "ipv6='[::1]:25566'},routes={public='lobby'},"
+                          # The backends are byte fixtures that answer no status request.
+                          + "translation={detect=false},"
                           + "draining={" + drained + "},"
                           + "limits={connect_timeout_ms=1500},network={" + option
                           + "access={" + access + "}}}")

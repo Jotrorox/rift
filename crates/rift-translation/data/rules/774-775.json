@@ -1,0 +1,101 @@
+{
+  "block": {
+    "down": {
+      "golden_dandelion": "dandelion",
+      "potted_golden_dandelion": "potted_dandelion"
+    }
+  },
+  "block_state": {
+    "down": {
+      "golden_dandelion": "dandelion",
+      "potted_golden_dandelion": "potted_dandelion"
+    }
+  },
+  "block_type": {
+    "renames": {
+      "farm": "farmland",
+      "fungus": "nether_fungus",
+      "roots": "nether_roots",
+      "waterlily": "lily_pad"
+    }
+  },
+  "item": {
+    "down": {
+      "golden_dandelion": "dandelion"
+    }
+  },
+  "particle_type": {
+    "down": {
+      "pause_mob_growth": "happy_villager",
+      "reset_mob_growth": "angry_villager"
+    }
+  },
+  "sound_event": {
+    "down": {
+      "block.note_block.trumpet": "block.note_block.flute",
+      "block.note_block.trumpet_exposed": "block.note_block.flute",
+      "block.note_block.trumpet_oxidized": "block.note_block.flute",
+      "block.note_block.trumpet_weathered": "block.note_block.flute",
+      "entity.baby_cat.ambient": "entity.cat.ambient",
+      "entity.baby_cat.beg_for_food": "entity.cat.beg_for_food",
+      "entity.baby_cat.death": "entity.cat.death",
+      "entity.baby_cat.eat": "entity.cat.eat",
+      "entity.baby_cat.hiss": "entity.cat.hiss",
+      "entity.baby_cat.hurt": "entity.cat.hurt",
+      "entity.baby_cat.purr": "entity.cat.purr",
+      "entity.baby_cat.purreow": "entity.cat.purreow",
+      "entity.baby_cat.stray_ambient": "entity.cat.stray_ambient",
+      "entity.baby_chicken.ambient": "entity.chicken.ambient",
+      "entity.baby_chicken.death": "entity.chicken.death",
+      "entity.baby_chicken.hurt": "entity.chicken.hurt",
+      "entity.baby_chicken.step": "entity.chicken.step",
+      "entity.baby_horse.ambient": "entity.horse.ambient",
+      "entity.baby_horse.angry": "entity.horse.angry",
+      "entity.baby_horse.breathe": "entity.horse.breathe",
+      "entity.baby_horse.death": "entity.horse.death",
+      "entity.baby_horse.eat": "entity.horse.eat",
+      "entity.baby_horse.hurt": "entity.horse.hurt",
+      "entity.baby_horse.land": "entity.horse.land",
+      "entity.baby_horse.step": "entity.horse.step",
+      "entity.baby_pig.ambient": "entity.pig.ambient",
+      "entity.baby_pig.death": "entity.pig.death",
+      "entity.baby_pig.eat": "entity.generic.eat",
+      "entity.baby_pig.hurt": "entity.pig.hurt",
+      "entity.baby_pig.step": "entity.pig.step",
+      "entity.baby_wolf.ambient": "entity.wolf.ambient",
+      "entity.baby_wolf.death": "entity.wolf.death",
+      "entity.baby_wolf.growl": "entity.wolf.growl",
+      "entity.baby_wolf.hurt": "entity.wolf.hurt",
+      "entity.baby_wolf.pant": "entity.wolf.pant",
+      "entity.baby_wolf.step": "entity.wolf.step",
+      "entity.baby_wolf.whine": "entity.wolf.whine",
+      "entity.cat_royal.ambient": "entity.cat.ambient",
+      "entity.cat_royal.beg_for_food": "entity.cat.beg_for_food",
+      "entity.cat_royal.death": "entity.cat.death",
+      "entity.cat_royal.eat": "entity.cat.eat",
+      "entity.cat_royal.hiss": "entity.cat.hiss",
+      "entity.cat_royal.hurt": "entity.cat.hurt",
+      "entity.cat_royal.purr": "entity.cat.purr",
+      "entity.cat_royal.purreow": "entity.cat.purreow",
+      "entity.cat_royal.stray_ambient": "entity.cat.stray_ambient",
+      "entity.chicken_picky.ambient": "entity.chicken.ambient",
+      "entity.chicken_picky.death": "entity.chicken.death",
+      "entity.chicken_picky.hurt": "entity.chicken.hurt",
+      "entity.cow_moody.ambient": "entity.cow.ambient",
+      "entity.cow_moody.death": "entity.cow.death",
+      "entity.cow_moody.hurt": "entity.cow.hurt",
+      "entity.cow_moody.step": "entity.cow.step",
+      "entity.pig.eat": "entity.generic.eat",
+      "entity.pig_big.ambient": "entity.pig.ambient",
+      "entity.pig_big.death": "entity.pig.death",
+      "entity.pig_big.eat": "entity.generic.eat",
+      "entity.pig_big.hurt": "entity.pig.hurt",
+      "entity.pig_mini.ambient": "entity.pig.ambient",
+      "entity.pig_mini.death": "entity.pig.death",
+      "entity.pig_mini.eat": "entity.generic.eat",
+      "entity.pig_mini.hurt": "entity.pig.hurt",
+      "item.golden_dandelion.unuse": "item.bone_meal.use",
+      "item.golden_dandelion.use": "item.bone_meal.use"
+    }
+  }
+}

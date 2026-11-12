@@ -9,10 +9,15 @@
 //!   guest answers with a decision the hook does not accept, carrying the
 //!   text `database down`. The host rejects it as an invalid reply, applies
 //!   `on_failure` and keeps the instance running, as for a Lua error.
+//!
+//! The `chat` export is the registration of the chat hook, so it cannot follow
+//! the configuration: the `chat` feature builds the guest with it, and
+//! `tests/fixtures/plugins/conformance-chat-rs` is this source with that
+//! feature on, for the scenarios that handle chat.
 use rift_plugin::{
-    Action, BusMessage, CommandSpec, Connection, Context, Hook, HttpRequest, HttpResponse, Ping,
-    Plugin, Registration, RouteDecision, StatusOverride, SuggestKind, Suggestion, bus, meta,
-    permissions, store, timers,
+    Action, BusMessage, ChatAttempt, ChatKind, CommandSpec, Connection, Context, Hook, HttpRequest,
+    HttpResponse, Ping, Plugin, Registration, RouteDecision, StatusOverride, SuggestKind,
+    Suggestion, bus, meta, permissions, players, store, timers,
 };
 use serde_json::Value;
 
@@ -22,7 +27,11 @@ struct Guest {
 }
 
 fn report(text: &str) {
-    let _ = bus::publish(&format!("conformance.{}", meta::name()), text.as_bytes(), None);
+    let _ = bus::publish(
+        &format!("conformance.{}", meta::name()),
+        text.as_bytes(),
+        None,
+    );
 }
 
 fn tag(config: &Value) -> String {
@@ -64,6 +73,17 @@ impl Guest {
         match &self.config["decide"][hook] {
             Value::Object(action) => match action.iter().next() {
                 Some((kind, Value::String(text))) if kind == "deny" => Action::Deny(text.clone()),
+                // A JSON text component: the `-json` form of the decision.
+                Some((kind, component @ (Value::Object(_) | Value::Array(_))))
+                    if kind == "deny" =>
+                {
+                    Action::deny_json(component)
+                }
+                Some((kind, component @ (Value::Object(_) | Value::Array(_))))
+                    if kind == "message" =>
+                {
+                    Action::message_json(component)
+                }
                 Some((kind, Value::String(text))) if kind == "server" => {
                     Action::Server(text.clone())
                 }
@@ -182,6 +202,9 @@ impl Plugin for Guest {
             // `command` accepts every decision; an empty message is invalid.
             return Action::Message(String::new());
         }
+        if !self.config["decide"]["command"].is_null() {
+            return self.decide("command");
+        }
         Action::Message(format!("hi {}", ctx.args))
     }
 
@@ -219,8 +242,24 @@ impl Plugin for Guest {
         })
     }
 
-    fn join(&mut self, _ctx: Context) {
+    fn join(&mut self, ctx: Context) {
         self.observe("join");
+        let rich = &self.config["rich"];
+        if !rich.is_null() {
+            let rich = rich.to_string();
+            let show = |result: Result<bool, String>| match result {
+                Ok(online) => online.to_string(),
+                Err(error) => format!("error({error})"),
+            };
+            let message = show(players::message_json(&ctx.uuid, &rich));
+            let action_bar = show(players::action_bar_json(&ctx.uuid, &rich));
+            let broadcast = match players::broadcast_json(&rich) {
+                Ok(count) => count.to_string(),
+                Err(error) => format!("error({error})"),
+            };
+            let kick = show(players::kick_json(&ctx.uuid, &rich));
+            report(&format!("rich {message} {action_bar} {broadcast} {kick}"));
+        }
     }
 
     fn after_transfer(&mut self, _ctx: Context) {
@@ -247,6 +286,29 @@ impl Plugin for Guest {
             String::from_utf8_lossy(&message.payload)
         ));
     }
+
+    fn chat(&mut self, attempt: ChatAttempt) -> Action {
+        let kind = match attempt.kind {
+            ChatKind::Message => "message",
+            ChatKind::Command => "command",
+        };
+        report(&format!(
+            "chat {kind} {} {}",
+            attempt.ctx.command.as_deref().unwrap_or("-"),
+            attempt.text
+        ));
+        let blocked = self.config["chat"]["block"]
+            .as_str()
+            .is_some_and(|block| attempt.text.contains(block));
+        if blocked {
+            self.decide("chat")
+        } else {
+            Action::Continue
+        }
+    }
 }
 
+#[cfg(not(feature = "chat"))]
 rift_plugin::export!(Guest);
+#[cfg(feature = "chat")]
+rift_plugin::export!(Guest, chat);

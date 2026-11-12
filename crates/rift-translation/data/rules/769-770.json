@@ -1,0 +1,132 @@
+{
+  "block_state": {
+    "renames": {
+      "creaking_heart[active=true]": "creaking_heart[creaking_heart_state=awake]",
+      "creaking_heart[active=false]": "creaking_heart[creaking_heart_state=dormant]"
+    },
+    "down": {
+      "creaking_heart[creaking_heart_state=uprooted]": "creaking_heart[active=false]",
+      "bush": "short_grass",
+      "short_dry_grass": "dead_bush",
+      "tall_dry_grass": "dead_bush",
+      "cactus_flower": "pink_tulip",
+      "test_block": "structure_block",
+      "test_instance_block": "structure_block",
+      "wildflowers": "pink_petals",
+      "leaf_litter": "brown_carpet",
+      "firefly_bush": "fern"
+    }
+  },
+  "block": {
+    "down": {
+      "bush": "short_grass",
+      "short_dry_grass": "dead_bush",
+      "tall_dry_grass": "dead_bush",
+      "cactus_flower": "pink_tulip",
+      "test_block": "structure_block",
+      "test_instance_block": "structure_block",
+      "wildflowers": "pink_petals",
+      "leaf_litter": "brown_carpet",
+      "firefly_bush": "fern"
+    }
+  },
+  "block_entity_type": {
+    "down": {
+      "test_block": "structure_block",
+      "test_instance_block": "structure_block"
+    }
+  },
+  "item": {
+    "down": {
+      "bush": "short_grass",
+      "firefly_bush": "fern",
+      "short_dry_grass": "dead_bush",
+      "tall_dry_grass": "dead_bush",
+      "wildflowers": "pink_petals",
+      "leaf_litter": "brown_carpet",
+      "cactus_flower": "pink_tulip",
+      "test_block": "structure_block",
+      "test_instance_block": "structure_block",
+      "blue_egg": "egg",
+      "brown_egg": "egg"
+    }
+  },
+  "entity_type": {
+    "renames": {
+      "potion": "splash_potion"
+    },
+    "down": {
+      "lingering_potion": "potion"
+    }
+  },
+  "particle_type": {
+    "down": {
+      "tinted_leaves": "pale_oak_leaves",
+      "firefly": "glow"
+    }
+  },
+  "command_argument_type": {
+    "down": {
+      "resource_selector": "resource_location"
+    }
+  },
+  "sound_event": {
+    "up": {
+      "entity.wolf.howl": "entity.wolf.ambient"
+    },
+    "down": {
+      "block.cactus_flower.break": "block.grass.break",
+      "block.cactus_flower.place": "block.grass.place",
+      "block.deadbush.idle": "intentionally_empty",
+      "block.firefly_bush.idle": "intentionally_empty",
+      "block.iron.break": "block.metal.break",
+      "block.iron.step": "block.metal.step",
+      "block.iron.place": "block.metal.place",
+      "block.iron.hit": "block.metal.hit",
+      "block.iron.fall": "block.metal.fall",
+      "block.leaf_litter.break": "block.azalea_leaves.break",
+      "block.leaf_litter.step": "block.azalea_leaves.step",
+      "block.leaf_litter.place": "block.azalea_leaves.place",
+      "block.leaf_litter.hit": "block.azalea_leaves.hit",
+      "block.leaf_litter.fall": "block.azalea_leaves.fall",
+      "block.sand.idle": "intentionally_empty",
+      "block.sand.wind": "intentionally_empty",
+      "entity.wolf_puglin.ambient": "entity.wolf.ambient",
+      "entity.wolf_puglin.death": "entity.wolf.death",
+      "entity.wolf_puglin.growl": "entity.wolf.growl",
+      "entity.wolf_puglin.hurt": "entity.wolf.hurt",
+      "entity.wolf_puglin.pant": "entity.wolf.pant",
+      "entity.wolf_puglin.whine": "entity.wolf.whine",
+      "entity.wolf_sad.ambient": "entity.wolf.ambient",
+      "entity.wolf_sad.death": "entity.wolf.death",
+      "entity.wolf_sad.growl": "entity.wolf.growl",
+      "entity.wolf_sad.hurt": "entity.wolf.hurt",
+      "entity.wolf_sad.pant": "entity.wolf.pant",
+      "entity.wolf_sad.whine": "entity.wolf.whine",
+      "entity.wolf_angry.ambient": "entity.wolf.ambient",
+      "entity.wolf_angry.death": "entity.wolf.death",
+      "entity.wolf_angry.growl": "entity.wolf.growl",
+      "entity.wolf_angry.hurt": "entity.wolf.hurt",
+      "entity.wolf_angry.pant": "entity.wolf.pant",
+      "entity.wolf_angry.whine": "entity.wolf.whine",
+      "entity.wolf_grumpy.ambient": "entity.wolf.ambient",
+      "entity.wolf_grumpy.death": "entity.wolf.death",
+      "entity.wolf_grumpy.growl": "entity.wolf.growl",
+      "entity.wolf_grumpy.hurt": "entity.wolf.hurt",
+      "entity.wolf_grumpy.pant": "entity.wolf.pant",
+      "entity.wolf_grumpy.whine": "entity.wolf.whine",
+      "entity.wolf_big.ambient": "entity.wolf.ambient",
+      "entity.wolf_big.death": "entity.wolf.death",
+      "entity.wolf_big.growl": "entity.wolf.growl",
+      "entity.wolf_big.hurt": "entity.wolf.hurt",
+      "entity.wolf_big.pant": "entity.wolf.pant",
+      "entity.wolf_big.whine": "entity.wolf.whine",
+      "entity.wolf_cute.ambient": "entity.wolf.ambient",
+      "entity.wolf_cute.death": "entity.wolf.death",
+      "entity.wolf_cute.growl": "entity.wolf.growl",
+      "entity.wolf_cute.hurt": "entity.wolf.hurt",
+      "entity.wolf_cute.pant": "entity.wolf.pant",
+      "entity.wolf_cute.whine": "entity.wolf.whine"
+    }
+  }
+}

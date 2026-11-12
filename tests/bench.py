@@ -564,6 +564,7 @@ def configuration(scenario, backend, init_iterations):
     listeners = {{ public = "127.0.0.1:0" }},
     backends = {{ backend = "127.0.0.1:{backend}" }},
     routes = {{ public = {policy} }},
+    translation = {{ detect = false }}, -- The backend is a byte fixture that answers no status request.
     metrics = "127.0.0.1:0",
     {hook}
     {cache}
@@ -589,6 +590,24 @@ def number(value):
     return "n/a" if value is None else f"{value:.2f}"
 
 
+def warm_up(port, scenario, timeout, settle=10):
+    """Sequential warmup: primes the cache and exercises the connection startup path.
+
+    A Lua scenario's previous burst overloads the script workers on purpose,
+    and the proxy is still refusing the tail of that burst when its clients
+    have already given up. Repeat until one pass is clean, so only a proxy
+    that stays unable to serve a single sequential client fails the run.
+    """
+    deadline = time.monotonic() + settle
+    while True:
+        warmup, _, _ = asyncio.run(run_bursts(port, scenario, 1, 16, timeout))
+        if not any(sample["error"] for sample in warmup):
+            return
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"{scenario}: sequential warmup failed: {warmup}")
+        time.sleep(0.1)
+
+
 def measure_route(port, scenario, pids, args, metrics_port=None, log=None):
     route = {"setup_bursts": []}
     if scenario in ("direct", "rift") and not args.skip_throughput:
@@ -599,10 +618,7 @@ def measure_route(port, scenario, pids, args, metrics_port=None, log=None):
         print(f"{scenario}: RTT p50/p95 {p50:.1f}/{p95:.1f} us; throughput 1/16 clients "
               f"{single:.1f}/{parallel:.1f} MiB/s", flush=True)
     for size in args.burst_sizes:
-        # Sequential warmup primes the cache and exercises the connection startup path.
-        warmup, _, _ = asyncio.run(run_bursts(port, scenario, 1, 16, args.timeout))
-        if any(sample["error"] for sample in warmup):
-            raise RuntimeError(f"{scenario}: sequential warmup failed: {warmup}")
+        warm_up(port, scenario, args.timeout)
         before = idle_metrics(metrics_port) if metrics_port else {}
         log_offset = log.stat().st_size if log else 0
         with Resources(pids) as resources:

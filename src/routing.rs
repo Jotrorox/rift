@@ -57,6 +57,9 @@ pub struct Backend {
     address: String,
     /// The backend's protocol when it differs from what clients speak.
     version: Option<crate::protocol::ProtocolVersion>,
+    /// The client versions translated for this backend; `None` follows
+    /// `translation.clients`.
+    clients: Option<crate::protocol::ClientVersions>,
 }
 
 impl std::str::FromStr for Backend {
@@ -80,6 +83,7 @@ impl Backend {
         Ok(Self {
             address: value.to_owned(),
             version: None,
+            clients: None,
         })
     }
 
@@ -88,6 +92,18 @@ impl Backend {
     pub fn with_version(mut self, version: crate::protocol::ProtocolVersion) -> Self {
         self.version = Some(version);
         self
+    }
+
+    /// Name the client versions translated for this backend, instead of the
+    /// proxy-wide `translation.clients`.
+    pub fn with_clients(mut self, clients: crate::protocol::ClientVersions) -> Self {
+        self.clients = Some(clients);
+        self
+    }
+
+    /// This backend's own translation setting, when it has one.
+    pub fn clients(&self) -> Option<&crate::protocol::ClientVersions> {
+        self.clients.as_ref()
     }
 
     /// The declared backend protocol; `None` means the client's own protocol.

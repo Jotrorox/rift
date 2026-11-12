@@ -302,7 +302,7 @@ async fn live_permission_writes_apply_within_the_same_session() {
                 .command(&format!("access {operation}"))
                 .await
                 .unwrap(),
-            Action::Message(granted.to_string())
+            Action::Message(granted.to_string().into())
         );
         assert_eq!(
             player.decision("initial_server").await.unwrap(),
@@ -815,7 +815,7 @@ fn probe(runtime: &Extensions, command: &str, args: &str) -> io::Result<String> 
         runtime,
     )?;
     Ok(match action {
-        Action::Message(message) => message,
+        Action::Message(message) => message.to_string(),
         Action::Continue => String::new(),
         action => panic!("unexpected {action:?}"),
     })
@@ -935,6 +935,7 @@ async fn players_api_lists_and_queues_actions_for_joined_players() {
         assert(list[1].connection_id == '9' and list[1].protocol == 774)
         assert(#players.list('game') == 1 and players.list('game')[1].name == 'Bob')
         assert(players.get('aLiCe').name == 'Alice' and players.get('Nobody') == nil)
+        assert(players.get('Alice').locale == 'de_de' and players.get('Bob').locale == nil)
         local names = players.names()
         assert(#names == 2 and names[1] == 'Alice' and names[2] == 'Bob')
         assert(#players.names('b') == 1 and players.names('b')[1] == 'Bob')
@@ -952,7 +953,8 @@ async fn players_api_lists_and_queues_actions_for_joined_players() {
         assert(players.broadcast('lobby only', 'lobby') == 1)
     end"#,
     );
-    let (_alice, mut alice) = joined(&runtime, 9, "Alice", "lobby");
+    let (alice_handle, mut alice) = joined(&runtime, 9, "Alice", "lobby");
+    alice_handle.set_locale(Some("de_de"));
     let (bob_handle, mut bob) = joined(&runtime, 10, "Bob", "lobby");
     bob_handle.set_server("game");
     runtime
@@ -962,7 +964,7 @@ async fn players_api_lists_and_queues_actions_for_joined_players() {
         .await
         .unwrap();
     let title = |title: &str, subtitle: Option<&str>, times| PlayerAction::Title {
-        title: title.into(),
+        title: (!title.is_empty()).then(|| title.into()),
         subtitle: subtitle.map(Into::into),
         times,
     };
@@ -989,10 +991,57 @@ async fn players_api_lists_and_queues_actions_for_joined_players() {
 }
 
 #[tokio::test]
+async fn players_api_takes_chat_component_tables_for_rich_text() {
+    use crate::text::Text;
+    let runtime = runtime(
+        r#"api_version=2, login=function(ctx)
+        local players = require('rift.players')
+        local accept = { text = '[Accept]', color = 'green',
+            click_event = { action = 'run_command', command = '/party accept' } }
+        assert(players.message('Alice', { 'Join? ', accept }))
+        assert(players.action_bar('Alice', { text = 'bar', bold = true }))
+        assert(players.broadcast({ text = 'all', color = 'gold' }) == 1)
+        assert(players.message('Alice', 42))
+        assert(players.kick('Alice', { text = 'Banned', color = 'red' }))
+    end"#,
+    );
+    let (_alice, mut alice) = joined(&runtime, 9, "Alice", "lobby");
+    runtime
+        .session(context(1))
+        .unwrap()
+        .decision("login")
+        .await
+        .unwrap();
+    let component = |value| Text::Component(value);
+    assert_eq!(
+        drain(&mut alice),
+        [
+            PlayerAction::Message(component(serde_json::json!(["Join? ", {
+                "text": "[Accept]", "color": "green",
+                "click_event": {"action": "run_command", "command": "/party accept"},
+            }]))),
+            PlayerAction::ActionBar(component(serde_json::json!({"text": "bar", "bold": true}))),
+            PlayerAction::Message(component(
+                serde_json::json!({"text": "all", "color": "gold"})
+            )),
+            PlayerAction::Message("42".into()),
+            PlayerAction::Kick(component(
+                serde_json::json!({"text": "Banned", "color": "red"})
+            )),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn invalid_player_actions_fail_without_queueing() {
     for operation in [
         "rift.players.message('Alice', '')",
         "rift.players.message('Alice', string.rep('x', 1025))",
+        "rift.players.message('Alice', {})",
+        "rift.players.message('Alice', { text = function() end })",
+        "rift.players.message('Alice', { text = string.rep('x', 33000) })",
+        "rift.players.kick('Alice', true)",
+        "rift.players.broadcast({ [1] = 'a', x = 'b' })",
         "rift.players.message('Alice Smith', 'hello')",
         "rift.players.message('0909090909090909090909090909090G', 'hello')",
         "rift.players.get('*')",

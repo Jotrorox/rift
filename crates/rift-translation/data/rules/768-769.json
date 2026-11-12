@@ -1,0 +1,82 @@
+{
+  "block_state": {
+    "renames": {
+      "creaking_heart[creaking=active]": "creaking_heart[active=true]",
+      "creaking_heart[creaking=dormant]": "creaking_heart[active=false]"
+    },
+    "up": {
+      "creaking_heart[creaking=disabled]": "creaking_heart[active=false]"
+    },
+    "down": {
+      "resin_clump": "glow_lichen",
+      "resin_block": "honeycomb_block",
+      "resin_bricks": "bricks",
+      "resin_brick_stairs": "brick_stairs",
+      "resin_brick_slab": "brick_slab",
+      "resin_brick_wall": "brick_wall",
+      "chiseled_resin_bricks": "chiseled_red_sandstone",
+      "open_eyeblossom": "orange_tulip",
+      "closed_eyeblossom": "lily_of_the_valley",
+      "potted_open_eyeblossom": "potted_orange_tulip",
+      "potted_closed_eyeblossom": "potted_lily_of_the_valley"
+    }
+  },
+  "block": {
+    "down": {
+      "resin_clump": "glow_lichen",
+      "resin_block": "honeycomb_block",
+      "resin_bricks": "bricks",
+      "resin_brick_stairs": "brick_stairs",
+      "resin_brick_slab": "brick_slab",
+      "resin_brick_wall": "brick_wall",
+      "chiseled_resin_bricks": "chiseled_red_sandstone",
+      "open_eyeblossom": "orange_tulip",
+      "closed_eyeblossom": "lily_of_the_valley",
+      "potted_open_eyeblossom": "potted_orange_tulip",
+      "potted_closed_eyeblossom": "potted_lily_of_the_valley"
+    }
+  },
+  "item": {
+    "down": {
+      "open_eyeblossom": "orange_tulip",
+      "closed_eyeblossom": "lily_of_the_valley",
+      "resin_clump": "honeycomb",
+      "resin_block": "honeycomb_block",
+      "resin_bricks": "bricks",
+      "resin_brick_stairs": "brick_stairs",
+      "resin_brick_slab": "brick_slab",
+      "resin_brick_wall": "brick_wall",
+      "chiseled_resin_bricks": "chiseled_red_sandstone",
+      "resin_brick": "brick"
+    }
+  },
+  "entity_type": {
+    "up": {
+      "creaking_transient": "creaking"
+    }
+  },
+  "particle_type": {
+    "down": {
+      "pale_oak_leaves": "white_ash"
+    }
+  },
+  "sound_event": {
+    "down": {
+      "entity.creaking.twitch": "entity.creaking.sway",
+      "block.eyeblossom.open_long": "intentionally_empty",
+      "block.eyeblossom.open": "intentionally_empty",
+      "block.eyeblossom.close_long": "intentionally_empty",
+      "block.eyeblossom.close": "intentionally_empty",
+      "block.eyeblossom.idle": "intentionally_empty",
+      "block.resin.break": "block.honey_block.break",
+      "block.resin.fall": "block.honey_block.fall",
+      "block.resin.place": "block.honey_block.place",
+      "block.resin.step": "block.honey_block.step",
+      "block.resin_bricks.break": "block.mud_bricks.break",
+      "block.resin_bricks.fall": "block.mud_bricks.fall",
+      "block.resin_bricks.hit": "block.mud_bricks.hit",
+      "block.resin_bricks.place": "block.mud_bricks.place",
+      "block.resin_bricks.step": "block.mud_bricks.step"
+    }
+  }
+}

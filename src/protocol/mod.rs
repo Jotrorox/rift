@@ -11,7 +11,7 @@ mod packets;
 mod state;
 mod switching;
 mod tab_list;
-pub(crate) mod translation;
+mod versions;
 
 pub(crate) use boss_bar::BossBars;
 pub use boss_bar::{
@@ -21,15 +21,25 @@ pub use dialog::supported as dialogs_supported;
 pub use framing::{Codec, MAX_FRAME_SIZE, MAX_PACKET_SIZE, Packet, Reader};
 pub(crate) use legacy::LegacyState;
 pub use packets::{Handshake, NextState, PacketKind, ProtocolVersion, disconnect, status_response};
-pub use packets::{PlayerIdentity, action_bar, system_message, title};
+pub use packets::{PlayerIdentity, action_bar, action_bar_component, system_message, title};
+pub(crate) use packets::{
+    ProfileKey, login_identity, start_identity, start_profile_key, success_identity,
+    without_profile_key,
+};
 pub use packets::{disconnect_component, system_component, validate_component};
-pub(crate) use packets::{login_identity, start_identity, success_identity};
 pub use state::{ConnectionState, Direction, State};
 use std::io;
+pub(crate) use switching::ChatKind;
 pub use switching::{GameMode, PlayerWorld, Suggestion};
 pub(crate) use tab_list::TabList;
 pub use tab_list::{TabEntry, TabView};
-pub use translation::supported as translatable;
+pub use versions::{ClientVersions, releases, translated_range, translated_releases};
+
+/// Whether a client on `client` can play on a backend on `backend`, directly
+/// or through protocol translation.
+pub fn translatable(client: ProtocolVersion, backend: ProtocolVersion) -> bool {
+    rift_translation::supported(client.number(), backend.number())
+}
 
 pub(crate) fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)

@@ -589,3 +589,61 @@ fn remote_registrations_never_touch_local_storage() {
     assert!(store.records().unwrap().is_empty());
     assert!(!fixture.root.join("temp").exists());
 }
+
+#[test]
+fn group_states_persist_apart_from_the_instance_schema() {
+    let fixture = Fixture::new("persistent");
+    let store = fixture.store();
+    assert!(store.group_states().unwrap().is_empty());
+    let dev = GroupState {
+        suspended: true,
+        mode: GroupMode::Dev,
+    };
+    store.set_group_state("games", dev).unwrap();
+    store
+        .set_group_state(
+            "lobby",
+            GroupState {
+                suspended: true,
+                mode: GroupMode::Active,
+            },
+        )
+        .unwrap();
+    drop(store);
+    let store = fixture.store();
+    let states = store.group_states().unwrap();
+    assert_eq!(states.len(), 2);
+    assert_eq!(states["games"], dev);
+    // The default state is not stored.
+    store
+        .set_group_state("lobby", GroupState::default())
+        .unwrap();
+    assert_eq!(
+        store.group_states().unwrap().keys().collect::<Vec<_>>(),
+        ["games"]
+    );
+    // The instance schema keeps its version, so older releases still open it.
+    let connection = store.database().lock();
+    assert_eq!(database::version(&connection, "instances").unwrap(), 2);
+    assert_eq!(database::version(&connection, "groups").unwrap(), 1);
+}
+
+#[test]
+fn every_creation_of_a_name_gets_a_new_login_generation() {
+    let fixture = Fixture::new("persistent");
+    let store = fixture.store();
+    let (config, name, plan) = fixture.ready(&store);
+    assert_eq!(store.login_generation(&name).unwrap(), 1);
+    assert_eq!(store.login_generation("never-created").unwrap(), 0);
+    store.begin_removal(&name).unwrap();
+    store.finish_removal(&name).unwrap();
+    // Removal keeps the generation, so the next creation moves past it.
+    assert_eq!(store.login_generation(&name).unwrap(), 1);
+    let reused = provisioning::plan(&config, &name).unwrap();
+    store.begin_creation(&config, &name, &reused).unwrap();
+    assert_eq!(store.login_generation(&name).unwrap(), 2);
+    drop(store);
+    // It survives a restart, which keeps tokens of running servers valid.
+    assert_eq!(fixture.store().login_generation(&name).unwrap(), 2);
+    let _ = plan;
+}

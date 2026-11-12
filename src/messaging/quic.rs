@@ -47,6 +47,9 @@ pub struct Identity {
     pub publish: Vec<String>,
     pub subscribe: Vec<String>,
     pub control: bool,
+    /// May publish on `rift.players.*` (with a matching publish grant):
+    /// message, kick and transfer players without `control`.
+    pub players: bool,
 }
 impl std::fmt::Debug for Identity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -55,13 +58,37 @@ impl std::fmt::Debug for Identity {
             .field("publish", &self.publish)
             .field("subscribe", &self.subscribe)
             .field("control", &self.control)
+            .field("players", &self.players)
             .finish_non_exhaustive()
+    }
+}
+
+/// Identities the configuration does not list, such as the logins Rift
+/// issues managed instances ([`crate::instance_login`]). A token that starts
+/// with [`DynamicIdentities::prefix`] is decided here alone.
+pub trait DynamicIdentities: Send + Sync + 'static {
+    fn prefix(&self) -> &str;
+    /// The identity a token stands for right now, or `None`.
+    fn authenticate(&self, token: &str) -> Option<Identity>;
+    /// Principal names whose open connections must close, such as a
+    /// removed instance's.
+    fn revocations(&self) -> tokio::sync::broadcast::Receiver<String>;
+}
+
+/// [`AuthConfig::dynamic`]: a shared [`DynamicIdentities`].
+#[derive(Clone)]
+pub struct Dynamic(pub Arc<dyn DynamicIdentities>);
+impl std::fmt::Debug for Dynamic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Dynamic").field(&self.0.prefix()).finish()
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct AuthConfig {
     pub identities: Vec<Identity>,
+    /// Logins issued at runtime; see [`DynamicIdentities`].
+    pub dynamic: Option<Dynamic>,
     /// Authenticated connections of all identities except node agents, whose
     /// one session each never competes with plugins for a slot.
     pub max_connections: usize,
@@ -77,6 +104,7 @@ impl Default for AuthConfig {
     fn default() -> Self {
         Self {
             identities: vec![],
+            dynamic: None,
             max_connections: 1024,
             max_connections_per_address: 256,
             max_connections_per_identity: 256,
@@ -118,6 +146,13 @@ impl AuthConfig {
         Ok(())
     }
     fn authenticate(&self, token: &str) -> Result<Identity> {
+        if let Some(Dynamic(dynamic)) = &self.dynamic
+            && token.starts_with(dynamic.prefix())
+        {
+            return dynamic
+                .authenticate(token)
+                .ok_or_else(|| denied("authentication failed"));
+        }
         // HMAC verification compares fixed-size tags in constant time, without
         // exposing tokens or leaking their matching prefix through comparison.
         let tag = token_mac(token).finalize().into_bytes();
@@ -151,6 +186,7 @@ impl Identity {
             || reserved(subject, "rift.perms.update")
             || reserved(subject, rift_permissions::wire::CHANGES)
             || (!self.control && reserved(subject, "rift.control"))
+            || (!self.players && reserved(subject, crate::players_service::PREFIX))
             || (reserved(subject, "rift.node") && !self.node_scope(subject))
             || !self.publish.iter().any(|p| covers(p, subject))
         {
@@ -168,6 +204,10 @@ impl Identity {
         validate_pattern(pattern)?;
         if (!self.control
             && (overlaps(pattern, "rift.control.>") || covers(pattern, "rift.control")))
+            // A subscriber to player requests could read every caller's
+            // kicks and answer them in Rift's place.
+            || (!self.control
+                && (overlaps(pattern, "rift.players.>") || covers(pattern, crate::players_service::PREFIX)))
             // Node commands carry secrets such as the forwarding secret.
             || (!self.control
                 && !self.node_scope(pattern)
@@ -284,7 +324,24 @@ impl Server {
             auth,
             streams,
             node_sessions: std::sync::Mutex::new(HashMap::new()),
+            dynamic_sessions: std::sync::Mutex::new(HashMap::new()),
             next_session: AtomicU64::new(0),
+        });
+        // Close the connections of a revoked dynamic identity at once: an
+        // instance that was removed must not keep its session.
+        let revoker = context.auth.dynamic.as_ref().map(|Dynamic(dynamic)| {
+            let mut revocations = dynamic.revocations();
+            let context = context.clone();
+            tokio::spawn(async move {
+                use tokio::sync::broadcast::error::RecvError;
+                loop {
+                    match revocations.recv().await {
+                        Ok(name) => context.revoke(&name),
+                        Err(RecvError::Lagged(_)) => context.revoke_stale(),
+                        Err(RecvError::Closed) => return,
+                    }
+                }
+            })
         });
         let task = tokio::spawn(async move {
             let mut tasks = JoinSet::new();
@@ -316,6 +373,9 @@ impl Server {
                     }
                     _ = tasks.join_next(), if !tasks.is_empty() => {}
                 }
+            }
+            if let Some(revoker) = revoker {
+                revoker.abort();
             }
             tasks.abort_all();
             while tasks.join_next().await.is_some() {}
@@ -360,6 +420,9 @@ struct Context {
     /// Node commands are addressed to the principal, so a second session must
     /// never receive them alongside the first.
     node_sessions: std::sync::Mutex<HashMap<String, (u64, Connection)>>,
+    /// Live connections of dynamic identities by principal, with the token
+    /// each authenticated with, so a revocation can close them.
+    dynamic_sessions: std::sync::Mutex<HashMap<String, Vec<DynamicConnection>>>,
     next_session: AtomicU64,
 }
 /// Slots held by a connection from its validated first packet on.
@@ -371,6 +434,61 @@ struct Admission {
 /// Slots held by an authenticated connection of an identity other than a node.
 type Session = (tokio::sync::OwnedSemaphorePermit, Claim<String>);
 impl Context {
+    /// Close every connection of dynamic principal `name`.
+    fn revoke(&self, name: &str) {
+        let removed = self
+            .dynamic_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(name);
+        for (_, _, connection) in removed.into_iter().flatten() {
+            connection.close(5u32.into(), b"this login was revoked");
+        }
+    }
+
+    /// After missed revocations, close every dynamic connection whose token
+    /// no longer authenticates.
+    fn revoke_stale(&self) {
+        let Some(Dynamic(dynamic)) = &self.auth.dynamic else {
+            return;
+        };
+        let mut sessions = self
+            .dynamic_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for list in sessions.values_mut() {
+            list.retain(|(_, token, connection)| {
+                let valid = dynamic.authenticate(token).is_some();
+                if !valid {
+                    connection.close(5u32.into(), b"this login was revoked");
+                }
+                valid
+            });
+        }
+        sessions.retain(|_, list| !list.is_empty());
+    }
+
+    /// Track a dynamic identity's connection until it ends.
+    fn claim_dynamic_session(
+        self: &Arc<Self>,
+        name: &str,
+        token: &str,
+        connection: &Connection,
+    ) -> DynamicSession {
+        let id = self.next_session.fetch_add(1, Ordering::Relaxed);
+        self.dynamic_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(name.to_owned())
+            .or_default()
+            .push((id, token.to_owned(), connection.clone()));
+        DynamicSession {
+            context: self.clone(),
+            name: name.to_owned(),
+            id,
+        }
+    }
+
     fn admit(&self, ip: IpAddr) -> Option<Admission> {
         let address = address_key(ip);
         let connection = self
@@ -414,6 +532,31 @@ impl Context {
             context: self.clone(),
             name: name.to_owned(),
             id,
+        }
+    }
+}
+/// A dynamic identity's connection: session id, the token it authenticated
+/// with, and the connection to close on revocation.
+type DynamicConnection = (u64, String, Connection);
+
+/// Forgets a dynamic identity's connection when it ends.
+struct DynamicSession {
+    context: Arc<Context>,
+    name: String,
+    id: u64,
+}
+impl Drop for DynamicSession {
+    fn drop(&mut self) {
+        let mut sessions = self
+            .context
+            .dynamic_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(list) = sessions.get_mut(&self.name) {
+            list.retain(|(id, _, _)| *id != self.id);
+            if list.is_empty() {
+                sessions.remove(&self.name);
+            }
         }
     }
 }
@@ -509,9 +652,15 @@ async fn serve_connection(connection: Connection, context: Arc<Context>, admissi
                 let node_session = session
                     .is_none()
                     .then(|| context.claim_node_session(&identity.name, &connection));
+                let dynamic_session = context
+                    .auth
+                    .dynamic
+                    .as_ref()
+                    .filter(|Dynamic(dynamic)| token.starts_with(dynamic.prefix()))
+                    .map(|_| context.claim_dynamic_session(&identity.name, &token, &connection));
                 write_simple(&mut send, OK).await?;
                 send.finish().map_err(other)?;
-                Ok((identity, node_session, session))
+                Ok((identity, node_session, (session, dynamic_session)))
             }
             Err(error) => {
                 let _ = write_error(&mut send, &error).await;
@@ -524,7 +673,7 @@ async fn serve_connection(connection: Connection, context: Arc<Context>, admissi
     })
     .await;
     drop(pending);
-    let Ok(Ok((identity, _node_session, _session))) = auth_result else {
+    let Ok(Ok((identity, _node_session, _sessions))) = auth_result else {
         connection.close(1u32.into(), b"authentication failed");
         return;
     };

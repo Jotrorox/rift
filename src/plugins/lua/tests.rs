@@ -284,6 +284,7 @@ end)
     let Action::Deny(errors) = session(&runtime, 1, "A").decision("login").await.unwrap() else {
         panic!("login should deny with the errors");
     };
+    let errors = errors.to_string();
     assert!(
         errors.contains("rift.on is only available while the plugin initializes"),
         "{errors}"
@@ -454,9 +455,9 @@ async fn the_same_handler_body_runs_in_rift_lua_and_as_a_plugin() {
         assert_eq!(
             suggestions
                 .iter()
-                .map(|suggestion| (suggestion.text.as_str(), suggestion.tooltip.as_deref()))
+                .map(|suggestion| (suggestion.text.as_str(), suggestion.tooltip.clone()))
                 .collect::<Vec<_>>(),
-            [("hello", None), ("hey", Some("he"))]
+            [("hello", None), ("hey", Some("he".into()))]
         );
         assert_eq!(
             session(runtime, 3, "Other").command("greet").await.unwrap(),
@@ -521,4 +522,155 @@ end)
         .unwrap();
     runtime.plugins().shutdown().await;
     assert!(actions.try_recv().is_err());
+}
+
+/// A player table carries the client's `locale` once the session published
+/// it; before that it is nil.
+#[tokio::test]
+async fn player_tables_carry_the_client_locale_once_it_is_known() {
+    let root = folder(
+        "",
+        &[(
+            "init.lua",
+            r#"
+rift.on("login", function(ctx)
+    local player = rift.players.get(ctx.uuid)
+    assert(rift.players.list()[1].locale == player.locale)
+    return { deny = "locale=" .. tostring(player.locale) }
+end)
+"#,
+        )],
+    );
+    let broker = Broker::default();
+    let runtime = started(&root, "{}", &broker).await;
+    let (handle, _actions) = runtime
+        .players()
+        .register(7, &[7; 16], "Alex", 774, "lobby");
+    let player = session(&runtime, 7, "Alex");
+    assert_eq!(
+        player.decision("login").await.unwrap(),
+        Action::Deny("locale=nil".into())
+    );
+    for locale in ["de_de", "en_us"] {
+        handle.set_locale(Some(locale));
+        assert_eq!(
+            player.decision("login").await.unwrap(),
+            Action::Deny(format!("locale={locale}").as_str().into())
+        );
+    }
+    assert_eq!(
+        runtime.players().list(None).unwrap()[0].locale.as_deref(),
+        Some("en_us")
+    );
+    runtime.plugins().shutdown().await;
+}
+
+/// `examples/plugins/vanish-lua`: `/vanish` sets the `rift.visible-to` meta
+/// key; the directory's watcher resolves it onto both records, publishes a
+/// `visibility` event, and every viewer without the node loses the player.
+#[tokio::test]
+async fn the_vanish_example_hides_a_player_from_viewers_without_the_node() {
+    use crate::players::Viewer;
+    let broker = Broker::default();
+    let mut events = broker
+        .subscribe(crate::extensions::players::EVENTS, None)
+        .unwrap();
+    let mut config = Config::from_lua(&format!("return {{ {BASE} }}"), "vanish.lua").unwrap();
+    config.plugins = vec![conformance::installed(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/plugins/vanish-lua"),
+        r#"{"see":"rift.vanish.see"}"#,
+    )];
+    let runtime =
+        Extensions::with_engines(&config, broker.clone(), None, Engines::builtin()).unwrap();
+    runtime.plugins().start().await.unwrap();
+    let players = runtime.players().clone();
+    let watcher = tokio::spawn(players.clone().watch());
+    let staff = [2; 16];
+    let permissions = &runtime.plugins().persistent.base.permissions;
+    permissions.grant(&"02".repeat(16), "rift.vanish.use");
+    permissions.grant(&"03".repeat(16), "rift.vanish.see");
+    let _roster = players.roster().register(staff, "Staff", "lobby").unwrap();
+    let (_staff, _actions) = players.register(2, &staff, "Staff", 774, "lobby");
+    let mut session = session(&runtime, 2, "Staff");
+    session.ready("lobby").await;
+    let join: serde_json::Value =
+        serde_json::from_slice(&events.recv().await.unwrap().payload).unwrap();
+    assert_eq!(join["visible_to"], serde_json::Value::Null);
+
+    assert_eq!(
+        session.command("vanish").await.unwrap(),
+        Action::Message("You are vanished.".into())
+    );
+    let event: serde_json::Value = serde_json::from_slice(
+        &tokio::time::timeout(Duration::from_secs(5), events.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .payload,
+    )
+    .unwrap();
+    assert_eq!(event["event"], "visibility");
+    assert_eq!(event["visible_to"], "rift.vanish.see");
+    assert_eq!(event["previous_visible_to"], serde_json::Value::Null);
+    let roster = players.roster();
+    assert_eq!(roster.count_for(Viewer::Public, None), 0);
+    assert_eq!(roster.count_for(Viewer::System, None), 1);
+    assert_eq!(
+        players.list(None).unwrap()[0].visible_to.as_deref(),
+        Some("rift.vanish.see")
+    );
+    let check = |uuid: [u8; 16]| {
+        move |node: &str| {
+            permissions.check_active(rift_permissions::Uuid::from_bytes(uuid), node)
+                == rift_permissions::Tristate::True
+        }
+    };
+    let (plain, moderator) = (check([4; 16]), check([3; 16]));
+    assert!(
+        players
+            .names_for(Viewer::Player {
+                uuid: [4; 16],
+                holds: &plain
+            })
+            .is_empty()
+    );
+    assert_eq!(
+        players.names_for(Viewer::Player {
+            uuid: [3; 16],
+            holds: &moderator
+        }),
+        ["Staff"]
+    );
+
+    // A timed vanish replaces the global node with one that expires.
+    assert_eq!(
+        session.command("vanish 2").await.unwrap(),
+        Action::Message("You are vanished for 2 minutes.".into())
+    );
+    let user = permissions
+        .user(rift_permissions::Uuid::from_bytes(staff))
+        .unwrap();
+    let node = user
+        .nodes
+        .iter()
+        .find(|node| node.payload.key() == crate::players::VISIBLE_TO)
+        .unwrap();
+    assert!(node.expires_at.is_some() && node.contexts.is_empty());
+    assert_eq!(
+        node.source.to_string(),
+        "plugin:vanish-lua",
+        "the change log names the plugin"
+    );
+    assert_eq!(
+        session.command("vanish").await.unwrap(),
+        Action::Message("You are visible again.".into())
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while roster.count_for(Viewer::Public, None) == 0 {
+        assert!(Instant::now() < deadline, "the player stayed hidden");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(players.list(None).unwrap()[0].visible_to, None);
+    watcher.abort();
+    runtime.plugins().shutdown().await;
 }

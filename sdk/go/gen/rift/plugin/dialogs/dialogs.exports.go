@@ -2,7 +2,7 @@
 
 package dialogs
 
-// Exports represents the caller-defined exports from "rift:plugin/dialogs@0.1.1".
+// Exports represents the caller-defined exports from "rift:plugin/dialogs@0.1.5".
 var Exports struct {
 	// Dialog represents the caller-defined, exported function "dialog".
 	//

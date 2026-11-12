@@ -1,0 +1,967 @@
+{
+ "protocol": 404,
+ "serializers": [
+  "byte",
+  "int",
+  "float",
+  "string",
+  "component",
+  "optional_component",
+  "item_stack",
+  "boolean",
+  "rotations",
+  "block_pos",
+  "optional_block_pos",
+  "direction",
+  "optional_uuid",
+  "optional_block_state",
+  "compound_tag",
+  "particle"
+ ],
+ "enums": {
+  "direction": [
+   "DOWN",
+   "UP",
+   "NORTH",
+   "SOUTH",
+   "WEST",
+   "EAST"
+  ]
+ },
+ "classes": {
+  "AbstractArrow": {
+   "parent": "Entity",
+   "fields": [
+    [
+     "AbstractArrow.ID_FLAGS",
+     "byte"
+    ],
+    [
+     "AbstractArrow.DATA_OWNERUUID_ID",
+     "optional_uuid"
+    ]
+   ]
+  },
+  "AbstractBoat": {
+   "parent": "Entity",
+   "fields": [
+    [
+     "VehicleEntity.DATA_ID_HURT",
+     "int"
+    ],
+    [
+     "VehicleEntity.DATA_ID_HURTDIR",
+     "int"
+    ],
+    [
+     "VehicleEntity.DATA_ID_DAMAGE",
+     "float"
+    ],
+    [
+     "AbstractBoat.DATA_ID_TYPE",
+     "int"
+    ],
+    [
+     "AbstractBoat.DATA_ID_PADDLE_LEFT",
+     "boolean"
+    ],
+    [
+     "AbstractBoat.DATA_ID_PADDLE_RIGHT",
+     "boolean"
+    ],
+    [
+     "AbstractBoat.DATA_ID_BUBBLE_TIME",
+     "int"
+    ]
+   ]
+  },
+  "AbstractChestedHorse": {
+   "parent": "AbstractHorse",
+   "fields": [
+    [
+     "AbstractChestedHorse.DATA_ID_CHEST",
+     "boolean"
+    ]
+   ]
+  },
+  "AbstractCubeMob": {
+   "parent": "Mob",
+   "fields": [
+    [
+     "AbstractCubeMob.ID_SIZE",
+     "int"
+    ]
+   ]
+  },
+  "AbstractFish": {
+   "parent": "Mob",
+   "fields": [
+    [
+     "AbstractFish.FROM_BUCKET",
+     "boolean"
+    ]
+   ]
+  },
+  "AbstractHorse": {
+   "parent": "AgeableMob",
+   "fields": [
+    [
+     "AbstractHorse.DATA_ID_FLAGS",
+     "byte"
+    ],
+    [
+     "AbstractHorse.DATA_ID_OWNER_UUID",
+     "optional_uuid"
+    ]
+   ]
+  },
+  "AbstractIllager": {
+   "parent": "Mob",
+   "fields": [
+    [
+     "AbstractIllager.DATA_FLAGS_ID",
+     "byte"
+    ]
+   ]
+  },
+  "AbstractMinecart": {
+   "parent": "Entity",
+   "fields": [
+    [
+     "VehicleEntity.DATA_ID_HURT",
+     "int"
+    ],
+    [
+     "VehicleEntity.DATA_ID_HURTDIR",
+     "int"
+    ],
+    [
+     "VehicleEntity.DATA_ID_DAMAGE",
+     "float"
+    ],
+    [
+     "AbstractMinecart.DATA_ID_CUSTOM_DISPLAY_BLOCK",
+     "int"
+    ],
+    [
+     "AbstractMinecart.DATA_ID_DISPLAY_OFFSET",
+     "int"
+    ],
+    [
+     "AbstractMinecart.DATA_ID_CUSTOM_DISPLAY",
+     "boolean"
+    ]
+   ]
+  },
+  "AbstractSkeleton": {
+   "parent": "Mob",
+   "fields": [
+    [
+     "AbstractSkeleton.DATA_SWINGING_ARMS",
+     "boolean"
+    ]
+   ]
+  },
+  "AgeableMob": {
+   "parent": "Mob",
+   "fields": [
+    [
+     "AgeableMob.DATA_BABY_ID",
+     "boolean"
+    ]
+   ]
+  },
+  "AreaEffectCloud": {
+   "parent": "Entity",
+   "fields": [
+    [
+     "AreaEffectCloud.DATA_RADIUS",
+     "float"
+    ],
+    [
+     "AreaEffectCloud.DATA_COLOR",
+     "int"
+    ],
+    [
+     "AreaEffectCloud.DATA_WAITING",
+     "boolean"
+    ],
+    [
+     "AreaEffectCloud.DATA_PARTICLE",
+     "particle"
+    ]
+   ]
+  },
+  "ArmorStand": {
+   "parent": "LivingEntity",
+   "fields": [
+    [
+     "ArmorStand.DATA_CLIENT_FLAGS",
+     "byte"
+    ],
+    [
+     "ArmorStand.DATA_HEAD_POSE",
+     "rotations"
+    ],
+    [
+     "ArmorStand.DATA_BODY_POSE",
+     "rotations"
+    ],
+    [
+     "ArmorStand.DATA_LEFT_ARM_POSE",
+     "rotations"
+    ],
+    [
+     "ArmorStand.DATA_RIGHT_ARM_POSE",
+     "rotations"
+    ],
+    [
+     "ArmorStand.DATA_LEFT_LEG_POSE",
+     "rotations"
+    ],
+    [
+     "ArmorStand.DATA_RIGHT_LEG_POSE",
+     "rotations"
+    ]
+   ]
+  },
+  "Arrow": {
+   "parent": "AbstractArrow",
+   "fields": [
+    [
+     "Arrow.ID_EFFECT_COLOR",
+     "int"
+    ]
+   ]
+  },
+  "Bat": {
+   "parent": "Mob",
+   "fields": [
+    [
+     "Bat.DATA_ID_FLAGS",
+     "byte"
+    ]
+   ]
+  },
+  "Blaze": {
+   "parent": "Mob",
+   "fields": [
+    [
+     "Blaze.DATA_FLAGS_ID",
+     "byte"
+    ]
+   ]
+  },
+  "Creeper": {
+   "parent": "Mob",
+   "fields": [
+    [
+     "Creeper.DATA_SWELL_DIR",
+     "int"
+    ],
+    [
+     "Creeper.DATA_IS_POWERED",
+     "boolean"
+    ],
+    [
+     "Creeper.DATA_IS_IGNITED",
+     "boolean"
+    ]
+   ]
+  },
+  "Dolphin": {
+   "parent": "Mob",
+   "fields": [
+    [
+     "Dolphin.TREASURE_POS",
+     "block_pos"
+    ],
+    [
+     "Dolphin.GOT_FISH",
+     "boolean"
+    ],
+    [
+     "Dolphin.MOISTNESS_LEVEL",
+     "int"
+    ]
+   ]
+  },
+  "EndCrystal": {
+   "parent": "Entity",
+   "fields": [
+    [
+     "EndCrystal.DATA_BEAM_TARGET",
+     "optional_block_pos"
+    ],
+    [
+     "EndCrystal.DATA_SHOW_BOTTOM",
+     "boolean"
+    ]
+   ]
+  },
+  "EnderDragon": {
+   "parent": "Mob",
+   "fields": [
+    [
+     "EnderDragon.DATA_PHASE",
+     "int"
+    ]
+   ]
+  },
+  "Enderman": {
+   "parent": "Mob",
+   "fields": [
+    [
+     "Enderman.DATA_CARRY_STATE",
+     "optional_block_state"
+    ],
+    [
+     "Enderman.DATA_CREEPY",
+     "boolean"
+    ]
+   ]
+  },
+  "Entity": {
+   "parent": null,
+   "fields": [
+    [
+     "Entity.DATA_SHARED_FLAGS_ID",
+     "byte"
+    ],
+    [
+     "Entity.DATA_AIR_SUPPLY_ID",
+     "int"
+    ],
+    [
+     "Entity.DATA_CUSTOM_NAME",
+     "optional_component"
+    ],
+    [
+     "Entity.DATA_CUSTOM_NAME_VISIBLE",
+     "boolean"
+    ],
+    [
+     "Entity.DATA_SILENT",
+     "boolean"
+    ],
+    [
+     "Entity.DATA_NO_GRAVITY",
+     "boolean"
+    ]
+   ]
+  },
+  "FallingBlockEntity": {
+   "parent": "Entity",
+   "fields": [
+    [
+     "FallingBlockEntity.DATA_START_POS",
+     "block_pos"
+    ]
+   ]
+  },
+  "FireworkRocketEntity": {
+   "parent": "Entity",
+   "fields": [
+    [
+     "FireworkRocketEntity.DATA_ID_FIREWORKS_ITEM",
+     "item_stack"
+    ],
+    [
+     "FireworkRocketEntity.DATA_ATTACHED_TO_TARGET",
+     "int"
+    ]
+   ]
+  },
+  "FishingHook": {
+   "parent": "Entity",
+   "fields": [
+    [
+     "FishingHook.DATA_HOOKED_ENTITY",
+     "int"
+    ]
+   ]
+  },
+  "Ghast": {
+   "parent": "Mob",
+   "fields": [
+    [
+     "Ghast.DATA_IS_CHARGING",
+     "boolean"
+    ]
+   ]
+  },
+  "Guardian": {
+   "parent": "Mob",
+   "fields": [
+    [
+     "Guardian.DATA_ID_MOVING",
+     "boolean"
+    ],
+    [
+     "Guardian.DATA_ID_ATTACK_TARGET",
+     "int"
+    ]
+   ]
+  },
+  "Horse": {
+   "parent": "AbstractHorse",
+   "fields": [
+    [
+     "Horse.DATA_ID_TYPE_VARIANT",
+     "int"
+    ],
+    [
+     "Horse.LEGACY_ARMOR_TYPE",
+     "int"
+    ]
+   ]
+  },
+  "IronGolem": {
+   "parent": "Mob",
+   "fields": [
+    [
+     "IronGolem.DATA_FLAGS_ID",
+     "byte"
+    ]
+   ]
+  },
+  "ItemEntity": {
+   "parent": "Entity",
+   "fields": [
+    [
+     "ItemEntity.DATA_ITEM",
+     "item_stack"
+    ]
+   ]
+  },
+  "ItemFrame": {
+   "parent": "Entity",
+   "fields": [
+    [
+     "ItemFrame.DATA_ITEM",
+     "item_stack"
+    ],
+    [
+     "ItemFrame.DATA_ROTATION",
+     "int"
+    ]
+   ]
+  },
+  "LivingEntity": {
+   "parent": "Entity",
+   "fields": [
+    [
+     "LivingEntity.DATA_LIVING_ENTITY_FLAGS",
+     "byte"
+    ],
+    [
+     "LivingEntity.DATA_HEALTH_ID",
+     "float"
+    ],
+    [
+     "LivingEntity.DATA_EFFECT_PARTICLES",
+     "int"
+    ],
+    [
+     "LivingEntity.DATA_EFFECT_AMBIENCE_ID",
+     "boolean"
+    ],
+    [
+     "LivingEntity.DATA_ARROW_COUNT_ID",
+     "int"
+    ]
+   ]
+  },
+  "Llama": {
+   "parent": "AbstractChestedHorse",
+   "fields": [
+    [
+     "Llama.DATA_STRENGTH_ID",
+     "int"
+    ],
+    [
+     "Llama.DATA_SWAG_ID",
+     "int"
+    ],
+    [
+     "Llama.DATA_VARIANT_ID",
+     "int"
+    ]
+   ]
+  },
+  "MinecartCommandBlock": {
+   "parent": "AbstractMinecart",
+   "fields": [
+    [
+     "MinecartCommandBlock.DATA_ID_COMMAND_NAME",
+     "string"
+    ],
+    [
+     "MinecartCommandBlock.DATA_ID_LAST_OUTPUT",
+     "component"
+    ]
+   ]
+  },
+  "MinecartFurnace": {
+   "parent": "AbstractMinecart",
+   "fields": [
+    [
+     "MinecartFurnace.DATA_ID_FUEL",
+     "boolean"
+    ]
+   ]
+  },
+  "Mob": {
+   "parent": "LivingEntity",
+   "fields": [
+    [
+     "Mob.DATA_MOB_FLAGS_ID",
+     "byte"
+    ]
+   ]
+  },
+  "Ocelot": {
+   "parent": "TamableAnimal",
+   "fields": [
+    [
+     "Ocelot.LEGACY_TYPE_ID",
+     "int"
+    ]
+   ]
+  },
+  "Parrot": {
+   "parent": "TamableAnimal",
+   "fields": [
+    [
+     "Parrot.DATA_VARIANT_ID",
+     "int"
+    ]
+   ]
+  },
+  "Phantom": {
+   "parent": "Mob",
+   "fields": [
+    [
+     "Phantom.ID_SIZE",
+     "int"
+    ]
+   ]
+  },
+  "Pig": {
+   "parent": "AgeableMob",
+   "fields": [
+    [
+     "Pig.DATA_SADDLE_ID",
+     "boolean"
+    ],
+    [
+     "Pig.DATA_BOOST_TIME",
+     "int"
+    ]
+   ]
+  },
+  "Player": {
+   "parent": "LivingEntity",
+   "fields": [
+    [
+     "Player.DATA_PLAYER_ABSORPTION_ID",
+     "float"
+    ],
+    [
+     "Player.DATA_SCORE_ID",
+     "int"
+    ],
+    [
+     "Avatar.DATA_PLAYER_MODE_CUSTOMISATION",
+     "byte"
+    ],
+    [
+     "Avatar.DATA_PLAYER_MAIN_HAND",
+     "byte"
+    ],
+    [
+     "Player.DATA_SHOULDER_LEFT",
+     "compound_tag"
+    ],
+    [
+     "Player.DATA_SHOULDER_RIGHT",
+     "compound_tag"
+    ]
+   ]
+  },
+  "PolarBear": {
+   "parent": "AgeableMob",
+   "fields": [
+    [
+     "PolarBear.DATA_STANDING_ID",
+     "boolean"
+    ]
+   ]
+  },
+  "PrimedTnt": {
+   "parent": "Entity",
+   "fields": [
+    [
+     "PrimedTnt.DATA_FUSE_ID",
+     "int"
+    ]
+   ]
+  },
+  "Pufferfish": {
+   "parent": "AbstractFish",
+   "fields": [
+    [
+     "Pufferfish.PUFF_STATE",
+     "int"
+    ]
+   ]
+  },
+  "Rabbit": {
+   "parent": "AgeableMob",
+   "fields": [
+    [
+     "Rabbit.DATA_TYPE_ID",
+     "int"
+    ]
+   ]
+  },
+  "Raider": {
+   "parent": "Mob",
+   "fields": [
+    [
+     "Raider.IS_CELEBRATING",
+     "boolean"
+    ]
+   ]
+  },
+  "Sheep": {
+   "parent": "AgeableMob",
+   "fields": [
+    [
+     "Sheep.DATA_WOOL_ID",
+     "byte"
+    ]
+   ]
+  },
+  "Shulker": {
+   "parent": "Mob",
+   "fields": [
+    [
+     "Shulker.DATA_ATTACH_FACE_ID",
+     "direction"
+    ],
+    [
+     "Shulker.DATA_ATTACH_POS_ID",
+     "optional_block_pos"
+    ],
+    [
+     "Shulker.DATA_PEEK_ID",
+     "byte"
+    ],
+    [
+     "Shulker.DATA_COLOR_ID",
+     "byte"
+    ]
+   ]
+  },
+  "SnowGolem": {
+   "parent": "Mob",
+   "fields": [
+    [
+     "SnowGolem.DATA_PUMPKIN_ID",
+     "byte"
+    ]
+   ]
+  },
+  "SpellcasterIllager": {
+   "parent": "AbstractIllager",
+   "fields": [
+    [
+     "SpellcasterIllager.DATA_SPELL_CASTING_ID",
+     "byte"
+    ]
+   ]
+  },
+  "Spider": {
+   "parent": "Mob",
+   "fields": [
+    [
+     "Spider.DATA_FLAGS_ID",
+     "byte"
+    ]
+   ]
+  },
+  "TamableAnimal": {
+   "parent": "AgeableMob",
+   "fields": [
+    [
+     "TamableAnimal.DATA_FLAGS_ID",
+     "byte"
+    ],
+    [
+     "TamableAnimal.DATA_OWNERUUID_ID",
+     "optional_uuid"
+    ]
+   ]
+  },
+  "ThrownPotion": {
+   "parent": "Entity",
+   "fields": [
+    [
+     "ThrowableItemProjectile.DATA_ITEM_STACK",
+     "item_stack"
+    ]
+   ]
+  },
+  "ThrownTrident": {
+   "parent": "AbstractArrow",
+   "fields": [
+    [
+     "ThrownTrident.ID_LOYALTY",
+     "byte"
+    ]
+   ]
+  },
+  "TropicalFish": {
+   "parent": "AbstractFish",
+   "fields": [
+    [
+     "TropicalFish.DATA_ID_TYPE_VARIANT",
+     "int"
+    ]
+   ]
+  },
+  "Turtle": {
+   "parent": "AgeableMob",
+   "fields": [
+    [
+     "Turtle.HOME_POS",
+     "block_pos"
+    ],
+    [
+     "Turtle.HAS_EGG",
+     "boolean"
+    ],
+    [
+     "Turtle.LAYING_EGG",
+     "boolean"
+    ],
+    [
+     "Turtle.TRAVEL_POS",
+     "block_pos"
+    ],
+    [
+     "Turtle.GOING_HOME",
+     "boolean"
+    ],
+    [
+     "Turtle.TRAVELLING",
+     "boolean"
+    ]
+   ]
+  },
+  "Vex": {
+   "parent": "Mob",
+   "fields": [
+    [
+     "Vex.DATA_FLAGS_ID",
+     "byte"
+    ]
+   ]
+  },
+  "Villager": {
+   "parent": "AgeableMob",
+   "fields": [
+    [
+     "Villager.DATA_VILLAGER_DATA",
+     "int"
+    ]
+   ]
+  },
+  "WitherBoss": {
+   "parent": "Mob",
+   "fields": [
+    [
+     "WitherBoss.DATA_TARGET_A",
+     "int"
+    ],
+    [
+     "WitherBoss.DATA_TARGET_B",
+     "int"
+    ],
+    [
+     "WitherBoss.DATA_TARGET_C",
+     "int"
+    ],
+    [
+     "WitherBoss.DATA_ID_INV",
+     "int"
+    ]
+   ]
+  },
+  "WitherSkull": {
+   "parent": "Entity",
+   "fields": [
+    [
+     "WitherSkull.DATA_DANGEROUS",
+     "boolean"
+    ]
+   ]
+  },
+  "Wolf": {
+   "parent": "TamableAnimal",
+   "fields": [
+    [
+     "Wolf.DATA_HEALTH_ID",
+     "float"
+    ],
+    [
+     "Wolf.DATA_INTERESTED_ID",
+     "boolean"
+    ],
+    [
+     "Wolf.DATA_COLLAR_COLOR",
+     "int"
+    ]
+   ]
+  },
+  "Zombie": {
+   "parent": "Mob",
+   "fields": [
+    [
+     "Zombie.DATA_BABY_ID",
+     "boolean"
+    ],
+    [
+     "Zombie.DATA_SPECIAL_TYPE_ID",
+     "int"
+    ],
+    [
+     "Zombie.LEGACY_HANDS_UP",
+     "boolean"
+    ],
+    [
+     "Zombie.DATA_DROWNED_CONVERSION_ID",
+     "boolean"
+    ]
+   ]
+  },
+  "ZombieVillager": {
+   "parent": "Zombie",
+   "fields": [
+    [
+     "ZombieVillager.DATA_CONVERTING_ID",
+     "boolean"
+    ],
+    [
+     "ZombieVillager.DATA_VILLAGER_DATA",
+     "int"
+    ]
+   ]
+  }
+ },
+ "types": {
+  "area_effect_cloud": "AreaEffectCloud",
+  "armor_stand": "ArmorStand",
+  "arrow": "Arrow",
+  "bat": "Bat",
+  "blaze": "Blaze",
+  "boat": "AbstractBoat",
+  "cave_spider": "Spider",
+  "chest_minecart": "AbstractMinecart",
+  "chicken": "AgeableMob",
+  "cod": "AbstractFish",
+  "commandblock_minecart": "MinecartCommandBlock",
+  "cow": "AgeableMob",
+  "creeper": "Creeper",
+  "dolphin": "Dolphin",
+  "donkey": "AbstractChestedHorse",
+  "dragon_fireball": "Entity",
+  "drowned": "Zombie",
+  "egg": "Entity",
+  "elder_guardian": "Guardian",
+  "end_crystal": "EndCrystal",
+  "ender_dragon": "EnderDragon",
+  "ender_pearl": "Entity",
+  "enderman": "Enderman",
+  "endermite": "Mob",
+  "evoker": "SpellcasterIllager",
+  "evoker_fangs": "Entity",
+  "experience_bottle": "Entity",
+  "experience_orb": "Entity",
+  "eye_of_ender": "Entity",
+  "falling_block": "FallingBlockEntity",
+  "fireball": "Entity",
+  "fireworks_rocket": "FireworkRocketEntity",
+  "fishing_bobber": "FishingHook",
+  "furnace_minecart": "MinecartFurnace",
+  "ghast": "Ghast",
+  "giant": "Mob",
+  "guardian": "Guardian",
+  "hopper_minecart": "AbstractMinecart",
+  "horse": "Horse",
+  "husk": "Zombie",
+  "illusioner": "SpellcasterIllager",
+  "iron_golem": "IronGolem",
+  "item": "ItemEntity",
+  "item_frame": "ItemFrame",
+  "leash_knot": "Entity",
+  "lightning_bolt": "Entity",
+  "llama": "Llama",
+  "llama_spit": "Entity",
+  "magma_cube": "AbstractCubeMob",
+  "minecart": "AbstractMinecart",
+  "mooshroom": "AgeableMob",
+  "mule": "AbstractChestedHorse",
+  "ocelot": "Ocelot",
+  "painting": "Entity",
+  "parrot": "Parrot",
+  "phantom": "Phantom",
+  "pig": "Pig",
+  "player": "Player",
+  "polar_bear": "PolarBear",
+  "potion": "ThrownPotion",
+  "pufferfish": "Pufferfish",
+  "rabbit": "Rabbit",
+  "salmon": "AbstractFish",
+  "sheep": "Sheep",
+  "shulker": "Shulker",
+  "shulker_bullet": "Entity",
+  "silverfish": "Mob",
+  "skeleton": "AbstractSkeleton",
+  "skeleton_horse": "AbstractHorse",
+  "slime": "AbstractCubeMob",
+  "small_fireball": "Entity",
+  "snow_golem": "SnowGolem",
+  "snowball": "Entity",
+  "spawner_minecart": "AbstractMinecart",
+  "spectral_arrow": "AbstractArrow",
+  "spider": "Spider",
+  "squid": "Mob",
+  "stray": "AbstractSkeleton",
+  "tnt": "PrimedTnt",
+  "tnt_minecart": "AbstractMinecart",
+  "trident": "ThrownTrident",
+  "tropical_fish": "TropicalFish",
+  "turtle": "Turtle",
+  "vex": "Vex",
+  "villager": "Villager",
+  "vindicator": "AbstractIllager",
+  "witch": "Raider",
+  "wither": "WitherBoss",
+  "wither_skeleton": "AbstractSkeleton",
+  "wither_skull": "WitherSkull",
+  "wolf": "Wolf",
+  "zombie": "Zombie",
+  "zombie_horse": "AbstractHorse",
+  "zombie_pigman": "Zombie",
+  "zombie_villager": "ZombieVillager"
+ },
+ "particles": {
+  "block": "BlockParticleOption",
+  "dust": "DustParticleOptions",
+  "falling_dust": "BlockParticleOption",
+  "item": "ItemParticleOption"
+ },
+ "renamed": {}
+}

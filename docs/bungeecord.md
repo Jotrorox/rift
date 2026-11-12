@@ -44,8 +44,8 @@ table lists the remaining fields in wire order.
 | `ConnectOther` | Player name, server name | No response; transfer the named player |
 | `IP` | None | Carrier IP address, integer port |
 | `IPOther` | Player name | Player name, IP address, integer port |
-| `PlayerCount` | Server name or `ALL` | Server name or `ALL`, integer player count |
-| `PlayerList` | Server name or `ALL` | Server name or `ALL`, comma-and-space-separated player names |
+| `PlayerCount` | Server name or `ALL` | Server name or `ALL`, integer player count, without players a [visibility rule](permissions.md#visibility) hides |
+| `PlayerList` | Server name or `ALL` | Server name or `ALL`, comma-and-space-separated player names, without hidden players |
 | `GetServers` | None | Comma-and-space-separated configured server names |
 | `GetServer` | None | Carrier's current server name |
 | `GetPlayerServer` | Player name | Player name, current server name |
@@ -179,11 +179,13 @@ to the Minecraft client.
 `Message` sends text to one player, or to every player for uppercase `ALL`.
 Legacy `§` formatting codes in the text work as in BungeeCord. `KickPlayer`
 disconnects one player with a text reason; `ALL` is a player name there.
-`MessageRaw` and `KickPlayerRaw` take a JSON text component instead, written
-for the player's Minecraft version. Rift checks only that it is a JSON string,
-list or object without `null` list entries, then sends it unchanged to clients
-before 1.20.3 and converts it to NBT for 1.20.3 and newer, as the server does.
-Invalid components are dropped.
+`MessageRaw` and `KickPlayerRaw` take a JSON text component instead. Rift checks
+only that it is a JSON string, list or object without `null` list entries, then
+sends it as JSON to clients before 1.20.3 and converts it to NBT for 1.20.3 and
+newer, as the server does. Hover and click events may use either the 1.21.5+
+spelling (`click_event`, `hover_event`) or the older one; Rift rewrites them
+into the form the player's client reads (see
+[rich text](extensions.md#rich-text)). Invalid components are dropped.
 
 These requests enter the target player's queue of pending proxy actions, the
 same bounded queue that `rift.players` uses, and the player's own session sends

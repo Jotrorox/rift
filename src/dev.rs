@@ -139,7 +139,9 @@ pub fn prepare(args: &[String]) -> io::Result<Dev> {
         env::set_var(TOKEN_ENV, &token);
         env::set_var(ADMIN_TOKEN_ENV, &admin_token);
     }
-    let (publish, subscribe) = rift::permissions::backend_grants();
+    let (mut publish, subscribe) = rift::permissions::backend_grants();
+    // Plugin authors try the player API from the same login.
+    publish.push(format!("{}.*", rift::players_service::PREFIX));
     config.messaging = Some(MessagingConfig {
         listen: Some(bus),
         certificate: Some(ca.clone()),
@@ -150,6 +152,7 @@ pub fn prepare(args: &[String]) -> io::Result<Dev> {
             publish,
             subscribe,
             control: true,
+            players: true,
         }],
         ..MessagingConfig::default()
     });

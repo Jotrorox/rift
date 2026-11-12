@@ -51,8 +51,24 @@ final class Lookups {
         return contexts(world);
     }
 
-    /** {@code server}, plus {@code world} when given: the contexts of a write or offline read. */
+    /**
+     * {@code server} and this backend's {@code group}, plus {@code world} when given: the contexts of
+     * an offline read, as a player here would have them.
+     */
     ContextSet contexts(String world) {
+        ContextSet.Builder contexts = ContextSet.builder().add(ContextSet.SERVER, server);
+        client.group().ifPresent(group -> contexts.add(ContextSet.GROUP, group));
+        if (world != null) {
+            contexts.add(ContextSet.WORLD, world);
+        }
+        return contexts.build();
+    }
+
+    /**
+     * {@code server}, plus {@code world} when given: where a Vault write lands. Not {@code group},
+     * which would only make the node more specific without changing where it applies.
+     */
+    ContextSet scope(String world) {
         ContextSet.Builder contexts = ContextSet.builder().add(ContextSet.SERVER, server);
         if (world != null) {
             contexts.add(ContextSet.WORLD, world);

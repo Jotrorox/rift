@@ -3,8 +3,10 @@ package rift
 import (
 	"go.bytecodealliance.org/cm"
 
+	"github.com/Jotrorox/rift/sdk/go/gen/rift/plugin/decisions"
 	"github.com/Jotrorox/rift/sdk/go/gen/rift/plugin/dialogs"
 	"github.com/Jotrorox/rift/sdk/go/gen/rift/plugin/handler"
+	"github.com/Jotrorox/rift/sdk/go/gen/rift/plugin/styled"
 	"github.com/Jotrorox/rift/sdk/go/gen/rift/plugin/types"
 )
 
@@ -29,6 +31,10 @@ var (
 	onTimer          = func(uint64) {}
 	onEvent          = func(Event) {}
 	onDialog         = func(DialogResponse) {}
+	// Set by OnRichSuggest and OnRichStatus; nil answers with onSuggest and
+	// onStatus.
+	onRichSuggest func(Context) []RichSuggestion
+	onRichStatus  func(Ping) *RichStatusOverride
 )
 
 // handled records the hooks that have a handler, for registrations that
@@ -93,6 +99,68 @@ func OnStatus(f func(Ping) *StatusOverride) {
 	handled[HookStatus] = true
 }
 
+// OnRichSuggest sets the suggest handler with JSON text tooltips
+// (rift:plugin 0.1.4); it replaces an OnSuggest handler. Hosts before 0.1.4
+// show the tooltips' words.
+func OnRichSuggest(f func(Context) []RichSuggestion) {
+	onRichSuggest = f
+	handled[HookSuggest] = true
+}
+
+// OnRichStatus sets the status handler with JSON text for the version and
+// the player sample (rift:plugin 0.1.4); it replaces an OnStatus handler.
+// Hosts before 0.1.4 show the text's words.
+func OnRichStatus(f func(Ping) *RichStatusOverride) {
+	onRichStatus = f
+	handled[HookStatus] = true
+}
+
+func suggestRich(c Context) []RichSuggestion {
+	if onRichSuggest != nil {
+		return onRichSuggest(c)
+	}
+	plain := onSuggest(c)
+	out := make([]RichSuggestion, len(plain))
+	for i, s := range plain {
+		out[i] = s.rich()
+	}
+	return out
+}
+
+func suggestPlain(c Context) []Suggestion {
+	if onRichSuggest == nil {
+		return onSuggest(c)
+	}
+	rich := onRichSuggest(c)
+	out := make([]Suggestion, len(rich))
+	for i, s := range rich {
+		out[i] = s.plain()
+	}
+	return out
+}
+
+func statusRich(p Ping) *RichStatusOverride {
+	if onRichStatus != nil {
+		return onRichStatus(p)
+	}
+	if o := onStatus(p); o != nil {
+		rich := o.rich()
+		return &rich
+	}
+	return nil
+}
+
+func statusPlain(p Ping) *StatusOverride {
+	if onRichStatus == nil {
+		return onStatus(p)
+	}
+	if o := onRichStatus(p); o != nil {
+		plain := o.plain()
+		return &plain
+	}
+	return nil
+}
+
 // OnHTTP sets the handler for /api/script/* requests; nil means not handled.
 func OnHTTP(f func(HTTPRequest) *HTTPResponse) {
 	onHTTP = f
@@ -142,6 +210,29 @@ func OnDialog(f func(DialogResponse)) { onDialog = f }
 
 func init() {
 	dialogs.Exports.Dialog = func(r types.DialogResponse) { onDialog(liftDialogResponse(r)) }
+	// Hosts from rift:plugin 0.1.2 ask decisions; older ones the handler.
+	d := &decisions.Exports
+	d.Login = func(c types.Context) types.Decision { return onLogin(liftContext(c)).lowerDecision() }
+	d.InitialServer = func(c types.Context) types.Decision { return onInitialServer(liftContext(c)).lowerDecision() }
+	d.BeforeTransfer = func(c types.Context) types.Decision { return onBeforeTransfer(liftContext(c)).lowerDecision() }
+	d.Command = func(c types.Context) types.Decision { return onCommand(liftContext(c)).lowerDecision() }
+	// Hosts from rift:plugin 0.1.4 ask styled for suggest and status; older
+	// ones the handler.
+	s := &styled.Exports
+	s.Suggest = func(c types.Context) cm.List[types.RichSuggestion] {
+		suggestions := suggestRich(liftContext(c))
+		out := make([]types.RichSuggestion, len(suggestions))
+		for i, s := range suggestions {
+			out[i] = types.RichSuggestion{Text: s.Text, TooltipJSON: lowerOptString(s.TooltipJSON)}
+		}
+		return cm.ToList(out)
+	}
+	s.Status = func(p types.Ping) cm.Option[types.RichStatusOverride] {
+		if o := statusRich(liftPing(p)); o != nil {
+			return cm.Some(o.lower())
+		}
+		return cm.None[types.RichStatusOverride]()
+	}
 	e := &handler.Exports
 	e.Init = func(configJSON string) cm.Result[handler.RegistrationShape, types.Registration, string] {
 		reg, err := onInit(configJSON)
@@ -170,7 +261,7 @@ func init() {
 	e.BeforeTransfer = func(c types.Context) types.Action { return onBeforeTransfer(liftContext(c)).lower() }
 	e.Command = func(c types.Context) types.Action { return onCommand(liftContext(c)).lower() }
 	e.Suggest = func(c types.Context) cm.List[types.Suggestion] {
-		suggestions := onSuggest(liftContext(c))
+		suggestions := suggestPlain(liftContext(c))
 		out := make([]types.Suggestion, len(suggestions))
 		for i, s := range suggestions {
 			out[i] = types.Suggestion{Text: s.Text, Tooltip: lowerOptString(s.Tooltip)}
@@ -178,7 +269,7 @@ func init() {
 		return cm.ToList(out)
 	}
 	e.Status = func(p types.Ping) cm.Option[types.StatusOverride] {
-		if o := onStatus(liftPing(p)); o != nil {
+		if o := statusPlain(liftPing(p)); o != nil {
 			return cm.Some(o.lower())
 		}
 		return cm.None[types.StatusOverride]()

@@ -117,8 +117,15 @@ What differs is the environment:
   `shutdown` (called with the reason). Handlers run in registration order: for
   decision events the first non-nil result wins; observers all run and must
   return nil.
+- `rift.on("chat", fn)` (contract 0.1.5) registers the plugin for
+  [chat](plugins.md#chat): the handler receives every chat message and backend
+  command as `ctx` with `ctx.kind` (`"message"` or `"command"`) and `ctx.text`
+  (for a command also `ctx.command` and `ctx.args`), and returns nil or
+  `{ deny = "reason" }`, which drops it. A plugin with this handler starts
+  only with `authentication.signed_chat = false`.
 - `rift.command(name, { permission, run, suggest })` also accepts a list of
-  strings as `suggest`. A command name belongs to exactly one owner across the
+  strings as `suggest`. `permission` is required; `permission = ""` (contract
+  0.1.5) opens the command to every player. A command name belongs to exactly one owner across the
   configuration script and all plugins.
 - `rift.on` and `rift.command` work only while the entry script runs.
   `rift.every(name, every_ms, fn)`, `rift.subscribe(subject, [queue,] [fn])`
@@ -137,9 +144,9 @@ mode:
 
 | Contract | In a persistent Lua plugin |
 | --- | --- |
-| `players.*` | `rift.players.list`, `get`, `names`, `message`, `action_bar`, `title`, `tab_list`, `boss_bar`, `dialog`, `clear_dialog`, `kick`, `transfer`, `broadcast`, as in API v2. Clicks on the plugin's [dialogs](dialogs.md) reach its `rift.on("dialog", fn)` handlers. |
+| `players.*` | `rift.players.list`, `get`, `names`, `message`, `action_bar`, `title`, `tab_list`, `boss_bar`, `dialog`, `clear_dialog`, `kick`, `transfer`, `broadcast`, as in API v2. `players.locale` is the `locale` field of the player tables that `list` and `get` return (since 0.1.5): the client's language (`en_us`), or nil while Rift does not know it, which is always the case in `login` and, for clients before 1.20.2, in `join` ([timing](plugins.md#host-api)). `message`, `action_bar`, `kick` and `broadcast`, like `deny` and `message` results, take a chat component table in place of the string ([rich text](extensions.md#rich-text)). Clicks on the plugin's [dialogs](dialogs.md) reach its `rift.on("dialog", fn)` handlers. |
 | `store.*` | `rift.store.*`. Namespaces are private (`plugin.<name>.<namespace>`). `delete` returns whether the entry existed, `increment`'s delta defaults to 1, and `rift.store.list(namespace, prefix)` returns `{ key, value }` entries sorted by key. |
-| `permissions.*` | `rift.permissions.*`. `groups` returns effective groups, including inherited ones and `default`; `rift.permissions.list_groups()` returns every group of the [permission store](permissions.md#persistent-plugins). Lua also has `rift.permissions.check(uuid, node, contexts?)` (true, false or nil) and `rift.permissions.meta(uuid, contexts?)`. |
+| `permissions.*` | `rift.permissions.*`. `groups` returns effective groups, including inherited ones and `default`; `rift.permissions.list_groups()` returns every group of the [permission store](permissions.md#persistent-plugins). Lua also has `rift.permissions.check(uuid, node, contexts?)` (true, false or nil), `rift.permissions.meta(uuid, contexts?)` and `rift.permissions.set_meta(uuid, key, value_or_nil, { contexts?, expires_in?, expires_at? })`. Player tables carry `visible_to`, the node a viewer needs to see a [hidden](permissions.md#visibility) player, or nil. |
 | `bus.publish`, `bus.request` | `rift.publish(subject, payload, reply?)` returns `{ delivered = n }`; `rift.request(subject, payload, timeout_ms)` waits for a reply. |
 | `bus.subscribe`, `bus.unsubscribe` | `rift.subscribe(subject, [queue,] [fn])` and `rift.unsubscribe(handle)`. |
 | `servers.*` | `rift.servers.*` waits for the control service and returns its decoded reply; `rift.servers.control(operation, payload)` reaches any `rift.control.*` operation. |

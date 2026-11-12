@@ -65,6 +65,35 @@ func Player(target string) (*PlayerInfo, error) {
 	return nil, nil
 }
 
+// VisibleTo returns the permission node a viewer needs to see the player,
+// and false when everyone sees them (rift:plugin 0.1.3).
+func VisibleTo(target string) (string, bool, error) {
+	node, err := unwrap(players.VisibleTo(target))
+	if err != nil {
+		return "", false, err
+	}
+	if value := node.Some(); value != nil {
+		return *value, true, nil
+	}
+	return "", false, nil
+}
+
+// Locale returns the language the player's client reported, as the client
+// spells it ("en_us"), and false while Rift does not know it (rift:plugin
+// 0.1.5). The client sends it after login: during configuration from
+// 1.20.2, after Join Game before. So it is never known in OnLogin and in
+// OnJoin only for 1.20.2 and newer clients.
+func Locale(target string) (string, bool, error) {
+	locale, err := unwrap(players.Locale(target))
+	if err != nil {
+		return "", false, err
+	}
+	if value := locale.Some(); value != nil {
+		return *value, true, nil
+	}
+	return "", false, nil
+}
+
 // PlayerNames lists joined player names starting with prefix, sorted.
 func PlayerNames(prefix string) []string {
 	return players.Names(optional(prefix)).Slice()
@@ -74,15 +103,36 @@ func PlayerNames(prefix string) []string {
 // id) and reports whether the player was online.
 func SendMessage(target, text string) (bool, error) { return unwrap(players.Message(target, text)) }
 
+// SendMessageJSON sends a chat message given as a JSON text component of at
+// most 32 KiB, for colours, hover text and click events.
+func SendMessageJSON(target, textJSON string) (bool, error) {
+	return unwrap(players.MessageJSON(target, textJSON))
+}
+
 // SendActionBar shows text above a player's hotbar.
 func SendActionBar(target, text string) (bool, error) {
 	return unwrap(players.ActionBar(target, text))
+}
+
+// SendActionBarJSON shows a JSON text component above a player's hotbar.
+func SendActionBarJSON(target, textJSON string) (bool, error) {
+	return unwrap(players.ActionBarJSON(target, textJSON))
 }
 
 // SendTitle shows a title to a player.
 func SendTitle(target string, t Title) (bool, error) {
 	return unwrap(players.Title(target, types.TitleSpec{
 		Title: t.Title, Subtitle: lowerOptString(t.Subtitle), FadeIn: t.FadeIn, Stay: t.Stay, FadeOut: t.FadeOut,
+	}))
+}
+
+// SendTitleJSON shows a title whose text is JSON text components, such as
+// text builders (rift:plugin 0.1.4):
+//
+//	rift.SendTitleJSON(target, rift.TitleJSON{TitleJSON: rift.Mini("<gold>Welcome").JSON(), FadeIn: 10, Stay: 70, FadeOut: 20})
+func SendTitleJSON(target string, t TitleJSON) (bool, error) {
+	return unwrap(players.TitleJSON(target, types.TitleJSONSpec{
+		TitleJSON: t.TitleJSON, SubtitleJSON: lowerOptString(t.SubtitleJSON), FadeIn: t.FadeIn, Stay: t.Stay, FadeOut: t.FadeOut,
 	}))
 }
 
@@ -119,11 +169,20 @@ func ClearDialog(target string) (bool, error) { return unwrap(players.ClearDialo
 // Kick disconnects a player with a reason.
 func Kick(target, reason string) (bool, error) { return unwrap(players.Kick(target, reason)) }
 
+// KickJSON disconnects a player with a reason given as a JSON text component.
+func KickJSON(target, reasonJSON string) (bool, error) {
+	return unwrap(players.KickJSON(target, reasonJSON))
+}
+
 // Transfer moves a player to a server.
 func Transfer(target, server string) (bool, error) { return unwrap(players.Transfer(target, server)) }
 
 // Broadcast messages every joined player and returns how many received it.
 func Broadcast(text string) (uint32, error) { return unwrap(players.Broadcast(text)) }
+
+// BroadcastJSON sends a JSON text component to every joined player and
+// returns how many received it.
+func BroadcastJSON(textJSON string) (uint32, error) { return unwrap(players.BroadcastJSON(textJSON)) }
 
 // Store. Namespaces are prefixed with plugin.<name>. by the host.
 
@@ -200,6 +259,36 @@ func Groups(uuid string) []string { return permissions.Groups(uuid).Slice() }
 // ListGroupsJSON returns the configured groups and their permissions as a
 // JSON object.
 func ListGroupsJSON() string { return permissions.ListGroups() }
+
+// VisibleToKey is the meta key that makes a player visible only to viewers
+// holding the node in its value.
+const VisibleToKey = "rift.visible-to"
+
+// Meta returns one meta value in the player's current contexts, and false
+// when it is unset (rift:plugin 0.1.3).
+func Meta(uuid, key string) (string, bool) {
+	value := permissions.Meta(uuid, key)
+	if found := value.Some(); found != nil {
+		return *found, true
+	}
+	return "", false
+}
+
+// SetMeta sets the user's meta node key to value in the contexts of
+// contextsJSON ("" for global), expiring at expiresAt Unix seconds (0 for
+// never); remove deletes the node in those contexts instead. It reports
+// whether anything changed (rift:plugin 0.1.3).
+func SetMeta(uuid, key, value string, remove bool, contextsJSON string, expiresAt uint64) (bool, error) {
+	v := cm.Some(value)
+	if remove {
+		v = cm.None[string]()
+	}
+	expiry := cm.None[uint64]()
+	if expiresAt != 0 {
+		expiry = cm.Some(expiresAt)
+	}
+	return unwrap(permissions.SetMeta(uuid, key, v, optional(contextsJSON), expiry))
+}
 
 // Bus
 

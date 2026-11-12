@@ -7,6 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub use crate::protocol::ClientVersions;
 use crate::routing::{Backend, Mode, Routes};
 use mlua::{Table, Value};
 use tokio::sync::Semaphore;
@@ -14,11 +15,13 @@ use tokio::sync::Semaphore;
 pub use crate::message_script::MessageScript;
 pub use crate::server_list::{ServerList, StatusScript};
 pub use crate::{http_script::HttpScript, script::RouteScript};
-pub use managed::ManagedServer;
+pub use managed::{InstanceMessaging, Isolation, IsolationMode, ManagedServer, ProcessEnvironment};
 pub use messaging::{MessagingConfig, MessagingPrincipal, MessagingStream, MessagingSubscription};
 pub use nodes::{LOCAL_NODE, NodeConfig, NodeSelector, Placement, valid_node_directory};
 pub use permissions::PermissionsConfig;
-pub use services::{InstanceStorage, ServiceGroup, ServiceInstance, ServiceScaling};
+pub use services::{
+    GroupMode, GroupState, InstanceStorage, ServiceGroup, ServiceInstance, ServiceScaling,
+};
 pub use status::{
     StatusBackend, StatusConfig, StatusExposure, StatusLink, StatusPage, StatusPanels,
 };
@@ -33,6 +36,7 @@ mod services;
 mod status;
 mod tab_list;
 mod templates;
+mod text;
 
 // Configuration evaluation includes cold VM setup and can be descheduled on
 // busy hosts. Keep it bounded without applying the latency-sensitive callback
@@ -66,7 +70,7 @@ pub struct Config {
     pub routes: BTreeMap<String, Route>,
     pub limits: Limits,
     pub authentication: Authentication,
-    pub forwarding: Option<VelocityForwarding>,
+    pub forwarding: Option<Forwarding>,
     pub on_route: Option<RouteScript>,
     pub extensions: Option<crate::extensions::ExtensionScript>,
     /// Persistent plugins from `rift.plugin(name, config)`, in call order.
@@ -93,9 +97,38 @@ pub struct Config {
     pub admin: Option<Admin>,
     pub maintenance: bool,
     pub draining: BTreeSet<String>,
+    /// Whether players may join backends that run another Minecraft version.
+    pub translation: Translation,
     pub web: Option<WebConfig>,
     pub status: Option<StatusConfig>,
     pub shutdown_timeout: Duration,
+    /// The theme and Rift's own messages (`text = { theme, messages }`).
+    pub text: std::sync::Arc<crate::text::catalog::Catalog>,
+}
+
+/// Protocol translation between players and backends on different Minecraft
+/// versions, like ViaVersion and ViaBackwards on other proxies. On unless
+/// configured otherwise.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Translation {
+    /// Off: every backend is spoken to in the player's own protocol and
+    /// accepts or refuses the player itself.
+    pub enabled: bool,
+    /// Ask backends without a declared `version` which one they run.
+    pub detect: bool,
+    /// The client versions translated for backends and service groups that
+    /// do not set their own `translation`.
+    pub clients: ClientVersions,
+}
+
+impl Default for Translation {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            detect: true,
+            clients: ClientVersions::all(),
+        }
+    }
 }
 
 /// Gameplay destinations and access rules. An empty initial list retains the
@@ -121,12 +154,15 @@ pub struct ServerAccess {
     pub deny: Vec<String>,
 }
 
-/// Online authentication and Velocity forwarding are enabled together. Existing
+/// Online authentication and player forwarding are enabled together. Existing
 /// configurations retain their explicitly documented offline behavior.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Authentication {
     pub online_mode: bool,
     pub timeout: Duration,
+    /// `false` withholds players' chat signing keys and sessions from
+    /// backends, so that every backend treats their chat as unsigned.
+    pub signed_chat: bool,
 }
 
 impl Default for Authentication {
@@ -134,14 +170,63 @@ impl Default for Authentication {
         Self {
             online_mode: false,
             timeout: Duration::from_secs(10),
+            signed_chat: true,
+        }
+    }
+}
+
+/// How backends learn the authenticated player's UUID, skin and address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForwardingMode {
+    /// Velocity modern forwarding: an HMAC-signed login plugin answer, 1.13+.
+    Velocity,
+    /// BungeeCord IP forwarding in the handshake, every version. Unsigned:
+    /// backends must accept connections from Rift alone.
+    BungeeCord,
+    /// BungeeCord forwarding plus a BungeeGuard token property.
+    BungeeGuard,
+}
+
+impl ForwardingMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Velocity => "velocity",
+            Self::BungeeCord => "bungeecord",
+            Self::BungeeGuard => "bungeeguard",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        [Self::Velocity, Self::BungeeCord, Self::BungeeGuard]
+            .into_iter()
+            .find(|mode| mode.as_str() == value)
+    }
+
+    /// The oldest protocol a backend can receive this forwarding on.
+    pub fn minimum_protocol(self) -> i32 {
+        match self {
+            // Login plugin messages arrived in 1.13.
+            Self::Velocity => 393,
+            Self::BungeeCord | Self::BungeeGuard => 0,
+        }
+    }
+
+    /// What the variable named by `secret_env` holds.
+    pub fn secret_name(self) -> Option<&'static str> {
+        match self {
+            Self::Velocity => Some("Velocity forwarding secret"),
+            Self::BungeeGuard => Some("BungeeGuard token"),
+            Self::BungeeCord => None,
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VelocityForwarding {
+pub struct Forwarding {
+    pub mode: ForwardingMode,
     /// The configuration stores a variable name, never its secret value.
-    pub secret_env: String,
+    /// `None` only for `bungeecord`, which has no secret.
+    pub secret_env: Option<String>,
 }
 
 /// Listeners behind a load balancer that prepends a HAProxy PROXY protocol
@@ -332,6 +417,39 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Every environment variable this configuration reads a secret from, as
+    /// `(configuration field, variable name)`. Rift removes these from the
+    /// environment of every process it starts (see [`crate::environment`]),
+    /// and `rift check --strict` verifies that each is set.
+    pub fn secret_variables(&self) -> Vec<(String, String)> {
+        let mut variables = Vec::new();
+        if let Some(secret_env) = self
+            .forwarding
+            .as_ref()
+            .and_then(|forwarding| forwarding.secret_env.clone())
+        {
+            variables.push(("forwarding.secret_env".into(), secret_env));
+        }
+        if let Some(admin) = &self.admin {
+            variables.push(("admin.token_env".into(), admin.token_env.clone()));
+        }
+        if let Some(messaging) = &self.messaging {
+            for principal in &messaging.principals {
+                variables.push((
+                    format!("messaging.principals.{}.token_env", principal.name),
+                    principal.token_env.clone(),
+                ));
+            }
+        }
+        for (name, node) in &self.nodes {
+            variables.push((format!("nodes.{name}.token_env"), node.token_env.clone()));
+        }
+        if let Some(extensions) = &self.extensions {
+            variables.extend(extensions.environment());
+        }
+        variables
+    }
+
     pub fn from_addresses(listen: &str, backend: &str) -> io::Result<Self> {
         let config = Self {
             listeners: BTreeMap::from([("default".into(), address(listen, "listen")?)]),
@@ -369,9 +487,11 @@ impl Config {
             admin: None,
             maintenance: false,
             draining: BTreeSet::new(),
+            translation: Translation::default(),
             web: None,
             status: None,
             shutdown_timeout: Duration::from_secs(30),
+            text: std::sync::Arc::default(),
         };
         config.validate()?;
         Ok(config)
@@ -537,12 +657,17 @@ impl Config {
                     "admin",
                     "maintenance",
                     "draining",
+                    "translation",
                     "web",
                     "status",
                     "shutdown_timeout_ms",
+                    "text",
                 ],
                 "config",
             )?;
+            // First, so markup elsewhere in this configuration uses its theme.
+            let text = text::parse(&root)?;
+            let _theme = crate::text::catalog::loading(text.styles().clone());
             let listeners = addresses(
                 root.get("listeners").map_err(|e| e.to_string())?,
                 "listeners",
@@ -634,6 +759,7 @@ impl Config {
                         config_json,
                         // Set below, once `authentication` is parsed.
                         online_mode: false,
+                        signed_chat: true,
                     };
                     spec.check_grants()
                         .map_err(|error| format!("plugin {}: {error}", spec.name))?;
@@ -788,6 +914,29 @@ impl Config {
                 Value::Nil => BTreeSet::new(),
                 value => string_set(value, "draining")?,
             };
+            let translation = match root
+                .get::<Value>("translation")
+                .map_err(|e| e.to_string())?
+            {
+                Value::Nil => Translation::default(),
+                Value::Boolean(enabled) => Translation {
+                    enabled,
+                    ..Translation::default()
+                },
+                Value::Table(_) => {
+                    let t = options(&root, "translation", &["enabled", "detect", "clients"])?
+                        .expect("translation is a table");
+                    Translation {
+                        enabled: boolean(&t, "translation", "enabled", true)?,
+                        detect: boolean(&t, "translation", "detect", true)?,
+                        clients: match t.get::<Value>("clients").map_err(|e| e.to_string())? {
+                            Value::Nil => ClientVersions::all(),
+                            clients => client_versions(clients, "translation.clients")?,
+                        },
+                    }
+                }
+                _ => return Err("translation: expected a boolean or a table".into()),
+            };
             let web = web_options(&root, directory)?;
             let status = status::parse(&root)?;
             let shutdown_timeout = Duration::from_millis(integer(
@@ -827,6 +976,7 @@ impl Config {
             let authentication = authentication(&root)?;
             for plugin in &mut plugins {
                 plugin.online_mode = authentication.online_mode;
+                plugin.signed_chat = authentication.signed_chat;
             }
             let forwarding = forwarding(&root)?;
             Ok(Self {
@@ -865,9 +1015,11 @@ impl Config {
                 admin,
                 maintenance,
                 draining,
+                translation,
                 web,
                 status,
                 shutdown_timeout,
+                text,
             })
         };
         let mut config = parse().map_err(|error| invalid(format!("{name}: {error}")))?;
@@ -915,11 +1067,55 @@ impl Config {
         nodes::validate(self).map_err(invalid)?;
         services::validate(self).map_err(invalid)?;
         managed::validate(&self.managed_servers, &self.backends, &self.nodes).map_err(invalid)?;
+        // Secrets are removed from every child anyway; naming one is a mistake
+        // worth reporting rather than a silently ignored grant.
+        let secrets = self.secret_variables();
+        let definitions = self
+            .managed_servers
+            .iter()
+            .map(|(name, server)| (format!("managed_servers.{name}"), server))
+            .chain(
+                self.service_groups
+                    .iter()
+                    .map(|(name, group)| (format!("service_groups.{name}"), &group.server)),
+            );
+        for (path, server) in definitions {
+            if let Some(grants) = &server.messaging {
+                let listening = self
+                    .messaging
+                    .as_ref()
+                    .is_some_and(|messaging| messaging.listen.is_some());
+                if !listening {
+                    return Err(invalid(format!(
+                        "{path}.messaging: instance logins need messaging.listen with a certificate"
+                    )));
+                }
+                let max = self.messaging.as_ref().map_or(256, |m| m.max_subject_bytes);
+                for pattern in grants.publish.iter().chain(&grants.subscribe) {
+                    messaging::pattern_valid(pattern, max)
+                        .map_err(|error| invalid(format!("{path}.messaging: {error}")))?;
+                }
+            }
+            for name in server.environment.inherit.iter().flatten() {
+                if let Some((field, _)) = secrets.iter().find(|(_, variable)| variable == name) {
+                    return Err(invalid(format!(
+                        "{path}.inherit_env: {name} holds Rift's own secret ({field}) and is never passed to servers"
+                    )));
+                }
+            }
+        }
         templates::validate(self).map_err(invalid)?;
         self.validate_status().map_err(invalid)?;
         if let Some(extensions) = &self.extensions {
             if !self.authentication.online_mode {
                 return Err(invalid("extensions requires authentication.online_mode"));
+            }
+            if self.authentication.signed_chat && extensions.hook_names().any(|hook| hook == "chat")
+            {
+                return Err(invalid(format!(
+                    "extensions.chat: {}",
+                    crate::plugins::worker::CHAT_NEEDS_UNSIGNED
+                )));
             }
             if extensions.legacy_grants().is_some() {
                 return Err(invalid(
@@ -938,8 +1134,15 @@ impl Config {
             }
         }
         if let Some(messaging) = &self.messaging {
+            // Node agents and instance logins are identities the listener
+            // serves without a configured principal.
+            let logins = self
+                .managed_servers
+                .values()
+                .chain(self.service_groups.values().map(|group| &group.server))
+                .any(|server| server.messaging.is_some());
             messaging
-                .validate_with_nodes(!self.nodes.is_empty())
+                .validate_with_nodes(!self.nodes.is_empty() || logins)
                 .map_err(invalid)?;
         }
         if self.server_list.is_some() && self.status_cache.is_some() {
@@ -958,7 +1161,7 @@ impl Config {
         }
         if self.authentication.online_mode != self.forwarding.is_some() {
             return Err(invalid(
-                "authentication.online_mode and forwarding.mode = 'velocity' must be enabled together",
+                "authentication.online_mode and forwarding.mode must be enabled together",
             ));
         }
         if self.authentication.timeout < Duration::from_millis(1)
@@ -966,8 +1169,12 @@ impl Config {
         {
             return Err(invalid("authentication.timeout_ms: expected 1..=60000"));
         }
-        if let Some(forwarding) = &self.forwarding {
-            let mut bytes = forwarding.secret_env.bytes();
+        if let Some(secret_env) = self
+            .forwarding
+            .as_ref()
+            .and_then(|forwarding| forwarding.secret_env.as_ref())
+        {
+            let mut bytes = secret_env.bytes();
             if !bytes
                 .next()
                 .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
@@ -1296,6 +1503,19 @@ impl Config {
             })
     }
 
+    /// The client versions translated for backend `name`: its own setting,
+    /// its service group's, or the proxy-wide `translation.clients`.
+    pub fn client_versions(&self, name: &str) -> &ClientVersions {
+        self.backends
+            .get(name)
+            .and_then(Backend::clients)
+            .or_else(|| {
+                let group = &self.instances.get(name)?.group;
+                self.service_groups.get(group)?.translation.as_ref()
+            })
+            .unwrap_or(&self.translation.clients)
+    }
+
     pub fn mode(&self, listener: &str) -> io::Result<Mode> {
         let backend = |name: &str| {
             self.backends
@@ -1324,7 +1544,12 @@ impl Config {
 }
 
 fn authentication(root: &Table) -> Result<Authentication, String> {
-    let Some(values) = options(root, "authentication", &["online_mode", "timeout_ms"])? else {
+    let Some(values) = options(
+        root,
+        "authentication",
+        &["online_mode", "timeout_ms", "signed_chat"],
+    )?
+    else {
         return Ok(Authentication::default());
     };
     Ok(Authentication {
@@ -1336,10 +1561,11 @@ fn authentication(root: &Table) -> Result<Authentication, String> {
             10_000,
             60_000,
         )? as u64),
+        signed_chat: boolean(&values, "authentication", "signed_chat", true)?,
     })
 }
 
-fn forwarding(root: &Table) -> Result<Option<VelocityForwarding>, String> {
+fn forwarding(root: &Table) -> Result<Option<Forwarding>, String> {
     let Some(values) = options(root, "forwarding", &["mode", "secret_env"])? else {
         return Ok(None);
     };
@@ -1347,17 +1573,23 @@ fn forwarding(root: &Table) -> Result<Option<VelocityForwarding>, String> {
         values.get("mode").map_err(|e| e.to_string())?,
         "forwarding.mode",
     )?;
-    if mode != "velocity" {
-        return Err("forwarding.mode: expected 'velocity' (omit forwarding to disable)".into());
-    }
+    let mode = ForwardingMode::parse(&mode).ok_or(
+        "forwarding.mode: expected 'velocity', 'bungeecord' or 'bungeeguard' (omit forwarding to disable)",
+    )?;
     let secret_env = match values
         .get::<Value>("secret_env")
         .map_err(|e| e.to_string())?
     {
-        Value::Nil => "RIFT_FORWARDING_SECRET".into(),
-        value => string(value, "forwarding.secret_env")?,
+        Value::Nil if mode == ForwardingMode::BungeeCord => None,
+        Value::Nil => Some("RIFT_FORWARDING_SECRET".into()),
+        _ if mode == ForwardingMode::BungeeCord => {
+            return Err(
+                "forwarding.secret_env: 'bungeecord' forwarding has no secret; use 'bungeeguard' for a token".into(),
+            );
+        }
+        value => Some(string(value, "forwarding.secret_env")?),
     };
-    Ok(Some(VelocityForwarding { secret_env }))
+    Ok(Some(Forwarding { mode, secret_env }))
 }
 
 fn network(root: &Table) -> Result<Network, String> {
@@ -1752,8 +1984,41 @@ fn fields(table: &Table, allowed: &[&str], path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The client versions a backend, a service group or the proxy translates
+/// for: `true` or `"all"`, `false` or `"none"`, `"newer"`, `"older"`, one
+/// version pattern, or a list of patterns.
+pub(crate) fn client_versions(value: Value, path: &str) -> Result<ClientVersions, String> {
+    let patterns = match value {
+        Value::Boolean(true) => return Ok(ClientVersions::all()),
+        Value::Boolean(false) => return Ok(ClientVersions::none()),
+        Value::String(pattern) => vec![pattern.to_string_lossy()],
+        Value::Table(list) => {
+            let mut patterns = Vec::new();
+            for pair in list.pairs::<Value, Value>() {
+                let (key, pattern) = pair.map_err(|e| e.to_string())?;
+                if !matches!(key, Value::Integer(_)) {
+                    return Err(format!(
+                        "{path}: expected a list of version patterns such as {{ \"1.20.*\", \"1.21.4\" }}"
+                    ));
+                }
+                patterns.push(string(pattern, path)?);
+            }
+            patterns
+        }
+        value => {
+            return Err(format!(
+                "{path}: expected true, false, \"all\", \"none\", \"newer\", \"older\" or version patterns, got {}",
+                value.type_name()
+            ));
+        }
+    };
+    ClientVersions::parse(patterns.iter().map(String::as_str))
+        .map_err(|error| format!("{path}: {error}"))
+}
+
 /// Backends are `"host:port"`, or `{ address = "host:port", version = "1.21.6" }`
-/// for a server on another Minecraft version than its players.
+/// for a server on another Minecraft version than its players; `translation`
+/// there names the client versions translated for it.
 fn backends(value: Value) -> Result<BTreeMap<String, Backend>, String> {
     let mut result = BTreeMap::new();
     for pair in table(value, "backends")?.pairs::<Value, Value>() {
@@ -1765,14 +2030,14 @@ fn backends(value: Value) -> Result<BTreeMap<String, Backend>, String> {
         let path = format!("backends.{name}");
         let backend = match value {
             Value::Table(entry) => {
-                fields(&entry, &["address", "version"], &path)?;
+                fields(&entry, &["address", "version", "translation"], &path)?;
                 let address = string(
                     entry.get("address").map_err(|e| e.to_string())?,
                     &format!("{path}.address"),
                 )?;
                 let backend =
                     Backend::parse(&address).map_err(|error| format!("{path}: {error}"))?;
-                match entry.get::<Value>("version").map_err(|e| e.to_string())? {
+                let backend = match entry.get::<Value>("version").map_err(|e| e.to_string())? {
                     Value::Nil => backend,
                     version => {
                         let version = string(version, &format!("{path}.version"))?;
@@ -1782,6 +2047,14 @@ fn backends(value: Value) -> Result<BTreeMap<String, Backend>, String> {
                             })?;
                         backend.with_version(protocol)
                     }
+                };
+                match entry
+                    .get::<Value>("translation")
+                    .map_err(|e| e.to_string())?
+                {
+                    Value::Nil => backend,
+                    clients => backend
+                        .with_clients(client_versions(clients, &format!("{path}.translation"))?),
                 }
             }
             value => Backend::parse(&string(value, &path)?)
