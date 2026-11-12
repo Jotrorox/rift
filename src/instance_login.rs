@@ -216,13 +216,7 @@ impl Logins {
         let Some(bus) = self.bus() else {
             return Ok(());
         };
-        let path = directory.join(CERTIFICATE_FILE);
-        if std::fs::read_to_string(&path).is_ok_and(|current| current == bus.certificate) {
-            return Ok(());
-        }
-        let temporary = directory.join(format!(".{CERTIFICATE_FILE}.tmp"));
-        std::fs::write(&temporary, &bus.certificate)?;
-        std::fs::rename(temporary, path)
+        install_certificate(directory, &bus.certificate)
     }
 
     /// Split a token into name and generation, verifying its MAC.
@@ -242,6 +236,34 @@ impl Logins {
         self.mac(name, generation).verify_slice(&tag).ok()?;
         Some((name.to_owned(), generation))
     }
+}
+
+/// Put `certificate` at [`CERTIFICATE_FILE`] in a server directory.
+///
+/// The server owns that directory and may be confined to it, while this
+/// process is not: a plain write would follow a symbolic link the server left
+/// under either name and overwrite its target. The temporary file is
+/// therefore created exclusively, which never follows a link, and the rename
+/// replaces whatever holds the final name.
+pub fn install_certificate(directory: &Path, certificate: &str) -> io::Result<()> {
+    use std::io::Write;
+    let path = directory.join(CERTIFICATE_FILE);
+    let unchanged = std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_file())
+        && std::fs::read_to_string(&path).is_ok_and(|current| current == certificate);
+    if unchanged {
+        return Ok(());
+    }
+    let temporary = directory.join(format!(".{CERTIFICATE_FILE}.tmp"));
+    match std::fs::remove_file(&temporary) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?
+        .write_all(certificate.as_bytes())?;
+    std::fs::rename(temporary, path)
 }
 
 /// The bus principal of an instance, the same as a configured backend's.
@@ -445,6 +467,32 @@ mod tests {
             std::path::absolute(directory.join(CERTIFICATE_FILE)).unwrap()
         );
         assert_eq!(environment["RIFT_BUS_TOKEN"], logins.token("lobby-3", 4));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installing_the_certificate_never_writes_through_a_link() {
+        let directory =
+            std::env::temp_dir().join(format!("rift-bus-cert-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let victim = directory.join("victim");
+        std::fs::write(&victim, "untouched").unwrap();
+        let path = directory.join(CERTIFICATE_FILE);
+        let temporary = directory.join(format!(".{CERTIFICATE_FILE}.tmp"));
+        // Planted under both names, and with the certificate's own content.
+        for content in ["untouched", "PEM"] {
+            std::fs::write(&victim, content).unwrap();
+            let _ = std::fs::remove_file(&path);
+            std::os::unix::fs::symlink(&victim, &path).unwrap();
+            std::os::unix::fs::symlink(&victim, &temporary).unwrap();
+            install_certificate(&directory, "PEM").unwrap();
+            assert_eq!(std::fs::read_to_string(&victim).unwrap(), content);
+            assert!(std::fs::symlink_metadata(&path).unwrap().is_file());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "PEM");
+            assert!(!temporary.exists());
+        }
+        std::fs::remove_dir_all(&directory).unwrap();
     }
 
     #[test]

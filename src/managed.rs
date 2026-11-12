@@ -903,7 +903,8 @@ pub(crate) fn rotate_log(directory: &Path, limit: u64) -> io::Result<bool> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            options.custom_flags(libc::O_NOFOLLOW);
+            // Non-blocking so a planted FIFO cannot stall the check.
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
         }
         options.open(path)
     };
