@@ -123,12 +123,17 @@ async fn start(args: Vec<String>) -> io::Result<()> {
         .first()
         .is_some_and(|arg| arg == "init" || arg == "check" || arg == "--check")
     {
+        if args[1..].iter().any(|arg| arg == "--help" || arg == "-h") {
+            println!("{USAGE}");
+            return Ok(());
+        }
         let strict = args[0] != "init" && args[1..].iter().any(|arg| arg == "--strict");
         let operands: Vec<&String> = args[1..]
             .iter()
             .filter(|arg| !(strict && *arg == "--strict"))
             .collect();
-        if operands.len() > 1 {
+        // An unknown option is not a path; `./-name` still names such a file.
+        if operands.len() > 1 || operands.iter().any(|arg| arg.starts_with('-')) {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, USAGE));
         }
         let path = operands

@@ -2,6 +2,7 @@
 use crate::{
     Direction, Packet, State,
     data::{self, VersionData},
+    nbt,
     step::{Cx, Emitted, Step},
     steps, version,
 };
@@ -207,9 +208,17 @@ impl Translator {
                 backend_protocol: self.backend_protocol,
             };
             let step = &mut self.steps[position as usize];
+            // One budget per packet and step: a step's parsed tags are gone
+            // before the next one runs.
             match direction {
-                Direction::Clientbound => step.clientbound(&mut cx, state, packet)?,
-                Direction::Serverbound => step.serverbound(&mut cx, state, packet)?,
+                Direction::Clientbound => {
+                    let _budget = nbt::Budget::new(nbt::CLIENTBOUND_BUDGET);
+                    step.clientbound(&mut cx, state, packet)?
+                }
+                Direction::Serverbound => {
+                    let _budget = nbt::Budget::new(nbt::SERVERBOUND_BUDGET);
+                    step.serverbound(&mut cx, state, packet)?
+                }
             }
             queue.extend(emitted.drain(..).map(|emitted| Item {
                 position: match emitted.direction {
