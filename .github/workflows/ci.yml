@@ -49,6 +49,10 @@ jobs:
         with:
           python-version: '3.12'
       - run: cargo fmt --all --check
+      - name: Check the Pumpkin adapter's formatting
+        # The adapter is its own workspace and builds only when it changes
+        # (pumpkin-adapter below); formatting needs no dependencies.
+        run: cargo fmt --manifest-path adapters/pumpkin/Cargo.toml --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - name: Lint without WebAssembly support
         run: cargo clippy --locked --all-targets --no-default-features -- -D warnings
@@ -118,6 +122,8 @@ jobs:
         working-directory: examples/plugins/hello-rs
         run: cargo build --locked --release --target wasm32-wasip2
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        # Nothing downloads this; an artifact service error must not fail the job.
+        continue-on-error: true
         with:
           name: hello-rs-wasm
           path: examples/plugins/hello-rs/target/wasm32-wasip2/release/hello_rs.wasm
@@ -155,12 +161,41 @@ jobs:
         # Cache the tool, never the advisory database or audit result.
         run: '"$RUNNER_TEMP/cargo-audit/bin/cargo-audit" audit --deny warnings'
 
+  changes:
+    name: Find changed areas
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      pumpkin: ${{ steps.changes.outputs.pumpkin }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # A pull request is checked out as its merge commit: the first parent
+          # is the base branch, so one more commit is enough to diff against.
+          fetch-depth: 2
+      - name: Check whether the Pumpkin adapter or its crates changed
+        id: changes
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          pumpkin=false
+          if [[ "$EVENT" == pull_request ]]; then
+            if git diff --name-only HEAD^1 HEAD | grep -qE '^(adapters/pumpkin/|crates/rift-permissions|rust-toolchain\.toml$)'; then
+              pumpkin=true
+            fi
+          fi
+          echo "pumpkin=$pumpkin" >> "$GITHUB_OUTPUT"
+
   pumpkin-adapter:
     name: Pumpkin permissions adapter
     # Pumpkin is a large git dependency, so the adapter (its own workspace in
-    # adapters/pumpkin) builds on the weekly and nightly schedules and on
-    # demand, not on every pull request; ci-ready does not wait for it.
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # adapters/pumpkin) builds on the weekly and nightly schedules, on demand,
+    # and on pull requests that touch it or the crates it is built from. Its
+    # formatting is checked on every run (quality).
+    needs: changes
+    if: >-
+      github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' ||
+      needs.changes.outputs.pumpkin == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     defaults:
@@ -233,10 +268,24 @@ jobs:
       - name: Verify the hello-c component
         run: sdk/check-component.sh examples/plugins/hello-c/hello_c.wasm
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: upload
+        # The artifact service has outages; one failed upload gets a second try.
+        continue-on-error: true
+        timeout-minutes: 5
         with:
           name: hello-c-wasm
           path: examples/plugins/hello-c/hello_c.wasm
           if-no-files-found: error
+          retention-days: 14
+      - name: Retry the upload after an artifact service error
+        if: steps.upload.outcome == 'failure'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        timeout-minutes: 10
+        with:
+          name: hello-c-wasm
+          path: examples/plugins/hello-c/hello_c.wasm
+          if-no-files-found: error
+          overwrite: true
           retention-days: 14
       - name: Save verified toolchain downloads
         if: >-
@@ -312,10 +361,24 @@ jobs:
       - name: Verify the hello-go component
         run: sdk/check-component.sh examples/plugins/hello-go/hello_go.wasm
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: upload
+        # The artifact service has outages; one failed upload gets a second try.
+        continue-on-error: true
+        timeout-minutes: 5
         with:
           name: hello-go-wasm
           path: examples/plugins/hello-go/hello_go.wasm
           if-no-files-found: error
+          retention-days: 14
+      - name: Retry the upload after an artifact service error
+        if: steps.upload.outcome == 'failure'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        timeout-minutes: 10
+        with:
+          name: hello-go-wasm
+          path: examples/plugins/hello-go/hello_go.wasm
+          if-no-files-found: error
+          overwrite: true
           retention-days: 14
       - name: Save verified toolchain downloads
         if: >-
@@ -340,9 +403,9 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           prefix-key: v1-rust
-          shared-key: regression-ubuntu-24.04
+          shared-key: test-debug-ubuntu-24.04
           cache-bin: false
-          # Only regression saves the shared cache.
+          # Only the debug test job saves the shared cache.
           save-if: false
       - name: Download this run's hello-c component
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -361,12 +424,100 @@ jobs:
           test -f examples/plugins/hello-go/hello_go.wasm
           cargo test --locked --lib plugins::wasm -- --test-threads=1
 
-  regression:
-    name: Regression (${{ matrix.platform }})
+  test:
+    name: Tests (${{ matrix.platform }}, debug)
     runs-on: ${{ matrix.os }}
-    # Debug and release builds of the wasmtime plugin engine. Pull requests
-    # never save the dependency cache, so they compile it cold every time.
-    timeout-minutes: 60
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux-x86_64
+          - os: macos-15
+            platform: macos-aarch64
+          - os: windows-2022
+            platform: windows-x86_64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned Rust toolchain and the WebAssembly target
+        # The WebAssembly conformance tests build their guest components.
+        run: |
+          rustup show
+          rustup target add wasm32-wasip2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          prefix-key: v1-rust
+          # This job owns the debug dependency cache of its platform.
+          shared-key: test-debug-${{ matrix.os }}
+          cache-bin: false
+          # Keep PR/tag caches from crowding out reusable default-branch caches.
+          save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      # One test at a time: concurrent test cases can consume the 50 ms Lua
+      # callback budget on shared runners before workers run. Each concurrency
+      # test still exercises its own parallel clients/workers. A test that
+      # fails is rerun alone and reported as flaky if it then passes.
+      - name: Test every target
+        run: python scripts/ci_test.py --all-targets
+
+  test-release:
+    name: Release tests (${{ matrix.platform }}, ${{ matrix.suite }})
+    runs-on: ${{ matrix.os }}
+    # The release profile (thin LTO, one codegen unit) links every test
+    # executable slowly, so the targets are split across jobs. Together the
+    # suites are `cargo test --release --all-targets` for the whole workspace.
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux-x86_64, macos-aarch64, windows-x86_64]
+        suite: [unit, integration, crates]
+        include:
+          - platform: linux-x86_64
+            os: ubuntu-24.04
+          - platform: macos-aarch64
+            os: macos-15
+          - platform: windows-x86_64
+            os: windows-2022
+          - suite: unit
+            select: -p rift --lib --bins --examples --benches
+          - suite: integration
+            select: -p rift --tests
+          - suite: crates
+            select: --workspace --exclude rift --all-targets
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned Rust toolchain and the WebAssembly target
+        # The WebAssembly conformance tests build their guest components.
+        run: |
+          rustup show
+          rustup target add wasm32-wasip2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          prefix-key: v1-rust
+          # The suites of a platform share one release dependency cache, saved
+          # by the suite that builds the most.
+          shared-key: test-release-${{ matrix.os }}
+          cache-bin: false
+          save-if: ${{ matrix.suite == 'integration' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - name: Test the suite's targets with the release profile
+        env:
+          SELECT: ${{ matrix.select }}
+        run: |
+          # Word splitting is intended: SELECT holds several cargo arguments.
+          # shellcheck disable=SC2086
+          python scripts/ci_test.py --release $SELECT
+
+  package:
+    name: Package (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -385,26 +536,18 @@ jobs:
             archive: rift-windows-x86_64.zip
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install pinned Rust toolchain and the WebAssembly target
-        # The WebAssembly conformance tests build their guest components.
-        run: |
-          rustup show
-          rustup target add wasm32-wasip2
+      - name: Install pinned Rust toolchain
+        run: rustup show
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           prefix-key: v1-rust
-          # This job owns the complete debug + release dependency cache.
-          shared-key: regression-${{ matrix.os }}
+          # This job owns the cache of the release executable's dependencies.
+          shared-key: package-${{ matrix.os }}
           cache-bin: false
           save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
-      # Concurrent test cases can consume the 50 ms Lua callback budget on
-      # shared runners before workers run. Each concurrency test still
-      # exercises its own parallel clients/workers.
-      - run: cargo test --locked --all-targets -- --test-threads=1
-      - run: cargo test --locked --all-targets --release -- --test-threads=1
       - run: cargo build --locked --release
       - name: Verify protocol and zlib interoperability
         run: python tests/protocol_wire.py --binary target/release/rift
@@ -425,12 +568,28 @@ jobs:
       - name: Stage, archive and smoke-test executable
         run: python scripts/package.py --platform ${{ matrix.platform }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: upload
+        # The artifact service has outages; one failed upload gets a second try.
+        continue-on-error: true
+        timeout-minutes: 5
         with:
           name: release-${{ matrix.platform }}
           path: |
             dist/${{ matrix.executable }}
             dist/${{ matrix.archive }}
           if-no-files-found: error
+          retention-days: 14
+      - name: Retry the upload after an artifact service error
+        if: steps.upload.outcome == 'failure'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        timeout-minutes: 10
+        with:
+          name: release-${{ matrix.platform }}
+          path: |
+            dist/${{ matrix.executable }}
+            dist/${{ matrix.archive }}
+          if-no-files-found: error
+          overwrite: true
           retention-days: 14
 
   java:
@@ -453,8 +612,9 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           prefix-key: v1-rust
-          shared-key: regression-ubuntu-24.04
+          shared-key: test-debug-ubuntu-24.04
           cache-bin: false
+          # Only the debug test job saves the shared cache.
           save-if: false
       - name: Build the proxy for interoperability tests
         working-directory: .
@@ -462,6 +622,8 @@ jobs:
       - name: Interoperate with the real proxy over QUIC
         run: ./gradlew integrationTest --no-daemon
       - name: Preserve test reports
+        # Diagnostics only: an artifact service error must not fail the job.
+        continue-on-error: true
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -482,9 +644,9 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           prefix-key: v1-rust
-          shared-key: regression-ubuntu-24.04
+          shared-key: test-debug-ubuntu-24.04
           cache-bin: false
-          # Only regression saves the shared cache.
+          # Only the debug test job saves the shared cache.
           save-if: false
       - run: cargo clippy --locked --all-targets --features test-session-server -- -D warnings
       - name: Test authentication with the override compiled in
@@ -504,10 +666,9 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           prefix-key: v1-rust
-          shared-key: regression-ubuntu-24.04
+          shared-key: package-ubuntu-24.04
           cache-bin: false
-          # Only regression saves, so a release-only build cannot win the race
-          # and leave the shared immutable cache without debug dependencies.
+          # Only the Linux package job saves this cache.
           save-if: false
       - name: Read compatibility matrix from pinned fixtures
         id: compatibility
@@ -522,10 +683,25 @@ jobs:
       - name: Archive executable with its Unix permissions
         run: tar -czf "$RUNNER_TEMP/rift-linux.tar.gz" -C target/release rift
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: upload
+        # The artifact service has outages; one failed upload gets a second try.
+        continue-on-error: true
+        timeout-minutes: 5
         with:
           name: rift-linux-${{ github.sha }}
           path: ${{ runner.temp }}/rift-linux.tar.gz
           if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+      - name: Retry the upload after an artifact service error
+        if: steps.upload.outcome == 'failure'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        timeout-minutes: 10
+        with:
+          name: rift-linux-${{ github.sha }}
+          path: ${{ runner.temp }}/rift-linux.tar.gz
+          if-no-files-found: error
+          overwrite: true
           compression-level: 0
           retention-days: 14
 
@@ -604,6 +780,8 @@ jobs:
           path: target/minecraft/downloads/${{ steps.fixture.outputs.filename }}
           key: ${{ steps.server-cache.outputs.cache-primary-key }}
       - name: Preserve reports and server/proxy logs
+        # Diagnostics only: an artifact service error must not fail the job.
+        continue-on-error: true
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -653,6 +831,8 @@ jobs:
       - name: Test observer callbacks with an unsigned client
         run: python tests/online_probe_wire.py --accept-eula --plugin-stack ${{ matrix.stack }}
       - name: Preserve preflight evidence (no forwarding-secret configuration files)
+        # Diagnostics only: an artifact service error must not fail the job.
+        continue-on-error: true
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -728,6 +908,8 @@ jobs:
           path: target/minecraft/downloads/${{ steps.fixture.outputs.filename }}
           key: ${{ steps.server-cache.outputs.cache-primary-key }}
       - name: Preserve reports and server/proxy logs
+        # Diagnostics only: an artifact service error must not fail the job.
+        continue-on-error: true
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -802,6 +984,8 @@ jobs:
             target/minecraft/downloads/vanilla-1.21.8.jar
           key: ${{ steps.server-cache.outputs.cache-primary-key }}
       - name: Preserve server and proxy logs
+        # Diagnostics only: an artifact service error must not fail the job.
+        continue-on-error: true
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -878,6 +1062,8 @@ jobs:
           --server "$SERVER" --client "$CLIENTS"
           --via rift --binary target/release/rift
       - name: Preserve server, proxy and client logs
+        # Diagnostics only: an artifact service error must not fail the job.
+        continue-on-error: true
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -944,6 +1130,8 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
+        # Diagnostics only: an artifact service error must not fail the job.
+        continue-on-error: true
         with:
           name: benchmark
           path: |
@@ -955,7 +1143,7 @@ jobs:
   ci-ready:
     name: CI ready
     if: always()
-    needs: [quality, plugin-sdk-rust, plugin-sdk-c, plugin-sdk-go, plugin-examples-wasm, audit, regression, test-session-server, java, build-linux, minecraft, compatibility, benchmark]
+    needs: [quality, plugin-sdk-rust, plugin-sdk-c, plugin-sdk-go, plugin-examples-wasm, audit, changes, pumpkin-adapter, test, test-release, package, test-session-server, java, build-linux, minecraft, compatibility, translation, benchmark]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
@@ -966,7 +1154,12 @@ jobs:
           python3 - <<'PY'
           import json, os
           results = json.loads(os.environ['RESULTS'])
-          failed = [name for name, job in results.items() if job['result'] != 'success']
+          # Jobs that only run on a schedule, on demand or for certain changes.
+          optional = {'pumpkin-adapter'}
+          failed = [
+              name for name, job in results.items()
+              if job['result'] != 'success' and not (name in optional and job['result'] == 'skipped')
+          ]
           if failed:
               raise SystemExit('Required checks did not pass: ' + ', '.join(failed))
           print('All required checks passed.')

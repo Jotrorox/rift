@@ -235,7 +235,12 @@ mod tests {
         // fall back to Rift's variables, and the client refuses to start
         // when neither sets them.
         assert!(parse("address = \"a:1\"\nadress = \"typo\"\n", Format::Toml).is_err());
-        assert!(parse("server = \"s\"\n", Format::Toml).unwrap().address.is_empty());
+        assert!(
+            parse("server = \"s\"\n", Format::Toml)
+                .unwrap()
+                .address
+                .is_empty()
+        );
         assert!(parse("{", Format::Json).is_err());
     }
 
