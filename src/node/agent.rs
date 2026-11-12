@@ -640,7 +640,7 @@ impl Agent {
         let mut environment = crate::config::ProcessEnvironment::try_from(&start.environment)?;
         if let Some(certificate) = &start.bus_certificate {
             let path = directory.join(crate::instance_login::CERTIFICATE_FILE);
-            std::fs::write(&path, certificate)?;
+            crate::instance_login::install_certificate(&directory, certificate)?;
             environment
                 .set
                 .insert("RIFT_BUS_CERT".into(), path.to_string_lossy().into_owned());

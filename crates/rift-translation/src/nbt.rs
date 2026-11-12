@@ -3,7 +3,56 @@
 //! Compounds keep their entries in wire order so an untouched tag serializes
 //! back to the same bytes. Strings are Java modified UTF-8 on the wire.
 use crate::wire::{MAX_NBT_DEPTH, Reader, Writer, invalid};
-use std::io;
+use std::{cell::Cell, io, mem::size_of};
+
+/// Heap a client's packet may spend on parsed tags in one translation step.
+/// Vanilla servers refuse a serverbound tag above 2 MiB by their own, smaller
+/// per-node estimate; this leaves several times that.
+pub const SERVERBOUND_BUDGET: usize = 16 * 1024 * 1024;
+/// The same for a backend's packet. Chunks and registries are far larger than
+/// anything a client sends.
+pub const CLIENTBOUND_BUDGET: usize = 64 * 1024 * 1024;
+
+thread_local! {
+    /// Bytes parsed tags may still allocate; `None` outside any [`Budget`].
+    static BUDGET: Cell<Option<usize>> = const { Cell::new(None) };
+}
+
+/// A limit on the heap that tags parsed on this thread may take while it is
+/// alive.
+///
+/// The value model costs up to 32 bytes per input byte (a list of bytes is a
+/// `Vec<Nbt>`), so the size of a packet alone does not bound what parsing it
+/// allocates. The translator holds one budget per packet and step; a tag read
+/// outside any budget gets [`CLIENTBOUND_BUDGET`] of its own.
+pub struct Budget {
+    previous: Option<usize>,
+}
+
+impl Budget {
+    pub fn new(bytes: usize) -> Self {
+        Self {
+            previous: BUDGET.replace(Some(bytes)),
+        }
+    }
+}
+
+impl Drop for Budget {
+    fn drop(&mut self) {
+        BUDGET.set(self.previous);
+    }
+}
+
+/// Account for `count` heap items of `size` bytes before allocating them.
+fn charge(count: usize, size: usize) -> io::Result<()> {
+    let left = BUDGET
+        .get()
+        .zip(count.checked_mul(size))
+        .and_then(|(left, bytes)| left.checked_sub(bytes))
+        .ok_or_else(|| invalid("NBT memory budget exceeded"))?;
+    BUDGET.set(Some(left));
+    Ok(())
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Nbt {
@@ -213,6 +262,10 @@ impl Nbt {
             let size = reader.u16()?;
             reader.take(usize::from(size))?;
         }
+        let _budget = BUDGET
+            .get()
+            .is_none()
+            .then(|| Budget::new(CLIENTBOUND_BUDGET));
         payload(reader, kind, 0).map(Some)
     }
 
@@ -324,6 +377,7 @@ fn payload(reader: &mut Reader, kind: u8, depth: usize) -> io::Result<Nbt> {
         {
             return Err(invalid("invalid NBT array length"));
         }
+        charge(count, width)?;
         Ok(count)
     };
     Ok(match kind {
@@ -348,6 +402,7 @@ fn payload(reader: &mut Reader, kind: u8, depth: usize) -> io::Result<Nbt> {
             if count as usize > reader.remaining() {
                 return Err(invalid("invalid NBT list"));
             }
+            charge(count as usize, size_of::<Nbt>())?;
             let mut values = Vec::with_capacity(count as usize);
             for _ in 0..count {
                 values.push(payload(reader, element, depth + 1)?);
@@ -361,6 +416,7 @@ fn payload(reader: &mut Reader, kind: u8, depth: usize) -> io::Result<Nbt> {
                 if element == 0 {
                     break;
                 }
+                charge(1, size_of::<(String, Nbt)>())?;
                 let name = read_string(reader)?;
                 entries.push((name, payload(reader, element, depth + 1)?));
             }
@@ -391,6 +447,7 @@ fn payload(reader: &mut Reader, kind: u8, depth: usize) -> io::Result<Nbt> {
 fn read_string(reader: &mut Reader) -> io::Result<String> {
     let size = reader.u16()?;
     let bytes = reader.take(usize::from(size))?;
+    charge(bytes.len(), 1)?;
     if bytes.is_ascii() {
         return Ok(String::from_utf8_lossy(bytes).into_owned());
     }
@@ -529,5 +586,41 @@ mod tests {
             deep.extend([9, 0, 0, 0, 1]);
         }
         assert!(Nbt::from_bytes(&deep, false).is_err());
+    }
+
+    /// A list of `count` bytes: one input byte per 32-byte element.
+    fn byte_list(count: usize) -> Vec<u8> {
+        let mut bytes = vec![9, 1];
+        bytes.extend((count as i32).to_be_bytes());
+        bytes.resize(bytes.len() + count, 7);
+        bytes
+    }
+
+    #[test]
+    fn parsing_is_charged_against_the_budget() {
+        let list = byte_list(1024);
+        let cost = 1024 * size_of::<Nbt>();
+        {
+            let _budget = Budget::new(cost);
+            assert!(Nbt::from_bytes(&list, false).is_ok());
+            // The packet's budget is spent, whichever tag spends it.
+            assert!(Nbt::from_bytes(&byte_list(1), false).is_err());
+        }
+        {
+            let _budget = Budget::new(cost - 1);
+            assert!(Nbt::from_bytes(&list, false).is_err());
+        }
+        // Compound entries, strings and arrays count too.
+        let sample = sample().to_bytes(false);
+        {
+            let _budget = Budget::new(64);
+            assert!(Nbt::from_bytes(&sample, false).is_err());
+        }
+        // Outside a budget each tag gets the default, which a list that
+        // amplifies a small packet past it still exceeds.
+        assert!(Nbt::from_bytes(&sample, false).is_ok());
+        let huge = byte_list(CLIENTBOUND_BUDGET / size_of::<Nbt>() + 1);
+        assert!(Nbt::from_bytes(&huge, false).is_err());
+        assert!(Nbt::from_bytes(&list, false).is_ok());
     }
 }

@@ -248,10 +248,7 @@ pub(crate) fn spawn(
             "managed server command is empty",
         )
     })?;
-    let log = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(directory.join(LOG_FILE))?;
+    let log = open_log(directory)?;
     let mut command = Command::new(program);
     command
         .args(arguments)
@@ -289,6 +286,44 @@ pub(crate) fn spawn(
         }
     }
     spawner::spawn(command)
+}
+
+/// Open a server's log for appending, refusing anything but a regular file.
+///
+/// The server owns its directory and may be confined to it, while this
+/// process is not. Following a symbolic link it left under the log's name
+/// would append its output to a file of its choosing outside the sandbox.
+fn open_log(directory: &std::path::Path) -> io::Result<std::fs::File> {
+    let path = directory.join(LOG_FILE);
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Non-blocking so a FIFO fails the check below instead of waiting
+        // for a reader; the flag does nothing on a regular file.
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let refused = || {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "{} must be a regular file, not a symbolic link or special file; remove it",
+                path.display()
+            ),
+        )
+    };
+    let log = options.open(&path).map_err(|error| {
+        #[cfg(unix)]
+        if matches!(error.raw_os_error(), Some(libc::ELOOP | libc::ENXIO)) {
+            return refused();
+        }
+        error
+    })?;
+    if !log.metadata()?.is_file() {
+        return Err(refused());
+    }
+    Ok(log)
 }
 
 fn arguments_with(program: &str, arguments: &[String]) -> Vec<String> {
@@ -695,6 +730,42 @@ pub(super) fn mark_unknown(server: &Server) {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn the_log_is_never_opened_through_a_link_or_special_file() {
+        let directory = std::env::temp_dir().join(format!("rift-log-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let victim = directory.join("victim");
+        std::fs::write(&victim, "untouched").unwrap();
+        let log = directory.join(LOG_FILE);
+        std::os::unix::fs::symlink(&victim, &log).unwrap();
+        let command = ["sh", "-c", "echo escaped"].map(String::from);
+        let error = spawn(
+            &command,
+            &directory,
+            &ProcessEnvironment::default(),
+            &Default::default(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("must be a regular file"));
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched");
+        // A link to nothing is not created through either.
+        std::fs::remove_file(&log).unwrap();
+        std::os::unix::fs::symlink(directory.join("absent"), &log).unwrap();
+        assert!(open_log(&directory).is_err());
+        assert!(!directory.join("absent").exists());
+        // A FIFO is refused without waiting for a reader.
+        std::fs::remove_file(&log).unwrap();
+        let name = std::ffi::CString::new(log.to_str().unwrap()).unwrap();
+        // SAFETY: `name` is a valid C string.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        assert!(open_log(&directory).is_err());
+        std::fs::remove_file(&log).unwrap();
+        assert!(open_log(&directory).unwrap().metadata().unwrap().is_file());
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
 
     /// Whether `pid` has exited (gone, or a zombie awaiting its new parent).
     fn exited(pid: &str) -> bool {

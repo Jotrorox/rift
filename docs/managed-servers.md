@@ -676,7 +676,10 @@ guarantee completion of plugin initialization or a successful Minecraft login.
 An already occupied backend port is a startup failure: Rift does not adopt the
 existing process or send it shutdown commands.
 
-Output from the child is appended to `rift-server.log` in its directory. Inspect
+Output from the child is appended to `rift-server.log` in its directory. The
+log must be a regular file: Rift refuses to start a server whose log is a
+symbolic link or special file, because it opens the log outside the server's
+isolation. Inspect
 this file alongside the lifecycle state when startup fails. Startup timeout and
 shutdown timeout both clean up the supervised child. Each child leads its own
 process group, and a kill reaches the whole group, so helper processes started by

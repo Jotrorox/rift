@@ -276,10 +276,24 @@ fn setup_commands_report_paths_and_reject_extra_arguments() {
         vec!["init", "one", "two"],
         vec!["check", "one", "two"],
         vec!["--check", "one", "two"],
+        vec!["init", "--strict"],
+        vec!["init", "--bogus"],
+        vec!["check", "--bogus"],
     ] {
         let output = fixture.run(&args);
         assert!(!output.status.success());
         assert!(String::from_utf8_lossy(&output.stderr).contains("Usage:"));
+    }
+    // Help is never taken for a path to create or check.
+    for args in [
+        vec!["init", "--help"],
+        vec!["init", "-h"],
+        vec!["check", "--help"],
+        vec!["--check", "--strict", "-h"],
+    ] {
+        let output = fixture.run(&args);
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Usage:"));
     }
     assert!(fs::read_dir(&fixture.0).unwrap().next().is_none());
 }
