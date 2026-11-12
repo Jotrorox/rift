@@ -394,6 +394,8 @@ pub enum Route {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
     pub max_connections: usize,
+    /// Open connections one IPv4 address or IPv6 /64 may hold at once.
+    pub max_connections_per_address: usize,
     pub connect_timeout: Duration,
     pub buffer_size: usize,
 }
@@ -403,6 +405,9 @@ impl Default for Limits {
         Self {
             // Packet buffers grow as bytes arrive; budget for framed packets, sockets and runtime.
             max_connections: 1024,
+            // One host must not be able to hold every slot, yet players behind
+            // a shared NAT have to fit.
+            max_connections_per_address: 256,
             connect_timeout: Duration::from_secs(5),
             buffer_size: 32 * 1024,
         }
@@ -723,13 +728,24 @@ impl Config {
                 let values = table(value, "limits")?;
                 fields(
                     &values,
-                    &["max_connections", "connect_timeout_ms", "buffer_size"],
+                    &[
+                        "max_connections",
+                        "max_connections_per_address",
+                        "connect_timeout_ms",
+                        "buffer_size",
+                    ],
                     "limits",
                 )?;
                 limits.max_connections = positive_integer(
                     &values,
                     "max_connections",
                     limits.max_connections,
+                    Semaphore::MAX_PERMITS,
+                )?;
+                limits.max_connections_per_address = positive_integer(
+                    &values,
+                    "max_connections_per_address",
+                    limits.max_connections_per_address,
                     Semaphore::MAX_PERMITS,
                 )?;
                 limits.buffer_size =

@@ -566,8 +566,13 @@ rift.config.service_groups.lobby = {
 
 Each instance authenticates as `server.<instance>` with the grants of the
 block (`preset = "backend"` adds the [permission replica's
-subjects](messaging.md#backend-permission-principals); `_INBOX.>` is always
-added for replies). Rift sets these variables for its process:
+subjects](messaging.md#backend-permission-principals)). Rift always adds
+publish access to `_INBOX.>`, so the instance can answer requests, and
+subscribe access to `_INBOX.server.<instance>.>` only: REQUEST uses a private
+broker inbox and needs no grant, and manual reply subjects must sit in the
+instance's own namespace. An instance never receives `_INBOX.>` subscribe
+access, which would expose every other identity's replies. Rift sets these
+variables for its process:
 
 | Variable | Value |
 | --- | --- |
@@ -677,7 +682,12 @@ An already occupied backend port is a startup failure: Rift does not adopt the
 existing process or send it shutdown commands.
 
 Output from the child is appended to `rift-server.log` in its directory. Inspect
-this file alongside the lifecycle state when startup fails. Startup timeout and
+this file alongside the lifecycle state when startup fails. Once the file
+reaches 32 MiB, checked at each start and every 30 seconds while the server
+runs, Rift copies it to `rift-server.log.1` (replacing the previous copy) and
+empties it, so one server keeps at most about 64 MiB of output. A few lines
+written during the copy can be lost; log readers following a cursor see
+`truncated` and continue from the new file. Startup timeout and
 shutdown timeout both clean up the supervised child. Each child leads its own
 process group, and a kill reaches the whole group, so helper processes started by
 a wrapper script die with it. Programs should run in the foreground; wrappers

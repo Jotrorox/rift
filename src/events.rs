@@ -5,9 +5,44 @@ use std::{
     fmt::Display,
     io::{self, Write},
     net::SocketAddr,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Mutex, PoisonError,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+/// `connection_rejected` lines written per second. A flood of rejected
+/// connections (rate limited, over capacity, untrusted proxy) would otherwise
+/// write one line each and fill the log; counters still count every one.
+const REJECTIONS_PER_SECOND: u32 = 20;
+
+#[derive(Default)]
+struct RejectionLog {
+    second: Option<Instant>,
+    written: u32,
+    suppressed: u64,
+}
+
+impl RejectionLog {
+    /// Whether to write a line now: `Some` with the number of rejections left
+    /// out since the last written line.
+    fn admit(&mut self, now: Instant) -> Option<u64> {
+        if self
+            .second
+            .is_none_or(|second| now.duration_since(second) >= Duration::from_secs(1))
+        {
+            self.second = Some(now);
+            self.written = 0;
+        }
+        if self.written >= REJECTIONS_PER_SECOND {
+            self.suppressed += 1;
+            return None;
+        }
+        self.written += 1;
+        Some(std::mem::take(&mut self.suppressed))
+    }
+}
 
 pub struct Connection {
     id: u64,
@@ -107,8 +142,24 @@ impl Connection {
     }
 
     pub fn reject(&mut self, failure: &'static str, message: &str) {
+        static LOG: Mutex<RejectionLog> = Mutex::new(RejectionLog {
+            second: None,
+            written: 0,
+            suppressed: 0,
+        });
         self.failure = failure;
-        self.emit("connection_rejected", &message, None);
+        let admitted = LOG
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .admit(Instant::now());
+        let Some(suppressed) = admitted else {
+            return;
+        };
+        let mut value = self.value("connection_rejected", &message, None);
+        if suppressed > 0 {
+            value["suppressed"] = json!(suppressed);
+        }
+        let _ = writeln!(io::stderr().lock(), "{value}");
     }
 }
 
@@ -165,6 +216,20 @@ mod tests {
             serde_json::from_str::<Value>(&line).unwrap()["message"],
             value["message"]
         );
+    }
+
+    #[test]
+    fn rejection_lines_are_capped_per_second_and_report_what_was_left_out() {
+        let mut log = RejectionLog::default();
+        let start = Instant::now();
+        for _ in 0..REJECTIONS_PER_SECOND {
+            assert_eq!(log.admit(start), Some(0));
+        }
+        for _ in 0..500 {
+            assert_eq!(log.admit(start + Duration::from_millis(900)), None);
+        }
+        assert_eq!(log.admit(start + Duration::from_secs(1)), Some(500));
+        assert_eq!(log.admit(start + Duration::from_secs(1)), Some(0));
     }
 
     #[test]

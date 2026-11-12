@@ -31,6 +31,7 @@ pub const CONSUMER_OPEN: u8 = 12;
 pub const CONSUMER_FETCH: u8 = 13;
 pub const DELIVERY: u8 = 14;
 pub const ACK: u8 = 15;
+pub const CONSUMER_DELETE: u8 = 16;
 
 /// Reads length-prefixed frames from one stream. Reads are cancellation safe:
 /// a partial frame stays buffered for the next call.

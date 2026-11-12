@@ -297,7 +297,9 @@ streams = {
 },
 ```
 
-The QUIC client exposes `stream_publish`, `consumer`, `fetch`, and `ack`.
+The QUIC client exposes `stream_publish`, `consumer`, `fetch`, `ack` and
+`delete_consumer`. One principal may hold a quarter of a stream's
+`max_consumers`; delete consumers that are no longer used.
 `ConsumerConfig` selects a filter, starting sequence, acknowledgement deadline
 and maximum in-flight records. Fetch returns sequence numbers and delivery counts;
 acknowledge only after processing. Unacknowledged records become available again

@@ -266,19 +266,39 @@ impl quic::DynamicIdentities for Logins {
             .get(&name)
             .cloned()?;
         // A valid MAC for a removed or recreated instance is still refused.
-        (registered.generation == generation).then(|| quic::Identity {
-            name: principal(&name),
-            token: String::new(),
-            publish: registered.grants.publish,
-            subscribe: registered.grants.subscribe,
-            control: false,
-            players: false,
+        (registered.generation == generation).then(|| {
+            let mut subscribe = registered.grants.subscribe;
+            if let Some(inbox) = private_inbox(&name)
+                && !subscribe.contains(&inbox)
+            {
+                subscribe.push(inbox);
+            }
+            quic::Identity {
+                name: principal(&name),
+                token: String::new(),
+                publish: registered.grants.publish,
+                subscribe,
+                control: false,
+                players: false,
+            }
         })
     }
 
     fn revocations(&self) -> broadcast::Receiver<String> {
         self.revoked.subscribe()
     }
+}
+
+/// The reply namespace only `name`'s login may subscribe to:
+/// `_INBOX.server.<name>.>`. Instances never get `_INBOX.>`, which would
+/// expose every other identity's replies. `None` when the name is not a
+/// single subject token, so one instance's namespace cannot cover another's.
+pub fn private_inbox(name: &str) -> Option<String> {
+    let token = !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'));
+    token.then(|| format!("_INBOX.{}.>", principal(name)))
 }
 
 /// The key at `path`, created with its directory when missing.
@@ -344,7 +364,7 @@ mod tests {
     fn grants() -> InstanceMessaging {
         InstanceMessaging {
             publish: vec!["rift.perms.hello".into()],
-            subscribe: vec!["_INBOX.>".into()],
+            subscribe: vec![],
         }
     }
 
@@ -359,6 +379,13 @@ mod tests {
         let identity = logins.authenticate(&token).unwrap();
         assert_eq!(identity.name, "server.lobby-3");
         assert!(!identity.control && !identity.players);
+        // Replies arrive in a namespace no other instance can subscribe to.
+        assert!(
+            identity
+                .subscribe
+                .contains(&"_INBOX.server.lobby-3.>".to_owned())
+        );
+        assert_eq!(private_inbox("lobby.3"), None);
         // Tampering with any part breaks the MAC.
         for forged in [
             token.replace("lobby-3", "lobby-4"),

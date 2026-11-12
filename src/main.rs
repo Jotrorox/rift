@@ -1,3 +1,16 @@
+// Every `eprintln!` in this crate resolves to this macro instead of the
+// standard one, because it is defined before any `mod`. The standard macro
+// panics when stderr cannot be written: a log pipe whose reader died, or a
+// full disk behind a redirect. A diagnostic is never worth that. In the
+// control loop such a panic would skip the connection drain and leave managed
+// servers running without their supervisor. Keep in step with lib.rs.
+macro_rules! eprintln {
+    ($($arg:tt)*) => {{
+        use ::std::io::Write as _;
+        let _ = ::std::writeln!(::std::io::stderr().lock(), $($arg)*);
+    }};
+}
+
 mod admin;
 mod admission;
 mod bungee_runtime;
@@ -165,6 +178,9 @@ async fn start(args: Vec<String>) -> io::Result<()> {
                 eprintln!(
                     "rift: warning: configuration evaluation is heavy; move expensive work into callbacks that need it, or callbacks may miss their 50 ms deadline"
                 );
+            }
+            if let Some(warning) = check::offline_mode(&config) {
+                eprintln!("rift: warning: {warning}");
             }
             for warning in check::instance_logins(&config) {
                 eprintln!("rift: warning: {warning}");

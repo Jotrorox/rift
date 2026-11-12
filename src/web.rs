@@ -261,7 +261,7 @@ impl App {
                     .collect(),
             );
             value["fallbacks"] = json!(config.fallbacks);
-            value["limits"] = json!({"max_connections":config.limits.max_connections,"connect_timeout_ms":config.limits.connect_timeout.as_millis(),"buffer_size":config.limits.buffer_size});
+            value["limits"] = json!({"max_connections":config.limits.max_connections,"max_connections_per_address":config.limits.max_connections_per_address,"connect_timeout_ms":config.limits.connect_timeout.as_millis(),"buffer_size":config.limits.buffer_size});
         }
         value
     }
@@ -911,7 +911,11 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
             let granted = permission.is_empty()
                 || access.allows(permission)
                 || (permission == "perms" && access.allows("config"));
-            granted && in_scope
+            // A rollback applies a complete retained source, which may hold a
+            // token since rotated or operators since removed: that is a
+            // configuration write, so `deploy` alone does not allow it.
+            let rollback = matches!(segments.as_slice(), ["api", "deployments", _, "rollback"]);
+            granted && in_scope && (!rollback || access.allows("config"))
         };
         let operation = match segments.as_slice() {
             ["api", "servers", _, "start"] => "start",

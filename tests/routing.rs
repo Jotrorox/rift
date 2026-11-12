@@ -29,7 +29,13 @@ impl Proxy {
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let mut lines = BufReader::new(stderr).lines();
-            sender.send(lines.next().unwrap().unwrap()).ok();
+            // Startup warnings may precede the listener line.
+            let ready = lines
+                .by_ref()
+                .map(|line| line.unwrap())
+                .find(|line| line.starts_with("rift: listening on "))
+                .unwrap();
+            sender.send(ready).ok();
             // Drain errors too so a full stderr pipe cannot stall the proxy.
             for line in lines {
                 if line.is_err() {

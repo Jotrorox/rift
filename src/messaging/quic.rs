@@ -224,7 +224,17 @@ impl Identity {
         }
         Ok(())
     }
-    fn consumer_name(&self, name: &str) -> Result<String> {
+    /// The prefix of every durable consumer this identity creates, so its
+    /// consumers can be counted against a quota.
+    fn consumer_scope(&self) -> String {
+        let hex: String = Sha256::digest(self.name.as_bytes())
+            .iter()
+            .take(8)
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        format!("remote_{hex}_")
+    }
+    fn consumer_digest(&self, name: &str) -> Result<String> {
         if !valid_name(name) {
             return Err(invalid("invalid consumer name"));
         }
@@ -234,12 +244,32 @@ impl Identity {
         digest.update((self.name.len() as u64).to_be_bytes());
         digest.update(self.name.as_bytes());
         digest.update(name.as_bytes());
-        let hex: String = digest
+        Ok(digest
             .finalize()
             .iter()
             .map(|byte| format!("{byte:02x}"))
-            .collect();
-        Ok(format!("remote_{hex}"))
+            .collect())
+    }
+    fn consumer_name(&self, name: &str) -> Result<String> {
+        Ok(format!(
+            "{}{}",
+            self.consumer_scope(),
+            self.consumer_digest(name)?
+        ))
+    }
+    /// The stored name before consumers carried their owner's scope. Such
+    /// consumers stay usable but can no longer be created.
+    fn legacy_consumer_name(&self, name: &str) -> Result<String> {
+        Ok(format!("remote_{}", self.consumer_digest(name)?))
+    }
+    /// The stored name of this identity's consumer `name` on `stream`: the
+    /// legacy one when it exists there, else the scoped one.
+    async fn stored_consumer(&self, stream: &Stream, name: &str) -> Result<String> {
+        let legacy = self.legacy_consumer_name(name)?;
+        if stream.get_consumer(&legacy).await.is_ok() {
+            return Ok(legacy);
+        }
+        self.consumer_name(name)
     }
 }
 fn valid_name(name: &str) -> bool {
@@ -822,7 +852,7 @@ async fn serve_stream(
             }
             CONSUMER_OPEN => {
                 let stream_name = take_string(&mut frame)?;
-                let name = identity.consumer_name(&take_string(&mut frame)?)?;
+                let name = take_string(&mut frame)?;
                 let filter_subject = take_string(&mut frame)?;
                 let start_sequence = take_u64(&mut frame)?;
                 let ack_wait_ms = take_u32(&mut frame)?;
@@ -836,18 +866,25 @@ async fn serve_stream(
                 {
                     return Err(invalid("invalid consumer limits"));
                 }
-                context
+                let stream = context
                     .streams
                     .get(&stream_name)
-                    .ok_or_else(|| invalid("unknown stream"))?
-                    .consumer(
-                        &name,
-                        ConsumerConfig {
-                            filter_subject,
-                            start_sequence,
-                            ack_wait: Duration::from_millis(ack_wait_ms as u64),
-                            max_ack_pending,
-                        },
+                    .ok_or_else(|| invalid("unknown stream"))?;
+                let config = ConsumerConfig {
+                    filter_subject,
+                    start_sequence,
+                    ack_wait: Duration::from_millis(ack_wait_ms as u64),
+                    max_ack_pending,
+                };
+                let stored = identity.stored_consumer(stream, &name).await?;
+                // One identity may hold a quarter of the stream's consumers,
+                // so no single principal can fill it for everyone else.
+                stream
+                    .consumer_scoped(
+                        &stored,
+                        config,
+                        &identity.consumer_scope(),
+                        (stream.max_consumers() / 4).max(1),
                     )
                     .await
                     .map_err(other)?;
@@ -858,19 +895,18 @@ async fn serve_stream(
             }
             CONSUMER_FETCH => {
                 let stream_name = take_string(&mut frame)?;
-                let name = identity.consumer_name(&take_string(&mut frame)?)?;
+                let name = take_string(&mut frame)?;
                 let limit = take_u32(&mut frame)? as usize;
                 exhausted(&frame)?;
                 if limit == 0 || limit > MAX_FETCH {
                     return Err(invalid("fetch limit must be 1..256"));
                 }
-                let consumer = context
+                let stream = context
                     .streams
                     .get(&stream_name)
-                    .ok_or_else(|| invalid("unknown stream"))?
-                    .get_consumer(&name)
-                    .await
-                    .map_err(other)?;
+                    .ok_or_else(|| invalid("unknown stream"))?;
+                let name = identity.stored_consumer(stream, &name).await?;
+                let consumer = stream.get_consumer(&name).await.map_err(other)?;
                 let deliveries = consumer.fetch(limit).await.map_err(other)?;
                 for delivery in deliveries {
                     identity.can_subscribe(&delivery.record.message.subject)?;
@@ -892,19 +928,38 @@ async fn serve_stream(
             }
             ACK => {
                 let stream_name = take_string(&mut frame)?;
-                let name = identity.consumer_name(&take_string(&mut frame)?)?;
+                let name = take_string(&mut frame)?;
                 let sequence = take_u64(&mut frame)?;
                 exhausted(&frame)?;
-                context
+                let stream = context
                     .streams
                     .get(&stream_name)
-                    .ok_or_else(|| invalid("unknown stream"))?
+                    .ok_or_else(|| invalid("unknown stream"))?;
+                let name = identity.stored_consumer(stream, &name).await?;
+                stream
                     .get_consumer(&name)
                     .await
                     .map_err(other)?
                     .ack(sequence)
                     .await
                     .map_err(other)?;
+                timeout(context.auth.io_timeout, write_simple(send, OK))
+                    .await
+                    .map_err(timed_out)??;
+                return Ok(());
+            }
+            CONSUMER_DELETE => {
+                let stream_name = take_string(&mut frame)?;
+                let name = take_string(&mut frame)?;
+                exhausted(&frame)?;
+                let stream = context
+                    .streams
+                    .get(&stream_name)
+                    .ok_or_else(|| invalid("unknown stream"))?;
+                // Names resolve inside the caller's own namespace, so an
+                // identity can delete only consumers it created.
+                let name = identity.stored_consumer(stream, &name).await?;
+                stream.delete_consumer(&name).await.map_err(other)?;
                 timeout(context.auth.io_timeout, write_simple(send, OK))
                     .await
                     .map_err(timed_out)??;

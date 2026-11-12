@@ -102,6 +102,7 @@ enum Event {
     Fetch(String, u64, Vec<(u64, Pending)>),
     Ack(String, u64),
     NextSequence(u64),
+    DeleteConsumer(String),
 }
 
 impl Stream {
@@ -242,6 +243,42 @@ impl Stream {
     }
 
     pub async fn consumer(&self, name: &str, config: ConsumerConfig) -> Result<DurableConsumer> {
+        self.consumer_within(name, config, None).await
+    }
+
+    /// [`Stream::consumer`], creating the consumer only while fewer than
+    /// `limit` consumers have a name starting with `scope`. One owner whose
+    /// consumers share a prefix then cannot use up the whole stream.
+    pub async fn consumer_scoped(
+        &self,
+        name: &str,
+        config: ConsumerConfig,
+        scope: &str,
+        limit: usize,
+    ) -> Result<DurableConsumer> {
+        self.consumer_within(name, config, Some((scope.to_owned(), limit)))
+            .await
+    }
+
+    /// Remove a durable consumer and its delivery state, freeing its place
+    /// under `max_consumers`.
+    pub async fn delete_consumer(&self, name: &str) -> Result<()> {
+        let owned = name.to_owned();
+        self.run(move |state| {
+            if !state.consumers.contains_key(&owned) {
+                return Err(Error::ConsumerNotFound);
+            }
+            state.commit(Event::DeleteConsumer(owned))
+        })
+        .await
+    }
+
+    async fn consumer_within(
+        &self,
+        name: &str,
+        config: ConsumerConfig,
+        scope: Option<(String, usize)>,
+    ) -> Result<DurableConsumer> {
         validate_consumer(name, &config)?;
         let owned = name.to_owned();
         self.run(move |state| {
@@ -256,6 +293,18 @@ impl Stream {
             if state.consumers.len() >= state.config.max_consumers {
                 return Err(Error::InvalidConfig("stream consumer limit reached".into()));
             }
+            if let Some((scope, limit)) = &scope
+                && state
+                    .consumers
+                    .keys()
+                    .filter(|name| name.starts_with(scope.as_str()))
+                    .count()
+                    >= *limit
+            {
+                return Err(Error::InvalidConfig(
+                    "consumer limit for this identity reached; delete unused consumers".into(),
+                ));
+            }
             let consumer = ConsumerState {
                 next_sequence: config.start_sequence,
                 config,
@@ -268,6 +317,11 @@ impl Stream {
             stream: self.clone(),
             name: Arc::from(name),
         })
+    }
+
+    /// The most durable consumers this stream keeps.
+    pub fn max_consumers(&self) -> usize {
+        self.inner.config.max_consumers
     }
 
     pub async fn get_consumer(&self, name: &str) -> Result<DurableConsumer> {
@@ -495,6 +549,9 @@ impl State {
             }
             Event::NextSequence(next_sequence) => {
                 self.next_sequence = self.next_sequence.max(next_sequence);
+            }
+            Event::DeleteConsumer(name) => {
+                self.consumers.remove(&name);
             }
         }
         Ok(())
@@ -822,6 +879,10 @@ fn encode(event: &Event) -> Result<Vec<u8>> {
             out.push(5);
             put_u64(&mut out, *sequence);
         }
+        Event::DeleteConsumer(name) => {
+            out.push(6);
+            put_string(&mut out, name);
+        }
     }
     Ok(out)
 }
@@ -945,6 +1006,7 @@ fn decode(bytes: &[u8], config: &StreamConfig) -> Result<Event> {
             Event::Ack(name, decoder.u64()?)
         }
         5 => Event::NextSequence(decoder.u64()?),
+        6 => Event::DeleteConsumer(decoder.string()?),
         _ => return Err(Error::Storage("unknown journal event".into())),
     };
     if decoder.offset != bytes.len() {
@@ -1004,6 +1066,52 @@ mod tests {
             [2, 3]
         );
         assert_eq!(stream.replay(3, 1).await.unwrap()[0].sequence, 3);
+    }
+
+    #[tokio::test]
+    async fn deleted_consumers_free_their_place_across_reopen_and_scopes_are_capped() {
+        let directory = Directory::new();
+        let config = StreamConfig {
+            max_consumers: 3,
+            ..Default::default()
+        };
+        let stream = Stream::open(&directory.0, config.clone()).await.unwrap();
+        let consumer = ConsumerConfig::default;
+        // One scope may hold two of the three places.
+        for name in ["a_1", "a_2"] {
+            stream
+                .consumer_scoped(name, consumer(), "a_", 2)
+                .await
+                .unwrap();
+        }
+        assert!(matches!(
+            stream.consumer_scoped("a_3", consumer(), "a_", 2).await,
+            Err(Error::InvalidConfig(_))
+        ));
+        // Reopening an existing consumer is not a creation.
+        stream
+            .consumer_scoped("a_1", consumer(), "a_", 2)
+            .await
+            .unwrap();
+        stream
+            .consumer_scoped("b_1", consumer(), "b_", 2)
+            .await
+            .unwrap();
+        assert!(stream.consumer("c", consumer()).await.is_err());
+        stream.delete_consumer("a_1").await.unwrap();
+        assert!(matches!(
+            stream.delete_consumer("a_1").await,
+            Err(Error::ConsumerNotFound)
+        ));
+        assert!(matches!(
+            stream.get_consumer("a_1").await,
+            Err(Error::ConsumerNotFound)
+        ));
+        drop(stream);
+        let reopened = Stream::open(&directory.0, config).await.unwrap();
+        assert!(reopened.get_consumer("a_1").await.is_err());
+        assert!(reopened.get_consumer("a_2").await.is_ok());
+        reopened.consumer("c", consumer()).await.unwrap();
     }
 
     #[tokio::test]
