@@ -2,13 +2,22 @@
 //! deadline overruns, stop requests, capabilities and captured output.
 //!
 //! - `init(config)`: fails with `config.fail` when set; otherwise registers
-//!   command `probe` (permission `probe.use`) and hooks `login`, `command`
-//!   and `join`.
+//!   command `probe` (permission `probe.use`, dynamic suggestions) and hooks
+//!   `login`, `command`, `join`, `suggest` and `status`.
 //! - `reload(config)`: fails when `config.fail` is set.
 //! - `login(ctx)`: name `Spin` loops forever, name `Trap` panics (a trap
 //!   after the panic message on stderr), name `Dialog` is shown a dialog with
 //!   a text input `answer` and a `dynamic/custom` action `reply` (additions
-//!   `{"round": 1}`) and continues, anyone else continues.
+//!   `{"round": 1}`) and continues, name `Title` is shown a `title-json`
+//!   title (markup) and subtitle (legacy codes) for 5/40/10 ticks and
+//!   continues, name `Locale` is denied with `locale=<players.locale>`
+//!   (`locale=unknown` for `none`), anyone else continues.
+//! - `suggest_rich(ctx)` (the `styled` export): `rich` with the tooltip
+//!   markup `<red>Hi <p>` (argument `p` the player's name) and `plain`
+//!   without a tooltip; for the word `bad`, a tooltip that is not JSON.
+//! - `status_rich(ping)` (the `styled` export): for hostname `rich.example`
+//!   a markup version and sample lines `<green>one` and `two`; for
+//!   `bad.example` a version that is not JSON; otherwise nothing.
 //! - `dialog(response)`: messages the player `<action> <values> <payload>`.
 //!   The registration does not list it: dialog clicks need none.
 //! - `join(ctx)`: name `Spin` loops forever.
@@ -19,7 +28,8 @@
 //!   `meta.config-dir`, the environment's variable names and the outcome of
 //!   a TCP connection to 127.0.0.1:9.
 use rift_plugin::{
-    Action, CommandSpec, Context, DialogResponse, Hook, Plugin, Registration, meta, players,
+    Action, CommandSpec, Context, DialogResponse, Hook, Ping, Plugin, Registration,
+    RichStatusOverride, RichSuggestion, SuggestKind, TitleJsonSpec, meta, players, text,
 };
 use serde::Deserialize;
 use std::io::Write;
@@ -47,8 +57,18 @@ impl Plugin for Probe {
             return Err(reason);
         }
         Ok(Registration::new()
-            .command(CommandSpec::new("probe").permission("probe.use"))
-            .hooks([Hook::Login, Hook::Command, Hook::Join]))
+            .command(
+                CommandSpec::new("probe")
+                    .permission("probe.use")
+                    .suggest(SuggestKind::Dynamic),
+            )
+            .hooks([
+                Hook::Login,
+                Hook::Command,
+                Hook::Join,
+                Hook::Suggest,
+                Hook::Status,
+            ]))
     }
 
     fn reload(&mut self, config: &str) -> Result<(), String> {
@@ -78,7 +98,43 @@ impl Plugin for Probe {
                 assert!(invalid.unwrap_err().contains("title is required"));
                 Action::Continue
             }
+            "Title" => {
+                let title = TitleJsonSpec::new(text::mini("<gold>Welcome"))
+                    .subtitle(text::legacy("&7to the probe"))
+                    .times(5, 40, 10);
+                assert_eq!(players::title_json(&ctx.uuid, &title), Ok(true));
+                Action::Continue
+            }
+            "Locale" => {
+                let locale = players::locale(&ctx.uuid).expect("players.locale");
+                Action::Deny(format!("locale={}", locale.as_deref().unwrap_or("unknown")))
+            }
             _ => Action::Continue,
+        }
+    }
+
+    fn suggest_rich(&mut self, ctx: Context) -> Vec<RichSuggestion> {
+        if ctx.word == "bad" {
+            return vec![RichSuggestion::new("bad").tooltip("{nope")];
+        }
+        vec![
+            RichSuggestion::new("rich").tooltip(text::mini("<red>Hi <p>").arg("p", ctx.name)),
+            RichSuggestion::new("plain"),
+        ]
+    }
+
+    fn status_rich(&mut self, ping: Ping) -> Option<RichStatusOverride> {
+        match ping.hostname.as_str() {
+            "rich.example" => Some(RichStatusOverride {
+                version_json: Some(text::mini("<gold>Probe").to_string()),
+                sample_json: Some(vec![text::mini("<green>one").to_string(), "two".to_owned()]),
+                ..Default::default()
+            }),
+            "bad.example" => Some(RichStatusOverride {
+                version_json: Some("[1,".to_owned()),
+                ..Default::default()
+            }),
+            _ => None,
         }
     }
 

@@ -5,6 +5,7 @@ mod check;
 mod control;
 mod dev;
 mod events;
+mod groups;
 mod health;
 mod messaging_runtime;
 mod metrics;
@@ -30,7 +31,7 @@ use std::{
 
 const DEFAULT_CONFIG_PATH: &str = "rift.lua";
 
-const USAGE: &str = "Usage: rift [<listen-ip:port> <backend-ip:port>]\n\
+const USAGE: &str = "Usage: rift [<listen-ip:port> <backend-ip:port> [--translation <on|off>]]\n\
     Backend may also be a DNS hostname with a port.\n\
     rift --config <path>\n\
     rift init [path] (generate configuration; default ./rift.lua)\n\
@@ -44,8 +45,9 @@ const USAGE: &str = "Usage: rift [<listen-ip:port> <backend-ip:port>]\n\
     rift node --controller <host:port> --name <node> --root <dir> --ca <pem> (run servers for a controller; see rift node --help)\n\
     rift --version (print package version)\n\
     rift --license (print project license and third-party notices)\n\
-    Routing: rift <listen-ip:port> [--route <hostname=backend:port>]... [--default <backend:port>]\n\
+    Routing: rift <listen-ip:port> [--route <hostname=backend:port>]... [--default <backend:port>] [--translation <on|off>]\n\
     Routes: exact hostname, '*.example.com', or '*' (default).\n\
+    Translation between Minecraft versions is on unless --translation off; see docs/translation.md.\n\
     Priority: exact, longest wildcard suffix, default. Unmatched clients get a message.\n\
     No arguments: load ./rift.lua if present, otherwise use defaults.\n\
     Defaults: 0.0.0.0:25565 127.0.0.1:25566\n\
@@ -55,6 +57,8 @@ const USAGE: &str = "Usage: rift [<listen-ip:port> <backend-ip:port>]\n\
     IPv6: rift '[::]:25565' '[::1]:25566'";
 
 fn main() -> ExitCode {
+    // First, while this is the only thread and before any secret is read.
+    rift::environment::harden_process();
     let args: Vec<String> = env::args().skip(1).collect();
     // `rift dev` sets its token variables before any thread exists.
     let dev = match args.first().map(String::as_str) {
@@ -162,6 +166,12 @@ async fn start(args: Vec<String>) -> io::Result<()> {
                     "rift: warning: configuration evaluation is heavy; move expensive work into callbacks that need it, or callbacks may miss their 50 ms deadline"
                 );
             }
+            for warning in check::instance_logins(&config) {
+                eprintln!("rift: warning: {warning}");
+            }
+            for line in check::isolation(&config) {
+                println!("rift: {line}");
+            }
             let (plugins, warnings) = check::plugins(&config);
             for line in &plugins {
                 println!("rift: {line}");
@@ -224,6 +234,15 @@ async fn start(args: Vec<String>) -> io::Result<()> {
             Some(PathBuf::from(path)),
         ),
         [listen, backend] => (Config::from_addresses(listen, backend)?, None),
+        [listen, backend, flag, value] if flag == "--translation" => {
+            let mut config = Config::from_addresses(listen, backend)?;
+            config.translation.enabled = match value.as_str() {
+                "on" => true,
+                "off" => false,
+                _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, USAGE)),
+            };
+            (config, None)
+        }
         [listen, options @ ..] if !options.is_empty() && options.len().is_multiple_of(2) => {
             let mut config = Config::from_addresses(listen, "127.0.0.1:0")?;
             config.backends.clear();
@@ -238,6 +257,14 @@ async fn start(args: Vec<String>) -> io::Result<()> {
                         )
                     })?,
                     "--default" => ("*", option[1].as_str()),
+                    "--translation" => {
+                        config.translation.enabled = match option[1].as_str() {
+                            "on" => true,
+                            "off" => false,
+                            _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, USAGE)),
+                        };
+                        continue;
+                    }
                     _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, USAGE)),
                 };
                 let backend = Backend::parse(target)?;

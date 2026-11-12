@@ -2,7 +2,7 @@
 
 Rift has one plugin system. A plugin is anything that receives Rift's events
 and calls Rift's host API, and every plugin uses the same contract,
-[`wit/rift-plugin.wit`](../wit/rift-plugin.wit) (`rift:plugin@0.1.1`): one
+[`wit/rift-plugin.wit`](../wit/rift-plugin.wit) (`rift:plugin@0.1.5`): one
 event schema, one set of answers, one host API. What differs is where the code
 runs:
 
@@ -10,7 +10,7 @@ runs:
 | --- | --- | --- | --- |
 | **script** | `rift.lua`, its modules and script-mode plugin folders, in the sandboxed configuration VM | Sandboxed: instruction and memory budgets, no I/O | `rift.on`, `rift.command`, `rift.config.plugins`, `rift.plugin` for a folder without a persistent manifest |
 | **persistent** | A plugin folder installed on disk with a `plugin.toml`, running in its own long-lived Lua state or WebAssembly instance on its own OS thread | Trusted: runs with Rift's process privileges | `rift.plugin(name, config)` |
-| **remote** | A service on the [message bus](messaging.md) that answers `login`, `initial_server` and `before_transfer` | Whatever the service is; Rift only reads its replies | `rift.config.plugins.decisions` |
+| **remote** | A service on the [message bus](messaging.md) that answers `login`, `initial_server` and `before_transfer`, and calls the `players` interface as [`rift.players.*`](messaging.md#player-api-subjects) | Whatever the service is; Rift only reads its replies and checks its login's grants | `rift.config.plugins.decisions`, `messaging.principals` |
 
 Persistent plugins come in two engines: [Lua](plugins-lua.md) (LuaJIT, the
 same `rift` API as `rift.lua`) and WebAssembly components written in
@@ -103,7 +103,7 @@ restart = "on-failure"      # "never", "on-failure" or "always"; default "on-fai
 [capabilities]
 filesystem = ["data"]       # "data", "host" or absolute paths; default ["data"]
 network = true              # default true
-env = ["RELAXOBAN_DSN"]     # omit to inherit Rift's whole environment; [] for none
+env = ["RELAXOBAN_DSN"]     # omit to inherit Rift's environment minus its own secrets; [] for none
 
 [lua]                       # engine = "lua" only
 ffi = false                 # LuaJIT's FFI; default false
@@ -121,7 +121,7 @@ jit = true                  # false: interpret everything so deadlines interrupt
 | `hot_reload` | `false` | See [lifecycle](#lifecycle-failures-restarts-and-reloads). |
 | `[deadlines]` | per hook | Keys are `init`, `reload`, `shutdown` and the awaited hooks; observers have no deadline and are rejected here. Awaited hooks allow 1–10 000 ms, `http` up to 60 000. |
 | `[failure]` | | `on_timeout` overrides the per-hook default for every hook. |
-| `[capabilities]` | `filesystem = ["data"]`, `network = true`, all of `env` | `data` is `plugins/<name>/data/` (created on start, read-write); `host` is the configuration directory, read-only; an absolute path is read-write and, for WebAssembly, may not contain or lie inside `local/plugincache` or `plugins/`. WebAssembly enforces all three. Lua enforces `env` (`os.getenv`) and `network` (`rift.http.request`) but not `filesystem`: Lua `io` sees what Rift sees. |
+| `[capabilities]` | `filesystem = ["data"]`, `network = true`, all of `env` except [Rift's own secrets](operations.md#secrets-and-the-processes-rift-starts) | `data` is `plugins/<name>/data/` (created on start, read-write); `host` is the configuration directory, read-only; an absolute path is read-write and, for WebAssembly, may not contain or lie inside `local/plugincache` or `plugins/`. WebAssembly enforces all three. Lua enforces `env` (`os.getenv`) and `network` (`rift.http.request`) but not `filesystem`: Lua `io` sees what Rift sees. |
 | `[lua]` | | `engine = "lua"` only. See [the JIT and deadlines](plugins-lua.md#the-jit-and-deadlines). |
 | `[wasm]` | | `engine = "wasm"` only: per-instance limits; see [WebAssembly plugins](#webassembly-plugins). |
 
@@ -148,26 +148,46 @@ list from `rift.on`, `rift.command`, timers and subscriptions.
 | `command` | awaited, owner only | message, server, queue, leave-queue or continue | 1000 ms | deny (the command reports an error) |
 | `suggest` | awaited, owner only | completions | 50 ms | continue (no completions) |
 | `status` | awaited | fields to replace in one server-list ping | 50 ms | continue |
-| `http` | awaited | a response for `/ext/*`, or none | 5000 ms | continue |
+| `http` | awaited | a response for `/ext` and `/ext/*`, or none | 5000 ms | continue |
 | `join`, `after_transfer`, `disconnect` | observer | none | none (queued; interrupted after 60 s) | – |
 | `message` | observer | a message on a subscription the plugin made | none (queued; interrupted after 60 s) | – |
 | `timer` | observer | a tick of a timer the plugin started | none (queued; interrupted after 60 s) | – |
 | `event` | observer | a `rift.events.*` publication | none (queued; interrupted after 60 s) | – |
 | `dialog` | observer, owner only | a click on a plugin action of a [dialog](dialogs.md) the plugin showed | none (queued; interrupted after 60 s) | – |
+| `chat` | awaited, only plugins with a handler | continue or deny, for a chat message or a backend command ([below](#chat)) | 50 ms | deny (the message is dropped) |
 | `init`, `reload`, `shutdown` | lifecycle | registration / ok / none | 30 s / 5 s / 10 s | init fails the plugin; reload keeps the old configuration |
 
 Player hooks (`login`, `initial_server`, `before_transfer`, `command`,
-`suggest`, `join`, `after_transfer`, `disconnect`) need
+`suggest`, `join`, `after_transfer`, `disconnect`, `chat`) need
 `authentication.online_mode`, because they carry a verified identity. Without
 it, persistent plugins still run `route`, `status`, `http`, timers, bus
 messages and events, but a plugin whose registration lists a player hook,
 registers a command or has an empty hook list fails to start (it is not
 retried), so a ban list cannot silently allow everyone; `rift check` and `rift
 check --strict` warn when persistent plugins are configured without it.
-Turning `online_mode` on or off restarts every persistent plugin. Answers are
+Turning `online_mode` or `signed_chat` on or off restarts every persistent
+plugin. Answers are
 validated exactly like Lua results and bus replies: strings are 1–1024 bytes,
-servers must exist, and an answer a hook does not accept is a failure of the
-plugin.
+JSON text components (the `deny-json` and `message-json` answers of the
+optional `decisions` export, which a WebAssembly component that has it answers
+decision hooks with instead of `handler`) at most 32 KiB, servers must exist, and an answer a hook does not accept is a failure of the plugin.
+The same holds for the optional `styled` export (since 0.1.4), which a
+component that has it answers `suggest` and `status` with instead of
+`handler`: its suggestion tooltips (`tooltip-json`; empty means none), status
+`version-json` and `sample-json` lines are JSON text components, the `mini`
+and `legacy` [authoring objects](text.md) included, or text shown as written;
+clients see the version and sample lines as `§` codes. One invalid entry fails
+the whole answer.
+
+**Who is calling `http`.** Every web credential with the `extensions`
+permission reaches `/ext`, an operator holding little else as much as the full
+token; Rift does not ask for more, the handler decides. The request's context (`context-json` in
+WebAssembly) is the status object the configuration script's
+[`on_http`](http.md#lua-websites-and-endpoints) receives, including its
+`operator` member: `{name, permissions, groups}` as `GET /api/access` reports
+the caller, with `permissions` `null` (absent in Lua) for full access and
+`groups` `null` when the caller is not limited to service groups. Check it
+before a handler changes anything.
 
 **Deny or continue.** When a plugin misses its deadline, `on_timeout` applies;
 when it fails (a handler error, a trap, an invalid answer, or the plugin is
@@ -178,6 +198,98 @@ and asks the next one. Rift never treats an error as permission to proceed
 unless a manifest says so. Each plugin has a queue of 1024 undelivered calls;
 when it is full, awaited calls count as timeouts at once and observer events
 are dropped (a slow plugin stalls only itself).
+
+### Chat
+
+The `chat` hook sees what a player types into the chat box before the backend
+does: chat messages, and the commands that would reach the backend. It answers
+`continue`, and the backend receives the packet exactly as the client sent it,
+in its place before everything the client sent afterwards; or `deny` with a
+text (`deny-json` for a JSON text component), and Rift drops the packet and
+shows the player the text as a system message. Commands that Rift or a plugin
+owns (`/server`, `/hub`, `/perms`, registered commands) never come to the
+hook. This is the hook for mutes and chat filters.
+
+| Mode | Registering | Input |
+| --- | --- | --- |
+| Configuration script | `chat = function(ctx) ... end` in `rift.config.plugins` ([callbacks](extensions.md#callbacks-and-decisions)) | `ctx.kind` (`"message"` or `"command"`), `ctx.text`, and for a command `ctx.command` and `ctx.args` |
+| Persistent Lua | `rift.on("chat", fn)` | the same `ctx` |
+| WebAssembly | exporting `chat` (interface `rift:plugin/chat`, since 0.1.5) | `chat-attempt`: `ctx`, `kind`, `text` |
+
+`text` is the message, or the command line without its leading slash;
+`ctx.command` is the command's root name and `ctx.args` the rest, as for
+`command`. The chain is the configuration script, then persistent plugins in
+`rift.plugin()` order; the first deny wins and there is no bus responder. Any
+answer other than continue and deny is a failure of the plugin.
+
+**Having a handler is the registration.** The contract's `hook` list has no
+entry for chat, and an empty hook list does not include it. Rift asks every
+plugin that has a handler about every message of every player, so a WebAssembly
+component exports `chat` only when it moderates chat: the SDKs leave the
+export out unless the plugin asks for it ([Rust](plugins-rust.md#chat):
+`export!(Type, chat)`; [C](plugins-c.md#chat): `RIFT_CHAT`;
+[Go](plugins-go.md#chat): package `rift/chat` and world `plugin-chat`). While
+no plugin and no script handles chat, sessions do not even parse chat packets.
+
+**Chat must be unsigned.** A backend that verifies a player's chat counts
+every signed message; when the proxy withholds one, the backend rejects all
+that follow and disconnects the player. So a `chat` handler needs
+[`authentication.signed_chat = false`](network-protocol.md#unsigned-chat),
+which keeps the signing material from backends:
+
+- A plugin with a handler fails to start while `signed_chat` is `true`, with
+  `the chat hook needs authentication.signed_chat = false` (it is not
+  retried); `rift check --strict` refuses a component that exports `chat`. A
+  configuration whose script defines `chat` does not load.
+- Paper backends also need `enforce-secure-profile=false` in
+  `server.properties`, or they refuse every chat message of players without a
+  signing key.
+- Players lose two things, on the whole network: their chat is shown to
+  others as not secure (the client's unsigned-message marker), and chat
+  reporting stops working.
+- `signed_chat` applies to connections made after it changed. A player who
+  connected while it was `true` keeps a signed chat session with the backend
+  until they reconnect: for that player Rift asks the hook only about packets
+  that carry no signature (commands without signed arguments, and all chat of
+  clients before 1.19) and forwards signed ones without asking. The hook
+  covers every message of players who connected after the setting became
+  `false`.
+
+The deadline is 50 ms (`deadlines.chat`, 1–10 000 ms). A missed deadline or a
+failure applies `on_timeout` and `on_failure`; with `deny`, the default, the
+message is dropped and the player sees the `chat.failed`
+[message](text.md). Like every player hook, `chat` needs
+`authentication.online_mode`. While a server switch is under way the old
+backend's chat is dropped without asking the hook, as its commands are.
+
+### Testing player hooks without Mojang
+
+Player hooks need `online_mode`, and `online_mode` asks Mojang's session server
+about every login, so an automated test has no account to log in with. For
+tests only, Rift can be built with the Cargo feature `test-session-server`:
+
+```sh
+cargo build --locked --features test-session-server
+RIFT_TEST_SESSION_URL=http://127.0.0.1:8080/session/minecraft/hasJoined target/debug/rift
+```
+
+Such a build asks the server in `RIFT_TEST_SESSION_URL` instead of Mojang. The
+test answers `GET <url>?username=<name>&serverId=<hash>` with status 200 and
+the profile to log in (`{"id": "<32 hex digits>", "name": "<name>",
+"properties": []}`), or with 204 to refuse the login.
+[`tests/session_server.rs`](../tests/session_server.rs) has a login bot and
+such a server.
+
+- The feature is off by default. Release and nightly binaries are built
+  without it and never read the variable; no configuration option exists.
+- The URL must be `http://` or `https://` on a loopback IP address
+  (`127.0.0.1`, `[::1]`; not `localhost`). Anything else stops Rift at startup.
+- Rift logs a warning at startup whenever the variable is in effect. Without
+  the variable, a build with the feature asks Mojang as usual.
+- The bot must still perform the encryption handshake, as a premium client
+  does. A real Minecraft client with an offline account (the headless harness
+  in [`tests/real_client.py`](../tests/real_client.py)) still cannot join: it
+  fails its own request to Mojang before Rift asks anyone.
 
 ## Dispatch order
 
@@ -194,10 +306,14 @@ chain, so a deny anywhere is final. Observers go to every plugin that wants
 them; the script's observers run separately, as before. Each command has
 exactly one owner: the configuration script or one persistent plugin. A name
 registered twice, by two plugins or by a plugin and the script, is a load
-error. `message` and `timer` go only to the plugin that made the subscription
+error. A command's `permission` is the node a player needs to see and run it;
+an empty permission (since 0.1.5) opens the command to every player, in every
+engine and in the configuration script. `message` and `timer` go only to the plugin that made the subscription
 or timer; `event` goes to every plugin that registered it. `dialog` goes only
 to whoever showed the dialog (the script or one plugin) and needs no entry in
-`registration.hooks`: the WIT `hook` enum has no case for it.
+`registration.hooks`: the WIT `hook` enum has no case for it. [`chat`](#chat)
+goes to the script, then to every plugin with a chat handler, and stops at the
+first deny; it has no case in the `hook` enum either.
 
 ## Lifecycle, failures, restarts and reloads
 
@@ -280,9 +396,9 @@ and the SDK guides map it to each language.
 
 | Interface | Functions | Notes |
 | --- | --- | --- |
-| `players` | `list(server?)`, `get(target)`, `names(prefix?)`, `message`, `action-bar`, `title`, `tab-list`, `boss-bar`, `dialog`, `clear-dialog`, `kick`, `transfer`, `broadcast` | `target` is a name, a UUID or a connection id. Actions return whether the player was online. Transfers pass `before_transfer`. `dialog` and `clear-dialog` (since 0.1.1) show and close [dialogs](dialogs.md). |
+| `players` | `list(server?)`, `get(target)`, `names(prefix?)`, `message`, `action-bar`, `title`, `tab-list`, `boss-bar`, `dialog`, `clear-dialog`, `kick`, `transfer`, `broadcast`, `message-json`, `action-bar-json`, `kick-json`, `broadcast-json`, `title-json`, `locale` | `target` is a name, a UUID or a connection id. Actions return whether the player was online. Transfers pass `before_transfer`. `dialog` and `clear-dialog` (since 0.1.1) show and close [dialogs](dialogs.md). The `-json` functions (since 0.1.2) take a JSON text component for colours, hover text and click events ([rich text](extensions.md#rich-text)); Lua takes a chat component table in place of the string. `list` and `get` include hidden players; `visible-to(target)` (since 0.1.3; `visible_to` in Lua player tables and bus replies) returns the node a viewer needs to see one ([visibility](permissions.md#visibility)). `title-json` (since 0.1.4) takes a `title-json-spec`: title and optional subtitle as JSON text components (an empty title shows only the subtitle) and times in ticks. Components may contain the authoring objects `{"mini": "<red>Hi <player>", "args": {...}}` and `{"legacy": "&cHi", "marker": "&"}` ([text](text.md)); a bare string is never read as markup. Every SDK has builders that write them. `locale(target)` (since 0.1.5; `locale` in Lua player tables and bus replies) returns the language the player's client reported, as the client spells it (`en_us`; old clients send `en_US`), or `none`. The client sends its settings after login: during configuration from 1.20.2, after Join Game before. So the `login` hook never has a locale, `join` has one only for 1.20.2 and newer clients, and a missing value means "not known yet", not "no language". It follows later changes of the client's language setting and survives server switches. |
 | `store` | `get`, `set`, `delete`, `increment`, `list(namespace, prefix)` | The durable store shared with API v2. Namespaces are private: `plugin.<name>.<namespace>`, which the configuration script's `rift.store` cannot read or write. Each plugin has its own quota, 4096 entries and 1 MiB unless [`extensions.storage.quota`](extensions.md#persistent-state) sets another. |
-| `permissions` | `has`, `set`, `add-group`, `remove-group`, `groups`, `list-groups` | Rift's [permission store](permissions.md#persistent-plugins): user nodes and group memberships, checked in the player's current contexts. |
+| `permissions` | `has`, `set`, `add-group`, `remove-group`, `groups`, `list-groups`, `meta`, `set-meta` | Rift's [permission store](permissions.md#persistent-plugins): user nodes, group memberships and (since 0.1.3) meta values with contexts and expiry, checked in the player's current contexts. |
 | `bus` | `publish`, `request(subject, payload, timeout_ms)`, `subscribe(subject, queue_group?)`, `unsubscribe`, `stream-publish` | Messages arrive through the `message` hook. At most 256 subscriptions; requests wait at most 60 s. |
 | `servers` | `create`, `remove`, `start`, `stop`, `download`, `control(operation, payload_json)` | The same `rift.control.*` operations as the bus, awaiting the reply (at most 60 s). |
 | `timers` | `every(ms)`, `after(ms)`, `cancel(handle)` | Ticks arrive through the `timer` hook. At least 10 ms; at most 1024 timers. |
@@ -312,7 +428,8 @@ Install only plugins you would run as Rift's user.
   capabilities allow: with full WASI (`filesystem = ["host"]`,
   `network = true`, the whole environment) it can read `rift.sqlite3` and the
   configuration with its secrets, fill the disk through `data`, read every
-  secret in the environment, or open ports. Every plugin can also use the
+  secret in the environment (Rift's own token variables only when the
+  manifest names them in `env`), or open ports. Every plugin can also use the
   whole host API: kick players, change permissions, publish on the bus and
   start servers. Lua plugins, being trusted, can write anywhere Rift can,
   the cache included.
@@ -320,7 +437,8 @@ Install only plugins you would run as Rift's user.
   `network = false` and `env = []` (or a list of names) confine a WebAssembly
   plugin to its own folder; Lua honours `env` and `network` for the Rift API
   only. The defaults are permissive: `data`, network on and the whole
-  environment.
+  environment apart from Rift's own secrets. Lua's `io.popen` starts programs
+  with Rift's full environment.
 - **`rift check` prints the grants** for every plugin, including the Lua
   options and which grants Lua does not enforce, before anything runs.
 - **Rift never downloads or auto-enables plugins.** A plugin runs only when its
@@ -395,7 +513,9 @@ appear in the [operator audit log](http.md#authentication-and-access) as
 `plugin started`, `plugin stopped`, `plugin restarting`, `plugin failed`,
 `plugin reloaded` and `plugin reload_failed` by `system`, and operator
 restarts as `plugin restart_requested` by the operator (`local-admin` for the
-admin socket, `rift.control` for the bus, a name no web operator can have). Records carry the plugin name, never
+admin socket; on the bus `bus:<login>`, `plugin:<name>` for another plugin
+and `rift.control` for the configuration script, names no web operator can
+have). Records carry the plugin name, never
 error text. The HTTP and admin requests themselves are audited as usual.
 
 **Metrics** on the status service's `/metrics`:
@@ -413,7 +533,7 @@ plugin disappear at the next reload), and `hook` and `outcome` are fixed sets.
 ## WebAssembly plugins
 
 A WebAssembly plugin is a component built for `wasm32-wasip2` against world
-`plugin`. Rift runs it on Wasmtime, one instance per plugin on the plugin's
+`plugin` (or `plugin-chat`, with the [`chat`](#chat) export). Rift runs it on Wasmtime, one instance per plugin on the plugin's
 thread, and links Rift's interfaces plus WASI 0.2, with `[capabilities]`
 deciding which directories, network access and environment variables the
 instance sees. The guides for [Rust](plugins-rust.md), [C](plugins-c.md) and
@@ -428,16 +548,23 @@ or `future`; no `resource` types (host-managed things are `u64` handles); plain
 records, variants and lists; configuration and free-form payloads as JSON
 strings; every hook an export with a default in each SDK. Guests build
 against world `plugin`, which includes the WASI CLI imports; world `core` is the
-same without WASI.
+same without WASI. Worlds `plugin-chat` and `core-chat` add the `chat` export,
+the one export an SDK does not default: exporting it registers the plugin for
+[chat](#chat).
 
 Additions keep compiled components loading. Wasmtime matches interface
 versions on the `0.1` track, so a component built against `0.1.0` links
-against this `0.1.1` host and the other way round. An addition may bring new
+against this `0.1.5` host and the other way round. An addition may bring new
 host functions, types and interfaces, but never changes an existing type or
 adds a case to an existing enum or variant, since exports are checked exactly.
 A new export lives in its own interface, which the host looks up when it
 loads a component and treats as optional: world `base` holds what every
-component has, world `optional` what later releases added (`dialogs` in
-0.1.1). A host function a component calls needs a host that has it; a
+component has, worlds `optional`, `optional-decisions`, `optional-styled` and
+`optional-chat` what later releases added (`dialogs` in 0.1.1, `decisions` in
+0.1.2, `styled` in 0.1.4, `chat` in 0.1.5). The rich text host functions came
+in 0.1.2, the visibility and permission meta host functions in 0.1.3,
+`players.title-json` in 0.1.4, and `players.locale` and command permissions
+that may be empty in 0.1.5. A
+host function a component calls needs a host that has it; a
 component that only exports something new still loads on older 0.1 hosts.
 Breaking changes move to 1.0.

@@ -4,7 +4,8 @@
 Each pinned, checksum-verified vanilla server in tests/servers.json is run with
 its bundled data generator (`--reports`). The reports list every built-in
 registry with its network ID and every packet ID per protocol state. From
-them this script writes, under src/protocol/translation/data/:
+them this script writes, under
+crates/rift-translation/src/steps/v1_21_6_to_1_21_7/data/:
 
 * `<version>.json`: the small registries that select wire layouts (data
   component types, particle types, slot displays, ...) and the configuration
@@ -20,6 +21,9 @@ Requires Java 21+ (the fixtures' runtime). Usage:
 
     python3 scripts/translation_data.py              # regenerate everything
     python3 scripts/translation_data.py --check      # fail if files are stale
+
+`python3 scripts/translation_data.py crate [--check]` runs
+scripts/translation_crate.py, which generates crates/rift-translation/data.
 """
 
 import argparse
@@ -33,7 +37,8 @@ import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 CACHE = ROOT / "target" / "minecraft"
-OUTPUT = ROOT / "src" / "protocol" / "translation" / "data"
+OUTPUT = (ROOT / "crates" / "rift-translation" / "src" / "steps"
+          / "v1_21_6_to_1_21_7" / "data")
 SERVERS = json.loads((ROOT / "tests" / "servers.json").read_text())
 
 # Adjacent steps Rift translates, oldest first: (older fixture, newer fixture).
@@ -209,6 +214,11 @@ def outputs():
 
 
 def main():
+    if sys.argv[1:2] == ["crate"]:
+        # The rift-translation crate's data has its own generator.
+        sys.argv[1:2] = []
+        from translation_crate import main as crate
+        return crate()
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--check", action="store_true", help="fail if generated files differ")
     args = parser.parse_args()

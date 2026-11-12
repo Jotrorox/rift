@@ -168,7 +168,18 @@ impl App {
     fn status_snapshot(&self, snapshot: &Snapshot, view: View) -> Value {
         let config = &snapshot.config;
         let settings = config.status.as_ref();
-        let players = self.metrics.backend_players();
+        // The status server is unauthenticated, so it shows the public
+        // count, without hidden players; `/api/status` shows everyone.
+        let players: BTreeMap<String, u64> = if view.status_server() {
+            snapshot
+                .players
+                .server_counts_for(rift::players::Viewer::Public)
+                .into_iter()
+                .map(|(server, count)| (server, count as u64))
+                .collect()
+        } else {
+            self.metrics.backend_players()
+        };
         let health_checks = config.health_check.is_some();
         let mut backends = Vec::with_capacity(config.backends.len());
         // Instances shown under a group's display name are numbered within it.
@@ -202,7 +213,11 @@ impl App {
         }
         let mut value = json!({
             "uptime_seconds":self.started.elapsed().as_secs(),
-            "players":self.metrics.players.get(),
+            "players":if view.status_server() {
+                snapshot.players.count_for(rift::players::Viewer::Public, None) as u64
+            } else {
+                self.metrics.players.get()
+            },
             "backends":backends,
             "health_checks_enabled":health_checks,
         });
@@ -446,6 +461,9 @@ fn router(kind: Kind, address: SocketAddr, mut app: App) -> Router {
             .route("/api/servers/{name}/stop", post(stop_server))
             .route("/api/servers/{name}/logs", get(server_logs))
             .route("/api/servers/{name}/console", post(server_console))
+            .route("/api/players", get(player_list))
+            .route("/api/players/{player}/message", post(message_player))
+            .route("/api/players/{player}/kick", post(kick_player))
             .route("/api/groups", get(service_groups))
             .route("/api/nodes", get(nodes))
             .route("/api/plugins", get(plugin_list))
@@ -487,6 +505,9 @@ fn router(kind: Kind, address: SocketAddr, mut app: App) -> Router {
                 any(files::server).layer(DefaultBodyLimit::max(files::MAX_FILE)),
             )
             .route("/api/groups/{name}/instances", post(create_instance))
+            .route("/api/groups/{name}/start", post(start_group))
+            .route("/api/groups/{name}/stop", post(stop_group))
+            .route("/api/groups/{name}/mode", put(group_mode))
             .route("/api/instances/{name}", delete(remove_instance))
             .route("/api/operations/{id}", get(instance_result))
             .route("/api/metrics", get(json_metrics))
@@ -558,6 +579,11 @@ struct Access {
     groups: Option<BTreeSet<String>>,
 }
 impl Access {
+    /// The caller as `GET /api/access` and the `on_http` context report it;
+    /// `null` permissions or groups mean unrestricted.
+    fn describe(&self) -> Value {
+        json!({"name":self.name,"permissions":self.permissions,"groups":self.groups})
+    }
     fn allows(&self, permission: &str) -> bool {
         self.permissions
             .as_ref()
@@ -740,8 +766,11 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
                 ["api", "servers", _, "logs"] | ["api", "plugins", _, "logs"] => "logs",
                 ["api", "plugins", _, "restart"] => "plugins",
                 ["api", "servers", _, "console"] => "console",
+                // Messaging or kicking a player is what a server console
+                // would do to them, scoped like one (see `in_scope`).
+                ["api", "players", _, "message" | "kick"] => "console",
                 ["api", "servers", _, _]
-                | ["api", "groups", _, "instances"]
+                | ["api", "groups", _, "instances" | "start" | "stop" | "mode"]
                 | ["api", "instances", _]
                 | ["api", "operations", _] => "servers",
                 // Permission data: `perms` (or `config`) reads, `config` writes.
@@ -833,6 +862,23 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
                     },
                 )
             }
+            // A player is in scope while they are on a server the operator
+            // may access; offline players only for unrestricted operators.
+            ["api", "players", name, ..] => {
+                let name = decode_name(name).unwrap_or_default();
+                let server = snapshot
+                    .extensions
+                    .players()
+                    .get(&name)
+                    .ok()
+                    .flatten()
+                    .map(|player| player.server);
+                (
+                    access.groups.is_none()
+                        || server.is_some_and(|server| access.server(&snapshot, &server)),
+                    name.chars().take(128).collect(),
+                )
+            }
             // Plugins act on the whole proxy: group-scoped operators see none.
             ["api", "plugins", rest @ ..] => {
                 let name = rest
@@ -871,7 +917,12 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
             ["api", "servers", _, "start"] => "start",
             ["api", "servers", _, "stop"] => "stop",
             ["api", "servers", _, "console"] => "console",
+            ["api", "players", _, "message"] => "message_player",
+            ["api", "players", _, "kick"] => "kick_player",
             ["api", "groups", _, "instances"] => "create_instance",
+            ["api", "groups", _, "start"] => "start_group",
+            ["api", "groups", _, "stop"] => "stop_group",
+            ["api", "groups", _, "mode"] => "group_mode",
             ["api", "instances", _] => "remove_instance",
             ["api", "templates", _, "download"] => "download_software",
             ["api", "definitions", "templates", _] => "edit_template",
@@ -1083,6 +1134,64 @@ async fn admin_status(State(app): State<App>, Extension(access): Extension<Acces
     }
     Json(value)
 }
+/// `GET /api/players`: online players with their server, as
+/// `rift.players.list` reports them, limited to the operator's servers.
+async fn player_list(State(app): State<App>, Extension(access): Extension<Access>) -> Response {
+    let snapshot = app.snapshot();
+    match snapshot.extensions.players().list(None) {
+        Ok(mut players) => {
+            players.retain(|player| access.server(&snapshot, &player.server));
+            Json(json!({ "players": players })).into_response()
+        }
+        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, &message),
+    }
+}
+/// `POST /api/players/{player}/message` with `{"text": …}`.
+async fn message_player(
+    State(app): State<App>,
+    Path(player): Path<String>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    player_action(app, player, body, "text", "message").await
+}
+/// `POST /api/players/{player}/kick` with `{"reason": …}`.
+async fn kick_player(
+    State(app): State<App>,
+    Path(player): Path<String>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    player_action(app, player, body, "reason", "kick").await
+}
+/// One player action through [`rift::players_service`], so HTTP accepts
+/// exactly what the bus does. A JSON string is plain text; an object or a
+/// list is a text component (the `-json` operation). The type decides,
+/// never the content of a string.
+async fn player_action(
+    app: App,
+    player: String,
+    body: Result<Json<Value>, JsonRejection>,
+    field: &str,
+    operation: &str,
+) -> Response {
+    let value = match payload(body, &[field]) {
+        Ok(value) => value,
+        Err(error) => return error.into_response(),
+    };
+    let operation = match value.get(field) {
+        Some(Value::Object(_) | Value::Array(_)) => format!("{operation}-json"),
+        _ => operation.to_owned(),
+    };
+    let mut request = value;
+    request["target"] = json!(player);
+    let decoded =
+        rift::players_service::Request::decode(&operation, request.to_string().as_bytes());
+    let result = decoded.and_then(|request| request.execute(app.snapshot().extensions.players()));
+    match result {
+        Ok(Value::Bool(true)) => Json(json!({"online": true})).into_response(),
+        Ok(_) => error(StatusCode::NOT_FOUND, "player is not online"),
+        Err(message) => error(StatusCode::BAD_REQUEST, &message),
+    }
+}
 async fn managed_servers(
     State(app): State<App>,
     Extension(access): Extension<Access>,
@@ -1101,7 +1210,7 @@ async fn nodes(State(app): State<App>) -> Json<Value> {
 }
 
 async fn operator_access(Extension(access): Extension<Access>) -> Json<Value> {
-    Json(json!({"name":access.name,"permissions":access.permissions,"groups":access.groups}))
+    Json(access.describe())
 }
 async fn server_logs(
     State(app): State<App>,
@@ -1202,7 +1311,7 @@ async fn rollback(
 }
 fn definition_values(config: &Config) -> Value {
     let server = |s: &rift::config::ManagedServer| {
-        json!({
+        let mut value = json!({
             "directory": s.directory,
             "command": s.command,
             "autostart": s.autostart,
@@ -1212,7 +1321,29 @@ fn definition_values(config: &Config) -> Value {
             "stop_timeout_ms": s.stop_timeout.as_millis(),
             "restart_delay_ms": s.restart_delay.as_millis(),
             "restart_retries": s.restart_retries,
-        })
+        });
+        // Present only when set, so a structured edit writes them back
+        // instead of dropping a server's environment or bus login.
+        if !s.environment.set.is_empty() {
+            value["env"] = json!(s.environment.set);
+        }
+        match &s.environment.inherit {
+            Some(names) if names.is_empty() => value["inherit_env"] = json!(false),
+            Some(names) => value["inherit_env"] = json!(names),
+            None => {}
+        }
+        if s.isolation != rift::config::Isolation::default() {
+            value["isolation"] = if s.isolation.read.is_empty() && s.isolation.write.is_empty() {
+                json!(s.isolation.mode.as_str())
+            } else {
+                json!({"mode": s.isolation.mode.as_str(), "read": s.isolation.read, "write": s.isolation.write})
+            };
+        }
+        if let Some(messaging) = &s.messaging {
+            value["messaging"] =
+                json!({"publish": messaging.publish, "subscribe": messaging.subscribe});
+        }
+        value
     };
     let groups: BTreeMap<_, _> = config
         .service_groups
@@ -1234,6 +1365,10 @@ fn definition_values(config: &Config) -> Value {
             }
             if let Some(scaling) = &group.scaling {
                 value["scaling"] = admin::scaling_values(scaling);
+            }
+            // Present only when the group sets it; absent follows the proxy.
+            if let Some(clients) = &group.translation {
+                value["translation"] = clients.to_json();
             }
             (name, value)
         })
@@ -1290,7 +1425,20 @@ fn definition_values(config: &Config) -> Value {
         .extensions
         .as_ref()
         .and_then(|extensions| extensions.permission_groups());
+    // What a group without its own `translation` follows, and the releases
+    // the editor previews patterns against.
+    let translation = json!({
+        "enabled": config.translation.enabled,
+        "clients": config.translation.clients.to_json(),
+        "summary": config.translation.clients.summary(),
+        // Every release a pattern may name, and the protocols translated.
+        "releases": rift::protocol::releases()
+            .map(|(release, protocol)| json!([release, protocol]))
+            .collect::<Vec<_>>(),
+        "range": rift::protocol::translated_range(),
+    });
     json!({
+        "translation": translation,
         "service_groups": groups,
         "templates": templates,
         "permission_groups": permission_groups,
@@ -1375,15 +1523,25 @@ async fn apply_definition(
             "permission groups require extensions with api_version = 2 or 3; configure them in Lua first",
         );
     }
-    if section == "server_list"
-        && ["favicon", "hosts"]
-            .iter()
-            .any(|field| definition.get(field).is_some())
-    {
+    if section == "server_list" && definition.get("hosts").is_some() {
         return error(
             StatusCode::BAD_REQUEST,
-            "set the favicon and per-host entries in Lua; edits keep the configured ones",
+            "set per-host entries in Lua; edits keep the configured ones",
         );
+    }
+    // A favicon is an uploaded PNG data URL, or `false` to remove it; omitting
+    // it keeps the configured one, including a file set in Lua.
+    if section == "server_list"
+        && let Some(favicon) = definition.get("favicon")
+    {
+        let checked = match favicon {
+            Value::Bool(false) => Ok(()),
+            Value::String(url) => rift::server_list::favicon_data(url).map(drop),
+            _ => Err("expected a PNG data URL or false".to_owned()),
+        };
+        if let Err(message) = checked {
+            return error(StatusCode::BAD_REQUEST, format!("favicon: {message}"));
+        }
     }
     let source = match operator::edited_source(source, section, name, definition) {
         Ok(s) => s,
@@ -1789,6 +1947,50 @@ fn server_operation(
         ),
     }
 }
+async fn start_group(
+    State(app): State<App>,
+    Path(name): Path<String>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    group_operation(body, &[], StatusCode::ACCEPTED, |_| {
+        crate::groups::start(&app.snapshot(), &name)
+    })
+}
+async fn stop_group(
+    State(app): State<App>,
+    Path(name): Path<String>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    group_operation(body, &[], StatusCode::ACCEPTED, |_| {
+        crate::groups::stop(&app.snapshot(), &name)
+    })
+}
+async fn group_mode(
+    State(app): State<App>,
+    Path(name): Path<String>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    group_operation(body, &["mode"], StatusCode::OK, |value| {
+        let mode = value
+            .get("mode")
+            .and_then(Value::as_str)
+            .ok_or_else(|| control::Error::invalid("mode must be \"active\" or \"dev\""))?;
+        crate::groups::set_mode(&app.snapshot(), &name, mode)
+    })
+}
+/// Group operations finish synchronously except for the process changes
+/// they request, which `/api/servers` reports as they complete.
+fn group_operation(
+    body: Result<Json<Value>, JsonRejection>,
+    allowed: &[&str],
+    status: StatusCode,
+    operation: impl FnOnce(&Value) -> Result<Value, control::Error>,
+) -> Response {
+    match payload(body, allowed).and_then(|value| operation(&value)) {
+        Ok(value) => (status, Json(value)).into_response(),
+        Err(failure) => failure.into_response(),
+    }
+}
 /// Every plugin in dispatch order with its state, restarts and calls.
 async fn plugin_list(State(app): State<App>) -> Json<Value> {
     Json(json!({"plugins": app.snapshot().extensions.plugins().statuses()}))
@@ -2009,7 +2211,7 @@ async fn standalone_metrics(state: State<App>) -> Response {
 }
 async fn discovery() -> Json<Value> {
     Json(
-        json!({"version":1,"endpoints":["GET /api/access","GET /api/status","GET /api/servers","POST /api/servers/{name}/start","POST /api/servers/{name}/stop","GET /api/servers/{name}/logs","POST /api/servers/{name}/console","GET /api/groups","GET /api/nodes","GET /api/plugins","GET /api/plugins/{name}","GET /api/plugins/{name}/logs","POST /api/plugins/{name}/restart","POST /api/groups/{name}/instances","GET /api/templates","POST /api/templates/{name}/download","GET /api/software/{type}/versions","GET|PUT|DELETE /api/files/templates/{path}","GET|PUT|DELETE /api/files/servers/{name}/{path}","DELETE /api/instances/{name}","GET /api/definitions","PUT /api/definitions/{section}/{name}","PUT /api/definitions/{section}","GET /api/permissions","POST /api/permissions/members/{uuid}/{group}","DELETE /api/permissions/members/{uuid}/{group}","GET /api/perms/revision","GET /api/perms/backends","GET /api/perms/registered","GET /api/perms/search","GET /api/perms/users","GET|PATCH /api/perms/users/{user}","GET|PUT|DELETE /api/perms/users/{user}/nodes","PUT|DELETE /api/perms/users/{user}/nodes/{id}","GET /api/perms/users/{user}/compiled","GET|POST /api/perms/groups","GET|PATCH|DELETE /api/perms/groups/{name}","GET|PUT|DELETE /api/perms/groups/{name}/nodes","PUT|DELETE /api/perms/groups/{name}/nodes/{id}","GET /api/perms/tracks","GET|PUT|DELETE /api/perms/tracks/{name}","POST /api/perms/tracks/{name}/promote","POST /api/perms/tracks/{name}/demote","GET /api/perms/audit","POST /api/perms/trace","POST /api/perms/apply","POST /api/perms/bulk","POST /api/perms/import","GET /api/perms/export","GET /api/deployments","POST /api/deployments/{id}/rollback","GET /api/audit","GET /api/operations/{id}","GET /api/metrics","GET /api/config","POST /api/config/validate","PUT /api/config","POST /api/reload"],"extensions":"/ext/* -> on_http(request)","source_limit_bytes":control::MAX_SOURCE}),
+        json!({"version":1,"endpoints":["GET /api/access","GET /api/status","GET /api/servers","POST /api/servers/{name}/start","POST /api/servers/{name}/stop","GET /api/servers/{name}/logs","POST /api/servers/{name}/console","GET /api/players","POST /api/players/{player}/message","POST /api/players/{player}/kick","GET /api/groups","GET /api/nodes","GET /api/plugins","GET /api/plugins/{name}","GET /api/plugins/{name}/logs","POST /api/plugins/{name}/restart","POST /api/groups/{name}/instances","GET /api/templates","POST /api/templates/{name}/download","GET /api/software/{type}/versions","GET|PUT|DELETE /api/files/templates/{path}","GET|PUT|DELETE /api/files/servers/{name}/{path}","DELETE /api/instances/{name}","GET /api/definitions","PUT /api/definitions/{section}/{name}","PUT /api/definitions/{section}","GET /api/permissions","POST /api/permissions/members/{uuid}/{group}","DELETE /api/permissions/members/{uuid}/{group}","GET /api/perms/revision","GET /api/perms/backends","GET /api/perms/registered","GET /api/perms/search","GET /api/perms/users","GET|PATCH /api/perms/users/{user}","GET|PUT|DELETE /api/perms/users/{user}/nodes","PUT|DELETE /api/perms/users/{user}/nodes/{id}","GET /api/perms/users/{user}/compiled","GET|POST /api/perms/groups","GET|PATCH|DELETE /api/perms/groups/{name}","GET|PUT|DELETE /api/perms/groups/{name}/nodes","PUT|DELETE /api/perms/groups/{name}/nodes/{id}","GET /api/perms/tracks","GET|PUT|DELETE /api/perms/tracks/{name}","POST /api/perms/tracks/{name}/promote","POST /api/perms/tracks/{name}/demote","GET /api/perms/audit","POST /api/perms/trace","POST /api/perms/apply","POST /api/perms/bulk","POST /api/perms/import","GET /api/perms/export","GET /api/deployments","POST /api/deployments/{id}/rollback","GET /api/audit","GET /api/operations/{id}","GET /api/metrics","GET /api/config","POST /api/config/validate","PUT /api/config","POST /api/reload"],"extensions":"/ext/* -> on_http(request)","source_limit_bytes":control::MAX_SOURCE}),
     )
 }
 async fn config_source(State(app): State<App>) -> Json<Value> {
@@ -2160,7 +2362,11 @@ async fn reload(
     }
     submit(app, control::Operation::Reload, operator.name).await
 }
-async fn extension(State(app): State<App>, request: Request) -> Response {
+async fn extension(
+    State(app): State<App>,
+    Extension(access): Extension<Access>,
+    request: Request,
+) -> Response {
     let snapshot = app.snapshot();
     let script = snapshot.config.on_http.clone();
     let plugins = snapshot.extensions.plugins();
@@ -2197,13 +2403,17 @@ async fn extension(State(app): State<App>, request: Request) -> Response {
                 .map(|v| (name.to_string(), v.to_owned()))
         })
         .collect();
+    // `/ext` needs only `extensions`, so the handler is told who is calling
+    // and decides what that caller may do.
+    let mut context = app.status_snapshot(&snapshot, View::Context);
+    context["operator"] = access.describe();
     let request = HttpRequest {
         method: parts.method.to_string(),
         path: parts.uri.path().into(),
         query: parts.uri.query().unwrap_or("").into(),
         body,
         headers,
-        context: app.status_snapshot(&snapshot, View::Context),
+        context,
     };
     // The configuration script first, then persistent plugins in order.
     let result = match script {

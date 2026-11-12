@@ -1,5 +1,11 @@
 //! Process-wide player presence. A session owns its registration, so cancellation,
 //! login failure and disconnect all remove the player without a separate cleanup.
+//!
+//! This is also the roster every reader of "who is online" goes through. A
+//! player may carry a visibility rule ([`Player::visible_to`], the permission
+//! node from the `rift.visible-to` meta key): Rift does not know what
+//! "vanished" means, only who may see whom. Each reader names its [`Viewer`]
+//! and gets the players that viewer may see.
 use crate::{auth::ProfileProperty, protocol::TabEntry};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -17,6 +23,50 @@ pub struct Player {
     pub server: String,
     /// Signed profile properties (the skin) of an authenticated player.
     pub properties: Arc<[ProfileProperty]>,
+    /// Only viewers holding this permission node see the player; `None` is
+    /// everyone. Resolved from the player's `rift.visible-to` meta.
+    pub visible_to: Option<Arc<str>>,
+}
+
+/// The meta key whose value is the node a viewer needs to see a player.
+pub const VISIBLE_TO: &str = "rift.visible-to";
+
+/// Who is looking at the roster.
+///
+/// | Viewer | Sees | Readers |
+/// | --- | --- | --- |
+/// | `Player` | everyone unrestricted, themselves, and players whose node they hold | the network tab list, `{online}`/`{server_online}`, name completion |
+/// | `Public` | only unrestricted players | the server-list count, the status page and badge |
+/// | `Backend` | only unrestricted players | BungeeCord `PlayerCount`, `PlayerList`, `RiftServers` |
+/// | `System` | everyone | capacity, queues, scaling, idle stops, metrics, admin status, kick and transfer by name, `GetPlayerServer` |
+///
+/// System readers must see hidden players: idle shutdown counting only
+/// visible players would stop the server a hidden administrator stands on.
+#[derive(Clone, Copy)]
+pub enum Viewer<'a> {
+    Player {
+        uuid: [u8; 16],
+        /// Whether the viewer holds a permission node in their contexts.
+        holds: &'a dyn Fn(&str) -> bool,
+    },
+    Public,
+    Backend,
+    System,
+}
+
+impl Viewer<'_> {
+    /// Whether this viewer sees a player with `visible_to` and `uuid`.
+    pub fn sees(&self, uuid: &[u8; 16], visible_to: Option<&str>) -> bool {
+        match (self, visible_to) {
+            (_, None) | (Self::System, _) => true,
+            (Self::Public | Self::Backend, Some(_)) => false,
+            (Self::Player { uuid: own, holds }, Some(node)) => own == uuid || holds(node),
+        }
+    }
+
+    fn sees_player(&self, player: &Player) -> bool {
+        self.sees(&player.uuid, player.visible_to.as_deref())
+    }
 }
 
 #[derive(Debug, Default)]
@@ -61,6 +111,18 @@ impl PlayerRegistry {
         name: impl Into<String>,
         server: impl Into<String>,
     ) -> io::Result<PlayerRegistration> {
+        self.register_visible(uuid, name, server, None)
+    }
+
+    /// [`PlayerRegistry::register`] with the player's visibility rule, so no
+    /// reader ever sees them without it.
+    pub fn register_visible(
+        self: &Arc<Self>,
+        uuid: [u8; 16],
+        name: impl Into<String>,
+        server: impl Into<String>,
+        visible_to: Option<Arc<str>>,
+    ) -> io::Result<PlayerRegistration> {
         let name = checked_name(name.into())?;
         let key = name.to_ascii_lowercase();
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
@@ -75,6 +137,7 @@ impl PlayerRegistry {
                 name,
                 server: server.into(),
                 properties: Arc::default(),
+                visible_to,
             },
         );
         self.generation.fetch_add(1, Ordering::Relaxed);
@@ -88,14 +151,35 @@ impl PlayerRegistry {
         self.generation.load(Ordering::Relaxed)
     }
 
-    /// Tab list entries for every connected player who is not on `server`.
-    pub fn tab_entries(&self, server: &str) -> Vec<TabEntry> {
+    /// Force every session to rebuild its view, for a change that alters
+    /// what a viewer may see without touching a record: a viewer's own
+    /// permissions.
+    pub fn touch(&self) {
+        self.generation.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Set a connected player's visibility rule; returns whether it changed.
+    pub fn set_visibility(&self, uuid: &[u8; 16], visible_to: Option<Arc<str>>) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        match state.players.get_mut(uuid) {
+            Some(player) if player.visible_to != visible_to => {
+                player.visible_to = visible_to;
+                self.generation.fetch_add(1, Ordering::Relaxed);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Tab list entries for every connected player who is not on `server`
+    /// and whom `viewer` may see.
+    pub fn tab_entries(&self, server: &str, viewer: Viewer<'_>) -> Vec<TabEntry> {
         self.state
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .players
             .values()
-            .filter(|player| player.server != server)
+            .filter(|player| player.server != server && viewer.sees_player(player))
             .map(|player| TabEntry {
                 uuid: player.uuid,
                 name: player.name.clone(),
@@ -104,18 +188,52 @@ impl PlayerRegistry {
             .collect()
     }
 
+    /// Every connected player; the [`Viewer::System`] view.
     pub fn snapshot(&self) -> Vec<Player> {
+        self.snapshot_for(Viewer::System)
+    }
+
+    /// The connected players `viewer` may see.
+    pub fn snapshot_for(&self, viewer: Viewer<'_>) -> Vec<Player> {
         self.state
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .players
             .values()
+            .filter(|player| viewer.sees_player(player))
             .cloned()
             .collect()
     }
 
+    /// How many connected players `viewer` may see, on `server` or anywhere.
+    pub fn count_for(&self, viewer: Viewer<'_>, server: Option<&str>) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .players
+            .values()
+            .filter(|player| server.is_none_or(|server| player.server == server))
+            .filter(|player| viewer.sees_player(player))
+            .count()
+    }
+
+    /// [`PlayerRegistry::server_counts`] as `viewer` sees it.
+    pub fn server_counts_for(&self, viewer: Viewer<'_>) -> BTreeMap<String, usize> {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let mut counts = BTreeMap::new();
+        for player in state
+            .players
+            .values()
+            .filter(|player| viewer.sees_player(player))
+        {
+            *counts.entry(player.server.clone()).or_default() += 1;
+        }
+        counts
+    }
+
     /// Count connected players from one consistent view of the registry.
     /// Clone only distinct server names, not player records or pending logins.
+    /// The [`Viewer::System`] view: capacity and scaling count everyone.
     pub(crate) fn server_counts(&self) -> BTreeMap<String, usize> {
         let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         let mut counts = BTreeMap::new();
@@ -129,7 +247,8 @@ impl PlayerRegistry {
         counts
     }
 
-    /// Check one backend's occupancy without cloning player records.
+    /// Check one backend's occupancy without cloning player records. The
+    /// [`Viewer::System`] view: a hidden player keeps their server running.
     pub(crate) fn count_on_server(&self, server: &str) -> usize {
         self.state
             .lock()
@@ -174,9 +293,19 @@ pub struct NameReservation {
 
 impl NameReservation {
     pub fn register(
+        self,
+        uuid: [u8; 16],
+        server: impl Into<String>,
+    ) -> io::Result<PlayerRegistration> {
+        self.register_visible(uuid, server, None)
+    }
+
+    /// [`NameReservation::register`] with the player's visibility rule.
+    pub fn register_visible(
         mut self,
         uuid: [u8; 16],
         server: impl Into<String>,
+        visible_to: Option<Arc<str>>,
     ) -> io::Result<PlayerRegistration> {
         let mut state = self
             .registry
@@ -193,6 +322,7 @@ impl NameReservation {
             name: self.name.clone(),
             server: server.into(),
             properties: Arc::default(),
+            visible_to,
         });
         self.registry.generation.fetch_add(1, Ordering::Relaxed);
         // Keep the existing name claim without an unreserved interval.
@@ -274,17 +404,17 @@ fn checked_name(name: String) -> io::Result<String> {
     if valid_username(&name) {
         Ok(name)
     } else {
-        Err(io::Error::new(
+        Err(crate::text::notice_error(
             io::ErrorKind::InvalidInput,
-            "invalid player name",
+            crate::text::catalog::Notice::LoginInvalidName,
         ))
     }
 }
 
 fn already_connected() -> io::Error {
-    io::Error::new(
+    crate::text::notice_error(
         io::ErrorKind::AlreadyExists,
-        "That player is already connected to this network.",
+        crate::text::catalog::Notice::LoginDuplicateName,
     )
 }
 
@@ -494,6 +624,7 @@ mod tests {
                 name: "Alice".into(),
                 server: "lobby".into(),
                 properties: Arc::default(),
+                visible_to: None,
             }]
         );
         assert_eq!(
@@ -526,6 +657,7 @@ mod tests {
                 name: "Alice".into(),
                 server: "survival".into(),
                 properties: Arc::default(),
+                visible_to: None,
             }]
         );
         let bob = registry

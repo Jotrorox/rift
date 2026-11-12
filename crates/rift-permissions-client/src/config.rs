@@ -16,21 +16,38 @@ use crate::Error;
 ///  "join_timeout_ms": 2000, "request_timeout_ms": 5000,
 ///  "offline_policy": {"mode": "last_snapshot", "path": "replica.json"}}
 /// ```
+///
+/// On a server Rift manages with a `messaging` block, every connection field
+/// may be left out: [`Config::with_environment`] (which
+/// [`Client::start`](crate::Client::start) applies) fills what is unset from
+/// the `RIFT_*` variables Rift sets for the process, so one configuration
+/// file serves every instance of a group.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    /// `host:port` of the proxy's messaging listener.
+    /// `host:port` of the proxy's messaging listener (`RIFT_BUS_ADDRESS`).
+    #[serde(default)]
     pub address: String,
-    /// The name the proxy's certificate is verified against.
+    /// The name the proxy's certificate is verified against
+    /// (`RIFT_BUS_SERVER_NAME`).
+    #[serde(default)]
     pub server_name: String,
-    /// PEM file with the CA or the proxy's own certificate.
+    /// PEM file with the CA or the proxy's own certificate (`RIFT_BUS_CERT`).
+    #[serde(default)]
     pub ca: PathBuf,
     /// Environment variable that holds the bus token of this backend's
-    /// principal (conventionally `server.<name>`).
+    /// principal (conventionally `server.<name>`); `RIFT_BUS_TOKEN` if unset.
+    #[serde(default)]
     pub token_env: String,
     /// This backend's name: sent in `hello` and filled in as the `server`
-    /// context when a check does not name one.
+    /// context when a check does not name one (`RIFT_SERVER_NAME`).
+    #[serde(default)]
     pub server: String,
+    /// This backend's service group, when it is an instance of one (`lobby`
+    /// for `lobby-2`): filled in as the `group` context together with
+    /// `server`. `None` outside a group.
+    #[serde(default)]
+    pub group: Option<String>,
     /// How long [`Client::join`](crate::Client::join) waits for a snapshot.
     #[serde(
         rename = "join_timeout_ms",
@@ -65,10 +82,82 @@ impl Config {
             ca: ca.into(),
             token_env: token_env.into(),
             server: server.into(),
+            group: None,
             join_timeout: default_join_timeout(),
             request_timeout: default_request_timeout(),
             offline_policy: OfflinePolicy::Deny,
         }
+    }
+
+    /// The same configuration for an instance of service group `group`.
+    pub fn with_group(mut self, group: impl Into<String>) -> Self {
+        self.group = Some(group.into());
+        self
+    }
+
+    /// Everything from the `RIFT_*` variables Rift sets for a managed server
+    /// with a bus login, with the default timeouts and offline policy.
+    pub fn from_environment() -> Result<Self, Error> {
+        let config = Self::new("", "", "", "", "").with_environment();
+        config.check_complete()?;
+        Ok(config)
+    }
+
+    /// Fill unset connection fields from the environment: `address` from
+    /// `RIFT_BUS_ADDRESS`, `server_name` from `RIFT_BUS_SERVER_NAME` (else the
+    /// host of `address`), `ca` from `RIFT_BUS_CERT`, `server` from
+    /// `RIFT_SERVER_NAME`, `group` from `RIFT_SERVER_GROUP`, and the token
+    /// variable `RIFT_BUS_TOKEN`. Set fields win.
+    pub fn with_environment(self) -> Self {
+        self.with_variables(|name| std::env::var(name).ok().filter(|value| !value.is_empty()))
+    }
+
+    /// [`Config::with_environment`] over any variable lookup, for tests.
+    pub fn with_variables(mut self, variable: impl Fn(&str) -> Option<String>) -> Self {
+        let fill = |field: &mut String, name: &str| {
+            if field.is_empty()
+                && let Some(value) = variable(name)
+            {
+                *field = value;
+            }
+        };
+        fill(&mut self.address, "RIFT_BUS_ADDRESS");
+        fill(&mut self.server_name, "RIFT_BUS_SERVER_NAME");
+        if self.server_name.is_empty()
+            && let Some((host, _)) = self.address.rsplit_once(':')
+        {
+            self.server_name = host.trim_matches(['[', ']']).to_owned();
+        }
+        fill(&mut self.server, "RIFT_SERVER_NAME");
+        if self.ca.as_os_str().is_empty()
+            && let Some(path) = variable("RIFT_BUS_CERT")
+        {
+            self.ca = path.into();
+        }
+        if self.group.is_none() {
+            self.group = variable("RIFT_SERVER_GROUP");
+        }
+        if self.token_env.is_empty() {
+            self.token_env = "RIFT_BUS_TOKEN".into();
+        }
+        self
+    }
+
+    /// Fail naming the first connection field neither the configuration
+    /// nor the environment set.
+    pub(crate) fn check_complete(&self) -> Result<(), Error> {
+        for (field, value, variable) in [
+            ("address", self.address.is_empty(), "RIFT_BUS_ADDRESS"),
+            ("server", self.server.is_empty(), "RIFT_SERVER_NAME"),
+            ("ca", self.ca.as_os_str().is_empty(), "RIFT_BUS_CERT"),
+        ] {
+            if value {
+                return Err(Error::Config(format!(
+                    "{field} is not set, and neither is {variable} (Rift sets it for managed servers with a messaging block)"
+                )));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -181,6 +270,43 @@ mod tests {
             config,
             Config::new("127.0.0.1:7443", "localhost", "ca.pem", "TOKEN", "lobby")
         );
+        let instance: Config = serde_json::from_str(
+            r#"{"address": "127.0.0.1:7443", "server_name": "localhost", "ca": "ca.pem",
+                "token_env": "TOKEN", "server": "lobby-2", "group": "lobby"}"#,
+        )
+        .unwrap();
+        assert_eq!(instance.group.as_deref(), Some("lobby"));
+        // A template for every instance leaves the connection to Rift.
+        let template: Config =
+            serde_json::from_str(r#"{"offline_policy": {"mode": "deny"}}"#).unwrap();
+        let variables = std::collections::HashMap::from([
+            ("RIFT_BUS_ADDRESS", "10.0.0.2:7443"),
+            ("RIFT_BUS_CERT", "/srv/lobby-3/rift-bus.pem"),
+            ("RIFT_SERVER_NAME", "lobby-3"),
+            ("RIFT_SERVER_GROUP", "lobby"),
+        ]);
+        let filled = template
+            .clone()
+            .with_variables(|name| variables.get(name).map(|value| (*value).to_owned()));
+        assert_eq!(filled.address, "10.0.0.2:7443");
+        assert_eq!(filled.server_name, "10.0.0.2");
+        assert_eq!(filled.ca, PathBuf::from("/srv/lobby-3/rift-bus.pem"));
+        assert_eq!(filled.server, "lobby-3");
+        assert_eq!(filled.group.as_deref(), Some("lobby"));
+        assert_eq!(filled.token_env, "RIFT_BUS_TOKEN");
+        assert!(filled.check_complete().is_ok());
+        // Configured values win; without either, the error names both.
+        let explicit = Config::new("a:1", "a", "ca.pem", "T", "fixed")
+            .with_variables(|name| variables.get(name).map(|value| (*value).to_owned()));
+        assert_eq!(
+            (explicit.server.as_str(), explicit.token_env.as_str()),
+            ("fixed", "T")
+        );
+        let error = template
+            .with_variables(|_| None)
+            .check_complete()
+            .unwrap_err();
+        assert!(error.to_string().contains("RIFT_BUS_ADDRESS"), "{error}");
         let policy: OfflinePolicy =
             serde_json::from_str(r#"{"mode": "fallback_file", "path": "f.json"}"#).unwrap();
         assert_eq!(policy, OfflinePolicy::FallbackFile("f.json".into()));

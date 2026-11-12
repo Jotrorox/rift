@@ -77,7 +77,10 @@ routes and are never interrupted by an HTTP configuration change.
 ## Public status page
 
 The status server can be the page you link players to. Set
-`exposure = "public"` and it reveals only names, health and player counts:
+`exposure = "public"` and it reveals only names, health and player counts.
+Its player counts and its badge, under either exposure, leave out players a
+[visibility rule](permissions.md#visibility) hides; the `operator` exposure's
+`metrics` counters and `/api/status` count everyone, as Prometheus does.
 
 ```lua
 status = {
@@ -211,8 +214,8 @@ rift.config.web = {
 | --- | --- |
 | `read` | Status, metrics and scoped group/server listings; include it for dashboard use |
 | `logs` | Read managed server logs within the operator's scope |
-| `console` | Send commands with the managed server's console privileges |
-| `servers` | Start/stop servers and create/remove instances within scope |
+| `console` | Send commands with the managed server's console privileges, and message or kick players who are on a server within scope (`/api/players/{player}/…`) |
+| `servers` | Start/stop servers and whole groups, switch group modes and create/remove instances within scope |
 | `config` | Read, validate, edit and reload complete Lua source and structured definitions |
 | `deploy` | View configuration deployment metadata and restore retained deployments |
 | `audit` | View operator records; group-scoped operators see only their own records |
@@ -263,7 +266,10 @@ Errors use `{"error":"description"}`. `GET /api` provides endpoint discovery.
 | `POST /api/servers/{name}/stop` | Request an unused managed server stop and pause automatic wake with `{}`; returns `202` when accepted |
 | `GET /api/servers/{name}/logs?cursor={byte_offset}` | Up to 64 KiB of log text with the next byte cursor, `truncated` and `has_more`; omit cursor to tail the log |
 | `POST /api/servers/{name}/console` | Write one `{command: "list"}` to a running managed server; commands are limited to 4096 bytes without control characters |
-| `GET /api/definitions` | Structured `templates`, `service_groups`, `permission_groups`, `tab_list`, `server_list` and the active `revision`; includes private paths and executable arguments. Absent settings are `null` |
+| `GET /api/players` | `{players: [...]}`: online players as `rift.players.list` reports them (`connection_id`, `uuid`, `name`, `server`, `protocol`, `visible_to`, `locale`), hidden players included; group-scoped operators see the players on their servers. Needs `read` |
+| `POST /api/players/{player}/message` | Send `{text}` to one player (a name, UUID or connection id). A JSON string is plain text of 1..=1024 bytes; an object or list is a JSON text component of at most 32 KiB, with colours, hover text and click events ([rich text](extensions.md#rich-text)). Returns `{online: true}`, or `404` when the player is not online. Needs `console` and, for a group-scoped operator, a player on one of their servers |
+| `POST /api/players/{player}/kick` | Disconnect one player with `{reason}`, plain or a component as for `message`; line breaks in a component make a multi-line screen. Same answers and scope as `message` |
+| `GET /api/definitions` | Structured `templates`, `service_groups`, `permission_groups`, `tab_list`, `server_list` and the active `revision`; includes private paths and executable arguments. Absent settings are `null`. A service group's `translation` is `"all"`, `"none"`, `"newer"`, `"older"` or a list of [version patterns](translation.md#which-versions-a-backend-takes), and absent while it follows the proxy. `translation` at the top level has the proxy-wide `enabled`, `clients` and `summary`, every known release as `releases` (`[name, protocol]`) and the translated protocol `range` |
 | `PUT /api/definitions/{section}/{name}` | Apply `{revision, definition}`; section is `templates`, `service_groups` or `permission_groups`, and `null` removes a definition |
 | `PUT /api/definitions/{section}` | Apply `{revision, definition}` to `tab_list` or `server_list`; `null` turns the setting off |
 | `/api/perms/...` | The permission store; see [Permissions API](#permissions-api) |
@@ -273,7 +279,7 @@ Errors use `{"error":"description"}`. `GET /api` provides endpoint discovery.
 | `GET /api/deployments` | Retained deployment metadata, active revision, retention limit and durability flag; never includes source |
 | `POST /api/deployments/{id}/rollback` | Validate and restore a retained configuration with `{revision}` |
 | `GET /api/audit` | Latest operator records and durability flag |
-| `GET /api/groups` | `{groups: [...]}` with group names, inclusive port ranges, instance names, template and storage policy, and `nodes`/`placement` for groups on [nodes](nodes.md) |
+| `GET /api/groups` | `{groups: [...]}` with group names, inclusive port ranges, instance names, template and storage policy, `nodes`/`placement` for groups on [nodes](nodes.md), the operator state `suspended` and `mode` (`active` or `dev`) with its `dev_permission`, `translation` (`clients` as in the definition, a readable `summary`, `inherited` when it follows the proxy and the proxy-wide `enabled`), and a `summary` of instance states (`running`, `starting`, `stopping`, `stopped`, `failed`, `unknown`), `players`, and `draining` (occupied instances of a stopped group still waiting to stop) |
 | `GET /api/plugins` | `{plugins: [...]}`: every [plugin](plugins.md#operator-surface) in dispatch order with `name`, `mode`, `engine`, `version`, `status`, `restarts`, `calls`, `last_error`, `hooks`, `commands`, `capabilities` and `restartable`; unrestricted operators only |
 | `GET /api/plugins/{name}` | One plugin's entry, or `404` |
 | `GET /api/plugins/{name}/logs` | `{plugin, lines}`: the last 200 log lines of a persistent plugin as `{timestamp_unix_ms, level, message}`; `logs` permission |
@@ -281,6 +287,9 @@ Errors use `{"error":"description"}`. `GET /api` provides endpoint discovery.
 | `GET /api/nodes` | `{nodes: [...]}` with each [node](nodes.md)'s `state` (`online`, `unreachable`, `never_connected`), address, labels, `instances`, `max_instances`, `memory_mb`, `allocated_memory_mb`, agent `version` and `last_seen_ms` |
 | `POST /api/groups/{name}/instances` | Submit provisioning with `{}`; returns `202` with `{operation_id, status: "pending", poll}` (autostart follows group policy) |
 | `DELETE /api/instances/{name}` | Submit removal of an unused instance with `{}`; returns `202` with `{operation_id, status: "pending", poll}` |
+| `POST /api/groups/{name}/start` | Start a whole [service group](managed-servers.md#start-stop-and-dev-mode-for-a-whole-group) with `{}`: resume it and start every instance that is not running; returns `202` with `{group, suspended, mode, instances}` |
+| `POST /api/groups/{name}/stop` | Stop a whole group with `{}`: keep new players out, pause scaling and stop every empty instance now and the others once their players leave; returns `202` with the same shape |
+| `PUT /api/groups/{name}/mode` | Set `{"mode": "dev"}` or `{"mode": "active"}`; returns `200` with `{group, suspended, mode, dev_permission}` |
 | `GET /api/operations/{id}` | Retrieve instance or download operation state and its completed result; requires current `servers` permission and the operation's group scope |
 | `GET /api/templates` | `{templates: [...]}` with names, the groups using them, counts of config layers and plugins, and `software` with its download cache state (`cached`, `resolved_version`, `build`, `size`, `sha256`); never includes asset paths |
 | `POST /api/templates/{name}/download` | Download (`{}`) or refresh (`{"refresh":true}`) a template's server software ahead of instance creation; `servers` permission, returns `202` with an operation to poll |
@@ -343,6 +352,16 @@ are retained for 10 minutes, then polls return `404`. Records are in memory
 and do not survive proxy restarts. Pending operations retain their slots
 until completion, regardless of HTTP disconnections. Each poll checks current
 permissions and the group saved at submission, including after removal.
+
+Whole-group operations need `servers` and the group's scope, and are audited
+as `start_group`, `stop_group` and `group_mode`. They record the group's state
+and return immediately; each entry of `instances` is `{name, result}` with an
+optional `message`, where `result` is `starting`, `running` (already up),
+`stopping`, `stopped` (already stopped), `draining` (has players; stops once
+they leave) or `failed`. Process changes complete asynchronously; poll
+`/api/servers`, whose entries carry `group_suspended`, `group_mode` and
+`draining`. Unknown groups are `404`, an unknown mode `400`, and creating an
+instance in a stopped group fails with `409`.
 The dashboard polls through long operations, displays operation failures and
 cleanup warnings, and identifies unresolved operations if polling fails.
 
@@ -380,9 +399,13 @@ instance files are preserved. Scaling policies can change while instances run.
 The same editor covers the network settings on the Server list and Tab list
 pages. `tab_list` and `server_list` definitions replace the whole
 setting with the fields of their Lua tables; text fields take a string or a chat
-component. A server list edit keeps the configured `favicon` and `hosts`, which
-can only be set in Lua, so a definition containing either is rejected.
-`GET /api/definitions` returns the favicon as its `data:` URL. Permission group
+component. A server list edit keeps the configured `hosts`, which can only be
+set in Lua, so a definition containing `hosts` is rejected. It also keeps the
+configured `favicon` unless the definition sets one: a
+`data:image/png;base64,...` URL of a 64×64 PNG up to 16 KiB replaces it, and
+`false` removes it. That choice is kept by later edits that omit `favicon`.
+File paths can only be set in Lua. `GET /api/definitions` returns the favicon as
+its `data:` URL. Permission group
 definitions take the fields of `extensions.groups` (`inherits`, `permissions`,
 `weight`, `prefix`, `suffix`, `meta`) and need extensions with `api_version = 2`
 or `3`; edits return `409` otherwise. They change configuration; the dashboard's
@@ -566,7 +589,12 @@ directory fails startup. A post-commit history write failure is reported in Rift
 stderr; the already-applied configuration remains active.
 
 HTTP mutations record the named actor, operation, target, timestamp and admission
-result. Scope denials, local CLI commands and signal reload results are also
+result. Player messages and kicks are recorded as `message_player` and
+`kick_player` with the player as the target; their text is not. Requests on
+the [message bus](messaging.md#player-api-subjects) that change something are
+recorded too, by `bus:<login>` for a bus login, `plugin:<name>` for a
+persistent plugin, and `rift.control` or `rift.players` for the configuration
+script. Scope denials, local CLI commands and signal reload results are also
 recorded. Requests without a valid token are summarised rather than recorded one
 by one: the first in each minute writes an `authentication` record by
 `anonymous` whose `count` is the number of such requests since the previous
@@ -662,7 +690,10 @@ is refused with `403`. Node reads are not audited, like other reads.
 
 The optional `on_http` callback handles every HTTP method at `/ext` and `/ext/*`.
 It has the same web bearer authentication and browser-origin protections as the
-admin API. Use it for network dashboards, maintenance information, deployment
+admin API, and a caller needs the `extensions` permission (or a full token) to
+reach it; the handler decides what each such caller may do from
+`request.context.operator` (below). Use it
+for network dashboards, maintenance information, deployment
 metadata, diagnostic pages and application-specific API responses. Paths outside
 this namespace remain owned by Rift.
 
@@ -693,6 +724,35 @@ removed. JSON arrays become one-based Lua arrays. The context is an isolated
 snapshot; modifying it cannot change the live runtime. With API v2 in
 [`rift.config.plugins`](extensions.md#online-players), the handler can also
 list, message, kick and transfer players through `rift.players`.
+
+`context.operator` is the authenticated caller, in the shape of
+`GET /api/access`: `name` (`admin` for `web.token`, `local` for the generated
+loopback token, otherwise the `web.operators` key), `permissions` and `groups`.
+`permissions` is absent (`nil`; JSON `null` for plugins) for full access and
+otherwise an array of permission names; `groups` is absent when the caller is
+not limited to service groups (`extensions` cannot be combined with `groups`, so
+it is absent for every caller that reaches the handler). Rift requires only
+`extensions` for `/ext`, so a handler that changes anything must check the
+caller itself:
+
+```lua
+local function allows(operator, permission)
+    if operator.permissions == nil then return true end -- Full access.
+    for _, held in ipairs(operator.permissions) do
+        if held == permission then return true end
+    end
+    return false
+end
+
+on_http = function(request)
+    if request.method == "POST" and request.path == "/ext/announce" then
+        if not allows(request.context.operator, "console") then
+            return { status = 403, body = "console permission required" }
+        end
+        -- ...
+    end
+end,
+```
 
 Return `nil`, or `{body = "...", status = 200, content_type = "text/plain"}`.
 Only `body` is required. Status must be an integer from 200 to 599; 204, 205 and

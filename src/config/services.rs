@@ -17,6 +17,9 @@ pub struct ServiceGroup {
     /// Nodes that run this group's instances; `None` runs them on this host.
     pub nodes: Option<NodeSelector>,
     pub placement: Placement,
+    /// The client versions translated for this group's instances; `None`
+    /// follows `translation.clients`.
+    pub translation: Option<ClientVersions>,
 }
 
 /// Occupancy and queue policy for automatically managed service instances.
@@ -50,6 +53,56 @@ impl InstanceStorage {
     }
 }
 
+/// Operator-controlled runtime state of a service group. It is not part of
+/// the Lua configuration: it survives reloads and, with an instance database,
+/// restarts, and is dropped when the group's definition is removed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GroupState {
+    /// Stopped as a whole: the scaler leaves the group alone, members take
+    /// no new players and each one stops once it is empty.
+    pub suspended: bool,
+    pub mode: GroupMode,
+}
+
+impl GroupState {
+    pub fn is_default(self) -> bool {
+        self == Self::default()
+    }
+}
+
+/// Who may join a service group's instances.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum GroupMode {
+    /// Everyone the network's access rules admit; scaling runs normally.
+    #[default]
+    Active,
+    /// Only players granted [`GroupMode::dev_permission`]; automatic scaling
+    /// is frozen so instances and their files stay as they are.
+    Dev,
+}
+
+impl GroupMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Dev => "dev",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "active" => Some(Self::Active),
+            "dev" => Some(Self::Dev),
+            _ => None,
+        }
+    }
+
+    /// The permission node that admits a player to `group` in dev mode.
+    pub fn dev_permission(group: &str) -> String {
+        format!("rift.group.{group}.dev")
+    }
+}
+
 /// Runtime metadata; instance definitions cannot be supplied by Lua configuration.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ServiceInstance {
@@ -78,6 +131,7 @@ pub(super) fn parse(
     let mut scaling_policies = BTreeMap::new();
     let mut defaults = BTreeMap::new();
     let mut placements = BTreeMap::new();
+    let mut translations = BTreeMap::new();
     for pair in values.pairs::<Value, Value>() {
         let (name, value) = pair.map_err(|e| e.to_string())?;
         let name = string(name, "service_groups key")?;
@@ -107,6 +161,14 @@ pub(super) fn parse(
             placement => nodes::parse_placement(placement, &format!("{path}.placement"))?,
         };
         placements.insert(name.clone(), (selector, placement));
+        let translation = match value
+            .raw_get::<Value>("translation")
+            .map_err(|e| e.to_string())?
+        {
+            Value::Nil => None,
+            clients => Some(client_versions(clients, &format!("{path}.translation"))?),
+        };
+        translations.insert(name.clone(), translation);
         let template = match value
             .raw_get::<Value>("template")
             .map_err(|e| e.to_string())?
@@ -198,6 +260,7 @@ pub(super) fn parse(
                         | b"memory_mb"
                         | b"nodes"
                         | b"placement"
+                        | b"translation"
                 )
             }) {
                 continue;
@@ -253,6 +316,7 @@ pub(super) fn parse(
             let scaling = scaling_policies.remove(&name).unwrap();
             let (memory_mb, default_directory) = defaults.remove(&name).unwrap();
             let (nodes, placement) = placements.remove(&name).unwrap();
+            let translation = translations.remove(&name).unwrap();
             (
                 name,
                 ServiceGroup {
@@ -266,6 +330,7 @@ pub(super) fn parse(
                     default_directory,
                     nodes,
                     placement,
+                    translation,
                 },
             )
         })
@@ -417,6 +482,9 @@ pub(super) fn render(
         .map(|value| substitute(value))
         .collect();
     server.directory = substitute(&server.directory.to_string_lossy()).into();
+    for value in server.environment.set.values_mut() {
+        *value = substitute(value);
+    }
     server
 }
 
@@ -704,6 +772,93 @@ mod tests {
             )),
             "scaling.lua",
         )
+    }
+
+    #[test]
+    fn instance_environment_expands_placeholders_and_rejects_bad_names() {
+        let source = group_source(
+            "directory='servers/{name}',command={'java'},port_range={25600,25602},env={DB_PASSWORD='hunter2',SERVER='{name}@{group}:{port}',HEAP=2048},inherit_env={'PATH','HOME'}",
+        );
+        let mut config = Config::from_lua(&source, "env.lua").unwrap();
+        config.add_instance("lobby", "lobby-2", 25601).unwrap();
+        let environment = &config.managed_servers["lobby-2"].environment;
+        assert_eq!(environment.set["SERVER"], "lobby-2@lobby:25601");
+        assert_eq!(environment.set["DB_PASSWORD"], "hunter2");
+        assert_eq!(environment.set["HEAP"], "2048");
+        assert_eq!(
+            environment.inherit,
+            Some(["HOME".to_owned(), "PATH".to_owned()].into())
+        );
+        config.validate().unwrap();
+        let closed = group_source(
+            "directory='servers/{name}',command={'java'},port_range={25600,25602},inherit_env=false",
+        );
+        let config = Config::from_lua(&closed, "closed.lua").unwrap();
+        assert_eq!(
+            config.service_groups["lobby"].server.environment.inherit,
+            Some(BTreeSet::new())
+        );
+        for (definition, message) in [
+            ("env={['A-B']='x'}", "is not a variable name"),
+            ("inherit_env={'2X'}", "is not a variable name"),
+            ("inherit_env='PATH'", "expected false or a list"),
+            ("env='x'", "expected a table"),
+        ] {
+            let source = group_source(&format!(
+                "directory='servers/{{name}}',command={{'java'}},port_range={{25600,25602}},{definition}"
+            ));
+            let error = Config::from_lua(&source, "bad.lua")
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("service_groups.lobby"), "{error}");
+            assert!(error.contains(message), "{definition}: {error}");
+        }
+    }
+
+    #[test]
+    fn isolation_takes_a_mode_or_a_table_with_extra_paths() {
+        let parse = |definition: &str| {
+            Config::from_lua(
+                &group_source(&format!(
+                    "directory='servers/{{name}}',command={{'java'}},port_range={{25600,25602}},{definition}"
+                )),
+                "isolation.lua",
+            )
+            .map(|config| config.service_groups["lobby"].server.isolation.clone())
+        };
+        use crate::config::IsolationMode;
+        assert_eq!(parse("").unwrap().mode, IsolationMode::Off);
+        assert_eq!(
+            parse("isolation='required'").unwrap().mode,
+            IsolationMode::Required
+        );
+        let isolation = parse("isolation={read={'/srv/maps'},write={'shared'}}").unwrap();
+        assert_eq!(isolation.mode, IsolationMode::Landlock);
+        // Absolute in the host's own terms (Windows adds a drive).
+        assert_eq!(isolation.read, [std::path::absolute("/srv/maps").unwrap()]);
+        assert!(isolation.write[0].is_absolute() && isolation.write[0].ends_with("shared"));
+        for (bad, message) in [
+            ("isolation='strict'", "expected \"off\""),
+            ("isolation={mode='landlock',extra=1}", "isolation"),
+            ("isolation=5", "expected a mode or a table"),
+        ] {
+            let error = parse(bad).unwrap_err().to_string();
+            assert!(error.contains(message), "{bad}: {error}");
+        }
+    }
+
+    #[test]
+    fn inherit_env_cannot_name_rifts_own_secret() {
+        let source = "return { listeners={public='127.0.0.1:25565'}, backends={}, routes={public='lobby'}, \
+            admin={listen='127.0.0.1:0', token_env='ADMIN_TOKEN', permissions={'status'}}, \
+            service_groups={lobby={directory='servers/{name}',command={'java'},port_range={25600,25602},inherit_env={'PATH','ADMIN_TOKEN'}}} }";
+        let error = Config::from_lua(source, "secret.lua")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("service_groups.lobby.inherit_env: ADMIN_TOKEN holds Rift's own secret (admin.token_env)"),
+            "{error}"
+        );
     }
 
     #[test]

@@ -16,6 +16,7 @@ use aws_lc_rs::{
     encoding::{AsDer, PublicKeyX509Der},
     rand,
     rsa::{KeySize, Pkcs1PrivateDecryptingKey, PrivateDecryptingKey},
+    signature,
 };
 use cfb8::cipher::{
     IvState, KeyIvInit, SetIvState,
@@ -31,6 +32,9 @@ use std::{
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 const SESSION_URL: &str = "https://sessionserver.mojang.com/session/minecraft/hasJoined";
+/// Read only in builds with the `test-session-server` feature.
+#[cfg(feature = "test-session-server")]
+pub const TEST_SESSION_URL_ENV: &str = "RIFT_TEST_SESSION_URL";
 const MAX_SESSION_BODY: usize = 64 * 1024;
 const MAX_PROPERTIES: usize = 16;
 const MAX_PROPERTY_LENGTH: usize = 16 * 1024;
@@ -169,7 +173,7 @@ pub struct Authenticator {
     private_key: Pkcs1PrivateDecryptingKey,
     public_key: Vec<u8>,
     http: reqwest::Client,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-session-server"))]
     session_url: Option<String>,
 }
 
@@ -190,26 +194,39 @@ impl Authenticator {
             .user_agent(concat!("Rift/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|_| io::Error::other("Could not initialize authentication HTTPS client."))?;
+        #[cfg(feature = "test-session-server")]
+        let (http, session_url) = match std::env::var_os(TEST_SESSION_URL_ENV) {
+            Some(value) => {
+                let url = test_session_url(value.to_str().unwrap_or(""))?;
+                eprintln!(
+                    "rift: warning: {TEST_SESSION_URL_ENV} is set: logins are verified by {url}, not by Mojang. This build is for tests only."
+                );
+                let http = test_session_client(timeout).map_err(|_| {
+                    io::Error::other("Could not initialize authentication HTTP client.")
+                })?;
+                (http, Some(url))
+            }
+            None => (http, None),
+        };
+        #[cfg(all(test, not(feature = "test-session-server")))]
+        let session_url = None;
         Ok(Self {
             private_key: Pkcs1PrivateDecryptingKey::new(private_key)
                 .map_err(|_| io::Error::other("Could not initialize proxy encryption key."))?,
             public_key,
             http,
-            #[cfg(test)]
-            session_url: None,
+            #[cfg(any(test, feature = "test-session-server"))]
+            session_url,
         })
     }
 
-    /// No endpoint override exists in production configuration or environment.
+    /// No endpoint override exists in the configuration, and none in the
+    /// environment of default and release builds. Only a build with the
+    /// `test-session-server` feature reads `RIFT_TEST_SESSION_URL`.
     #[cfg(test)]
     pub(crate) fn for_test_session_server(url: String, timeout: Duration) -> Self {
         let mut auth = Self::new(timeout).unwrap();
-        auth.http = reqwest::Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(timeout)
-            .build()
-            .unwrap();
+        auth.http = test_session_client(timeout).unwrap();
         auth.session_url = Some(url);
         auth
     }
@@ -217,11 +234,16 @@ impl Authenticator {
     /// The caller bounds the complete login with its connection deadline. HTTP
     /// requests also have their own timeout. Encryption starts before hasJoined
     /// so outages and rejected sessions receive an encrypted login disconnect.
+    ///
+    /// `profile_key` is the X.509 public key a 1.19–1.19.2 client sent in
+    /// Login Start. Such a client signs the challenge with it instead of
+    /// encrypting it, as the vanilla server requires.
     pub async fn authenticate<S: AsyncRead + AsyncWrite + Unpin>(
         &self,
         stream: &mut CryptoStream<S>,
         version: ProtocolVersion,
         name: &str,
+        profile_key: Option<&[u8]>,
     ) -> io::Result<AuthenticatedProfile> {
         if !valid_name(name) || stream.is_encrypted() {
             return Err(failed());
@@ -242,7 +264,7 @@ impl Authenticator {
         // A separate exact-length Reader cannot consume the first encrypted
         // packet while reading the final plaintext Encryption Response.
         let frame = Reader::default()
-            .read_frame(stream, 1024)
+            .read_frame(stream, 2048)
             .await?
             .ok_or_else(failed)?;
         let response = Packet::from_body(&frame).map_err(|_| failed())?;
@@ -251,26 +273,65 @@ impl Authenticator {
         }
         let mut bytes = response.data.as_slice();
         let secret_ciphertext = read_rsa_bytes(&mut bytes, self.private_key.key_size_bytes())?;
-        let token_ciphertext = read_rsa_bytes(&mut bytes, self.private_key.key_size_bytes())?;
+        // 1.19–1.19.2 say which proof follows; a client with a profile key
+        // must sign, and one without must encrypt (vanilla's own rule).
+        let signed = matches!(version.number(), 759..=760) && {
+            let (&flag, rest) = bytes.split_first().ok_or_else(failed)?;
+            bytes = rest;
+            match flag {
+                1 => false,
+                0 => true,
+                _ => return Err(failed()),
+            }
+        };
+        if signed != profile_key.is_some() {
+            return Err(failed());
+        }
+        let challenge = if signed {
+            let salt = bytes.get(..8).ok_or_else(failed)?;
+            bytes = &bytes[8..];
+            let length = read_varint(&mut bytes).map_err(|_| failed())?;
+            if !(1..=1024).contains(&length) {
+                return Err(failed());
+            }
+            let signature = bytes.get(..length as usize).ok_or_else(failed)?;
+            bytes = &bytes[length as usize..];
+            Challenge::Signed { salt, signature }
+        } else {
+            Challenge::Encrypted(read_rsa_bytes(
+                &mut bytes,
+                self.private_key.key_size_bytes(),
+            )?)
+        };
         if !bytes.is_empty() {
             return Err(failed());
         }
         let mut secret_buffer = Zeroizing::new(vec![0; self.private_key.min_output_size()]);
         let mut token_buffer = Zeroizing::new(vec![0; self.private_key.min_output_size()]);
-        // Perform both decryptions before validating either result; all malformed
-        // RSA/token failures have the same externally visible error.
+        // Perform both checks before validating either result; all malformed
+        // RSA/token/signature failures have the same externally visible error.
         let secret = self
             .private_key
             .decrypt(secret_ciphertext, &mut secret_buffer);
-        let actual_token = self
-            .private_key
-            .decrypt(token_ciphertext, &mut token_buffer);
-        let (Ok(secret), Ok(actual_token)) = (secret, actual_token) else {
+        let proven = match challenge {
+            Challenge::Encrypted(ciphertext) => self
+                .private_key
+                .decrypt(ciphertext, &mut token_buffer)
+                .is_ok_and(|actual| verify_slices_are_equal(&token, actual).is_ok()),
+            Challenge::Signed { salt, signature } => {
+                let mut message = token.to_vec();
+                message.extend_from_slice(salt);
+                signature::UnparsedPublicKey::new(
+                    &signature::RSA_PKCS1_2048_8192_SHA256,
+                    profile_key.unwrap(),
+                )
+                .verify(&message, signature)
+                .is_ok()
+            }
+        };
+        let (Ok(secret), true) = (secret, proven) else {
             return Err(failed());
         };
-        if verify_slices_are_equal(&token, actual_token).is_err() {
-            return Err(failed());
-        }
         let mut secret: [u8; 16] = secret.try_into().map_err(|_| failed())?;
         let hash = server_hash(&secret, &self.public_key);
         stream.enable_encryption(secret)?;
@@ -281,9 +342,9 @@ impl Authenticator {
     }
 
     async fn has_joined(&self, name: &str, hash: &str) -> io::Result<AuthenticatedProfile> {
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-session-server")))]
         let url = SESSION_URL;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-session-server"))]
         let url = self.session_url.as_deref().unwrap_or(SESSION_URL);
         let mut response = self
             .http
@@ -312,6 +373,50 @@ impl Authenticator {
         }
         parse_profile(&body, name)
     }
+}
+
+/// Plain HTTP is allowed here, unlike for Mojang's session server.
+#[cfg(any(test, feature = "test-session-server"))]
+fn test_session_client(timeout: Duration) -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(timeout)
+        .build()
+}
+
+/// Accepts only `http://` and `https://` URLs whose host is a loopback IP
+/// address, so a test build cannot hand logins to another machine.
+#[cfg(feature = "test-session-server")]
+fn test_session_url(value: &str) -> io::Result<String> {
+    let loopback = reqwest::Url::parse(value).is_ok_and(|url| {
+        matches!(url.scheme(), "http" | "https")
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.host_str().is_some_and(|host| {
+                // An IPv6 host is printed in brackets.
+                host.trim_matches(['[', ']'])
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
+            })
+    });
+    if !loopback {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "{TEST_SESSION_URL_ENV}: expected an http:// or https:// URL on a loopback IP address (127.0.0.1 or [::1]), such as http://127.0.0.1:8080/session/minecraft/hasJoined; unset it to use Mojang"
+            ),
+        ));
+    }
+    Ok(value.to_owned())
+}
+
+/// The client's proof that it answered this login's challenge.
+enum Challenge<'a> {
+    /// The challenge, encrypted with the proxy's public key.
+    Encrypted(&'a [u8]),
+    /// SHA256withRSA over the challenge and salt, by the client's profile key.
+    Signed { salt: &'a [u8], signature: &'a [u8] },
 }
 
 fn valid_name(name: &str) -> bool {

@@ -1,12 +1,15 @@
-//! Host bindings for `rift:plugin@0.1.1`: generated types and traits, the
+//! Host bindings for `rift:plugin@0.1.5`: generated types and traits, the
 //! trait implementations that forward every import to
 //! [`Services`](crate::plugins::services::Services), and conversions between
 //! the generated types and the engine-neutral [`api`] types. WASI is linked
 //! separately (see [`super::wasi`]).
 //!
 //! The host binds world `base` (every import and the `handler` export that
-//! every component has) and, separately, world `optional`, whose exports a
-//! component built against an older 0.1 lacks; see [`Optional::load`].
+//! every component has) and, separately, worlds `optional` (`dialogs`),
+//! `optional-decisions` (`decisions`), `optional-styled` (`styled`) and
+//! `optional-chat` (`chat`), whose exports a component built against an older
+//! 0.1 lacks, and `chat` every component that does not moderate chat; see
+//! [`Optional::load`].
 use super::State;
 use crate::plugins::api;
 
@@ -20,6 +23,39 @@ pub(super) mod optional {
     wasmtime::component::bindgen!({
         path: "wit",
         world: "rift:plugin/optional",
+        with: {
+            "rift:plugin/types": super::rift::plugin::types,
+        },
+    });
+}
+
+/// The optional `decisions` export (since 0.1.2), sharing `base`'s types.
+pub(super) mod optional_decisions {
+    wasmtime::component::bindgen!({
+        path: "wit",
+        world: "rift:plugin/optional-decisions",
+        with: {
+            "rift:plugin/types": super::rift::plugin::types,
+        },
+    });
+}
+
+/// The optional `styled` export (since 0.1.4), sharing `base`'s types.
+pub(super) mod optional_styled {
+    wasmtime::component::bindgen!({
+        path: "wit",
+        world: "rift:plugin/optional-styled",
+        with: {
+            "rift:plugin/types": super::rift::plugin::types,
+        },
+    });
+}
+
+/// The optional `chat` export (since 0.1.5), sharing `base`'s types.
+pub(super) mod optional_chat {
+    wasmtime::component::bindgen!({
+        path: "wit",
+        world: "rift:plugin/optional-chat",
         with: {
             "rift:plugin/types": super::rift::plugin::types,
         },
@@ -46,8 +82,8 @@ fn level(level: types::Level) -> api::Level {
 
 fn title(title: types::TitleSpec) -> api::TitleSpec {
     api::TitleSpec {
-        title: title.title,
-        subtitle: title.subtitle,
+        title: crate::text::Text::Plain(title.title),
+        subtitle: title.subtitle.map(crate::text::Text::Plain),
         fade_in: title.fade_in,
         stay: title.stay,
         fade_out: title.fade_out,
@@ -107,6 +143,8 @@ pub(super) fn registration(registration: types::Registration) -> api::Registrati
             })
             .collect(),
         hooks: registration.hooks.into_iter().map(hook).collect(),
+        // Set by the engine from the component's exports.
+        chat: false,
     }
 }
 
@@ -121,12 +159,29 @@ pub(super) fn route_decision(decision: types::RouteDecision) -> api::RouteDecisi
 pub(super) fn action(action: types::Action) -> api::Action {
     match action {
         types::Action::Continue => api::Action::Continue,
-        types::Action::Deny(reason) => api::Action::Deny(reason),
+        types::Action::Deny(reason) => api::Action::Deny(reason.into()),
         types::Action::Server(server) => api::Action::Server(server),
-        types::Action::Message(text) => api::Action::Message(text),
+        types::Action::Message(text) => api::Action::Message(text.into()),
         types::Action::Queue(server) => api::Action::Queue(server),
         types::Action::LeaveQueue => api::Action::LeaveQueue,
     }
+}
+
+/// The `decisions` export's answer. Fails for a `-json` case whose text is
+/// not a valid text component; the host then treats the decision like any
+/// other invalid one.
+pub(super) fn decision(decision: types::Decision) -> Result<api::Action, String> {
+    use crate::text::Text;
+    Ok(match decision {
+        types::Decision::Continue => api::Action::Continue,
+        types::Decision::Deny(reason) => api::Action::Deny(reason.into()),
+        types::Decision::Server(server) => api::Action::Server(server),
+        types::Decision::Message(text) => api::Action::Message(text.into()),
+        types::Decision::Queue(server) => api::Action::Queue(server),
+        types::Decision::LeaveQueue => api::Action::LeaveQueue,
+        types::Decision::DenyJson(reason) => api::Action::Deny(Text::json(&reason, "deny reason")?),
+        types::Decision::MessageJson(text) => api::Action::Message(Text::json(&text, "message")?),
+    })
 }
 
 pub(super) fn suggestions(suggestions: Vec<types::Suggestion>) -> Vec<api::Suggestion> {
@@ -134,7 +189,7 @@ pub(super) fn suggestions(suggestions: Vec<types::Suggestion>) -> Vec<api::Sugge
         .into_iter()
         .map(|suggestion| api::Suggestion {
             text: suggestion.text,
-            tooltip: suggestion.tooltip,
+            tooltip: suggestion.tooltip.map(crate::text::Text::Plain),
         })
         .collect()
 }
@@ -142,13 +197,65 @@ pub(super) fn suggestions(suggestions: Vec<types::Suggestion>) -> Vec<api::Sugge
 pub(super) fn status_override(status: types::StatusOverride) -> api::StatusOverride {
     api::StatusOverride {
         motd_json: status.motd_json,
-        version: status.version,
+        version: status.version.map(crate::text::Text::Plain),
         protocol: status.protocol,
         online: status.online,
         max_players: status.max_players,
-        sample: status.sample,
+        sample: status
+            .sample
+            .map(|lines| lines.into_iter().map(crate::text::Text::Plain).collect()),
         favicon: status.favicon,
     }
+}
+
+/// The `styled` export's suggestions. An empty or blank `tooltip-json` is no
+/// tooltip; an invalid one fails the whole answer.
+pub(super) fn rich_suggestions(
+    suggestions: Vec<types::RichSuggestion>,
+) -> Result<Vec<api::Suggestion>, String> {
+    suggestions
+        .into_iter()
+        .map(|suggestion| {
+            let tooltip = match suggestion.tooltip_json {
+                Some(json) if !json.trim().is_empty() => {
+                    Some(crate::text::Text::json(&json, "suggestion tooltip")?)
+                }
+                _ => None,
+            };
+            Ok(api::Suggestion {
+                text: suggestion.text,
+                tooltip,
+            })
+        })
+        .collect()
+}
+
+/// The `styled` export's status override. Fails for a version or sample
+/// line that is not a valid text component.
+pub(super) fn rich_status_override(
+    status: types::RichStatusOverride,
+) -> Result<api::StatusOverride, String> {
+    use crate::text::Text;
+    Ok(api::StatusOverride {
+        motd_json: status.motd_json,
+        version: status
+            .version_json
+            .map(|version| Text::json(&version, "status version"))
+            .transpose()?,
+        protocol: status.protocol,
+        online: status.online,
+        max_players: status.max_players,
+        sample: status
+            .sample_json
+            .map(|lines| {
+                lines
+                    .iter()
+                    .map(|line| Text::json(line, "status sample line"))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?,
+        favicon: status.favicon,
+    })
 }
 
 pub(super) fn http_response(response: types::HttpResponse) -> api::HttpResponse {
@@ -256,6 +363,22 @@ pub(super) fn dialog_response(mut context: api::Context) -> types::DialogRespons
     }
 }
 
+/// A chat message or backend command: `context.chat` holds it.
+pub(super) fn chat_attempt(mut context: api::Context) -> types::ChatAttempt {
+    let chat = context.chat.take().unwrap_or(api::ChatInput {
+        kind: api::ChatKind::Message,
+        text: String::new(),
+    });
+    types::ChatAttempt {
+        ctx: self::context(context),
+        kind: match chat.kind {
+            api::ChatKind::Message => types::ChatKind::Message,
+            api::ChatKind::Command => types::ChatKind::Command,
+        },
+        text: chat.text,
+    }
+}
+
 pub(super) fn rift_event(event: api::RiftEvent) -> types::RiftEvent {
     types::RiftEvent {
         subject: event.subject,
@@ -285,12 +408,29 @@ impl players::Host for State {
         self.services.players().message(&target, &text)
     }
 
+    fn message_json(&mut self, target: String, text_json: String) -> Result<bool, String> {
+        self.services.players().message_json(&target, &text_json)
+    }
+
     fn action_bar(&mut self, target: String, text: String) -> Result<bool, String> {
         self.services.players().action_bar(&target, &text)
     }
 
+    fn action_bar_json(&mut self, target: String, text_json: String) -> Result<bool, String> {
+        self.services.players().action_bar_json(&target, &text_json)
+    }
+
     fn title(&mut self, target: String, spec: types::TitleSpec) -> Result<bool, String> {
         self.services.players().title(&target, &title(spec))
+    }
+
+    fn title_json(&mut self, target: String, spec: types::TitleJsonSpec) -> Result<bool, String> {
+        self.services.players().title_json(
+            &target,
+            &spec.title_json,
+            spec.subtitle_json.as_deref(),
+            [spec.fade_in, spec.stay, spec.fade_out],
+        )
     }
 
     fn tab_list(
@@ -328,12 +468,28 @@ impl players::Host for State {
         self.services.players().kick(&target, &reason)
     }
 
+    fn kick_json(&mut self, target: String, reason_json: String) -> Result<bool, String> {
+        self.services.players().kick_json(&target, &reason_json)
+    }
+
     fn transfer(&mut self, target: String, server: String) -> Result<bool, String> {
         self.services.players().transfer(&target, &server)
     }
 
     fn broadcast(&mut self, text: String) -> Result<u32, String> {
         self.services.players().broadcast(&text)
+    }
+
+    fn broadcast_json(&mut self, text_json: String) -> Result<u32, String> {
+        self.services.players().broadcast_json(&text_json)
+    }
+
+    fn visible_to(&mut self, target: String) -> Result<Option<String>, String> {
+        self.services.players().visible_to(&target)
+    }
+
+    fn locale(&mut self, target: String) -> Result<Option<String>, String> {
+        self.services.players().locale(&target)
     }
 }
 
@@ -386,6 +542,29 @@ impl permissions::Host for State {
 
     fn list_groups(&mut self) -> String {
         self.services.permissions().list_groups()
+    }
+
+    fn meta(&mut self, uuid: String, key: String) -> Option<String> {
+        self.services.permissions().meta_value(&uuid, &key)
+    }
+
+    fn set_meta(
+        &mut self,
+        uuid: String,
+        key: String,
+        value: Option<String>,
+        contexts_json: Option<String>,
+        expires_at: Option<u64>,
+    ) -> Result<bool, String> {
+        let contexts = match contexts_json {
+            None => rift_permissions::ContextSet::new(),
+            Some(json) => {
+                serde_json::from_str(&json).map_err(|error| format!("contexts-json: {error}"))?
+            }
+        };
+        self.services
+            .permissions()
+            .set_meta(&uuid, &key, value.as_deref(), contexts, expires_at)
     }
 }
 
@@ -525,9 +704,27 @@ mod tests {
         .into_iter()
         .map(hook)
         .collect();
-        // `dialog` has no WIT case, so 0.1.0 components keep loading.
-        assert_eq!(names, api::Hook::ALL[..api::Hook::ALL.len() - 1]);
-        assert_eq!(api::Hook::ALL.last(), Some(&api::Hook::Dialog));
+        // `dialog` and `chat` have no WIT case, so 0.1.0 components keep
+        // loading.
+        assert_eq!(names, api::Hook::ALL[..api::Hook::ALL.len() - 2]);
+        assert_eq!(
+            api::Hook::ALL[api::Hook::ALL.len() - 2..],
+            [api::Hook::Dialog, api::Hook::Chat]
+        );
+        let attempt = chat_attempt(api::Context {
+            id: 9,
+            command: Some("msg".into()),
+            args: "Alex hi".into(),
+            chat: Some(api::ChatInput {
+                kind: api::ChatKind::Command,
+                text: "msg Alex hi".into(),
+            }),
+            ..Default::default()
+        });
+        assert_eq!(attempt.kind, types::ChatKind::Command);
+        assert_eq!(attempt.text, "msg Alex hi");
+        assert_eq!(attempt.ctx.command.as_deref(), Some("msg"));
+        assert_eq!(attempt.ctx.args, "Alex hi");
         let converted = context(api::Context {
             id: 9,
             name: "Alex".into(),
@@ -550,9 +747,87 @@ mod tests {
             query: String::new(),
             body: String::new(),
             headers: [("a".to_owned(), "b".to_owned())].into(),
-            context: serde_json::json!({"scopes": []}),
+            context: serde_json::json!({
+                "operator": {"name": "viewer", "permissions": ["read"], "groups": null},
+            }),
         });
         assert_eq!(request.headers, [("a".to_owned(), "b".to_owned())]);
-        assert_eq!(request.context_json, r#"{"scopes":[]}"#);
+        assert_eq!(
+            request.context_json,
+            r#"{"operator":{"groups":null,"name":"viewer","permissions":["read"]}}"#
+        );
+    }
+
+    #[test]
+    fn styled_answers_convert_their_rich_text() {
+        use crate::text::Text;
+        let suggestions = rich_suggestions(vec![
+            types::RichSuggestion {
+                text: "a".into(),
+                tooltip_json: Some(r#"{"text":"Tip","color":"red"}"#.into()),
+            },
+            types::RichSuggestion {
+                text: "b".into(),
+                tooltip_json: Some("  ".into()),
+            },
+            types::RichSuggestion {
+                text: "c".into(),
+                tooltip_json: Some("as written".into()),
+            },
+            types::RichSuggestion {
+                text: "d".into(),
+                tooltip_json: None,
+            },
+        ])
+        .unwrap();
+        assert_eq!(
+            suggestions[0].tooltip,
+            Some(Text::Component(
+                serde_json::json!({"text": "Tip", "color": "red"})
+            ))
+        );
+        assert_eq!(suggestions[1].tooltip, None);
+        assert!(suggestions[2].tooltip.is_some());
+        assert_eq!(suggestions[3].tooltip, None);
+        let error = rich_suggestions(vec![types::RichSuggestion {
+            text: "x".into(),
+            tooltip_json: Some("{nope".into()),
+        }])
+        .unwrap_err();
+        assert!(error.contains("suggestion tooltip"), "{error}");
+
+        let status = rich_status_override(types::RichStatusOverride {
+            motd_json: Some("\"motd\"".into()),
+            version_json: Some(r#"{"text":"Rift","color":"gold"}"#.into()),
+            protocol: Some(774),
+            online: Some(1),
+            max_players: Some(2),
+            sample_json: Some(vec!["\"one\"".into(), "two".into()]),
+            favicon: None,
+        })
+        .unwrap();
+        assert_eq!(status.motd_json.as_deref(), Some("\"motd\""));
+        assert_eq!(
+            status.version,
+            Some(Text::Component(
+                serde_json::json!({"text": "Rift", "color": "gold"})
+            ))
+        );
+        assert_eq!(status.sample.as_ref().map(Vec::len), Some(2));
+        assert_eq!(
+            (status.protocol, status.online, status.max_players),
+            (Some(774), Some(1), Some(2))
+        );
+        let error = rich_status_override(types::RichStatusOverride {
+            motd_json: None,
+            version_json: None,
+            protocol: None,
+            online: None,
+            max_players: None,
+            sample_json: Some(vec!["[1,".into()]),
+            favicon: None,
+        })
+        .unwrap_err();
+        assert!(error.contains("status sample line"), "{error}");
     }
 }

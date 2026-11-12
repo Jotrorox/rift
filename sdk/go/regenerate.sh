@@ -19,11 +19,17 @@ else
     rm -rf "$out"
 fi
 
-go run "$WIT_BINDGEN_GO" generate \
-    --world plugin \
-    --package-root github.com/Jotrorox/rift/sdk/go/gen \
-    --out "$out" \
-    "$wit"
+# World `plugin`, then `plugin-chat` on top of it: the same packages plus
+# rift/plugin/chat, the optional `chat` export. Only a plugin that imports
+# sdk/go/rift/chat links that package, and it is built with
+# `--wit-world plugin-chat`.
+for world in plugin plugin-chat; do
+    go run "$WIT_BINDGEN_GO" generate \
+        --world "$world" \
+        --package-root github.com/Jotrorox/rift/sdk/go/gen \
+        --out "$out" \
+        "$wit"
+done
 
 if [[ "${1:-}" == "--check" ]]; then
     if ! diff -r "$sdk/gen" "$out"; then

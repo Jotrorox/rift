@@ -96,11 +96,14 @@ Pumpkin then takes the player's UUID, name, skin properties and address from
 the proxy, and ignores `[networking.java] online_mode` and `encryption` for
 logins (Rift has already verified the account). Direct connections that
 bypass the proxy are kicked, as they cannot sign the forwarded data. Vine
-takes precedence over Velocity in Pumpkin's login and Rift does not speak it;
-BungeeCord forwarding is not sent by Rift, so Pumpkin would fall back to its
-own UUIDs.
+takes precedence over Velocity in Pumpkin's login and Rift does not speak it.
 
-Without Velocity forwarding Pumpkin derives an offline UUID from the name
+Pumpkin also reads BungeeCord forwarding: enable
+`[networking.proxy.bungeecord]` instead and set Rift's `forwarding.mode =
+"bungeecord"`. BungeeCord forwarding is unsigned, so Pumpkin must then accept
+connections from Rift alone; prefer Velocity.
+
+Without forwarding Pumpkin derives an offline UUID from the name
 (the first 16 bytes of its SHA-256, not vanilla's `OfflinePlayer:` MD5 that an
 offline-mode Rift uses), so the pushed snapshot goes unused and each login
 waits to fetch one (up to `join_timeout_ms`). Permissions still work, keyed by
@@ -139,11 +142,19 @@ path = "replica.json"
 | `ca` | | PEM file with the CA or the proxy's certificate |
 | `token_env` | | Environment variable holding the principal's token |
 | `server` | | This backend's name: sent in `hello` and used as the `server` context |
+| `group` | none | This backend's service group, for an instance of one (`lobby` for `lobby-2`): the `group` context |
 | `join_timeout_ms` | 2000 | How long a login waits for the player's snapshot |
 | `request_timeout_ms` | 5000 | How long `/perms`, writes and group requests wait |
 | `offline_policy` | `{mode = "deny"}` | `deny`, `last_snapshot` or `fallback_file` with a `path`; see [offline policies](permissions-clients.md#offline-policies) |
 
 Relative paths (`ca`, the policy's `path`) are relative to the data folder.
+
+On a server Rift manages with a `messaging` block, leave out `address`,
+`server_name`, `ca`, `token_env`, `server` and `group`: they fall back to the
+`RIFT_*` variables Rift sets for each instance (see [bus logins for
+instances](managed-servers.md#bus-logins-for-instances)), and with those
+variables present and no configuration file at all, the plugin starts on them
+alone instead of writing a template.
 The template uses `last_snapshot`, so players known before a restart keep
 their permissions while the proxy is away.
 
@@ -162,7 +173,8 @@ player's contexts, asks the replica, and overwrites `event.result` only for
 (`minecraft:command.gamemode`), so a grant of `minecraft:command.*` covers
 every vanilla command.
 
-**Contexts.** Every check uses `server` (from the configuration), `world`
+**Contexts.** Every check uses `server` and, when configured, `group` (from
+the configuration), `world`
 (the world folder, such as `world_nether`), `dimension` (such as
 `minecraft:the_nether`) and `gamemode` (`survival`, `creative`, `adventure`,
 `spectator`), plus custom keys from calculators other plugins register (see
@@ -262,8 +274,8 @@ fn region_of(_player: &Arc<Player>) -> &'static str {
 | `permissions()` | The service as `Arc<dyn RiftPermissions>`, so code tested with `TestPermissions` takes it unchanged |
 
 Calculators run on every permission check, on the checking thread: keep them
-cheap and non-blocking. `server`, `world`, `dimension` and `gamemode` are
-reserved and ignored; the proxy keeps only keys listed in its external
+cheap and non-blocking. `server`, `group`, `world`, `dimension` and
+`gamemode` are reserved and ignored; the proxy keeps only keys listed in its external
 contexts. A panicking calculator is logged and contributes nothing.
 
 Change listeners, and the futures of `apply` and `command`, run on the

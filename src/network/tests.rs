@@ -24,27 +24,33 @@ fn group_candidates_balance_load_inherit_access_and_expand_fallbacks() {
         .register([1; 16], "Alice", "lobby-1")
         .unwrap();
     assert_eq!(
-        network.initial_candidates("lobby", false, "Bob").unwrap(),
+        network
+            .initial_candidates("lobby", false, "Bob", None)
+            .unwrap(),
         ["lobby-2", "lobby-1", "backup"]
     );
     assert_eq!(
-        network.initial_candidates("lobby-1", false, "Bob").unwrap(),
+        network
+            .initial_candidates("lobby-1", false, "Bob", None)
+            .unwrap(),
         ["lobby-1", "backup"]
     );
     assert!(
         network
-            .initial_candidates("lobby", false, "Blocked")
+            .initial_candidates("lobby", false, "Blocked", None)
             .is_err()
     );
     assert!(
         network
-            .initial_candidates("lobby-1", false, "Blocked")
+            .initial_candidates("lobby-1", false, "Blocked", None)
             .is_err()
     );
     assert_eq!(network.recovery_candidates("lobby-1"), ["backup"]);
     drop(player);
     assert_eq!(
-        network.initial_candidates("lobby", false, "Bob").unwrap(),
+        network
+            .initial_candidates("lobby", false, "Bob", None)
+            .unwrap(),
         ["lobby-1", "lobby-2", "backup"]
     );
 }
@@ -104,18 +110,20 @@ fn explicit_initial_order_filters_access_without_using_backend_fallbacks() {
     };
     assert_eq!(
         network
-            .initial_candidates("survival", true, "ALICE")
+            .initial_candidates("survival", true, "ALICE", None)
             .unwrap(),
         ["restricted", "lobby", "backup"]
     );
     assert_eq!(
-        network.initial_candidates("survival", true, "Bob").unwrap(),
+        network
+            .initial_candidates("survival", true, "Bob", None)
+            .unwrap(),
         ["lobby", "backup"]
     );
     // An explicit initial list replaces the direct primary, including its ACL.
     assert_eq!(
         network
-            .initial_candidates("restricted", true, "Eve")
+            .initial_candidates("restricted", true, "Eve", None)
             .unwrap(),
         ["lobby", "backup"]
     );
@@ -131,18 +139,18 @@ fn selected_route_permissions_are_terminal_and_cannot_be_bypassed_by_fallbacks()
         metrics: &metrics,
     };
     let error = network
-        .initial_candidates("restricted", false, "Bob")
+        .initial_candidates("restricted", false, "Bob", None)
         .unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
     assert_eq!(
         network
-            .initial_candidates("restricted", false, "Alice")
+            .initial_candidates("restricted", false, "Alice", None)
             .unwrap(),
         ["restricted", "lobby"]
     );
     assert_eq!(
         network
-            .initial_candidates("missing", false, "Alice")
+            .initial_candidates("missing", false, "Alice", None)
             .unwrap_err()
             .kind(),
         io::ErrorKind::PermissionDenied
@@ -160,13 +168,13 @@ fn ordinary_routes_keep_their_order_and_filter_restricted_fallbacks() {
     };
     assert_eq!(
         network
-            .initial_candidates("survival", false, "Eve")
+            .initial_candidates("survival", false, "Eve", None)
             .unwrap(),
         ["survival", "backup", "lobby"]
     );
     assert_eq!(
         network
-            .initial_candidates("survival", false, "Alice")
+            .initial_candidates("survival", false, "Alice", None)
             .unwrap(),
         ["survival", "restricted", "backup", "lobby"]
     );
@@ -477,6 +485,10 @@ async fn queue_command_waits_for_capacity_and_transfer_policy_runs_before_target
         let mut cfg = config();
         cfg.backends.insert("lobby".into(), rift::routing::Backend::parse(&lobby.local_addr().unwrap().to_string()).unwrap());
         cfg.backends.insert("survival".into(), rift::routing::Backend::parse(&game.local_addr().unwrap().to_string()).unwrap());
+        // A 1.12.2 backend that takes only its own version and older ones.
+        cfg.backends.insert("classic".into(), rift::routing::Backend::parse("127.0.0.1:1").unwrap()
+            .with_version(ProtocolVersion::from_release("1.12.2").unwrap())
+            .with_clients(rift::protocol::ClientVersions::parse(["older"]).unwrap()));
         let snapshot = Arc::new(Snapshot::new(cfg.clone(), None).unwrap());
         let extension_config = Config::from_lua(r#"return {
             listeners={public='127.0.0.1:0'}, backends={lobby='127.0.0.1:1',survival='127.0.0.1:2'}, routes={public='lobby'},
@@ -484,7 +496,7 @@ async fn queue_command_waits_for_capacity_and_transfer_policy_runs_before_target
             extensions={api_version=1, queues={survival=1},
                 commands={queue={permission='queue.use',run=function() return {queue='survival'} end}},
                 before_transfer=function(ctx)
-                    if ctx.reason ~= 'queue' then return {deny='Use the queue'} end
+                    if ctx.reason ~= 'queue' then return {deny={text='Use the queue',color='gold'}} end
                 end,
                 after_transfer=function(ctx) rift.publish('observed', tostring(ctx.success)) end
             }
@@ -531,9 +543,21 @@ async fn queue_command_waits_for_capacity_and_transfer_policy_runs_before_target
         session.extension.as_mut().unwrap().ready("lobby").await;
         assert!(session.can_switch());
 
-        // A manually typed built-in route cannot bypass the extension policy.
+        // A target whose translation setting leaves this 1.21.11 player out
+        // says so instead of reporting an outage.
+        assert!(network.command(&mut session,"lobby","server classic",&mut event).await.unwrap().is_none());
+        let refused = read(&mut client).await;
+        let reason = b"This server does not accept your Minecraft version.";
+        assert!(refused.data.windows(reason.len()).any(|window| window == reason), "{refused:?}");
+
+        // A manually typed built-in route cannot bypass the extension policy,
+        // and the player sees the hook's reason with its formatting.
         assert!(network.command(&mut session,"lobby","server survival",&mut event).await.unwrap().is_none());
-        assert_eq!(read(&mut client).await.id, 0x77);
+        let denied = read(&mut client).await;
+        assert_eq!(denied.id, 0x77);
+        let contains = |needle: &[u8]| denied.data.windows(needle.len()).any(|window| window == needle);
+        assert!(contains(b"Unable to switch servers: ") && contains(b"Use the queue"));
+        assert!(contains(b"color") && contains(b"gold"));
         assert!(timeout(Duration::from_millis(10), game.accept()).await.is_err());
         let mut command=Vec::new(); write_string("queue", &mut command);
         Codec::default().write(&mut client, &Packet::new(6,command)).await.unwrap();
@@ -568,6 +592,29 @@ async fn queue_command_waits_for_capacity_and_transfer_policy_runs_before_target
 
 #[tokio::test]
 async fn initial_selection_skips_backends_that_cannot_serve_the_client_version() {
+    // 1.11.2 is older than anything Rift translates.
+    selection_skips(|backend| {
+        backend.with_version(rift::protocol::ProtocolVersion::from_release("1.11.2").unwrap())
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn initial_selection_skips_backends_whose_translation_setting_leaves_the_client_out() {
+    // The 1.21.8 player is newer than this 1.21.6 backend, which takes only
+    // its own version and older ones.
+    selection_skips(|backend| {
+        backend
+            .with_version(rift::protocol::ProtocolVersion::from_release("1.21.6").unwrap())
+            .with_clients(rift::protocol::ClientVersions::parse(["older"]).unwrap())
+    })
+    .await;
+}
+
+/// A 1.21.8 player with the candidates `ancient`, which `unservable` makes a
+/// backend that cannot take them, and `legacy` on 1.21.6: the player lands on
+/// `legacy`, and `ancient` alone refuses them without being contacted.
+async fn selection_skips(unservable: impl Fn(rift::routing::Backend) -> rift::routing::Backend) {
     use rift::protocol::{
         Codec, Handshake, NextState, Packet, ProtocolVersion, Reader, write_string,
     };
@@ -577,18 +624,18 @@ async fn initial_selection_skips_backends_that_cannot_serve_the_client_version()
         time::{Duration, timeout},
     };
     timeout(Duration::from_secs(5), async {
-        let modern = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let ancient = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let legacy = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let backend = |listener: &TcpListener, release| {
-            rift::routing::Backend::parse(&listener.local_addr().unwrap().to_string())
-                .unwrap()
-                .with_version(ProtocolVersion::from_release(release).unwrap())
+        let backend = |listener: &TcpListener| {
+            rift::routing::Backend::parse(&listener.local_addr().unwrap().to_string()).unwrap()
         };
         let mut cfg = config();
         cfg.backends
-            .insert("modern".into(), backend(&modern, "1.21.11"));
-        cfg.backends
-            .insert("legacy".into(), backend(&legacy, "1.21.6"));
+            .insert("ancient".into(), unservable(backend(&ancient)));
+        cfg.backends.insert(
+            "legacy".into(),
+            backend(&legacy).with_version(ProtocolVersion::from_release("1.21.6").unwrap()),
+        );
         let snapshot = Arc::new(Snapshot::new(cfg, None).unwrap());
         let metrics = Metrics::default();
         let network = Network {
@@ -625,7 +672,7 @@ async fn initial_selection_skips_backends_that_cannot_serve_the_client_version()
         let selected = network
             .connect_initial(
                 &mut session,
-                &["modern".into(), "legacy".into()],
+                &["ancient".into(), "legacy".into()],
                 &mut (Instant::now() + Duration::from_secs(1)),
                 &mut event,
             )
@@ -640,7 +687,7 @@ async fn initial_selection_skips_backends_that_cannot_serve_the_client_version()
             .unwrap();
         assert_eq!(Handshake::decode(&handshake).unwrap().protocol, 771);
         assert!(
-            timeout(Duration::from_millis(20), modern.accept())
+            timeout(Duration::from_millis(20), ancient.accept())
                 .await
                 .is_err()
         );
@@ -649,7 +696,7 @@ async fn initial_selection_skips_backends_that_cannot_serve_the_client_version()
         let error = network
             .connect_initial(
                 &mut session,
-                &["modern".into()],
+                &["ancient".into()],
                 &mut (Instant::now() + Duration::from_secs(1)),
                 &mut event,
             )
@@ -657,7 +704,7 @@ async fn initial_selection_skips_backends_that_cannot_serve_the_client_version()
             .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::Unsupported);
         assert!(
-            timeout(Duration::from_millis(20), modern.accept())
+            timeout(Duration::from_millis(20), ancient.accept())
                 .await
                 .is_err()
         );

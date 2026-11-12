@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::ForwardingMode;
 use crate::protocol::{read_string, write_string};
 use tokio::{
     io::DuplexStream,
@@ -372,6 +373,139 @@ async fn backend_switch_relogs_backend_and_retains_client_socket_and_compression
     })
     .await
     .unwrap();
+}
+
+/// Client Information with `locale` first, as every protocol has it.
+fn client_information(id: i32, locale: &str) -> Packet {
+    let mut data = Vec::new();
+    write_string(locale, &mut data);
+    // View distance, chat mode and colours, skin parts, main hand, text
+    // filtering, server listing, particles.
+    data.extend([8, 0, 1, 0x7f, 1, 0, 1, 0]);
+    Packet::new(id, data)
+}
+
+#[tokio::test]
+async fn client_locale_is_read_updated_and_kept_across_a_backend_switch() {
+    timeout(Duration::from_secs(3), async {
+        let (mut session, mut client, mut backend) = session().await;
+        let codec = Codec::default();
+        let caps = session.version().unwrap().switching().unwrap();
+        codec.write(&mut backend, &login_success()).await.unwrap();
+        session.forward().await.unwrap();
+        assert_eq!(receive(&mut client, codec).await, login_success());
+        codec.write(&mut client, &Packet::empty(3)).await.unwrap();
+        session.forward().await.unwrap();
+        assert_eq!(receive(&mut backend, codec).await, Packet::empty(3));
+        // Nothing is known through login.
+        assert_eq!(session.locale(), None);
+
+        // 1.20.2+ clients send it during configuration.
+        let configured = client_information(caps.config_information, "de_de");
+        codec.write(&mut client, &configured).await.unwrap();
+        session.forward().await.unwrap();
+        assert_eq!(receive(&mut backend, codec).await, configured);
+        assert_eq!(session.locale(), Some("de_de"));
+
+        codec.write(&mut backend, &Packet::empty(3)).await.unwrap();
+        session.forward().await.unwrap();
+        assert_eq!(receive(&mut client, codec).await, Packet::empty(3));
+        codec.write(&mut client, &Packet::empty(3)).await.unwrap();
+        session.forward().await.unwrap();
+        assert_eq!(receive(&mut backend, codec).await, Packet::empty(3));
+        let join = join_game(1);
+        codec.write(&mut backend, &join).await.unwrap();
+        session.forward().await.unwrap();
+        assert_eq!(receive(&mut client, codec).await, join);
+        assert_eq!(session.locale(), Some("de_de"));
+
+        // Changing the language in the options sends it again, in play.
+        let changed = client_information(caps.play_information, "fr_fr");
+        codec.write(&mut client, &changed).await.unwrap();
+        session.forward().await.unwrap();
+        assert_eq!(receive(&mut backend, codec).await, changed);
+        assert_eq!(session.locale(), Some("fr_fr"));
+
+        // A locale longer than vanilla allows is the backend's to judge and
+        // leaves the known one alone.
+        let overlong = client_information(caps.play_information, "x".repeat(17).as_str());
+        codec.write(&mut client, &overlong).await.unwrap();
+        session.forward().await.unwrap();
+        assert_eq!(receive(&mut backend, codec).await, overlong);
+        assert_eq!(session.locale(), Some("fr_fr"));
+        codec.write(&mut client, &changed).await.unwrap();
+        session.forward().await.unwrap();
+        assert_eq!(receive(&mut backend, codec).await, changed);
+
+        // A switch replays the options to the new backend and keeps the locale.
+        let (replacement, mut second) = tokio::io::duplex(65536);
+        let switch = session.connect_backend(replacement);
+        let peers = async {
+            receive(&mut second, codec).await;
+            assert_eq!(receive(&mut second, codec).await, login_start());
+            codec.write(&mut second, &login_success()).await.unwrap();
+            assert_eq!(receive(&mut second, codec).await, Packet::empty(3));
+            assert_eq!(receive(&mut client, codec).await, Packet::empty(0x74));
+            codec
+                .write(&mut client, &Packet::empty(0x0f))
+                .await
+                .unwrap();
+            assert_eq!(
+                receive(&mut second, codec).await,
+                Packet::new(caps.config_information, changed.data.clone())
+            );
+            assert_eq!(receive(&mut client, codec).await, Packet::new(8, vec![0]));
+        };
+        let (result, ()) = tokio::join!(switch, peers);
+        result.unwrap();
+        assert_eq!(session.locale(), Some("fr_fr"));
+
+        // The new configuration may bring a new answer.
+        let reconfigured = client_information(caps.config_information, "en_us");
+        codec.write(&mut client, &reconfigured).await.unwrap();
+        session.forward().await.unwrap();
+        assert_eq!(receive(&mut second, codec).await, reconfigured);
+        assert_eq!(session.locale(), Some("en_us"));
+    })
+    .await
+    .unwrap();
+}
+
+/// Clients before 1.20.2 have no configuration: the locale comes in play,
+/// after Join Game, and old clients spell it `en_US`.
+#[tokio::test]
+async fn legacy_client_locale_arrives_in_play() {
+    for (number, locale) in [(47, "en_US"), (340, "de_DE"), (763, "en_us")] {
+        let (mut client, input) = tokio::io::duplex(65536);
+        let handshake = Handshake {
+            protocol: number,
+            address: "play.test".into(),
+            port: 25565,
+            next_state: NextState::Login,
+        };
+        let codec = Codec::default();
+        codec.write(&mut client, &handshake.packet()).await.unwrap();
+        let mut session: Session<DuplexStream, DuplexStream> =
+            Session::accept(input).await.unwrap();
+        let caps = session.version().unwrap().switching().unwrap();
+        assert_eq!(caps.config_information, -1);
+        assert_eq!(session.locale(), None);
+        session
+            .remember_client_packet(
+                State::Play,
+                &client_information(caps.play_information, locale),
+            )
+            .unwrap();
+        assert_eq!(session.locale(), Some(locale), "protocol {number}");
+        // Another packet with the same shape is not Client Information.
+        session
+            .remember_client_packet(
+                State::Play,
+                &client_information(caps.play_information + 1, "zz_zz"),
+            )
+            .unwrap();
+        assert_eq!(session.locale(), Some(locale), "protocol {number}");
+    }
 }
 
 #[tokio::test]
@@ -1139,6 +1273,117 @@ async fn authenticated_session_for(
     CryptoStream<DuplexStream>,
     DuplexStream,
 ) {
+    let (session, client, backend, _) =
+        authenticated_session_with(number, ForwardingMode::Velocity, None).await;
+    (session, client, backend)
+}
+
+/// A backend handshake, keeping a BungeeCord-forwarded hostname whole
+/// (Spigot reads up to 32767 characters; a client's is cut at its first NUL).
+fn forwarded_handshake(packet: &Packet) -> Handshake {
+    assert_eq!(packet.id, 0);
+    let mut bytes = packet.data.as_slice();
+    let protocol = read_varint(&mut bytes).unwrap();
+    let address = read_string(&mut bytes, 32767).unwrap().to_owned();
+    let port = u16::from_be_bytes(bytes[..2].try_into().unwrap());
+    assert_eq!(&bytes[2..], &[2]);
+    Handshake {
+        protocol,
+        address,
+        port,
+        next_state: NextState::Login,
+    }
+}
+
+/// A client's Login Start for `number`, claiming `uuid` where the version
+/// carries one, with a 1.19–1.19.2 profile key if given.
+fn client_login_start(number: i32, uuid: [u8; 16], key: Option<&protocol::ProfileKey>) -> Packet {
+    let mut data = Vec::new();
+    write_string("Player", &mut data);
+    if matches!(number, 759..=760) {
+        data.push(u8::from(key.is_some()));
+        if let Some(key) = key {
+            key.write(&mut data);
+        }
+    }
+    if number >= 760 {
+        if number < 764 {
+            data.push(1); // optional UUID before 1.20.2
+        }
+        data.extend(uuid);
+    }
+    Packet::new(0, data)
+}
+
+/// A client logs in online on `number` and Rift attaches a backend with
+/// `mode` forwarding. With `signer`, a 1.19–1.19.2 client sends its profile
+/// key and signs the challenge. Returns the handshake the backend received.
+async fn authenticated_session_with(
+    number: i32,
+    mode: ForwardingMode,
+    signer: Option<&aws_lc_rs::rsa::KeyPair>,
+) -> (
+    Session<DuplexStream, DuplexStream>,
+    CryptoStream<DuplexStream>,
+    DuplexStream,
+    Handshake,
+) {
+    let (mut session, client, handshake, key) = authenticated_client(number, mode, signer).await;
+    session.enable_network().unwrap();
+    let (server, mut backend) = tokio::io::duplex(65536);
+    session.connect_backend(server).await.unwrap();
+    let received = forwarded_handshake(&receive(&mut backend, Codec::default()).await);
+    if mode == ForwardingMode::Velocity {
+        assert_eq!(received, handshake);
+    }
+    // The backend learns the Mojang UUID, never the claimed one.
+    assert_eq!(
+        receive(&mut backend, Codec::default()).await,
+        client_login_start(number, [7; 16], key.as_ref())
+    );
+    (session, client, backend, received)
+}
+
+/// An authenticated client with forwarding set and no backend yet.
+async fn authenticated_client(
+    number: i32,
+    mode: ForwardingMode,
+    signer: Option<&aws_lc_rs::rsa::KeyPair>,
+) -> (
+    Session<DuplexStream, DuplexStream>,
+    CryptoStream<DuplexStream>,
+    Handshake,
+    Option<protocol::ProfileKey>,
+) {
+    authenticated_client_with(number, mode, signer, true).await
+}
+
+/// The same with `authentication.signed_chat` as given.
+async fn authenticated_client_with(
+    number: i32,
+    mode: ForwardingMode,
+    signer: Option<&aws_lc_rs::rsa::KeyPair>,
+    signed_chat: bool,
+) -> (
+    Session<DuplexStream, DuplexStream>,
+    CryptoStream<DuplexStream>,
+    Handshake,
+    Option<protocol::ProfileKey>,
+) {
+    let key = signer.map(|signer| {
+        use aws_lc_rs::{
+            encoding::{AsDer, PublicKeyX509Der},
+            signature::KeyPair as _,
+        };
+        protocol::ProfileKey {
+            expiry: 1_800_000_000_000,
+            public_key: AsDer::<PublicKeyX509Der>::as_der(signer.public_key())
+                .unwrap()
+                .as_ref()
+                .to_vec(),
+            signature: vec![0x5a; 512],
+        }
+    });
     let (mut client, input) = tokio::io::duplex(65536);
     let handshake = Handshake {
         protocol: number,
@@ -1151,16 +1396,13 @@ async fn authenticated_session_for(
         .await
         .unwrap();
     // This client-supplied UUID must never reach Paper.
-    let mut claimed = login_start();
-    claimed.data[7..].fill(99);
-    if number < 764 {
-        claimed.data.insert(7, 1); // optional UUID before 1.20.2
-    }
+    let claimed = client_login_start(number, [99; 16], key.as_ref());
     Codec::default().write(&mut client, &claimed).await.unwrap();
     let mut session = Session::accept(input).await.unwrap();
+    session.set_signed_chat(signed_chat);
     assert_eq!(
         session.read_login_start().await.unwrap().uuid,
-        Some([99; 16])
+        (number >= 760).then_some([99; 16])
     );
     let mut client = CryptoStream::new(client);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1209,12 +1451,36 @@ async fn authenticated_session_for(
         let size = read_varint(&mut data).unwrap() as usize;
         let token = &data[..size];
         assert_eq!(&data[size..], if number >= 766 { &[1][..] } else { &[] });
-        let mut response = Vec::new();
-        for plaintext in [&[42; 16][..], token] {
+        let encrypt = |plaintext: &[u8], response: &mut Vec<u8>| {
             let mut encrypted = vec![0; public.ciphertext_size()];
             let encrypted = public.encrypt(plaintext, &mut encrypted).unwrap();
-            write_varint(encrypted.len() as i32, &mut response);
+            write_varint(encrypted.len() as i32, response);
             response.extend_from_slice(encrypted);
+        };
+        let mut response = Vec::new();
+        encrypt(&[42; 16], &mut response);
+        if let Some(signer) = signer {
+            response.push(0);
+            let salt = 77_i64.to_be_bytes();
+            response.extend(salt);
+            let mut message = token.to_vec();
+            message.extend(salt);
+            let mut signature = vec![0; signer.public_modulus_len()];
+            signer
+                .sign(
+                    &aws_lc_rs::signature::RSA_PKCS1_SHA256,
+                    &aws_lc_rs::rand::SystemRandom::new(),
+                    &message,
+                    &mut signature,
+                )
+                .unwrap();
+            write_varint(signature.len() as i32, &mut response);
+            response.extend(signature);
+        } else {
+            if matches!(number, 759..=760) {
+                response.push(1);
+            }
+            encrypt(token, &mut response);
         }
         Codec::default()
             .write(&mut client, &Packet::new(1, response))
@@ -1225,28 +1491,19 @@ async fn authenticated_session_for(
     let (result, (), ()) = tokio::join!(session.authenticate(&authenticator), peer, verify);
     result.unwrap();
     assert_eq!(session.authenticated_profile(), Some(&verified_profile()));
+    let secret: &[u8] = if mode == ForwardingMode::BungeeGuard {
+        b"guard-token"
+    } else {
+        b"shared-secret"
+    };
     session
         .set_forwarding(
-            Arc::from(&b"shared-secret"[..]),
+            mode,
+            (mode != ForwardingMode::BungeeCord).then(|| Arc::from(secret)),
             "203.0.113.9".parse().unwrap(),
         )
         .unwrap();
-    session.enable_network().unwrap();
-    let (server, mut backend) = tokio::io::duplex(65536);
-    session.connect_backend(server).await.unwrap();
-    assert_eq!(
-        receive(&mut backend, Codec::default()).await,
-        handshake.packet()
-    );
-    let mut expected_start = login_start();
-    if number < 764 {
-        expected_start.data.insert(7, 1);
-    }
-    assert_eq!(
-        receive(&mut backend, Codec::default()).await,
-        expected_start
-    );
-    (session, client, backend)
+    (session, client, handshake, key)
 }
 
 fn validate_velocity_response(packet: &Packet, id: i32, secret: &[u8]) -> bool {
@@ -1986,7 +2243,7 @@ async fn relayed_play_packets_keep_the_proxy_dimension_and_game_mode_contexts() 
                 gamemode: Some(protocol::GameMode::Survival),
             }
         );
-        authority.join(player, "Player", "lobby");
+        authority.join(player, "Player", "lobby", None);
         assert_eq!(authority.contexts(player).to_string(), "server=lobby");
         session.sync_permission_contexts();
         assert_eq!(
@@ -2046,7 +2303,7 @@ async fn relayed_play_packets_keep_the_proxy_dimension_and_game_mode_contexts() 
             "dimension=minecraft:the_nether;gamemode=spectator;server=lobby"
         );
         // A switch restarts from the server; the runtime syncs again after it.
-        authority.switch_server(player, "survival");
+        authority.switch_server(player, "survival", None);
         assert_eq!(authority.contexts(player).to_string(), "server=survival");
         session.sync_permission_contexts();
         assert_eq!(
@@ -2169,6 +2426,414 @@ async fn rift_dialog_clicks_reach_the_owner_and_never_the_backend() {
             .await
             .is_err()
         );
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn legacy_clients_receive_titles_rendered_for_them() {
+    timeout(Duration::from_secs(3), async {
+        let codec = Codec::default();
+        let (mut client, input) = tokio::io::duplex(65536);
+        let handshake = Handshake {
+            protocol: 47,
+            address: "play.test".into(),
+            port: 25565,
+            next_state: NextState::Login,
+        };
+        codec.write(&mut client, &handshake.packet()).await.unwrap();
+        let mut session = Session::accept(input).await.unwrap();
+        let (server, mut backend) = tokio::io::duplex(65536);
+        session.connect_backend(server).await.unwrap();
+        receive(&mut backend, codec).await;
+        let mut start = Vec::new();
+        write_string("Player", &mut start);
+        codec
+            .write(&mut client, &Packet::new(0, start))
+            .await
+            .unwrap();
+        session.forward().await.unwrap();
+        receive(&mut backend, codec).await;
+        let mut profile = Vec::new();
+        write_string("00000000-0000-0000-0000-000000000007", &mut profile);
+        write_string("Player", &mut profile);
+        let mut world = 1_i32.to_be_bytes().to_vec();
+        world.extend([1, 0, 0, 20]);
+        write_string("flat", &mut world);
+        world.push(0);
+        for packet in [Packet::new(2, profile), Packet::new(1, world)] {
+            codec.write(&mut backend, &packet).await.unwrap();
+            session.forward().await.unwrap();
+            assert_eq!(receive(&mut client, codec).await, packet);
+        }
+        let title = crate::text::Text::Component(
+            serde_json::json!({"text": "Hi", "color": "#ff8800", "shadow_color": 1}),
+        );
+        session
+            .send_title(Some(&title), Some(&"sub".into()), [1, 2, 3])
+            .await
+            .unwrap();
+        let mut times = vec![2];
+        times.extend([0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3]);
+        assert_eq!(receive(&mut client, codec).await, Packet::new(0x45, times));
+        let mut subtitle = vec![1];
+        write_string(r#"{"text":"sub"}"#, &mut subtitle);
+        assert_eq!(
+            receive(&mut client, codec).await,
+            Packet::new(0x45, subtitle)
+        );
+        // Hex becomes the nearest named colour and the shadow is dropped.
+        let mut heading = vec![0];
+        write_string(r#"{"color":"gold","text":"Hi"}"#, &mut heading);
+        assert_eq!(
+            receive(&mut client, codec).await,
+            Packet::new(0x45, heading)
+        );
+    })
+    .await
+    .unwrap();
+}
+
+/// Every protocol before 1.19.3, where online mode used to be refused.
+const LEGACY_ONLINE: [i32; 33] = [
+    47, 107, 108, 109, 110, 210, 315, 316, 335, 338, 340, 393, 401, 404, 477, 480, 485, 490, 498,
+    573, 575, 578, 735, 736, 751, 753, 754, 755, 756, 757, 758, 759, 760,
+];
+
+fn velocity_request_for(id: i32, requested: u8) -> Packet {
+    let mut data = Vec::new();
+    write_varint(id, &mut data);
+    write_string(forwarding::CHANNEL, &mut data);
+    data.push(requested);
+    Packet::new(4, data)
+}
+
+/// Check the HMAC and the verified profile; return the forwarding version
+/// and whatever follows the profile properties (a 1.19 key).
+fn velocity_payload(packet: &Packet, id: i32) -> (i32, Vec<u8>) {
+    use hmac::{Hmac, KeyInit, Mac};
+    use sha2::Sha256;
+    assert_eq!(packet.id, 2);
+    let mut data = packet.data.as_slice();
+    assert_eq!(read_varint(&mut data).unwrap(), id);
+    assert_eq!(data[0], 1);
+    data = &data[1..];
+    let mut mac = Hmac::<Sha256>::new_from_slice(b"shared-secret").unwrap();
+    mac.update(&data[32..]);
+    mac.verify_slice(&data[..32]).unwrap();
+    data = &data[32..];
+    let version = read_varint(&mut data).unwrap();
+    assert_eq!(read_string(&mut data, 255).unwrap(), "203.0.113.9");
+    assert_eq!(&data[..16], &[7; 16]);
+    data = &data[16..];
+    assert_eq!(read_string(&mut data, 16).unwrap(), "Player");
+    assert_eq!(read_varint(&mut data).unwrap(), 1);
+    assert_eq!(read_string(&mut data, 32767).unwrap(), "textures");
+    assert_eq!(read_string(&mut data, 32767).unwrap(), "authenticated-skin");
+    assert_eq!(data[0], 1);
+    data = &data[1..];
+    assert_eq!(read_string(&mut data, 32767).unwrap(), "mojang-signature");
+    (version, data.to_vec())
+}
+
+/// A backend's Login Success for the verified player, as `number` encodes it.
+fn backend_login_success(number: i32) -> Packet {
+    if number >= 759 {
+        return verified_login_success(number);
+    }
+    let mut data = Vec::new();
+    if number < 735 {
+        write_string("07070707-0707-0707-0707-070707070707", &mut data);
+    } else {
+        data.extend([7; 16]);
+    }
+    write_string("Player", &mut data);
+    Packet::new(2, data)
+}
+
+fn assert_bungeecord_handshake(handshake: &Handshake, number: i32, mode: ForwardingMode) {
+    assert_eq!(handshake.protocol, number);
+    let parts: Vec<&str> = handshake.address.split('\0').collect();
+    assert_eq!(
+        parts[..3],
+        [
+            "play.test",
+            "203.0.113.9",
+            "07070707070707070707070707070707"
+        ]
+    );
+    let mut expected = vec![serde_json::json!({
+        "name": "textures", "value": "authenticated-skin", "signature": "mojang-signature",
+    })];
+    if mode == ForwardingMode::BungeeGuard {
+        expected.push(serde_json::json!({
+            "name": "bungeeguard-token", "value": "guard-token", "signature": "",
+        }));
+    }
+    let properties: serde_json::Value = serde_json::from_str(parts[3]).unwrap();
+    assert_eq!(properties, serde_json::Value::Array(expected));
+}
+
+#[tokio::test]
+async fn online_login_below_1_19_3_with_every_forwarding_mode() {
+    for number in LEGACY_ONLINE {
+        for mode in [
+            ForwardingMode::Velocity,
+            ForwardingMode::BungeeCord,
+            ForwardingMode::BungeeGuard,
+        ] {
+            if number < mode.minimum_protocol() {
+                continue;
+            }
+            timeout(Duration::from_secs(5), async {
+                let (mut session, mut client, mut backend, handshake) =
+                    authenticated_session_with(number, mode, None).await;
+                let codec = Codec::default();
+                if mode == ForwardingMode::Velocity {
+                    // Paper asks for the newest version it knows; before 1.19.3
+                    // and without a chat key the answer is version 1.
+                    codec
+                        .write(&mut backend, &velocity_request_for(-5, 4))
+                        .await
+                        .unwrap();
+                    session.forward().await.unwrap();
+                    assert_eq!(
+                        velocity_payload(&receive(&mut backend, codec).await, -5),
+                        (1, Vec::new())
+                    );
+                } else {
+                    assert_bungeecord_handshake(&handshake, number, mode);
+                }
+                codec
+                    .write(&mut backend, &backend_login_success(number))
+                    .await
+                    .unwrap();
+                session.forward().await.unwrap();
+                let success = receive(&mut client, codec).await;
+                if number >= 759 {
+                    assert_verified_login_success(number, &success);
+                } else {
+                    assert_eq!(success, backend_login_success(number));
+                }
+                assert_eq!(session.identity().unwrap().uuid, Some([7; 16]));
+                assert!(session.client.io.is_encrypted());
+            })
+            .await
+            .unwrap_or_else(|_| panic!("online login {number} with {mode:?} timed out"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn signed_1_19_logins_forward_the_chat_key() {
+    let signer = aws_lc_rs::rsa::KeyPair::generate(aws_lc_rs::rsa::KeySize::Rsa2048).unwrap();
+    for number in [759, 760] {
+        for mode in [ForwardingMode::Velocity, ForwardingMode::BungeeGuard] {
+            timeout(Duration::from_secs(5), async {
+                // The helper checks that Login Start carries the key (and on
+                // 1.19.1+ the Mojang UUID) to the backend.
+                let (mut session, mut client, mut backend, handshake) =
+                    authenticated_session_with(number, mode, Some(&signer)).await;
+                let codec = Codec::default();
+                if mode == ForwardingMode::Velocity {
+                    codec
+                        .write(&mut backend, &velocity_request_for(9, 3))
+                        .await
+                        .unwrap();
+                    session.forward().await.unwrap();
+                    let (version, tail) = velocity_payload(&receive(&mut backend, codec).await, 9);
+                    // The key exactly as the client sent it in Login Start.
+                    let mut key = Vec::new();
+                    session.profile_key.as_ref().unwrap().write(&mut key);
+                    assert_eq!(&key[8..10], &[0xa6, 0x02]); // a 294-byte X.509 key
+                    if number == 760 {
+                        key.push(1);
+                        key.extend([7; 16]);
+                    }
+                    assert_eq!((version, tail), (number - 757, key));
+                } else {
+                    assert_bungeecord_handshake(&handshake, number, mode);
+                }
+                codec
+                    .write(&mut backend, &backend_login_success(number))
+                    .await
+                    .unwrap();
+                session.forward().await.unwrap();
+                assert_verified_login_success(number, &receive(&mut client, codec).await);
+            })
+            .await
+            .unwrap_or_else(|_| panic!("signed login {number} with {mode:?} timed out"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn unsigned_chat_withholds_the_1_19_login_key_from_backends() {
+    let signer = aws_lc_rs::rsa::KeyPair::generate(aws_lc_rs::rsa::KeySize::Rsa2048).unwrap();
+    for number in [759, 760] {
+        for mode in [ForwardingMode::Velocity, ForwardingMode::BungeeGuard] {
+            timeout(Duration::from_secs(5), async {
+                // The client logs in with its key, and Rift checks it as ever.
+                let (mut session, mut client, handshake, key) =
+                    authenticated_client_with(number, mode, Some(&signer), false).await;
+                assert_eq!(session.profile_key, key);
+                assert!(key.is_some());
+                session.enable_network().unwrap();
+                let (server, mut backend) = tokio::io::duplex(65536);
+                session.connect_backend(server).await.unwrap();
+                let codec = Codec::default();
+                let received = forwarded_handshake(&receive(&mut backend, codec).await);
+                // The backend's Login Start names the player and no key.
+                assert_eq!(
+                    receive(&mut backend, codec).await,
+                    client_login_start(number, [7; 16], None)
+                );
+                if mode == ForwardingMode::Velocity {
+                    assert_eq!(received, handshake);
+                    // Paper asks for the keyed versions; without a key the
+                    // answer is version 1, as for a player who has none.
+                    codec
+                        .write(&mut backend, &velocity_request_for(9, 3))
+                        .await
+                        .unwrap();
+                    session.forward().await.unwrap();
+                    assert_eq!(
+                        velocity_payload(&receive(&mut backend, codec).await, 9),
+                        (1, Vec::new())
+                    );
+                } else {
+                    assert_bungeecord_handshake(&received, number, mode);
+                }
+                codec
+                    .write(&mut backend, &backend_login_success(number))
+                    .await
+                    .unwrap();
+                session.forward().await.unwrap();
+                assert_verified_login_success(number, &receive(&mut client, codec).await);
+            })
+            .await
+            .unwrap_or_else(|_| panic!("unsigned login {number} with {mode:?} timed out"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn unsigned_chat_strips_the_key_from_an_offline_1_19_login_start() {
+    let key = protocol::ProfileKey {
+        expiry: 1_800_000_000_000,
+        public_key: vec![1, 2, 3],
+        signature: vec![4, 5],
+    };
+    for number in [759, 760] {
+        for signed_chat in [true, false] {
+            // Login Start read before a backend is chosen, and after.
+            for early in [true, false] {
+                let (mut client, input) = tokio::io::duplex(65536);
+                let handshake = Handshake {
+                    protocol: number,
+                    address: "play.test".into(),
+                    port: 25565,
+                    next_state: NextState::Login,
+                };
+                let codec = Codec::default();
+                codec.write(&mut client, &handshake.packet()).await.unwrap();
+                let start = client_login_start(number, [9; 16], Some(&key));
+                codec.write(&mut client, &start).await.unwrap();
+                let mut session = Session::accept(input).await.unwrap();
+                session.set_signed_chat(signed_chat);
+                if early {
+                    session.read_login_start().await.unwrap();
+                }
+                let (server, mut backend) = tokio::io::duplex(65536);
+                session.connect_backend(server).await.unwrap();
+                assert_eq!(receive(&mut backend, codec).await, handshake.packet());
+                if !early {
+                    session.forward().await.unwrap();
+                }
+                assert_eq!(
+                    receive(&mut backend, codec).await,
+                    if signed_chat {
+                        start
+                    } else {
+                        client_login_start(number, [9; 16], None)
+                    },
+                    "protocol {number} signed_chat {signed_chat} early {early}"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn bungeecord_backend_that_ignores_forwarding_is_named() {
+    timeout(Duration::from_secs(5), async {
+        let (mut session, _client, mut backend, _) =
+            authenticated_session_with(47, ForwardingMode::BungeeCord, None).await;
+        // A backend without settings.bungeecord derives an offline UUID.
+        let mut data = Vec::new();
+        write_string("8c2b2a8e-4a0e-3d7c-9a59-0c3f3f6f3d43", &mut data);
+        write_string("Player", &mut data);
+        Codec::default()
+            .write(&mut backend, &Packet::new(2, data))
+            .await
+            .unwrap();
+        let error = session.forward().await.unwrap_err().to_string();
+        assert!(error.contains("spigot.yml"), "{error}");
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn velocity_forwarding_refuses_backends_before_1_13() {
+    // Login plugin messages arrived in 1.13. The backend's version decides:
+    // an older client is fine when translation puts it on a newer backend.
+    for number in [47, 340] {
+        let (mut session, _client, _, _) =
+            authenticated_client(number, ForwardingMode::Velocity, None).await;
+        let (server, _backend) = tokio::io::duplex(4096);
+        let error = session.connect_backend(server).await.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert!(error.to_string().contains("1.13"), "{error}");
+    }
+}
+
+#[tokio::test]
+async fn a_translated_backend_gets_velocity_forwarding_in_its_own_protocol() {
+    timeout(Duration::from_secs(10), async {
+        let (mut session, mut client, _, _) =
+            authenticated_client(772, ForwardingMode::Velocity, None).await;
+        let (server, mut backend) = tokio::io::duplex(65536);
+        session
+            .connect_backend_as(server, Some(ProtocolVersion::new(771).unwrap()))
+            .await
+            .unwrap();
+        let codec = Codec::default();
+        let handshake = Handshake::decode(&receive(&mut backend, codec).await).unwrap();
+        assert_eq!(handshake.protocol, 771);
+        assert_eq!(
+            receive(&mut backend, codec).await,
+            client_login_start(771, [7; 16], None)
+        );
+        codec
+            .write(&mut backend, &velocity_request_for(-5, 4))
+            .await
+            .unwrap();
+        // The answer comes from the connection itself: the session, and so
+        // the client, never see the request.
+        let answer = tokio::select! {
+            answer = receive(&mut backend, codec) => answer,
+            _ = async { loop { session.forward().await.unwrap(); } } => unreachable!(),
+        };
+        assert_eq!(velocity_payload(&answer, -5), (4, Vec::new()));
+        codec
+            .write(&mut backend, &backend_login_success(771))
+            .await
+            .unwrap();
+        session.forward().await.unwrap();
+        assert_verified_login_success(772, &receive(&mut client, codec).await);
+        assert_eq!(session.identity().unwrap().uuid, Some([7; 16]));
     })
     .await
     .unwrap();

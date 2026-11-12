@@ -14,8 +14,12 @@ require("config.services")
 rift.plugin("greeting")
 ```
 
-A backend may also be a table, `{ address = "127.0.0.1:25567", version = "1.21.6" }`,
-for a server running another Minecraft version than its players; see
+A backend may run another Minecraft version than its players (1.12 to 26.3):
+Rift asks it for its version and translates. A table,
+`{ address = "127.0.0.1:25567", version = "1.12.2" }`, declares the version
+instead, and `config.translation = false` turns translation off. A backend or
+service group can limit translation to some client versions with
+`translation = "newer"` or a list such as `{ "1.20.*", ">=1.21.4" }`; see
 [protocol translation](translation.md).
 
 `rift` is a global, like Neovim's `vim`; `local rift = require("rift")` returns
@@ -150,7 +154,7 @@ rift.on("route", function(connection)
     end
 end)
 
--- Requires online authentication, Velocity forwarding and a permission grant.
+-- Requires online authentication, forwarding and a permission grant.
 rift.config.extensions = {
     api_version = 2,
     groups = { default = { permissions = { ["greeting.hello"] = true } } },
@@ -164,7 +168,7 @@ rift.command("hello", {
 Authenticated event and command registration creates `extensions` and defaults
 its `api_version` to 1 when absent. Explicit versions are still validated.
 `rift.command(name, definition)` uses the existing command schema and permission
-checks. Duplicate names, including collisions with `extensions.commands`, fail
+checks, including `permission = ""` for a command open to every player. Duplicate names, including collisions with `extensions.commands`, fail
 validation. Settings and registrations belong in initialization, outside runtime
 callbacks. `rift.on`, `rift.command` and `rift.setup` reject late registration.
 
@@ -211,6 +215,10 @@ run for unbounded time outside the instruction budget) and `table.sort`.
 - `rift.clock()` returns seconds, with sub-millisecond precision, from a fixed
   point in the process's life. Subtract two readings to measure elapsed time.
 - `rift.time()` returns the current Unix time in whole seconds.
+- `rift.text` builds styled text: `rift.text.mini(markup, args)` and
+  `rift.text.legacy(text, marker)` return chat component tables, and
+  `to_legacy`, `plain`, `to_mini` and `escape` convert text. See
+  [styled text](text.md).
 - `rift.publish`, `rift.enabled` and `rift.servers` (callbacks only),
   `rift.store`, `rift.http` and `rift.players` (API v2 and v3 extension
   callbacks; `rift.players` also in `on_message` and `on_http`), and

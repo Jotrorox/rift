@@ -1,6 +1,6 @@
 //! Bounded, authenticated local control plane. One JSON request/response per TCP connection.
 use crate::{admission::Admission, events, metrics::Metrics, runtime::Snapshot};
-use rift::config::{Admin, Config};
+use rift::config::{Admin, Config, GroupState};
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
@@ -71,6 +71,8 @@ struct Entry {
 pub struct Control {
     maintenance: Mutex<Option<bool>>,
     draining: Mutex<BTreeMap<String, bool>>,
+    /// Operator state of service groups; groups absent here are active.
+    groups: Mutex<BTreeMap<String, GroupState>>,
     pub logins: Mutex<Admission>,
     players: Mutex<BTreeMap<u64, Entry>>,
 }
@@ -83,6 +85,8 @@ impl Control {
             .unwrap_or(config.maintenance)
     }
 
+    /// A backend drains when an operator or the configuration says so, or
+    /// while its service group is stopped; `drain off` cannot override that.
     pub fn draining(&self, config: &Config, backend: &str) -> bool {
         self.draining
             .lock()
@@ -90,6 +94,55 @@ impl Control {
             .get(backend)
             .copied()
             .unwrap_or_else(|| config.draining.contains(backend))
+            || config
+                .instances
+                .get(backend)
+                .is_some_and(|instance| self.group(&instance.group).suspended)
+    }
+
+    pub fn group(&self, name: &str) -> GroupState {
+        self.groups
+            .lock()
+            .unwrap()
+            .get(name)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Replace the whole table, as restored from the instance database.
+    pub fn restore_groups(&self, groups: BTreeMap<String, GroupState>) {
+        *self.groups.lock().unwrap() = groups;
+    }
+
+    /// Change one group's state under the table lock. `persist` runs before
+    /// the change becomes visible and can veto it, so the durable record
+    /// never lags behind what routing and the scaler see.
+    pub fn update_group(
+        &self,
+        name: &str,
+        change: impl FnOnce(&mut GroupState),
+        persist: impl FnOnce(GroupState) -> io::Result<()>,
+    ) -> io::Result<GroupState> {
+        let mut groups = self.groups.lock().unwrap();
+        let mut state = groups.get(name).copied().unwrap_or_default();
+        change(&mut state);
+        persist(state)?;
+        if state.is_default() {
+            groups.remove(name);
+        } else {
+            groups.insert(name.to_owned(), state);
+        }
+        Ok(state)
+    }
+
+    /// Forget groups whose definitions are gone; returns their names.
+    pub fn retain_groups(&self, keep: impl Fn(&str) -> bool) -> Vec<String> {
+        let mut groups = self.groups.lock().unwrap();
+        let removed: Vec<_> = groups.keys().filter(|name| !keep(name)).cloned().collect();
+        for name in &removed {
+            groups.remove(name);
+        }
+        removed
     }
 
     pub fn register(
@@ -229,7 +282,8 @@ fn request(value: &Value, settings: &Admin, secret: &str) -> Result<Vec<String>,
     let command = args.first().ok_or("missing command")?;
     let permission = match (command.as_str(), args.get(1).map(String::as_str)) {
         (
-            "start" | "stop" | "groups" | "create" | "remove" | "templates" | "download" | "nodes",
+            "start" | "stop" | "groups" | "group" | "create" | "remove" | "templates" | "download"
+            | "nodes",
             _,
         ) => "servers",
         // Restarting a plugin changes the running proxy; its log tail may
@@ -257,6 +311,7 @@ pub(crate) fn managed_servers(snapshot: &Snapshot) -> Value {
         .into_iter()
         .map(|server| {
             let instance = config.instances.get(&server.name);
+            let group = instance.map(|instance| snapshot.control.group(&instance.group));
             let address = config
                 .backends
                 .get(&server.name)
@@ -273,6 +328,9 @@ pub(crate) fn managed_servers(snapshot: &Snapshot) -> Value {
                 "restart_attempts": server.restart_attempts,
                 "restart_exhausted": server.restart_exhausted,
                 "group": instance.map(|instance| &instance.group),
+                "group_suspended": group.map(|group| group.suspended),
+                "group_mode": group.map(|group| group.mode.as_str()),
+                "draining": snapshot.control.draining(config, &server.name),
                 "template": instance.and_then(|instance| instance.template.as_ref()),
                 "storage": instance.map_or("persistent", |instance| instance.storage.as_str()),
                 "node": server.node.as_deref().unwrap_or(rift::config::LOCAL_NODE),
@@ -293,8 +351,47 @@ pub(crate) fn nodes(snapshot: &Snapshot) -> Value {
 
 /// Group metadata only: templates contain executable arguments and filesystem paths.
 pub(crate) fn service_groups(snapshot: &Snapshot) -> Value {
+    let servers = snapshot.managed.snapshot();
     json!({"groups":snapshot.config.service_groups.iter().map(|(name, group)| {
+        let state = snapshot.control.group(name);
+        let members: Vec<_> = servers
+            .iter()
+            .filter(|server| {
+                snapshot
+                    .config
+                    .instances
+                    .get(&server.name)
+                    .is_some_and(|instance| instance.group == *name)
+            })
+            .collect();
+        let phase = |phase: rift::managed::Phase| members.iter().filter(|server| server.state == phase).count();
+        // The client versions translated for the group's instances: its own
+        // setting, or the proxy-wide one it inherits.
+        let translation = &snapshot.config.translation;
+        let clients = group.translation.as_ref().unwrap_or(&translation.clients);
         json!({
+            "translation":{
+                "enabled":translation.enabled,
+                "inherited":group.translation.is_none(),
+                "clients":clients.to_json(),
+                "summary":if translation.enabled { clients.summary() } else { "Off for the whole proxy".to_owned() },
+            },
+            "suspended":state.suspended,
+            "mode":state.mode.as_str(),
+            "dev_permission":rift::config::GroupMode::dev_permission(name),
+            "summary":{
+                "running":phase(rift::managed::Phase::Running),
+                "starting":phase(rift::managed::Phase::Starting),
+                "stopping":phase(rift::managed::Phase::Stopping),
+                "stopped":phase(rift::managed::Phase::Stopped),
+                "failed":phase(rift::managed::Phase::Failed),
+                "unknown":phase(rift::managed::Phase::Unknown),
+                "players":members.iter().map(|server| server.players).sum::<usize>(),
+                // Occupied members of a stopped group still waiting to stop.
+                "draining":members.iter().filter(|server| {
+                    state.suspended && server.automatic_enabled && (server.players > 0 || server.reservations > 0)
+                }).count(),
+            },
             "name":name,
             "template":group.template,
             "storage":group.storage.as_str(),
@@ -427,7 +524,7 @@ pub(crate) fn plugins(snapshot: &Snapshot, args: &[String], actor: &str) -> Resu
 /// plugin name, or the command alone.
 pub(crate) fn audited(args: &[String]) -> (String, String) {
     match args {
-        [command, action, rest @ ..] if command == "plugins" => (
+        [command, action, rest @ ..] if command == "plugins" || command == "group" => (
             format!("{command} {action}").chars().take(64).collect(),
             rest.first().cloned().unwrap_or_default(),
         ),
@@ -514,12 +611,21 @@ pub(crate) async fn execute(
                 Err(output.text())
             }
         }
+        [command, action, group] if command == "group" && action == "start" => {
+            crate::groups::start(&snapshot, group).map_err(|error| error.message)
+        }
+        [command, action, group] if command == "group" && action == "stop" => {
+            crate::groups::stop(&snapshot, group).map_err(|error| error.message)
+        }
+        [command, action, group, mode] if command == "group" && action == "mode" => {
+            crate::groups::set_mode(&snapshot, group, mode).map_err(|error| error.message)
+        }
         [command] if command == "reload" => {
             let (reply, receiver) = oneshot::channel();
             commands.try_send(Command::Reload(reply)).map_err(|_| "administrator command queue is full or shutting down")?;
             receiver.await.map_err(|_| "proxy is shutting down".to_owned())?
         }
-        _ => Err("usage: status | servers | groups | nodes | templates | download <template> [refresh] | create <group> | remove <instance> | start <backend> | stop <backend> | maintenance on/off | drain <backend> on/off | transfer <connection-id> <backend> | plugins list | plugins status <name> | plugins logs <name> | plugins restart <name> | perms <command> | reload | shutdown".into()),
+        _ => Err("usage: status | servers | groups | nodes | templates | download <template> [refresh] | create <group> | remove <instance> | start <backend> | stop <backend> | group start|stop <group> | group mode <group> active|dev | maintenance on/off | drain <backend> on/off | transfer <connection-id> <backend> | plugins list | plugins status <name> | plugins logs <name> | plugins restart <name> | perms <command> | reload | shutdown".into()),
     }
 }
 

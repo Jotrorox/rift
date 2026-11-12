@@ -1,0 +1,10 @@
+{
+  "entries": [
+    "{external_title:{translate:\"menu.custom_options\"},button_width:310,columns:1,exit_action:{width:200,label:{translate:\"gui.back\"}},title:{translate:\"menu.custom_options.title\"},type:\"minecraft:dialog_list\",dialogs:\"#minecraft:pause_screen_additions\"}",
+    "{external_title:{translate:\"menu.quick_actions\"},button_width:310,columns:1,exit_action:{width:200,label:{translate:\"gui.back\"}},title:{translate:\"menu.quick_actions.title\"},type:\"minecraft:dialog_list\",dialogs:\"#minecraft:quick_actions\"}",
+    "{external_title:{translate:\"menu.server_links\"},button_width:310,columns:1,exit_action:{width:200,label:{translate:\"gui.back\"}},title:{translate:\"menu.server_links.title\"},type:\"minecraft:server_links\"}"
+  ],
+  "versions": [
+    {"protocols":[771,772,773,774,775,776,777],"names":["minecraft:custom_options","minecraft:quick_actions","minecraft:server_links"],"elements":[0,1,2]}
+  ]
+}

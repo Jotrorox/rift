@@ -32,7 +32,10 @@ both a matching ACL and `control = true`. `rift.node.<n>` subjects belong to the
 [node agent](nodes.md) authenticated as `node.<n>`: other identities may not
 publish to `rift.node` subjects, and only control identities may subscribe to
 patterns that overlap them. This includes bare `rift.control` and
-broad subscriptions such as `>`. Remote publishing to `rift.events` and its
+broad subscriptions such as `>`. Publishing to `rift.players` subjects requires
+a matching ACL and `players = true`; subscribing to patterns that overlap them
+requires `control = true`, because a subscriber would receive other callers'
+requests. Remote publishing to `rift.events` and its
 children is always rejected because Rift owns those events. Explicit reply
 subjects must be literal `_INBOX.*` subjects covered by the requester's subscribe
 ACL. Responders need publish access to the inbox namespaces they answer. The

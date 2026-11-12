@@ -152,13 +152,16 @@ has an array:
 {"server": "survival", "region": ["market", "spawn"]}
 ```
 
-Rift fills the reserved keys `server` (the backend name), `world`,
-`dimension` (for example `minecraft:the_nether`) and `gamemode`
-(`survival`, `creative`, `adventure`, `spectator`). Each has at most one value
-in an active set. Other keys are custom. A backend fills all four from its own
-player state; the proxy fills `server`, `dimension` and `gamemode` from the
-session and the play packets it relays, never `world` (see
-[contexts on the proxy](permissions.md#contexts-on-the-proxy)).
+Rift fills the reserved keys `server` (the backend name), `group` (the
+backend's service group, for an instance of one), `world`, `dimension` (for
+example `minecraft:the_nether`) and `gamemode` (`survival`, `creative`,
+`adventure`, `spectator`). Each has at most one value in an active set. Other
+keys are custom. A backend fills `server` and `group` from its configuration
+and the rest from its own player state; the proxy fills `server` and `group`
+from the session's backend, and `dimension` and `gamemode` from the play
+packets it relays, never `world` (see
+[contexts on the proxy](permissions.md#contexts-on-the-proxy)). A backend
+outside any service group, and its players on the proxy, have no `group`.
 
 A node's contexts are satisfied when every one of its pairs is in the active
 set (subset test); the empty set is global and always satisfied. A node that

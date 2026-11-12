@@ -346,6 +346,7 @@ def configurations(port, backend):
     listeners = {{ public = "127.0.0.1:{port}" }},
     backends = {{ backend = "127.0.0.1:{backend}" }},
     routes = {{ public = "backend" }},
+    translation = {{ detect = false }}, -- The backend is a byte fixture that answers no status request.
     limits = {{ max_connections = 16384 }},
 }}
 '''

@@ -6,6 +6,13 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessagingConfig {
     pub listen: Option<SocketAddr>,
+    /// `host:port` handed to managed instances as `RIFT_BUS_ADDRESS`, for a
+    /// `listen` on `0.0.0.0` or behind NAT. Without it, local instances get
+    /// `127.0.0.1` and the bound port.
+    pub advertise: Option<String>,
+    /// The certificate name instances verify (`RIFT_BUS_SERVER_NAME`);
+    /// defaults to the host of `advertise`, else `localhost`.
+    pub advertise_server_name: Option<String>,
     pub certificate: Option<PathBuf>,
     pub private_key: Option<PathBuf>,
     pub principals: Vec<MessagingPrincipal>,
@@ -35,6 +42,9 @@ pub struct MessagingPrincipal {
     pub publish: Vec<String>,
     pub subscribe: Vec<String>,
     pub control: bool,
+    /// May call the `rift.players.*` API (with a matching publish grant)
+    /// without the much broader `control`.
+    pub players: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +65,8 @@ impl Default for MessagingConfig {
         let broker = crate::messaging::BrokerConfig::default();
         Self {
             listen: None,
+            advertise: None,
+            advertise_server_name: None,
             certificate: None,
             private_key: None,
             principals: Vec::new(),
@@ -91,6 +103,23 @@ impl MessagingConfig {
     /// Node agents authenticate with their own principals, so a listener that
     /// only serves nodes needs no `principals` entry.
     pub fn validate_with_nodes(&self, nodes: bool) -> Result<(), String> {
+        if let Some(advertise) = &self.advertise
+            && advertise
+                .rsplit_once(':')
+                .is_none_or(|(host, port)| host.is_empty() || port.parse::<u16>().is_err())
+        {
+            return Err(format!(
+                "messaging.advertise: expected host:port, got {advertise:?}"
+            ));
+        }
+        if self.advertise.is_some() && self.listen.is_none() {
+            return Err("messaging.advertise: requires messaging.listen".into());
+        }
+        if let Some(name) = &self.advertise_server_name
+            && (name.is_empty() || name.len() > 253 || name.chars().any(char::is_whitespace))
+        {
+            return Err("messaging.advertise_server_name: expected a DNS name or address".into());
+        }
         if self.max_subject_bytes < 64 {
             return Err("messaging.max_subject_bytes: at least 64 bytes are required for Rift control and request inbox subjects".into());
         }
@@ -269,7 +298,7 @@ impl MessagingConfig {
     }
 }
 
-fn pattern_valid(pattern: &str, maximum: usize) -> Result<(), String> {
+pub(super) fn pattern_valid(pattern: &str, maximum: usize) -> Result<(), String> {
     let tokens: Vec<_> = pattern.split('.').collect();
     if pattern.is_empty()
         || pattern.len() > maximum
@@ -334,6 +363,8 @@ pub(super) fn parse(root: &Table) -> Result<Option<MessagingConfig>, String> {
         "messaging",
         &[
             "listen",
+            "advertise",
+            "advertise_server_name",
             "certificate",
             "private_key",
             "principals",
@@ -359,6 +390,8 @@ pub(super) fn parse(root: &Table) -> Result<Option<MessagingConfig>, String> {
         listen: optional_string(&values, "messaging", "listen")?
             .map(|value| address(&value, "messaging.listen").map_err(|e| e.to_string()))
             .transpose()?,
+        advertise: optional_string(&values, "messaging", "advertise")?,
+        advertise_server_name: optional_string(&values, "messaging", "advertise_server_name")?,
         certificate: optional_string(&values, "messaging", "certificate")?.map(PathBuf::from),
         private_key: optional_string(&values, "messaging", "private_key")?.map(PathBuf::from),
         subscription_capacity: integer(
@@ -442,6 +475,7 @@ pub(super) fn parse(root: &Table) -> Result<Option<MessagingConfig>, String> {
                 "publish",
                 "subscribe",
                 "control",
+                "players",
                 "preset",
             ],
             "messaging.principals",
@@ -481,6 +515,7 @@ pub(super) fn parse(root: &Table) -> Result<Option<MessagingConfig>, String> {
             publish,
             subscribe,
             control: boolean(&principal, "messaging.principals", "control", false)?,
+            players: boolean(&principal, "messaging.principals", "players", false)?,
         });
     }
     for subscription in array(&values, "messaging", "subscriptions", 1024)? {

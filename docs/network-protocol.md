@@ -2,18 +2,93 @@
 
 Network commands and backend replacement support Java **1.8.9–26.3**
 (66 releases, 50 protocols).
-Clients and backends use the same protocol version unless a backend declares
-another one that Rift translates; see [protocol translation](translation.md)
-(1.21.6 ↔ 1.21.7/1.21.8). Online authentication and Velocity modern forwarding require
-**1.19.3 or newer**; older versions use offline backends with forwarding disabled.
+A client and a backend on different versions between 1.12 and 26.3 are
+translated; see [protocol translation](translation.md). Outside that range, or
+with translation turned off, both use the same protocol. Online authentication
+works on every supported version. Velocity modern forwarding requires a backend
+on **1.13 or newer** (login plugin messages arrived in 1.13); BungeeCord and
+BungeeGuard forwarding work on all.
 With online authentication enabled, Rift encrypts the client connection, verifies
 the Mojang session and retains its UUID, canonical name and signed profile properties.
 Paper backends run `online-mode=false` with Velocity modern forwarding enabled
-and `proxies.velocity.online-mode=true`; see the README for configuration.
+and `proxies.velocity.online-mode=true`, or with `settings.bungeecord=true` for
+BungeeCord forwarding; see the README for configuration.
+
+1.19–1.19.2 clients send a chat signing key in Login Start and sign the login
+challenge with it instead of encrypting it. Rift checks that signature against
+the key, as the vanilla server does, and passes the key on: in the backend's
+Login Start (as Velocity and BungeeCord do) and, when Paper asks for it, in
+Velocity forwarding versions 2 (1.19) and 3 (1.19.1–1.19.2, with the owning
+Mojang UUID). Rift does not check Mojang's signature over the key; a backend
+with `enforce-secure-profile=true` does.
 The backend login exchange receives the same verified profile and socket peer IP
 on initial login and every replacement. Authentication service failures never
 fall back to offline identities. Omitted security settings retain the original
 offline mode, which requires forwarding disabled and `enforce-secure-profile=false`.
+
+### Unsigned chat
+
+`authentication.signed_chat` (default `true`) decides whether backends learn
+the material they verify a player's chat signatures with. With `false`, Rift
+withholds it on every backend attachment, translated or not:
+
+| Client | Withheld |
+| --- | --- |
+| 1.19–1.19.2 | The chat key: the backend's Login Start is rewritten without it, and Velocity forwarding answers with version 1, as for a player who has no key. Rift still checks the client's signature over the login challenge. |
+| 1.19.3 and newer | Every serverbound Player Session packet (chat session update), at login and whenever the client renews its key. |
+
+Chat messages, commands, their signatures and last-seen acknowledgements are
+forwarded as before. A backend without the key or session does not verify
+them and does not track a signature chain: it takes the player's chat as
+unsigned. That is what makes it safe for the proxy to drop a single chat
+message or command of a player; with signed chat, a backend that misses one
+signed message rejects every later one.
+
+The consequences, for every player on the network: their chat is shown to
+others as not secure (the client's unsigned-message marker), and chat
+reporting does not work, because nothing they say is signed towards the
+backend. Clients before 1.19 and offline-mode networks are unaffected; they
+sign nothing.
+
+Backends must not require signed chat:
+
+- **Vanilla** (and Spigot) enforce `enforce-secure-profile` only with
+  `online-mode=true`, which a backend behind a proxy does not have. From
+  1.19.1 on the setting has no effect there; a 1.19 backend must keep
+  `enforce-secure-profile=false` (see [translation](translation.md)).
+- **Paper** also enforces it when its proxy settings say the proxy is in
+  online mode (`proxies.velocity.online-mode: true`, or
+  `proxies.bungee-cord.online-mode` with `settings.bungeecord`). Set
+  `enforce-secure-profile=false` in `server.properties` on Paper backends,
+  or players cannot chat: the server answers each message with "Chat disabled
+  due to missing profile public key". Established from the bytecode of Paper
+  1.21.11 build 132 (`DedicatedServer.enforceSecureProfile` and
+  `SignedMessageChain.Decoder.unsigned`, `javap -c`), not from a run.
+- **Pumpkin** 0.2.0 accepts chat from a player with no chat session in its
+  default configuration (`allow_chat_reports = false`): it ignores Player
+  Session packets and message signatures altogether and broadcasts chat
+  unsigned, although it announces secure-chat enforcement. Established by a
+  run against the pinned release binary (`tests/servers.json`,
+  0.2.0+26.3-26.51, protocol 777): a player that never sent a Player Session
+  chatted with and without a 256-byte signature, and both messages reached
+  another player and the server log. With `allow_chat_reports = true`, which
+  Pumpkin permits only together with its own `online_mode`, the source at the
+  pinned commit (`net/java/play/chat_message.rs`) kicks a player whose message
+  has no signature, and one without a session for an expired key; that
+  configuration was not run and does not work with `signed_chat = false`.
+
+Changing the setting applies to connections made afterwards and restarts
+every persistent plugin, as a change of `online_mode` does.
+
+Unsigned chat is what the [`chat` hook](plugins.md#chat) builds on: a plugin
+or the configuration script sees each message and backend command first and
+may drop it. Rift holds the packet, and on a deny sends the backend only the
+last-seen acknowledgement the packet carried, as it does for a proxy command.
+A plugin or script with a chat handler is refused while `signed_chat` is
+`true`. A player who connected before the setting became `false` still has a
+signed chat session with their backend; until they reconnect, the hook is
+asked only about their packets without a signature, and signed ones pass
+unseen.
 
 Switching is an explicit capability in `src/protocol/switching.rs`, separate from
 relay and configuration-state support. Each protocol maps its control packet IDs,
@@ -204,15 +279,25 @@ The backend handshake carries the client's hostname and, for Forge clients, its
 network version, found anywhere in the NUL-delimited list as Forge itself
 reads it). Rift drops any other NUL-delimited data the client sends after the
 hostname, so a client cannot pass BungeeCord-style IP, UUID or skin data to an
-offline backend that has `settings.bungeecord=true`. Rift never sends BungeeCord IP forwarding itself; use
-Velocity modern forwarding to give backends player identities.
+offline backend that has `settings.bungeecord=true`.
+
+With `forwarding.mode = "bungeecord"` or `"bungeeguard"`, Rift itself writes
+BungeeCord's layout into the backend handshake: the client's hostname, the
+socket peer IP, the undashed verified UUID and the verified profile properties
+as JSON, NUL-separated. A Forge marker travels as Bungee's `forgeClient` and
+`extraData` properties. BungeeGuard adds one `bungeeguard-token` property;
+a profile property of that name from anywhere else is dropped. The hostname
+may be up to 32767 characters, which Spigot and Paper read; a backend that
+ignores the forwarded data derives an offline UUID, which Rift refuses at
+Login Success with a pointer to `spigot.yml`.
 
 Velocity `velocity:player_info` requests stay inside the proxy. Their responses
 use HMAC-SHA256 over the negotiated version, socket peer IP, verified UUID, name
-and profile properties, including property signatures. Rift supports forwarding
-version 1 and the version 4 format used by modern Paper; versions 2/3's legacy
-1.19 player-key fields are outside Rift's online authentication range. Each backend
-must request forwarding before Login Success. Client responses can only answer
+and profile properties, including property signatures. Rift negotiates the
+version as Velocity does: 4 for a 1.19.3+ player when Paper asks for it, 2 or 3
+with a 1.19–1.19.2 chat key, otherwise 1. With Velocity forwarding each backend
+must request forwarding before Login Success; a Velocity request while Rift
+uses BungeeCord forwarding fails the login. Client responses can only answer
 plugin queries actually relayed to that client; they cannot answer a Velocity
 query or reuse a completed query ID. Proxy-owned forwarding can be repeated on
 a safe initial transport retry because it needs no new client exchange.

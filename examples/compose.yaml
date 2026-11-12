@@ -1,5 +1,5 @@
-# Run from a repository checkout with the Linux executable saved as rift
-# and a readable config/rift.lua containing:
+# Run from the extracted Linux x86_64 release archive with a readable
+# config/rift.lua containing:
 # rift.config.instance_database = "/var/lib/rift/rift.sqlite3"
 # docker compose -f examples/compose.yaml up --build -d
 services:

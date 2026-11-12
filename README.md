@@ -35,8 +35,11 @@ Managed Minecraft processes need their own Java runtime and explicit EULA accept
 
 ## Quick start
 
-Download a native archive from [Releases](https://github.com/Jotrorox/rift/releases),
-extract it, then run:
+Download the archive for your platform (`rift-linux-x86_64.tar.gz`,
+`rift-macos-aarch64.tar.gz` or `rift-windows-x86_64.zip`) and `SHA256SUMS` from
+[Releases](https://github.com/Jotrorox/rift/releases). Check it
+([verification](docs/operations.md#verifying-a-download)), extract it into an
+empty directory, then run:
 
 ```sh
 ./rift init
@@ -97,6 +100,29 @@ Restart Paper after changing these settings. Rift verifies accounts with Mojang,
 handles client encryption, and forwards player identities to Paper. Failed
 verification never falls back to offline authentication.
 
+`authentication.signed_chat` (default `true`) can be set to `false` to keep
+players' chat signing keys and sessions from every backend, so that backends
+treat all chat as unsigned and the proxy may drop single messages, which the
+plugin [`chat` hook](docs/plugins.md#chat) needs for mutes and filters. Players'
+chat then shows as not secure and chat reporting stops working, and Paper
+backends need `enforce-secure-profile=false`; see
+[unsigned chat](docs/network-protocol.md#unsigned-chat).
+
+Online mode works on every supported version, 1.8.9 through 26.3. Velocity
+forwarding needs 1.13 or newer backends, so a network with older versions uses
+BungeeCord forwarding instead, which every Spigot derivative reads:
+
+```lua
+rift.config.forwarding = { mode = "bungeeguard", secret_env = "RIFT_FORWARDING_SECRET" }
+```
+
+Set `settings.bungeecord: true` in each backend's `spigot.yml` and install the
+[BungeeGuard](https://github.com/lucko/BungeeGuard) plugin with the same token
+in `allowed-tokens`. `mode = "bungeecord"` sends the same data without a token;
+anyone who can reach such a backend can join as any player, so use it only
+when backends accept connections from Rift alone. With `velocity`, clients
+older than 1.13 are turned away at login.
+
 ## Routing and configuration
 
 Write an ordinary Lua script using `rift.config`; no outer return table is needed:
@@ -133,6 +159,11 @@ checks, rate limits and metrics. Hostname routing also works from the CLI:
 Routes prefer exact names, then the longest wildcard suffix, then the default.
 Listeners require an IP and port; backends accept IPs or DNS names with ports.
 
+Every text a player sees can be styled with markup such as
+`<gradient:gold:red>Welcome</gradient>`, from Lua, plugins, the bus and the
+configuration, and Rift's own messages can be restyled or translated; see
+[styled text](docs/text.md).
+
 Rift can also own the server-list entry and the in-game tab list: set a
 network MOTD and favicon with `server_list`, and a tab list header, footer and
 network-wide player list with `tab_list`. See the
@@ -160,7 +191,9 @@ three ways to run code:
 Plugins get login and transfer decisions, lifecycle events, commands with UUID
 permission checks, FIFO server queues, durable namespaced state, timers,
 permissions, the message bus and an online-player API for messages, titles,
-action bars, tab lists, kicks, broadcasts and transfers.
+action bars, tab lists, kicks, broadcasts and transfers. Messages, kicks and
+deny reasons can be rich text: colours, line breaks, hover text and click
+events, spelled for each player's client version.
 
 Permissions live in Rift's [permission store](docs/permissions.md):
 LuckPerms-style users, groups, weights, contexts, temporary nodes, tracks,
@@ -181,8 +214,7 @@ and [Go](docs/plugins-go.md). [`examples/plugins`](examples/plugins) has the sam
 plugin in all four languages, and [`examples/extensions.lua`](examples/extensions.lua)
 a survival queue and staff-only server in `rift.lua`. `rift admin plugins`, the
 dashboard and Prometheus metrics show each plugin's state, restarts and log.
-Player hooks require online authentication and Java 1.19.3–26.3 (the online
-authentication range).
+Player hooks require online authentication.
 
 ## Compatibility
 
@@ -199,15 +231,20 @@ plus pinned LuckPerms/EssentialsX and ViaVersion/ViaBackwards combinations.
 CI runs their startup and rejection preflights; full acceptance requires a signed-in
 1.21.11 client and records Paper observations alongside operator confirmations.
 
-Backends can run a different version than their players: Rift translates between
-1.21.6 and 1.21.7/1.21.8 in both directions, including `/server` switches between
-backends of different versions. Declare a backend's version with
-`config.backends.survival = { address = "127.0.0.1:25567", version = "1.21.6" }`.
-Other pairs still need matching versions. See [protocol translation](docs/translation.md).
-Online authentication, Velocity modern forwarding and
-plugin player hooks require **1.19.3 or newer**; earlier versions use offline
-backends with forwarding disabled. Bedrock/UDP, unlisted snapshots and legacy
-pre-1.7 pings are unsupported.
+Backends can run a different version than their players. Like ViaVersion and
+ViaBackwards on other proxies, but built in, Rift translates between any two
+releases from 1.12 to 26.3 in both directions, including `/server` switches
+between backends of different versions. It is on by default and asks each
+backend for its version; `config.backends.survival = { address = "127.0.0.1:25567",
+version = "1.12.2" }` declares one, and `config.translation = false` turns it
+off. Each backend or service group can choose which client versions it takes
+(`translation = "newer"`, `{ "1.20.*", ">=1.21.4" }`, or `false`), in Lua or
+in the web interface. See [protocol translation](docs/translation.md) for what
+players on other versions see.
+Online authentication and plugin player hooks work on every listed version.
+Velocity modern forwarding needs a backend on **1.13 or newer**; BungeeCord and
+BungeeGuard forwarding cover all of them (see [Authentication](#authentication)).
+Bedrock/UDP, unlisted snapshots and legacy pre-1.7 pings are unsupported.
 
 Set `rift.config.network = { bungeecord = true }` for existing backend plugins to
 request transfers, query players/servers, forward plugin messages between servers,

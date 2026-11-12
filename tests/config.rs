@@ -390,8 +390,10 @@ fn config(backends: &[SocketAddr], limits: &str) -> String {
         .map(|(i, addr)| format!("b{i} = '{addr}'"))
         .collect::<Vec<_>>()
         .join(",");
+    // The test backends accept only the players' own connections, not the
+    // status requests that detect a backend's version.
     format!(
-        "return {{ listeners = {{ {listeners} }}, backends = {{ {backends} }}, routes = {{ {routes} }}, limits = {{ {limits} }} }}"
+        "return {{ listeners = {{ {listeners} }}, backends = {{ {backends} }}, routes = {{ {routes} }}, limits = {{ {limits} }}, translation = {{ detect = false }} }}"
     )
 }
 
@@ -624,6 +626,30 @@ fn assert_no_connection(backend: &TcpListener) {
         backend.accept().unwrap_err().kind(),
         std::io::ErrorKind::WouldBlock
     );
+}
+
+#[test]
+fn a_player_no_backend_takes_is_told_it_is_their_minecraft_version() {
+    let fixture = Fixture::new();
+    let backend = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = backend.local_addr().unwrap();
+    // The test client speaks 1.8, which this 1.12.2 backend is not translated for.
+    fixture.write(&config(&[address], "").replace(
+        &format!("b0 = '{address}'"),
+        &format!("b0 = {{ address = '{address}', version = '1.12.2', translation = 'newer' }}"),
+    ));
+    let process = fixture.spawn(&[]);
+    let mut client = connect(process.listener());
+    client.write_all(&game::setup()).unwrap();
+    let packet = game::read_packet(&mut client).unwrap();
+    assert_eq!(packet.id, 0);
+    let message = rift::protocol::read_string(&mut packet.data.as_slice(), 32767).unwrap();
+    assert!(
+        message.contains("No server on this network supports your Minecraft version."),
+        "{message}"
+    );
+    assert_closed(&mut client);
+    assert_no_connection(&backend);
 }
 
 #[test]

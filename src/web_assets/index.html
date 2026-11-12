@@ -114,14 +114,24 @@
                 <div class="field"><label for="server-list-version">Version label <span class="muted">Optional</span></label><input id="server-list-version" maxlength="256" spellcheck="false" placeholder="Rift"></div>
                 <div class="field"><label for="server-list-max-players">Maximum players <span class="muted">Optional</span></label><input id="server-list-max-players" type="number" min="0" step="1" placeholder="Connection limit"></div>
                 <div class="field"><label for="server-list-sample">Player list hover <span class="muted">One line each</span></label><textarea id="server-list-sample" spellcheck="false" placeholder="Online players"></textarea></div>
+                <div class="field"><label for="server-list-favicon-choose">Server icon <span class="muted">Optional</span></label>
+                  <div class="favicon-picker" id="server-list-favicon-picker">
+                    <div class="favicon-preview" id="server-list-favicon-preview"><img id="server-list-favicon" alt="Server icon preview" width="64" height="64" hidden></div>
+                    <div class="favicon-actions">
+                      <div class="action-group"><button type="button" class="button secondary" id="server-list-favicon-choose">Upload image…</button><button type="button" class="button subtle" id="server-list-favicon-remove" hidden>Remove</button></div>
+                      <p class="field-help" id="server-list-favicon-state" aria-live="polite">No icon</p>
+                    </div>
+                  </div>
+                  <p class="field-help">PNG, JPEG, WebP or GIF. Rift fits it to 64×64 pixels.</p>
+                  <input type="file" id="server-list-favicon-file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+                </div>
               </div>
               <div class="editor-actions"><div class="action-group"></div><div class="action-group"><button type="submit" class="button" id="server-list-save">Save &amp; apply</button></div></div>
             </form>
             <p class="operation-result" id="server-list-result" role="status" aria-live="polite">Saving validates the complete configuration and checks its revision.</p>
           </section>
-          <section class="panel" id="server-list-lua-panel"><div class="panel-heading"><h2>Favicon and hostnames</h2><a class="text-link" href="#script">Edit in Lua</a></div>
-            <p class="panel-note">The favicon file and per-hostname entries are set in Lua. Saving here keeps them; turning the server list off removes them.</p>
-            <div class="favicon-row"><img id="server-list-favicon" alt="Configured favicon" width="64" height="64" hidden><span id="server-list-favicon-state" class="muted small">No favicon configured</span></div>
+          <section class="panel" id="server-list-lua-panel"><div class="panel-heading"><h2>Hostnames</h2><a class="text-link" href="#script">Edit in Lua</a></div>
+            <p class="panel-note">Per-hostname entries, including their own icons, are set in Lua. Saving here keeps them; turning the server list off removes them.</p>
             <div class="table-wrap"><table><thead><tr><th scope="col">Hostname</th><th scope="col">MOTD</th><th scope="col">Version label</th><th scope="col" class="numeric">Maximum players</th></tr></thead><tbody id="server-list-hosts"><tr><td colspan="4" class="empty">Waiting for data</td></tr></tbody></table></div>
           </section>
         </section>
@@ -150,6 +160,7 @@
         <section class="view" id="view-servers" aria-labelledby="view-title" hidden>
           <div class="page-head"><p class="page-intro">Servers wake when players need them and stop after their idle timeout. Stop pauses automatic wake until you choose Start. Servers with connected players or pending attachments can’t be stopped or removed.</p><a class="button secondary" href="#groups">New instance</a></div>
           <section class="panel">
+            <div class="form-row top"><div class="field"><label for="servers-group">Service group</label><select id="servers-group"><option value="">All groups</option></select></div></div>
             <div class="table-wrap flush"><table><thead><tr><th scope="col">Name</th><th scope="col">State</th><th scope="col">Usage</th><th scope="col">Automatic wake</th><th scope="col">Storage</th><th scope="col">Template</th><th scope="col">Group / address</th><th scope="col">Node</th><th scope="col">Last error</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead><tbody id="managed-servers"><tr><td colspan="10" class="empty">Waiting for data</td></tr></tbody></table></div>
             <p class="operation-result" id="server-result" role="status" aria-live="polite"></p>
           </section>
@@ -171,7 +182,9 @@
 
         <section class="view" id="view-groups" aria-labelledby="view-title" hidden>
           <div class="page-head"><p class="page-intro">Create instances from a template’s server software, template folders, plugins and map, or from prepared directories. Templates with server software download Paper, Folia, Purpur, Fabric or vanilla on first use and reuse the cached jar. Persistent worlds keep their files when removed; disposable games delete them. Only templates with <code>accept_eula</code> accept the Minecraft EULA.</p><a class="button secondary" href="#definitions">Edit groups</a></div>
-          <section class="panel"><div class="table-wrap flush"><table><thead><tr><th scope="col">Group</th><th scope="col">Port range</th><th scope="col">Storage</th><th scope="col">Template</th><th scope="col">Instances</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead><tbody id="service-groups"><tr><td colspan="6" class="empty">Waiting for data</td></tr></tbody></table></div></section>
+          <section class="panel"><p class="panel-note">Stop all keeps new players out, pauses scaling and stops each instance once it is empty; nobody is disconnected. Dev mode admits only players with <code>rift.group.&lt;group&gt;.dev</code> and pauses scaling, so instances stay as they are while you work on them.</p>
+            <div class="table-wrap flush"><table><thead><tr><th scope="col">Group</th><th scope="col">Status</th><th scope="col">Port range</th><th scope="col">Storage</th><th scope="col">Template</th><th scope="col">Instances</th><th scope="col">Player versions</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead><tbody id="service-groups"><tr><td colspan="8" class="empty">Waiting for data</td></tr></tbody></table></div>
+            <p class="operation-result" id="group-result" role="status" aria-live="polite"></p></section>
           <section class="panel" id="templates-panel" aria-labelledby="templates-heading"><div class="panel-heading"><h2 id="templates-heading">Templates</h2><span class="muted small" id="template-count">—</span></div>
             <div class="table-wrap flush"><table><thead><tr><th scope="col">Template</th><th scope="col">Server software</th><th scope="col">Download cache</th><th scope="col">Used by</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead><tbody id="templates"><tr><td colspan="5" class="empty">Waiting for data</td></tr></tbody></table></div>
             <p class="operation-result" id="template-result" role="status" aria-live="polite"></p>

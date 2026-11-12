@@ -17,9 +17,15 @@
 ///   new types and new interfaces, never a changed type or a new case in an
 ///   existing enum or variant. Wasmtime matches `@0.1.x` names with each
 ///   other, so 0.1.1 adds the optional `dialogs` export and the dialog host
-///   functions without breaking components built against 0.1.0.
+///   functions, 0.1.2 the optional `decisions` export and the rich text
+///   host functions, 0.1.3 the visibility and permission meta host
+///   functions, 0.1.4 `players.title-json` and the optional `styled`
+///   export (rich suggestion tooltips and server-list text), and 0.1.5
+///   `players.locale`, command permissions that may be empty (every player
+///   may run the command) and the optional `chat` export, without breaking
+///   components built against 0.1.0.
 /// - Breaking changes move to 1.0.
-package rift:plugin@0.1.1;
+package rift:plugin@0.1.5;
 
 interface types {
     /// Log severity.
@@ -61,7 +67,8 @@ interface types {
         reason: option<string>,
         /// `after-transfer`: whether the transfer completed.
         success: option<bool>,
-        /// `command`/`suggest`: the command name and the text after it.
+        /// `command`/`suggest`, and `chat` for a command: the command name
+        /// and the text after it.
         command: option<string>,
         args: string,
         /// `suggest`: the argument being completed and its 1-based position.
@@ -102,9 +109,39 @@ interface types {
         leave-queue,
     }
 
+    /// `action` with rich text (since 0.1.2), the answer of the `decisions`
+    /// export. The hooks accept the same subsets, with `deny-json` wherever
+    /// `deny` is accepted and `message-json` wherever `message` is. It is
+    /// also the answer of the `chat` export (since 0.1.5), which accepts
+    /// continue, deny and deny-json.
+    ///
+    /// `deny` and `message` are plain text of 1..=1024 bytes. `deny-json`
+    /// and `message-json` are JSON text components of at most 32 KiB, for
+    /// colours, line breaks, hover text and click events; text that does not
+    /// start with `{`, `[` or `"` is shown as written.
+    variant decision {
+        continue,
+        deny(string),
+        server(string),
+        message(string),
+        queue(string),
+        leave-queue,
+        deny-json(string),
+        message-json(string),
+    }
+
     record suggestion {
         text: string,
         tooltip: option<string>,
+    }
+
+    /// `suggestion` with a rich tooltip (since 0.1.4), the answer of the
+    /// `styled` export. `tooltip-json` is a JSON text component (including
+    /// the `mini` and `legacy` authoring objects, see docs/text.md) or text
+    /// shown as written; empty means no tooltip.
+    record rich-suggestion {
+        text: string,
+        tooltip-json: option<string>,
     }
 
     /// A server-list ping, before any backend contact.
@@ -133,14 +170,35 @@ interface types {
         favicon: option<string>,
     }
 
-    /// An authenticated request to `/api/script/*` on the web server.
+    /// `status-override` with rich version and player-sample text (since
+    /// 0.1.4), the answer of the `styled` export. `version-json` and each
+    /// `sample-json` line are JSON text components (including the `mini`
+    /// and `legacy` authoring objects) or text shown as written; clients
+    /// show them as `§` codes.
+    record rich-status-override {
+        motd-json: option<string>,
+        version-json: option<string>,
+        protocol: option<s32>,
+        online: option<u32>,
+        max-players: option<u32>,
+        sample-json: option<list<string>>,
+        /// A `data:image/png;base64,...` URI.
+        favicon: option<string>,
+    }
+
+    /// An authenticated request to `/ext` or `/ext/*` on the web server.
     record http-request {
         method: string,
         path: string,
         query: string,
         body: string,
         headers: list<tuple<string, string>>,
-        /// The authenticated principal and scopes, as a JSON object.
+        /// The status object with operator detail, as a JSON object, plus
+        /// `operator`: the authenticated caller as `{name, permissions,
+        /// groups}`. `permissions` is `null` for full access and `groups` is
+        /// `null` when the caller is not limited to service groups. Any
+        /// caller with the `extensions` permission reaches this hook, so check
+        /// `operator` before acting for it.
         context-json: string,
     }
 
@@ -184,6 +242,8 @@ interface types {
         /// 1..=64 bytes of `a-z0-9_-`; `server` and `hub` are reserved.
         name: string,
         /// The permission node a player needs to see and run the command.
+        /// Empty (since 0.1.5) means every player may see and run it; hosts
+        /// before 0.1.5 reject a registration with an empty permission.
         permission: string,
         suggest: suggest-kind,
     }
@@ -239,6 +299,38 @@ interface types {
         fade-out: s32,
     }
 
+    /// `title-spec` with rich text (since 0.1.4); times are ticks. Both are
+    /// JSON text components (including the `mini` and `legacy` authoring
+    /// objects) or text shown as written. An empty `title-json` shows only
+    /// the subtitle.
+    record title-json-spec {
+        title-json: string,
+        subtitle-json: option<string>,
+        fade-in: s32,
+        stay: s32,
+        fade-out: s32,
+    }
+
+    /// What a player sent through the chat box (since 0.1.5).
+    enum chat-kind {
+        /// A chat message.
+        message,
+        /// A command that neither Rift nor a plugin owns, on its way to the
+        /// backend.
+        command,
+    }
+
+    /// A chat message or backend command a player sent, before the backend
+    /// sees it (since 0.1.5); the input of the `chat` export.
+    record chat-attempt {
+        /// The player. `server` is their current backend. For `command`,
+        /// `ctx.command` is the root name and `ctx.args` the rest.
+        ctx: context,
+        kind: chat-kind,
+        /// The message, or the command line without the leading slash.
+        text: string,
+    }
+
     /// A click on a plugin action of a dialog this plugin showed with
     /// `players.dialog` (since 0.1.1).
     record dialog-response {
@@ -261,14 +353,15 @@ interface types {
 
 /// The joined players. `target` is a name, a UUID or a connection id.
 interface players {
-    use types.{player-info, title-spec, boss-bar-spec};
+    use types.{player-info, title-spec, title-json-spec, boss-bar-spec};
 
     /// Players, optionally only those on one server or service group.
     %list: func(server: option<string>) -> result<list<player-info>, string>;
     get: func(target: string) -> result<option<player-info>, string>;
     /// Names starting with `prefix`, sorted.
     names: func(prefix: option<string>) -> list<string>;
-    /// Each returns whether the player was online.
+    /// Each returns whether the player was online. Plain text is 1..=1024
+    /// bytes.
     message: func(target: string, text: string) -> result<bool, string>;
     action-bar: func(target: string, text: string) -> result<bool, string>;
     title: func(target: string, title: title-spec) -> result<bool, string>;
@@ -290,6 +383,29 @@ interface players {
     transfer: func(target: string, server: string) -> result<bool, string>;
     /// Returns how many players received the message.
     broadcast: func(text: string) -> result<u32, string>;
+    /// `message`, `action-bar`, `kick` and `broadcast` with a JSON text
+    /// component of at most 32 KiB instead of plain text, for colours, line
+    /// breaks, hover text and click events (since 0.1.2). Text that does not
+    /// start with `{`, `[` or `"` is shown as written. Rift spells hover and
+    /// click events the way each player's client reads them.
+    message-json: func(target: string, text-json: string) -> result<bool, string>;
+    action-bar-json: func(target: string, text-json: string) -> result<bool, string>;
+    kick-json: func(target: string, reason-json: string) -> result<bool, string>;
+    broadcast-json: func(text-json: string) -> result<u32, string>;
+    /// The permission node a viewer needs to see the player, from their
+    /// `rift.visible-to` meta, or `none` when everyone sees them (since
+    /// 0.1.3). `list` and `get` return hidden players too; Rift leaves them
+    /// out of tab lists, counts and completion for viewers without the node.
+    visible-to: func(target: string) -> result<option<string>, string>;
+    /// `title` with JSON text components (since 0.1.4).
+    title-json: func(target: string, title: title-json-spec) -> result<bool, string>;
+    /// The language the player's client reported, as the client spells it
+    /// (`en_us`; old clients send `en_US`), or `none` while Rift does not
+    /// know it yet (since 0.1.5). The client sends it after login: during
+    /// configuration from 1.20.2, after Join Game before. So it is never
+    /// known in `login`, in `join` only for 1.20.2 and newer clients, and it
+    /// follows later changes of the client's language setting.
+    locale: func(target: string) -> result<option<string>, string>;
 }
 
 /// The durable key-value store. Namespaces are prefixed with
@@ -318,6 +434,14 @@ interface permissions {
     groups: func(uuid: string) -> list<string>;
     /// Every group with its weight, display name and nodes, as a JSON object.
     list-groups: func() -> string;
+    /// One meta value in the player's current contexts (since 0.1.3).
+    meta: func(uuid: string, key: string) -> option<string>;
+    /// Set the user's meta node `key` in exactly the contexts of
+    /// `contexts-json` (a JSON object such as `{"server":"lobby-1"}`; `none`
+    /// is global), expiring at `expires-at` Unix seconds if given; a `none`
+    /// value removes the node in those contexts. Returns whether anything
+    /// changed (since 0.1.3).
+    set-meta: func(uuid: string, key: string, value: option<string>, contexts-json: option<string>, expires-at: option<u64>) -> result<bool, string>;
 }
 
 /// The message bus.
@@ -419,6 +543,54 @@ interface dialogs {
     dialog: func(response: dialog-response);
 }
 
+/// The decision hooks answering with rich text (since 0.1.2). Optional: for a
+/// component that exports it, the host calls these instead of the `handler`
+/// functions of the same names, so components built against 0.1.0 and 0.1.1
+/// still load. Deadlines and failure policies are those of the hooks.
+interface decisions {
+    use types.{context, decision};
+
+    login: func(ctx: context) -> decision;
+    initial-server: func(ctx: context) -> decision;
+    before-transfer: func(ctx: context) -> decision;
+    command: func(ctx: context) -> decision;
+}
+
+/// The `suggest` and `status` hooks answering with rich text (since 0.1.4).
+/// Optional: for a component that exports it, the host calls these instead
+/// of the `handler` functions of the same names, so components built against
+/// 0.1.0 to 0.1.3 still load. Deadlines and failure policies are those of the
+/// hooks.
+interface styled {
+    use types.{context, rich-suggestion, ping, rich-status-override};
+
+    suggest: func(ctx: context) -> list<rich-suggestion>;
+    status: func(ping: ping) -> option<rich-status-override>;
+}
+
+/// Chat messages and backend commands before the backend sees them (since
+/// 0.1.5), for mutes and filters. Optional, and unlike the other optional
+/// exports it is the registration: the host asks every component that exports
+/// it, about every message of every player, and no entry in the `hook` list
+/// is needed. So only components that moderate chat export it; the SDKs leave
+/// it out unless a plugin asks for it (worlds `plugin-chat` and `core-chat`).
+///
+/// Withholding one signed message breaks a player's signature chain, so a
+/// component that exports `chat` starts only with
+/// `authentication.signed_chat = false`, which makes backends take chat as
+/// unsigned. Commands that Rift or a plugin owns never come here. The
+/// deadline is 50 ms unless the manifest sets `deadlines.chat`; a missed
+/// deadline or a failure applies the manifest's policy, where `deny` drops
+/// the message.
+interface chat {
+    use types.{chat-attempt, decision};
+
+    /// Accepts `continue` (the backend receives the packet unchanged), and
+    /// `deny` and `deny-json` (the packet is dropped and the player sees the
+    /// text).
+    chat: func(attempt: chat-attempt) -> decision;
+}
+
 /// Every import and the exports every component has, without WASI: what the
 /// host requires. Exports added in later 0.1 releases are looked up
 /// separately.
@@ -434,15 +606,36 @@ world base {
     export handler;
 }
 
-/// The optional exports, which the host looks up one by one.
+/// The optional exports, which the host looks up one by one: one world
+/// each, so a component may have any of them.
 world optional {
     export dialogs;
+}
+
+world optional-decisions {
+    export decisions;
+}
+
+world optional-styled {
+    export styled;
+}
+
+world optional-chat {
+    export chat;
 }
 
 /// Imports and exports without WASI; the host links WASI separately.
 world core {
     include base;
     export dialogs;
+    export decisions;
+    export styled;
+}
+
+/// `core` for a component that also exports `chat`.
+world core-chat {
+    include core;
+    export chat;
 }
 
 /// The world guests build against. TinyGo's `wasip2` target expects the
@@ -450,4 +643,10 @@ world core {
 world plugin {
     include wasi:cli/imports@0.2.0;
     include core;
+}
+
+/// `plugin` for a component that also exports `chat`.
+world plugin-chat {
+    include plugin;
+    export chat;
 }

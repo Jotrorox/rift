@@ -437,7 +437,7 @@ impl Manifest {
             return Some(*deadline);
         }
         Some(Duration::from_millis(match hook {
-            Hook::Route | Hook::Suggest | Hook::Status => 50,
+            Hook::Route | Hook::Suggest | Hook::Status | Hook::Chat => 50,
             Hook::Login | Hook::InitialServer | Hook::Command => 1000,
             Hook::BeforeTransfer => 300,
             Hook::Http => 5000,
@@ -620,6 +620,7 @@ mod tests {
             (Hook::Suggest, 50),
             (Hook::Status, 50),
             (Hook::Http, 5000),
+            (Hook::Chat, 50),
         ] {
             assert_eq!(manifest.deadline(hook), Some(Duration::from_millis(ms)));
         }
@@ -636,6 +637,7 @@ mod tests {
         assert_eq!(manifest.on_timeout(Hook::Login), Policy::Deny);
         assert_eq!(manifest.on_timeout(Hook::Status), Policy::Continue);
         assert_eq!(manifest.on_timeout(Hook::Http), Policy::Continue);
+        assert_eq!(manifest.on_timeout(Hook::Chat), Policy::Deny);
         assert_eq!(manifest.on_failure(), Policy::Deny);
         assert_eq!(manifest.restart, Restart::OnFailure);
         assert_eq!(manifest.capabilities, Capabilities::default());

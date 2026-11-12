@@ -1,12 +1,12 @@
 //! Durable instance registrations and filesystem intents, using bundled SQLite.
 use crate::{
-    config::{Config, InstanceStorage, ServiceInstance},
+    config::{Config, GroupMode, GroupState, InstanceStorage, ServiceInstance},
     database::{self, Database},
     provisioning::{self, Plan},
 };
 use rusqlite::{OptionalExtension, params};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions as FileOptions},
     io,
     net::{SocketAddr, TcpListener},
@@ -26,6 +26,26 @@ const INSTANCES_V2: &str = "CREATE TABLE instances (
     explicitly_stopped INTEGER NOT NULL DEFAULT 0 CHECK(explicitly_stopped IN (0,1)),
     definition TEXT NOT NULL,
     UNIQUE(node, port)
+) STRICT;";
+
+/// Operator group state lives in its own schema component, so the
+/// `instances` schema (and a downgrade to a release without group state)
+/// is unaffected; older releases ignore the extra table.
+const GROUPS_COMPONENT: &str = "groups";
+const GROUPS_SCHEMA_VERSION: u32 = 1;
+/// Instance login generations live in their own schema component, like
+/// group states, so the instances schema and downgrades are unaffected.
+const LOGINS_COMPONENT: &str = "instance_logins";
+const LOGINS_SCHEMA_VERSION: u32 = 1;
+const LOGINS_V1: &str = "CREATE TABLE login_generations (
+    name TEXT PRIMARY KEY NOT NULL,
+    generation INTEGER NOT NULL CHECK(generation > 0)
+) STRICT;";
+
+const GROUPS_V1: &str = "CREATE TABLE group_states (
+    name TEXT PRIMARY KEY NOT NULL,
+    suspended INTEGER NOT NULL DEFAULT 0 CHECK(suspended IN (0,1)),
+    mode TEXT NOT NULL DEFAULT 'active' CHECK(mode IN ('active','dev'))
 ) STRICT;";
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -160,6 +180,12 @@ impl Store {
                 DROP TABLE instances_v1;
                 PRAGMA user_version={SCHEMA_VERSION};"
             ),
+        })?;
+        database.migrate(GROUPS_COMPONENT, GROUPS_SCHEMA_VERSION, |_| {
+            GROUPS_V1.to_owned()
+        })?;
+        database.migrate(LOGINS_COMPONENT, LOGINS_SCHEMA_VERSION, |_| {
+            LOGINS_V1.to_owned()
         })?;
         Ok(Self { database })
     }
@@ -449,8 +475,9 @@ impl Store {
             plan: plan.clone(),
         })
         .map_err(|e| self.error(e))?;
-        self.database
-            .lock()
+        let mut connection = self.database.lock();
+        let transaction = connection.transaction().map_err(|e| self.error(e))?;
+        transaction
             .execute(
                 "INSERT INTO instances (name,node,port,phase,definition) VALUES (?1,?2,?3,'creating',?4)",
                 params![
@@ -461,7 +488,32 @@ impl Store {
                 ],
             )
             .map_err(|e| self.error(e))?;
+        // Every creation of a name gets a new login generation, so a
+        // recreated instance never inherits its predecessor's bus token.
+        transaction
+            .execute(
+                "INSERT INTO login_generations (name,generation) VALUES (?1,1)
+                 ON CONFLICT(name) DO UPDATE SET generation=generation+1",
+                [name],
+            )
+            .map_err(|e| self.error(e))?;
+        transaction.commit().map_err(|e| self.error(e))?;
         Ok(())
+    }
+
+    /// The bus login generation of instance `name`; 0 if it was never
+    /// created here (a static managed server).
+    pub fn login_generation(&self, name: &str) -> io::Result<u64> {
+        let connection = self.database.lock();
+        let generation: Option<i64> = connection
+            .query_row(
+                "SELECT generation FROM login_generations WHERE name=?1",
+                [name],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| self.error(e))?;
+        Ok(generation.map_or(0, |generation| generation as u64))
     }
 
     pub fn commit_creation(&self, name: &str) -> io::Result<()> {
@@ -536,6 +588,46 @@ impl Store {
                 params![stopped, name],
             )
             .map_err(|e| self.error(e))?;
+        Ok(())
+    }
+
+    /// Every group with a state other than the default.
+    pub fn group_states(&self) -> io::Result<BTreeMap<String, GroupState>> {
+        let connection = self.database.lock();
+        let mut statement = connection
+            .prepare("SELECT name,suspended,mode FROM group_states ORDER BY name")
+            .map_err(|e| self.error(e))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, bool>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|e| self.error(e))?;
+        rows.map(|row| {
+            let (name, suspended, mode) = row.map_err(|e| self.error(e))?;
+            let mode = GroupMode::parse(&mode)
+                .ok_or_else(|| self.error(format!("invalid mode for group {name}")))?;
+            Ok((name, GroupState { suspended, mode }))
+        })
+        .collect()
+    }
+
+    /// Record a group's state; the default state removes its row.
+    pub fn set_group_state(&self, group: &str, state: GroupState) -> io::Result<()> {
+        let connection = self.database.lock();
+        let result = if state.is_default() {
+            connection.execute("DELETE FROM group_states WHERE name=?1", [group])
+        } else {
+            connection.execute(
+                "INSERT INTO group_states (name,suspended,mode) VALUES (?1,?2,?3)
+                 ON CONFLICT(name) DO UPDATE SET suspended=excluded.suspended, mode=excluded.mode",
+                params![group, state.suspended, state.mode.as_str()],
+            )
+        };
+        result.map_err(|e| self.error(e))?;
         Ok(())
     }
 

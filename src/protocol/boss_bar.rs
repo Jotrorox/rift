@@ -94,6 +94,17 @@ pub(crate) struct BossBars {
     revision: u64,
 }
 
+/// A bar's text as `version` reads it (see [`crate::text::for_client`]).
+fn rendered(
+    text: &Json,
+    version: ProtocolVersion,
+    nbt: bool,
+    data: &mut Vec<u8>,
+) -> io::Result<()> {
+    let converted = crate::text::for_client(text, Some(version));
+    Text::Component(converted.as_ref().unwrap_or(text)).write(nbt, data)
+}
+
 impl BossBars {
     /// The client discarded every boss bar with its play listener.
     pub(crate) fn reset(&mut self) {
@@ -131,7 +142,7 @@ impl BossBars {
         for (name, bar) in wanted {
             match self.shown.get(name) {
                 None => packets.push(packet(name, ADD, &|data| {
-                    Text::Component(&bar.text).write(nbt, data)?;
+                    rendered(&bar.text, version, nbt, data)?;
                     data.extend(bar.progress.to_be_bytes());
                     write_varint(bar.color.into(), data);
                     write_varint(bar.style.into(), data);
@@ -141,7 +152,7 @@ impl BossBars {
                 Some(shown) => {
                     if shown.text != bar.text {
                         packets.push(packet(name, NAME, &|data| {
-                            Text::Component(&bar.text).write(nbt, data)
+                            rendered(&bar.text, version, nbt, data)
                         })?);
                     }
                     if shown.progress != bar.progress {

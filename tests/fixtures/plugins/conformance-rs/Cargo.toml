@@ -11,6 +11,10 @@ publish = false
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+# Export the `chat` hook; see ../conformance-chat-rs.
+chat = []
+
 [dependencies]
 rift-plugin = { path = "../../../../sdk/rust" }
 serde = { version = "1", features = ["derive"] }

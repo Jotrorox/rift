@@ -55,9 +55,20 @@ dashboard URL (see [`rift dev`](permissions.md#rift-dev)).
 | `ca` | | PEM file with the CA or the proxy's certificate |
 | `token_env` | | Environment variable holding the principal's token (`Client::start_with_token` takes it directly instead) |
 | `server` | | This backend's name: sent in `hello` and used as the `server` context |
+| `group` | none | This backend's service group, for an instance of one: filled in as the `group` context with `server` (`Config::with_group`) |
 | `join_timeout_ms` | 2000 | How long a join waits for a missing snapshot |
 | `request_timeout_ms` | 5000 | How long writes, commands and group requests wait |
 | `offline_policy` | `{"mode": "deny"}` | See [offline policies](#offline-policies) |
+
+On a server Rift manages with a `messaging` block, the connection fields may
+be left out. `Client::start` fills what is unset from the variables Rift sets
+([bus logins for instances](managed-servers.md#bus-logins-for-instances)):
+`address` from `RIFT_BUS_ADDRESS`, `server_name` from `RIFT_BUS_SERVER_NAME`
+(else the host of `address`), `ca` from `RIFT_BUS_CERT`, `server` from
+`RIFT_SERVER_NAME`, `group` from `RIFT_SERVER_GROUP`, and `token_env` defaults
+to `RIFT_BUS_TOKEN`. `Config::from_environment()` builds a configuration from
+the variables alone, and `Config::with_environment()` applies the fallback
+explicitly.
 
 ### Lifecycle
 
@@ -108,8 +119,8 @@ from memory and never block on the network:
 | `apply(actor, change).await` | `Result<Applied, Error>` once the proxy commits; `actor` is the player acting, `None` the backend itself |
 | `revision()` | The newest revision the replica has seen |
 
-`contexts` is the player's active set; the client adds its `server` when the
-set names none. `Client` also has `command` (forward `/perms`), `register`
+`contexts` is the player's active set; the client adds its `server` (and
+`group`, when configured) when the set names none. `Client` also has `command` (forward `/perms`), `register`
 (plugin permissions with defaults), `report_context` (custom contexts),
 `fetch_groups` (groups with permission nodes), `on_snapshot` (a player's
 snapshot changed) and `replica()` for direct reads.
@@ -250,7 +261,8 @@ fn vip_players_get_five_homes() {
 Builders take `permission`, `parent`, `prefix`, `suffix`, `meta` and any
 `node(Node)`, plus `weight` and `display_name` for groups and
 `primary_group` for users; invalid input panics, as a broken fixture should.
-`server(name)` fills in the `server` context like a backend client.
+`server(name)` fills in the `server` context like a backend client, and
+`service_group(name)` the `group` context with it.
 `apply_now(actor, change)` is the synchronous form of `apply`, and
 `compiled(uuid)` returns the compiled subject the proxy would send. Every
 UUID compiles, a stranger to just `default`, as on the proxy.
