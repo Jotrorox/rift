@@ -30,7 +30,7 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [dependencies]
-rift-plugin = { path = "../rift/sdk/rust" } # sdk/rust in a Rift checkout
+rift-plugin = { git = "https://github.com/Jotrorox/rift", tag = "sdk/rust/v0.1.5" }
 serde = { version = "1", features = ["derive"] }
 
 [profile.release]
@@ -40,7 +40,9 @@ codegen-units = 1
 strip = true
 ```
 
-The release profile above keeps the component small. Check the result with
+The `sdk/rust/v…` tags name SDK versions, which follow the plugin contract
+(`rift:plugin@0.1.5`), not the proxy's version. In a Rift checkout,
+`{ path = "…/sdk/rust" }` works as well. The release profile above keeps the component small. Check the result with
 `wasm-tools component wit my_plugin.wasm`: it exports
 `rift:plugin/handler@0.1.x` and imports the `rift:plugin/*` interfaces it uses.
 

@@ -1,0 +1,75 @@
+# Changelog
+
+Notable changes to Rift, newest first. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow the
+[stability policy](docs/stability.md). Every release that changes the
+`rift.sqlite3` schema says so under **Database**, because an older binary
+refuses a newer schema: see
+[upgrade and rollback](docs/operations.md#shutdown-upgrade-and-rollback).
+
+The SDKs are versioned on their own, after the plugin contract they implement,
+and are listed under **SDKs**.
+
+## [Unreleased]
+
+## [0.1.0] - unreleased
+
+The first tagged release. Release candidates are tagged `v0.1.0-rc.N` and
+published as prereleases from the same pipeline.
+
+### Proxy
+
+- Hostname routing through one port, backend DNS resolution, PROXY protocol
+  v1/v2 from trusted load balancers and structured connection diagnostics.
+- Online authentication with Velocity modern forwarding and BungeeCord
+  forwarding, for every supported client version.
+- Server switching, hubs, queues and recovery when a backend fails or kicks a
+  player, for Minecraft 1.8.9 to 26.3.
+- Protocol translation between Minecraft versions from 1.12 to 26.3.
+- A proxy-owned server list (MOTD, favicon, status hook), tab list header and
+  footer, a network-wide player list, boss bars, dialogs and styled text with a
+  message catalogue.
+- BungeeCord plugin-message channel compatibility.
+
+### Configuration and plugins
+
+- Validated Lua configuration (`rift.lua`), `rift check`, atomic reloads with
+  history and rollback.
+- One plugin contract (`rift:plugin@0.1.5`) with script, persistent Lua,
+  WebAssembly and remote execution modes; login, transfer, chat and kick
+  hooks; commands with suggestions; per-plugin storage quotas.
+- A network-wide permission store with groups, tracks, contexts, a LuckPerms
+  import and `/server` access by permission node.
+
+### Managed servers
+
+- On-demand local servers, service groups with scaling and bounded recovery,
+  templates with downloaded server software, persistent and ephemeral instance
+  storage, Landlock confinement and per-instance bus logins.
+- `rift node` agents to run game servers on more hosts.
+
+### Integration and operations
+
+- A message bus over QUIC with durable streams, shared by Rust, Lua and
+  server plugins; typed Java APIs for permissions and the network.
+- An embedded web dashboard and HTTP API with scoped operator tokens and audit
+  records; a shareable status page.
+- Release archives and standalone executables for Linux x86_64, macOS aarch64
+  and Windows x86_64 with SHA-256 checksums and build provenance attestations.
+
+### Database
+
+- `rift.sqlite3` instance schema 2, service groups schema 1, bus logins
+  schema 1 and permissions schema 1. Files written by earlier development
+  builds are migrated at the first start.
+
+### SDKs
+
+- Rust `rift-plugin` 0.1.5: git tag `sdk/rust/v0.1.5`.
+- Go `github.com/Jotrorox/rift/sdk/go` v0.1.5: git tag `sdk/go/v0.1.5`.
+- C SDK in `sdk/c` of the release tag.
+- Java `io.github.jotrorox.rift` artifacts at the proxy's version, from
+  `https://jotrorox.github.io/rift/maven` and GitHub Packages.
+
+[Unreleased]: https://github.com/Jotrorox/rift/commits/master
+[0.1.0]: https://github.com/Jotrorox/rift/releases
