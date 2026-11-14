@@ -7,6 +7,7 @@
 //! "vanished" means, only who may see whom. Each reader names its [`Viewer`]
 //! and gets the players that viewer may see.
 use crate::{auth::ProfileProperty, protocol::TabEntry};
+use serde_json::Value as Json;
 use std::{
     collections::{BTreeMap, BTreeSet},
     io,
@@ -26,6 +27,12 @@ pub struct Player {
     /// Only viewers holding this permission node see the player; `None` is
     /// everyone. Resolved from the player's `rift.visible-to` meta.
     pub visible_to: Option<Arc<str>>,
+    /// The name with the player's permission prefix and suffix, as other
+    /// servers' network tab lists show it; `None` without either.
+    pub display: Option<Arc<Json>>,
+    /// The weight of the player's primary group when `display` is set, for
+    /// the tab list order.
+    pub order: i32,
 }
 
 /// The meta key whose value is the node a viewer needs to see a player.
@@ -138,6 +145,8 @@ impl PlayerRegistry {
                 server: server.into(),
                 properties: Arc::default(),
                 visible_to,
+                display: None,
+                order: 0,
             },
         );
         self.generation.fetch_add(1, Ordering::Relaxed);
@@ -171,6 +180,21 @@ impl PlayerRegistry {
         }
     }
 
+    /// Set a connected player's tab list display name and order; returns
+    /// whether either changed.
+    pub fn set_display(&self, uuid: &[u8; 16], display: Option<Arc<Json>>, order: i32) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        match state.players.get_mut(uuid) {
+            Some(player) if player.display != display || player.order != order => {
+                player.display = display;
+                player.order = order;
+                self.generation.fetch_add(1, Ordering::Relaxed);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Tab list entries for every connected player who is not on `server`
     /// and whom `viewer` may see.
     pub fn tab_entries(&self, server: &str, viewer: Viewer<'_>) -> Vec<TabEntry> {
@@ -184,6 +208,8 @@ impl PlayerRegistry {
                 uuid: player.uuid,
                 name: player.name.clone(),
                 properties: player.properties.clone(),
+                display: player.display.clone(),
+                order: player.order,
             })
             .collect()
     }
@@ -323,6 +349,8 @@ impl NameReservation {
             server: server.into(),
             properties: Arc::default(),
             visible_to,
+            display: None,
+            order: 0,
         });
         self.registry.generation.fetch_add(1, Ordering::Relaxed);
         // Keep the existing name claim without an unreserved interval.
@@ -625,6 +653,8 @@ mod tests {
                 server: "lobby".into(),
                 properties: Arc::default(),
                 visible_to: None,
+                display: None,
+                order: 0,
             }]
         );
         assert_eq!(
@@ -658,6 +688,8 @@ mod tests {
                 server: "survival".into(),
                 properties: Arc::default(),
                 visible_to: None,
+                display: None,
+                order: 0,
             }]
         );
         let bob = registry

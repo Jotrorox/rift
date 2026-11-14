@@ -12,6 +12,16 @@ fn entry(uuid: u8, name: &str) -> TabEntry {
         uuid: [uuid; 16],
         name: name.into(),
         properties: Arc::new([]),
+        display: None,
+        order: 0,
+    }
+}
+
+fn ranked(uuid: u8, name: &str, display: Json, order: i32) -> TabEntry {
+    TabEntry {
+        display: Some(Arc::new(display)),
+        order,
+        ..entry(uuid, name)
     }
 }
 
@@ -157,7 +167,10 @@ fn rift_lists_only_players_the_backend_does_not() {
             players: Some(vec![entry(1, "Own"), entry(2, "Local"), entry(3, "Remote")]),
         };
         let packets = tabs.sync(version, Some([1; 16]), &view).unwrap();
-        assert_eq!(packets, [addition(version, ids, &[&entry(3, "Remote")])]);
+        assert_eq!(
+            packets,
+            [addition(version, ids, &[&entry(3, "Remote")]).unwrap()]
+        );
         let mut expected = if version.number() >= 761 {
             vec![9, 1]
         } else {
@@ -205,11 +218,7 @@ fn backend_entries_displace_rift_entries_without_removal() {
     assert!(tabs.revision() > revision);
     assert_eq!(
         tabs.sync(version, None, &view).unwrap(),
-        [addition(
-            version,
-            ids(version).unwrap(),
-            &[&entry(3, "Mover")]
-        )]
+        [addition(version, ids(version).unwrap(), &[&entry(3, "Mover")]).unwrap()]
     );
     // A backend removal of a Rift entry deletes it on the client too.
     tabs.observe(version, &backend_remove(version, &[3]))
@@ -276,4 +285,182 @@ fn legacy_switches_remove_rift_entries() {
         [backend_remove(version, &[3])]
     );
     assert!(tabs.remove_remote(version).unwrap().is_empty());
+}
+
+/// The display name as each layout carries it: a JSON string before 1.20.3
+/// and NBT from it, with the list order from 1.21.2.
+#[test]
+fn display_names_and_list_order_are_encoded_for_every_layout() {
+    let display = json!({"text": "", "extra": [
+        {"text": "[VIP] ", "color": "gold"},
+        {"text": "Remote", "color": "#12ab34"},
+    ]});
+    let remote = ranked(3, "Remote", display.clone(), 10);
+    for version in switchable() {
+        let number = version.number();
+        let ids = ids(version).unwrap();
+        let mut tabs = TabList::default();
+        let view = TabView {
+            header: None,
+            players: Some(vec![remote.clone(), entry(4, "Plain")]),
+        };
+        let packets = tabs.sync(version, None, &view).unwrap();
+        // What the client reads: hex colours only from 1.16.
+        let rendered = crate::text::for_client(&display, Some(version)).unwrap_or(display.clone());
+        assert_eq!(rendered != display, number < 735, "protocol {number}");
+        let mut text = Vec::new();
+        Text::Component(&rendered)
+            .write(version.nbt_components(), &mut text)
+            .unwrap();
+        if version.nbt_components() {
+            assert_eq!(text[0], 10, "protocol {number}"); // TAG_Compound.
+        } else {
+            let mut json_string = Vec::new();
+            write_string(&rendered.to_string(), &mut json_string);
+            assert_eq!(text, json_string);
+        }
+        let mut expected = match number {
+            ..761 => vec![0, 2],
+            761..768 => vec![1 | 8 | 32, 2],
+            _ => vec![1 | 8 | 32 | 64, 2],
+        };
+        for (uuid, name, shown) in [(3, "Remote", true), (4, "Plain", false)] {
+            expected.extend([uuid; 16]);
+            write_string(name, &mut expected);
+            expected.push(0); // No properties.
+            if number >= 761 {
+                expected.push(1); // Listed.
+            } else {
+                expected.extend([0, 0]); // Survival, no latency.
+            }
+            expected.push(u8::from(shown));
+            if shown {
+                expected.extend(&text);
+            }
+            if number >= 768 {
+                expected.push(if shown { 10 } else { 0 }); // List order.
+            }
+            if (759..761).contains(&number) {
+                expected.push(0); // No profile key.
+            }
+        }
+        assert_eq!(packets, [Packet::new(ids.players, expected)]);
+        // Rift's own packets parse like a backend's.
+        let mut seen = Vec::new();
+        let listed = changes(version, ids, &packets[0], |uuid, added| {
+            seen.push((uuid[0], added));
+        });
+        assert!(listed.unwrap());
+        assert_eq!(seen, [(3, true), (4, true)], "protocol {number}");
+        assert!(tabs.sync(version, None, &view).unwrap().is_empty());
+    }
+}
+
+#[test]
+fn exact_display_name_bytes_for_one_version_of_each_layout() {
+    let remote = ranked(3, "Bob", json!({"text": "[A] Bob", "color": "red"}), 7);
+    let packet = |number| {
+        let version = ProtocolVersion::new(number).unwrap();
+        addition(version, ids(version).unwrap(), &[&remote])
+            .unwrap()
+            .data
+    };
+    let json_text = "{\"color\":\"red\",\"text\":\"[A] Bob\"}";
+    let head = |action: u8| {
+        let mut data = vec![action, 1];
+        data.extend([3; 16]);
+        data.extend(b"\x03Bob\x00");
+        data
+    };
+    // 1.12.2: action 0, game mode, latency, display name as a JSON string.
+    let mut legacy = head(0);
+    legacy.extend([0, 0, 1, json_text.len() as u8]);
+    legacy.extend(json_text.bytes());
+    assert_eq!(packet(340), legacy);
+    // 1.20.2: actions add, listed and display name; still a JSON string.
+    let mut modern = head(1 | 8 | 32);
+    modern.extend([1, 1, json_text.len() as u8]);
+    modern.extend(json_text.bytes());
+    assert_eq!(packet(764), modern);
+    // 1.20.3: the display name is an anonymous NBT compound.
+    let mut nbt = head(1 | 8 | 32);
+    nbt.extend([1, 1, 10]);
+    nbt.extend(b"\x08\x00\x05color\x00\x03red");
+    nbt.extend(b"\x08\x00\x04text\x00\x07[A] Bob");
+    nbt.push(0);
+    assert_eq!(packet(765), nbt);
+    // 1.21.2: the list order follows the display name.
+    let mut ordered = head(1 | 8 | 32 | 64);
+    ordered.extend(&nbt[23..]);
+    ordered.push(7);
+    assert_eq!(packet(768), ordered);
+}
+
+#[test]
+fn changed_display_names_update_listed_entries_in_place() {
+    for version in switchable() {
+        let number = version.number();
+        let ids = ids(version).unwrap();
+        let mut tabs = TabList::default();
+        let view = |players| TabView {
+            header: None,
+            players: Some(players),
+        };
+        let plain = view(vec![entry(3, "Remote"), entry(4, "Other")]);
+        assert_eq!(tabs.sync(version, None, &plain).unwrap().len(), 1);
+        // A prefix arrives: one update for that entry, no removal.
+        let display = json!({"text": "[VIP] Remote", "color": "gold"});
+        let named = view(vec![
+            ranked(3, "Remote", display.clone(), 10),
+            entry(4, "Other"),
+        ]);
+        let action = match number {
+            ..761 => 3,
+            761..768 => 32,
+            _ => 32 | 64,
+        };
+        let mut expected = vec![action, 1];
+        expected.extend([3; 16]);
+        expected.push(1);
+        Text::Component(&display)
+            .write(version.nbt_components(), &mut expected)
+            .unwrap();
+        if number >= 768 {
+            expected.push(10);
+        }
+        let packets = tabs.sync(version, None, &named).unwrap();
+        assert_eq!(
+            packets,
+            [Packet::new(ids.players, expected)],
+            "protocol {number}"
+        );
+        let listed = changes(version, ids, &packets[0], |_, _| panic!("no entry changes"));
+        assert!(listed.unwrap());
+        assert!(tabs.sync(version, None, &named).unwrap().is_empty());
+        // Only the rank changes: clients without a list order have nothing new.
+        let promoted = view(vec![
+            ranked(3, "Remote", display.clone(), 20),
+            entry(4, "Other"),
+        ]);
+        let packets = tabs.sync(version, None, &promoted).unwrap();
+        assert_eq!(
+            packets.len(),
+            usize::from(number >= 768),
+            "protocol {number}"
+        );
+        // The prefix goes away again: the display name is cleared.
+        let mut expected = vec![action, 1];
+        expected.extend([3; 16]);
+        expected.push(0);
+        if number >= 768 {
+            expected.push(0);
+        }
+        let packets = tabs.sync(version, None, &plain).unwrap();
+        assert_eq!(
+            packets,
+            [Packet::new(ids.players, expected)],
+            "protocol {number}"
+        );
+        assert!(tabs.sync(version, None, &plain).unwrap().is_empty());
+    }
 }

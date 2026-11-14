@@ -247,6 +247,131 @@ async fn a_hidden_player_is_missing_for_viewers_without_the_node() {
     check_hidden("lobby-1");
 }
 
+/// Network tab list entries show the listed player's prefix and suffix,
+/// resolved in that player's contexts, and follow permission changes and
+/// server switches. A player with neither keeps the plain entry.
+#[tokio::test]
+async fn network_tab_entries_show_the_prefix_and_suffix_of_the_listed_player() {
+    use crate::players::Viewer;
+    use rift_permissions::Change;
+    use serde_json::json;
+    let runtime = runtime("api_version=1");
+    let players = runtime.players().clone();
+    let roster = players.roster().clone();
+    let authority = runtime.permissions().clone();
+    let watcher = tokio::spawn(players.clone().watch());
+    let (alice, bob, carol) = ([1; 16], [2; 16], [3; 16]);
+    let user = SubjectRef::User(Uuid::from_bytes(bob));
+    let apply = |change| authority.apply(Actor::Cli, change).unwrap();
+    apply(Change::CreateGroup {
+        name: "vip".into(),
+        weight: 10,
+        display_name: None,
+    });
+    apply(Change::SetNode {
+        subject: SubjectRef::Group("vip".into()),
+        node: Node::prefix(100, "&6[VIP] ").unwrap(),
+    });
+    apply(Change::SetNode {
+        subject: user.clone(),
+        node: Node::inherit("vip", true).unwrap(),
+    });
+    apply(Change::SetNode {
+        subject: user.clone(),
+        node: Node::suffix(1, " &7*")
+            .unwrap()
+            .with_context("server", "game")
+            .unwrap(),
+    });
+    let join = |uuid: [u8; 16], name: &str, server: &str| {
+        let record = roster.register(uuid, name, server).unwrap();
+        let (handle, actions) = players.register(u64::from(uuid[0]), &uuid, name, 774, server);
+        (record, handle, actions)
+    };
+    let _alice = join(alice, "Alice", "lobby");
+    let bob_session = join(bob, "Bob", "game");
+    let _carol = join(carol, "Carol", "game");
+    let tab = crate::tab_list::TabList {
+        network: true,
+        ..Default::default()
+    };
+    let entries = |server: &str| {
+        crate::tab_list::view(&roster, Viewer::System, Some(&tab), None, "Alice", server)
+            .players
+            .unwrap()
+    };
+    let listed = entries("lobby");
+    assert_eq!(listed.len(), 2);
+    assert_eq!(listed[0].name, "Bob");
+    assert_eq!(
+        listed[0].display.as_deref(),
+        Some(&json!({"text": "", "extra": [
+            {"text": "[VIP] Bob ", "color": "gold"},
+            {"text": "*", "color": "gray"},
+        ]}))
+    );
+    assert_eq!(listed[0].order, 10);
+    // No prefix and no suffix: the entry Rift always sent.
+    assert_eq!(
+        listed[1],
+        crate::protocol::TabEntry {
+            uuid: carol,
+            name: "Carol".into(),
+            properties: Arc::new([]),
+            display: None,
+            order: 0,
+        }
+    );
+    // A permission change reaches the roster and rebuilds every view.
+    tokio::task::yield_now().await; // The watcher subscribes.
+    let before = roster.generation();
+    apply(Change::SetNode {
+        subject: user.clone(),
+        node: Node::prefix(200, "&c[Admin] ").unwrap(),
+    });
+    timeout(Duration::from_secs(5), async {
+        while roster.get(&bob).unwrap().display == listed[0].display {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_ne!(roster.generation(), before);
+    let bob_entry = |server: &str| entries(server).remove(0);
+    assert_eq!(
+        bob_entry("lobby").display.as_deref(),
+        Some(&json!({"text": "", "extra": [
+            {"text": "[Admin] Bob ", "color": "red"},
+            {"text": "*", "color": "gray"},
+        ]}))
+    );
+    // A switch resolves in the new server's contexts: no suffix off `game`.
+    let mut carol_view = entries("game");
+    assert!(carol_view.iter().all(|entry| entry.name != "Bob"));
+    bob_session.1.set_server("lobby");
+    bob_session.0.set_server("lobby");
+    carol_view = entries("game");
+    let moved = carol_view.iter().find(|entry| entry.name == "Bob").unwrap();
+    assert_eq!(
+        moved.display.as_deref(),
+        Some(&json!({"text": "[Admin] Bob", "color": "red"}))
+    );
+    // Without either the display name goes away again.
+    apply(Change::ClearSubject {
+        subject: user,
+        contexts: None,
+    });
+    timeout(Duration::from_secs(5), async {
+        while roster.get(&bob).unwrap().display.is_some() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(roster.get(&bob).unwrap().order, 0);
+    watcher.abort();
+}
+
 #[test]
 fn version_schema_and_authenticated_mode_are_required() {
     for invalid in [

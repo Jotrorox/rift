@@ -226,8 +226,65 @@ mod tests {
                 uuid: [2; 16],
                 name: "Bob".into(),
                 properties: Arc::new([skin]),
+                display: None,
+                order: 0,
             }])
         );
+    }
+
+    #[test]
+    fn network_entries_carry_the_display_name_and_order_on_the_roster() {
+        let registry = Arc::new(PlayerRegistry::default());
+        let _alice = registry.register([1; 16], "Alice", "lobby").unwrap();
+        let _bob = registry.register([2; 16], "Bob", "survival").unwrap();
+        let _carol = registry.register([3; 16], "Carol", "survival").unwrap();
+        let config = TabList {
+            network: true,
+            ..TabList::default()
+        };
+        let entries = || {
+            view(
+                &registry,
+                Viewer::System,
+                Some(&config),
+                None,
+                "Alice",
+                "lobby",
+            )
+            .players
+            .unwrap()
+        };
+        let plain = |uuid: u8, name: &str| TabEntry {
+            uuid: [uuid; 16],
+            name: name.into(),
+            properties: Arc::new([]),
+            display: None,
+            order: 0,
+        };
+        // Without a prefix or suffix entries are what they always were.
+        assert_eq!(entries(), [plain(2, "Bob"), plain(3, "Carol")]);
+        let display = Arc::new(json!({"text": "[VIP] Bob", "color": "gold"}));
+        let before = registry.generation();
+        assert!(registry.set_display(&[2; 16], Some(display.clone()), 10));
+        assert_ne!(registry.generation(), before);
+        assert_eq!(
+            entries(),
+            [
+                TabEntry {
+                    display: Some(display.clone()),
+                    order: 10,
+                    ..plain(2, "Bob")
+                },
+                plain(3, "Carol")
+            ]
+        );
+        // An unchanged value rebuilds nothing; so does an unknown player.
+        let before = registry.generation();
+        assert!(!registry.set_display(&[2; 16], Some(display), 10));
+        assert!(!registry.set_display(&[9; 16], None, 5));
+        assert_eq!(registry.generation(), before);
+        assert!(registry.set_display(&[2; 16], None, 0));
+        assert_eq!(entries(), [plain(2, "Bob"), plain(3, "Carol")]);
     }
 
     #[test]

@@ -29,7 +29,7 @@ and last; a negated `inherit` node is the only way to opt a user out.
 | --- | --- | --- |
 | `permission` | pattern, `true`/`false` | Grant or deny `a.b`, `a.*` or `*` |
 | `inherit` | group, `true`/`false` | Inherit a group; `false` blocks it on every path |
-| `prefix`, `suffix` | priority, text | Chat decoration; the highest priority wins |
+| `prefix`, `suffix` | priority, text | Chat decoration; the highest priority wins. Also shown in the [network tab list](operations.md#tab-list-header-footer-and-network-wide-players) |
 | `meta` | key, value | Arbitrary key/value data such as `homes = "5"` |
 | `weight` | integer | Groups only; the same as the group's weight |
 | `display_name` | text | Groups only |
