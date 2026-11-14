@@ -34,9 +34,10 @@ Use `rift.config.templates` to describe local provisioning assets: `server_jar`,
 optional `plugins` jar paths, a `configs` directory and a `map` directory. These
 Minecraft server assets are separate from Rift's Lua modules and folder plugins.
 Use `rift.config.service_groups` for lifecycle commands, a port range, an optional
-named `template`, and a `storage` policy (`persistent` by default, or `disposable`
-for games whose generated directory should be deleted on removal). Disposable
-groups require a template. Routes can target the group to spread logins across
+named `template`, and a `storage` policy (`persistent` by default, `disposable`
+for games whose generated directory should be deleted on removal, or `ephemeral`
+for games that start every run from a fresh copy deleted when the process ends).
+Disposable and ephemeral groups require a template. Routes can target the group to spread logins across
 its runtime instances. Asset paths resolve relative to the configuration file.
 Templates and group policies can change live when existing instances retain
 their process definitions and storage policy. Remove affected instances before

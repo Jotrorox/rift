@@ -35,13 +35,15 @@ pub struct ServiceScaling {
 }
 
 /// Persistent worlds retain their data when their process or instance stops.
-/// Disposable game instances own a fresh copy of their template assets.
+/// Disposable game instances own a fresh copy of their template assets,
+/// deleted with the instance; ephemeral ones get a fresh copy for every run.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum InstanceStorage {
     #[default]
     Persistent,
     Disposable,
+    Ephemeral,
 }
 
 impl InstanceStorage {
@@ -49,7 +51,14 @@ impl InstanceStorage {
         match self {
             Self::Persistent => "persistent",
             Self::Disposable => "disposable",
+            Self::Ephemeral => "ephemeral",
         }
+    }
+
+    /// Whether the files are a template copy Rift owns and deletes, at the
+    /// latest when the instance is removed.
+    pub fn discards_data(self) -> bool {
+        self != Self::Persistent
     }
 }
 
@@ -184,9 +193,10 @@ pub(super) fn parse(
             value => match string(value, &format!("{path}.storage"))?.as_str() {
                 "persistent" => InstanceStorage::Persistent,
                 "disposable" => InstanceStorage::Disposable,
+                "ephemeral" => InstanceStorage::Ephemeral,
                 _ => {
                     return Err(format!(
-                        "{path}.storage: expected 'persistent' or 'disposable'"
+                        "{path}.storage: expected 'persistent', 'disposable' or 'ephemeral'"
                     ));
                 }
             },
@@ -200,7 +210,9 @@ pub(super) fn parse(
         let directory = match directory_value {
             Value::Nil => match storage {
                 InstanceStorage::Persistent => DEFAULT_PERSISTENT_DIRECTORY,
-                InstanceStorage::Disposable => DEFAULT_DISPOSABLE_DIRECTORY,
+                InstanceStorage::Disposable | InstanceStorage::Ephemeral => {
+                    DEFAULT_DISPOSABLE_DIRECTORY
+                }
             }
             .to_owned(),
             value => string(value, &format!("{path}.directory"))?,
@@ -501,7 +513,9 @@ fn render_group(
         server.node = Some(node.to_owned());
         server.directory = match definition.storage {
             InstanceStorage::Persistent => DEFAULT_PERSISTENT_DIRECTORY,
-            InstanceStorage::Disposable => DEFAULT_DISPOSABLE_DIRECTORY,
+            InstanceStorage::Disposable | InstanceStorage::Ephemeral => {
+                DEFAULT_DISPOSABLE_DIRECTORY
+            }
         }
         .replace("{name}", name)
         .into();
@@ -524,9 +538,16 @@ pub(super) fn validate(config: &Config) -> Result<(), String> {
             if !config.templates.contains_key(template) {
                 return Err(format!("{path}.template: unknown template {template:?}"));
             }
-        } else if group.storage == InstanceStorage::Disposable {
+        } else if group.storage.discards_data() {
             return Err(format!(
-                "{path}.storage: disposable instances require a template"
+                "{path}.storage: {} instances require a template",
+                group.storage.as_str()
+            ));
+        }
+        // This host's supervisor builds and deletes each run's copy.
+        if group.storage == InstanceStorage::Ephemeral && group.nodes.is_some() {
+            return Err(format!(
+                "{path}.storage: ephemeral instances run on this host only; use 'disposable' with nodes"
             ));
         }
         if !safe_name(name) || name.len() > 107 {

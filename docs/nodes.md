@@ -151,7 +151,9 @@ the proxy, since it must reach the server anyway.
 ## Service groups across nodes
 
 A group with `nodes` creates its instances on matching nodes. Groups without
-`nodes` keep running on the controller.
+`nodes` keep running on the controller. `storage = "ephemeral"` (a fresh copy
+per run) is available only on the controller; groups with `nodes` use
+`disposable` or `persistent`.
 
 ```lua
 rift.config.service_groups.bedwars = {

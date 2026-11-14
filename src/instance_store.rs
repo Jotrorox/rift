@@ -1,6 +1,6 @@
 //! Durable instance registrations and filesystem intents, using bundled SQLite.
 use crate::{
-    config::{Config, GroupMode, GroupState, InstanceStorage, ServiceInstance},
+    config::{Config, GroupMode, GroupState, ServiceInstance},
     database::{self, Database},
     provisioning::{self, Plan},
 };
@@ -293,7 +293,7 @@ impl Store {
             let mut storage_paths = vec![directory.clone()];
             if record.phase != "ready" {
                 storage_paths.extend(definition.plan.stage.iter().cloned());
-                if definition.instance.storage == InstanceStorage::Disposable {
+                if definition.instance.storage.discards_data() {
                     storage_paths.push(provisioning::tombstone(&definition.plan)?);
                 }
             }
@@ -370,7 +370,7 @@ impl Store {
                         directory.display()
                     )));
                 }
-                provisioning::validate_restored(&definition.plan)
+                provisioning::validate_registered(&definition.instance, &definition.plan)
                     .map_err(|e| self.error(format!("instances.{}: {e}", record.name)))?;
                 check_configured_port(&candidate, &record.name, definition.instance.port)
                     .map_err(|e| self.error(e))?;
@@ -400,6 +400,15 @@ impl Store {
             let address = SocketAddr::from(([127,0,0,1], instance.port));
             TcpListener::bind(address).map_err(|e| self.error(format!("instances.{name}: port {address} is unavailable: {e}; stop the conflicting process or correct the configuration")))
         }).collect()
+    }
+
+    /// The storage plan of registered instance `name`.
+    pub(crate) fn plan(&self, name: &str) -> io::Result<Option<Plan>> {
+        Ok(self
+            .records()?
+            .into_iter()
+            .find(|r| r.name == name && r.phase == "ready")
+            .map(|r| r.definition.plan))
     }
 
     pub fn stopped_names(&self) -> io::Result<BTreeSet<String>> {
@@ -569,7 +578,7 @@ impl Store {
             .into_iter()
             .find(|r| r.name == name && ["removing", "deleting"].contains(&r.phase.as_str()))
             .ok_or_else(|| self.error("no pending removal"))?;
-        if record.definition.instance.storage == InstanceStorage::Disposable && !record.remote() {
+        if record.definition.instance.storage.discards_data() && !record.remote() {
             if record.phase == "removing" {
                 provisioning::retire_storage(&record.definition.plan)?;
                 self.transition(name, "removing", "deleting")?;

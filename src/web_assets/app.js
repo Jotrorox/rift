@@ -216,7 +216,7 @@
       cell(tr, server.name); cell(tr, server.state, `state ${server.state}`);
       cell(tr, `${count(server.players)} players · ${count(server.reservations)} attachments`);
       cell(tr, wakeLabel(server));
-      cell(tr, server.storage === "disposable" ? "Disposable game" : "Persistent world");
+      cell(tr, storageLabel(server.storage));
       cell(tr, server.template || "Prepared directory");
       cell(tr, server.group ? `${server.group} · ${server.address}` : server.address, "address");
       cell(tr, server.node || "local");
@@ -236,15 +236,15 @@
       }
       if (server.group) {
         const button = document.createElement("button");
-        button.type = "button"; button.className = server.storage === "disposable" ? "button destructive" : "button subtle";
-        button.textContent = server.storage === "disposable" ? "Remove & delete files" : "Remove · keep files";
+        button.type = "button"; button.className = discardsFiles(server.storage) ? "button destructive" : "button subtle";
+        button.textContent = discardsFiles(server.storage) ? "Remove & delete files" : "Remove · keep files";
         button.setAttribute("aria-label", `${button.textContent}: ${server.name}`);
-        button.title = server.storage === "disposable" ? "Stops the instance and permanently deletes its generated directory, including the world." : "Stops and unregisters the instance; its world and server files remain on disk.";
+        button.title = discardsFiles(server.storage) ? "Stops the instance and permanently deletes its generated directory, including the world." : "Stops and unregisters the instance; its world and server files remain on disk.";
         const unavailable = number(server.players) > 0 || number(server.reservations) > 0 || ["stopping", "removing"].includes(server.state);
         state.serverButtons.push({ button, unavailable });
         button.addEventListener("click", () => {
           if (button.disabled) return;
-          if (server.storage === "disposable" && !window.confirm(`Remove ${server.name} and permanently delete its files, including its world? This can't be undone.`)) return;
+          if (discardsFiles(server.storage) && !window.confirm(`Remove ${server.name} and permanently delete its files, including its world? This can't be undone.`)) return;
           instanceOperation(server.name, "remove", server.storage);
         });
         actions.append(button);
@@ -286,7 +286,7 @@
         const tag = document.createElement("span"); tag.className = `tag ${kind}`; tag.textContent = label; badges.append(tag);
       }
       cell(tr, (group.port_range || []).join("–"));
-      cell(tr, group.storage === "disposable" ? "Disposable game" : "Persistent world");
+      cell(tr, storageLabel(group.storage));
       cell(tr, group.template || "Prepared directories");
       cell(tr, instanceSummary(group)).title = names.join(", ");
       // Which client versions Rift translates for the group, and where that is set.
@@ -464,7 +464,7 @@
     ["directory", "Instance directory (optional; {name} required)", "text"], ["command", "Command arguments (one per line; optional with a template)", "array"],
     ["memory_mb", "Memory in MiB (default command only)", "number"],
     ["port_range.0", "First port", "number"], ["port_range.1", "Last port", "number"],
-    ["template", "Template (optional)", "text"], ["storage", "Storage", ["persistent", "disposable"]],
+    ["template", "Template (optional)", "text"], ["storage", "Storage", ["persistent", "disposable", "ephemeral"]],
     ["autostart", "Start new instances automatically", "boolean"], ["start_on_connect", "Start on player connection", "boolean"],
     ["idle_timeout_ms", "Idle timeout (ms; 0 disables)", "number"], ["start_timeout_ms", "Startup timeout (ms)", "number"],
     ["stop_timeout_ms", "Stop timeout (ms)", "number"], ["restart_delay_ms", "Recovery delay (ms)", "number"], ["restart_retries", "Recovery attempts", "number"],
@@ -1658,6 +1658,11 @@
       $("plugin-result").className = "operation-result error";
     } finally { state.busy = false; controls(); }
   }
+  // Disposable and ephemeral instances own throwaway template copies.
+  function discardsFiles(storage) { return storage === "disposable" || storage === "ephemeral"; }
+  function storageLabel(storage) {
+    return storage === "disposable" ? "Disposable game" : storage === "ephemeral" ? "Ephemeral game · fresh copy each run" : "Persistent world";
+  }
   function wakeLabel(server) {
     if (server.group_suspended) return `Paused · group ${server.group} stopped; start the group to resume`;
     const label = baseWakeLabel(server);
@@ -1827,10 +1832,10 @@
       text("server-result", action === "create"
         ? `Created ${outcome.name || "instance"} in ${name}. Check its state below; provisioned servers require your EULA acceptance and backend settings before starting.`
         : cleanupFailed ? `Removed ${name}, but file cleanup failed: ${outcome.cleanup_error}`
-          : storage === "disposable"
+          : discardsFiles(storage)
             ? outcome.files_removed === true ? `Removed ${name} and deleted its instance files, including its world.` : `Removed ${name}. Instance files were not deleted; inspect the directory before reuse.`
             : `Removed ${name}. Its persistent world and server files remain on disk.`);
-      $("server-result").className = `operation-result ${cleanupFailed || (action === "remove" && storage === "disposable" && outcome.files_removed !== true) ? "warning" : "success"}`;
+      $("server-result").className = `operation-result ${cleanupFailed || (action === "remove" && discardsFiles(storage) && outcome.files_removed !== true) ? "warning" : "success"}`;
       await refreshStatus({ syncSource: false });
     } catch (error) {
       if (error.status === 401 || error.status === 403) $("auth-panel").open = true;
