@@ -2636,6 +2636,8 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
             .map(|handler| handler.with_players(initial.extensions.player_api()));
     let messaging_controls = crate::messaging_runtime::Controls::new(initial.messaging.clone())?;
     let player_requests = crate::messaging_runtime::PlayerRequests::new(initial.messaging.clone())?;
+    let network_requests =
+        crate::messaging_runtime::NetworkRequests::new(initial.messaging.clone())?;
     let server_states = crate::messaging_runtime::ServerStates::new(initial.messaging.clone())?;
     let permission_bus = initial.perms.listen()?;
     initial.addresses = Arc::new(
@@ -2673,6 +2675,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         app.workflows.clone(),
     ));
     background.spawn(player_requests.run(receiver.clone(), app.workflows.clone()));
+    background.spawn(network_requests.run(receiver.clone(), app.workflows.clone()));
     background.spawn(server_states.run(receiver.clone()));
     // Keep visibility rules current as permissions change.
     background.spawn(snapshot.extensions.players().clone().watch());

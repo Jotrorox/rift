@@ -17,6 +17,7 @@ testing {
         register<JvmTestSuite>("integrationTest") {
             dependencies {
                 implementation(project())
+                implementation(project(":rift-network-client"))
             }
             targets.configureEach {
                 testTask.configure {

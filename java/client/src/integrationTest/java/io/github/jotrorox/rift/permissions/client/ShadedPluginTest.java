@@ -42,6 +42,12 @@ class ShadedPluginTest {
             Class<?> contextType = plugin.loadClass("io.github.jotrorox.rift.permissions.ContextSet");
             assertSame(plugin, clientType.getClassLoader());
             assertSame(plugin, contextType.getClassLoader(), "the API comes from the plugin jar");
+            assertThrows(ClassNotFoundException.class,
+                    () -> plugin.loadClass("io.github.jotrorox.rift.network.client.NetworkClient"),
+                    "the network client is relocated");
+            assertSame(plugin, plugin.loadClass(LIB + "network.NetworkClient").getClassLoader());
+            assertSame(plugin, plugin.loadClass("io.github.jotrorox.rift.network.RiftNetwork").getClassLoader(),
+                    "the network API comes from the plugin jar");
 
             Object busBuilder = messagingType.getMethod("builder").invoke(null);
             call(busBuilder, "address", new Class<?>[] {String.class, int.class}, "127.0.0.1", rift.port());

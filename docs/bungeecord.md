@@ -32,6 +32,9 @@ version. Bukkit/Paper plugins should keep using the `BungeeCord` API channel;
 the server maps that name for modern clients. Rift registers its channel with
 each backend after entering play, including after a transfer.
 
+Plugins written for Rift can use the typed [network API](network-java.md)
+instead, which needs no carrier player and answers every request.
+
 ## Supported requests
 
 All string fields use Java `DataOutput.writeUTF` / `DataInput.readUTF`, including

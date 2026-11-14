@@ -507,7 +507,8 @@ impl Players {
         reached.len()
     }
 
-    fn known(&self, server: &str) -> Result<(), &'static str> {
+    /// Whether `server` is a configured server or service group.
+    pub fn known(&self, server: &str) -> Result<(), &'static str> {
         if !self
             .destinations
             .lock()

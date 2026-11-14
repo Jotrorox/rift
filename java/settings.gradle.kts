@@ -37,6 +37,9 @@ mapOf(
     "api" to "rift-permissions-api",
     "client" to "rift-permissions-client",
     "test" to "rift-permissions-test",
+    "network-api" to "rift-network-api",
+    "network" to "rift-network-client",
+    "network-test" to "rift-network-test",
     "paper" to "rift-permissions-paper",
 ).forEach { (directory, artifact) ->
     include(artifact)
