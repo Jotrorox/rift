@@ -885,15 +885,13 @@ pub fn upgrade_nodes(config: &Config) -> io::Result<Vec<(SubjectRef, Node)>> {
         let store = storage::Store::open(Some(storage))?;
         for (key, value) in store.namespace(MEMBERSHIPS) {
             let (Ok(uuid), Ok(groups)) = (Uuid::parse(&key), std::str::from_utf8(&value)) else {
-                eprintln!(
-                    "rift: permission upgrade skipped an invalid {MEMBERSHIPS} entry {key:?}"
-                );
+                log_warn!("permission upgrade skipped an invalid {MEMBERSHIPS} entry {key:?}");
                 continue;
             };
             for group in groups.split(',') {
                 match Node::inherit(group, true) {
                     Ok(node) => nodes.push((SubjectRef::User(uuid), node)),
-                    Err(error) => eprintln!("rift: permission upgrade skipped {key}: {error}"),
+                    Err(error) => log_warn!("permission upgrade skipped {key}: {error}"),
                 }
             }
         }
@@ -1152,8 +1150,8 @@ impl Extensions {
             .filter(|script| script.api_version >= 2)
             .map_or(&empty, |script| &script.groups);
         if let Err(error) = self.permissions.mirror_config(groups) {
-            eprintln!(
-                "rift: extensions.groups could not be mirrored into the permission store: {error}"
+            log_error!(
+                "extensions.groups could not be mirrored into the permission store: {error}"
             );
         }
     }
@@ -1564,7 +1562,7 @@ impl ExtensionSession {
 
     async fn notify(&self, hook: &str, input: &Context) {
         if let Err(error) = self.runtime.call(hook, input, &self.jobs).await {
-            eprintln!("rift: {error}");
+            log_error!("{error}");
         }
     }
     pub async fn before_transfer(&mut self, target: &str, reason: &str) -> io::Result<()> {
@@ -1682,7 +1680,7 @@ impl ExtensionSession {
             .await;
         match provided {
             Ok(contexts) => self.runtime.permissions.provide_contexts(uuid, contexts),
-            Err(error) => eprintln!("rift: {error}"),
+            Err(error) => log_error!("{error}"),
         }
     }
 
@@ -1813,7 +1811,7 @@ impl Drop for ExtensionSession {
         // dropping the notification on the first busy moment.
         handle.clone().spawn(async move {
             let Some(permit) = script::acquire_slot(&runtime.slots).await else {
-                eprintln!("rift: extension teardown notification dropped: capacity exhausted");
+                log_warn!("extension teardown notification dropped: capacity exhausted");
                 return;
             };
             let deadline = Instant::now() + script::EXECUTION_TIMEOUT;
@@ -1826,13 +1824,13 @@ impl Drop for ExtensionSession {
                         && let Err(error) =
                             script.evaluate("after_transfer", &transfer, deadline, &runtime)
                     {
-                        eprintln!("rift: {error}");
+                        log_error!("{error}");
                     }
                 }
                 if script.hooks.contains("disconnect")
                     && let Err(error) = script.evaluate("disconnect", &input, deadline, &runtime)
                 {
-                    eprintln!("rift: {error}");
+                    log_error!("{error}");
                 }
             });
         });

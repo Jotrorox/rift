@@ -351,7 +351,7 @@ impl ManagedServers {
             && definition.directory.is_dir()
             && let Err(error) = logins.write_certificate(&definition.directory)
         {
-            eprintln!("rift: cannot write the bus certificate for {name}: {error}");
+            log_error!("cannot write the bus certificate for {name}: {error}");
         }
         Ok(())
     }
@@ -995,8 +995,8 @@ pub(crate) fn rotate_log(directory: &Path, limit: u64) -> io::Result<bool> {
 /// returning them: a log that cannot be rotated never stops its server.
 pub(crate) fn rotate_log_reporting(directory: &Path) {
     if let Err(error) = rotate_log(directory, LOG_ROTATE_BYTES) {
-        eprintln!(
-            "rift: cannot rotate {}: {error}",
+        log_error!(
+            "cannot rotate {}: {error}",
             directory.join(LOG_FILE).display()
         );
     }
@@ -1369,8 +1369,8 @@ async fn discard_copy<B: ProcessBackend>(server: &Server, backend: &B) {
         .await
         .unwrap_or_else(|error| Err(io::Error::other(error)));
     if let Err(error) = result {
-        eprintln!(
-            "rift: cannot delete the ephemeral copy of {}: {error}",
+        log_error!(
+            "cannot delete the ephemeral copy of {}: {error}",
             server.name
         );
         lock(&server.state)

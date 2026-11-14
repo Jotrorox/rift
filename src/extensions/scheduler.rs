@@ -105,7 +105,7 @@ impl Extensions {
                         // avoids catch-up bursts and an unbounded queue of missed ticks.
                         tokio::time::sleep(every).await;
                         if let Err(error) = runtime.run_job(&name, &gate).await {
-                            eprintln!("rift: extension job {name}: {error}");
+                            log_error!("extension job {name}: {error}");
                         }
                     }
                 }));
@@ -128,12 +128,12 @@ impl Extensions {
             match notifications.recv().await {
                 Ok(Notification::Committed { event, .. }) if event.actor != own => {
                     if let Err(error) = self.run_permission_change(event).await {
-                        eprintln!("rift: {error}");
+                        log_error!("{error}");
                     }
                 }
                 Ok(_) => {}
-                Err(RecvError::Lagged(missed)) => eprintln!(
-                    "rift: extensions.on_permission_change fell behind and missed {missed} changes"
+                Err(RecvError::Lagged(missed)) => log_warn!(
+                    "extensions.on_permission_change fell behind and missed {missed} changes"
                 ),
                 Err(RecvError::Closed) => return,
             }

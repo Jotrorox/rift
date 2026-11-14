@@ -147,24 +147,24 @@ impl MessageHandler {
                     let message = match subscription.recv().await {
                         Ok(message) => message,
                         Err(Error::SlowConsumer) => {
-                            eprintln!("messaging Lua subscription {} exceeded its queue; dropped pending messages and resubscribing", settings.subject);
+                            log_warn!("messaging Lua subscription {} exceeded its queue; dropped pending messages and resubscribing", settings.subject);
                             match broker.subscribe(&settings.subject, settings.queue.as_deref()) {
                                 Ok(receiver) => subscription = receiver,
                                 Err(error) => {
-                                    eprintln!("messaging Lua subscription ended: {error}");
+                                    log_error!("messaging Lua subscription ended: {error}");
                                     break;
                                 }
                             }
                             continue;
                         }
                         Err(error) => {
-                            eprintln!("messaging Lua subscription ended: {error}");
+                            log_error!("messaging Lua subscription ended: {error}");
                             break;
                         }
                     };
                     let script = scripts.borrow().clone();
                     if let Err(error) = script.execute(message, settings.subject.clone(), broker.clone(), players.clone()).await {
-                        eprintln!("{error}");
+                        log_error!("{error}");
                     }
                 }
             });

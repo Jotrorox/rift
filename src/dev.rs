@@ -139,6 +139,11 @@ pub fn prepare(args: &[String]) -> io::Result<Dev> {
         env::set_var(TOKEN_ENV, &token);
         env::set_var(ADMIN_TOKEN_ENV, &admin_token);
     }
+    // A plugin author wants their plugin's debug and trace lines without
+    // asking; an explicit RIFT_LOG_LEVEL still decides.
+    if env::var_os(rift::log::LEVEL_ENV).is_none_or(|level| level.is_empty()) {
+        rift::log::set_level(rift::log::Level::Debug);
+    }
     let (mut publish, subscribe) = rift::permissions::backend_grants();
     // Plugin authors try the player API from the same login.
     publish.push(format!("{}.*", rift::players_service::PREFIX));

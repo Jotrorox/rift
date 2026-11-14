@@ -80,15 +80,15 @@ pub fn harden_process() {
     #[cfg(target_os = "linux")]
     {
         if std::env::var_os(KEEP_DUMPABLE).is_some_and(|value| value == "1") {
-            eprintln!(
-                "rift: warning: {KEEP_DUMPABLE}=1: processes of the same user can read Rift's environment and memory, and a crash writes a core dump"
+            log_warn!(
+                "{KEEP_DUMPABLE}=1: processes of the same user can read Rift's environment and memory, and a crash writes a core dump"
             );
             return;
         }
         // SAFETY: a plain prctl without pointer arguments.
         if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
-            eprintln!(
-                "rift: warning: could not clear the dumpable flag ({}); processes of the same user can read Rift's environment",
+            log_warn!(
+                "could not clear the dumpable flag ({}); processes of the same user can read Rift's environment",
                 std::io::Error::last_os_error()
             );
         }

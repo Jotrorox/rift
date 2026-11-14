@@ -230,7 +230,7 @@ impl Controls {
                         )
                         .await
                     {
-                        eprintln!("rift: audit of rift.control.{command} failed: {error}");
+                        log_error!("audit of rift.control.{command} failed: {error}");
                     }
                 }
                 respond(&broker, &reply, &command, result);
@@ -386,7 +386,7 @@ impl PlayerRequests {
                         )
                         .await
                     {
-                        eprintln!("rift: audit of rift.players.{operation} failed: {error}");
+                        log_error!("audit of rift.players.{operation} failed: {error}");
                     }
                 }
                 let _ = broker.publish(&reply, Bytes::from(response.to_string()));
@@ -439,8 +439,8 @@ impl ServerStates {
                         }),
                     ),
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
-                        eprintln!(
-                            "rift: {missed} server state events dropped; subscribers should re-read servers"
+                        log_warn!(
+                            "{missed} server state events dropped; subscribers should re-read servers"
                         );
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
@@ -466,8 +466,8 @@ impl ServerStates {
                 let result = report(&snapshot, &message);
                 if let Err(error) = &result {
                     let sender = message.sender.as_deref().unwrap_or("local");
-                    eprintln!(
-                        "rift: {} from {sender} refused: {error}",
+                    log_warn!(
+                        "{} from {sender} refused: {error}",
                         rift::service_state::SUBJECT
                     );
                 }
@@ -635,7 +635,7 @@ impl NetworkRequests {
                         .audit_async(&actor, "network.connect", &target, outcome, status)
                         .await
                     {
-                        eprintln!("rift: audit of rift.network.connect failed: {error}");
+                        log_error!("audit of rift.network.connect failed: {error}");
                     }
                 }
                 let _ = broker.publish(&reply, Bytes::from(response.to_string()));

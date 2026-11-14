@@ -65,7 +65,7 @@ impl axum::serve::Listener for Listener {
                     );
                 }
                 Err(error) => {
-                    eprintln!("rift: HTTP accept: {error}");
+                    log_warn!("HTTP accept: {error}");
                     sleep(Duration::from_millis(100)).await;
                 }
             }

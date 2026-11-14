@@ -253,7 +253,7 @@ fn server_contexts(server: &str, group: Option<&str>) -> Option<ContextSet> {
     if let Some(group) = group
         && let Err(error) = set.insert(context::GROUP, group)
     {
-        eprintln!("rift: leaving out the group context {group:?}: {error}");
+        log_warn!("leaving out the group context {group:?}: {error}");
     }
     Some(set)
 }
@@ -391,7 +391,7 @@ impl Authority {
         let (subject, dependencies) = match compiled {
             Ok((subject, dependencies)) => (Arc::new(subject), dependencies),
             Err(error) => {
-                eprintln!("rift: permissions for {uuid}: {error}; checks resolve as undefined");
+                log_error!("permissions for {uuid}: {error}; checks resolve as undefined");
                 return Arc::new(unresolved(uuid, revision));
             }
         };
@@ -777,7 +777,7 @@ impl Authority {
                 tokio::time::sleep(authority.config().sweep_interval).await;
                 let sweeper = authority.clone();
                 if let Ok(Err(error)) = tokio::task::spawn_blocking(move || sweeper.sweep()).await {
-                    eprintln!("rift: permission expiry sweep failed: {error}");
+                    log_error!("permission expiry sweep failed: {error}");
                 }
             }
         })
@@ -811,7 +811,7 @@ impl Authority {
                     if matches!(error, PermError::Storage(_)) {
                         return Err(error);
                     }
-                    eprintln!("rift: permission upgrade skipped a node of {subject}: {error}");
+                    log_warn!("permission upgrade skipped a node of {subject}: {error}");
                 }
             }
             store::set_meta(work.connection(), MIGRATED, &work.now().to_string())?;
@@ -1021,7 +1021,7 @@ impl Authority {
         let work = move || {
             let connection = authority.database.lock();
             if let Err(error) = store::set_last_name(&connection, uuid, &name, unix_now()) {
-                eprintln!("rift: cannot record the name of {uuid}: {error}");
+                log_error!("cannot record the name of {uuid}: {error}");
             }
             let subject = authority.compile_locked(&connection, uuid);
             let _ = authority.notifications.send(Notification::Joined(subject));
