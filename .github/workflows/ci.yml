@@ -522,10 +522,29 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-24.04
+          # The glibc executables are built on the oldest runner image, so
+          # they start on any distribution with glibc 2.35 or newer; the
+          # static musl ones need no libc on the host at all.
+          - os: ubuntu-22.04
             platform: linux-x86_64
+            libc: glibc
             executable: rift-linux-x86_64
             archive: rift-linux-x86_64.tar.gz
+          - os: ubuntu-22.04-arm
+            platform: linux-aarch64
+            libc: glibc
+            executable: rift-linux-aarch64
+            archive: rift-linux-aarch64.tar.gz
+          - os: ubuntu-24.04
+            platform: linux-x86_64-musl
+            libc: musl
+            executable: rift-linux-x86_64-musl
+            archive: rift-linux-x86_64-musl.tar.gz
+          - os: ubuntu-24.04-arm
+            platform: linux-aarch64-musl
+            libc: musl
+            executable: rift-linux-aarch64-musl
+            archive: rift-linux-aarch64-musl.tar.gz
           - os: macos-15
             platform: macos-aarch64
             executable: rift-macos-aarch64
@@ -542,13 +561,55 @@ jobs:
         with:
           prefix-key: v1-rust
           # This job owns the cache of the release executable's dependencies.
-          shared-key: package-${{ matrix.os }}
+          shared-key: package-${{ matrix.platform }}
           cache-bin: false
           save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
-      - run: cargo build --locked --release
+      - if: matrix.libc != 'musl'
+        run: cargo build --locked --release
+      - name: Build a static executable in Alpine
+        if: matrix.libc == 'musl'
+        # Alpine's native toolchain is the musl target, so LuaJIT, AWS-LC and
+        # SQLite build as they do everywhere else and the result lands in
+        # target/release like the other platforms'. The steps after this one
+        # run it on the Ubuntu runner, which is the point of a static build.
+        env:
+          ALPINE_IMAGE: alpine:3.22
+        run: |
+          channel="$(python -c "import tomllib; print(tomllib.load(open('rust-toolchain.toml', 'rb'))['toolchain']['channel'])")"
+          mkdir -p "$HOME/.cargo/registry" "$HOME/.cargo/git" target
+          docker run --rm \
+            --volume "$PWD:/src" --workdir /src \
+            --volume "$HOME/.cargo/registry:/root/.cargo/registry" \
+            --volume "$HOME/.cargo/git:/root/.cargo/git" \
+            --env CHANNEL="$channel" --env OWNER="$(id -u):$(id -g)" \
+            --env CARGO_TERM_COLOR \
+            "$ALPINE_IMAGE" sh -euc '
+              apk add --no-cache build-base cmake linux-headers perl rustup
+              rustup-init -y --profile minimal --default-toolchain "$CHANNEL"
+              . "$HOME/.cargo/env"
+              # Files the later steps and the cache must own, also on failure.
+              trap "chown -R \"\$OWNER\" target /root/.cargo/registry /root/.cargo/git" EXIT
+              cargo build --locked --release
+            '
+      - name: Require a static executable
+        if: matrix.libc == 'musl'
+        run: |
+          file target/release/rift
+          if readelf --dynamic target/release/rift | grep -q '(NEEDED)'; then
+            echo '::error::the musl executable links shared libraries'
+            exit 1
+          fi
+      - name: Require the documented glibc baseline
+        if: matrix.libc == 'glibc'
+        # docs/operations.md promises glibc 2.35; a newer symbol version here
+        # means the executable no longer starts on such a host.
+        run: |
+          newest="$(objdump -T target/release/rift | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1)"
+          echo "newest glibc symbol version: $newest"
+          [[ "$(printf '%s\n' GLIBC_2.35 "$newest" | sort -V | tail -n 1)" == GLIBC_2.35 ]]
       - name: Verify protocol and zlib interoperability
         run: python tests/protocol_wire.py --binary target/release/rift
       - name: Verify server switching and recovery
