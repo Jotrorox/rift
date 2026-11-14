@@ -75,9 +75,24 @@ pub struct Control {
     groups: Mutex<BTreeMap<String, GroupState>>,
     pub logins: Mutex<Admission>,
     players: Mutex<BTreeMap<u64, Entry>>,
+    /// What backends report about themselves, including their own drain.
+    states: rift::service_state::ServiceStates,
 }
 
 impl Control {
+    /// Share `states` with the managed servers, which forget a report when
+    /// its server starts again.
+    pub fn with_states(states: rift::service_state::ServiceStates) -> Self {
+        Self {
+            states,
+            ..Self::default()
+        }
+    }
+
+    pub fn states(&self) -> &rift::service_state::ServiceStates {
+        &self.states
+    }
+
     pub fn maintenance(&self, config: &Config) -> bool {
         self.maintenance
             .lock()
@@ -85,8 +100,9 @@ impl Control {
             .unwrap_or(config.maintenance)
     }
 
-    /// A backend drains when an operator or the configuration says so, or
-    /// while its service group is stopped; `drain off` cannot override that.
+    /// A backend drains when an operator or the configuration says so, when
+    /// it asked to on `rift.server.state`, or while its service group is
+    /// stopped; `drain off` cannot override a stopped group.
     pub fn draining(&self, config: &Config, backend: &str) -> bool {
         self.draining
             .lock()
@@ -94,6 +110,7 @@ impl Control {
             .get(backend)
             .copied()
             .unwrap_or_else(|| config.draining.contains(backend))
+            || self.states.draining(backend)
             || config
                 .instances
                 .get(backend)
@@ -208,7 +225,8 @@ impl Control {
     fn status(&self, snapshot: &Snapshot, metrics: &Metrics) -> Value {
         let players: Vec<Value> = self.players.lock().unwrap().iter().map(|(id, entry)| json!({"connection_id":id,"name":entry.name,"backend":entry.backend,"protocol":entry.protocol})).collect();
         let backends: Vec<Value> = snapshot.health.metrics().into_iter().map(|(name, up)| {
-            json!({"draining":self.draining(&snapshot.config, &name),"backend":name,"up":up})
+            let report = self.states.get(&name);
+            json!({"draining":self.draining(&snapshot.config, &name),"service_state":report.state,"properties":report.properties,"backend":name,"up":up})
         }).collect();
         json!({"maintenance":self.maintenance(&snapshot.config),"connections":metrics.active.get(),"players_online":metrics.players.get(),"players":players,"backends":backends,"managed_servers":managed_servers(snapshot)})
     }
@@ -260,12 +278,16 @@ async fn read_line(stream: &mut TcpStream, limit: usize) -> io::Result<Vec<u8>> 
     }
 }
 
-fn request(value: &Value, settings: &Admin, secret: &str) -> Result<Vec<String>, String> {
-    if !value
+/// Whether the request carries the administrator token.
+fn holds_token(value: &Value, secret: &str) -> bool {
+    value
         .get("token")
         .and_then(Value::as_str)
         .is_some_and(|s| authenticated(secret, s))
-    {
+}
+
+fn request(value: &Value, settings: &Admin, secret: &str) -> Result<Vec<String>, String> {
+    if !holds_token(value, secret) {
         return Err("authentication failed; supply RIFT_ADMIN_TOKEN".into());
     }
     let args = value
@@ -312,6 +334,7 @@ pub(crate) fn managed_servers(snapshot: &Snapshot) -> Value {
         .map(|server| {
             let instance = config.instances.get(&server.name);
             let group = instance.map(|instance| snapshot.control.group(&instance.group));
+            let report = snapshot.control.states().get(&server.name);
             let address = config
                 .backends
                 .get(&server.name)
@@ -331,6 +354,8 @@ pub(crate) fn managed_servers(snapshot: &Snapshot) -> Value {
                 "group_suspended": group.map(|group| group.suspended),
                 "group_mode": group.map(|group| group.mode.as_str()),
                 "draining": snapshot.control.draining(config, &server.name),
+                "service_state": report.state,
+                "properties": report.properties,
                 "template": instance.and_then(|instance| instance.template.as_ref()),
                 "storage": instance.map_or("persistent", |instance| instance.storage.as_str()),
                 "node": server.node.as_deref().unwrap_or(rift::config::LOCAL_NODE),
@@ -585,6 +610,9 @@ pub(crate) async fn execute(
             if !snapshot.config.backends.contains_key(backend) { return Err(format!("unknown backend {backend:?}; use status to list backends")); }
             let value = enabled(value)?;
             control.draining.lock().unwrap().insert(backend.clone(), value);
+            // The operator decides from here: `drain off` also withdraws
+            // the server's own drain, until it asks again.
+            control.states.undrain(backend);
             Ok(json!({"backend":backend,"draining":value}))
         }
         [command, id, backend] if command == "transfer" => {
@@ -657,7 +685,9 @@ pub async fn serve(
                 handlers.spawn(async move {
                     let _ = async {
                         let bytes = timeout(Duration::from_secs(2), read_line(&mut stream, 8192)).await??;
-                        let parsed = serde_json::from_slice::<Value>(&bytes).map_err(|_| "invalid JSON request".to_owned()).and_then(|value| request(&value, &settings, &secret));
+                        let value = serde_json::from_slice::<Value>(&bytes).map_err(|_| "invalid JSON request".to_owned());
+                        let trusted = value.as_ref().is_ok_and(|value| holds_token(value, &secret));
+                        let parsed = value.and_then(|value| request(&value, &settings, &secret));
                         let mut permission = String::new();
                         let mut target = String::new();
                         let mut shutdown_ack = None;
@@ -697,9 +727,16 @@ pub async fn serve(
                             }
                             Err(error) => Err(error),
                         };
-                        let actor = if permission.is_empty() { "anonymous" } else { "local-admin" };
                         let (outcome, status) = if result.is_ok() { ("accepted", 200) } else { ("rejected", 400) };
-                        if let Err(error) = workflows.audit_async(actor, &permission, &target, outcome, status).await {
+                        // Any local process can send requests without the
+                        // token. Those are counted as denial summaries, apart
+                        // from operator records, so they cannot flush them.
+                        let audit = if trusted {
+                            workflows.audit_async("local-admin", &permission, &target, outcome, status).await
+                        } else {
+                            workflows.deny_async(401).await
+                        };
+                        if let Err(error) = audit {
                             eprintln!("rift: local administrator audit failed: {error}");
                         }
                         let response = match result {

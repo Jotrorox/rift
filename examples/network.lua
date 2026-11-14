@@ -21,6 +21,8 @@ rift.config.fallbacks = {
 }
 rift.config.limits = {
     max_connections = 1024,
+    -- Open connections per IPv4 address or IPv6 /64; raise it for large shared NATs.
+    max_connections_per_address = 256,
     connect_timeout_ms = 5000,
     buffer_size = 32 * 1024,
 }

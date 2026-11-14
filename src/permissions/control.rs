@@ -42,7 +42,7 @@ use tokio::{
 };
 
 /// What `messaging.principals[].preset = "backend"` may publish.
-pub const BACKEND_PUBLISH: [&str; 7] = [
+pub const BACKEND_PUBLISH: [&str; 8] = [
     wire::HELLO,
     "rift.perms.subject.*",
     "rift.perms.groups.*",
@@ -50,6 +50,8 @@ pub const BACKEND_PUBLISH: [&str; 7] = [
     wire::REGISTER,
     wire::COMMAND,
     wire::CONTEXT,
+    // Not a permission subject, but every backend may report its own state.
+    crate::service_state::SUBJECT,
 ];
 /// What `messaging.principals[].preset = "backend"` may subscribe to.
 pub const BACKEND_SUBSCRIBE: [&str; 4] =

@@ -184,11 +184,19 @@ impl InstanceMessaging {
                 }
             }
         }
-        // Replies to the requests the instance makes.
-        for list in [&mut grants.publish, &mut grants.subscribe] {
-            if !list.iter().any(|pattern| pattern == "_INBOX.>") {
-                list.push("_INBOX.>".into());
-            }
+        // Publishing to inboxes lets the instance answer requests. Subscribing
+        // to `_INBOX.>` would hand it every other identity's replies (node file
+        // reads, log tails, permission answers), so that is never added here:
+        // REQUEST uses a private broker inbox, and the login adds a namespace
+        // of the instance's own for manual request/reply.
+        if !grants.publish.iter().any(|pattern| pattern == "_INBOX.>") {
+            grants.publish.push("_INBOX.>".into());
+        }
+        // Rift accepts a report there only for the instance itself, so every
+        // instance may report its own state, properties and drain.
+        let state = crate::service_state::SUBJECT;
+        if !grants.publish.iter().any(|pattern| pattern == state) {
+            grants.publish.push(state.into());
         }
         Ok(Some(grants))
     }

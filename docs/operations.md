@@ -396,7 +396,10 @@ sudo journalctl -u rift --since '10 minutes ago' -o cat --no-pager \
   | jq -R 'fromjson? | select(.event == "connection_failed" or .event == "connection_rejected")'
 ```
 
-Use `connection_id` to join related events within one process. A
+At most 20 `connection_rejected` lines are written per second, so a flood of
+rejected connections cannot fill the log. The next line written carries
+`suppressed`, the number left out; the rejection counters in the metrics count
+every one. Use `connection_id` to join related events within one process. A
 `backend_attempt_failed` can be followed by successful fallback; it does not
 alone mean the player disconnected. `admin_command` events record operation
 results without logging credentials.
@@ -413,7 +416,7 @@ results without logging credentials.
 | `status_hook_failed` | Inspect the named `on_status` script and its returned fields; pings are still answered with the default |
 | Session/login failure | Check supported versions, authentication-service access, matching Velocity secrets on every Paper backend and the backend's own log |
 | `proxy_untrusted` / `proxy_header` | Add the load balancer to `proxy_protocol.trusted_proxies`, enable PROXY protocol on it, or block direct access to the listener |
-| Rate-limit/capacity rejection | Check legitimate player traffic and NAT concentration before changing limits |
+| Rate-limit/capacity rejection (`rate_limited`, `capacity_exhausted`, `address_capacity_exhausted`) | Check legitimate player traffic and NAT concentration before changing limits |
 | Admin permission/authentication failure | Check the CLI secret and the configured operation permission |
 
 ## Linux systemd service
@@ -608,6 +611,19 @@ and backend-drain overrides survive reloads until another admin command changes
 them or the process restarts. `off` is itself an override, not a reset to the
 configured value. Keep persistent policy in the Lua file. Lowering `max_connections` preserves
 sessions and rejects new admission until the total falls below the new limit.
+
+`limits.max_connections_per_address` (default 256) caps the open connections of
+one IPv4 address or IPv6 /64, so a single host cannot hold every slot of
+`max_connections`. Behind PROXY protocol it counts the client address the
+trusted proxy reports. A connection over the cap is rejected with the failure
+`address_capacity_exhausted`. Raise it when many players legitimately share
+one address, and keep it below `max_connections`. It limits open connections;
+`rate_limit`, which is off unless configured, limits how fast new ones arrive.
+
+A reload whose configuration was applied but whose plugins could not be
+activated reports an error that says so: the new revision is live, the
+previous plugins keep running, and the reload counts as a failure in the
+metrics. Fix the plugin and reload again.
 
 Outside systemd, use `kill -HUP <pid>` on Unix or Ctrl-Break on Windows.
 

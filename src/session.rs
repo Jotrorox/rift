@@ -1799,17 +1799,13 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                         // signatures and takes the player's chat as unsigned.
                         return Ok(SessionEvent::Packet);
                     }
-                    if self.bungeecord
-                        && crate::bungeecord::payload(
-                            version,
-                            phase,
-                            Direction::Serverbound,
-                            &packet,
-                        )
+                    if crate::bungeecord::payload(version, phase, Direction::Serverbound, &packet)
                         .is_some()
                     {
                         // Never allow a client to impersonate this proxy to a
                         // backend, including during configuration or switching.
+                        // The bridge being off changes nothing: a backend
+                        // plugin still trusts this channel as coming from a proxy.
                         return Ok(SessionEvent::Packet);
                     }
                     if let Some(click) = protocol::dialog::click(version, phase, &packet)?

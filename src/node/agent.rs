@@ -269,6 +269,7 @@ pub struct Agent {
 struct Process {
     child: Option<Child>,
     pid: Option<u32>,
+    directory: PathBuf,
 }
 
 impl Agent {
@@ -446,8 +447,25 @@ impl Agent {
     pub async fn monitor(self: Arc<Self>) {
         let mut tick = tokio::time::interval(Duration::from_millis(200));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut logs_checked = std::time::Instant::now();
         loop {
             tick.tick().await;
+            if logs_checked.elapsed() >= crate::managed::LOG_CHECK_INTERVAL {
+                logs_checked = std::time::Instant::now();
+                let directories: Vec<PathBuf> = self
+                    .processes
+                    .lock()
+                    .await
+                    .values()
+                    .map(|process| process.directory.clone())
+                    .collect();
+                let _ = tokio::task::spawn_blocking(move || {
+                    for directory in directories {
+                        crate::managed::rotate_log_reporting(&directory);
+                    }
+                })
+                .await;
+            }
             let mut exited = Vec::new();
             {
                 let mut processes = self.processes.lock().await;
@@ -640,7 +658,7 @@ impl Agent {
         let mut environment = crate::config::ProcessEnvironment::try_from(&start.environment)?;
         if let Some(certificate) = &start.bus_certificate {
             let path = directory.join(crate::instance_login::CERTIFICATE_FILE);
-            std::fs::write(&path, certificate)?;
+            crate::instance_login::install_certificate(&directory, certificate)?;
             environment
                 .set
                 .insert("RIFT_BUS_CERT".into(), path.to_string_lossy().into_owned());
@@ -654,6 +672,7 @@ impl Agent {
             Process {
                 child: Some(child),
                 pid,
+                directory: directory.clone(),
             },
         );
         self.exits

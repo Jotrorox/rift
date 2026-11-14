@@ -1625,6 +1625,34 @@ fn http_and_cli_controls_share_revisions_and_preserve_runtime_overrides() {
     let original = client.get("/api/config").expect(200).value();
     assert_eq!(admin(&["maintenance", "on"])["ok"], true);
     assert_eq!(admin(&["drain", "primary", "on"])["ok"], true);
+    // Any local process can reach the port. Requests without the token are
+    // summarised as denials and cannot push operator records out of the log.
+    for body in [
+        "not json".to_owned(),
+        json!({"token":"wrong","args":["status"]}).to_string(),
+    ] {
+        for _ in 0..40 {
+            let mut stream = connect(address);
+            writeln!(stream, "{body}").unwrap();
+            let mut line = String::new();
+            BufReader::new(stream).read_line(&mut line).unwrap();
+            assert_eq!(serde_json::from_str::<Value>(&line).unwrap()["ok"], false);
+        }
+    }
+    let audit = client.get("/api/audit").expect(200).value();
+    let records = audit["records"].as_array().unwrap();
+    let anonymous: Vec<_> = records
+        .iter()
+        .filter(|record| record["actor"] == "anonymous")
+        .collect();
+    assert_eq!(anonymous.len(), 1, "{audit}");
+    assert_eq!(anonymous[0]["action"], "authentication");
+    assert_eq!(audit["unrecorded_denials"], 79);
+    assert!(
+        records.iter().any(|record| {
+            record["actor"] == "local-admin" && record["action"] == "maintenance"
+        })
+    );
 
     // HTTP commits hot-bind metrics while retaining the local control socket,
     // its credentials and the operator's runtime maintenance/draining overrides.
@@ -1953,6 +1981,36 @@ fn loopback_without_credentials_requires_the_generated_token_and_denials_are_sum
         .filter(|line| line.starts_with(LOCAL_TOKEN_LOG))
         .count();
     assert_eq!(printed, 1);
+}
+
+#[test]
+fn rollback_needs_config_as_well_as_deploy() {
+    let fixture = Fixture::new();
+    let source = fixture.source(
+        &format!(
+            "token = '{TOKEN}', operators = {{ \
+             releaser = {{ token = '{OPERATOR_TOKEN}', permissions = {{'read','deploy'}} }} }},"
+        ),
+        "",
+    );
+    let _process = fixture.start(&source);
+    let admin = fixture.client().authenticated();
+    let releaser = Client {
+        token: Some(OPERATOR_TOKEN),
+        ..fixture.client()
+    };
+    let listed = releaser.get("/api/deployments").expect(200).value();
+    let id = listed["deployments"][0]["id"].as_u64().unwrap();
+    // Restoring an old source could bring back a rotated token or removed
+    // operator grants, so viewing deployments does not include it.
+    releaser
+        .json(
+            "POST",
+            &format!("/api/deployments/{id}/rollback"),
+            json!({"revision":revision(admin)}),
+        )
+        .expect(403);
+    assert_eq!(fixture.read(), source);
 }
 
 #[test]

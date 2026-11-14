@@ -1572,7 +1572,7 @@
       cell(tr, time(deployment.timestamp_unix_ms)); cell(tr, deployment.actor); cell(tr, deployment.action); cell(tr, deployment.revision, "address");
       const actions = cell(tr, ""), button = document.createElement("button"); button.type = "button"; button.className = "button secondary"; button.textContent = "Roll back";
       button.addEventListener("click", async () => {
-        if (state.busy || !allowed("deploy")) return;
+        if (state.busy || !allowed("deploy") || !allowed("config")) return;
         if (dirty() || state.definitionDirty || settingsDirty()) { text("deployment-result", "Save or discard editor changes before rolling back."); return; }
         if (!window.confirm(`Restore deployment ${deployment.id}? Configuration will be validated before applying.`)) return;
         state.busy = true; controls(); text("deployment-result", "Restoring deployment…");

@@ -288,7 +288,9 @@ def disabled_checks(binary, omit):
             assert client.until("payload", string(channel)) == string(channel) + request
             client.send(0x15, string(channel) + request)
             client.probe("lobby")
-            assert (channel, request) in payloads(source)
+            # A client never speaks as the proxy to a backend, even with
+            # the bridge off.
+            assert (channel, request) not in payloads(source)
         assert not [(channel, body) for channel, body in payloads(source)
                     if channel == "minecraft:register" and CHANNEL.encode() in body]
 
