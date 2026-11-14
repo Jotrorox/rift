@@ -712,3 +712,119 @@ async fn selection_skips(unservable: impl Fn(rift::routing::Backend) -> rift::ro
     .await
     .unwrap();
 }
+
+#[test]
+fn access_rules_admit_permission_groups_and_nodes_and_gate_the_server_command() {
+    use rift_permissions::{Actor, Change, Node, SubjectRef, Uuid};
+    let source = "return {
+        listeners={public='127.0.0.1:0'},
+        backends={lobby='127.0.0.1:25566', vip='127.0.0.1:25567', staff='127.0.0.1:25568'},
+        routes={public='lobby'},
+        network={
+            server_permission='Rift.Command.Server',
+            access={
+                vip={groups={'VIP','staff'}, deny={'Banned'}},
+                staff={permission='rift.server.staff', allow={'Owner'}},
+            },
+        },
+    }";
+    let config = Config::from_lua(source, "access.lua").unwrap();
+    assert_eq!(
+        config.network.server_permission.as_deref(),
+        Some("rift.command.server")
+    );
+    assert_eq!(config.network.access["vip"].groups, ["vip", "staff"]);
+    let snapshot = Snapshot::new(config, None).unwrap();
+    let authority = snapshot.extensions.permissions();
+    let apply = |change| authority.apply(Actor::Cli, change).unwrap();
+    let member = Uuid::from_bytes([1; 16]);
+    let holder = Uuid::from_bytes([2; 16]);
+    let nobody = Uuid::from_bytes([3; 16]);
+
+    // Unrestricted backends stay public; restricted ones admit only listed
+    // names until the store says otherwise. Nobody may use `/server` yet.
+    for uuid in [None, Some(member), Some(holder), Some(nobody)] {
+        assert!(snapshot.admits("lobby", "Player", uuid));
+        assert!(!snapshot.admits("vip", "Player", uuid));
+        assert!(!snapshot.admits("staff", "Player", uuid));
+        assert!(!snapshot.may_use_server_command(uuid));
+    }
+    assert!(snapshot.admits("staff", "owner", None));
+
+    apply(Change::CreateGroup {
+        name: "staff".into(),
+        weight: 10,
+        display_name: None,
+    });
+    apply(Change::SetNode {
+        subject: SubjectRef::User(member),
+        node: Node::inherit("staff", true).unwrap(),
+    });
+    apply(Change::SetNode {
+        subject: SubjectRef::Group("staff".into()),
+        node: Node::permission("rift.command.server", true).unwrap(),
+    });
+    apply(Change::SetNode {
+        subject: SubjectRef::User(holder),
+        node: Node::permission("rift.server.*", true).unwrap(),
+    });
+    assert!(snapshot.admits("vip", "Member", Some(member)));
+    assert!(
+        !snapshot.admits("vip", "Banned", Some(member)),
+        "a deny entry wins over a group"
+    );
+    assert!(!snapshot.admits("staff", "Member", Some(member)));
+    assert!(
+        snapshot.admits("staff", "Holder", Some(holder)),
+        "wildcards grant the node"
+    );
+    assert!(!snapshot.admits("vip", "Holder", Some(holder)));
+    assert!(!snapshot.admits("vip", "Nobody", Some(nobody)));
+    assert!(snapshot.may_use_server_command(Some(member)));
+    assert!(!snapshot.may_use_server_command(Some(holder)));
+
+    // `default` membership is implicit, so a rule naming it admits everyone
+    // the store knows, but not a player without a UUID.
+    let mut config = snapshot.config.clone();
+    config.network.access.get_mut("vip").unwrap().groups = vec!["default".into()];
+    config.network.server_permission = None;
+    let snapshot = Snapshot::new(config, Some(&snapshot)).unwrap();
+    assert!(snapshot.admits("vip", "Nobody", Some(nobody)));
+    assert!(!snapshot.admits("vip", "Nobody", None));
+    assert!(snapshot.may_use_server_command(None));
+}
+
+#[test]
+fn access_rule_groups_and_permissions_are_validated() {
+    let source = |rule: &str| {
+        format!(
+            "return {{ listeners={{public='127.0.0.1:0'}}, backends={{lobby='127.0.0.1:25566'}}, routes={{public='lobby'}}, network={rule} }}"
+        )
+    };
+    for (rule, error) in [
+        (
+            "{access={lobby={groups={'bad name'}}}}",
+            "network.access.lobby.groups",
+        ),
+        ("{access={lobby={groups={'vip','VIP'}}}}", "duplicate group"),
+        (
+            "{access={lobby={permission='rift.server.*'}}}",
+            "network.access.lobby.permission",
+        ),
+        (
+            "{access={lobby={permission='a..b'}}}",
+            "network.access.lobby.permission",
+        ),
+        (
+            "{access={lobby={permission=true}}}",
+            "network.access.lobby.permission",
+        ),
+        ("{server_permission='*'}", "network.server_permission"),
+        ("{access={lobby={group={'vip'}}}}", "group"),
+    ] {
+        let message = Config::from_lua(&source(rule), "access.lua")
+            .unwrap_err()
+            .to_string();
+        assert!(message.contains(error), "{rule}: {message}");
+    }
+}
