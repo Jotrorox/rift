@@ -213,6 +213,7 @@ impl LuaEngine {
         Registration {
             commands,
             chat: hooks.contains(&Hook::Chat),
+            kick: hooks.contains(&Hook::Kick),
             hooks: hooks.iter().copied().collect(),
         }
     }
@@ -338,7 +339,8 @@ impl LuaEngine {
             Event::Login(ctx)
             | Event::InitialServer(ctx)
             | Event::BeforeTransfer(ctx)
-            | Event::Chat(ctx) => {
+            | Event::Chat(ctx)
+            | Event::Kick(ctx) => {
                 let value = self.first(name, self.context(&ctx, hook)?)?;
                 Reply::Action(crate::extensions::parse_action(name, value)?)
             }

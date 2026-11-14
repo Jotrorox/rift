@@ -135,8 +135,8 @@ and the [plugin overview](plugins.md).
 ## Registering callbacks and commands
 
 `rift.on(event, callback)` appends a handler. Supported events are `route`, `http`,
-`message`, `status`, `login`, `initial_server`, `join`, `disconnect`, `before_transfer` and
-`after_transfer`. Arguments and results match the existing `on_route`, `on_http`,
+`message`, `status`, `login`, `initial_server`, `join`, `disconnect`, `before_transfer`,
+`after_transfer`, `dialog` and `kick`. Arguments and results match the existing `on_route`, `on_http`,
 `on_message`, [`on_status`](operations.md#server-list-motd-favicon-and-player-count) and
 [plugin event](extensions.md) callbacks.
 

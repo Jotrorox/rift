@@ -20,6 +20,8 @@ rift.config.forwarding = { mode = "velocity", secret_env = "RIFT_FORWARDING_SECR
 rift.config.network = {
     initial = { "lobby" },
     hubs = { "lobby" },
+    -- A backend kick in play moves the player to a hub; "disconnect" keeps it final.
+    on_kick = "hub",
 }
 rift.config.fallbacks = { survival = { "lobby" } }
 rift.config.login_rate_limit = { per_ip_per_second = 5, per_ip_burst = 10 }

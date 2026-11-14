@@ -8,7 +8,7 @@ use std::{collections::BTreeMap, io, sync::Arc, time::Duration};
 use tokio::sync::Semaphore;
 
 /// Hooks whose outcome a subscriber can decide.
-const HOOKS: &[&str] = &["login", "initial_server", "before_transfer"];
+const HOOKS: &[&str] = &["login", "initial_server", "before_transfer", "kick"];
 const DEFAULT_TIMEOUT_MS: u64 = 1000;
 const MAX_TIMEOUT_MS: u64 = 10_000;
 const DEFAULT_IN_FLIGHT: usize = 256;
@@ -57,7 +57,7 @@ pub(super) fn parse(value: Value) -> mlua::Result<BTreeMap<String, Decision>> {
         let (hook, value) = pair?;
         if !HOOKS.contains(&hook.as_str()) {
             return Err(error(format!(
-                "extensions.decisions.{hook}: only login, initial_server and before_transfer can be decided"
+                "extensions.decisions.{hook}: only login, initial_server, before_transfer and kick can be decided"
             )));
         }
         let Value::Table(entry) = value else {
@@ -186,7 +186,7 @@ fn request(hook: &str, input: &Context) -> bytes::Bytes {
 }
 
 /// `{"action":"continue"}`, `{"action":"deny","reason":…}` or, for
-/// `initial_server` only, `{"action":"server","server":…}`. A reason is a
+/// `initial_server` and `kick` only, `{"action":"server","server":…}`. A reason is a
 /// string of plain text or a JSON text component (an object or a list).
 /// Anything else is an error, exactly like an invalid Lua result.
 fn parse_reply(hook: &str, payload: &[u8]) -> io::Result<Action> {
@@ -199,7 +199,7 @@ fn parse_reply(hook: &str, payload: &[u8]) -> io::Result<Action> {
     let field = match object.get("action").and_then(serde_json::Value::as_str) {
         Some("continue") => None,
         Some("deny") => Some("reason"),
-        Some("server") if hook == "initial_server" => Some("server"),
+        Some("server") if matches!(hook, "initial_server" | "kick") => Some("server"),
         Some(_) => return Err(fail("invalid decision for this hook")),
         None => return Err(fail("reply requires a string action")),
     };
@@ -254,6 +254,11 @@ mod tests {
                 "before_transfer",
                 r#"{"action":"deny","reason":"no"}"#,
                 Action::Deny("no".into()),
+            ),
+            (
+                "kick",
+                r#"{"action":"server","server":"lobby"}"#,
+                Action::Server("lobby".into()),
             ),
             (
                 "login",

@@ -217,6 +217,13 @@ impl Network<'_> {
                     SessionEvent::Disconnected => return Err(rift::text::notice_error(
                         io::ErrorKind::PermissionDenied, Notice::ConnectionBackendClosed,
                     )),
+                    // The player waits for a transfer; the kick stays final.
+                    SessionEvent::BackendKicked(_) => {
+                        session.deliver_kick().await?;
+                        return Err(rift::text::notice_error(
+                            io::ErrorKind::PermissionDenied, Notice::ConnectionBackendClosed,
+                        ));
+                    }
                     SessionEvent::BackendClosed | SessionEvent::BackendFailed => return Err(io::Error::new(
                         io::ErrorKind::ConnectionAborted, "current backend closed while destination was starting",
                     )),
@@ -283,6 +290,67 @@ impl Network<'_> {
             .into_iter()
             .filter(|server| self.snapshot.admits(server, name, uuid))
             .collect())
+    }
+
+    /// `current` kicked the player in play. The `kick` hooks choose first:
+    /// a server to move them to, or a text to disconnect them with.
+    /// Otherwise `network.on_kick` applies: a hub or fallback, or the
+    /// backend's own kick. A player who moved learns why from
+    /// `connection.kicked`, returned for the caller to show once they are in
+    /// the new world. Anyone who cannot be moved receives the backend's
+    /// kick, and `None` says so: the session is over.
+    pub async fn kicked<C: AsyncRead + AsyncWrite + Unpin>(
+        &self,
+        session: &mut Session<C, TcpStream>,
+        current: &str,
+        reason: &rift::text::Text,
+        event: &mut Connection,
+    ) -> io::Result<Option<(String, rift::text::Text)>> {
+        use rift::extensions::Action;
+        const WRITE: Duration = Duration::from_secs(5);
+        let decision = match &session.extension {
+            Some(extension) => extension.kick(current, &reason.to_string()).await,
+            None => Ok(Action::Continue),
+        };
+        let candidates = match decision {
+            Ok(Action::Server(server)) => vec![server],
+            Ok(Action::Deny(text)) => {
+                timeout(WRITE, session.disconnect_text(&text)).await??;
+                return Ok(None);
+            }
+            other => {
+                if let Err(error) = other {
+                    eprintln!("rift: kick hook: {error}");
+                }
+                match self.snapshot.config.network.on_kick {
+                    rift::config::OnKick::Hub => self.recovery_candidates(current),
+                    rift::config::OnKick::Disconnect => Vec::new(),
+                }
+            }
+        };
+        if !candidates.is_empty() {
+            match self
+                .switch_for(session, current, &candidates, event, "kick")
+                .await
+            {
+                Ok(target) => {
+                    let notice = catalog::notice_with(
+                        Notice::ConnectionKicked,
+                        &match reason {
+                            rift::text::Text::Plain(text) => Args::new().text("reason", text),
+                            rift::text::Text::Component(component) => {
+                                Args::new().component("reason", component.clone())
+                            }
+                        }
+                        .text("server", current),
+                    );
+                    return Ok(Some((target, notice)));
+                }
+                Err(error) => event.emit("kick_redirect_failed", &error, Some(error.kind())),
+            }
+        }
+        timeout(WRITE, session.deliver_kick()).await??;
+        Ok(None)
     }
 
     pub fn recovery_candidates(&self, current: &str) -> Vec<String> {

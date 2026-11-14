@@ -347,6 +347,10 @@ pub enum SessionEvent {
     ClientClosed,
     BackendClosed,
     BackendFailed,
+    /// The backend kicked a player in play on a network session. The client
+    /// has not seen the kick yet: switch the player elsewhere, or
+    /// [`Session::deliver_kick`]. The text is the backend's reason.
+    BackendKicked(crate::text::Text),
     ProxyCommand(String),
     /// A Command Suggestions Request for a proxy command's arguments; answer
     /// it with [`Session::answer_suggestions`].
@@ -465,6 +469,9 @@ pub struct Session<C, B> {
     /// The chat packet reported as [`SessionEvent::Chat`], until its owner
     /// releases or drops it.
     held_chat: Option<HeldPacket>,
+    /// The backend Disconnect reported as [`SessionEvent::BackendKicked`],
+    /// with its reason, until it is delivered or the player moves on.
+    held_kick: Option<(Packet, crate::text::Text)>,
 }
 
 impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Session<C, B> {
@@ -510,6 +517,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             dialog: None,
             suggestions: SuggestionBudget::default(),
             held_chat: None,
+            held_kick: None,
         })
     }
 
@@ -693,6 +701,34 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             && let Some(acknowledgement) = held.acknowledgement
         {
             backend.queue(version, Direction::Serverbound, &acknowledgement)?;
+        }
+        Ok(())
+    }
+
+    /// Send the kick held for [`SessionEvent::BackendKicked`] and close the
+    /// connection: the backend's own packet while the client is still in
+    /// play, otherwise the same reason in the client's current state. A
+    /// no-op when nothing is held.
+    pub async fn deliver_kick(&mut self) -> io::Result<()> {
+        let Some((packet, reason)) = self.held_kick.take() else {
+            return Ok(());
+        };
+        if !self.client.state.settled(State::Play) {
+            return self.disconnect_text(&reason).await;
+        }
+        self.client.flush_pending().await?;
+        self.send_client(&packet).await?;
+        self.backend = None;
+        self.client.io.shutdown().await
+    }
+
+    /// Queue the held kick for the client as an unheld one goes, for an
+    /// owner that cannot move the player now. Closing flushes it.
+    pub fn queue_kick(&mut self) -> io::Result<()> {
+        if let Some((packet, _)) = self.held_kick.take() {
+            let version = self.version()?;
+            self.client
+                .queue(version, Direction::Clientbound, &packet)?;
         }
         Ok(())
     }
@@ -945,6 +981,11 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                             // Nobody can ask the hook here, so chat is not let through.
                             SessionEvent::Chat(_) => self.drop_chat().await?,
                             SessionEvent::BackendClosed | SessionEvent::BackendFailed => {}
+                            // Mid-switch a kick stays authoritative, as unheld.
+                            SessionEvent::BackendKicked(_) => {
+                                self.queue_kick()?;
+                                return Err(crate::text::notice_error(io::ErrorKind::PermissionDenied, crate::text::catalog::Notice::ConnectionBackendClosed));
+                            }
                             SessionEvent::ClientClosed => return Err(io::Error::new(
                                 io::ErrorKind::UnexpectedEof, "client closed during replacement login")),
                             SessionEvent::Disconnected => return Err(crate::text::notice_error(io::ErrorKind::PermissionDenied, crate::text::catalog::Notice::ConnectionBackendClosed)),
@@ -1098,6 +1139,8 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         }
         self.backend = Some(backend);
         self.backend_error = None;
+        // The player is on another backend; the kick is history.
+        self.held_kick = None;
         Ok(())
     }
 
@@ -1192,6 +1235,13 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                 Poll::Ready(Ok(SessionEvent::Chat(_))) => self.drop_chat().await?,
                 Poll::Ready(Ok(SessionEvent::BackendClosed | SessionEvent::BackendFailed)) => {
                     return Ok(());
+                }
+                Poll::Ready(Ok(SessionEvent::BackendKicked(_))) => {
+                    self.queue_kick()?;
+                    return Err(crate::text::notice_error(
+                        io::ErrorKind::PermissionDenied,
+                        crate::text::catalog::Notice::ConnectionBackendClosed,
+                    ));
                 }
                 Poll::Ready(Ok(SessionEvent::Disconnected)) => {
                     return Err(crate::text::notice_error(
@@ -1860,6 +1910,24 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                     let kind = backend
                         .state
                         .observe(version, Direction::Clientbound, &packet)?;
+                    // A network session holds an in-play kick so its owner
+                    // can move the player instead. A reason Rift cannot read
+                    // reaches the client unheld.
+                    if kind == PacketKind::Disconnect
+                        && phase == State::Play
+                        // can_switch(), by field: `backend` is borrowed.
+                        // `network` implies a switchable version.
+                        && self.network
+                        && self.joined
+                        && !self.switch_in_progress
+                        && !self.client_eof
+                        && self.client.state.settled(State::Play)
+                        && let Ok(reason) = protocol::disconnect_reason(version, &packet)
+                    {
+                        self.held_kick = Some((packet, reason.clone()));
+                        self.backend = None;
+                        return Ok(SessionEvent::BackendKicked(reason));
+                    }
                     if self.bungeecord
                         && let Some(payload) = crate::bungeecord::payload(
                             version,

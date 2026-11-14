@@ -1034,6 +1034,26 @@ fn network_order_and_explicit_access_rules_are_preserved() {
 }
 
 #[test]
+fn network_on_kick_defaults_to_hub_and_rejects_unknown_rules() {
+    let config = Config::from_lua(NETWORK, "network.lua").unwrap();
+    assert_eq!(config.network.on_kick, crate::config::OnKick::Hub);
+    let source = NETWORK.replace(
+        "hubs = { 'lobby' },",
+        "hubs = { 'lobby' }, on_kick = 'disconnect',",
+    );
+    let config = Config::from_lua(&source, "network.lua").unwrap();
+    assert_eq!(config.network.on_kick, crate::config::OnKick::Disconnect);
+    let source = NETWORK.replace(
+        "hubs = { 'lobby' },",
+        "hubs = { 'lobby' }, on_kick = 'lobby',",
+    );
+    let error = Config::from_lua(&source, "network.lua")
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("network.on_kick"), "{error}");
+}
+
+#[test]
 fn omitted_network_fields_keep_ordinary_routes_public() {
     let config = Config::from_lua(VALID, "network.lua").unwrap();
     assert_eq!(config.network, Network::default());

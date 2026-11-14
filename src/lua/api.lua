@@ -9,7 +9,7 @@ local events = {
     route = "on_route", http = "on_http", message = "on_message", status = "on_status",
     login = "login", initial_server = "initial_server", join = "join",
     disconnect = "disconnect", before_transfer = "before_transfer",
-    after_transfer = "after_transfer", dialog = "dialog",
+    after_transfer = "after_transfer", dialog = "dialog", kick = "kick",
 }
 
 api.config = config

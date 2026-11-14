@@ -837,6 +837,8 @@ pub async fn handle(
         };
         let mut login_complete = false;
         let mut client_closed = false;
+        // Why a kicked player moved, shown once they are in the new world.
+        let mut kick_notice: Option<rift::text::Text> = None;
         let mut player: Option<Player> = None;
         let mut registration = None;
         let mut registered_backend = String::new();
@@ -1318,6 +1320,9 @@ pub async fn handle(
                                 "connection_id": event.id(), "backend": current_backend,
                             })));
                         }
+                        if let Some(notice) = kick_notice.take() {
+                            timeout(HANDSHAKE_TIMEOUT, session.send_text(&notice)).await??;
+                        }
                     }
                     if playing && !ready {
                         phase_deadline = Deadline::now() + Duration::from_secs(30);
@@ -1438,6 +1443,25 @@ pub async fn handle(
                     network.chat(&mut session, chat).await?;
                 }
                 Ok(SessionEvent::Disconnected) => break,
+                Ok(SessionEvent::BackendKicked(reason)) => {
+                    let live_snapshot = snapshot.latest();
+                    let network = Network {
+                        snapshot: &live_snapshot,
+                        addresses: &live_snapshot.addresses,
+                        metrics: &metrics,
+                    };
+                    let Some((target, notice)) = network
+                        .kicked(&mut session, &current_backend, &reason, event)
+                        .await?
+                    else {
+                        break;
+                    };
+                    metrics.fallbacks.inc();
+                    current_address = live_snapshot.config.backends[&target].address().to_owned();
+                    current_backend = target;
+                    kick_notice = Some(notice);
+                    phase_deadline = Deadline::now() + Duration::from_secs(30);
+                }
                 Ok(SessionEvent::ClientClosed) => {
                     client_closed = true;
                     phase_deadline = Deadline::now() + Duration::from_secs(30);

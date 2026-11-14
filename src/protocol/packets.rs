@@ -501,6 +501,26 @@ pub(crate) fn disconnect_text(
     Ok(Packet::new(id, data))
 }
 
+/// The reason of a clientbound configuration or play Disconnect: a JSON
+/// string before 1.20.3, an NBT text component since.
+pub(crate) fn disconnect_reason(
+    version: ProtocolVersion,
+    packet: &Packet,
+) -> io::Result<crate::text::Text> {
+    let mut bytes = packet.data.as_slice();
+    if version.nbt_components() {
+        let component = super::nbt::to_json(&mut bytes)?;
+        // A bare string tag is plain text, never JSON to parse again.
+        return Ok(match component {
+            serde_json::Value::String(text) => crate::text::Text::Plain(text),
+            component => crate::text::Text::from_backend(component)
+                .ok_or_else(|| invalid("empty disconnect reason"))?,
+        });
+    }
+    let raw = read_string(&mut bytes, 262_144)?;
+    Ok(crate::text::Text::from_backend_json(raw))
+}
+
 /// Check a backend-supplied JSON text component before queueing it: the root
 /// must be text, a list or an object, with an NBT form for 1.20.3+ clients.
 pub fn validate_component(component: &serde_json::Value) -> io::Result<()> {

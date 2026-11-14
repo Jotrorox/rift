@@ -180,18 +180,23 @@ impl Text {
     /// with its formatting when it is valid, otherwise shown as its words or
     /// as written.
     pub fn from_backend_json(raw: &str) -> Self {
-        let parsed = serde_json::from_str::<Json>(raw).ok();
-        if let Some(component) = &parsed {
-            if let Ok(text) = Self::component(component.clone(), "backend text") {
-                return text;
+        match serde_json::from_str::<Json>(raw) {
+            Ok(component) => {
+                Self::from_backend(component).unwrap_or_else(|| Self::Plain(raw.into()))
             }
-            let mut words = String::new();
-            flatten(component, &mut words, 0);
-            if !words.is_empty() {
-                return Self::Plain(words);
-            }
+            Err(_) => Self::Plain(raw.to_owned()),
         }
-        Self::Plain(raw.to_owned())
+    }
+
+    /// A text component a backend sent, kept with its formatting when it is
+    /// valid, otherwise as its words; `None` when it has no words.
+    pub fn from_backend(component: Json) -> Option<Self> {
+        let mut words = String::new();
+        flatten(&component, &mut words, 0);
+        if let Ok(text) = Self::component(component, "backend text") {
+            return Some(text);
+        }
+        (!words.is_empty()).then_some(Self::Plain(words))
     }
 
     /// The text of a WIT `*-json` argument: a JSON text component, like a
