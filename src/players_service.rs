@@ -378,11 +378,13 @@ pub fn plugin_sender(plugin: &str) -> String {
 /// only these, because other handlers (the permission service) treat any
 /// sender as a remote principal.
 pub fn audited_subject(subject: &str) -> bool {
-    ["rift.control", PREFIX].iter().any(|prefix| {
-        subject
-            .strip_prefix(prefix)
-            .is_some_and(|rest| rest.starts_with('.'))
-    })
+    ["rift.control", PREFIX, crate::network_service::PREFIX]
+        .iter()
+        .any(|prefix| {
+            subject
+                .strip_prefix(prefix)
+                .is_some_and(|rest| rest.starts_with('.'))
+        })
 }
 
 #[cfg(test)]
@@ -473,6 +475,7 @@ mod tests {
         assert_eq!(actor(None, "rift.control"), "rift.control");
         assert!(audited_subject("rift.players.kick"));
         assert!(audited_subject("rift.control.stop"));
+        assert!(audited_subject("rift.network.connect"));
         assert!(!audited_subject("rift.playersx.kick"));
         assert!(!audited_subject("rift.perms.hello"));
         let request = Request::decode("title", br#"{"target":"A","title":"Hi"}"#).unwrap();
