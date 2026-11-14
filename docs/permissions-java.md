@@ -24,6 +24,10 @@ Everything is published to a Maven repository on GitHub Pages, group
 Versions follow the proxy's releases: use the API version of the RiftPerms
 you run.
 
+RiftPerms also provides the [network API](network-java.md)
+(`rift-network-api`): listing servers, finding and connecting players, and
+messages to proxy plugins, over the same bus connection.
+
 ## Depending on the API
 
 Gradle (Kotlin DSL):

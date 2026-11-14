@@ -29,13 +29,14 @@ use rift_permissions::wire::ErrorCode;
 use std::{fmt, io};
 
 /// The publish and subscribe grants of a backend principal
-/// (`messaging.principals[].preset = "backend"`).
+/// (`messaging.principals[].preset = "backend"`): the permission protocol,
+/// and the [network API](crate::network_service), whose `connect` a backend
+/// may use for its own players only.
 pub fn backend_grants() -> (Vec<String>, Vec<String>) {
     let strings = |list: &[&str]| list.iter().map(|s| (*s).to_owned()).collect();
-    (
-        strings(&control::BACKEND_PUBLISH),
-        strings(&control::BACKEND_SUBSCRIBE),
-    )
+    let mut publish: Vec<String> = strings(&control::BACKEND_PUBLISH);
+    publish.push(format!("{}.*", crate::network_service::PREFIX));
+    (publish, strings(&control::BACKEND_SUBSCRIBE))
 }
 
 /// Extension commands whose permission is neither registered by a backend

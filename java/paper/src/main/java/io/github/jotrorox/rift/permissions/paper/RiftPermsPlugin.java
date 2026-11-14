@@ -1,6 +1,9 @@
 package io.github.jotrorox.rift.permissions.paper;
 
 import io.github.jotrorox.rift.messaging.MessagingClient;
+import io.github.jotrorox.rift.network.RiftNetwork;
+import io.github.jotrorox.rift.network.RiftNetworkProvider;
+import io.github.jotrorox.rift.network.client.NetworkClient;
 import io.github.jotrorox.rift.permissions.RiftPermissions;
 import io.github.jotrorox.rift.permissions.RiftPermissionsProvider;
 import io.github.jotrorox.rift.permissions.SubjectUpdatedEvent;
@@ -18,11 +21,13 @@ import org.bukkit.plugin.java.JavaPlugin;
  * RiftPerms: Rift's permission service on Paper, Folia and Purpur. It follows the proxy over the
  * messaging bus, answers {@code hasPermission} from the replica through an injected permissible,
  * registers {@link RiftPermissions} with the services manager, and bridges Vault, PlaceholderAPI and
- * {@code /perms}.
+ * {@code /perms}. The same bus connection serves {@link RiftNetwork}, the network API for other
+ * plugins.
  */
 public final class RiftPermsPlugin extends JavaPlugin {
     private MessagingClient bus;
     private PermissionsClient client;
+    private NetworkClient network;
     private PlayerListener players;
 
     @Override
@@ -73,6 +78,14 @@ public final class RiftPermsPlugin extends JavaPlugin {
 
         getServer().getServicesManager().register(RiftPermissions.class, client, this, ServicePriority.Highest);
         RiftPermissionsProvider.register(client);
+        network = NetworkClient.builder()
+                .messaging(bus)
+                .server(config.server())
+                .group(config.group())
+                .requestTimeout(config.requestTimeout())
+                .build();
+        getServer().getServicesManager().register(RiftNetwork.class, network, this, ServicePriority.Highest);
+        RiftNetworkProvider.register(network);
 
         players = new PlayerListener(this, client, paper, config.joinTimeout());
         getServer().getPluginManager().registerEvents(players, this);
@@ -114,6 +127,7 @@ public final class RiftPermsPlugin extends JavaPlugin {
         players.restoreAll(getServer().getOnlinePlayers());
         getServer().getServicesManager().unregisterAll(this);
         RiftPermissionsProvider.unregister(client);
+        RiftNetworkProvider.unregister(network);
         client.close();
         bus.close();
         client = null;
