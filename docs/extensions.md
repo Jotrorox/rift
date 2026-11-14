@@ -50,6 +50,7 @@ server names are errors; Rift never treats an error as permission to proceed.
 | `disconnect(ctx)` | Session teardown, including an authenticated login that never joined | Last committed `server`, or nil; `reason = "session_closed"` | `nil` |
 | `dialog(ctx)` | A click on a plugin action of a [dialog](dialogs.md) the script showed (API v2+) | `server`, `action`, `values`, `payload` | `nil` |
 | `chat(ctx)` | A chat message, or a command on its way to the backend, before the backend sees it. Needs `authentication.signed_chat = false`; see [chat](plugins.md#chat) | `server`, `kind` (`"message"` or `"command"`), `text`; for a command also `command` and `args` | `{ deny = "reason" }` drops it and shows the player the reason |
+| `kick(ctx)` | A backend kicked the player in play, on a [network](operations.md#maintenance-and-transfers) session. The player is still connected to Rift | `server` (the backend that kicked), `reason` (its kick text without formatting) | `{ server = "name" }` moves the player there (a group picks an instance), `{ deny = "reason" }` disconnects them with that text; `nil` applies `network.on_kick` |
 
 Common player context fields are `api_version` (1, 2 or 3), `authenticated = true`, `uuid`
 (lowercase 32-digit hex, no hyphens), canonical Mojang `name`, `connection_id`
@@ -90,11 +91,11 @@ ends that event chain; observer callbacks must return nil. All handlers share
 one execution budget.
 
 Every transfer entry point uses `before_transfer`: `/server`, `/hub`, extension
-commands, queue admissions, outage recovery and administration (including its
-HTTP/messaging entry points), BungeeCord `Connect`/`ConnectOther` requests and
-`rift.players.transfer`. Static access/health checks may eliminate a target
-before this hook. `reason` is `command`, `queue`, `recovery`, `admin`, `bungeecord`
-or `extension`. A denial
+commands, queue admissions, outage recovery, backend kicks and administration
+(including its HTTP/messaging entry points), BungeeCord `Connect`/`ConnectOther`
+requests and `rift.players.transfer`. Static access/health checks may eliminate
+a target before this hook. `reason` is `command`, `queue`, `recovery`, `kick`,
+`admin`, `bungeecord` or `extension`. A denial
 prevents that target's connection; recovery may try another eligible candidate.
 A backend can still reject an allowed player.
 
@@ -244,7 +245,7 @@ permission alone does not protect a server against `/server` or admin routing.
 ## Decisions answered over the message bus
 
 A service with its own database, such as a ban system, can decide `login`,
-`initial_server` and `before_transfer` without running in Lua. Rust sends a
+`initial_server`, `before_transfer` and `kick` without running in Lua. Rust sends a
 request on the [message bus](messaging.md) and waits asynchronously, so a slow
 responder holds no Lua worker and no extension slot. Decisions require
 `api_version = 2` or later.
@@ -295,7 +296,7 @@ are `null`, as in the Lua context.
 | --- | --- |
 | `{"action":"continue"}` | every decided hook |
 | `{"action":"deny","reason":"…"}` | every decided hook |
-| `{"action":"server","server":"lobby-2"}` | `initial_server` only |
+| `{"action":"server","server":"lobby-2"}` | `initial_server` and `kick` |
 
 A `reason` is a string of plain text or a JSON text component, an object or a
 list, such as `{"action":"deny","reason":{"text":"Banned","color":"red"}}`

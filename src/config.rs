@@ -143,9 +143,31 @@ pub struct Network {
     pub initial: Vec<String>,
     pub hubs: Vec<String>,
     pub access: BTreeMap<String, ServerAccess>,
+    /// What a backend kick in play does when no `kick` hook decides.
+    pub on_kick: OnKick,
     /// The permission node `/server` requires; `None` lets every player use
     /// it. Access rules still decide which destinations a player may join.
     pub server_permission: Option<String>,
+}
+
+/// `network.on_kick`: where a player a backend kicked goes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum OnKick {
+    /// Move the player to a hub or fallback and show the reason in chat;
+    /// disconnect with the reason when none takes them.
+    #[default]
+    Hub,
+    /// Disconnect with the backend's reason.
+    Disconnect,
+}
+
+impl OnKick {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Hub => "hub",
+            Self::Disconnect => "disconnect",
+        }
+    }
 }
 
 /// Names are matched without ASCII case. A deny entry always wins. Otherwise
@@ -1677,6 +1699,7 @@ fn network(root: &Table) -> Result<Network, String> {
             "hubs",
             "access",
             "server_permission",
+            "on_kick",
         ],
     )?
     else {
@@ -1684,6 +1707,12 @@ fn network(root: &Table) -> Result<Network, String> {
     };
     let mut network = Network {
         bungeecord: boolean(&values, "network", "bungeecord", false)?,
+        on_kick: match values.get::<Value>("on_kick").map_err(|e| e.to_string())? {
+            Value::Nil => OnKick::Hub,
+            Value::String(value) if value.as_bytes() == b"hub" => OnKick::Hub,
+            Value::String(value) if value.as_bytes() == b"disconnect" => OnKick::Disconnect,
+            _ => return Err("network.on_kick: expected 'hub' or 'disconnect'".into()),
+        },
         ..Network::default()
     };
     for (key, destination) in [

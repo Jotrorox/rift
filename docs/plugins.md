@@ -10,7 +10,7 @@ runs:
 | --- | --- | --- | --- |
 | **script** | `rift.lua`, its modules and script-mode plugin folders, in the sandboxed configuration VM | Sandboxed: instruction and memory budgets, no I/O | `rift.on`, `rift.command`, `rift.config.plugins`, `rift.plugin` for a folder without a persistent manifest |
 | **persistent** | A plugin folder installed on disk with a `plugin.toml`, running in its own long-lived Lua state or WebAssembly instance on its own OS thread | Trusted: runs with Rift's process privileges | `rift.plugin(name, config)` |
-| **remote** | A service on the [message bus](messaging.md) that answers `login`, `initial_server` and `before_transfer`, and calls the `players` interface as [`rift.players.*`](messaging.md#player-api-subjects) | Whatever the service is; Rift only reads its replies and checks its login's grants | `rift.config.plugins.decisions`, `messaging.principals` |
+| **remote** | A service on the [message bus](messaging.md) that answers `login`, `initial_server`, `before_transfer` and `kick`, and calls the `players` interface as [`rift.players.*`](messaging.md#player-api-subjects) | Whatever the service is; Rift only reads its replies and checks its login's grants | `rift.config.plugins.decisions`, `messaging.principals` |
 
 Persistent plugins come in two engines: [Lua](plugins-lua.md) (LuaJIT, the
 same `rift` API as `rift.lua`) and WebAssembly components written in
@@ -155,10 +155,11 @@ list from `rift.on`, `rift.command`, timers and subscriptions.
 | `event` | observer | a `rift.events.*` publication | none (queued; interrupted after 60 s) | – |
 | `dialog` | observer, owner only | a click on a plugin action of a [dialog](dialogs.md) the plugin showed | none (queued; interrupted after 60 s) | – |
 | `chat` | awaited, only plugins with a handler | continue or deny, for a chat message or a backend command ([below](#chat)) | 50 ms | deny (the message is dropped) |
+| `kick` | awaited, only Lua plugins with a handler | continue, deny (disconnect with this text) or a server to move the player to, after a backend kick ([fallback on kick](operations.md#maintenance-and-transfers)) | 300 ms | deny (`network.on_kick` applies) |
 | `init`, `reload`, `shutdown` | lifecycle | registration / ok / none | 30 s / 5 s / 10 s | init fails the plugin; reload keeps the old configuration |
 
 Player hooks (`login`, `initial_server`, `before_transfer`, `command`,
-`suggest`, `join`, `after_transfer`, `disconnect`, `chat`) need
+`suggest`, `join`, `after_transfer`, `disconnect`, `chat`, `kick`) need
 `authentication.online_mode`, because they carry a verified identity. Without
 it, persistent plugins still run `route`, `status`, `http`, timers, bus
 messages and events, but a plugin whose registration lists a player hook,

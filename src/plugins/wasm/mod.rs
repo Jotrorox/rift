@@ -446,6 +446,10 @@ impl PluginEngine for WasmEngine {
                 .map(|()| Reply::None)
                 .map_err(|error| CallError::Fatal(self.fail(error)));
         }
+        if let Event::Kick(_) = event {
+            // The contract has no `kick` export yet.
+            return Ok(Reply::default_for(hook));
+        }
         if let Event::Chat(context) = event {
             // Only a component that exports `chat` wants the hook.
             let Some(chat) = &self.chat else {
@@ -577,7 +581,9 @@ impl PluginEngine for WasmEngine {
             Event::Event(event) => guest
                 .call_event(store, &bindings::rift_event(event))
                 .map(|()| Reply::None),
-            Event::Dialog(_) | Event::Chat(_) => unreachable!("dispatched above"),
+            Event::Dialog(_) | Event::Chat(_) | Event::Kick(_) => {
+                unreachable!("dispatched above")
+            }
         };
         result.map_err(|error| CallError::Fatal(self.fail(error)))
     }

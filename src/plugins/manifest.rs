@@ -439,7 +439,7 @@ impl Manifest {
         Some(Duration::from_millis(match hook {
             Hook::Route | Hook::Suggest | Hook::Status | Hook::Chat => 50,
             Hook::Login | Hook::InitialServer | Hook::Command => 1000,
-            Hook::BeforeTransfer => 300,
+            Hook::BeforeTransfer | Hook::Kick => 300,
             Hook::Http => 5000,
             _ => unreachable!("observers have no deadline"),
         }))
@@ -621,6 +621,7 @@ mod tests {
             (Hook::Status, 50),
             (Hook::Http, 5000),
             (Hook::Chat, 50),
+            (Hook::Kick, 300),
         ] {
             assert_eq!(manifest.deadline(hook), Some(Duration::from_millis(ms)));
         }

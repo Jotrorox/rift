@@ -38,6 +38,7 @@ const EVENTS: &[(&str, Option<Hook>)] = &[
     ("event", Some(Hook::Event)),
     ("dialog", Some(Hook::Dialog)),
     ("chat", Some(Hook::Chat)),
+    ("kick", Some(Hook::Kick)),
     ("reload", None),
     ("shutdown", None),
 ];

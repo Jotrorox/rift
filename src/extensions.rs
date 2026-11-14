@@ -37,6 +37,7 @@ const HOOKS: &[&str] = &[
     "after_transfer",
     "dialog",
     "chat",
+    "kick",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -255,6 +256,7 @@ impl ExtensionScript {
                 "after_transfer",
                 "dialog",
                 "chat",
+                "kick",
                 "commands",
                 "permissions",
                 "groups",
@@ -667,7 +669,7 @@ pub(crate) fn parse_action(hook: &str, value: Value) -> mlua::Result<Action> {
     let (key, value) = &entries[0];
     let allowed = match hook {
         "login" | "before_transfer" | "chat" => &["deny"][..],
-        "initial_server" => &["deny", "server"][..],
+        "initial_server" | "kick" => &["deny", "server"][..],
         "command" => &["message", "server", "queue", "leave_queue"][..],
         _ => &[][..],
     };
@@ -1547,6 +1549,17 @@ impl ExtensionSession {
         self.runtime
             .dialog(self.context.clone(), owner, response, &self.jobs)
             .await
+    }
+
+    /// Ask the `kick` hooks where a player `server` kicked goes: `Server`
+    /// moves them there, `Deny` disconnects them with that text and
+    /// `Continue` leaves it to `network.on_kick`. `reason` is the backend's
+    /// reason without formatting.
+    pub async fn kick(&self, server: &str, reason: &str) -> io::Result<Action> {
+        let mut input = self.context.clone();
+        input.server = Some(server.to_owned());
+        input.reason = Some(reason.to_owned());
+        self.runtime.call("kick", &input, &self.jobs).await
     }
 
     async fn notify(&self, hook: &str, input: &Context) {

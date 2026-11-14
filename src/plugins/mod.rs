@@ -843,7 +843,7 @@ impl Host {
         .await
     }
 
-    /// `login`, `initial_server`, `before_transfer`: the configuration script
+    /// `login`, `initial_server`, `before_transfer`, `kick`: the configuration script
     /// (when it defines the hook), then persistent plugins in order, then the
     /// bus responder. The first answer other than `continue` wins.
     pub(crate) async fn decide(
@@ -864,6 +864,7 @@ impl Host {
                     Hook::Login => Event::Login(input.clone()),
                     Hook::InitialServer => Event::InitialServer(input.clone()),
                     Hook::BeforeTransfer => Event::BeforeTransfer(input.clone()),
+                    Hook::Kick => Event::Kick(input.clone()),
                     _ => break,
                 };
                 if let Some(action) = self
@@ -1173,7 +1174,10 @@ fn validate_action(hook: Hook, action: &Action) -> Result<(), String> {
                 Hook::Login | Hook::BeforeTransfer | Hook::Chat,
                 Action::Deny(_)
             )
-            | (Hook::InitialServer, Action::Deny(_) | Action::Server(_))
+            | (
+                Hook::InitialServer | Hook::Kick,
+                Action::Deny(_) | Action::Server(_)
+            )
             | (
                 Hook::Command,
                 Action::Message(_) | Action::Server(_) | Action::Queue(_) | Action::LeaveQueue,

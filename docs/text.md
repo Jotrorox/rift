@@ -187,6 +187,7 @@ carries, such as a backend's ban screen.
 | `connection.lost` | – | The server connection was lost. Please reconnect. |
 | `connection.failed` | – | The server connection failed. Please reconnect. |
 | `connection.backend_closed` | – | The current backend disconnected the player. |
+| `connection.kicked` | `server`, `reason` | You were kicked from \<server\>: \<reason\> |
 | `connection.denied` | – | The destination server denied access. |
 | `switch.incomplete` | – | The server switch could not be completed. |
 | `switch.starting` | – | A server is starting. Please wait for the current transfer. |

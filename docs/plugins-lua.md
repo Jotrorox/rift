@@ -123,6 +123,13 @@ What differs is the environment:
   (for a command also `ctx.command` and `ctx.args`), and returns nil or
   `{ deny = "reason" }`, which drops it. A plugin with this handler starts
   only with `authentication.signed_chat = false`.
+- `rift.on("kick", fn)` registers the plugin for backend kicks in play: `ctx.server`
+  is the backend that kicked the player and `ctx.reason` its text without
+  formatting. Return `{ server = "lobby" }` to move the player there,
+  `{ deny = "reason" }` to disconnect them with that text, or nil to leave it
+  to [`network.on_kick`](operations.md#maintenance-and-transfers).
+  WebAssembly components cannot handle `kick` yet: the contract has no export
+  for it.
 - `rift.command(name, { permission, run, suggest })` also accepts a list of
   strings as `suggest`. `permission` is required; `permission = ""` (contract
   0.1.5) opens the command to every player. A command name belongs to exactly one owner across the

@@ -323,7 +323,7 @@ class NetworkClient(Client):
 
 
 @contextmanager
-def network(binary, backends, initial=("lobby",), hubs=("lobby",), access=""):
+def network(binary, backends, initial=("lobby",), hubs=("lobby",), access="", on_kick=None):
     with tempfile.TemporaryDirectory(prefix="rift-network-") as tmp:
         directory = Path(tmp)
         port = unused_port()
@@ -336,7 +336,8 @@ def network(binary, backends, initial=("lobby",), hubs=("lobby",), access=""):
                           # The backends are byte fixtures that answer no status request.
                           + "translation={detect=false},"
                           + "limits={connect_timeout_ms=1500},network={initial={" + names(initial) + "},hubs={" + names(hubs)
-                          + "},access={" + access + "}}}")
+                          + "},access={" + access + "}"
+                          + ("" if on_kick is None else ",on_kick=" + repr(on_kick)) + "}}")
         log = directory / "proxy.log"
         with process([str(binary), "--config", str(config)], directory, "proxy.log") as proxy:
             try:
@@ -413,7 +414,15 @@ def check(binary):
                 client.joined("lobby")
                 client.probe("lobby")
                 assert client.joins[-2:] == [22, 11]
-                # A play kick is an explicit policy decision; never recover it.
+                # A kick from another server moves the player to a hub and
+                # says why; the frontend socket stays (network.on_kick = 'hub').
+                client.command("server survival")
+                client.joined("survival")
+                client.send(0x15, string("rift:ban"))
+                assert b"Banned by survival" in client.until("message", b"kicked from survival")
+                client.probe("lobby")
+                assert client.joins[-2:] == [22, 11]
+                # A kick from the only hub has nowhere to go and stays final.
                 attempts = len(lobby.connections)
                 client.send(0x15, string("rift:ban"))
                 assert b"Banned by lobby" in client.until("disconnect")
@@ -426,7 +435,7 @@ def check(binary):
                 assert len(item["sessions"]) == 1, item["sessions"]
                 assert (0x1B, struct.pack(">q", 999)) not in item["packets"], "old-world reply leaked"
             observed = [record["sessions"][0] for record in survival.connections if record["ready"]]
-            assert observed == [chat_session(2), chat_session(4)], observed
+            assert observed == [chat_session(2), chat_session(4), chat_session(6)], observed
             with NetworkClient(port, "Eve") as client:
                 client.joined("lobby")
                 count = len(survival.connections)
@@ -440,7 +449,17 @@ def check(binary):
                     assert b"already connected" in duplicate.until("disconnect")
                 assert len(lobby.connections) == before_duplicate, "duplicate login reached backend"
                 client.probe("lobby")
-        print("PASS: lobby/survival/lobby, compression, chat reset, failure recovery, command/access denial, play ban")
+        print("PASS: lobby/survival/lobby, compression, chat reset, failure recovery, command/access denial, play kicks")
+        with network(binary, targets, on_kick="disconnect") as port:
+            with NetworkClient(port) as client:
+                client.joined("lobby")
+                client.command("server survival")
+                client.joined("survival")
+                attempts = len(lobby.connections)
+                client.send(0x15, string("rift:ban"))
+                assert b"Banned by survival" in client.until("disconnect")
+                assert len(lobby.connections) == attempts, "on_kick = 'disconnect' moved the player"
+        print("PASS: network.on_kick = 'disconnect' keeps backend kicks final")
         # Initial order excludes restricted entries and proceeds only after
         # transport failure. It must stop on an explicit login rejection.
         with network(binary, targets, initial=("offline", "backup", "lobby"),

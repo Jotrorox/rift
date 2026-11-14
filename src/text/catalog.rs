@@ -119,6 +119,8 @@ notices! {
         "The current backend disconnected the player.",
     ConnectionDenied => "connection.denied" []
         "The destination server denied access.",
+    ConnectionKicked => "connection.kicked" ["server", "reason"]
+        "You were kicked from <server>: <reason>",
     // Switching servers.
     SwitchIncomplete => "switch.incomplete" []
         "The server switch could not be completed.",
