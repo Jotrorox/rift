@@ -154,8 +154,9 @@ rift_plugin::export!(Mute, chat);
 command, `attempt.ctx.command` is the root name and `attempt.ctx.args` the
 rest. Answer `Action::Continue`, `Action::deny` or `Action::deny_json`. With
 `export!(Mute)` the component has no `chat` export and the method is never
-called. With `export!(Mute, chat)` Rift asks the plugin about every message
-and starts it only when the proxy sets `authentication.signed_chat = false`.
+called. With `export!(Mute, chat)` Rift asks the plugin about every message;
+with signed chat, the first deny costs that player their
+[chat signing](plugins.md#chat).
 
 ## Rich text builders
 

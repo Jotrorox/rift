@@ -291,9 +291,10 @@ static inline void rift_decision_from_action(rift_decision_t *ret, rift_action_t
 // The export exists only in a plugin built with RIFT_CHAT (`RIFT_CHAT=1
 // sdk/c/build.sh ...`, or `rift_add_chat_plugin()` in CMake). It is the
 // registration: Rift asks such a plugin about every message of every player,
-// whatever its hook list says, and starts it only with
-// `authentication.signed_chat = false`, because dropping one signed message
-// would break the player's signature chain. A plugin built without RIFT_CHAT
+// whatever its hook list says. Dropping one signed message breaks the
+// player's signature chain, so unless the proxy sets
+// `authentication.signed_chat = false`, the first deny costs that player
+// their chat signing until they reconnect. A plugin built without RIFT_CHAT
 // has no `chat` export and is never asked.
 //
 //   void exports_rift_plugin_chat_chat(rift_chat_attempt_t *attempt, rift_decision_t *ret) {

@@ -102,20 +102,6 @@ fn config(extra: &str, plugins: Vec<PluginSpec>) -> Config {
     config
 }
 
-/// [`config`] with `authentication.signed_chat = false`, which `chat` hooks
-/// need. The plugins carry the setting themselves, as `Config` gives it to
-/// the ones it loads.
-fn unsigned_config(extra: &str, plugins: Vec<PluginSpec>) -> Config {
-    let base = BASE.replace(
-        "online_mode = true",
-        "online_mode = true, signed_chat = false",
-    );
-    let mut config =
-        Config::from_lua(&format!("return {{ {base}, {extra} }}"), "conformance.lua").unwrap();
-    config.plugins = plugins;
-    config
-}
-
 /// A spec for a plugin folder that already holds its `plugin.toml`.
 pub(crate) fn installed(folder: &Path, config_json: &str) -> PluginSpec {
     let name = folder.file_name().unwrap().to_str().unwrap().to_owned();
@@ -128,7 +114,6 @@ pub(crate) fn installed(folder: &Path, config_json: &str) -> PluginSpec {
         config_json: config_json.into(),
         fingerprint: "one".into(),
         online_mode: true,
-        signed_chat: true,
     }
 }
 
@@ -182,15 +167,12 @@ impl<'a> Lab<'a> {
         installed(&folder, &config.to_string())
     }
 
-    /// A guest that handles `chat`, as configured with
-    /// `authentication.signed_chat = false`.
+    /// A guest that handles `chat`.
     fn chat_plugin(&self, name: &str, extra: &str, config: serde_json::Value) -> PluginSpec {
         let folder = self.root.join("plugins").join(name);
         std::fs::create_dir_all(&folder).unwrap();
         self.fixture.install_chat(&folder, name, extra);
-        let mut spec = installed(&folder, &config.to_string());
-        spec.signed_chat = false;
-        spec
+        installed(&folder, &config.to_string())
     }
 
     fn extensions(&self, config: &Config) -> std::io::Result<Extensions> {
@@ -916,8 +898,7 @@ pub(crate) async fn chat_hooks_follow_the_chain(fixture: &dyn Fixture) {
     use crate::extensions::ChatKind;
     let mut lab = Lab::new(fixture);
     let rich = json!({"text": "Muted", "color": "red"});
-    let mut bystander = lab.plugin("bystander", "", json!({}));
-    bystander.signed_chat = false;
+    let bystander = lab.plugin("bystander", "", json!({}));
     let plugins = vec![
         lab.chat_plugin("first", "", chat_config("spam", json!({"deny": "no spam"}))),
         bystander,
@@ -928,7 +909,7 @@ pub(crate) async fn chat_hooks_follow_the_chain(fixture: &dyn Fixture) {
         ),
     ];
     let script = "extensions = { api_version = 2, chat = function(ctx) if ctx.kind == 'message' and ctx.text == 'script' then return { deny = 'script says no' } end end }";
-    let runtime = lab.runtime(&unsigned_config(script, plugins)).await;
+    let runtime = lab.runtime(&config(script, plugins)).await;
     let active = runtime.plugins().active();
     assert!(active[0].registration().unwrap().wants(Hook::Chat));
     assert!(
@@ -1000,7 +981,7 @@ pub(crate) async fn chat_failures_and_deadlines_apply_the_policy(fixture: &dyn F
     slow["slow"] = json!(["chat"]);
 
     let strict = lab
-        .runtime(&unsigned_config(
+        .runtime(&config(
             "",
             vec![lab.chat_plugin("strict", "", invalid.clone())],
         ))
@@ -1020,7 +1001,7 @@ pub(crate) async fn chat_failures_and_deadlines_apply_the_policy(fixture: &dyn F
     strict.plugins().shutdown().await;
 
     let tolerant = lab
-        .runtime(&unsigned_config(
+        .runtime(&config(
             "",
             vec![lab.chat_plugin(
                 "tolerant",
@@ -1040,10 +1021,7 @@ pub(crate) async fn chat_failures_and_deadlines_apply_the_policy(fixture: &dyn F
 
     // The default deadline is 50 ms; the guest takes 300 ms.
     let late = lab
-        .runtime(&unsigned_config(
-            "",
-            vec![lab.chat_plugin("late", "", slow.clone())],
-        ))
+        .runtime(&config("", vec![lab.chat_plugin("late", "", slow.clone())]))
         .await;
     let started = Instant::now();
     let error = session(&late, 1)
@@ -1055,7 +1033,7 @@ pub(crate) async fn chat_failures_and_deadlines_apply_the_policy(fixture: &dyn F
     late.plugins().shutdown().await;
 
     let patient = lab
-        .runtime(&unsigned_config(
+        .runtime(&config(
             "",
             vec![
                 lab.chat_plugin(
@@ -1077,24 +1055,9 @@ pub(crate) async fn chat_failures_and_deadlines_apply_the_policy(fixture: &dyn F
     patient.plugins().shutdown().await;
 }
 
-/// A plugin that handles chat starts only with
-/// `authentication.signed_chat = false`; one that does not starts either way
-/// and is never asked.
-pub(crate) async fn chat_hooks_need_unsigned_chat(fixture: &dyn Fixture) {
+/// A plugin without a chat handler is never asked about chat.
+pub(crate) async fn chat_is_asked_only_of_its_handlers(fixture: &dyn Fixture) {
     let lab = Lab::new(fixture);
-    let mut signed = lab.chat_plugin("mute", "", chat_config("x", json!({"deny": "no"})));
-    signed.signed_chat = true;
-    let runtime = lab.extensions(&config("", vec![signed])).unwrap();
-    let error = runtime.plugins().start().await.unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("the chat hook needs authentication.signed_chat = false"),
-        "{error}"
-    );
-    assert!(runtime.plugins().active().is_empty());
-
-    // The ordinary guest has no chat handler, whatever its configuration.
     let plain = lab.plugin("plain", "", json!({}));
     let runtime = lab.runtime(&config("", vec![plain])).await;
     assert!(!runtime.plugins().active()[0].registration().unwrap().chat);
@@ -1346,11 +1309,11 @@ macro_rules! conformance_tests {
         }
 
         #[tokio::test]
-        async fn chat_hooks_need_unsigned_chat() {
+        async fn chat_is_asked_only_of_its_handlers() {
             if !$ready {
                 return;
             }
-            $crate::plugins::conformance::chat_hooks_need_unsigned_chat(&$fixture).await;
+            $crate::plugins::conformance::chat_is_asked_only_of_its_handlers(&$fixture).await;
         }
 
         #[tokio::test]

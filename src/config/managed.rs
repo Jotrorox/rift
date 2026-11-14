@@ -33,6 +33,9 @@ pub struct ManagedServer {
     pub messaging: Option<InstanceMessaging>,
     /// Whether the process is confined to its own directory.
     pub isolation: Isolation,
+    /// Whether the process keeps running when Rift shuts down or dies, to be
+    /// adopted by the next Rift (see `crate::managed`). Local servers only.
+    pub keep_running: bool,
 }
 
 /// How a managed server's process is confined; see
@@ -322,6 +325,7 @@ pub(super) fn parse(root: &Table, base: &Path) -> Result<BTreeMap<String, Manage
                 "inherit_env",
                 "messaging",
                 "isolation",
+                "keep_running",
             ],
             &path,
         )?;
@@ -398,6 +402,7 @@ pub(super) fn parse(root: &Table, base: &Path) -> Result<BTreeMap<String, Manage
                 environment: ProcessEnvironment::parse(&values, &path)?,
                 messaging: InstanceMessaging::parse(&values, &path)?,
                 isolation: Isolation::parse(&values, &path, base, remote)?,
+                keep_running: boolean(&values, &path, "keep_running", false)?,
             },
         );
     }
@@ -486,6 +491,18 @@ pub(super) fn validate(
             ));
         }
         server.environment.validate(&path)?;
+        if server.keep_running {
+            if server.node.is_some() {
+                return Err(format!(
+                    "{path}.keep_running: servers on a node already keep running while the proxy restarts; remove it"
+                ));
+            }
+            if !crate::managed::KEEP_RUNNING_SUPPORTED {
+                return Err(format!(
+                    "{path}.keep_running: keeping servers running without the proxy requires Linux or macOS"
+                ));
+            }
+        }
         validate_directory(&server.directory, &path)?;
         let directory = if server.node.is_some() {
             if !valid_node_directory(&server.directory) {
@@ -629,6 +646,27 @@ mod tests {
                 retries.parse::<f64>().unwrap() as usize
             );
         }
+    }
+
+    #[test]
+    fn keep_running_is_an_opt_in_for_supported_hosts() {
+        assert!(!config("").unwrap().managed_servers["lobby"].keep_running);
+        let kept = config("keep_running=true");
+        if cfg!(any(target_os = "linux", target_os = "macos")) {
+            assert!(kept.unwrap().managed_servers["lobby"].keep_running);
+        } else {
+            let error = kept.unwrap_err().to_string();
+            assert!(
+                error.contains("managed_servers.lobby.keep_running")
+                    && error.contains("requires Linux or macOS"),
+                "{error}"
+            );
+        }
+        let error = config("keep_running='yes'").unwrap_err().to_string();
+        assert!(
+            error.contains("keep_running: expected a boolean"),
+            "{error}"
+        );
     }
 
     #[test]

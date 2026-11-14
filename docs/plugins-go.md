@@ -139,8 +139,8 @@ tinygo build -target=wasip2 --wit-package path/to/rift/wit --wit-world plugin-ch
 `attempt.Text` is the message, or the command line without its slash; for a
 command, `attempt.Ctx.Command` is the root name and `attempt.Ctx.Args` the
 rest. Answer `rift.Continue()`, `rift.Deny` or `rift.DenyJSON`. Rift asks the
-plugin about every message and starts it only when the proxy sets
-`authentication.signed_chat = false`.
+plugin about every message; with signed chat, the first deny costs that
+player their [chat signing](plugins.md#chat).
 
 ## Rich text builders
 

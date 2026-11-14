@@ -27,10 +27,11 @@
 // about every message of every player, whatever Registration.Hooks lists. A
 // plugin that does not import it has no such export and is never asked.
 //
-// Two things follow. Rift starts a plugin with the export only when the
-// proxy sets authentication.signed_chat = false, because dropping one signed
-// message would break the player's signature chain. And the component must
-// be built against the world that has the export:
+// Two things follow. Dropping one signed message breaks the player's
+// signature chain, so unless the proxy sets authentication.signed_chat =
+// false, the first deny costs that player their chat signing until they
+// reconnect. And the component must be built against the world that has the
+// export:
 //
 //	tinygo build -target=wasip2 --wit-package <rift>/wit --wit-world plugin-chat -no-debug -o plugin.wasm .
 //

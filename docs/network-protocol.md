@@ -80,15 +80,34 @@ Backends must not require signed chat:
 Changing the setting applies to connections made afterwards and restarts
 every persistent plugin, as a change of `online_mode` does.
 
-Unsigned chat is what the [`chat` hook](plugins.md#chat) builds on: a plugin
-or the configuration script sees each message and backend command first and
-may drop it. Rift holds the packet, and on a deny sends the backend only the
+Unsigned chat is what lets the [`chat` hook](plugins.md#chat) drop a message:
+a plugin or the configuration script sees each message and backend command
+first. Rift holds the packet, and on a deny sends the backend only the
 last-seen acknowledgement the packet carried, as it does for a proxy command.
-A plugin or script with a chat handler is refused while `signed_chat` is
-`true`. A player who connected before the setting became `false` still has a
-signed chat session with their backend; until they reconnect, the hook is
-asked only about their packets without a signature, and signed ones pass
-unseen.
+
+With `signed_chat = true` the hook is asked all the same, and a packet it lets
+through reaches the backend as the client signed it. Unsigned chat then
+begins for one player at a time, when the hook first denies a packet of theirs
+that the backend would have verified:
+
+1. Rift drops the packet. The session stops giving out the player's signing
+   material: the chat key and every later Player Session packet are withheld
+   as in the table above.
+2. The backend still has the old material and a chain that misses a link, so
+   Rift closes that backend connection and logs the player in to the same
+   server again, the way it recovers a player after an outage. The player
+   sees the world load once, as for a server switch. It is not a transfer: no
+   `before_transfer` or `after_transfer` runs and no queue slot is taken. If
+   the server cannot be reached, the player moves to a hub like after any
+   outage.
+3. From then until the player reconnects to the proxy, every backend takes
+   their chat as unsigned, with the consequences above for that player only.
+
+Signed packets the client sends between the drop and the new login never
+reach the old backend. Where Rift cannot attach a backend again (a client on a
+protocol without switching support, below), it does not ask the hook about
+packets the backend verifies; they pass unseen, as does a packet that arrives
+while a switch is under way.
 
 Switching is an explicit capability in `src/protocol/switching.rs`, separate from
 relay and configuration-state support. Each protocol maps its control packet IDs,

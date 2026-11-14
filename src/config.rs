@@ -20,7 +20,7 @@ pub use messaging::{MessagingConfig, MessagingPrincipal, MessagingStream, Messag
 pub use nodes::{LOCAL_NODE, NodeConfig, NodeSelector, Placement, valid_node_directory};
 pub use permissions::PermissionsConfig;
 pub use services::{
-    GroupMode, GroupState, InstanceStorage, ServiceGroup, ServiceInstance, ServiceScaling,
+    Balance, GroupMode, GroupState, InstanceStorage, ServiceGroup, ServiceInstance, ServiceScaling,
 };
 pub use status::{
     StatusBackend, StatusConfig, StatusExposure, StatusLink, StatusPage, StatusPanels,
@@ -840,7 +840,6 @@ impl Config {
                         config_json,
                         // Set below, once `authentication` is parsed.
                         online_mode: false,
-                        signed_chat: true,
                     };
                     spec.check_grants()
                         .map_err(|error| format!("plugin {}: {error}", spec.name))?;
@@ -1057,7 +1056,6 @@ impl Config {
             let authentication = authentication(&root)?;
             for plugin in &mut plugins {
                 plugin.online_mode = authentication.online_mode;
-                plugin.signed_chat = authentication.signed_chat;
             }
             let forwarding = forwarding(&root)?;
             Ok(Self {
@@ -1190,13 +1188,6 @@ impl Config {
         if let Some(extensions) = &self.extensions {
             if !self.authentication.online_mode {
                 return Err(invalid("extensions requires authentication.online_mode"));
-            }
-            if self.authentication.signed_chat && extensions.hook_names().any(|hook| hook == "chat")
-            {
-                return Err(invalid(format!(
-                    "extensions.chat: {}",
-                    crate::plugins::worker::CHAT_NEEDS_UNSIGNED
-                )));
             }
             if extensions.legacy_grants().is_some() {
                 return Err(invalid(

@@ -74,6 +74,10 @@ fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.into())
 }
 
+/// How long a `keep_running` server found during removal recovery may take
+/// to stop before it is killed.
+const REMOVAL_STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
+
 #[derive(Debug)]
 pub struct Store {
     database: Arc<Database>,
@@ -254,6 +258,9 @@ impl Store {
         for record in &records {
             if ["removing", "deleting"].contains(&record.phase.as_str()) && !record.remote() {
                 let address = SocketAddr::from(([127, 0, 0, 1], record.definition.instance.port));
+                // A `keep_running` server outlived the proxy that was removing it.
+                crate::managed::stop_kept(&record.definition.plan.directory, REMOVAL_STOP_GRACE)
+                    .map_err(|e| self.error(format!("instances.{}: {e}", record.name)))?;
                 recovery_ports.push(TcpListener::bind(address).map_err(|e| self.error(format!(
                     "instances.{}: port {address} is still in use during removal recovery: {e}; stop the old server before retrying", record.name)))?);
             }
@@ -394,11 +401,19 @@ impl Store {
     }
 
     /// Keep these sockets until startup validation finishes; fail before autostart.
+    /// A port held by the instance's own `keep_running` server, which its
+    /// worker adopts, is not a conflict.
     pub fn reserve_restored_ports(&self, config: &Config) -> io::Result<Vec<TcpListener>> {
-        config.instances.iter().filter(|(_, instance)| instance.node.is_none()).map(|(name, instance)| {
-            check_configured_port(config, name, instance.port)?;
+        config.instances.iter().filter(|(_, instance)| instance.node.is_none()).filter_map(|(name, instance)| {
+            if let Err(error) = check_configured_port(config, name, instance.port) {
+                return Some(Err(error));
+            }
             let address = SocketAddr::from(([127,0,0,1], instance.port));
-            TcpListener::bind(address).map_err(|e| self.error(format!("instances.{name}: port {address} is unavailable: {e}; stop the conflicting process or correct the configuration")))
+            match TcpListener::bind(address) {
+                Ok(listener) => Some(Ok(listener)),
+                Err(_) if config.managed_servers.get(name).is_some_and(|server| server.keep_running && crate::managed::kept_running(&server.directory)) => None,
+                Err(e) => Some(Err(self.error(format!("instances.{name}: port {address} is unavailable: {e}; stop the conflicting process or correct the configuration")))),
+            }
         }).collect()
     }
 

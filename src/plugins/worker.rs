@@ -333,21 +333,6 @@ pub(crate) fn require_online_mode(registration: &Registration) -> Result<(), Str
     }
 }
 
-/// What the refusal of a `chat` hook says while chat is signed, for plugins
-/// and for the configuration script.
-pub(crate) const CHAT_NEEDS_UNSIGNED: &str = "the chat hook needs authentication.signed_chat = false: with signed chat, withholding one message breaks the player's signature chain and the backend disconnects them at their next message";
-
-/// A `chat` handler may drop messages, which is safe only when backends take
-/// chat as unsigned (`authentication.signed_chat = false`). A plugin that
-/// handles chat must not start otherwise: it could neither act on signed
-/// messages nor drop one without the backend kicking the player.
-pub(crate) fn require_unsigned_chat(registration: &Registration) -> Result<(), String> {
-    if registration.chat {
-        return Err(CHAT_NEEDS_UNSIGNED.into());
-    }
-    Ok(())
-}
-
 /// The same limits the configuration script's commands obey.
 pub(crate) fn validate_registration(registration: &Registration) -> Result<(), String> {
     if registration.commands.len() > 64 {
@@ -942,13 +927,6 @@ impl Worker {
                     Ok(())
                 } else {
                     require_online_mode(&registration)
-                }
-            })
-            .and_then(|()| {
-                if self.spec.signed_chat {
-                    require_unsigned_chat(&registration)
-                } else {
-                    Ok(())
                 }
             })
             .and_then(|()| {
