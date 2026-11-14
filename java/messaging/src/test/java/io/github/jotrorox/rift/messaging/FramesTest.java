@@ -62,4 +62,26 @@ class FramesTest {
         assertEquals("publication not permitted", error.getMessage());
         assertThrows(MessagingException.class, () -> Frames.expectOk(new byte[] {Frames.OK, 0}), "trailing bytes");
     }
+
+    @Test
+    void streamFramesCarryWideIntegers() throws Exception {
+        byte[] frame = new Frames.Writer(Frames.ACK).string("jobs").string("w").u64(0x0102030405060708L).frame();
+        assertArrayEquals(
+                new byte[] {0, 0, 0, 18, 15, 0, 4, 'j', 'o', 'b', 's', 0, 1, 'w', 1, 2, 3, 4, 5, 6, 7, 8}, frame);
+        // DELIVERY: sequence:u64, timestamp_millis:u64, delivery_count:u32, then a message
+        byte[] delivery = new Frames.Writer(Frames.DELIVERY)
+                .u64(-1L)
+                .u64(1_700_000_000_000L)
+                .u32(0xfffffffeL)
+                .subject("a")
+                .string("")
+                .payload(new byte[] {7})
+                .frame();
+        Frames.Reader reader = new Frames.Reader(Frames.read(new ByteArrayInputStream(delivery), Frames.MAX_FRAME));
+        assertEquals(Frames.DELIVERY, reader.u8());
+        assertEquals(-1L, reader.u64(), "u64 sequences above Long.MAX_VALUE keep their bits");
+        assertEquals(1_700_000_000_000L, reader.u64());
+        assertEquals(0xfffffffeL, reader.u32());
+        assertArrayEquals(new byte[] {7}, Frames.message(reader).payload());
+    }
 }

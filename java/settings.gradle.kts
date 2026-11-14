@@ -29,7 +29,7 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "rift-java"
+rootProject.name = "rift"
 
 // Directories stay short; project names are the published artifact IDs.
 mapOf(
@@ -40,6 +40,7 @@ mapOf(
     "network-api" to "rift-network-api",
     "network" to "rift-network-client",
     "network-test" to "rift-network-test",
+    "control" to "rift-control",
     "paper" to "rift-permissions-paper",
 ).forEach { (directory, artifact) ->
     include(artifact)
