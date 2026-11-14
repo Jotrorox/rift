@@ -186,6 +186,51 @@ fn interrupted_creation_recovers_before_copy_during_copy_after_publish_and_durin
     }
 }
 
+#[tokio::test]
+async fn ephemeral_instances_restore_between_runs_and_rebuild_with_their_creation_marker() {
+    let fixture = Fixture::new("ephemeral");
+    let store = fixture.store();
+    let (_, name, plan) = fixture.ready(&store);
+    let marker = |directory: &Path| -> serde_json::Value {
+        serde_json::from_slice(&fs::read(directory.join(".rift-instance.json")).unwrap()).unwrap()
+    };
+    // Between runs an ephemeral instance has no directory.
+    fs::remove_dir_all(&plan.directory).unwrap();
+    drop(store);
+    let store = Arc::new(fixture.store());
+    let mut restored = fixture.config();
+    store.restore(&mut restored).unwrap();
+    assert!(restored.instances.contains_key(&name));
+    let config = Arc::new(restored);
+    let fresh = provisioning::Fresh::new(&config, &name, false).unwrap();
+    fresh
+        .set_marker(&store.plan(&name).unwrap().unwrap())
+        .unwrap();
+    fresh.provision().unwrap();
+    assert_eq!(Some(marker(&plan.directory)), plan.marker);
+    // A copy a crash left behind restores too, and the worker deletes it
+    // again once its start fails (this test command does not exist).
+    let manager = ManagedServers::new(&config, Arc::new(PlayerRegistry::default()));
+    manager.with_persistence(store.clone()).unwrap();
+    manager.launch().unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while manager.snapshot()[0].state != Phase::Failed {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{:?}",
+            manager.snapshot()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let error = manager.snapshot()[0].last_error.clone().unwrap();
+    assert!(!error.contains("marker"), "{error}");
+    assert!(!plan.directory.exists());
+    manager.shutdown().await;
+    store.begin_removal(&name).unwrap();
+    store.finish_removal(&name).unwrap();
+    assert!(store.records().unwrap().is_empty());
+}
+
 #[test]
 fn aborted_creation_reusing_persistent_data_keeps_existing_world() {
     let fixture = Fixture::new("persistent");

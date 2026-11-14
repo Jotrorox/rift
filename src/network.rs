@@ -256,7 +256,7 @@ impl Network<'_> {
         uuid: Option<rift_permissions::Uuid>,
     ) -> io::Result<Vec<String>> {
         let config = &self.snapshot.config;
-        if !use_initial && !config.can_access(primary, name) {
+        if !use_initial && !config.can_access(primary, name, &self.snapshot.subject(uuid)) {
             return Err(rift::text::notice_error(
                 io::ErrorKind::PermissionDenied,
                 Notice::LoginNoAccess,
@@ -648,6 +648,9 @@ impl Network<'_> {
             return Vec::new();
         };
         let uuid = expected_uuid(session);
+        if !self.snapshot.may_use_server_command(uuid) {
+            return Vec::new();
+        }
         config
             .backends
             .keys()
@@ -716,6 +719,10 @@ impl Network<'_> {
             }
         } else {
             match words.as_slice() {
+                ["server", ..] if !self.snapshot.may_use_server_command(uuid) => (
+                    Vec::new(),
+                    Some(catalog::notice(Notice::CommandNoPermission)),
+                ),
                 ["server"] => {
                     let servers: Vec<_> = config
                         .backends

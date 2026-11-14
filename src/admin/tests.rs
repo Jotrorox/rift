@@ -608,6 +608,7 @@ async fn admin_transfer_obeys_both_original_and_current_player_access_rules() {
         let denied = || rift::config::ServerAccess {
             allow: Some(Vec::new()),
             deny: Vec::new(),
+            ..Default::default()
         };
         for deny_original in [false, true] {
             let mut fixture = SessionFixture::with_access(deny_original.then(denied)).await;

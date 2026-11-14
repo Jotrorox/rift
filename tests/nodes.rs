@@ -74,6 +74,9 @@ fn node_server_helper() {
         if fs::remove_file("crash").is_ok() {
             std::process::exit(3);
         }
+        if fs::remove_file("finish").is_ok() {
+            std::process::exit(0);
+        }
         let _ = listener.accept();
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -281,6 +284,15 @@ async fn named_servers_on_a_node_start_stop_log_recover_and_reconcile() {
         phase(&managed) == Phase::Running && managed.snapshot()[0].pid != first_pid
     })
     .await;
+    // A clean exit on the node is a stop: no error, no retry spent.
+    let attempts = managed.snapshot()[0].restart_attempts;
+    fs::write(directory.join("finish"), "").unwrap();
+    eventually("clean exit", || phase(&managed) == Phase::Stopped).await;
+    let server = &managed.snapshot()[0];
+    assert!(server.last_error.is_none(), "{server:?}");
+    assert_eq!(server.restart_attempts, attempts);
+    assert!(server.automatic_enabled);
+    managed.start("survival").await.unwrap();
 
     managed.stop("survival").await.unwrap();
     assert_eq!(phase(&managed), Phase::Stopped);
