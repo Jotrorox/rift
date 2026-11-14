@@ -962,15 +962,17 @@ fn ephemeral_config(root: &Path, address: SocketAddr) -> (Config, Config) {
         format!("{address}\n0\nnormal\n"),
     )
     .unwrap();
-    let exe = std::env::current_exe().unwrap();
+    // Escaped and double-quoted for Lua: a Windows path has backslashes.
+    let exe = format!(
+        "{:?}",
+        std::env::current_exe().unwrap().display().to_string()
+    );
     let source = format!(
         "return {{listeners={{public='127.0.0.1:0'}},backends={{}},routes={{public='mini'}},\
          templates={{mini={{server_jar='template/server.jar',configs='template/configs'}}}},\
          service_groups={{mini={{template='mini',storage='ephemeral',directory='instances/{{name}}',\
          command={{{exe},'--exact','managed_process_helper','--nocapture'}},port_range={{{port},{port}}},\
          stop_timeout_ms=10000,restart_delay_ms=200,restart_retries=3}}}}}}",
-        // Escaped and double-quoted: a Windows path has backslashes.
-        exe = format!("{:?}", exe.display().to_string()),
         port = address.port()
     );
     let base = Config::from_lua_at(&source, &root.join("rift.lua")).unwrap();
