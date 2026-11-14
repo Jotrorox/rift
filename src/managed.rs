@@ -105,6 +105,8 @@ struct Inner {
     instance_store: Mutex<Option<Arc<crate::instance_store::Store>>>,
     nodes: Nodes,
     logins: LoginSlot,
+    /// What servers report about themselves; forgotten when they start.
+    states: crate::service_state::ServiceStates,
 }
 
 /// The instance logins every worker reads when it starts a process, set
@@ -127,6 +129,8 @@ struct Server {
     /// Controller shutdown rather than removal: remote processes keep running.
     detach: AtomicBool,
     wake: Notify,
+    /// Shared with [`Inner::states`]; a new run starts without a report.
+    states: crate::service_state::ServiceStates,
 }
 
 #[derive(Debug)]
@@ -248,6 +252,7 @@ impl ManagedServers {
     /// Servers with a `node` run through that node's agent in `nodes`.
     pub fn with_nodes(config: &Config, players: Arc<PlayerRegistry>, nodes: Nodes) -> Self {
         protect_secrets(config);
+        let states = crate::service_state::ServiceStates::default();
         // Restored ephemeral instances learn their markers in `with_persistence`.
         let shared = config
             .instances
@@ -265,10 +270,8 @@ impl ManagedServers {
                 let fresh = shared
                     .as_ref()
                     .and_then(|config| Fresh::new(config, name, false));
-                (
-                    name.clone(),
-                    new_server(name, definition.clone(), endpoint, fresh),
-                )
+                let server = new_server(name, definition.clone(), endpoint, &states, fresh);
+                (name.clone(), server)
             })
             .collect();
         Self(Arc::new(Inner {
@@ -280,11 +283,18 @@ impl ManagedServers {
             instance_store: Mutex::new(None),
             nodes,
             logins: LoginSlot::default(),
+            states,
         }))
     }
 
     pub fn nodes(&self) -> &Nodes {
         &self.0.nodes
+    }
+
+    /// What servers report about themselves on
+    /// [`crate::service_state::SUBJECT`], managed or not.
+    pub fn service_states(&self) -> &crate::service_state::ServiceStates {
+        &self.0.states
     }
 
     /// Hand each process its bus login from now on (see
@@ -453,7 +463,7 @@ impl ManagedServers {
         {
             fresh.set_marker(&plan)?;
         }
-        let server = new_server(name, definition.clone(), endpoint, fresh);
+        let server = new_server(name, definition.clone(), endpoint, &self.0.states, fresh);
         launch_worker(
             &runtime,
             &server,
@@ -512,6 +522,7 @@ impl ManagedServers {
                 {
                     lock(&inner.retired).insert(name.clone());
                     servers.remove(&name);
+                    inner.states.clear(&name);
                     // The process is gone; so are its login and sessions.
                     if let Some(logins) = inner
                         .logins
@@ -867,12 +878,14 @@ fn new_server(
     name: &str,
     config: ManagedServer,
     endpoint: Option<String>,
+    states: &crate::service_state::ServiceStates,
     fresh: Option<Fresh>,
 ) -> Arc<Server> {
     let (sender, receiver) = mpsc::channel(64);
     Arc::new(Server {
         name: name.to_owned(),
         fresh: fresh.map(Arc::new),
+        states: states.clone(),
         address: endpoint
             .as_deref()
             .and_then(|endpoint| endpoint.parse().ok()),
@@ -1284,6 +1297,9 @@ async fn adopt<B: ProcessBackend>(server: &Server, backend: &mut B) {
             return;
         }
         if state.automatic {
+            // A process this worker did not start may have reported
+            // anything before; it reports again once it notices.
+            server.states.clear(&server.name);
             state.phase = Phase::Running;
             state.pid = pid;
             state.recover = true;
@@ -1458,6 +1474,8 @@ async fn start_process_inner<B: ProcessBackend>(
         state.recover = true;
         state.phase = Phase::Starting;
         state.last_error = None;
+        // The previous run's label, properties and drain end with it.
+        server.states.clear(&server.name);
     }
     let result = spawn_ready(server, backend).await;
     match result {

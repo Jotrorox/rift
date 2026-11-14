@@ -134,9 +134,6 @@ impl Snapshot {
             )
             .with_messaging(messaging.clone())
             .with_plugins(extensions.plugins().clone());
-        let control =
-            previous.map_or_else(|| Arc::new(Control::default()), |old| old.control.clone());
-        let health = Health::with_control(&config, control.clone());
         let forwarding_secret = config.forwarding.as_ref().and_then(|settings| {
             Some((settings.secret_env.as_ref()?, settings.mode.secret_name()?))
         }).map(|(secret_env, what)| {
@@ -195,6 +192,11 @@ impl Snapshot {
             || rift::managed::ManagedServers::with_nodes(&config, players.clone(), nodes.clone()),
             |old| old.managed.clone(),
         );
+        let control = previous.map_or_else(
+            || Arc::new(Control::with_states(managed.service_states().clone())),
+            |old| old.control.clone(),
+        );
+        let health = Health::with_control(&config, control.clone());
         Ok(Self {
             live: previous
                 .map_or_else(|| Arc::new(Mutex::new(Weak::new())), |old| old.live.clone()),
@@ -2634,6 +2636,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
             .map(|handler| handler.with_players(initial.extensions.player_api()));
     let messaging_controls = crate::messaging_runtime::Controls::new(initial.messaging.clone())?;
     let player_requests = crate::messaging_runtime::PlayerRequests::new(initial.messaging.clone())?;
+    let server_states = crate::messaging_runtime::ServerStates::new(initial.messaging.clone())?;
     let permission_bus = initial.perms.listen()?;
     initial.addresses = Arc::new(
         initial
@@ -2670,6 +2673,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         app.workflows.clone(),
     ));
     background.spawn(player_requests.run(receiver.clone(), app.workflows.clone()));
+    background.spawn(server_states.run(receiver.clone()));
     // Keep visibility rules current as permissions change.
     background.spawn(snapshot.extensions.players().clone().watch());
     // Subscribe before any plugin starts so its first lifecycle change is
