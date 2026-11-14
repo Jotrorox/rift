@@ -1198,20 +1198,21 @@ mod tests {
             .replace("backends={}", "backends={static='127.0.0.1:25566'}, fallbacks={static={'lobby'},lobby={'static'}}, network={initial={'lobby'},hubs={'lobby'},access={lobby={allow={'Notch'},deny={'Blocked'}}}}")
             .replace("routes={public='lobby'}", "routes={public={['*.example.com']='lobby',['*']='static'}}");
         let mut config = Config::from_lua(&source, "network.lua").unwrap();
-        assert!(config.can_access("lobby", "Notch"));
-        assert!(!config.can_access("lobby", "Other"));
+        assert!(config.can_access("lobby", "Notch", &crate::config::NameOnly));
+        assert!(!config.can_access("lobby", "Other", &crate::config::NameOnly));
         config.add_instance("lobby", "lobby-1", 25600).unwrap();
-        assert!(config.can_access("lobby-1", "Notch"));
-        assert!(!config.can_access("lobby-1", "Other"));
+        assert!(config.can_access("lobby-1", "Notch", &crate::config::NameOnly));
+        assert!(!config.can_access("lobby-1", "Other", &crate::config::NameOnly));
         config.network.access.insert(
             "lobby-1".into(),
             ServerAccess {
                 allow: None,
                 deny: vec!["Notch".into()],
+                ..Default::default()
             },
         );
-        assert!(!config.can_access("lobby-1", "Notch"));
-        assert!(!config.can_access("unknown", "Notch"));
+        assert!(!config.can_access("lobby-1", "Notch", &crate::config::NameOnly));
+        assert!(!config.can_access("unknown", "Notch", &crate::config::NameOnly));
     }
 
     #[test]
