@@ -110,8 +110,10 @@ A managed server is up while its process is `running`; Rift leaves it out while
 it is stopped, starting, stopping or failed. An unmanaged backend is up unless
 health checks mark it down. Without `health_check` it always counts as up. The
 state is `draining` for a server that is draining, through the `draining`
-setting or the administrator `drain` command, and `running` otherwise. Draining
-servers keep their players but accept no new ones.
+setting, the administrator `drain` command or the server's own report on
+[`rift.server.state`](messaging.md#server-state). Otherwise it is the label
+the server reported there, such as `LOBBY` or `INGAME`, and `running` when it
+reported none. Draining servers keep their players but accept no new ones.
 
 The service group is the group a server is an instance of, or an empty string.
 The player count matches `PlayerCount` for that server. The player limit is the
