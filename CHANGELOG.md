@@ -65,7 +65,8 @@ published as prereleases from the same pipeline.
 
 ### SDKs
 
-- Rust `rift-plugin` 0.1.5: git tag `sdk/rust/v0.1.5`.
+- Rust `rift-plugin` 0.1.5 on [crates.io](https://crates.io/crates/rift-plugin),
+  git tag `sdk/rust/v0.1.5`.
 - Go `github.com/Jotrorox/rift/sdk/go` v0.1.5: git tag `sdk/go/v0.1.5`.
 - C SDK in `sdk/c` of the release tag.
 - Java `io.github.jotrorox.rift` artifacts at the proxy's version, from
