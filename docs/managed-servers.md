@@ -566,7 +566,9 @@ rift.config.service_groups.lobby = {
 
 Each instance authenticates as `server.<instance>` with the grants of the
 block (`preset = "backend"` adds the [permission replica's
-subjects](messaging.md#backend-permission-principals)). Rift always adds
+subjects](messaging.md#backend-permission-principals) and the [network
+API](messaging.md#network-api-subjects), with which an instance lists servers
+and moves its own players). Rift always adds
 publish access to `_INBOX.>`, so the instance can answer requests, and to
 `rift.server.state`, so it can report its own [state, properties and
 drain](messaging.md#server-state), and

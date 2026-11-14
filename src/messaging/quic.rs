@@ -208,6 +208,10 @@ impl Identity {
             // kicks and answer them in Rift's place.
             || (!self.control
                 && (overlaps(pattern, "rift.players.>") || covers(pattern, crate::players_service::PREFIX)))
+            // Network requests name players too, and a subscriber could
+            // answer `connect` in Rift's place.
+            || (!self.control
+                && (overlaps(pattern, "rift.network.>") || covers(pattern, crate::network_service::PREFIX)))
             // Node commands carry secrets such as the forwarding secret.
             || (!self.control
                 && !self.node_scope(pattern)

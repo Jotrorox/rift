@@ -111,8 +111,9 @@ The preset adds publish `rift.perms.hello`, `rift.perms.subject.*`,
 `rift.perms.command` and `rift.perms.context`, plus the
 [server state](#server-state) subject `rift.server.state`, and subscribe
 `rift.perms.update`, `rift.perms.update.>`, `rift.events.permissions` and
-`rift.perms.changes` (the retained change log), to whatever `publish` and
-`subscribe` the entry also lists. Name the principal `server.<backend>`: Rift
+`rift.perms.changes` (the retained change log), and publish
+`rift.network.*`, the [network API](#network-api-subjects), to whatever
+`publish` and `subscribe` the entry also lists. Name the principal `server.<backend>`: Rift
 trusts it to speak for that backend's players and nobody else's.
 
 Rift records which principal sent each remote message, so permission handlers
@@ -215,6 +216,47 @@ to the [operator audit log](http.md#authentication-and-access) as
 `bus` interface appear as `plugin:<name>`, the configuration script as
 `rift.players`. Plugins normally use the `players` interface directly, which
 is not audited, like their other host calls.
+
+## Network API subjects
+
+A backend asks which servers are up, where players are, and for a player to
+be moved, on `rift.network.<operation>`. This is what the [Java network
+API](network-java.md) speaks. It needs only a publish grant for the subject,
+which the `backend` preset includes: no `players`, no `control`. Requests and
+answers have the shape of the player API's, with an `_INBOX.` reply subject.
+
+| Subject | JSON payload | `data` |
+| --- | --- | --- |
+| `rift.network.servers` | `{}` or `{"server":"lobby"}` (a server or service group, ignoring ASCII case) | `[{"name":"lobby-1","group":"lobby","state":"running","service_state":"LOBBY","properties":{"map":"Hub"},"players":12,"max_players":50}]`: servers that are up, sorted by name |
+| `rift.network.players` | `{}` or `{"server":"lobby"}` | players as `rift.players.list` reports them |
+| `rift.network.player` | `{"player":"Alice"}` (a name or a UUID) | one player, or `null` |
+| `rift.network.connect` | `{"player":"Alice","server":"survival"}` or `{"player":"Alice","group":"bedwars"}` | whether the player was online and the transfer queued |
+
+`servers` lists the servers the BungeeCord bridge's
+[`RiftServers`](bungeecord.md#rift-requests) lists, with the same rules for
+"up", the player count and `max_players` (`0` when Rift knows no limit);
+`group` is `null` outside a service group. `state` is `draining` or
+`running`, whatever the reason a server drains. What the server reported
+about itself on [`rift.server.state`](#server-state) comes beside it:
+`service_state` is its label or `null`, and `properties` its properties. An
+unknown server or group is an error, a group without running instances an
+empty list.
+
+`connect` with `server` takes a server or a service group, like
+`rift.players.transfer`; with `group` it takes a service group only, and Rift
+picks the instance. The destination is checked first, so a wrong name is an
+error even when the player is offline. The transfer passes access rules and
+`before_transfer` like any other, and the reply does not wait for its
+outcome.
+
+Who may move whom depends on the caller. A login named `server.<name>` moves
+players who are on `<name>`. A login with `players = true` moves anyone, as
+it can through `rift.players.transfer`, and so do persistent plugins and the
+configuration script. Anything else is refused with an error. Every `connect`
+is written to the [operator audit log](http.md#authentication-and-access) as
+`network.connect`, with `player -> destination` as the target; reads are not
+audited. Only principals with `control = true` may subscribe to
+`rift.network.*`, as for `rift.players.*`.
 
 ## Rift control subjects
 
