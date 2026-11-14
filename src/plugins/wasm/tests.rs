@@ -275,6 +275,7 @@ pub(crate) async fn hello_conformance(guest: &Guest) {
         *plugin.registration().unwrap(),
         Registration {
             chat: false,
+            kick: false,
             commands: vec![CommandSpec {
                 name: "hello".into(),
                 permission: "hello.use".into(),

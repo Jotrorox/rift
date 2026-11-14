@@ -68,6 +68,12 @@ impl Plan {
         self
     }
 
+    /// The plugin handles `kick`, as a Lua plugin with a handler does.
+    fn kick(mut self) -> Self {
+        self.registration.kick = true;
+        self
+    }
+
     fn commands(mut self, names: &[&str]) -> Self {
         self.registration.commands = names
             .iter()
@@ -1745,4 +1751,82 @@ fn webassembly_grants_may_not_cover_the_plugin_cache_or_the_plugins_folder() {
     let mut lua = spec(&root, "lua", "", "{}");
     lua.manifest.capabilities.filesystem = vec![manifest::Filesystem::Path("/".into())];
     lua.check_grants().unwrap();
+}
+
+/// Answers `kick` by the reason: `full` moves the player to `game`, `ban`
+/// disconnects them, `queue` answers what the hook does not accept and
+/// `echo` disconnects with what the hook received.
+fn bouncer(event: &Event, _: &services::Services) -> Result<Reply, CallError> {
+    let Event::Kick(context) = event else {
+        return Ok(Reply::default_for(event.hook()));
+    };
+    Ok(Reply::Action(
+        match context.reason.as_deref().unwrap_or_default() {
+            "full" => Action::Server("game".into()),
+            "ban" => Action::Deny("banned".into()),
+            "queue" => Action::Queue("game".into()),
+            "echo" => Action::Deny(
+                format!(
+                    "{}|{}|{}",
+                    context.name,
+                    context.server.as_deref().unwrap_or_default(),
+                    context.reason.as_deref().unwrap_or_default()
+                )
+                .into(),
+            ),
+            _ => Action::Continue,
+        },
+    ))
+}
+
+#[tokio::test]
+async fn kick_asks_the_script_then_plugins_that_handle_it() {
+    let root = directory();
+    let mocks = Mocks::default();
+    // An empty hook list delivers every hook except chat and kick.
+    mocks.plan("everything", Plan::new(action(Action::Continue)));
+    mocks.plan("bouncer", Plan::new(bouncer).hooks(&[Hook::Timer]).kick());
+    let broker = Broker::default();
+    let plugins = vec![
+        spec(&root, "everything", "", "{}"),
+        spec(&root, "bouncer", "", "{}"),
+    ];
+    let script = "extensions = { api_version = 2, kick = function(ctx) if ctx.reason == 'script' then return { server = 'lobby' } end end }";
+    let runtime = runtime(&config(script, plugins), &mocks, &broker).await;
+    assert!(runtime.plugins().may_handle(Hook::Kick));
+    let statuses = runtime.plugins().statuses();
+    // The script first, then the plugins.
+    assert_eq!(statuses[0].hooks, ["kick"]);
+    assert!(!statuses[1].hooks.contains(&"kick"), "{statuses:?}");
+    assert_eq!(statuses[2].hooks, ["timer", "dialog", "kick"]);
+    let player = session(&runtime, 1);
+    // The script answers first; the plugin is not asked.
+    assert_eq!(
+        player.kick("game", "script").await.unwrap(),
+        Action::Server("lobby".into())
+    );
+    assert!(mocks.calls("kick").is_empty());
+    assert_eq!(
+        player.kick("lobby", "full").await.unwrap(),
+        Action::Server("game".into())
+    );
+    assert_eq!(mocks.calls("kick"), ["bouncer:kick"]);
+    assert_eq!(
+        player.kick("game", "ban").await.unwrap(),
+        Action::Deny("banned".into())
+    );
+    assert_eq!(
+        player.kick("game", "echo").await.unwrap(),
+        Action::Deny("Player1|game|echo".into())
+    );
+    assert_eq!(
+        player.kick("game", "Round over").await.unwrap(),
+        Action::Continue
+    );
+    let error = player.kick("game", "queue").await.unwrap_err();
+    assert!(
+        error.to_string().contains("invalid decision for kick"),
+        "{error}"
+    );
+    runtime.plugins().shutdown().await;
 }

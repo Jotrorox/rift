@@ -753,6 +753,84 @@ async fn current_backend_ban_during_preflight_is_terminal() {
 }
 
 #[tokio::test]
+async fn network_kick_in_play_is_held_until_delivered() {
+    timeout(Duration::from_secs(3), async {
+        let (mut session, mut client, mut backend) = session().await;
+        session.enable_network().unwrap();
+        play(&mut session, &mut client, &mut backend, Codec::default()).await;
+        let kick = protocol::disconnect_component(
+            session.version,
+            State::Play,
+            &serde_json::json!({"text": "Round over", "color": "gold"}),
+        )
+        .unwrap();
+        Codec::default().write(&mut backend, &kick).await.unwrap();
+        assert_eq!(
+            session.forward().await.unwrap(),
+            SessionEvent::BackendKicked(crate::text::Text::Component(
+                serde_json::json!({"text": "Round over", "color": "gold"})
+            ))
+        );
+        // The player can still be moved; the client has seen nothing.
+        assert!(session.backend().is_none());
+        assert!(session.can_switch());
+        assert!(
+            timeout(
+                Duration::from_millis(10),
+                receive(&mut client, Codec::default())
+            )
+            .await
+            .is_err()
+        );
+        session.deliver_kick().await.unwrap();
+        assert_eq!(receive(&mut client, Codec::default()).await, kick);
+        assert!(session.client.state.settled(State::Closed));
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn plain_relay_kicks_reach_the_client_unheld() {
+    timeout(Duration::from_secs(3), async {
+        let (mut session, mut client, mut backend) = session().await;
+        play(&mut session, &mut client, &mut backend, Codec::default()).await;
+        let kick = protocol::disconnect(session.version, State::Play, "Round over").unwrap();
+        Codec::default().write(&mut backend, &kick).await.unwrap();
+        assert_eq!(session.run().await.unwrap(), SessionEvent::Disconnected);
+        assert_eq!(receive(&mut client, Codec::default()).await, kick);
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn network_kick_during_preflight_stays_terminal() {
+    timeout(Duration::from_secs(3), async {
+        let (mut session, mut client, mut backend) = session().await;
+        session.enable_network().unwrap();
+        play(&mut session, &mut client, &mut backend, Codec::default()).await;
+        let (replacement, mut second) = tokio::io::duplex(65536);
+        let banned = protocol::disconnect(session.version, State::Play, "Banned").unwrap();
+        let (result, ()) = tokio::join!(session.connect_backend(replacement), async {
+            receive(&mut second, Codec::default()).await;
+            receive(&mut second, Codec::default()).await;
+            Codec::default().write(&mut backend, &banned).await.unwrap();
+        });
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        // Closing flushes the queued kick before anything else.
+        session
+            .disconnect_text(&crate::text::Text::Plain("Switch failed".into()))
+            .await
+            .unwrap();
+        assert_eq!(receive(&mut client, Codec::default()).await, banned);
+        assert!(session.client.state.settled(State::Closed));
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
 async fn commands_are_intercepted_only_in_network_mode_without_signed_arguments() {
     let (mut session, mut client, mut backend) = session().await;
     session.enable_network().unwrap();

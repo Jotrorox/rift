@@ -145,6 +145,8 @@ pub(super) fn registration(registration: types::Registration) -> api::Registrati
         hooks: registration.hooks.into_iter().map(hook).collect(),
         // Set by the engine from the component's exports.
         chat: false,
+        // No export answers `kick` yet; components keep its default.
+        kick: false,
     }
 }
 
@@ -704,12 +706,12 @@ mod tests {
         .into_iter()
         .map(hook)
         .collect();
-        // `dialog` and `chat` have no WIT case, so 0.1.0 components keep
-        // loading.
-        assert_eq!(names, api::Hook::ALL[..api::Hook::ALL.len() - 2]);
+        // `dialog`, `chat` and `kick` have no WIT case, so 0.1.0 components
+        // keep loading.
+        assert_eq!(names, api::Hook::ALL[..api::Hook::ALL.len() - 3]);
         assert_eq!(
-            api::Hook::ALL[api::Hook::ALL.len() - 2..],
-            [api::Hook::Dialog, api::Hook::Chat]
+            api::Hook::ALL[api::Hook::ALL.len() - 3..],
+            [api::Hook::Dialog, api::Hook::Chat, api::Hook::Kick]
         );
         let attempt = chat_attempt(api::Context {
             id: 9,

@@ -674,3 +674,34 @@ async fn the_vanish_example_hides_a_player_from_viewers_without_the_node() {
     watcher.abort();
     runtime.plugins().shutdown().await;
 }
+
+#[tokio::test]
+async fn kick_handlers_register_the_hook_and_choose_where_the_player_goes() {
+    let source = r#"
+rift.on("kick", function(ctx)
+    if ctx.reason == "Round over" then return { server = "lobby" } end
+    if ctx.server == "arena" then return { deny = ctx.name .. " left " .. ctx.server } end
+end)
+"#;
+    let root = folder("", &[("init.lua", source)]);
+    let runtime = started(&root, "{}", &Broker::default()).await;
+    assert!(
+        runtime
+            .plugins()
+            .may_handle(crate::plugins::api::Hook::Kick)
+    );
+    let player = session(&runtime, 1, "Alex");
+    assert_eq!(
+        player.kick("game", "Round over").await.unwrap(),
+        Action::Server("lobby".into())
+    );
+    assert_eq!(
+        player.kick("arena", "Server closed").await.unwrap(),
+        Action::Deny("Alex left arena".into())
+    );
+    assert_eq!(
+        player.kick("game", "Server closed").await.unwrap(),
+        Action::Continue
+    );
+    runtime.plugins().shutdown().await;
+}

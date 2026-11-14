@@ -196,10 +196,14 @@ pub enum Hook {
     /// having a handler (the `chat` export, or `rift.on("chat", ...)`), see
     /// [`Registration::chat`].
     Chat,
+    /// A backend kicked a player in play: where they go next. No WIT case
+    /// either: a plugin registers with a handler (the `kicks` export, or
+    /// `rift.on("kick", ...)`), see [`Registration::kick`].
+    Kick,
 }
 
 impl Hook {
-    pub const ALL: [Hook; 16] = [
+    pub const ALL: [Hook; 17] = [
         Hook::Route,
         Hook::Login,
         Hook::InitialServer,
@@ -216,6 +220,7 @@ impl Hook {
         Hook::Event,
         Hook::Dialog,
         Hook::Chat,
+        Hook::Kick,
     ];
 
     /// The snake_case name used by manifests, Lua and the bus.
@@ -237,6 +242,7 @@ impl Hook {
             Self::Event => "event",
             Self::Dialog => "dialog",
             Self::Chat => "chat",
+            Self::Kick => "kick",
         }
     }
 
@@ -273,6 +279,7 @@ impl Hook {
                 | Self::AfterTransfer
                 | Self::Disconnect
                 | Self::Chat
+                | Self::Kick
         )
     }
 }
@@ -290,6 +297,9 @@ pub struct Registration {
     /// registration record, which has no field for it; an empty hook list
     /// does not imply it.
     pub chat: bool,
+    /// Whether the plugin handles `kick`: a component that exports `kicks`,
+    /// a Lua plugin with a `kick` handler. Set by the engine, like `chat`.
+    pub kick: bool,
 }
 
 impl Registration {
@@ -300,6 +310,7 @@ impl Registration {
         match hook {
             Hook::Dialog => true,
             Hook::Chat => self.chat,
+            Hook::Kick => self.kick,
             _ => self.hooks.is_empty() || self.hooks.contains(&hook),
         }
     }
@@ -353,6 +364,9 @@ pub enum Event {
     Dialog(Context),
     /// A chat message or backend command; `Context::chat` holds it.
     Chat(Context),
+    /// A backend kick; `Context::server` is the backend and
+    /// `Context::reason` its reason without formatting.
+    Kick(Context),
 }
 
 impl Event {
@@ -374,6 +388,7 @@ impl Event {
             Self::Event(_) => Hook::Event,
             Self::Dialog(_) => Hook::Dialog,
             Self::Chat(_) => Hook::Chat,
+            Self::Kick(_) => Hook::Kick,
         }
     }
 }
@@ -402,7 +417,8 @@ impl Reply {
             | Hook::InitialServer
             | Hook::BeforeTransfer
             | Hook::Command
-            | Hook::Chat => Self::Action(Action::Continue),
+            | Hook::Chat
+            | Hook::Kick => Self::Action(Action::Continue),
             Hook::Suggest => Self::Suggestions(Vec::new()),
             Hook::Status => Self::Status(None),
             Hook::Http => Self::Http(None),

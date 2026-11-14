@@ -680,7 +680,24 @@ session. Transfer success does not move inventories between independent servers.
 
 With a [network configuration](../examples/online.lua), a
 backend transport failure tries the configured hubs and fallbacks. Access rules,
-backend bans and draining still apply; explicit backend kicks are terminal.
+backend bans and draining still apply.
+
+A backend that kicks a player in play (a round ending, a ban, Paper's `/stop`)
+moves them to a hub or fallback the same way and shows the kick in chat as
+`connection.kicked` ("You were kicked from survival: …"). With nowhere to go,
+or when the kick came from the only hub, the player receives the backend's
+kick unchanged. Set `network.on_kick = "disconnect"` to keep every backend kick
+final:
+
+```lua
+rift.config.network = { hubs = { "lobby" }, on_kick = "disconnect" }
+```
+
+A [`kick` hook](extensions.md#callbacks-and-decisions) decides per kick before this
+rule: it can name the server to send the player to or the text to disconnect
+them with. Kicks during login, configuration or an ongoing transfer stay final,
+as do kicks without a network configuration or on Minecraft versions without
+server switching.
 
 After backend work, inspect its health and reopen admission:
 
