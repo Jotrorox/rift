@@ -2260,8 +2260,7 @@ async fn remove_instance(name: String, snapshot: &Arc<Snapshot>) -> InstanceResu
     .await
     .err()
     .map(|error| error.to_string());
-    let files_removed =
-        storage == rift::config::InstanceStorage::Disposable && cleanup_error.is_none();
+    let files_removed = storage.discards_data() && cleanup_error.is_none();
     let response = serde_json::json!({
         "name": name,
         "removed": true,
@@ -2309,8 +2308,7 @@ async fn remove_remote_instance(
         let name = name.clone();
         blocking(move || store.finish_removal(&name)).await?;
     }
-    let files_removed =
-        instance.storage == rift::config::InstanceStorage::Disposable && cleanup_error.is_none();
+    let files_removed = instance.storage.discards_data() && cleanup_error.is_none();
     let response = serde_json::json!({
         "name": name,
         "node": node,

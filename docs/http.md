@@ -315,7 +315,7 @@ automatic restarts since the last explicit Start, and `restart_exhausted`
 identifies failed services requiring operator intervention. The same array is available
 as `managed_servers` on authenticated `/api/status`. Listings include `address`,
 `port`, `group` (`null` for static servers), `template` (`null` without one),
-and `storage` (`persistent` or `disposable`; static managed servers are
+and `storage` (`persistent`, `disposable` or `ephemeral`; static managed servers are
 `persistent`). Authenticated `/api/status` also includes `service_groups` with
 the same objects as `/api/groups`, including the optional `scaling` policy.
 Commands, arguments and
@@ -368,9 +368,11 @@ cleanup warnings, and identifies unresolved operations if polling fails.
 Instance registration
 survives configuration reloads and ends when the proxy restarts. Instance
 removal runs asynchronously through its shutdown deadline. Persistent instances retain their world
-and other files; disposable instances delete their generated directory after
-the child exits. Stop/start preserves files for both storage policies. Successful
-file deletion returns `files_removed: true`; persistent removal returns `false`.
+and other files; disposable and ephemeral instances delete their generated
+directory after the child exits. Stop/start preserves files for persistent and
+disposable instances; ephemeral instances delete their copy whenever the process
+ends. Successful file deletion returns `files_removed: true`; persistent removal
+returns `false`.
 If deletion fails after the child is reaped, the backend is still removed and
 the operation result includes `files_removed: false` and `cleanup_error`; inspect the
 remaining directory. Failed provisioning does not register an instance.

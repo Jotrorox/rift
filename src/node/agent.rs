@@ -474,24 +474,34 @@ impl Agent {
                         continue;
                     };
                     match child.try_wait() {
-                        Ok(Some(status)) => exited.push((name.clone(), status.to_string())),
+                        Ok(Some(status)) => {
+                            exited.push((name.clone(), status.to_string(), status.success()))
+                        }
                         Ok(None) => {}
                         Err(error) => {
                             let _ = child.start_kill();
-                            exited.push((name.clone(), format!("cannot inspect process: {error}")));
+                            exited.push((
+                                name.clone(),
+                                format!("cannot inspect process: {error}"),
+                                false,
+                            ));
                         }
                     }
                 }
-                for (name, _) in &exited {
+                for (name, _, _) in &exited {
                     processes.remove(name);
                 }
             }
             if !exited.is_empty() {
                 let mut exits = self.exits.lock().unwrap_or_else(|e| e.into_inner());
-                for (name, status) in exited {
+                for (name, status, success) in exited {
                     eprintln!("rift: node server {name} exited: {status}");
                     exits.retain(|exit| exit.name != name);
-                    exits.push_back(ExitState { name, status });
+                    exits.push_back(ExitState {
+                        name,
+                        status,
+                        success,
+                    });
                     while exits.len() > MAX_EXITS {
                         exits.pop_front();
                     }

@@ -19,8 +19,13 @@ pub(super) enum Status {
     /// No process is owned.
     Idle,
     Running,
-    /// The process ended; the text describes its exit status.
-    Exited(String),
+    /// The process ended; the text describes its exit status. `success`
+    /// means exit status 0, which a node agent older than this field never
+    /// reports.
+    Exited {
+        status: String,
+        success: bool,
+    },
     /// The process could not be inspected and was reaped.
     Broken(String),
     /// The process may still run, but its node is unreachable.
@@ -161,7 +166,10 @@ impl ProcessBackend for Local {
         match process.try_wait() {
             Ok(Some(status)) => {
                 self.child = None;
-                Status::Exited(status.to_string())
+                Status::Exited {
+                    status: status.to_string(),
+                    success: status.success(),
+                }
             }
             Ok(None) => Status::Running,
             Err(error) => {
@@ -652,19 +660,28 @@ impl ProcessBackend for Remote {
             .is_some_and(|agent| agent != observation.agent)
         {
             self.running = None;
-            return Status::Exited(format!(
-                "the agent on node {} restarted and its servers stopped with it",
-                self.node
-            ));
+            return Status::Exited {
+                status: format!(
+                    "the agent on node {} restarted and its servers stopped with it",
+                    self.node
+                ),
+                success: false,
+            };
         }
         if observation.revision < self.revision || observation.running.is_some() {
             return Status::Running;
         }
         self.running = None;
-        Status::Exited(observation.exit.map_or_else(
-            || format!("no longer running on node {}", self.node),
-            |exit| format!("{exit} on node {}", self.node),
-        ))
+        match observation.exit {
+            Some((exit, success)) => Status::Exited {
+                status: format!("{exit} on node {}", self.node),
+                success,
+            },
+            None => Status::Exited {
+                status: format!("no longer running on node {}", self.node),
+                success: false,
+            },
+        }
     }
 
     async fn stop(&mut self, server: &Server, grace: Duration) -> io::Result<()> {

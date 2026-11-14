@@ -343,6 +343,21 @@ rift.config.templates.bedwars={server_jar='paper.jar'}",
     }
 
     #[test]
+    fn ephemeral_groups_cannot_run_on_nodes() {
+        let error = config(
+            "rift.config.nodes.node1={address='10.0.0.11',labels={'games'}}
+rift.config.service_groups.bedwars={template='bedwars',storage='ephemeral',port_range={30000,30099},nodes={labels={'games'}}}
+rift.config.templates.bedwars={server_jar='paper.jar'}",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("ephemeral instances run on this host only"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn invalid_nodes_and_selectors_are_rejected() {
         for (extra, expected) in [
             (
