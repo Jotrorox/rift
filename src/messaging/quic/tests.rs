@@ -82,6 +82,27 @@ fn wildcard_permissions_require_containment_not_overlap() {
 }
 
 #[test]
+fn the_network_api_needs_only_a_grant_and_only_control_may_answer_it() {
+    let mut peer = identity();
+    peer.publish = vec!["rift.network.*".into()];
+    peer.subscribe = vec![">".into()];
+    // No flag: `connect` scopes itself to the caller's own players.
+    assert!(peer.can_publish("rift.network.connect", None).is_ok());
+    assert!(peer.can_publish("rift.players.transfer", None).is_err());
+    for pattern in [
+        "rift.network.connect",
+        "rift.network.*",
+        "rift.network.>",
+        "rift.*.connect",
+        "rift.network",
+    ] {
+        assert!(peer.can_subscribe(pattern).is_err(), "{pattern}");
+    }
+    peer.control = true;
+    assert!(peer.can_subscribe("rift.network.*").is_ok());
+}
+
+#[test]
 fn the_player_api_needs_its_own_grant_and_only_control_may_answer_it() {
     let mut peer = identity();
     peer.publish = vec![

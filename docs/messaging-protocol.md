@@ -35,7 +35,9 @@ patterns that overlap them. This includes bare `rift.control` and
 broad subscriptions such as `>`. Publishing to `rift.players` subjects requires
 a matching ACL and `players = true`; subscribing to patterns that overlap them
 requires `control = true`, because a subscriber would receive other callers'
-requests. Remote publishing to `rift.events` and its
+requests. Subscribing to patterns that overlap `rift.network` subjects
+requires `control = true` for the same reason; publishing to them needs only
+a matching ACL. Remote publishing to `rift.events` and its
 children is always rejected because Rift owns those events. Explicit reply
 subjects must be literal `_INBOX.*` subjects covered by the requester's subscribe
 ACL. Responders need publish access to the inbox namespaces they answer. The

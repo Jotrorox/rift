@@ -8,6 +8,7 @@ description = "RiftPerms: the Paper, Folia and Purpur adapter for Rift permissio
 
 dependencies {
     implementation(project(":rift-permissions-client"))
+    implementation(project(":rift-network-client"))
     compileOnly(libs.paper.api)
     compileOnly(libs.vault.api) { isTransitive = false }
     compileOnly(libs.placeholderapi) { isTransitive = false }
@@ -26,10 +27,12 @@ tasks.processResources {
 tasks.shadowJar {
     archiveBaseName = "RiftPerms"
     archiveClassifier = ""
-    // The API stays at its own package so plugins compiled against
-    // rift-permissions-api resolve it from this jar; everything else moves.
+    // The APIs stay at their own packages so plugins compiled against
+    // rift-permissions-api and rift-network-api resolve them from this jar;
+    // everything else moves.
     val lib = "io.github.jotrorox.rift.permissions.paper.lib"
     relocate("io.github.jotrorox.rift.permissions.client", "$lib.client")
+    relocate("io.github.jotrorox.rift.network.client", "$lib.network")
     relocate("io.github.jotrorox.rift.messaging", "$lib.messaging")
     relocate("tech.kwik", "$lib.kwik")
     relocate("at.favre.lib", "$lib.favre")
