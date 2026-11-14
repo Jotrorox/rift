@@ -14,7 +14,7 @@
 //!   LuaJIT's default `cpath`).
 //! - Globals, modules and upvalues persist between calls. The JIT compiler is
 //!   on unless `lua.jit = false`; there is no instruction budget and memory
-//!   is limited only when `lua.memory_limit_mb` is set.
+//!   is limited by `lua.memory_limit_mb` (256 MiB by default, 0 for none).
 //! - Each call runs under its manifest deadline (`init`, `reload` and
 //!   `shutdown` under theirs; observers, timers and messages under
 //!   [`OBSERVER_DEADLINE`]). An instruction hook and every Rift function
