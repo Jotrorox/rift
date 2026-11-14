@@ -192,6 +192,12 @@ impl InstanceMessaging {
         if !grants.publish.iter().any(|pattern| pattern == "_INBOX.>") {
             grants.publish.push("_INBOX.>".into());
         }
+        // Rift accepts a report there only for the instance itself, so every
+        // instance may report its own state, properties and drain.
+        let state = crate::service_state::SUBJECT;
+        if !grants.publish.iter().any(|pattern| pattern == state) {
+            grants.publish.push(state.into());
+        }
         Ok(Some(grants))
     }
 }
