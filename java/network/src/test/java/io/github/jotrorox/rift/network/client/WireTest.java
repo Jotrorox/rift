@@ -10,6 +10,7 @@ import io.github.jotrorox.rift.network.ServerInfo;
 import io.github.jotrorox.rift.network.ServerState;
 import io.github.jotrorox.rift.permissions.client.Json;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.UUID;
@@ -19,16 +20,31 @@ class WireTest {
     @Test
     void serversCarryGroupStateAndLimits() {
         List<ServerInfo> servers = Wire.servers(Json.parse("""
-                [{"name":"lobby-1","group":"lobby","state":"running","players":50,"max_players":50},
+                [{"name":"lobby-1","group":"lobby","state":"running","service_state":"INGAME",
+                  "properties":{"map":"Desert"},"players":50,"max_players":50},
                  {"name":"survival","group":null,"state":"draining","players":3,"max_players":0},
                  {"name":"later","group":null,"state":"hibernating","players":0,"max_players":0,"extra":true}]"""));
         assertEquals(
-                new ServerInfo("lobby-1", Optional.of("lobby"), ServerState.RUNNING, 50, OptionalInt.of(50)),
+                new ServerInfo(
+                        "lobby-1",
+                        Optional.of("lobby"),
+                        ServerState.RUNNING,
+                        Optional.of("INGAME"),
+                        Map.of("map", "Desert"),
+                        50,
+                        OptionalInt.of(50)),
                 servers.get(0));
         assertTrue(servers.get(0).acceptsPlayers());
         assertTrue(servers.get(0).isFull());
         assertEquals(
-                new ServerInfo("survival", Optional.empty(), ServerState.DRAINING, 3, OptionalInt.empty()),
+                new ServerInfo(
+                        "survival",
+                        Optional.empty(),
+                        ServerState.DRAINING,
+                        Optional.empty(),
+                        Map.of(),
+                        3,
+                        OptionalInt.empty()),
                 servers.get(1));
         assertFalse(servers.get(1).acceptsPlayers());
         assertFalse(servers.get(1).isFull());

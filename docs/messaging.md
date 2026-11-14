@@ -108,7 +108,8 @@ principals = {
 
 The preset adds publish `rift.perms.hello`, `rift.perms.subject.*`,
 `rift.perms.groups.*`, `rift.perms.apply`, `rift.perms.register`,
-`rift.perms.command` and `rift.perms.context`, and subscribe
+`rift.perms.command` and `rift.perms.context`, plus the
+[server state](#server-state) subject `rift.server.state`, and subscribe
 `rift.perms.update`, `rift.perms.update.>`, `rift.events.permissions` and
 `rift.perms.changes` (the retained change log), and publish
 `rift.network.*`, the [network API](#network-api-subjects), to whatever
@@ -226,15 +227,18 @@ answers have the shape of the player API's, with an `_INBOX.` reply subject.
 
 | Subject | JSON payload | `data` |
 | --- | --- | --- |
-| `rift.network.servers` | `{}` or `{"server":"lobby"}` (a server or service group, ignoring ASCII case) | `[{"name":"lobby-1","group":"lobby","state":"running","players":12,"max_players":50}]`: servers that are up, sorted by name |
+| `rift.network.servers` | `{}` or `{"server":"lobby"}` (a server or service group, ignoring ASCII case) | `[{"name":"lobby-1","group":"lobby","state":"running","service_state":"LOBBY","properties":{"map":"Hub"},"players":12,"max_players":50}]`: servers that are up, sorted by name |
 | `rift.network.players` | `{}` or `{"server":"lobby"}` | players as `rift.players.list` reports them |
 | `rift.network.player` | `{"player":"Alice"}` (a name or a UUID) | one player, or `null` |
 | `rift.network.connect` | `{"player":"Alice","server":"survival"}` or `{"player":"Alice","group":"bedwars"}` | whether the player was online and the transfer queued |
 
-`servers` reports what the BungeeCord bridge's
-[`RiftServers`](bungeecord.md#rift-requests) reports, with the same rules for
-"up", `state` (`running` or `draining`), the player count and `max_players`
-(`0` when Rift knows no limit); `group` is `null` outside a service group. An
+`servers` lists the servers the BungeeCord bridge's
+[`RiftServers`](bungeecord.md#rift-requests) lists, with the same rules for
+"up", the player count and `max_players` (`0` when Rift knows no limit);
+`group` is `null` outside a service group. `state` is `draining` or
+`running`, whatever the reason a server drains. What the server reported
+about itself on [`rift.server.state`](#server-state) comes beside it:
+`service_state` is its label or `null`, and `properties` its properties. An
 unknown server or group is an error, a group without running instances an
 empty list.
 
@@ -311,9 +315,80 @@ see [online players](extensions.md#online-players)).
 change, the same JSON as `rift.perms.update`.
 `rift.events.plugins` reports persistent plugins starting, failing, restarting
 and stopping, and operator restarts, as described in [plugins](plugins.md#operator-surface).
+`rift.events.servers` reports changes to what backends report about
+themselves (see [server state](#server-state)).
 `rift.events.lifecycle` reports `ready` and `draining`. These are ephemeral events;
 query status to get current state. A timed-out command may already have executed;
 check status before retrying a mutation. No automatic mutation retry is performed.
+
+## Server state
+
+A backend reports what it is doing on `rift.server.state`: a state label such
+as `LOBBY` or `INGAME`, string properties such as the map or the round, and
+whether it accepts new players. A minigame server can mark itself `INGAME` and
+stop new players reaching it when a round starts, then reopen when the round
+ends, without an operator login.
+
+```json
+{"state":"INGAME","properties":{"map":"Desert","round":"3"},"draining":true}
+```
+
+Every field is optional and the ones left out stay as they are:
+
+| Field | Meaning |
+| --- | --- |
+| `state` | A label of 1–32 characters of `A-Z`, `a-z`, `0-9`, `_` or `-`, kept as sent; `null` clears it. Rift's own words (`running`, `draining`, `starting`, `stopping`, `stopped`, `failed`, `unknown`, in any case) are refused |
+| `properties` | String values merged into the server's properties; a `null` value removes that key. Keys are 1–64 characters of `A-Z`, `a-z`, `0-9`, `_`, `-` or `.`; values at most 256 bytes without control characters; at most 32 properties per server |
+| `replace` | `true` drops every existing property before `properties` is applied |
+| `draining` | `true` accepts no new players, as the operator `drain` command does; players already there stay. `false` withdraws it |
+| `server` | The server to report for; see below |
+
+The report needs no reply subject, so a plain publish is enough. With an
+`_INBOX.` reply subject (any request helper) the answer is
+`{"ok":true,"data":{"server":"game-1","state":"INGAME","properties":{…},"self_draining":true,"draining":true}}`,
+where `draining` is the server's effective drain from every source, or
+`{"ok":false,"error":"…"}`. Refused reports are logged either way.
+
+**Who may report.** A login named `server.<name>` reports for the configured
+backend `<name>` only; it may repeat its own name in `server` but not name
+another. [Instance logins](managed-servers.md#bus-logins-for-instances) get
+publish access to `rift.server.state` automatically, and the `backend` preset
+adds it for configured principals. A `control = true` principal and in-process
+publishers (Lua message scripts and plugins) must name the server in `server`.
+Any other login is refused. Only control principals may subscribe to
+`rift.server.state`, so nobody else can answer in Rift's place.
+
+**How long it lasts.** A report belongs to one run of a server. A managed
+server forgets its label, properties and drain each time it starts, so a game
+server that crashed mid-round comes back accepting players; an instance
+forgets them when it is removed. An unmanaged backend keeps its report until
+it changes it or Rift restarts. Reports are not stored on disk.
+
+**Drain.** A server's own drain adds to the other reasons a server drains (the
+`draining` setting, the operator `drain` command, a stopped service group). An
+operator's `drain <server> on|off`, from any surface, also withdraws the
+server's own drain, so `drain off` always reopens a server unless its group is
+stopped; the server can ask again with another report.
+
+**Where it shows.** `rift.control.servers` (also through a plugin's
+`servers.control`), `GET /api/servers` and `rift admin servers` include
+`service_state` (the label or `null`) and `properties` for every managed
+server, and `rift.control.status` for every backend, beside `draining`. The BungeeCord
+[`RiftServers`](bungeecord.md#rift-requests) entry state is `draining`, else
+the label, else `running`. Every change, including a report forgotten on
+restart, is published on `rift.events.servers`:
+`{"event":"state","server":"game-1","state":"INGAME","properties":{"map":"Desert"},"draining":true}`,
+where `draining` is the server's own drain only. The event carries the whole
+report, so subscribers can replace what they hold.
+
+A Java server plugin with the bundled client:
+
+```java
+MessagingClient bus = MessagingClient.builder().fromEnvironment().build();
+bus.publish("rift.server.state",
+    "{\"state\":\"INGAME\",\"properties\":{\"map\":\"Desert\"},\"draining\":true}"
+        .getBytes(StandardCharsets.UTF_8));
+```
 
 ## Retained streams
 

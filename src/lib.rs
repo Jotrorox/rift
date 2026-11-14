@@ -41,6 +41,7 @@ pub mod proxy_protocol;
 pub mod routing;
 mod script;
 pub mod server_list;
+pub mod service_state;
 pub mod session;
 pub mod software;
 pub mod tab_list;

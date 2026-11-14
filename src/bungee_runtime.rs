@@ -76,6 +76,8 @@ pub struct ServerEntry<'a> {
     pub group: Option<&'a str>,
     /// `running` or `draining`.
     pub state: &'static str,
+    /// The label and properties it reported on `rift.server.state`.
+    pub report: rift::service_state::Report,
     /// Players a viewer without any `see` node counts.
     pub players: usize,
     /// Zero when Rift knows no limit.
@@ -124,6 +126,7 @@ pub fn servers<'a>(
                 name,
                 group,
                 state,
+                report: snapshot.control.states().get(name),
                 players: players.get(name).copied().unwrap_or(0),
                 max_players: max_players(snapshot, name, group),
             })
@@ -347,9 +350,14 @@ pub fn handle(
             let mut data = strings(&["RiftServers", target.unwrap_or("ALL")])?;
             int(entries.len(), &mut data)?;
             for entry in entries {
+                // `draining`, else the label the server reported, else `running`.
+                let state = match (&entry.report.state, entry.state) {
+                    (Some(label), "running") => label.as_str(),
+                    (_, state) => state,
+                };
                 write_utf(entry.name, &mut data)?;
                 write_utf(entry.group.unwrap_or(""), &mut data)?;
-                write_utf(entry.state, &mut data)?;
+                write_utf(state, &mut data)?;
                 int(entry.players, &mut data)?;
                 int(entry.max_players, &mut data)?;
             }
@@ -883,6 +891,34 @@ mod tests {
         for target in ["all", "missing", "game-2"] {
             assert_eq!(query(&snapshot, Request::RiftServers(target.into())), None);
         }
+        // A reported label replaces `running`; draining still wins.
+        let states = snapshot.control.states();
+        for name in ["Lobby", "survival"] {
+            states
+                .apply(
+                    name,
+                    rift::service_state::Update::decode(br#"{"state":"INGAME"}"#).unwrap(),
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            servers(&query(&snapshot, Request::RiftServers("ALL".into())).unwrap()).1,
+            vec![
+                entry("Lobby", "INGAME", 1, 50),
+                entry("survival", "draining", 1, 0),
+            ]
+        );
+        // So does the server's own drain.
+        states
+            .apply(
+                "Lobby",
+                rift::service_state::Update::decode(br#"{"draining":true}"#).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            servers(&query(&snapshot, Request::RiftServers("lobby".into())).unwrap()).1,
+            vec![entry("Lobby", "draining", 1, 50)]
+        );
     }
 
     #[test]

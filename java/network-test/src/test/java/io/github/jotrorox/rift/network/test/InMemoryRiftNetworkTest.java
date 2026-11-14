@@ -17,6 +17,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -58,6 +59,12 @@ class InMemoryRiftNetworkTest {
         assertEquals(List.of("Alice"), network.players("lobby").join().stream().map(p -> p.name()).toList());
         assertEquals("survival", network.player("bob").join().orElseThrow().server());
         assertEquals(NetworkException.Reason.REFUSED, failure(network.servers("missing")).reason());
+
+        network.setServiceState("bedwars-1", "INGAME", Map.of("map", "Desert"));
+        ServerInfo bedwars = network.servers("bedwars-1").join().get(0);
+        assertEquals(Optional.of("INGAME"), bedwars.serviceState());
+        assertEquals(Map.of("map", "Desert"), bedwars.properties());
+        assertTrue(bedwars.acceptsPlayers());
 
         network.setHiddenPlayer(new UUID(0, 3), "Carol", "lobby-1", "vanish.see");
         assertEquals(1, network.servers("lobby-1").join().get(0).players());

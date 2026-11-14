@@ -216,6 +216,9 @@ impl Identity {
             || (!self.control
                 && !self.node_scope(pattern)
                 && (overlaps(pattern, "rift.node.>") || covers(pattern, "rift.node")))
+            // A subscriber to server reports could answer them in Rift's
+            // place and watch every backend's drain requests.
+            || (!self.control && overlaps(pattern, crate::service_state::SUBJECT))
             // Permission requests name players and carry `/perms` commands;
             // only the proxy (or a control principal) may receive them.
             || (!self.control

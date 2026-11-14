@@ -62,8 +62,9 @@ RiftNetwork network = RiftNetwork.get();
 
 network.servers("lobby").thenAccept(lobbies -> {
     for (ServerInfo lobby : lobbies) {
-        // name, group, state, players, maxPlayers
+        // name, group, state, serviceState, properties, players, maxPlayers
         boolean joinable = lobby.acceptsPlayers() && !lobby.isFull();
+        String map = lobby.properties().getOrDefault("map", "?");
     }
 });
 network.servers();                       // every server that is up
@@ -75,7 +76,13 @@ String here = network.localServer();     // this server's name; localGroup() is 
 
 `servers` lists servers that are up, sorted by name: a managed server while
 its process is running, an unmanaged one unless health checks mark it down.
-`ServerState.DRAINING` servers keep their players but take no new ones.
+`ServerState.DRAINING` servers keep their players but take no new ones,
+whether an operator drains them or the server asked for it itself.
+`serviceState()` and `properties()` are what the server reported on
+[`rift.server.state`](messaging.md#server-state): a label such as `INGAME`
+and values such as its map, so a selector can show running rounds without
+asking each server. A server reports with a plain
+`network.messages().publish("rift.server.state", json)`.
 `players()` is the count a player without special permissions sees, and
 `maxPlayers()` is the limit Rift knows (the server's queue capacity, else its
 group's `scaling.capacity_per_instance`), empty when it knows none. A server
@@ -186,8 +193,8 @@ assertEquals("bedwars-1", network.player(alice).join().orElseThrow().server());
 
 Futures are complete when returned and handlers run on the calling thread.
 A transfer moves the player at once, to the running instance with the fewest
-players that has room. `setServer`, `removeServer`, `setPlayer` and
-`removePlayer` change the network during a test, `connectAnyone()` on the
+players that has room. `setServer`, `setServiceState`, `removeServer`,
+`setPlayer` and `removePlayer` change the network during a test, `connectAnyone()` on the
 builder lifts the own-players rule, and `messages()` is a working bus with
 the same subject matching, queue groups and request/reply.
 

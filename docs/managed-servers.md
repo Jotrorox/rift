@@ -569,7 +569,9 @@ block (`preset = "backend"` adds the [permission replica's
 subjects](messaging.md#backend-permission-principals) and the [network
 API](messaging.md#network-api-subjects), with which an instance lists servers
 and moves its own players). Rift always adds
-publish access to `_INBOX.>`, so the instance can answer requests, and
+publish access to `_INBOX.>`, so the instance can answer requests, and to
+`rift.server.state`, so it can report its own [state, properties and
+drain](messaging.md#server-state), and
 subscribe access to `_INBOX.server.<instance>.>` only: REQUEST uses a private
 broker inbox and needs no grant, and manual reply subjects must sit in the
 instance's own namespace. An instance never receives `_INBOX.>` subscribe

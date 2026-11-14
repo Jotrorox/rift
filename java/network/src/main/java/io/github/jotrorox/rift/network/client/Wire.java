@@ -5,7 +5,9 @@ import io.github.jotrorox.rift.network.ServerInfo;
 import io.github.jotrorox.rift.network.ServerState;
 import io.github.jotrorox.rift.permissions.client.Json;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.UUID;
@@ -88,8 +90,25 @@ final class Wire {
                 string(object, "name"),
                 optionalString(object, "group"),
                 state,
+                optionalString(object, "service_state"),
+                properties(object.get("properties")),
                 count(object, "players"),
                 limit == 0 ? OptionalInt.empty() : OptionalInt.of(limit));
+    }
+
+    /** Absent on a proxy that predates server state reports. */
+    private static Map<String, String> properties(Json json) {
+        if (json == null || json instanceof Json.Null) {
+            return Map.of();
+        }
+        Map<String, String> out = new LinkedHashMap<>();
+        object(json).members().forEach((key, value) -> {
+            if (!(value instanceof Json.Str text)) {
+                throw new IllegalArgumentException("properties must be strings");
+            }
+            out.put(key, text.value());
+        });
+        return out;
     }
 
     static List<NetworkPlayer> players(Json json) {

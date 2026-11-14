@@ -395,6 +395,147 @@ impl PlayerRequests {
         }
     }
 }
+/// Reports backends make about themselves on
+/// [`rift::service_state::SUBJECT`], and their announcement on
+/// [`rift::service_state::EVENTS`].
+///
+/// A login named `server.<name>` reports for the configured backend
+/// `<name>` and nothing else, the same rule as permission context reports.
+/// A control principal and in-process publishers (Lua scripts and plugins)
+/// name the server with `"server"`. A reply, when asked for, goes only to an
+/// `_INBOX.` subject; reports without one are applied silently.
+pub struct ServerStates {
+    broker: Broker,
+    subscription: Subscription,
+}
+
+impl ServerStates {
+    pub fn new(broker: Broker) -> io::Result<Self> {
+        let subscription = broker
+            .subscribe(rift::service_state::SUBJECT, None)
+            .map_err(io::Error::other)?;
+        Ok(Self {
+            broker,
+            subscription,
+        })
+    }
+
+    pub async fn run(mut self, current: watch::Receiver<Arc<Snapshot>>) {
+        let states = current.borrow().control.states().clone();
+        let mut changes = states.subscribe();
+        let broker = self.broker.clone();
+        let announce = async move {
+            loop {
+                match changes.recv().await {
+                    Ok(change) => emit(
+                        &broker,
+                        rift::service_state::EVENTS,
+                        json!({
+                            "event": "state",
+                            "server": change.server,
+                            "state": change.report.state,
+                            "properties": change.report.properties,
+                            "draining": change.report.draining,
+                        }),
+                    ),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                        eprintln!(
+                            "rift: {missed} server state events dropped; subscribers should re-read servers"
+                        );
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                }
+            }
+        };
+        let receive = async move {
+            loop {
+                let message = match self.subscription.recv().await {
+                    Ok(message) => message,
+                    Err(error) => {
+                        events::admin("server_state", "rejected", "state", &error);
+                        match self.broker.subscribe(rift::service_state::SUBJECT, None) {
+                            Ok(subscription) => {
+                                self.subscription = subscription;
+                                continue;
+                            }
+                            Err(_) => return,
+                        }
+                    }
+                };
+                let snapshot = current.borrow().clone();
+                let result = report(&snapshot, &message);
+                if let Err(error) = &result {
+                    let sender = message.sender.as_deref().unwrap_or("local");
+                    eprintln!(
+                        "rift: {} from {sender} refused: {error}",
+                        rift::service_state::SUBJECT
+                    );
+                }
+                if let Some(reply) = message
+                    .reply
+                    .as_deref()
+                    .filter(|s| s.starts_with("_INBOX."))
+                {
+                    let response = match result {
+                        Ok(data) => json!({"ok": true, "data": data}),
+                        Err(error) => json!({"ok": false, "error": error}),
+                    };
+                    let _ = self
+                        .broker
+                        .publish(reply, Bytes::from(response.to_string()));
+                }
+            }
+        };
+        tokio::join!(announce, receive);
+    }
+}
+
+/// Apply one report, returning the server's resulting state.
+fn report(snapshot: &Snapshot, message: &Message) -> Result<Value, String> {
+    let update = rift::service_state::Update::decode(&message.payload)?;
+    let server = match message.sender.as_deref() {
+        None => update
+            .server
+            .clone()
+            .ok_or("name the server with \"server\"")?,
+        Some(principal) => {
+            let own = principal
+                .strip_prefix(rift::permissions::control::BACKEND_PRINCIPAL_PREFIX)
+                .filter(|name| !name.is_empty());
+            let control = snapshot.config.messaging.as_ref().is_some_and(|messaging| {
+                messaging
+                    .principals
+                    .iter()
+                    .any(|entry| entry.name == principal && entry.control)
+            });
+            match (&update.server, own) {
+                (Some(named), _) if control => named.clone(),
+                (Some(named), Some(own)) if named == own => named.clone(),
+                (None, Some(own)) => own.to_owned(),
+                (Some(_), Some(_)) => {
+                    return Err("a server may only report for itself".into());
+                }
+                (_, None) => {
+                    return Err(format!(
+                        "only a {}<name> login or a control principal may report server state",
+                        rift::permissions::control::BACKEND_PRINCIPAL_PREFIX
+                    ));
+                }
+            }
+        }
+    };
+    if !snapshot.config.backends.contains_key(&server) {
+        return Err(format!("unknown backend {server:?}"));
+    }
+    let report = snapshot.control.states().apply(&server, update)?;
+    Ok(json!({
+        "server": server,
+        "state": report.state,
+        "properties": report.properties,
+        "self_draining": report.draining,
+        "draining": snapshot.control.draining(&snapshot.config, &server),
+    }))
+}
 
 /// Who a `rift.network.*` request without a sender acts as (see
 /// [`CONTROL_ACTOR`]).
@@ -523,6 +664,8 @@ fn network(
                         "name": server.name,
                         "group": server.group,
                         "state": server.state,
+                        "service_state": server.report.state,
+                        "properties": server.report.properties,
                         "players": server.players,
                         "max_players": server.max_players,
                     })
@@ -701,6 +844,79 @@ mod tests {
             payload: Bytes::copy_from_slice(payload.as_bytes()),
             sender: None,
         }
+    }
+
+    #[test]
+    fn servers_report_only_for_themselves_and_drain_until_an_operator_decides() {
+        let config = rift::config::Config::from_lua(
+            "return {listeners={public='127.0.0.1:0'},
+                backends={['game-1']='127.0.0.1:1',['game-2']='127.0.0.1:2'},
+                routes={public='game-1'}}",
+            "states.lua",
+        )
+        .unwrap();
+        let snapshot = Snapshot::new(config, None).unwrap();
+        let send = |sender: Option<&str>, payload: &str| {
+            let mut message = message(rift::service_state::SUBJECT, payload);
+            message.sender = sender.map(Into::into);
+            report(&snapshot, &message)
+        };
+        let data = send(
+            Some("server.game-1"),
+            r#"{"state":"INGAME","properties":{"map":"Desert"},"draining":true}"#,
+        )
+        .unwrap();
+        assert_eq!(data["server"], "game-1");
+        assert_eq!(data["state"], "INGAME");
+        assert_eq!(data["properties"]["map"], "Desert");
+        assert_eq!(data["draining"], true);
+        assert!(snapshot.control.draining(&snapshot.config, "game-1"));
+        // Naming itself is fine; naming another server, or being no server, is not.
+        assert!(send(Some("server.game-1"), r#"{"server":"game-1"}"#).is_ok());
+        for (sender, payload) in [
+            (
+                Some("server.game-1"),
+                r#"{"server":"game-2","draining":true}"#,
+            ),
+            (Some("ops"), r#"{"server":"game-2","draining":true}"#),
+            (Some("server.ghost"), r#"{"state":"LOBBY"}"#),
+            (None, r#"{"state":"LOBBY"}"#),
+            (None, r#"{"server":"ghost","state":"LOBBY"}"#),
+        ] {
+            assert!(send(sender, payload).is_err(), "{sender:?} {payload}");
+        }
+        assert!(!snapshot.control.draining(&snapshot.config, "game-2"));
+        // In-process publishers name the server.
+        assert_eq!(
+            send(None, r#"{"server":"game-2","state":"LOBBY"}"#).unwrap()["state"],
+            "LOBBY"
+        );
+        // An operator's `drain off` withdraws the server's own drain.
+        control_drain(&snapshot, "game-1", "off");
+        assert!(!snapshot.control.draining(&snapshot.config, "game-1"));
+        assert_eq!(
+            snapshot.control.states().get("game-1").state.as_deref(),
+            Some("INGAME")
+        );
+    }
+
+    fn control_drain(snapshot: &Snapshot, backend: &str, value: &str) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (commands, _receiver) = mpsc::channel(1);
+        let args = ["drain".to_owned(), backend.to_owned(), value.to_owned()];
+        let snapshot = Arc::new(Snapshot::new(snapshot.config.clone(), Some(snapshot)).unwrap());
+        runtime
+            .block_on(admin::execute(
+                &args,
+                snapshot,
+                &Metrics::default(),
+                &commands,
+                "test",
+            ))
+            .unwrap();
     }
 
     #[test]
@@ -1063,15 +1279,30 @@ mod tests {
             .extensions
             .players()
             .register(1, &[1; 16], "Alice", 774, "Lobby");
-        let lobby = json!({"name": "Lobby", "group": null, "state": "running", "players": 1, "max_players": 0});
+        let lobby = json!({"name": "Lobby", "group": null, "state": "running",
+            "service_state": null, "properties": {}, "players": 1, "max_players": 0});
         assert_eq!(
             ask(&snapshot, Some("server.Lobby"), "servers", json!({})).unwrap(),
-            json!([lobby, {"name": "survival", "group": null, "state": "draining", "players": 0, "max_players": 0}])
+            json!([lobby, {"name": "survival", "group": null, "state": "draining",
+                "service_state": null, "properties": {}, "players": 0, "max_players": 0}])
         );
         assert_eq!(
             ask(&snapshot, None, "servers", json!({"server": "lobby"})).unwrap(),
             json!([lobby])
         );
+        // What the server reported about itself travels beside Rift's own
+        // state, and its own drain shows there.
+        let update = rift::service_state::Update::decode(
+            br#"{"state":"INGAME","properties":{"map":"Desert"},"draining":true}"#,
+        )
+        .unwrap();
+        snapshot.control.states().apply("Lobby", update).unwrap();
+        assert_eq!(
+            ask(&snapshot, None, "servers", json!({"server": "Lobby"})).unwrap(),
+            json!([{"name": "Lobby", "group": null, "state": "draining", "service_state": "INGAME",
+                "properties": {"map": "Desert"}, "players": 1, "max_players": 0}])
+        );
+        snapshot.control.states().clear("Lobby");
         // The group exists, but its only instance is not running.
         assert_eq!(
             ask(&snapshot, None, "servers", json!({"server": "game"})).unwrap(),

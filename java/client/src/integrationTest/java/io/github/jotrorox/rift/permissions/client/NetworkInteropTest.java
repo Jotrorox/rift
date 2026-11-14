@@ -22,6 +22,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.UUID;
@@ -82,9 +83,9 @@ class NetworkInteropTest {
         assertEquals("survival-1", survival.localServer());
         assertEquals(Optional.of("survival"), survival.localGroup());
         // Both configured backends have no health check, so both count as up.
-        ServerInfo lobby = new ServerInfo("lobby", Optional.empty(), ServerState.RUNNING, 0, OptionalInt.empty());
+        ServerInfo lobby = server("lobby", ServerState.RUNNING, Optional.empty(), Map.of());
         assertEquals(
-                List.of(lobby, new ServerInfo("survival-1", Optional.empty(), ServerState.RUNNING, 0, OptionalInt.empty())),
+                List.of(lobby, server("survival-1", ServerState.RUNNING, Optional.empty(), Map.of())),
                 get(survival.servers()));
         assertEquals(List.of(lobby), get(survival.servers("LOBBY")));
         assertEquals(List.of(), get(survival.players()));
@@ -95,6 +96,29 @@ class NetworkInteropTest {
         NetworkException unknown = failure(survival.servers("missing"));
         assertEquals(Reason.REFUSED, unknown.reason());
         assertTrue(unknown.getMessage().contains("unknown server"), unknown.getMessage());
+    }
+
+    private static ServerInfo server(
+            String name, ServerState state, Optional<String> serviceState, Map<String, String> properties) {
+        return new ServerInfo(name, Optional.empty(), state, serviceState, properties, 0, OptionalInt.empty());
+    }
+
+    /** What a backend reports on {@code rift.server.state} shows in the listing, its drain included. */
+    @Test
+    void aServersOwnReportShowsInTheListing() throws Exception {
+        String report = "{\"state\":\"INGAME\",\"properties\":{\"map\":\"Desert\"},\"draining\":true}";
+        get(survival.messages().request("rift.server.state", report.getBytes(StandardCharsets.UTF_8), WAIT));
+        try {
+            assertEquals(
+                    List.of(server("survival-1", ServerState.DRAINING, Optional.of("INGAME"), Map.of("map", "Desert"))),
+                    get(survival.servers("survival-1")));
+        } finally {
+            String clear = "{\"state\":null,\"replace\":true,\"draining\":false}";
+            get(survival.messages().request("rift.server.state", clear.getBytes(StandardCharsets.UTF_8), WAIT));
+        }
+        assertEquals(
+                List.of(server("survival-1", ServerState.RUNNING, Optional.empty(), Map.of())),
+                get(survival.servers("survival-1")));
     }
 
     @Test

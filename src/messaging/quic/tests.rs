@@ -65,6 +65,9 @@ fn wildcard_permissions_require_containment_not_overlap() {
     assert!(peer.can_subscribe("rift.*").is_err());
     assert!(peer.can_subscribe("rift.control").is_err());
     assert!(peer.can_subscribe("game.>").is_ok());
+    assert!(peer.can_subscribe("rift.server.*").is_err());
+    assert!(peer.can_subscribe("rift.server.state").is_err());
+    assert!(peer.can_publish("rift.server.state", None).is_ok());
     assert!(peer.can_publish("rift.control", None).is_err());
     assert!(peer.can_publish("rift.control.reload", None).is_err());
     assert!(peer.can_publish("rift.events.player", None).is_err());

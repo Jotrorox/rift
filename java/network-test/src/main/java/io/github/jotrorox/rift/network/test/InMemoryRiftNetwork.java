@@ -49,7 +49,12 @@ import java.util.function.Consumer;
  * allowed {@link Builder#connectAnyone() anyone}.
  */
 public final class InMemoryRiftNetwork implements RiftNetwork {
-    private record Server(String name, String group, int maxPlayers, ServerState state) {}
+    private record Server(
+            String name, String group, int maxPlayers, ServerState state, String serviceState, Map<String, String> properties) {
+        Server(String name, String group, int maxPlayers, ServerState state) {
+            this(name, group, maxPlayers, state, null, Map.of());
+        }
+    }
 
     private record Subscriber(String[] pattern, String queue, Consumer<BusMessage> handler) {}
 
@@ -108,6 +113,23 @@ public final class InMemoryRiftNetwork implements RiftNetwork {
      */
     public synchronized void setServer(String name, String group, int maxPlayers, ServerState state) {
         servers.put(name, new Server(name, group, maxPlayers, Objects.requireNonNull(state, "state")));
+    }
+
+    /**
+     * Set what a server reports about itself, as it would on {@code rift.server.state}.
+     *
+     * @param name a server added before
+     * @param serviceState its label, such as {@code INGAME}, or null for none
+     * @param properties its properties
+     */
+    public synchronized void setServiceState(String name, String serviceState, Map<String, String> properties) {
+        Server server = servers.get(name);
+        if (server == null) {
+            throw new IllegalArgumentException("unknown server " + name);
+        }
+        servers.put(
+                name,
+                new Server(name, server.group(), server.maxPlayers(), server.state(), serviceState, Map.copyOf(properties)));
     }
 
     /**
@@ -269,6 +291,8 @@ public final class InMemoryRiftNetwork implements RiftNetwork {
                 server.name(),
                 Optional.ofNullable(server.group()),
                 server.state(),
+                Optional.ofNullable(server.serviceState()),
+                server.properties(),
                 count(server.name()),
                 server.maxPlayers() == 0 ? OptionalInt.empty() : OptionalInt.of(server.maxPlayers()));
     }
