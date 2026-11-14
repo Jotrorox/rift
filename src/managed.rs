@@ -19,6 +19,7 @@ use crate::{
     config::{Config, ManagedServer},
     node::{Nodes, protocol},
     players::PlayerRegistry,
+    provisioning::Fresh,
 };
 
 mod backend;
@@ -117,6 +118,8 @@ struct Server {
     address: Option<SocketAddr>,
     /// The backend address the proxy connects to, also for remote servers.
     endpoint: Option<String>,
+    /// An ephemeral instance's per-run copy of its template.
+    fresh: Option<Arc<Fresh>>,
     state: Mutex<State>,
     sender: mpsc::Sender<Request>,
     receiver: Mutex<Option<mpsc::Receiver<Request>>>,
@@ -245,6 +248,12 @@ impl ManagedServers {
     /// Servers with a `node` run through that node's agent in `nodes`.
     pub fn with_nodes(config: &Config, players: Arc<PlayerRegistry>, nodes: Nodes) -> Self {
         protect_secrets(config);
+        // Restored ephemeral instances learn their markers in `with_persistence`.
+        let shared = config
+            .instances
+            .values()
+            .any(|instance| instance.storage == crate::config::InstanceStorage::Ephemeral)
+            .then(|| Arc::new(config.clone()));
         let servers = config
             .managed_servers
             .iter()
@@ -253,7 +262,13 @@ impl ManagedServers {
                     .backends
                     .get(name)
                     .map(|backend| backend.address().to_owned());
-                (name.clone(), new_server(name, definition.clone(), endpoint))
+                let fresh = shared
+                    .as_ref()
+                    .and_then(|config| Fresh::new(config, name, false));
+                (
+                    name.clone(),
+                    new_server(name, definition.clone(), endpoint, fresh),
+                )
             })
             .collect();
         Self(Arc::new(Inner {
@@ -356,6 +371,11 @@ impl ManagedServers {
         let stopped = store.stopped_names()?;
         for (name, server) in servers.iter() {
             lock(&server.state).automatic = !stopped.contains(name);
+            if let Some(fresh) = &server.fresh
+                && let Some(plan) = store.plan(name)?
+            {
+                fresh.set_marker(&plan)?;
+            }
         }
         *lock(&self.0.instance_store) = Some(store);
         Ok(())
@@ -421,7 +441,19 @@ impl ManagedServers {
         // Before the worker exists, so even an autostarting server's first
         // process has its login.
         self.issue_login(config, name)?;
-        let server = new_server(name, definition.clone(), endpoint);
+        let fresh = config
+            .instances
+            .get(name)
+            .is_some_and(|instance| instance.storage == crate::config::InstanceStorage::Ephemeral)
+            .then(|| Fresh::new(&Arc::new(config.clone()), name, true))
+            .flatten();
+        if let Some(fresh) = &fresh
+            && let Some(store) = lock(&self.0.instance_store).as_ref()
+            && let Some(plan) = store.plan(name)?
+        {
+            fresh.set_marker(&plan)?;
+        }
+        let server = new_server(name, definition.clone(), endpoint, fresh);
         launch_worker(
             &runtime,
             &server,
@@ -831,10 +863,16 @@ impl Drop for Inner {
     }
 }
 
-fn new_server(name: &str, config: ManagedServer, endpoint: Option<String>) -> Arc<Server> {
+fn new_server(
+    name: &str,
+    config: ManagedServer,
+    endpoint: Option<String>,
+    fresh: Option<Fresh>,
+) -> Arc<Server> {
     let (sender, receiver) = mpsc::channel(64);
     Arc::new(Server {
         name: name.to_owned(),
+        fresh: fresh.map(Arc::new),
         address: endpoint
             .as_deref()
             .and_then(|endpoint| endpoint.parse().ok()),
@@ -1094,6 +1132,10 @@ async fn worker<B: ProcessBackend>(
     mut requests: mpsc::Receiver<Request>,
     mut backend: B,
 ) {
+    // A copy left by a run this process did not reap, e.g. before a crash.
+    if server.fresh.as_ref().is_some_and(|fresh| !fresh.pristine()) {
+        discard_copy(&server, &backend).await;
+    }
     // A remote server autostarts once its node is reachable, which may be
     // after the controller itself started.
     let mut autostart = server.config.autostart && lock(&server.state).automatic;
@@ -1267,12 +1309,57 @@ async fn check_exit<B: ProcessBackend>(server: &Server, backend: &mut B) {
             }
         }
         Status::Unknown => backend::mark_unknown(server),
-        Status::Exited(status) => {
-            record_failure(server, format!("managed server exited: {status}"))
+        Status::Exited {
+            success: true,
+            status: _,
+        } => {
+            record_clean_exit(server);
+            discard_copy(server, backend).await;
+        }
+        Status::Exited { status, .. } => {
+            record_failure(server, format!("managed server exited: {status}"));
+            discard_copy(server, backend).await;
         }
         Status::Broken(error) => {
-            record_failure(server, format!("cannot inspect managed process: {error}"))
+            record_failure(server, format!("cannot inspect managed process: {error}"));
+            discard_copy(server, backend).await;
         }
+    }
+}
+
+/// A process that ended on its own with status 0, e.g. a finished game, is
+/// stopped rather than failed: no recovery, and its restart budget is kept.
+/// It is no administrator stop either, so demand and scaling may start it.
+fn record_clean_exit(server: &Server) {
+    let mut state = lock(&server.state);
+    state.phase = Phase::Stopped;
+    state.pid = None;
+    state.last_error = None;
+    state.retry_at = None;
+    state.recover = false;
+    state.last_activity = Instant::now();
+}
+
+/// Delete an ephemeral instance's copy once no process of it is owned; the
+/// next start builds a fresh one. A failure is reported and retried then.
+async fn discard_copy<B: ProcessBackend>(server: &Server, backend: &B) {
+    let Some(fresh) = server.fresh.clone() else {
+        return;
+    };
+    if backend.owns() {
+        return;
+    }
+    let result = tokio::task::spawn_blocking(move || fresh.discard())
+        .await
+        .unwrap_or_else(|error| Err(io::Error::other(error)));
+    if let Err(error) = result {
+        eprintln!(
+            "rift: cannot delete the ephemeral copy of {}: {error}",
+            server.name
+        );
+        lock(&server.state)
+            .last_error
+            .get_or_insert_with(|| format!("cannot delete the ephemeral copy: {error}"));
     }
 }
 
@@ -1385,6 +1472,7 @@ async fn start_process_inner<B: ProcessBackend>(
             if backend.owns() {
                 backend.kill(server).await;
             }
+            discard_copy(server, backend).await;
             if error.kind() == io::ErrorKind::Interrupted {
                 // An intentional stop during startup is not a failed launch
                 // and must not impose crash backoff on a later explicit start.
@@ -1403,6 +1491,11 @@ async fn start_process_inner<B: ProcessBackend>(
 }
 
 async fn spawn_ready<B: ProcessBackend>(server: &Server, backend: &mut B) -> io::Result<()> {
+    if let Some(fresh) = server.fresh.clone() {
+        tokio::task::spawn_blocking(move || fresh.provision())
+            .await
+            .map_err(io::Error::other)??;
+    }
     backend.start(server).await?;
     lock(&server.state).pid = backend.pid();
     let deadline = tokio::time::Instant::now() + server.config.start_timeout;
@@ -1443,7 +1536,8 @@ async fn exited_during_startup<B: ProcessBackend>(
 ) -> io::Result<()> {
     match backend.status(server).await {
         Status::Idle | Status::Running => Ok(()),
-        Status::Exited(status) => Err(io::Error::other(format!(
+        // Even a clean exit means the server never became ready.
+        Status::Exited { status, .. } => Err(io::Error::other(format!(
             "managed server exited {when}: {status}"
         ))),
         Status::Broken(error) => Err(io::Error::other(error)),
@@ -1464,18 +1558,24 @@ async fn stop_process<B: ProcessBackend>(server: &Server, backend: &mut B) -> io
     } else {
         Ok(())
     };
-    let mut state = lock(&server.state);
-    state.phase = if result.is_ok() {
-        Phase::Stopped
-    } else {
-        Phase::Failed
-    };
-    state.pid = None;
-    state.pending_stop = false;
-    state.recover = false;
-    state.retry_at = None;
-    if let Err(error) = &result {
-        state.last_error = Some(error.to_string());
+    {
+        let mut state = lock(&server.state);
+        state.phase = if result.is_ok() {
+            Phase::Stopped
+        } else {
+            Phase::Failed
+        };
+        state.pid = None;
+        state.pending_stop = false;
+        state.recover = false;
+        state.retry_at = None;
+        if let Err(error) = &result {
+            state.last_error = Some(error.to_string());
+        }
+    }
+    // A failed stop may have left the process running.
+    if result.is_ok() {
+        discard_copy(server, backend).await;
     }
     result
 }

@@ -6,7 +6,7 @@ named backend on the same host. Service groups create and remove named instances
 with allocated ports while the proxy stays running. Local asset templates copy
 server jars, plugins, configs and maps into new instance directories. Persistent
 worlds retain their files after removal; disposable game instances delete their
-generated files after removal. Templates can also download Paper, Folia,
+generated files after removal, and ephemeral ones after every run. Templates can also download Paper, Folia,
 Purpur, Fabric or vanilla servers automatically and lay instances out like
 CloudNet v4 (see [automatic server software](#automatic-server-software-and-cloudnet-style-folders)).
 Rift does not provision remote machines or manage containers.
@@ -29,7 +29,8 @@ use directories you prepare; service-group creation can create its instance
 directory. Static managed servers and persistent service-group instances retain
 worlds and other files across process restarts and removal. Disposable
 service-group instances retain files across stop/start, then delete their
-generated directory on explicit removal.
+generated directory on explicit removal. Ephemeral instances delete it whenever
+their process ends and start every run from a fresh template copy.
 
 The example expects `examples/servers/lobby/paper.jar` and
 `examples/servers/survival/paper.jar`. For lobby, set these properties:
@@ -169,7 +170,7 @@ Groups accept the managed-server lifecycle fields above plus an inclusive
 `port_range`, an optional `template` name and a `storage` policy. The directory
 must contain `{name}` to isolate instance data. When `directory` is omitted it
 defaults to `local/services/{name}` for persistent and `temp/services/{name}`
-for disposable storage, relative to the configuration. Groups with a `template`
+for disposable and ephemeral storage, relative to the configuration. Groups with a `template`
 may also omit `command`; Rift then runs
 `java -Xms{memory_mb}M -Xmx{memory_mb}M -jar server.jar nogui` with
 `memory_mb` defaulting to `1024` (accepted range `128` through `1048576`).
@@ -193,11 +194,28 @@ prepared-directory mode uses persistent storage. See
 | --- | --- | --- | --- |
 | `persistent` (default) | Retains files and world changes | Stops and unregisters; retains files | Reuses an owned template directory without reseeding its world |
 | `disposable` (requires `template`) | Retains files and world changes | Stops, reaps, unregisters and deletes the generated directory, including its world | Copies a fresh instance from the template |
+| `ephemeral` (requires `template`, this host only) | Deletes the generated directory once the process ends for any reason; the next start copies a fresh instance from the template | Stops, reaps, unregisters and deletes any remaining copy | Copies a fresh instance from the template |
 
 Choose persistent storage for survival/build worlds whose changes should outlive
 an instance registration. Choose disposable storage for matches or rounds that
-should start from a supplied map after removal and recreation. Idle shutdown or
-Stop does not reset a map or delete files for either policy.
+should start from a supplied map after removal and recreation; idle shutdown or
+Stop does not reset its map or delete its files. Choose ephemeral storage for
+minigames that reset every round: a game that ends by exiting with status 0
+returns as a fresh copy on the next demand or scaling start, without removing
+and recreating the instance.
+
+Ephemeral instances delete their copy only after the child is reaped: after a
+clean exit, a crash, an idle stop, an administrator Stop, a failed start, removal
+and proxy shutdown. A crash recovery restart therefore also begins from a fresh
+copy. The first run uses the copy built at creation. Every copy carries the
+ownership marker recorded at creation, so SQLite registrations, restarts and
+removal recognize it; an instance between runs has no directory, and a copy left
+by a killed Rift is deleted when the instance's supervisor starts. Each run
+copies the template files as they are at that moment, while the template
+definition (paths, software, layers) stays the one the instance was created
+with, like its process definition. A copy that cannot be deleted is reported in
+the server's error and deleted before the next start. Ephemeral storage is
+rejected for groups with `nodes`; use `disposable` there.
 
 With the `servers` admin permission:
 
@@ -223,8 +241,8 @@ is created.
 
 Removal refuses instances with players or attachment reservations. Drain and
 empty the instance first; removal stops and reaps its child before deregistering
-the backend. Persistent worlds remain on disk; disposable instance files are
-deleted only after the child is reaped. A failed deletion reports a cleanup error
+the backend. Persistent worlds remain on disk; disposable and ephemeral
+instance files are deleted only after the child is reaped. A failed deletion reports a cleanup error
 and leaves the backend deregistered; inspect the reported cleanup error. SQLite
 stores instance names, groups, allocated ports, directories, template/storage
 ownership and explicit stop intent. Registrations survive configuration reloads
@@ -433,7 +451,8 @@ changing those settings. Static managed definitions require a restart;
 ordinary routes and policies can reload while instances remain registered.
 
 Proxy shutdown stops disposable processes and retains their registrations and
-directories; it does not reset games. After a restart, Rift restores their owned
+directories; it does not reset games. Ephemeral instances keep their
+registrations but not their copies. After a restart, Rift restores their owned
 directories. Remove instances explicitly to clean them up and create fresh games.
 See [examples/templates.lua](../examples/templates.lua) for persistent survival
 and disposable game groups using one asset template.
@@ -520,7 +539,7 @@ The resulting layout matches CloudNet v4:
 | `local/templates/` | Template folders used as `configs` layers (`template_storage`) |
 | `local/versioncache/` | Downloaded server software (`software_cache`) |
 | `local/services/{name}` | Persistent instances (default group `directory`) |
-| `temp/services/{name}` | Disposable instances (default group `directory`) |
+| `temp/services/{name}` | Disposable and ephemeral instances (default group `directory`) |
 
 Both `software_cache` and `template_storage` accept a different path relative
 to the configuration. The dashboard's **Files** page (and `/api/files`) browses
@@ -696,12 +715,22 @@ process group, and a kill reaches the whole group, so helper processes started b
 a wrapper script die with it. Programs should run in the foreground; wrappers
 that daemonize or fork detached services are unsupported.
 
-A failed startup or unexpected exit records an error and automatically retries
-after `restart_delay_ms`, up to `restart_retries` times after the initial attempt.
+A failed startup or an exit with a nonzero status or signal records an error
+and automatically retries after `restart_delay_ms`, up to `restart_retries`
+times after the initial attempt.
 Successful readiness does not replenish this budget. When it is exhausted, the
 server remains failed and subsequent player demand cannot restart it. Inspect
 the error, fix the cause and explicitly Start the server to reset the budget.
 `restart_retries = 0` leaves automatic recovery disabled.
+
+A running server that exits on its own with status 0, such as a minigame
+that ends its round, is not a failure: it becomes `stopped` without an error,
+schedules no restart and leaves the restart budget untouched. Unlike a manual
+stop it keeps automatic wake, so the next eligible login or a scaling policy
+starts it again. An exit with status 0 before the server became
+ready still counts as a failed start. For servers on a `rift node`, agents
+report whether an exit was clean; an agent from before this report, a restarted
+agent and a process that disappeared without a status are treated as failures.
 
 `autostart` starts the server when registered and does not restart a server
 stopped by idle policy. Idle shutdown preserves wake-on-demand behavior.

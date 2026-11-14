@@ -74,12 +74,17 @@ fn managed_process_helper() {
     // A flapping helper exits shortly after the supervisor's readiness probe
     // connected, however long a loaded runner took to send it, and still far
     // too soon to count as stable.
+    // `crash` exits with a failure status, `finish` cleanly, like a game
+    // that ended.
     let mut probed_at = None;
     while !stopping.load(Ordering::Acquire) {
         if fs::remove_file("crash").is_ok()
             || (mode == "flap"
                 && probed_at.is_some_and(|at: Instant| at.elapsed() >= Duration::from_millis(300)))
         {
+            std::process::exit(3);
+        }
+        if fs::remove_file("finish").is_ok() {
             return;
         }
         if listener.accept().is_ok() {
@@ -916,6 +921,124 @@ async fn administrative_stop_shutdown_and_removal_cancel_pending_recovery() {
         assert_eq!(fixture.starts(), 1, "{action} did not cancel recovery");
         manager.shutdown().await;
     }
+}
+
+#[tokio::test]
+async fn clean_exit_stops_without_recovery_or_spending_restart_retries() {
+    let mut fixture = Fixture::new(0, "normal");
+    fixture.definition().restart_retries = 1;
+    let manager = fixture.manager();
+    manager.start("default").await.unwrap();
+    // A crash spends the one retry ...
+    fs::write(fixture.directory.join("crash"), "yes").unwrap();
+    wait_state(&manager, "failed").await;
+    wait_state(&manager, "running").await;
+    assert_eq!(manager.snapshot()[0].restart_attempts, 1);
+    // ... a finished run spends nothing and schedules no restart.
+    fs::write(fixture.directory.join("finish"), "yes").unwrap();
+    wait_state(&manager, "stopped").await;
+    let server = &manager.snapshot()[0];
+    assert!(server.last_error.is_none(), "{server:?}");
+    assert!(server.pid.is_none());
+    assert_eq!(server.restart_attempts, 1);
+    assert!(!server.restart_exhausted);
+    // Not an administrator stop: the server still wakes on demand.
+    assert!(server.automatic_enabled && server.automatic_start);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(fixture.starts(), 2);
+    assert!(manager.can_connect("default"));
+    manager.ensure_running("default").await.unwrap();
+    assert_eq!(fixture.starts(), 3);
+    manager.shutdown().await;
+}
+
+/// Writes a group whose template ships the helper's configuration, so every
+/// copy runs the helper in its own fresh directory.
+fn ephemeral_config(root: &Path, address: SocketAddr) -> (Config, Config) {
+    fs::create_dir_all(root.join("template/configs")).unwrap();
+    fs::write(root.join("template/server.jar"), b"jar").unwrap();
+    fs::write(
+        root.join("template/configs/helper-config"),
+        format!("{address}\n0\nnormal\n"),
+    )
+    .unwrap();
+    let exe = std::env::current_exe().unwrap();
+    let source = format!(
+        "return {{listeners={{public='127.0.0.1:0'}},backends={{}},routes={{public='mini'}},\
+         templates={{mini={{server_jar='template/server.jar',configs='template/configs'}}}},\
+         service_groups={{mini={{template='mini',storage='ephemeral',directory='instances/{{name}}',\
+         command={{'{}','--exact','managed_process_helper','--nocapture'}},port_range={{{port},{port}}},\
+         stop_timeout_ms=10000,restart_delay_ms=200,restart_retries=3}}}}}}",
+        exe.display(),
+        port = address.port()
+    );
+    let base = Config::from_lua_at(&source, &root.join("rift.lua")).unwrap();
+    let mut config = base.clone();
+    config
+        .add_instance("mini", "mini-1", address.port())
+        .unwrap();
+    (base, config)
+}
+
+#[tokio::test]
+async fn ephemeral_instances_run_from_a_fresh_copy_and_delete_it_when_the_process_ends() {
+    let root = std::env::temp_dir().join(format!("rift-ephemeral-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let root = fs::canonicalize(root).unwrap();
+    let (base, config) = ephemeral_config(&root, unique_address());
+    rift::provisioning::provision(&config, "mini-1").unwrap();
+    let directory = root.join("instances/mini-1");
+    let manager = ManagedServers::new(&base, Arc::new(PlayerRegistry::default()));
+    manager.launch().unwrap();
+    manager.add(&config, "mini-1").unwrap();
+    let starts = || {
+        fs::read_to_string(directory.join("starts"))
+            .unwrap_or_default()
+            .lines()
+            .count()
+    };
+    let wait_gone = || async {
+        let deadline = Instant::now() + EVENT_DEADLINE;
+        while directory.exists() {
+            assert!(Instant::now() < deadline, "the copy was not deleted");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    // The copy built at creation serves the first run.
+    fs::write(directory.join("progress"), "created").unwrap();
+    manager.start("mini-1").await.unwrap();
+    assert_eq!(starts(), 1);
+    assert!(directory.join("progress").exists());
+    // An administrator stop deletes the copy after the process is reaped.
+    manager.stop("mini-1").await.unwrap();
+    assert!(!directory.exists());
+    manager.start("mini-1").await.unwrap();
+    assert_eq!(starts(), 1);
+    assert!(!directory.join("progress").exists());
+    // A finished game: stopped, deleted, and fresh again on demand.
+    fs::write(directory.join("progress"), "played").unwrap();
+    fs::write(directory.join("finish"), "yes").unwrap();
+    wait_state(&manager, "stopped").await;
+    wait_gone().await;
+    assert!(manager.snapshot()[0].last_error.is_none());
+    manager.ensure_running("mini-1").await.unwrap();
+    assert_eq!(starts(), 1);
+    assert!(!directory.join("progress").exists());
+    // Crash recovery restarts from a fresh copy too.
+    fs::write(directory.join("progress"), "played").unwrap();
+    fs::write(directory.join("crash"), "yes").unwrap();
+    wait_state(&manager, "failed").await;
+    wait_state(&manager, "running").await;
+    assert_eq!(manager.snapshot()[0].restart_attempts, 1);
+    assert_eq!(starts(), 1);
+    assert!(!directory.join("progress").exists());
+    // Removal stops the process and leaves nothing behind.
+    manager.remove("mini-1").await.unwrap();
+    assert!(!directory.exists());
+    rift::provisioning::remove(&config, "mini-1").unwrap();
+    manager.shutdown().await;
+    let _ = fs::remove_dir_all(&root);
 }
 
 fn empty_manager(fixture: &Fixture) -> ManagedServers {

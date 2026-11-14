@@ -53,7 +53,8 @@ pub struct Observation {
     pub revision: u64,
     /// `Some(pid)` while the agent runs the server.
     pub running: Option<Option<u32>>,
-    pub exit: Option<String>,
+    /// The last exit's status, and whether it was successful.
+    pub exit: Option<(String, bool)>,
 }
 
 /// Reachability as shown by `/api/nodes`.
@@ -230,7 +231,7 @@ impl Nodes {
                 .iter()
                 .rev()
                 .find(|exit| exit.name == server)
-                .map(|exit| exit.status.clone()),
+                .map(|exit| (exit.status.clone(), exit.success)),
         })
     }
 
@@ -379,6 +380,7 @@ rift.config.nodes.node1={address='10.0.0.11'}",
             exits: vec![ExitState {
                 name: "gone".into(),
                 status: "exit status: 1".into(),
+                success: false,
             }],
         })
         .unwrap()
@@ -395,8 +397,8 @@ rift.config.nodes.node1={address='10.0.0.11'}",
         let observation = nodes.observe("node1", "game-1").unwrap();
         assert_eq!(observation.running, Some(Some(1)));
         assert_eq!(
-            nodes.observe("node1", "gone").unwrap().exit.as_deref(),
-            Some("exit status: 1")
+            nodes.observe("node1", "gone").unwrap().exit,
+            Some(("exit status: 1".to_owned(), false))
         );
         // An older, reordered snapshot does not resurrect stale processes.
         nodes.record("node1", &state("a", 1, &[])).unwrap();

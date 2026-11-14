@@ -34,6 +34,18 @@ config.service_groups.games = {
     start_on_connect = true,
     idle_timeout_ms = 5 * 60 * 1000,
 }
+config.service_groups.rounds = {
+    template = "paper",
+    -- A fresh copy for every run: deleted whenever the server stops or exits,
+    -- e.g. when a minigame ends its round by shutting down with status 0.
+    storage = "ephemeral",
+    directory = "servers/{name}",
+    command = { "java", "-Xms512M", "-Xmx1G", "-jar", "server.jar", "nogui" },
+    port_range = { 25700, 25749 },
+    autostart = false,
+    start_on_connect = true,
+    idle_timeout_ms = 5 * 60 * 1000,
+}
 config.authentication = { online_mode = true }
 config.forwarding = { mode = "velocity", secret_env = "RIFT_FORWARDING_SECRET" }
 config.admin = {
@@ -48,5 +60,6 @@ config.web = { listen = "127.0.0.1:8080" }
 -- rift admin groups
 -- rift admin remove games-1     # Stops it and deletes its world and server files.
 -- rift admin remove survival-1  # Stops it and retains its world and server files.
--- Stopping either instance preserves its files. Registration is runtime only;
+-- rift admin create rounds      # Every start of rounds-1 copies the template again.
+-- Stopping survival or games instances preserves their files. Registration is runtime only;
 -- after a proxy restart, `rift admin create survival` reuses survival-1 first.

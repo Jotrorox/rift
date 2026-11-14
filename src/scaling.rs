@@ -6,7 +6,7 @@ use std::{
 };
 
 use rift::{
-    config::{Config, GroupMode, InstanceStorage, Placement, ServiceScaling},
+    config::{Config, GroupMode, Placement, ServiceScaling},
     managed::{ManagedServerSnapshot, Phase},
     node::{DEFAULT_INSTANCE_MEMORY_MB, Nodes},
 };
@@ -106,7 +106,7 @@ impl Scaler {
                     .iter()
                     .map(|server| queues.get(&server.name).copied().unwrap_or(0))
                     .sum::<usize>();
-            let disposable = group.storage == InstanceStorage::Disposable;
+            let disposable = group.storage.discards_data();
             let change = decide(name, policy, &members, queued, disposable);
             if change.is_some() {
                 // Failed provisioning and occupied removal races are also

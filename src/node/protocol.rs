@@ -341,6 +341,10 @@ pub struct ProcessState {
 pub struct ExitState {
     pub name: String,
     pub status: String,
+    /// The process exited with status 0. Older agents omit it, so their
+    /// exits count as failures.
+    #[serde(default)]
+    pub success: bool,
 }
 
 const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";

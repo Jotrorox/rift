@@ -92,8 +92,11 @@ pub fn provision_planned(config: &Config, name: &str, plan: &Plan) -> io::Result
         return Err(invalid("instance directory changed after planning"));
     }
     let Some(template_name) = &instance.template else {
-        if instance.storage == InstanceStorage::Disposable {
-            return Err(invalid("disposable instances require a template"));
+        if instance.storage.discards_data() {
+            return Err(invalid(format!(
+                "{} instances require a template",
+                instance.storage.as_str()
+            )));
         }
         fs::create_dir_all(&directory)?;
         return Ok(Provisioned {
@@ -334,6 +337,9 @@ pub fn remote_prepare(config: &Config, name: &str) -> io::Result<crate::node::pr
         .managed_servers
         .get(name)
         .ok_or_else(|| invalid("instance has no managed server"))?;
+    if instance.storage == InstanceStorage::Ephemeral {
+        return Err(invalid("ephemeral instances run on this host only"));
+    }
     let template = instance
         .template
         .as_ref()
@@ -556,13 +562,22 @@ pub(crate) fn validate_plan(instance: &ServiceInstance, name: &str, plan: &Plan)
             return Err(invalid("invalid stored provisioning stage"));
         }
     } else if instance.template.is_some()
-        || instance.storage == InstanceStorage::Disposable
+        || instance.storage.discards_data()
         || plan.created
         || plan.stage.is_some()
     {
         return Err(invalid("missing stored storage ownership"));
     }
     Ok(())
+}
+
+/// [`validate_restored`] for a registered instance: an ephemeral instance
+/// has no directory between runs.
+pub(crate) fn validate_registered(instance: &ServiceInstance, plan: &Plan) -> io::Result<()> {
+    if instance.storage == InstanceStorage::Ephemeral && !exists(&plan.directory)? {
+        return checked_path(&plan.directory).map(drop);
+    }
+    validate_restored(plan)
 }
 
 /// Validate existing storage without reseeding it or changing properties.
@@ -684,7 +699,9 @@ fn sync_directory(path: &Path) -> io::Result<()> {
 /// Preflight removal before changing runtime registration.
 pub fn validate_remove(config: &Config, name: &str) -> io::Result<()> {
     let (instance, directory) = definition(config, name)?;
-    if instance.storage == InstanceStorage::Persistent {
+    if instance.storage == InstanceStorage::Persistent
+        || (instance.storage == InstanceStorage::Ephemeral && !exists(&directory)?)
+    {
         return Ok(());
     }
     let marker = read_marker(&directory)?;
@@ -692,14 +709,115 @@ pub fn validate_remove(config: &Config, name: &str) -> io::Result<()> {
     validate_tree(&directory, false)
 }
 
-/// Remove disposable data only. The caller must first stop and reap the process.
+/// Remove disposable and ephemeral data only. The caller must first stop and
+/// reap the process.
 pub fn remove(config: &Config, name: &str) -> io::Result<()> {
     validate_remove(config, name)?;
     let (instance, directory) = definition(config, name)?;
-    if instance.storage == InstanceStorage::Disposable {
+    if instance.storage.discards_data() && exists(&directory)? {
         fs::remove_dir_all(directory)?;
     }
     Ok(())
+}
+
+/// Builds an ephemeral instance's directory from its template for each run
+/// and deletes it after the run. Every copy carries the ownership marker the
+/// instance was created with, so registration, restore and removal keep
+/// recognizing it.
+#[derive(Debug)]
+pub(crate) struct Fresh {
+    /// The configuration the instance was registered with; like its process
+    /// definition, a reload does not change it, but template files do.
+    config: std::sync::Arc<Config>,
+    name: String,
+    /// The creation plan's marker, from the instance database or the first copy.
+    marker: std::sync::OnceLock<Value>,
+    /// The current copy is the unused one built at creation.
+    pristine: std::sync::atomic::AtomicBool,
+}
+
+impl Fresh {
+    /// `None` unless `name` is an ephemeral instance on this host. `created`
+    /// means its directory was provisioned just now, so its first run may
+    /// use that copy.
+    pub(crate) fn new(config: &std::sync::Arc<Config>, name: &str, created: bool) -> Option<Self> {
+        let instance = config.instances.get(name)?;
+        if instance.storage != InstanceStorage::Ephemeral || instance.node.is_some() {
+            return None;
+        }
+        let fresh = Self {
+            config: config.clone(),
+            name: name.to_owned(),
+            marker: std::sync::OnceLock::new(),
+            pristine: false.into(),
+        };
+        if created
+            && let Ok((instance, directory)) = definition(config, name)
+            && let Ok(marker) = read_marker(&directory)
+            && verify_marker(&marker, instance, name).is_ok()
+        {
+            let _ = fresh.marker.set(marker);
+            fresh.pristine.store(true, Ordering::Release);
+        }
+        Some(fresh)
+    }
+
+    /// Whether the current copy is the unused one built at creation.
+    pub(crate) fn pristine(&self) -> bool {
+        self.pristine.load(Ordering::Acquire)
+    }
+
+    /// Adopt the marker recorded at creation; a different one already in
+    /// use is refused.
+    pub(crate) fn set_marker(&self, plan: &Plan) -> io::Result<()> {
+        let marker = plan
+            .marker
+            .clone()
+            .ok_or_else(|| invalid("missing stored storage ownership"))?;
+        if self.marker.get_or_init(|| marker.clone()) != &marker {
+            return Err(invalid("instance storage ownership changed"));
+        }
+        Ok(())
+    }
+
+    /// The plan of one copy: like a creation, journaled by its stage.
+    fn plan(&self) -> io::Result<Plan> {
+        let (_, directory) = definition(&self.config, &self.name)?;
+        let marker = self
+            .marker
+            .get()
+            .ok_or_else(|| invalid("ephemeral instance has no recorded ownership marker"))?;
+        let token = marker["generation"]
+            .as_str()
+            .ok_or_else(|| invalid("missing stored ownership generation"))?;
+        let stage = directory
+            .parent()
+            .ok_or_else(|| invalid("instance directory has no parent"))?
+            .join(format!(".rift-stage-{token}"));
+        Ok(Plan {
+            directory,
+            marker: Some(marker.clone()),
+            stage: Some(stage),
+            created: true,
+        })
+    }
+
+    /// Replace whatever an earlier run left with a fresh copy of the template.
+    pub(crate) fn provision(&self) -> io::Result<()> {
+        let plan = self.plan()?;
+        if self.pristine.swap(false, Ordering::AcqRel) && validate_restored(&plan).is_ok() {
+            return Ok(());
+        }
+        rollback_plan(&plan)?;
+        provision_planned(&self.config, &self.name, &plan).map(drop)
+    }
+
+    /// Delete the current copy, and any unfinished one. The caller must have
+    /// stopped and reaped the process.
+    pub(crate) fn discard(&self) -> io::Result<()> {
+        self.pristine.store(false, Ordering::Release);
+        rollback_plan(&self.plan()?)
+    }
 }
 
 /// Roll back new materialization if runtime registration fails before spawning.
@@ -1399,6 +1517,93 @@ mod tests {
         assert_eq!(
             fs::read_to_string(fixture.directory("games-1").join("world/level.dat")).unwrap(),
             "map seed"
+        );
+    }
+
+    #[test]
+    fn ephemeral_runs_start_from_a_fresh_copy_with_the_creation_marker() {
+        let fixture = Fixture::new("ephemeral");
+        let config = std::sync::Arc::new(fixture.config.clone());
+        let plan = plan(&config, "games-1").unwrap();
+        provision_planned(&config, "games-1", &plan).unwrap();
+        let directory = fixture.directory("games-1");
+        let fresh = Fresh::new(&config, "games-1", true).unwrap();
+        assert!(fresh.pristine());
+        // The first run uses the copy built at creation.
+        fs::write(directory.join("built-at-creation"), "yes").unwrap();
+        fresh.provision().unwrap();
+        assert!(directory.join("built-at-creation").exists());
+        fs::write(directory.join("world/level.dat"), "played").unwrap();
+        fresh.discard().unwrap();
+        assert!(!directory.exists());
+        // Deleting nothing is fine; the next run is a fresh copy again.
+        fresh.discard().unwrap();
+        fresh.provision().unwrap();
+        assert_eq!(
+            fs::read_to_string(directory.join("world/level.dat")).unwrap(),
+            "map seed"
+        );
+        assert_eq!(
+            read_marker(&directory).unwrap(),
+            plan.marker.clone().unwrap()
+        );
+        // A leftover copy (a crashed run) is replaced, and an unfinished one
+        // (a crash while copying) deleted.
+        fs::write(directory.join("world/level.dat"), "crashed").unwrap();
+        fresh.provision().unwrap();
+        assert_eq!(
+            fs::read_to_string(directory.join("world/level.dat")).unwrap(),
+            "map seed"
+        );
+        fresh.discard().unwrap();
+        let stage = fresh.plan().unwrap().stage.unwrap();
+        fs::create_dir(&stage).unwrap();
+        fs::write(stage.join("partial"), "copy").unwrap();
+        fs::write(directory.parent().unwrap().join("unrelated"), "keep").unwrap();
+        fresh.provision().unwrap();
+        assert!(fixture.stages().is_empty());
+        assert!(directory.parent().unwrap().join("unrelated").exists());
+        // A restored instance learns its marker from the database; another
+        // owner's directory is never deleted or reused.
+        let restored = Fresh::new(&config, "games-1", false).unwrap();
+        assert!(!restored.pristine());
+        assert!(restored.discard().is_err());
+        restored.set_marker(&plan).unwrap();
+        let mut other = plan.clone();
+        other.marker.as_mut().unwrap()["generation"] = json!("other");
+        assert!(restored.set_marker(&other).is_err());
+        let foreign = Fresh::new(&config, "games-1", false).unwrap();
+        foreign.set_marker(&other).unwrap();
+        assert!(foreign.discard().is_err());
+        assert!(foreign.provision().is_err());
+        assert!(directory.join("world").exists());
+        restored.discard().unwrap();
+        assert!(!directory.exists());
+        // Removal accepts an instance between runs.
+        validate_remove(&config, "games-1").unwrap();
+        remove(&config, "games-1").unwrap();
+        restored.provision().unwrap();
+        remove(&config, "games-1").unwrap();
+        assert!(!directory.exists());
+        // Only ephemeral instances on this host get per-run copies.
+        let disposable = Fixture::new("disposable");
+        assert!(Fresh::new(&disposable.config.clone().into(), "games-1", true).is_none());
+    }
+
+    #[test]
+    fn ephemeral_storage_requires_a_template_and_this_host() {
+        let fixture = Fixture::new("ephemeral");
+        assert_eq!(
+            fixture.config.service_groups["games"].storage,
+            InstanceStorage::Ephemeral
+        );
+        let without_template = fixture.source.replace("template='game',", "");
+        let error = Config::from_lua_at(&without_template, &fixture.root.join("rift.lua"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("ephemeral instances require a template"),
+            "{error}"
         );
     }
 
