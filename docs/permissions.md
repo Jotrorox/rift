@@ -206,6 +206,47 @@ Removing a group from the table removes its configured nodes; the group itself
 and its runtime nodes stay. The table must fit `permissions.limits`, which
 `rift check` verifies.
 
+### Server access
+
+`network.access` restricts who may join a backend or a
+[service group](managed-servers.md#service-groups-and-dynamic-instances)
+(a group's rule applies to every instance). Besides player names, a rule can
+admit permission groups and holders of a node, and `network.server_permission`
+gates the `/server` command itself:
+
+```lua
+rift.config.network = {
+    hubs = { "lobby" },
+    server_permission = "rift.command.server", -- omit to let everyone use /server
+    access = {
+        vip = { groups = { "vip", "staff" } },
+        build = { permission = "rift.server.build", deny = { "Griefer" } },
+        staff = { groups = { "staff" }, allow = { "Owner" } },
+    },
+}
+```
+
+A `deny` name always wins. A rule without `allow`, `groups` or `permission` is
+public; with any of them the player must match one: be named in `allow`, be in
+one of `groups` (directly, inherited or through the implicit `default`) or have
+`permission` resolve to `true`. Groups and nodes are checked in the contexts
+the proxy knows for the player at that moment (see
+[Contexts on the proxy](#contexts-on-the-proxy)), so a grant scoped to
+`server=lobby` counts while they are on lobby; at login only global grants
+apply. Rules apply to the initial server, `/server`, `/hub`, fallbacks and
+recovery, transfers from extensions, BungeeCord and the admin API, and `/server`
+lists and suggests only the destinations a player may join.
+
+Permission wildcards do the work of server globs: guard each backend with its
+own node (`rift.server.build`, `rift.server.vip`) and grant `rift.server.*` to
+a group that may go everywhere. A dynamic group's instances (`lobby-1`,
+`lobby-2`) share the group's rule.
+
+`server_permission` must resolve to `true` for a player to list or join servers
+with `/server`; other players are told they lack permission and get no
+suggestions. It does not affect `/hub`, fallbacks or transfers. Group names
+and nodes are lowercased; nodes cannot end in a wildcard.
+
 ## Lua API
 
 `rift.permissions` (also `require("rift.permissions")`) needs

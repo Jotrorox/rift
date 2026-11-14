@@ -1023,26 +1023,26 @@ fn network_order_and_explicit_access_rules_are_preserved() {
     let config = Config::from_lua(NETWORK, "network.lua").unwrap();
     assert_eq!(config.network.initial, ["lobby", "survival"]);
     assert_eq!(config.network.hubs, ["lobby"]);
-    assert!(config.can_access("lobby", "Eve"));
-    assert!(config.can_access("survival", "aLiCe"));
-    assert!(!config.can_access("survival", "BOB"));
-    assert!(!config.can_access("survival", "Eve"));
-    assert!(!config.can_access("unknown", "Alice"));
+    assert!(config.can_access("lobby", "Eve", &crate::config::NameOnly));
+    assert!(config.can_access("survival", "aLiCe", &crate::config::NameOnly));
+    assert!(!config.can_access("survival", "BOB", &crate::config::NameOnly));
+    assert!(!config.can_access("survival", "Eve", &crate::config::NameOnly));
+    assert!(!config.can_access("unknown", "Alice", &crate::config::NameOnly));
     let deny_only = NETWORK.replace("allow = { 'Alice', 'Bob' }, ", "");
     let config = Config::from_lua(&deny_only, "network.lua").unwrap();
-    assert!(config.can_access("survival", "Eve"));
-    assert!(!config.can_access("survival", "Bob"));
+    assert!(config.can_access("survival", "Eve", &crate::config::NameOnly));
+    assert!(!config.can_access("survival", "Bob", &crate::config::NameOnly));
     let closed = NETWORK.replace("allow = { 'Alice', 'Bob' }", "allow = {}");
     let config = Config::from_lua(&closed, "network.lua").unwrap();
-    assert!(!config.can_access("survival", "Alice"));
-    assert!(!config.can_access("survival", "Eve"));
+    assert!(!config.can_access("survival", "Alice", &crate::config::NameOnly));
+    assert!(!config.can_access("survival", "Eve", &crate::config::NameOnly));
 }
 
 #[test]
 fn omitted_network_fields_keep_ordinary_routes_public() {
     let config = Config::from_lua(VALID, "network.lua").unwrap();
     assert_eq!(config.network, Network::default());
-    assert!(config.can_access("lobby", "Alice"));
+    assert!(config.can_access("lobby", "Alice", &crate::config::NameOnly));
     for body in ["{}", "{ initial = {}, hubs = {}, access = {} }"] {
         let source = with_security(&format!("network = {body}"));
         assert_eq!(
@@ -1462,8 +1462,8 @@ fn network_and_administrative_controls_keep_independent_access_policies() {
     let config = Config::from_lua(&source, "combined-network.lua").unwrap();
     assert_eq!(config.network.initial, ["lobby", "survival"]);
     assert_eq!(config.network.hubs, ["lobby"]);
-    assert!(config.can_access("survival", "Alice"));
-    assert!(!config.can_access("survival", "Bob"));
+    assert!(config.can_access("survival", "Alice", &crate::config::NameOnly));
+    assert!(!config.can_access("survival", "Bob", &crate::config::NameOnly));
     assert!(config.maintenance && config.draining.contains("survival"));
     assert_eq!(config.rate_limit.unwrap().per_ip_burst, 40);
     assert_eq!(config.login_rate_limit.unwrap().per_ip_burst, 3);
