@@ -49,6 +49,8 @@ export const DOCS = [
     blurb: 'The Rust client, the in-memory testing crate and the C ABI for backend plugins.' },
   { slug: 'permissions-java', file: 'docs/permissions-java.md', title: 'Permissions for Java plugins', group: 'Integrate',
     blurb: 'The RiftPerms plugin for Paper and Folia, the Java API, Vault, placeholders and tests.' },
+  { slug: 'network-java', file: 'docs/network-java.md', title: 'Network API for Java plugins', group: 'Integrate',
+    blurb: 'List servers, find players, connect them to a server or group, and message proxy plugins from Paper.' },
   { slug: 'permissions-pumpkin', file: 'docs/permissions-pumpkin.md', title: 'Permissions for Pumpkin', group: 'Integrate',
     blurb: 'The Pumpkin adapter plugin, its configuration and the service API for Pumpkin plugins.' },
   { slug: 'bungeecord', file: 'docs/bungeecord.md', title: 'BungeeCord compatibility', group: 'Integrate',

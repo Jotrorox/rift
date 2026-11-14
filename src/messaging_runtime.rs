@@ -395,6 +395,180 @@ impl PlayerRequests {
         }
     }
 }
+
+/// Who a `rift.network.*` request without a sender acts as (see
+/// [`CONTROL_ACTOR`]).
+const NETWORK_ACTOR: &str = "rift.network";
+
+/// The network API for backends, as `rift.network.<op>` (see
+/// [`rift::network_service`]): servers that are up, online players, and
+/// `connect`, which a backend login may use for its own players.
+///
+/// Requests run concurrently and need an `_INBOX.` reply subject, like
+/// [`PlayerRequests`]. `connect` is written to the operator audit log as
+/// `network.connect` before the reply is sent; reads are not audited.
+pub struct NetworkRequests {
+    broker: Broker,
+    subscription: Subscription,
+}
+
+impl NetworkRequests {
+    /// Subscribes at once, so requests are answered as soon as the bus is up.
+    pub fn new(broker: Broker) -> io::Result<Self> {
+        let subscription = broker
+            .subscribe(&format!("{}.*", rift::network_service::PREFIX), None)
+            .map_err(io::Error::other)?;
+        Ok(Self {
+            broker,
+            subscription,
+        })
+    }
+
+    pub async fn run(
+        mut self,
+        current: watch::Receiver<Arc<Snapshot>>,
+        audit: Arc<crate::operator::Store>,
+    ) {
+        let permits = Arc::new(tokio::sync::Semaphore::new(PLAYER_REQUESTS));
+        loop {
+            let message = match self.subscription.recv().await {
+                Ok(message) => message,
+                Err(error) => {
+                    events::admin("messaging_network", "rejected", "network", &error);
+                    match self
+                        .broker
+                        .subscribe(&format!("{}.*", rift::network_service::PREFIX), None)
+                    {
+                        Ok(subscription) => {
+                            self.subscription = subscription;
+                            continue;
+                        }
+                        Err(_) => return,
+                    }
+                }
+            };
+            let Some(reply) = message
+                .reply
+                .as_deref()
+                .filter(|reply| reply.starts_with("_INBOX."))
+                .map(str::to_owned)
+            else {
+                continue;
+            };
+            let Ok(permit) = permits.clone().acquire_owned().await else {
+                return;
+            };
+            let snapshot = current.borrow().clone();
+            let (broker, audit) = (self.broker.clone(), audit.clone());
+            tokio::spawn(async move {
+                let operation = message
+                    .subject
+                    .strip_prefix(rift::network_service::PREFIX)
+                    .and_then(|rest| rest.strip_prefix('.'))
+                    .unwrap_or_default();
+                let request = rift::network_service::Request::decode(operation, &message.payload);
+                let audited = match &request {
+                    Ok(rift::network_service::Request::Connect {
+                        player,
+                        destination,
+                    }) => Some(format!("{player} -> {}", destination.name())),
+                    _ => None,
+                };
+                let sender = message.sender.as_deref();
+                let result = request.and_then(|request| network(&snapshot, sender, request));
+                let response = match &result {
+                    Ok(data) => json!({"ok": true, "data": data}),
+                    Err(error) => {
+                        events::admin("messaging_network", "rejected", operation, error);
+                        json!({"ok": false, "error": error})
+                    }
+                };
+                // Record first, as for control requests.
+                if let Some(target) = audited {
+                    let actor = rift::players_service::actor(sender, NETWORK_ACTOR);
+                    let (outcome, status) = match &result {
+                        Ok(_) => ("ok", 200),
+                        Err(_) => ("rejected", 400),
+                    };
+                    if let Err(error) = audit
+                        .audit_async(&actor, "network.connect", &target, outcome, status)
+                        .await
+                    {
+                        eprintln!("rift: audit of rift.network.connect failed: {error}");
+                    }
+                }
+                let _ = broker.publish(&reply, Bytes::from(response.to_string()));
+                drop(permit);
+            });
+        }
+    }
+}
+
+/// Run one `rift.network` request for the login `sender`.
+fn network(
+    snapshot: &Snapshot,
+    sender: Option<&str>,
+    request: rift::network_service::Request,
+) -> Result<Value, String> {
+    use rift::network_service::{Destination, Request, may_connect};
+    let players = snapshot.extensions.players();
+    match request {
+        Request::Servers { server } => {
+            let (_, servers) = crate::bungee_runtime::servers(snapshot, server.as_deref())
+                .ok_or("unknown server or service group")?;
+            Ok(servers
+                .iter()
+                .map(|server| {
+                    json!({
+                        "name": server.name,
+                        "group": server.group,
+                        "state": server.state,
+                        "players": server.players,
+                        "max_players": server.max_players,
+                    })
+                })
+                .collect())
+        }
+        Request::Players { server } => Ok(json!(players.list(server.as_deref())?)),
+        Request::Player { player } => Ok(json!(players.get(&player)?)),
+        Request::Connect {
+            player,
+            destination,
+        } => {
+            if let Destination::Group(group) = &destination
+                && !snapshot.config.service_groups.contains_key(group)
+            {
+                return Err("unknown service group".into());
+            }
+            // Before the lookup, so a typo is an error whether or not the
+            // player happens to be online.
+            players.known(destination.name())?;
+            let Some(info) = players.get(&player)? else {
+                return Ok(Value::Bool(false));
+            };
+            let unrestricted = sender.is_some_and(|login| {
+                snapshot.config.messaging.as_ref().is_some_and(|messaging| {
+                    messaging
+                        .principals
+                        .iter()
+                        .any(|principal| principal.name == login && principal.players)
+                })
+            });
+            if !may_connect(sender, &info.server, unrestricted) {
+                return Err(
+                    "this login may only connect players on its own server; others need players = true"
+                        .into(),
+                );
+            }
+            // By UUID, so a name that changed hands in between cannot move
+            // somebody else.
+            players
+                .transfer(&info.uuid, destination.name())
+                .map(Value::Bool)
+        }
+    }
+}
+
 /// Subjects answered from their own task rather than the serialized loop.
 const LONG_RUNNING: &[&str] = &["create", "remove", "download"];
 
@@ -832,6 +1006,232 @@ mod tests {
             "{records:?}"
         );
         // Reads and undecodable requests are not audited.
+        assert_eq!(records.len(), 2, "{records:?}");
+        task.abort();
+        let _ = task.await;
+    }
+
+    /// Lobby and survival are up, game-1 is an instance of `game`, and the
+    /// login `friends` has `players = true`.
+    fn network_snapshot() -> Arc<Snapshot> {
+        let mut config = rift::config::Config::from_lua(
+            "return {listeners={public='127.0.0.1:0'},
+                backends={Lobby='127.0.0.1:1',survival='127.0.0.1:2'},
+                routes={public='Lobby'}, draining={'survival'},
+                service_groups={game={command={'unused'},directory='instances/{name}',
+                    port_range={26000,26003},scaling={capacity_per_instance=10,min_instances=0}}}}",
+            "rift-network.lua",
+        )
+        .unwrap();
+        config.add_instance("game", "game-1", 26001).unwrap();
+        // Set afterwards: a snapshot with principals wants a listener.
+        let mut snapshot = Snapshot::new(config, None).unwrap();
+        snapshot.config.messaging = Some(rift::config::MessagingConfig {
+            principals: vec![rift::config::MessagingPrincipal {
+                name: "friends".into(),
+                token_env: "UNUSED".into(),
+                publish: vec!["rift.network.*".into()],
+                subscribe: vec![],
+                control: false,
+                players: true,
+            }],
+            ..Default::default()
+        });
+        Arc::new(snapshot)
+    }
+
+    fn ask(
+        snapshot: &Snapshot,
+        sender: Option<&str>,
+        operation: &str,
+        payload: Value,
+    ) -> Result<Value, String> {
+        let request =
+            rift::network_service::Request::decode(operation, payload.to_string().as_bytes())?;
+        network(snapshot, sender, request)
+    }
+
+    #[test]
+    fn network_requests_list_servers_and_players() {
+        use rift::extensions::PlayerAction;
+        let snapshot = network_snapshot();
+        let _roster = snapshot
+            .players
+            .register([1; 16], "Alice", "Lobby")
+            .unwrap();
+        let (_alice, mut alice) = snapshot
+            .extensions
+            .players()
+            .register(1, &[1; 16], "Alice", 774, "Lobby");
+        let lobby = json!({"name": "Lobby", "group": null, "state": "running", "players": 1, "max_players": 0});
+        assert_eq!(
+            ask(&snapshot, Some("server.Lobby"), "servers", json!({})).unwrap(),
+            json!([lobby, {"name": "survival", "group": null, "state": "draining", "players": 0, "max_players": 0}])
+        );
+        assert_eq!(
+            ask(&snapshot, None, "servers", json!({"server": "lobby"})).unwrap(),
+            json!([lobby])
+        );
+        // The group exists, but its only instance is not running.
+        assert_eq!(
+            ask(&snapshot, None, "servers", json!({"server": "game"})).unwrap(),
+            json!([])
+        );
+        assert!(ask(&snapshot, None, "servers", json!({"server": "missing"})).is_err());
+
+        let listed = ask(&snapshot, Some("server.survival"), "players", json!({})).unwrap();
+        assert_eq!(listed[0]["name"], "Alice");
+        assert_eq!(listed[0]["server"], "Lobby");
+        assert_eq!(listed[0]["uuid"], "01".repeat(16));
+        assert_eq!(
+            ask(&snapshot, None, "players", json!({"server": "survival"})).unwrap(),
+            json!([])
+        );
+        assert_eq!(
+            ask(&snapshot, None, "player", json!({"player": "alice"})).unwrap()["server"],
+            "Lobby"
+        );
+        assert_eq!(
+            ask(&snapshot, None, "player", json!({"player": "Bob"})).unwrap(),
+            Value::Null
+        );
+
+        // Her own server moves her, to a server or to a group.
+        let connect = |sender, payload| ask(&snapshot, sender, "connect", payload);
+        assert_eq!(
+            connect(
+                Some("server.Lobby"),
+                json!({"player": "Alice", "server": "survival"})
+            ),
+            Ok(json!(true))
+        );
+        assert_eq!(
+            connect(
+                Some("server.Lobby"),
+                json!({"player": "01".repeat(16), "group": "game"})
+            ),
+            Ok(json!(true))
+        );
+        // Another backend does not, unless its login has `players = true`.
+        assert!(
+            connect(
+                Some("server.survival"),
+                json!({"player": "Alice", "server": "survival"})
+            )
+            .unwrap_err()
+            .contains("own server")
+        );
+        assert_eq!(
+            connect(
+                Some("friends"),
+                json!({"player": "Alice", "server": "survival"})
+            ),
+            Ok(json!(true))
+        );
+        // `group` names a service group and nothing else.
+        assert!(connect(None, json!({"player": "Alice", "group": "survival"})).is_err());
+        assert!(connect(None, json!({"player": "Alice", "server": "missing"})).is_err());
+        assert_eq!(
+            connect(
+                Some("server.Lobby"),
+                json!({"player": "Bob", "server": "survival"})
+            ),
+            Ok(json!(false))
+        );
+        // A typo is an error whether or not the player is online.
+        assert!(
+            connect(
+                Some("server.Lobby"),
+                json!({"player": "Bob", "server": "missing"})
+            )
+            .is_err()
+        );
+        let moved: Vec<_> = std::iter::from_fn(|| alice.try_recv().ok()).collect();
+        assert_eq!(
+            moved,
+            [
+                PlayerAction::Transfer("survival".into()),
+                PlayerAction::Transfer("game".into()),
+                PlayerAction::Transfer("survival".into()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn network_connects_are_answered_on_the_bus_and_audited() {
+        let snapshot = network_snapshot();
+        let broker = snapshot.messaging.clone();
+        let (_alice, _queue) = snapshot
+            .extensions
+            .players()
+            .register(1, &[1; 16], "Alice", 774, "Lobby");
+        let audit = Arc::new(crate::operator::Store::open(None).unwrap());
+        let (_current, receiver) = watch::channel(snapshot.clone());
+        let task = tokio::spawn(
+            NetworkRequests::new(broker.clone())
+                .unwrap()
+                .run(receiver, audit.clone()),
+        );
+        let ask = |sender: &'static str, subject: &'static str, payload: Value| {
+            let broker = broker.clone();
+            async move {
+                let reply = broker
+                    .request_as(
+                        subject,
+                        Bytes::from(payload.to_string()),
+                        Duration::from_secs(5),
+                        Some(sender),
+                    )
+                    .await
+                    .unwrap();
+                serde_json::from_slice::<Value>(&reply.payload).unwrap()
+            }
+        };
+        assert_eq!(
+            ask(
+                "server.Lobby",
+                "rift.network.connect",
+                json!({"player": "Alice", "group": "game"})
+            )
+            .await,
+            json!({"ok": true, "data": true})
+        );
+        let refused = ask(
+            "server.survival",
+            "rift.network.connect",
+            json!({"player": "Alice", "server": "survival"}),
+        )
+        .await;
+        assert_eq!(refused["ok"], false);
+        assert_eq!(
+            ask("server.survival", "rift.network.servers", json!({})).await["ok"],
+            true
+        );
+        let records = audit.audits();
+        let records: Vec<_> = records["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|record| {
+                format!(
+                    "{} {} {} {}",
+                    record["actor"].as_str().unwrap(),
+                    record["action"].as_str().unwrap(),
+                    record["target"].as_str().unwrap(),
+                    record["outcome"].as_str().unwrap()
+                )
+            })
+            .collect();
+        assert!(
+            records.contains(&"bus:server.Lobby network.connect Alice -> game ok".to_owned()),
+            "{records:?}"
+        );
+        assert!(
+            records.contains(
+                &"bus:server.survival network.connect Alice -> survival rejected".to_owned()
+            ),
+            "{records:?}"
+        );
         assert_eq!(records.len(), 2, "{records:?}");
         task.abort();
         let _ = task.await;

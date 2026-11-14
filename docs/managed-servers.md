@@ -566,7 +566,9 @@ rift.config.service_groups.lobby = {
 
 Each instance authenticates as `server.<instance>` with the grants of the
 block (`preset = "backend"` adds the [permission replica's
-subjects](messaging.md#backend-permission-principals)). Rift always adds
+subjects](messaging.md#backend-permission-principals) and the [network
+API](messaging.md#network-api-subjects), with which an instance lists servers
+and moves its own players). Rift always adds
 publish access to `_INBOX.>`, so the instance can answer requests, and
 subscribe access to `_INBOX.server.<instance>.>` only: REQUEST uses a private
 broker inbox and needs no grant, and manual reply subjects must sit in the

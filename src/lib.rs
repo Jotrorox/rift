@@ -28,6 +28,7 @@ pub mod instance_store;
 pub mod managed;
 pub mod message_script;
 pub mod messaging;
+pub mod network_service;
 pub mod node;
 pub mod permissions;
 pub mod players;

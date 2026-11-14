@@ -69,6 +69,69 @@ fn max_players(snapshot: &Snapshot, name: &str, group: Option<&str>) -> usize {
         .unwrap_or(0)
 }
 
+/// A server that is up, as `RiftServers` and `rift.network.servers` report it.
+pub struct ServerEntry<'a> {
+    pub name: &'a str,
+    /// The service group it is an instance of.
+    pub group: Option<&'a str>,
+    /// `running` or `draining`.
+    pub state: &'static str,
+    /// Players a viewer without any `see` node counts.
+    pub players: usize,
+    /// Zero when Rift knows no limit.
+    pub max_players: usize,
+}
+
+/// The servers that are up, sorted by name: every configured one for `None`,
+/// otherwise the server or the instances of the service group `target` names
+/// (ignoring ASCII case). The configured spelling of the target comes back
+/// with them; an unknown target is `None`.
+pub fn servers<'a>(
+    snapshot: &'a Snapshot,
+    target: Option<&str>,
+) -> Option<(Option<&'a str>, Vec<ServerEntry<'a>>)> {
+    let config = &snapshot.config;
+    let (target, names): (_, Vec<&str>) = match target {
+        None => (None, config.backends.keys().map(String::as_str).collect()),
+        Some(target) => {
+            let target =
+                key(&config.service_groups, target).or_else(|| server(snapshot, target))?;
+            let names = if config.service_groups.contains_key(target) {
+                config
+                    .instances
+                    .iter()
+                    .filter(|(_, instance)| instance.group == target)
+                    .map(|(name, _)| name.as_str())
+                    .collect()
+            } else {
+                vec![target]
+            };
+            (Some(target), names)
+        }
+    };
+    let players = snapshot
+        .players
+        .server_counts_for(rift::players::Viewer::Backend);
+    let entries = names
+        .into_iter()
+        .filter_map(|name| {
+            let state = running_state(snapshot, name)?;
+            let group = config
+                .instances
+                .get(name)
+                .map(|instance| instance.group.as_str());
+            Some(ServerEntry {
+                name,
+                group,
+                state,
+                players: players.get(name).copied().unwrap_or(0),
+                max_players: max_players(snapshot, name, group),
+            })
+        })
+        .collect();
+    Some((target, entries))
+}
+
 fn int(value: usize, data: &mut Vec<u8>) -> io::Result<()> {
     let value = i32::try_from(value).map_err(io::Error::other)?;
     data.extend_from_slice(&value.to_be_bytes());
@@ -276,41 +339,20 @@ pub fn handle(
             strings(&["GetPlayerServer", &player.name, &player.server])?
         }
         Request::RiftServers(target) => {
-            let config = &snapshot.config;
-            let all = target == "ALL";
-            let (target, names) = if all {
-                ("ALL", config.backends.keys().cloned().collect())
-            } else {
-                let Some(target) =
-                    key(&config.service_groups, &target).or_else(|| server(snapshot, &target))
-                else {
-                    return Ok(None);
-                };
-                (target, config.destination_names(target))
+            let Some((target, entries)) =
+                servers(snapshot, (target != "ALL").then_some(target.as_str()))
+            else {
+                return Ok(None);
             };
-            let players = snapshot
-                .players
-                .server_counts_for(rift::players::Viewer::Backend);
-            let mut count = 0;
-            let mut entries = Vec::new();
-            for name in &names {
-                let Some(state) = running_state(snapshot, name) else {
-                    continue;
-                };
-                let group = config
-                    .instances
-                    .get(name)
-                    .map(|instance| instance.group.as_str());
-                write_utf(name, &mut entries)?;
-                write_utf(group.unwrap_or(""), &mut entries)?;
-                write_utf(state, &mut entries)?;
-                int(players.get(name).copied().unwrap_or(0), &mut entries)?;
-                int(max_players(snapshot, name, group), &mut entries)?;
-                count += 1;
+            let mut data = strings(&["RiftServers", target.unwrap_or("ALL")])?;
+            int(entries.len(), &mut data)?;
+            for entry in entries {
+                write_utf(entry.name, &mut data)?;
+                write_utf(entry.group.unwrap_or(""), &mut data)?;
+                write_utf(entry.state, &mut data)?;
+                int(entry.players, &mut data)?;
+                int(entry.max_players, &mut data)?;
             }
-            let mut data = strings(&["RiftServers", target])?;
-            int(count, &mut data)?;
-            data.extend(entries);
             data
         }
         Request::RiftInGroup {

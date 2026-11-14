@@ -30,8 +30,8 @@ frame, code 1 for permission), not by a JSON reply.
 
 ### Principal permissions
 
-Give a backend principal the `backend` preset, which grants exactly what the
-protocol needs:
+Give a backend principal the `backend` preset, which grants what the
+protocol needs, and the [network API](messaging.md#network-api-subjects):
 
 ```lua
 { name = "server.survival-1", token_env = "RIFT_SURVIVAL_1_TOKEN", preset = "backend" }
@@ -46,7 +46,7 @@ Written out, that is:
     publish = {
         "rift.perms.hello", "rift.perms.subject.*", "rift.perms.groups.*",
         "rift.perms.apply", "rift.perms.register", "rift.perms.command",
-        "rift.perms.context",
+        "rift.perms.context", "rift.network.*",
     },
     subscribe = {
         "rift.perms.update", "rift.perms.update.>", "rift.events.permissions",
