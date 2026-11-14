@@ -143,15 +143,47 @@ pub struct Network {
     pub initial: Vec<String>,
     pub hubs: Vec<String>,
     pub access: BTreeMap<String, ServerAccess>,
+    /// The permission node `/server` requires; `None` lets every player use
+    /// it. Access rules still decide which destinations a player may join.
+    pub server_permission: Option<String>,
 }
 
-/// Names are matched without ASCII case. An absent allow list is public; an
-/// explicitly empty allow list denies everyone. A deny entry always wins.
-/// Names are authenticated only when online mode is enabled.
+/// Names are matched without ASCII case. A deny entry always wins. Otherwise
+/// a rule with no allow list, no groups and no permission is public; with any
+/// of them a player needs to match one: be named in `allow`, be in one of
+/// `groups` (directly or inherited) or hold `permission`. An explicitly empty
+/// allow list with neither of the others denies everyone. Names are
+/// authenticated only when online mode is enabled.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ServerAccess {
     pub allow: Option<Vec<String>>,
     pub deny: Vec<String>,
+    /// Permission groups whose members may join, lowercase.
+    pub groups: Vec<String>,
+    /// A permission node whose holders may join.
+    pub permission: Option<String>,
+}
+
+/// What access rules ask about a player beyond their name: the permission
+/// store's answers in the contexts the proxy knows for them.
+pub trait AccessSubject {
+    /// Whether the player is in `group`, directly, inherited or `default`.
+    fn in_group(&self, group: &str) -> bool;
+    /// Whether `node` resolves to `true` for the player.
+    fn holds(&self, node: &str) -> bool;
+}
+
+/// A player known only by name: in no group and holding no node.
+pub struct NameOnly;
+
+impl AccessSubject for NameOnly {
+    fn in_group(&self, _: &str) -> bool {
+        false
+    }
+
+    fn holds(&self, _: &str) -> bool {
+        false
+    }
 }
 
 /// Online authentication and player forwarding are enabled together. Existing
@@ -255,15 +287,26 @@ impl ProxyProtocol {
 }
 
 impl ServerAccess {
-    pub fn permits(&self, username: &str) -> bool {
-        !self
+    pub fn permits(&self, username: &str, subject: &dyn AccessSubject) -> bool {
+        if self
             .deny
             .iter()
             .any(|name| name.eq_ignore_ascii_case(username))
-            && self
-                .allow
-                .as_ref()
-                .is_none_or(|names| names.iter().any(|name| name.eq_ignore_ascii_case(username)))
+        {
+            return false;
+        }
+        if self.allow.is_none() && self.groups.is_empty() && self.permission.is_none() {
+            return true;
+        }
+        self.allow
+            .iter()
+            .flatten()
+            .any(|name| name.eq_ignore_ascii_case(username))
+            || self.groups.iter().any(|group| subject.in_group(group))
+            || self
+                .permission
+                .as_deref()
+                .is_some_and(|node| subject.holds(node))
     }
 }
 
@@ -1350,6 +1393,14 @@ impl Config {
                     }
                 }
             }
+            let mut seen = std::collections::HashSet::new();
+            for group in &access.groups {
+                if !rift_permissions::subject::valid_name(group) || !seen.insert(group) {
+                    return Err(invalid(format!(
+                        "network.access.{backend}.groups: invalid or duplicate group name {group:?}"
+                    )));
+                }
+            }
         }
         for (name, targets) in &self.fallbacks {
             if !self.is_destination(name) {
@@ -1504,19 +1555,27 @@ impl Config {
 
     /// Apply the same rule to initial login, commands and failure recovery.
     /// Unknown destinations are never permitted, even with no access entry.
-    pub fn can_access(&self, backend: &str, username: &str) -> bool {
+    pub fn can_access(&self, backend: &str, username: &str, subject: &dyn AccessSubject) -> bool {
         self.is_destination(backend)
             && self
                 .network
                 .access
                 .get(backend)
-                .is_none_or(|access| access.permits(username))
+                .is_none_or(|access| access.permits(username, subject))
             && self.instances.get(backend).is_none_or(|instance| {
                 self.network
                     .access
                     .get(&instance.group)
-                    .is_none_or(|access| access.permits(username))
+                    .is_none_or(|access| access.permits(username, subject))
             })
+    }
+
+    /// Whether a player may use `/server` at all.
+    pub fn can_use_server_command(&self, subject: &dyn AccessSubject) -> bool {
+        self.network
+            .server_permission
+            .as_deref()
+            .is_none_or(|node| subject.holds(node))
     }
 
     /// The client versions translated for backend `name`: its own setting,
@@ -1612,7 +1671,13 @@ fn network(root: &Table) -> Result<Network, String> {
     let Some(values) = options(
         root,
         "network",
-        &["bungeecord", "initial", "hubs", "access"],
+        &[
+            "bungeecord",
+            "initial",
+            "hubs",
+            "access",
+            "server_permission",
+        ],
     )?
     else {
         return Ok(Network::default());
@@ -1636,9 +1701,11 @@ fn network(root: &Table) -> Result<Network, String> {
             let backend = string(backend, "network.access key")?;
             let path = format!("network.access.{backend}");
             let rule = table(value, &path)?;
-            fields(&rule, &["allow", "deny"], &path)?;
+            fields(&rule, &["allow", "deny", "groups", "permission"], &path)?;
             let allow: Value = rule.get("allow").map_err(|e| e.to_string())?;
             let deny: Value = rule.get("deny").map_err(|e| e.to_string())?;
+            let groups: Value = rule.get("groups").map_err(|e| e.to_string())?;
+            let permission: Value = rule.get("permission").map_err(|e| e.to_string())?;
             network.access.insert(
                 backend,
                 ServerAccess {
@@ -1652,11 +1719,36 @@ fn network(root: &Table) -> Result<Network, String> {
                     } else {
                         string_list(deny, &format!("{path}.deny"), 65536)?
                     },
+                    groups: if groups.is_nil() {
+                        Vec::new()
+                    } else {
+                        string_list(groups, &format!("{path}.groups"), 64)?
+                            .into_iter()
+                            .map(|group| group.to_ascii_lowercase())
+                            .collect()
+                    },
+                    permission: permission_node(permission, &format!("{path}.permission"))?,
                 },
             );
         }
     }
+    let permission: Value = values.get("server_permission").map_err(|e| e.to_string())?;
+    network.server_permission = permission_node(permission, "network.server_permission")?;
     Ok(network)
+}
+
+/// An optional exact permission node, lowercased as the store does.
+fn permission_node(value: Value, path: &str) -> Result<Option<String>, String> {
+    if value.is_nil() {
+        return Ok(None);
+    }
+    let node = string(value, path)?.to_ascii_lowercase();
+    if !rift_permissions::node::valid_node(&node) || node.ends_with('*') {
+        return Err(format!(
+            "{path}: expected a permission node such as \"rift.server.vip\" (no wildcard)"
+        ));
+    }
+    Ok(Some(node))
 }
 
 fn string_list(value: Value, path: &str, maximum: usize) -> Result<Vec<String>, String> {

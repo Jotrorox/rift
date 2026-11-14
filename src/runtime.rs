@@ -46,6 +46,24 @@ enum Policy {
     Hostnames(Routes<String>),
 }
 
+/// See [`Snapshot::subject`].
+pub struct StoreSubject<'a> {
+    permissions: &'a rift::permissions::Authority,
+    uuid: Option<Uuid>,
+}
+
+impl rift::config::AccessSubject for StoreSubject<'_> {
+    fn in_group(&self, group: &str) -> bool {
+        self.uuid
+            .is_some_and(|uuid| self.permissions.in_group(uuid, group))
+    }
+
+    fn holds(&self, node: &str) -> bool {
+        self.uuid
+            .is_some_and(|uuid| self.permissions.check_active(uuid, node) == Tristate::True)
+    }
+}
+
 pub struct Snapshot {
     pub config: Config,
     generation: u64,
@@ -264,7 +282,24 @@ impl Snapshot {
     /// group): the configured access rules, then the dev mode of the
     /// service group it belongs to.
     pub fn admits(&self, backend: &str, username: &str, uuid: Option<Uuid>) -> bool {
-        self.config.can_access(backend, username) && self.dev_admits(backend, uuid)
+        self.config
+            .can_access(backend, username, &self.subject(uuid))
+            && self.dev_admits(backend, uuid)
+    }
+
+    /// The permission store's view of a player for access rules: global
+    /// nodes and the contexts the proxy knows for them. Without a UUID the
+    /// player is in no group and holds nothing.
+    pub fn subject(&self, uuid: Option<Uuid>) -> StoreSubject<'_> {
+        StoreSubject {
+            permissions: self.extensions.permissions(),
+            uuid,
+        }
+    }
+
+    /// Whether the player may use `/server` at all.
+    pub fn may_use_server_command(&self, uuid: Option<Uuid>) -> bool {
+        self.config.can_use_server_command(&self.subject(uuid))
     }
 
     /// A group in dev mode admits only players granted its dev permission.
@@ -1081,8 +1116,9 @@ pub async fn handle(
                         continue;
                     }
                     let name = session.player_name().unwrap_or_default();
-                    if snapshot.config.network.access.get(target).is_some_and(|access| !access.permits(name))
-                        || !request.snapshot.admits(target, name, crate::network::expected_uuid(&session))
+                    let uuid = crate::network::expected_uuid(&session);
+                    if snapshot.config.network.access.get(target).is_some_and(|access| !access.permits(name, &snapshot.subject(uuid)))
+                        || !request.snapshot.admits(target, name, uuid)
                         || control.draining(&request.snapshot.config, target)
                         || !request.snapshot.reachable(target)
                     {
