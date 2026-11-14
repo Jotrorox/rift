@@ -293,6 +293,10 @@ assertTrue(player.hasPermission("kits.starter"));
    fallback_file: fallback.json
    vault: true
    placeholders: true
+   chat:
+     enabled: false              # format chat with prefixes and suffixes
+   tab:
+     enabled: false              # decorate and sort the tab list
    ```
 
 RiftPerms waits for a joining player's snapshot during
@@ -366,6 +370,57 @@ highest one the subject has, so it wins.
 | `%rift_meta_<key>%` | A meta value, or empty |
 | `%rift_has_permission_<node>%` | `true` or `false` |
 | `%rift_in_group_<name>%` | `true` or `false`, inherited groups included |
+
+### Chat and tab list
+
+RiftPerms can show prefixes and suffixes itself, so a server needs no chat or
+tab plugin for rank tags. Both features are off by default and when their
+section is missing, which leaves the chat and tab plugins of an existing
+install alone:
+
+```yaml
+chat:
+  enabled: true
+  format: "{prefix}{name}{suffix}&7: &r{message}"
+tab:
+  enabled: true
+  format: "{prefix}{name}{suffix}"   # "" leaves the names alone
+  sort: true                         # by primary group weight
+```
+
+| Placeholder | Value |
+| --- | --- |
+| `{prefix}`, `{suffix}` | The winning prefix or suffix in the player's current contexts, or nothing |
+| `{name}` | The player's name |
+| `{display_name}` | The display name, as other plugins set it |
+| `{group}` | The primary group |
+| `{message}` | The chat message; `chat.format` only, and required there |
+
+Formats are legacy text like the prefixes themselves: `&` colour and style
+codes and `&#rrggbb`. A prefix is inserted before the line is parsed, so
+`&6[VIP] ` colours the name after it; put `&r` or a colour in front of what
+should not inherit. Names, display names and messages are inserted as
+finished components and never parsed, so `&c` or `{prefix}` typed into chat
+stays text and a player cannot add click or hover events. Players with the
+`rift.chat.color` permission (granted to nobody by default, operators
+included) may use the legacy codes in their messages, which can carry colours
+and styles and nothing else.
+
+The chat format is a renderer set on Paper's `AsyncChatEvent` at priority
+`LOW`; a chat plugin that sets its own renderer afterwards wins. A
+`chat.format` without `{message}` keeps RiftPerms disabled, like every other
+invalid setting.
+
+The tab list is sorted by the weight of each player's primary group, heaviest
+first; among equals the client's usual order applies (spectators last, then
+by name). RiftPerms sets the player list order the 1.21.2 protocol
+introduced rather than scoreboard teams, so name tags, collision rules and
+other plugins' teams are not involved and it works on Folia. On Paper 1.21
+and 1.21.1 that order does not exist: names are still decorated, RiftPerms
+logs one warning and the list keeps the client's alphabetical order. Entries
+follow the player: they are redone on join, on a world or game mode change
+(contexts may select another prefix), when the player's snapshot changes and
+when group weights change, and reset when RiftPerms is disabled.
 
 ### `/perms`
 

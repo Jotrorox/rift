@@ -1,6 +1,7 @@
 package io.github.jotrorox.rift.permissions.paper;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -52,5 +53,46 @@ class PaperConfigTest {
         IllegalArgumentException missing = assertThrows(IllegalArgumentException.class,
                 () -> PaperConfig.load(new YamlConfiguration(), FOLDER, name -> null));
         assertTrue(missing.getMessage().contains("RIFT_BUS_ADDRESS"), missing.getMessage());
+    }
+
+    @Test
+    void chatAndTabStayOffUntilEnabled() throws Exception {
+        YamlConfiguration yaml = new YamlConfiguration();
+        PaperConfig absent = PaperConfig.load(yaml, FOLDER, RIFT::get);
+        assertFalse(absent.chat().enabled());
+        assertFalse(absent.tab().enabled());
+
+        // A section without "enabled" is still off, and a broken format is not looked at.
+        yaml.loadFromString("chat:\n  format: '{name}'\ntab:\n  sort: true\n");
+        PaperConfig off = PaperConfig.load(yaml, FOLDER, RIFT::get);
+        assertFalse(off.chat().enabled());
+        assertFalse(off.tab().enabled());
+
+        yaml.loadFromString("chat:\n  enabled: true\ntab:\n  enabled: true\n");
+        PaperConfig defaults = PaperConfig.load(yaml, FOLDER, RIFT::get);
+        assertEquals(new PaperConfig.Chat(true, "{prefix}{name}{suffix}&7: &r{message}"), defaults.chat());
+        assertEquals(new PaperConfig.Tab(true, "{prefix}{name}{suffix}", true), defaults.tab());
+
+        yaml.loadFromString("chat:\n  enabled: true\n  format: '{display_name} > {message}'\n"
+                + "tab:\n  enabled: true\n  format: ''\n  sort: false\n");
+        PaperConfig custom = PaperConfig.load(yaml, FOLDER, RIFT::get);
+        assertEquals("{display_name} > {message}", custom.chat().format());
+        assertEquals(new PaperConfig.Tab(true, "", false), custom.tab());
+
+        yaml.loadFromString("chat:\n  enabled: true\n  format: '{name}: hello'\n");
+        IllegalArgumentException format = assertThrows(IllegalArgumentException.class,
+                () -> PaperConfig.load(yaml, FOLDER, RIFT::get));
+        assertTrue(format.getMessage().contains("{message}"), format.getMessage());
+    }
+
+    @Test
+    void theShippedConfigurationLeavesChatAndTabOff() throws Exception {
+        YamlConfiguration yaml = new YamlConfiguration();
+        try (java.io.InputStream in = PaperConfig.class.getResourceAsStream("/config.yml")) {
+            yaml.loadFromString(new String(in.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8));
+        }
+        PaperConfig shipped = PaperConfig.load(yaml, FOLDER, RIFT::get);
+        assertEquals(new PaperConfig.Chat(false, PaperConfig.Chat.DEFAULT_FORMAT), shipped.chat());
+        assertEquals(new PaperConfig.Tab(false, PaperConfig.Tab.DEFAULT_FORMAT, true), shipped.tab());
     }
 }
