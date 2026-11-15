@@ -128,6 +128,7 @@ admin = {
     permissions = { "status", "servers", "maintenance", "drain", "transfer", "reload", "shutdown", "plugins", "logs", "perms" },
 },
 maintenance = false,
+maintenance_permission = "rift.maintenance.bypass", -- Omit to turn everyone away.
 draining = {}, -- For example, { "survival" } blocks new attachments to survival.
 metrics = "127.0.0.1:9090",
 login_rate_limit = {
@@ -645,6 +646,21 @@ status. Backend draining preserves players already attached, prevents new
 attachments to that backend (including fallback and explicit transfers), and
 allows eligible configured fallbacks to accept new players. Wait for the backend
 player count to reach zero or transfer supported clients before stopping it.
+
+To let staff in during maintenance, name a permission node:
+
+```lua
+maintenance_permission = "rift.maintenance.bypass",
+```
+
+Players for whom the node resolves to `true` (granted directly, through a
+group or by a wildcard such as `rift.*`) log in as usual; everyone else gets
+the maintenance message. Only global grants count, as for
+[server access](permissions.md#server-access) at login. Without the option
+logins are refused before the player is identified. With it Rift reads the
+login and, in online mode, authenticates it first, so each refused login costs
+a Mojang session lookup; the login rate limit still applies beforehand. In
+offline mode names are unverified, so anyone claiming a staff name passes.
 
 For a managed backend, check both players and attachments before stopping:
 

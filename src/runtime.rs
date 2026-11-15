@@ -297,6 +297,15 @@ impl Snapshot {
         }
     }
 
+    /// Whether the player may log in during maintenance.
+    pub fn bypasses_maintenance(&self, uuid: Option<Uuid>) -> bool {
+        use rift::config::AccessSubject;
+        self.config
+            .maintenance_permission
+            .as_deref()
+            .is_some_and(|node| self.subject(uuid).holds(node))
+    }
+
     /// Whether the player may use `/server` at all.
     pub fn may_use_server_command(&self, uuid: Option<Uuid>) -> bool {
         self.config.can_use_server_command(&self.subject(uuid))
@@ -457,6 +466,9 @@ pub async fn handle(
             snapshot.generation,
             Instant::now(),
         );
+        // With a bypass node, maintenance is decided once the player's
+        // identity is known; without one nobody gets that far.
+        let maintenance = maintenance && snapshot.config.maintenance_permission.is_none();
         if maintenance || !login_allowed {
             let reason = if maintenance {
                 metrics.access_rejected.inc();
@@ -681,7 +693,8 @@ pub async fn handle(
         let tracked_login = network_configured
             || !snapshot.config.managed_servers.is_empty()
             || snapshot.authenticator.is_some()
-            || snapshot.perms.has_principals();
+            || snapshot.perms.has_principals()
+            || snapshot.config.maintenance_permission.is_some();
         let network_enabled = session.switch_supported() && network_configured;
         // Proxy-side checks see the dimension and game mode the backend sends.
         session.track_permission_contexts(snapshot.extensions.permissions().clone());
@@ -745,6 +758,20 @@ pub async fn handle(
                 peer_ip,
             )?;
             event.failure = "io_error";
+        }
+        // The identity is now as confirmed as it gets, and no extension,
+        // reservation or backend has seen the login yet.
+        if snapshot.control.maintenance(&snapshot.config)
+            && !snapshot.bypasses_maintenance(crate::network::expected_uuid(&session))
+        {
+            metrics.access_rejected.inc();
+            event.reject("maintenance", "network is in maintenance mode");
+            let _ = timeout(
+                HANDSHAKE_TIMEOUT,
+                session.disconnect_text(&catalog::notice(Notice::LoginMaintenance)),
+            )
+            .await;
+            return Ok((session.client.io.sent, session.client.io.received));
         }
         let mut extension_selection = None;
         if snapshot.config.player_hooks() {

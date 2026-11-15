@@ -96,6 +96,9 @@ pub struct Config {
     pub metrics: Option<SocketAddr>,
     pub admin: Option<Admin>,
     pub maintenance: bool,
+    /// The permission node whose holders may log in during maintenance;
+    /// `None` turns everyone away before their identity is known.
+    pub maintenance_permission: Option<String>,
     pub draining: BTreeSet<String>,
     /// Whether players may join backends that run another Minecraft version.
     pub translation: Translation,
@@ -556,6 +559,7 @@ impl Config {
             metrics: None,
             admin: None,
             maintenance: false,
+            maintenance_permission: None,
             draining: BTreeSet::new(),
             translation: Translation::default(),
             web: None,
@@ -726,6 +730,7 @@ impl Config {
                     "metrics",
                     "admin",
                     "maintenance",
+                    "maintenance_permission",
                     "draining",
                     "translation",
                     "web",
@@ -991,6 +996,11 @@ impl Config {
                 Value::Boolean(value) => value,
                 _ => return Err("maintenance: expected a boolean".into()),
             };
+            let maintenance_permission = permission_node(
+                root.get("maintenance_permission")
+                    .map_err(|e| e.to_string())?,
+                "maintenance_permission",
+            )?;
             let draining = match root.get::<Value>("draining").map_err(|e| e.to_string())? {
                 Value::Nil => BTreeSet::new(),
                 value => string_set(value, "draining")?,
@@ -1095,6 +1105,7 @@ impl Config {
                 metrics,
                 admin,
                 maintenance,
+                maintenance_permission,
                 draining,
                 translation,
                 web,
