@@ -12,3 +12,9 @@ type OptionStringShape struct {
 	_     cm.HostLayout
 	shape [unsafe.Sizeof(cm.Option[string]{})]byte
 }
+
+// TextShape is used for storage in variant or result types.
+type TextShape struct {
+	_     cm.HostLayout
+	shape [unsafe.Sizeof(Text{})]byte
+}

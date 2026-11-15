@@ -198,7 +198,10 @@ last error; they need `status`. `rift admin plugins logs <name>` shows a
 plugin's last 200 log lines and needs `logs`, like the HTTP log endpoints. `rift admin plugins restart <name>` stops a persistent plugin and
 starts a fresh instance with its current configuration; it needs the `plugins`
 permission, returns once the restart is accepted, and is recorded in the
-operator audit log with the plugin name.
+operator audit log with the plugin name. `rift admin plugins run <command>
+[arguments]` runs a persistent plugin's [command](plugins.md#commands) that is
+registered with `console` and prints the command's message; it needs the
+`plugins` permission too.
 
 Connection `rate_limit` runs before handshake parsing. `login_rate_limit` runs
 at login admission and has the same token-bucket fields and defaults; it allows
@@ -328,6 +331,22 @@ updates show again. Extensions can set a player's header and footer with
 `rift.players.tab_list` (see [online players](extensions.md#online-players)).
 The tab list works on every Minecraft version Rift can switch players on
 (1.8.9–26.3).
+
+## The player directory
+
+Rift remembers every player who joined, in `rift.sqlite3` beside the
+permission store: UUID, name, first and last seen, the last server, the
+language a plugin set and the address the player last joined from. Plugins and
+the configuration script read it with
+[`players.lookup` and `players.search`](plugins.md#the-player-directory-and-languages).
+
+```lua
+rift.config.players = { record_ip = false }
+```
+
+`record_ip` (default `true`) decides whether joins store the address. With
+`false`, `last_ip` is empty: a join stores no address and clears the one
+stored for that player before. The setting applies on reload.
 
 ## Run behind a load balancer (PROXY protocol)
 

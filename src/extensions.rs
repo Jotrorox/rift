@@ -25,7 +25,7 @@ mod integrations;
 pub(crate) mod players;
 mod scheduler;
 pub(crate) mod storage;
-pub use players::{PlayerAction, PlayerHandle, Players};
+pub use players::{PlayerAction, PlayerHandle, Players, Profile};
 pub use scheduler::Scheduler;
 
 const HOOKS: &[&str] = &[
@@ -40,10 +40,13 @@ const HOOKS: &[&str] = &[
     "kick",
 ];
 
+/// What `ctx.api_version` reports. The script API is no longer versioned;
+/// the field stays for scripts that read it.
+pub const API_VERSION: u8 = 3;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExtensionScript {
     source: script::ScriptSource,
-    api_version: u8,
     storage: Option<storage::StorageConfig>,
     integrations: integrations::Integrations,
     jobs: BTreeMap<String, Duration>,
@@ -156,7 +159,7 @@ impl ExtensionScript {
     /// `extensions.groups` with the field names of the configuration. API v1
     /// has no groups.
     pub fn permission_groups(&self) -> Option<serde_json::Value> {
-        (self.api_version >= 2).then(|| groups::value(&self.groups))
+        Some(groups::value(&self.groups))
     }
 
     /// The groups the configuration defines, as mirrored into the store.
@@ -182,20 +185,18 @@ impl ExtensionScript {
         integrations::check_environment(&self.integrations)
     }
 
-    /// Whether a reload can replace `old` with `new`: enablement, API version,
-    /// storage path and quotas, and queue capacities are fixed until a restart.
+    /// Whether a reload can replace `old` with `new`: enablement, storage
+    /// path and quotas, and queue capacities are fixed until a restart.
     pub fn live_compatible(old: Option<&Self>, new: Option<&Self>) -> Result<(), String> {
         match (old, new) {
             (Some(old), Some(new))
-                if old.api_version == new.api_version
-                    && old.storage == new.storage
-                    && old.queues == new.queues =>
+                if old.storage == new.storage && old.queues == new.queues =>
             {
                 Ok(())
             }
             (None, None) => Ok(()),
             _ => Err(
-                "extension enablement, API version, storage path and quotas, and queue capacities require a restart"
+                "extension enablement, storage path and quotas, and queue capacities require a restart"
                     .into(),
             ),
         }
@@ -236,14 +237,16 @@ impl ExtensionScript {
         let Value::Table(table) = value else {
             return Err(mlua::Error::runtime("extensions must be a table"));
         };
-        let api_version = match table.raw_get::<Value>("api_version")? {
-            Value::Integer(version @ 1..=3) => version as u8,
+        // There is one script API. `api_version` named the level a script
+        // was written for (1, 2 or 3); it is still accepted, and ignored.
+        match table.raw_get::<Value>("api_version")? {
+            Value::Nil | Value::Integer(1..=3) => {}
             _ => {
                 return Err(mlua::Error::runtime(
-                    "extensions.api_version must be 1, 2 or 3",
+                    "extensions.api_version is no longer needed; leave it out (1, 2 and 3 are still accepted)",
                 ));
             }
-        };
+        }
         fields(
             &table,
             &[
@@ -269,34 +272,6 @@ impl ExtensionScript {
                 "context_providers",
             ],
         )?;
-        if api_version == 1 {
-            for name in [
-                "storage",
-                "integrations",
-                "jobs",
-                "groups",
-                "decisions",
-                "dialog",
-            ] {
-                if !table.raw_get::<Value>(name)?.is_nil() {
-                    return Err(mlua::Error::runtime(format!(
-                        "extensions.{name} requires api_version = 2 or later"
-                    )));
-                }
-            }
-        }
-        if api_version < 3 {
-            for (name, api) in [
-                ("on_permission_change", "rift.permissions.on_change"),
-                ("context_providers", "rift.permissions.contexts.provide"),
-            ] {
-                if !table.raw_get::<Value>(name)?.is_nil() {
-                    return Err(mlua::Error::runtime(format!(
-                        "extensions.{name} ({api}) requires api_version = 3"
-                    )));
-                }
-            }
-        }
         let mut storage = storage::parse(table.raw_get("storage")?)?;
         if let Some(storage) = &mut storage
             && storage.path.is_relative()
@@ -415,7 +390,6 @@ impl ExtensionScript {
         }
         Ok(Some(Self {
             source: source.clone(),
-            api_version,
             storage,
             integrations,
             jobs,
@@ -486,7 +460,7 @@ impl ExtensionScript {
                 return Ok(denied());
             }
             let ctx = lua.create_table()?;
-            ctx.set("api_version", self.api_version)?;
+            ctx.set("api_version", API_VERSION)?;
             if hook == "job" {
                 ctx.set("job", input.command.as_deref())?;
                 let value: Value = callback.call(ctx)?;
@@ -500,6 +474,7 @@ impl ExtensionScript {
             ctx.set("listener", input.listener.as_str())?;
             ctx.set("hostname", input.hostname.as_str())?;
             ctx.set("peer_ip", input.peer_ip.as_str())?;
+            ctx.set("language", input.language.as_deref())?;
             ctx.set("protocol", input.protocol)?;
             ctx.set("server", input.server.as_deref())?;
             ctx.set("default_server", input.default_server.as_deref())?;
@@ -546,15 +521,13 @@ impl ExtensionScript {
     ) -> mlua::Result<(mlua::Lua, Table)> {
         let (lua, root) = script::load(&self.source, deadline)?;
         script::install_messaging(&lua, Some(runtime.broker.clone()), deadline)?;
-        if self.api_version >= 2 {
+        {
             let api: Table = lua.named_registry_value("rift.runtime")?;
             runtime.store.install(&lua, &api, deadline)?;
             runtime.players.install(&lua, &api, deadline)?;
             integrations::install(&lua, &api, &self.integrations, deadline)?;
-            if self.api_version == 3 {
-                let actor = Actor::Lua(actor.to_owned());
-                permissions::lua::install(&lua, &api, &runtime.permissions, actor, deadline)?;
-            }
+            let actor = Actor::Lua(actor.to_owned());
+            permissions::lua::install(&lua, &api, &runtime.permissions, actor, deadline)?;
         }
         let Value::Table(root) = root else {
             return Err(mlua::Error::runtime("configuration must return a table"));
@@ -830,6 +803,13 @@ pub struct Context {
     /// hold its root name and the rest.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chat: Option<ChatInput>,
+    /// The language a plugin set for the player, known from `login` on,
+    /// else the client's locale once it is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    /// `command`/`suggest`: the operator console runs the command.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub console: bool,
 }
 
 /// What a player sent through the chat box.
@@ -923,6 +903,8 @@ pub struct Extensions {
     permissions: Arc<Authority>,
     /// This generation's `permissions` section, applied on activation.
     permissions_config: PermissionsConfig,
+    /// `players.record_ip` of this configuration.
+    record_ip: bool,
     players: Players,
     job_gates: Arc<Mutex<BTreeMap<String, Weak<Semaphore>>>>,
     /// The dispatch chain: this script, persistent plugins, bus responders.
@@ -1066,6 +1048,7 @@ impl Extensions {
             store,
             permissions,
             permissions_config: config.permissions.clone(),
+            record_ip: config.record_ip,
             job_gates: previous.map_or_else(
                 || Arc::new(Mutex::new(BTreeMap::new())),
                 |p| p.job_gates.clone(),
@@ -1113,13 +1096,10 @@ impl Extensions {
         &self.players
     }
 
-    /// The directory for Lua outside extension callbacks; API v2 and later
-    /// expose it.
+    /// The directory for Lua outside extension callbacks, when the
+    /// configuration has extensions.
     pub fn player_api(&self) -> Option<Players> {
-        self.script
-            .as_ref()
-            .filter(|script| script.api_version >= 2)
-            .map(|_| self.players.clone())
+        self.script.as_ref().map(|_| self.players.clone())
     }
 
     #[cfg(test)]
@@ -1145,12 +1125,9 @@ impl Extensions {
     /// the store, once the configuration transaction has committed.
     pub fn activate(&self) {
         self.permissions.configure(&self.permissions_config);
+        self.players.set_record_ip(self.record_ip);
         let empty = BTreeMap::new();
-        let groups = self
-            .script
-            .as_ref()
-            .filter(|script| script.api_version >= 2)
-            .map_or(&empty, |script| &script.groups);
+        let groups = self.script.as_ref().map_or(&empty, |script| &script.groups);
         if let Err(error) = self.permissions.mirror_config(groups) {
             eprintln!(
                 "rift: extensions.groups could not be mirrored into the permission store: {error}"
@@ -1166,7 +1143,7 @@ impl Extensions {
     }
 
     /// Whether the player may see and run a command with this `permission`.
-    /// An empty permission (contract 0.1.5) is open to every player and is
+    /// An empty permission is open to every player and is
     /// never looked up as a node.
     fn permits_command(&self, uuid: &str, permission: &str) -> bool {
         permission.is_empty() || self.permits(uuid, permission)
@@ -1178,10 +1155,12 @@ impl Extensions {
         self.script.is_some() || self.plugins.has_plugins()
     }
 
-    pub fn session(&self, context: Context) -> Option<ExtensionSession> {
+    pub fn session(&self, mut context: Context) -> Option<ExtensionSession> {
         if !self.enabled() {
             return None;
         }
+        // Known before the client says anything: what a plugin set earlier.
+        context.language = self.players.stored_language(&context.uuid);
         Some(ExtensionSession {
             runtime: self.clone(),
             context,
@@ -1352,7 +1331,7 @@ impl ExtensionSession {
                     .plugins
                     .plugin_commands()
                     .into_iter()
-                    .map(|command| command.name),
+                    .flat_map(|command| command.names().map(str::to_owned).collect::<Vec<_>>()),
             )
             .collect()
     }
@@ -1382,9 +1361,12 @@ impl ExtensionSession {
                     .plugin_commands()
                     .into_iter()
                     .filter(|command| self.runtime.permits_command(uuid, &command.permission))
-                    .map(|command| {
+                    .flat_map(|command| {
                         let suggests = command.suggest != crate::plugins::api::SuggestKind::None;
-                        (command.name, suggests)
+                        command
+                            .names()
+                            .map(|name| (name.to_owned(), suggests))
+                            .collect::<Vec<_>>()
                     }),
             )
             .collect()
@@ -1424,7 +1406,8 @@ impl ExtensionSession {
                     SuggestKind::Servers => return Ok(complete_names(servers(), word)),
                     SuggestKind::Dynamic => {
                         let mut input = self.context.clone();
-                        input.command = Some(name.into());
+                        // The plugin sees the command's own name for an alias.
+                        input.command = Some(command.name.clone());
                         input.args = args.into();
                         input.word = word.into();
                         input.position = args.split(' ').count();
@@ -1502,7 +1485,9 @@ impl ExtensionSession {
         input.args = args.trim().into();
         match owner {
             CommandOwner::Script => self.runtime.call("command", &input, &self.jobs).await,
-            CommandOwner::Plugin(instance, _) => {
+            CommandOwner::Plugin(instance, command) => {
+                // The plugin sees the command's own name for an alias.
+                input.command = Some(command.name);
                 let action = self.runtime.plugins.command(&instance, input).await?;
                 self.runtime.known_destination(action)
             }
@@ -1667,7 +1652,7 @@ impl ExtensionSession {
         let Ok(uuid) = Uuid::parse(&self.context.uuid) else {
             return;
         };
-        if script.api_version < 3 || script.context_providers.is_empty() {
+        if script.context_providers.is_empty() {
             return;
         }
         let provided = self

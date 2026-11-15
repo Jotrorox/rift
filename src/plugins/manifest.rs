@@ -1,7 +1,7 @@
 //! `plugin.toml`: what an installed plugin is, how it runs and what it may
 //! touch. Parsing is strict: unknown keys, keys that do not apply to the
 //! selected mode or engine, and out-of-range values are errors.
-use super::api::{API_VERSION, Hook};
+use super::api::{API_VERSION, CONTRACT_VERSION, Hook, parse_version};
 use serde::Deserialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -23,6 +23,10 @@ pub const MAX_BYTES: usize = 64 * 1024;
 const INIT: Duration = Duration::from_secs(30);
 const RELOAD: Duration = Duration::from_secs(5);
 const SHUTDOWN: Duration = Duration::from_secs(10);
+/// One background job.
+const WORK: Duration = Duration::from_secs(30);
+/// Most background workers one plugin may ask for.
+pub const MAX_WORKERS: u32 = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -140,6 +144,9 @@ pub struct Manifest {
     pub name: String,
     pub version: String,
     pub api: String,
+    /// The lowest `rift:plugin` version the plugin runs on, such as
+    /// `0.2.1`, when it needs more than the first release of its track.
+    pub min_api: Option<String>,
     pub mode: Mode,
     /// `None` only for `mode = "script"`.
     pub engine: Option<EngineKind>,
@@ -154,6 +161,23 @@ pub struct Manifest {
     pub lua: Option<LuaOptions>,
     /// `Some` exactly for `engine = "wasm"`.
     pub wasm: Option<WasmOptions>,
+    pub background: Background,
+}
+
+/// `[background]`: workers for jobs queued with `background.run`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Background {
+    /// How many worker instances run jobs; 0 means none.
+    pub workers: u32,
+    /// Lua only: the worker script, relative to the plugin folder.
+    pub entry: Option<PathBuf>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawBackground {
+    workers: Option<i64>,
+    entry: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -162,6 +186,8 @@ struct Raw {
     name: String,
     version: String,
     api: String,
+    min_api: Option<String>,
+    background: Option<RawBackground>,
     mode: Option<String>,
     engine: Option<String>,
     entry: Option<String>,
@@ -225,7 +251,7 @@ fn policy(value: Option<String>, field: &str) -> Result<Option<Policy>, String> 
 /// Upper bounds per deadline key, in milliseconds.
 fn deadline_limit(key: &str) -> Option<u64> {
     match key {
-        "init" => Some(300_000),
+        "init" | "work" => Some(300_000),
         "reload" | "shutdown" | "http" => Some(60_000),
         _ => match Hook::parse(key) {
             Some(hook) if !hook.is_observer() => Some(10_000),
@@ -273,10 +299,30 @@ impl Manifest {
             );
         }
         if raw.api != API_VERSION {
+            let hint = if raw.api == "0.1" {
+                "; rift:plugin 0.2 replaced 0.1 (see docs/plugins.md, \"Moving from 0.1\"): update the plugin, rebuild a WebAssembly component against the 0.2 SDK and set api = \"0.2\""
+            } else {
+                ""
+            };
             return Err(format!(
-                "api {:?} is not supported; this Rift implements rift:plugin {API_VERSION}",
+                "api {:?} is not supported; this Rift implements rift:plugin {API_VERSION}{hint}",
                 raw.api
             ));
+        }
+        if let Some(min_api) = &raw.min_api {
+            let wanted = parse_version(min_api)
+                .filter(|_| min_api.starts_with(&format!("{API_VERSION}.")))
+                .ok_or_else(|| {
+                    format!(
+                        "min_api must be a rift:plugin {API_VERSION} version such as \"{CONTRACT_VERSION}\""
+                    )
+                })?;
+            let have = parse_version(CONTRACT_VERSION).unwrap_or_default();
+            if wanted > have {
+                return Err(format!(
+                    "the plugin needs rift:plugin {min_api} or newer; this Rift implements {CONTRACT_VERSION}. Update Rift"
+                ));
+            }
         }
         let mode = match raw.mode.as_deref() {
             None | Some("persistent") => Mode::Persistent,
@@ -293,6 +339,7 @@ impl Manifest {
                 (raw.capabilities.is_some(), "capabilities"),
                 (raw.lua.is_some(), "lua"),
                 (raw.wasm.is_some(), "wasm"),
+                (raw.background.is_some(), "background"),
             ] {
                 if present {
                     return Err(format!(
@@ -304,6 +351,7 @@ impl Manifest {
                 name: raw.name,
                 version: raw.version,
                 api: raw.api,
+                min_api: raw.min_api,
                 mode,
                 engine: None,
                 entry: None,
@@ -315,6 +363,7 @@ impl Manifest {
                 capabilities: Capabilities::default(),
                 lua: None,
                 wasm: None,
+                background: Background::default(),
             });
         }
         let engine = match raw.engine.as_deref() {
@@ -403,10 +452,37 @@ impl Manifest {
                 })
             }
         };
+        let background = match raw.background {
+            None => Background::default(),
+            Some(raw) => {
+                let workers = raw.workers.unwrap_or(1);
+                if !(0..=i64::from(MAX_WORKERS)).contains(&workers) {
+                    return Err(format!("background.workers must be 0..={MAX_WORKERS}"));
+                }
+                let entry = match (raw.entry, engine) {
+                    (Some(_), EngineKind::Wasm) => {
+                        return Err(
+                            "background.entry applies only to engine = \"lua\": a WebAssembly worker is another instance of the component"
+                                .into(),
+                        );
+                    }
+                    (entry, EngineKind::Lua) => {
+                        Some(relative_entry(entry.as_deref().unwrap_or("worker.lua"))?)
+                    }
+                    (None, EngineKind::Wasm) => None,
+                };
+                Background {
+                    workers: workers as u32,
+                    entry,
+                }
+            }
+        };
         Ok(Self {
             name: raw.name,
             version: raw.version,
             api: raw.api,
+            min_api: raw.min_api,
+            background,
             mode,
             engine: Some(engine),
             entry: Some(entry),
@@ -443,6 +519,16 @@ impl Manifest {
             Hook::Http => 5000,
             _ => unreachable!("observers have no deadline"),
         }))
+    }
+
+    /// How many background workers the plugin runs.
+    pub fn background_workers(&self) -> u32 {
+        self.background.workers
+    }
+
+    /// How long one background job may run.
+    pub fn work_deadline(&self) -> Duration {
+        self.deadlines.get("work").copied().unwrap_or(WORK)
     }
 
     pub fn init_deadline(&self) -> Duration {
@@ -601,7 +687,7 @@ fn capabilities(raw: RawCapabilities) -> Result<Capabilities, String> {
 mod tests {
     use super::*;
 
-    const MINIMAL: &str = "name = \"relaxoban\"\nversion = \"0.3.1\"\napi = \"0.1\"\nengine = \"wasm\"\nentry = \"relaxoban.wasm\"\n";
+    const MINIMAL: &str = "name = \"relaxoban\"\nversion = \"0.3.1\"\napi = \"0.2\"\nengine = \"wasm\"\nentry = \"relaxoban.wasm\"\n";
 
     #[test]
     fn defaults_follow_the_contract() {
@@ -649,7 +735,7 @@ mod tests {
             "filesystem=data network=yes env=all"
         );
         let lua = Manifest::parse(
-            "name = \"a\"\nversion = \"1\"\napi = \"0.1\"\nengine = \"lua\"\n",
+            "name = \"a\"\nversion = \"1\"\napi = \"0.2\"\nengine = \"lua\"\n",
             "a",
         )
         .unwrap();
@@ -686,7 +772,7 @@ mod tests {
                 r#"
 name = "relaxoban"
 version = "0.3.1"
-api = "0.1"
+api = "0.2"
 mode = "persistent"
 engine = "lua"
 entry = "src/main.lua"
@@ -727,7 +813,7 @@ jit = false
             )
         );
         let script = Manifest::parse(
-            "name = \"a\"\nversion = \"1\"\napi = \"0.1\"\nmode = \"script\"\n",
+            "name = \"a\"\nversion = \"1\"\napi = \"0.2\"\nmode = \"script\"\n",
             "a",
         )
         .unwrap();
@@ -737,7 +823,7 @@ jit = false
 
     #[test]
     fn invalid_manifests_are_rejected() {
-        let base = "name = \"a\"\nversion = \"1\"\napi = \"0.1\"\n";
+        let base = "name = \"a\"\nversion = \"1\"\napi = \"0.2\"\n";
         for (extra, folder) in [
             ("engine = \"lua\"\ntypo = 1\n", "a"),
             ("engine = \"lua\"\n", "b"),
@@ -795,10 +881,10 @@ jit = false
             assert!(Manifest::parse(&text, folder).is_err(), "{text}");
         }
         for text in [
-            "version = \"1\"\napi = \"0.1\"\nengine = \"lua\"\n",
-            "name = \"a\"\nversion = \"1 2\"\napi = \"0.1\"\nengine = \"lua\"\n",
-            "name = \"a\"\nversion = \"1\"\napi = \"0.2\"\nengine = \"lua\"\n",
-            "name = \"a/b\"\nversion = \"1\"\napi = \"0.1\"\nengine = \"lua\"\n",
+            "version = \"1\"\napi = \"0.2\"\nengine = \"lua\"\n",
+            "name = \"a\"\nversion = \"1 2\"\napi = \"0.2\"\nengine = \"lua\"\n",
+            "name = \"a\"\nversion = \"1\"\napi = \"0.3\"\nengine = \"lua\"\n",
+            "name = \"a/b\"\nversion = \"1\"\napi = \"0.2\"\nengine = \"lua\"\n",
             "name = [\n",
         ] {
             assert!(Manifest::parse(text, "a").is_err(), "{text}");
@@ -806,5 +892,75 @@ jit = false
         let error =
             Manifest::parse(&format!("{base}engine = \"lua\"\ntypo = 1\n"), "a").unwrap_err();
         assert!(error.contains("typo"), "{error}");
+    }
+    #[test]
+    fn min_api_names_a_version_of_the_track_this_rift_has() {
+        let with = |line: &str| Manifest::parse(&format!("{MINIMAL}{line}\n"), "relaxoban");
+        assert_eq!(
+            with("min_api = \"0.2.0\"").unwrap().min_api.as_deref(),
+            Some("0.2.0")
+        );
+        assert_eq!(Manifest::parse(MINIMAL, "relaxoban").unwrap().min_api, None);
+        let newer = with("min_api = \"0.2.99\"").unwrap_err();
+        assert!(
+            newer.contains("needs rift:plugin 0.2.99") && newer.contains("Update Rift"),
+            "{newer}"
+        );
+        for invalid in ["0.2", "0.3.0", "0.1.5", "0.2.x", "0.2.0.1", "v0.2.0", ""] {
+            let error = with(&format!("min_api = \"{invalid}\"")).unwrap_err();
+            assert!(error.starts_with("min_api must be"), "{invalid}: {error}");
+        }
+        // A plugin for the track this Rift replaced is told what to do.
+        let old = Manifest::parse(&MINIMAL.replace("0.2", "0.1"), "relaxoban").unwrap_err();
+        assert!(old.contains("Moving from 0.1"), "{old}");
+    }
+
+    #[test]
+    fn background_workers_are_counted_and_lua_names_their_script() {
+        let wasm = |extra: &str| Manifest::parse(&format!("{MINIMAL}{extra}"), "relaxoban");
+        let none = wasm("").unwrap();
+        assert_eq!(none.background_workers(), 0);
+        assert_eq!(none.work_deadline(), Duration::from_secs(30));
+        let one = wasm("[background]\n").unwrap();
+        assert_eq!((one.background_workers(), one.background.entry), (1, None));
+        let four = wasm("[deadlines]\nwork = 120000\n[background]\nworkers = 4\n").unwrap();
+        assert_eq!(four.background_workers(), 4);
+        assert_eq!(four.work_deadline(), Duration::from_secs(120));
+        for invalid in [
+            "[background]\nworkers = -1\n",
+            "[background]\nworkers = 17\n",
+            "[background]\nentry = \"worker.wasm\"\n",
+            "[background]\ntypo = 1\n",
+            "[deadlines]\nwork = 300001\n",
+        ] {
+            assert!(wasm(invalid).is_err(), "{invalid}");
+        }
+        let lua = |extra: &str| {
+            Manifest::parse(
+                &format!("name = \"a\"\nversion = \"1\"\napi = \"0.2\"\nengine = \"lua\"\n{extra}"),
+                "a",
+            )
+        };
+        assert_eq!(lua("").unwrap().background.entry, None);
+        assert_eq!(
+            lua("[background]\nworkers = 2\n").unwrap().background.entry,
+            Some(PathBuf::from("worker.lua"))
+        );
+        assert_eq!(
+            lua("[background]\nentry = \"jobs/main.lua\"\n")
+                .unwrap()
+                .background
+                .entry,
+            Some(PathBuf::from("jobs/main.lua"))
+        );
+        assert!(lua("[background]\nentry = \"../worker.lua\"\n").is_err());
+        // A script-mode folder has no instance to give workers to.
+        assert!(
+            Manifest::parse(
+                "name = \"a\"\nversion = \"1\"\napi = \"0.2\"\nmode = \"script\"\n[background]\n",
+                "a"
+            )
+            .is_err()
+        );
     }
 }

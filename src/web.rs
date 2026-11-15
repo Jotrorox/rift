@@ -1524,7 +1524,7 @@ async fn apply_definition(
     {
         return error(
             StatusCode::CONFLICT,
-            "permission groups require extensions with api_version = 2 or 3; configure them in Lua first",
+            "permission groups require extensions; configure them in Lua first",
         );
     }
     if section == "server_list" && definition.get("hosts").is_some() {

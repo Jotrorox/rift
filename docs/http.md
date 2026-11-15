@@ -409,8 +409,8 @@ configured `favicon` unless the definition sets one: a
 File paths can only be set in Lua. `GET /api/definitions` returns the favicon as
 its `data:` URL. Permission group
 definitions take the fields of `extensions.groups` (`inherits`, `permissions`,
-`weight`, `prefix`, `suffix`, `meta`) and need extensions with `api_version = 2`
-or `3`; edits return `409` otherwise. They change configuration; the dashboard's
+`weight`, `prefix`, `suffix`, `meta`) and need `rift.config.plugins` to be
+set; edits return `409` otherwise. They change configuration; the dashboard's
 permission views edit the store directly through `/api/perms`.
 
 The `/api/permissions` membership routes predate `/api/perms` and stay as
@@ -727,8 +727,8 @@ The request table contains `method`, `path`, `query` (raw query string without
 operator detail, as a Lua table; `status.exposure` and hidden `status.backends`
 do not apply to it, and each backend has `display` and `players`). Authorization, cookie and proxy authorization headers are
 removed. JSON arrays become one-based Lua arrays. The context is an isolated
-snapshot; modifying it cannot change the live runtime. With API v2 in
-[`rift.config.plugins`](extensions.md#online-players), the handler can also
+snapshot; modifying it cannot change the live runtime. With
+[`rift.config.plugins`](extensions.md#online-players) set, the handler can also
 list, message, kick and transfer players through `rift.players`.
 
 `context.operator` is the authenticated caller, in the shape of

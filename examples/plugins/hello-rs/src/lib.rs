@@ -74,7 +74,7 @@ impl Plugin for Hello {
     }
 
     fn join(&mut self, ctx: Context) {
-        let _ = players::message(&ctx.uuid, &format!("Welcome, {}!", ctx.name));
+        let _ = players::message(&ctx.uuid, format!("Welcome, {}!", ctx.name));
         let _ = store::increment("hello", "joins", 1);
     }
 

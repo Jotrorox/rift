@@ -12,7 +12,7 @@ publish = false
 crate-type = ["cdylib"]
 
 [features]
-# Export the `chat` hook; see ../conformance-chat-rs.
+# List the `chat` hook in the registration; see ../conformance-chat-rs.
 chat = []
 
 [dependencies]

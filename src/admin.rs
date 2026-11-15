@@ -311,7 +311,8 @@ fn request(value: &Value, settings: &Admin, secret: &str) -> Result<Vec<String>,
         // Restarting a plugin changes the running proxy; its log tail may
         // carry whatever the plugin logs, as server logs do over HTTP;
         // reading its state is status.
-        ("plugins", Some("restart")) => "plugins",
+        // So does running one of its commands as the console.
+        ("plugins", Some("restart" | "run")) => "plugins",
         ("plugins", Some("logs")) => "logs",
         ("plugins", _) => "status",
         (command, _) => command,
@@ -511,10 +512,10 @@ pub(crate) fn managed_backend(snapshot: &Snapshot, backend: &str) -> io::Result<
     Ok(())
 }
 
-const PLUGINS_USAGE: &str =
-    "usage: plugins list | plugins status <name> | plugins logs <name> | plugins restart <name>";
+const PLUGINS_USAGE: &str = "usage: plugins list | plugins status <name> | plugins logs <name> | plugins restart <name> | plugins run <command> [arguments]";
 
-/// `plugins list|status|logs|restart`, shared by the local administration
+/// `plugins list|status|logs|restart` (`plugins run` is handled by
+/// [`execute`], for the administration service only), shared by the local administration
 /// service and `rift.control.plugins`. `actor` is recorded with a restart.
 pub(crate) fn plugins(snapshot: &Snapshot, args: &[String], actor: &str) -> Result<Value, String> {
     let host = snapshot.extensions.plugins();
@@ -577,6 +578,16 @@ pub(crate) async fn execute(
         [command] if command == "groups" => Ok(service_groups(&snapshot)),
         [command] if command == "nodes" => Ok(nodes(&snapshot)),
         [command] if command == "templates" => Ok(templates(&snapshot)),
+        // The console sender: a plugin command registered with `console`.
+        [command, action, line @ ..] if command == "plugins" && action == "run" && !line.is_empty() => {
+            let line = line.join(" ");
+            let output = snapshot.extensions.plugins().console(&line).await?;
+            let component = match &output {
+                rift::text::Text::Component(component) => component.clone(),
+                rift::text::Text::Plain(text) => Value::String(text.clone()),
+            };
+            Ok(json!({"command": line, "output": output.to_string(), "component": component}))
+        }
         [command, rest @ ..] if command == "plugins" => plugins(&snapshot, rest, actor),
         [command, template] if command == "download" => download_template(&snapshot, template, false).await,
         [command, template, refresh] if command == "download" && refresh == "refresh" => download_template(&snapshot, template, true).await,
@@ -653,7 +664,7 @@ pub(crate) async fn execute(
             commands.try_send(Command::Reload(reply)).map_err(|_| "administrator command queue is full or shutting down")?;
             receiver.await.map_err(|_| "proxy is shutting down".to_owned())?
         }
-        _ => Err("usage: status | servers | groups | nodes | templates | download <template> [refresh] | create <group> | remove <instance> | start <backend> | stop <backend> | group start|stop <group> | group mode <group> active|dev | maintenance on/off | drain <backend> on/off | transfer <connection-id> <backend> | plugins list | plugins status <name> | plugins logs <name> | plugins restart <name> | perms <command> | reload | shutdown".into()),
+        _ => Err("usage: status | servers | groups | nodes | templates | download <template> [refresh] | create <group> | remove <instance> | start <backend> | stop <backend> | group start|stop <group> | group mode <group> active|dev | maintenance on/off | drain <backend> on/off | transfer <connection-id> <backend> | plugins list | plugins status <name> | plugins logs <name> | plugins restart <name> | plugins run <command> [arguments] | perms <command> | reload | shutdown".into()),
     }
 }
 
@@ -762,7 +773,7 @@ pub async fn client(args: &[String]) -> io::Result<()> {
     if args.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "usage: rift admin [--address 127.0.0.1:9091] status|servers|groups|create <group>|remove <instance>|start <backend>|stop <backend>|maintenance on/off|drain <backend> on/off|transfer <connection-id> <backend>|plugins list|plugins status <name>|plugins logs <name>|plugins restart <name>|perms <command>|reload|shutdown",
+            "usage: rift admin [--address 127.0.0.1:9091] status|servers|groups|create <group>|remove <instance>|start <backend>|stop <backend>|maintenance on/off|drain <backend> on/off|transfer <connection-id> <backend>|plugins list|plugins status <name>|plugins logs <name>|plugins restart <name>|plugins run <command> [arguments]|perms <command>|reload|shutdown",
         ));
     }
     let address: SocketAddr = address.parse().map_err(|_| {

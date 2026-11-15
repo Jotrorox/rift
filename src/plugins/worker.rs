@@ -86,6 +86,17 @@ pub trait Engine {
     fn reload(&mut self, config_json: &str) -> Result<(), String>;
     /// The last call before the instance is dropped.
     fn shutdown(&mut self, reason: &str);
+    /// Background workers only (see [`Services::is_worker`]): once before
+    /// the first job, instead of `init`.
+    fn work_init(&mut self, _config_json: &str) -> Result<(), String> {
+        Ok(())
+    }
+    /// Background workers only: run one job queued with `background.run`.
+    fn work(&mut self, _payload: Vec<u8>) -> Result<Vec<u8>, CallError> {
+        Err(CallError::Handler(
+            "this engine has no background workers".into(),
+        ))
+    }
 }
 
 /// Creates an engine instance on the plugin's thread.
@@ -236,6 +247,92 @@ impl Queue {
     }
 }
 
+/// The reply slot of an awaited call: where its answer goes, and until when
+/// somebody waits for it.
+pub(crate) struct Pending {
+    pub(crate) hook: super::api::Hook,
+    pub(crate) reply: oneshot::Sender<Result<Reply, CallError>>,
+}
+
+/// Undelivered background jobs per plugin.
+pub const JOBS: usize = 1024;
+/// Deferred answers a plugin may hold at once.
+const MAX_DEFERRED: usize = 4096;
+
+pub(crate) struct BackgroundJob {
+    pub(crate) handle: u64,
+    pub(crate) payload: Vec<u8>,
+}
+
+/// Deferred answers and the background job queue of one running engine.
+#[derive(Default)]
+pub(crate) struct Background {
+    /// The awaited call the engine is in, until it returns or defers.
+    current: Mutex<Option<Pending>>,
+    deferred: Mutex<BTreeMap<u64, Pending>>,
+    jobs: Mutex<Option<SyncSender<BackgroundJob>>>,
+}
+
+impl Background {
+    /// `background.defer`: keep the running call's reply slot for later.
+    pub(crate) fn defer(&self, ticket: u64) -> Result<(), String> {
+        let mut current = self.current.lock().unwrap();
+        match current.as_ref().map(|pending| pending.hook) {
+            None => {
+                return Err(
+                    "defer: no decision hook is running, or it was deferred already".into(),
+                );
+            }
+            Some(hook) if !matches!(Reply::default_for(hook), Reply::Action(_)) => {
+                return Err(format!("defer: {} cannot be deferred", hook.name()));
+            }
+            Some(_) => {}
+        }
+        let mut deferred = self.deferred.lock().unwrap();
+        // Tickets nobody waits for any more: their deadline passed.
+        deferred.retain(|_, pending| !pending.reply.is_closed());
+        if deferred.len() >= MAX_DEFERRED {
+            return Err(format!(
+                "defer: at most {MAX_DEFERRED} answers may be outstanding"
+            ));
+        }
+        if let Some(pending) = current.take() {
+            deferred.insert(ticket, pending);
+        }
+        Ok(())
+    }
+
+    /// `background.resolve`: false when nobody waits for `ticket` any more.
+    pub(crate) fn resolve(&self, ticket: u64, reply: Reply) -> bool {
+        self.deferred
+            .lock()
+            .unwrap()
+            .remove(&ticket)
+            .is_some_and(|pending| pending.reply.send(Ok(reply)).is_ok())
+    }
+
+    /// `background.run`: queue a job for the workers.
+    pub(crate) fn run(&self, job: BackgroundJob) -> Result<(), String> {
+        match self.jobs.lock().unwrap().as_ref() {
+            None => Err("background.run: the manifest sets no [background] workers".into()),
+            Some(jobs) => jobs.try_send(job).map_err(|error| match error {
+                TrySendError::Full(_) => {
+                    format!("background.run: {JOBS} jobs are waiting already")
+                }
+                TrySendError::Disconnected(_) => "background.run: the plugin is stopping".into(),
+            }),
+        }
+    }
+
+    /// The engine is gone: whoever waits for a deferred answer learns that
+    /// the plugin stopped, and the workers finish.
+    fn close(&self) {
+        self.current.lock().unwrap().take();
+        self.deferred.lock().unwrap().clear();
+        self.jobs.lock().unwrap().take();
+    }
+}
+
 #[derive(Default)]
 struct State {
     restarts: u32,
@@ -261,6 +358,8 @@ pub(crate) struct Shared {
     exited: watch::Sender<bool>,
     /// When the shutdown grace period ends; set by the first shutdown.
     abandon_at: OnceLock<Instant>,
+    /// Deferred answers and background jobs of the running engine.
+    pub(crate) background: Background,
 }
 
 /// What an awaited call produced.
@@ -304,7 +403,7 @@ fn valid_command(name: &str) -> bool {
 }
 
 /// A command permission: a node, or empty for a command every player may
-/// see and run (contract 0.1.5).
+/// see and run.
 fn valid_permission(node: &str) -> bool {
     node.len() <= 64
         && node.bytes().all(|b| {
@@ -363,6 +462,20 @@ pub(crate) fn validate_registration(registration: &Registration) -> Result<(), S
         }
         if !names.insert(command.name.as_str()) {
             return Err(format!("command {:?} registered twice", command.name));
+        }
+        if command.aliases.len() > 16 {
+            return Err(format!("command {:?}: at most 16 aliases", command.name));
+        }
+        for alias in &command.aliases {
+            if !valid_command(alias) {
+                return Err(format!(
+                    "command {:?}: alias {alias:?}: names are 1..=64 bytes of a-z0-9_- and server and hub are reserved",
+                    command.name
+                ));
+            }
+            if !names.insert(alias.as_str()) {
+                return Err(format!("command {alias:?} registered twice"));
+            }
         }
         if !valid_permission(&command.permission) {
             return Err(format!(
@@ -436,6 +549,7 @@ impl Instance {
             settle_by: settle_by + SETTLE_MARGIN,
             exited: watch::channel(false).0,
             abandon_at: OnceLock::new(),
+            background: Background::default(),
         });
         let spec = Arc::new(spec);
         let instance = Arc::new(Self {
@@ -840,6 +954,7 @@ impl Worker {
                 Ok(mut engine) => {
                     ran = true;
                     let started = Instant::now();
+                    self.start_workers(&services);
                     self.shared.state.lock().unwrap().last_error = None;
                     // Announced before the status changes, so whoever waits
                     // for the instance to run sees its lifecycle in order.
@@ -853,11 +968,13 @@ impl Worker {
                             }
                             let _ = guarded(move || drop(engine));
                             services.close();
+                            self.shared.background.close();
                             break;
                         }
                         Served::Fatal => {
                             let _ = guarded(move || drop(engine));
                             services.close();
+                            self.shared.background.close();
                             if started.elapsed() >= STABLE {
                                 backoff = MIN_BACKOFF;
                             }
@@ -1008,11 +1125,28 @@ impl Worker {
                         continue;
                     }
                     self.shared.state.lock().unwrap().calls += 1;
+                    // The reply slot is in reach of `background.defer` while
+                    // the engine runs; a deferred call keeps it.
+                    if let Some(reply) = reply {
+                        *self.shared.background.current.lock().unwrap() =
+                            Some(Pending { hook, reply });
+                    }
+                    let awaited = self.shared.background.current.lock().unwrap().is_some();
                     let result = guarded(|| engine.call(*event))
                         .unwrap_or_else(|panic| Err(CallError::Fatal(panic)));
+                    let reply = self
+                        .shared
+                        .background
+                        .current
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .map(|pending| pending.reply);
+                    // Deferred: only a failure is reported now, to the log.
+                    let deferred = awaited && reply.is_none();
                     let fatal = match &result {
                         Err(CallError::Fatal(error)) => Some(format!("{}: {error}", hook.name())),
-                        Err(CallError::Handler(error)) if reply.is_none() => {
+                        Err(CallError::Handler(error)) if reply.is_none() || deferred => {
                             eprintln!(
                                 "rift: plugin {}: {}: {error:.2048}",
                                 self.spec.name,
@@ -1033,6 +1167,37 @@ impl Worker {
                         return Served::Fatal;
                     }
                 }
+            }
+        }
+    }
+
+    /// One thread per `[background] workers`, each with its own engine
+    /// instance, until the engine they serve is gone.
+    fn start_workers(&self, services: &Services) {
+        let count = self.spec.manifest.background_workers();
+        if count == 0 {
+            return;
+        }
+        let (jobs, receiver) = sync_channel::<BackgroundJob>(JOBS);
+        *self.shared.background.jobs.lock().unwrap() = Some(jobs);
+        let receiver = Arc::new(Mutex::new(receiver));
+        for index in 0..count {
+            let receiver = receiver.clone();
+            let factory = self.factory.clone();
+            let spec = self.spec.clone();
+            let worker = services.worker();
+            let queue = self.queue.clone();
+            let shared = self.shared.clone();
+            let spawned = std::thread::Builder::new()
+                .name(format!("rift-plugin-{:.24}-bg{index}", self.spec.name))
+                .spawn(move || {
+                    background(&spec, factory.as_ref(), &worker, &receiver, &queue, &shared)
+                });
+            if let Err(error) = spawned {
+                services.log(
+                    super::api::Level::Error,
+                    &format!("cannot start background worker {index}: {error}"),
+                );
             }
         }
     }
@@ -1090,4 +1255,70 @@ impl Worker {
             }
         }
     }
+}
+
+/// One background worker: its own engine, created at the first job and again
+/// after a fatal failure, running jobs until the queue closes.
+fn background(
+    spec: &PluginSpec,
+    factory: &dyn EngineFactory,
+    services: &Services,
+    jobs: &Mutex<Receiver<BackgroundJob>>,
+    queue: &Queue,
+    shared: &Shared,
+) {
+    let mut engine: Option<Box<dyn Engine>> = None;
+    loop {
+        // Workers take turns at the queue; the lock is free while one works.
+        let job = match jobs.lock().unwrap().recv() {
+            Ok(job) => job,
+            Err(_) => break,
+        };
+        if services.stop_requested() {
+            break;
+        }
+        if engine.is_none() {
+            let config = shared.config_json.lock().unwrap().clone();
+            let created = guarded(|| factory.create(spec, services.clone()))
+                .and_then(|result| result)
+                .and_then(|mut engine| {
+                    guarded(|| engine.work_init(&config))
+                        .and_then(|result| result)
+                        .map(|()| engine)
+                });
+            match created {
+                Ok(created) => engine = Some(created),
+                Err(error) => {
+                    let error = format!("background worker: {error:.2048}");
+                    services.log(super::api::Level::Error, &error);
+                    queue.notify(Event::Job(job.handle, Err(error)));
+                    continue;
+                }
+            }
+        }
+        let running = engine.as_mut().expect("created above");
+        let outcome = guarded(|| running.work(job.payload))
+            .unwrap_or_else(|panic| Err(CallError::Fatal(panic)));
+        let outcome = match outcome {
+            Ok(result) => Ok(result),
+            Err(CallError::Handler(error)) => Err(error),
+            Err(error) => {
+                // A trap or an interrupt: this worker starts over.
+                let _ = guarded(|| drop(engine.take()));
+                services.log(
+                    super::api::Level::Error,
+                    &format!("background worker failed: {error}"),
+                );
+                Err(error.to_string())
+            }
+        };
+        if !queue.notify(Event::Job(job.handle, outcome)) {
+            services.log(
+                super::api::Level::Warn,
+                "queue full; dropped the result of a background job",
+            );
+        }
+    }
+    // A worker has no `shutdown` hook: its instance is just dropped.
+    let _ = guarded(move || drop(engine));
 }

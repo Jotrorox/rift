@@ -31,7 +31,7 @@ impl Fixture for LuaFixture {
         std::fs::write(
             folder.join("plugin.toml"),
             format!(
-                "name = \"{name}\"\nversion = \"1\"\napi = \"0.1\"\nengine = \"lua\"\n{extra}\n[lua]\nmemory_limit_mb = 64\n"
+                "name = \"{name}\"\nversion = \"1\"\napi = \"0.2\"\nengine = \"lua\"\n{extra}\n[lua]\nmemory_limit_mb = 64\n"
             ),
         )
         .unwrap();
@@ -76,7 +76,7 @@ fn folder(extra: &str, files: &[(&str, &str)]) -> PathBuf {
     }
     std::fs::write(
         plugin.join("plugin.toml"),
-        format!("name = \"t\"\nversion = \"1\"\napi = \"0.1\"\nengine = \"lua\"\n{extra}"),
+        format!("name = \"t\"\nversion = \"1\"\napi = \"0.2\"\nengine = \"lua\"\n{extra}"),
     )
     .unwrap();
     root
@@ -439,7 +439,7 @@ async fn the_same_handler_body_runs_in_rift_lua_and_as_a_plugin() {
                 .decision("login")
                 .await
                 .unwrap(),
-            Action::Deny("Blocked (api 2)".into())
+            Action::Deny("Blocked (api 3)".into())
         );
         let vip = session(runtime, 2, "Blocked");
         assert_eq!(vip.decision("login").await.unwrap(), Action::Continue);
@@ -702,6 +702,202 @@ end)
     assert_eq!(
         player.kick("game", "Server closed").await.unwrap(),
         Action::Continue
+    );
+    runtime.plugins().shutdown().await;
+}
+
+/// What 0.2 added, from Lua: command aliases and the console sender, the
+/// player directory and languages, timed groups, and answers that wait for
+/// a background worker.
+#[tokio::test]
+async fn aliases_the_console_the_directory_and_background_work_reach_lua() {
+    let root = folder(
+        "[background]\nworkers = 2\n[deadlines]\ncommand = 5000\nlogin = 5000\n",
+        &[
+            (
+                "init.lua",
+                r#"
+assert(rift.meta.api == "0.2.0")
+assert(not rift.background.is_worker())
+assert(not pcall(rift.on, "work", function() end), "work belongs in the worker script")
+rift.command("whois", {
+    permission = "", aliases = { "who", "w" }, console = true,
+    run = function(ctx)
+        local found = rift.players.lookup(ctx.args)
+        if not found then return { message = "unknown" } end
+        return { message = table.concat({
+            ctx.console and "console" or ctx.name, ctx.command, found.name,
+            tostring(found.online), tostring(found.language), found.last_server,
+            found.last_ip, #rift.players.search("al"),
+        }, " ") }
+    end,
+})
+rift.command("lang", { permission = "", run = function(ctx)
+    local known = rift.players.set_language(ctx.uuid, ctx.args ~= "" and ctx.args or nil)
+    return { message = tostring(known) .. " " .. tostring(ctx.language) }
+end })
+rift.command("temp", { permission = "", run = function(ctx)
+    local added = rift.permissions.add_group(ctx.uuid, "vip", { expires_in = 3600 })
+    assert(not pcall(rift.permissions.add_group, ctx.uuid, "vip", { expires_in = 1, expires_at = 2 }))
+    return { message = tostring(added) .. " " .. table.concat(rift.permissions.groups(ctx.uuid), ",") }
+end })
+-- The callback form: the answer follows when the worker is done.
+rift.command("slow", { permission = "", run = function(ctx)
+    local ticket = rift.background.defer()
+    assert(not pcall(rift.background.defer), "one answer per call")
+    rift.background.run(ctx.args, function(result, err)
+        assert(rift.background.resolve(ticket, { message = result or ("failed: " .. err) }))
+        assert(not rift.background.resolve(ticket, nil), "answered already")
+    end)
+    return { message = "ignored" }
+end })
+-- The event form, for a lookup at login.
+local waiting = {}
+rift.on("login", function(ctx)
+    local ticket = rift.background.defer()
+    waiting[rift.background.run("login " .. ctx.name)] = ticket
+end)
+rift.on("job_done", function(handle, result, err)
+    local ticket = waiting[handle]
+    waiting[handle] = nil
+    rift.background.resolve(ticket, result == "LOGIN BLOCKED" and { deny = "Banned" } or nil)
+end)
+"#,
+            ),
+            (
+                "worker.lua",
+                r#"
+local name, config = ...
+assert(name == "t" and config.greeting == "hi")
+assert(rift.background.is_worker())
+assert(not pcall(rift.on, "login", function() end), "a worker receives no events")
+rift.on("work", function(payload)
+    if payload == "fail" then error("worker says no") end
+    return payload:upper()
+end)
+"#,
+            ),
+        ],
+    );
+    let broker = Broker::default();
+    let runtime = started(&root, r#"{"greeting":"hi"}"#, &broker).await;
+    let (_handle, _actions) = runtime.players().register_with(
+        7,
+        &[7; 16],
+        "Alex",
+        774,
+        "lobby",
+        crate::extensions::Profile {
+            ip: "192.0.2.7".into(),
+            properties: Vec::new(),
+        },
+    );
+    // The join is written off the caller's task.
+    for _ in 0..200 {
+        if runtime.players().lookup("alex").unwrap().is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let message = |text: &str| Action::Message(text.into());
+    let alex = session(&runtime, 7, "Alex");
+    assert_eq!(
+        alex.commands().iter().filter(|name| *name == "w").count(),
+        1
+    );
+    // An alias runs the command, which sees its own name.
+    assert_eq!(
+        alex.command("w alex").await.unwrap(),
+        message("Alex whois Alex true nil lobby 192.0.2.7 1")
+    );
+    assert_eq!(
+        alex.command("whois nobody").await.unwrap(),
+        message("unknown")
+    );
+    // A language is remembered for the player and known to the next session.
+    assert_eq!(
+        alex.command("lang de-DE").await.unwrap(),
+        message("true nil")
+    );
+    assert_eq!(
+        runtime
+            .players()
+            .get("Alex")
+            .unwrap()
+            .unwrap()
+            .language
+            .as_deref(),
+        Some("de_de")
+    );
+    let alex = session(&runtime, 7, "Alex");
+    assert_eq!(alex.command("lang").await.unwrap(), message("true de_de"));
+    assert_eq!(
+        runtime.players().lookup("Alex").unwrap().unwrap().language,
+        None
+    );
+    assert!(alex.command("lang x").await.is_err(), "not a language tag");
+    // The console runs only commands that ask for it, as CONSOLE.
+    let plugins = runtime.plugins();
+    assert_eq!(
+        plugins.console("/who Alex").await.unwrap().to_string(),
+        "console whois Alex true nil lobby 192.0.2.7 1"
+    );
+    let error = plugins.console("lang de").await.unwrap_err();
+    assert!(error.contains("players only"), "{error}");
+    assert!(plugins.console("nope").await.is_err());
+    // A timed membership.
+    let groups = alex.command("temp").await.unwrap();
+    let Action::Message(groups) = groups else {
+        panic!("{groups:?}");
+    };
+    let groups = groups.to_string();
+    assert!(groups.starts_with("true "), "{groups}");
+    // Deferred answers: the hook returned long before the worker answered.
+    assert_eq!(alex.command("slow hello").await.unwrap(), message("HELLO"));
+    let failed = alex.command("slow fail").await.unwrap();
+    let Action::Message(failed) = failed else {
+        panic!("{failed:?}");
+    };
+    let failed = failed.to_string();
+    assert!(
+        failed.starts_with("failed: ") && failed.contains("worker says no"),
+        "{failed}"
+    );
+    assert_eq!(
+        session(&runtime, 8, "Blocked")
+            .decision("login")
+            .await
+            .unwrap(),
+        Action::Deny("Banned".into())
+    );
+    assert_eq!(alex.decision("login").await.unwrap(), Action::Continue);
+    runtime.plugins().shutdown().await;
+}
+
+/// Without `[background]` there are no workers to give a job to.
+#[tokio::test]
+async fn background_jobs_need_workers() {
+    let root = folder(
+        "",
+        &[(
+            "init.lua",
+            r#"
+rift.command("slow", { permission = "", run = function(ctx)
+    local ok, err = pcall(rift.background.run, "x")
+    return { message = tostring(ok) .. " " .. err }
+end })
+"#,
+        )],
+    );
+    let broker = Broker::default();
+    let runtime = started(&root, "{}", &broker).await;
+    let Action::Message(text) = session(&runtime, 1, "Alex").command("slow").await.unwrap() else {
+        panic!("expected a message");
+    };
+    let text = text.to_string();
+    assert!(
+        text.starts_with("false ") && text.contains("[background] workers"),
+        "{text}"
     );
     runtime.plugins().shutdown().await;
 }

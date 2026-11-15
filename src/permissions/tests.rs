@@ -1027,7 +1027,7 @@ async fn the_lua_module_reads_and_writes_through_the_authority() {
 }
 
 #[tokio::test]
-async fn change_handlers_and_context_providers_run_for_api_v3() {
+async fn change_handlers_and_context_providers_run() {
     let script = format!(
         r#"rift.permissions.on_change(function(event)
             rift.publish('perm.events', event.subject .. ' ' .. event.kind .. ' ' .. event.key)
@@ -1078,17 +1078,15 @@ async fn change_handlers_and_context_providers_run_for_api_v3() {
         runtime.permissions().contexts(ALICE).to_string(),
         "region=spawn;server=lobby"
     );
-    // API v2 has no rift.permissions functions at all.
+    // The functions do not depend on the level a script names.
     let v2 = self::runtime(&source(
         "api_version = 2, login = function(ctx) rift.permissions.check(ctx.uuid, 'a') end",
     ));
-    let error = v2
-        .session(context(1))
+    v2.session(context(1))
         .unwrap()
         .decision("login")
         .await
-        .unwrap_err();
-    assert!(error.to_string().contains("API v3"), "{error}");
+        .unwrap();
 }
 
 #[test]

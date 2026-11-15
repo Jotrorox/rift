@@ -1,12 +1,11 @@
 package rift
 
 import (
+	"errors"
+
 	"go.bytecodealliance.org/cm"
 
-	"github.com/Jotrorox/rift/sdk/go/gen/rift/plugin/decisions"
-	"github.com/Jotrorox/rift/sdk/go/gen/rift/plugin/dialogs"
 	"github.com/Jotrorox/rift/sdk/go/gen/rift/plugin/handler"
-	"github.com/Jotrorox/rift/sdk/go/gen/rift/plugin/styled"
 	"github.com/Jotrorox/rift/sdk/go/gen/rift/plugin/types"
 )
 
@@ -17,13 +16,15 @@ var (
 	onReload         = func(string) error { return nil }
 	onShutdown       = func(string) {}
 	onRoute          = func(Connection) RouteDecision { return RouteDefault() }
-	onLogin          = func(Context) Action { return Continue() }
-	onInitialServer  = func(Context) Action { return Continue() }
-	onBeforeTransfer = func(Context) Action { return Continue() }
-	onCommand        = func(Context) Action { return Continue() }
+	onLogin          = func(Context) Decision { return Continue() }
+	onInitialServer  = func(Context) Decision { return Continue() }
+	onBeforeTransfer = func(Context) Decision { return Continue() }
+	onCommand        = func(Context) Decision { return Continue() }
 	onSuggest        = func(Context) []Suggestion { return nil }
 	onStatus         = func(Ping) *StatusOverride { return nil }
 	onHTTP           = func(HTTPRequest) *HTTPResponse { return nil }
+	onChat           = func(ChatAttempt) Decision { return Continue() }
+	onKick           = func(Context) Decision { return Continue() }
 	onJoin           = func(Context) {}
 	onAfterTransfer  = func(Context) {}
 	onDisconnect     = func(Context) {}
@@ -31,15 +32,23 @@ var (
 	onTimer          = func(uint64) {}
 	onEvent          = func(Event) {}
 	onDialog         = func(DialogResponse) {}
-	// Set by OnRichSuggest and OnRichStatus; nil answers with onSuggest and
-	// onStatus.
-	onRichSuggest func(Context) []RichSuggestion
-	onRichStatus  func(Ping) *RichStatusOverride
+	onJobDone        = func(uint64, []byte, error) {}
+	onWorkInit       = func(string) error { return nil }
+	onWork           = func([]byte) ([]byte, error) { return nil, ErrNoWork }
 )
+
+// ErrNoWork is what the default work handler answers every job with.
+var ErrNoWork = errors.New("this plugin has no background work")
+
+// JobError is why a job started with Run failed: the error its OnWork
+// handler returned, or the host's reason (a trap, a missed deadline).
+type JobError string
+
+func (e JobError) Error() string { return string(e) }
 
 // handled records the hooks that have a handler, for registrations that
 // leave Hooks nil.
-var handled [HookEvent + 1]bool
+var handled [HookKick + 1]bool
 
 // OnInit sets the handler called once per instance with the plugin
 // configuration as a JSON object ("{}" without one). Create subscriptions and
@@ -47,7 +56,10 @@ var handled [HookEvent + 1]bool
 //
 // When the returned Registration.Hooks is nil, the SDK fills in the hooks
 // that have a handler set through the On* functions, so the host skips the
-// rest. A non-nil list, even an empty one (every hook), is sent unchanged.
+// rest. A non-nil list is sent unchanged; an empty one delivers every hook
+// except chat and kick, which must be listed.
+//
+// A background worker instance never runs this handler; see OnWorkInit.
 func OnInit(f func(configJSON string) (Registration, error)) { onInit = f }
 
 // OnReload sets the handler called when the configuration changes and the
@@ -64,25 +76,25 @@ func OnRoute(f func(Connection) RouteDecision) {
 }
 
 // OnLogin sets the handler that may deny an authenticated login.
-func OnLogin(f func(Context) Action) {
+func OnLogin(f func(Context) Decision) {
 	onLogin = f
 	handled[HookLogin] = true
 }
 
 // OnInitialServer sets the handler that may pick the first server.
-func OnInitialServer(f func(Context) Action) {
+func OnInitialServer(f func(Context) Decision) {
 	onInitialServer = f
 	handled[HookInitialServer] = true
 }
 
 // OnBeforeTransfer sets the handler that may deny a server switch.
-func OnBeforeTransfer(f func(Context) Action) {
+func OnBeforeTransfer(f func(Context) Decision) {
 	onBeforeTransfer = f
 	handled[HookBeforeTransfer] = true
 }
 
 // OnCommand sets the handler for registered commands.
-func OnCommand(f func(Context) Action) {
+func OnCommand(f func(Context) Decision) {
 	onCommand = f
 	handled[HookCommand] = true
 }
@@ -99,72 +111,36 @@ func OnStatus(f func(Ping) *StatusOverride) {
 	handled[HookStatus] = true
 }
 
-// OnRichSuggest sets the suggest handler with JSON text tooltips
-// (rift:plugin 0.1.4); it replaces an OnSuggest handler. Hosts before 0.1.4
-// show the tooltips' words.
-func OnRichSuggest(f func(Context) []RichSuggestion) {
-	onRichSuggest = f
-	handled[HookSuggest] = true
-}
-
-// OnRichStatus sets the status handler with JSON text for the version and
-// the player sample (rift:plugin 0.1.4); it replaces an OnStatus handler.
-// Hosts before 0.1.4 show the text's words.
-func OnRichStatus(f func(Ping) *RichStatusOverride) {
-	onRichStatus = f
-	handled[HookStatus] = true
-}
-
-func suggestRich(c Context) []RichSuggestion {
-	if onRichSuggest != nil {
-		return onRichSuggest(c)
-	}
-	plain := onSuggest(c)
-	out := make([]RichSuggestion, len(plain))
-	for i, s := range plain {
-		out[i] = s.rich()
-	}
-	return out
-}
-
-func suggestPlain(c Context) []Suggestion {
-	if onRichSuggest == nil {
-		return onSuggest(c)
-	}
-	rich := onRichSuggest(c)
-	out := make([]Suggestion, len(rich))
-	for i, s := range rich {
-		out[i] = s.plain()
-	}
-	return out
-}
-
-func statusRich(p Ping) *RichStatusOverride {
-	if onRichStatus != nil {
-		return onRichStatus(p)
-	}
-	if o := onStatus(p); o != nil {
-		rich := o.rich()
-		return &rich
-	}
-	return nil
-}
-
-func statusPlain(p Ping) *StatusOverride {
-	if onRichStatus == nil {
-		return onStatus(p)
-	}
-	if o := onRichStatus(p); o != nil {
-		plain := o.plain()
-		return &plain
-	}
-	return nil
-}
-
-// OnHTTP sets the handler for /api/script/* requests; nil means not handled.
+// OnHTTP sets the handler for /ext and /ext/* requests; nil means not handled.
 func OnHTTP(f func(HTTPRequest) *HTTPResponse) {
 	onHTTP = f
 	handled[HookHTTP] = true
+}
+
+// OnChat sets the handler that sees every chat message, and every command
+// that reaches the backend, before the backend does. Continue passes the
+// packet on unchanged; Deny drops it and shows the player the text. For a
+// command, attempt.Ctx.Command is the root name and attempt.Ctx.Args the
+// rest; commands that Rift or a plugin owns never come here.
+//
+// Rift asks only a plugin whose registration lists HookChat (the SDK lists it
+// when Hooks is nil), and starts such a plugin only with
+// authentication.signed_chat = false, because dropping one signed message
+// breaks the player's signature chain. The deadline is 50 ms unless the
+// manifest sets deadlines.chat.
+func OnChat(f func(ChatAttempt) Decision) {
+	onChat = f
+	handled[HookChat] = true
+}
+
+// OnKick sets the handler called when a backend kicks a player in play.
+// ctx.Server is the backend and ctx.Reason its reason without formatting.
+// Continue leaves it to network.on_kick, Deny disconnects the player with the
+// text, Server moves them there. The registration must list HookKick (the SDK
+// lists it when Hooks is nil).
+func OnKick(f func(Context) Decision) {
+	onKick = f
+	handled[HookKick] = true
 }
 
 // OnJoin sets the handler called after a player joined.
@@ -208,31 +184,37 @@ func OnEvent(f func(Event)) {
 // with ShowDialog. It needs no hook in the registration.
 func OnDialog(f func(DialogResponse)) { onDialog = f }
 
+// OnJobDone sets the handler called when a job started with Run finished:
+// result is what the worker's OnWork handler returned, or err is a JobError
+// saying why it failed. It needs no hook in the registration.
+func OnJobDone(f func(handle uint64, result []byte, err error)) { onJobDone = f }
+
+// OnWorkInit sets the handler a background worker runs once before its first
+// job, with the plugin's configuration. Each worker (manifest [background]
+// workers) is its own instance of the component with its own memory: package
+// init functions run, but it receives no hooks, never runs the OnInit
+// handler and makes no registration.
+func OnWorkInit(f func(configJSON string) error) { onWorkInit = f }
+
+// OnWork sets the handler that runs one job queued with Run, on a background
+// worker. It may block: the plugin's hooks keep running meanwhile. The limit
+// is 30 s unless the manifest sets deadlines.work. Without a handler every
+// job fails with ErrNoWork.
+func OnWork(f func(payload []byte) ([]byte, error)) { onWork = f }
+
+type (
+	unitResult  = cm.Result[string, struct{}, string]
+	bytesResult = cm.Result[cm.List[uint8], cm.List[uint8], string]
+)
+
+func lowerUnit(err error) unitResult {
+	if err != nil {
+		return cm.Err[unitResult](err.Error())
+	}
+	return cm.OK[unitResult](struct{}{})
+}
+
 func init() {
-	dialogs.Exports.Dialog = func(r types.DialogResponse) { onDialog(liftDialogResponse(r)) }
-	// Hosts from rift:plugin 0.1.2 ask decisions; older ones the handler.
-	d := &decisions.Exports
-	d.Login = func(c types.Context) types.Decision { return onLogin(liftContext(c)).lowerDecision() }
-	d.InitialServer = func(c types.Context) types.Decision { return onInitialServer(liftContext(c)).lowerDecision() }
-	d.BeforeTransfer = func(c types.Context) types.Decision { return onBeforeTransfer(liftContext(c)).lowerDecision() }
-	d.Command = func(c types.Context) types.Decision { return onCommand(liftContext(c)).lowerDecision() }
-	// Hosts from rift:plugin 0.1.4 ask styled for suggest and status; older
-	// ones the handler.
-	s := &styled.Exports
-	s.Suggest = func(c types.Context) cm.List[types.RichSuggestion] {
-		suggestions := suggestRich(liftContext(c))
-		out := make([]types.RichSuggestion, len(suggestions))
-		for i, s := range suggestions {
-			out[i] = types.RichSuggestion{Text: s.Text, TooltipJSON: lowerOptString(s.TooltipJSON)}
-		}
-		return cm.ToList(out)
-	}
-	s.Status = func(p types.Ping) cm.Option[types.RichStatusOverride] {
-		if o := statusRich(liftPing(p)); o != nil {
-			return cm.Some(o.lower())
-		}
-		return cm.None[types.RichStatusOverride]()
-	}
 	e := &handler.Exports
 	e.Init = func(configJSON string) cm.Result[handler.RegistrationShape, types.Registration, string] {
 		reg, err := onInit(configJSON)
@@ -248,28 +230,23 @@ func init() {
 		}
 		return cm.OK[cm.Result[handler.RegistrationShape, types.Registration, string]](reg.lower())
 	}
-	e.Reload = func(configJSON string) cm.Result[string, struct{}, string] {
-		if err := onReload(configJSON); err != nil {
-			return cm.Err[cm.Result[string, struct{}, string]](err.Error())
-		}
-		return cm.OK[cm.Result[string, struct{}, string]](struct{}{})
-	}
+	e.Reload = func(configJSON string) unitResult { return lowerUnit(onReload(configJSON)) }
 	e.Shutdown = func(reason string) { onShutdown(reason) }
 	e.Route = func(c types.Connection) types.RouteDecision { return onRoute(liftConnection(c)).lower() }
-	e.Login = func(c types.Context) types.Action { return onLogin(liftContext(c)).lower() }
-	e.InitialServer = func(c types.Context) types.Action { return onInitialServer(liftContext(c)).lower() }
-	e.BeforeTransfer = func(c types.Context) types.Action { return onBeforeTransfer(liftContext(c)).lower() }
-	e.Command = func(c types.Context) types.Action { return onCommand(liftContext(c)).lower() }
+	e.Login = func(c types.Context) types.Decision { return onLogin(liftContext(c)).lower() }
+	e.InitialServer = func(c types.Context) types.Decision { return onInitialServer(liftContext(c)).lower() }
+	e.BeforeTransfer = func(c types.Context) types.Decision { return onBeforeTransfer(liftContext(c)).lower() }
+	e.Command = func(c types.Context) types.Decision { return onCommand(liftContext(c)).lower() }
 	e.Suggest = func(c types.Context) cm.List[types.Suggestion] {
-		suggestions := suggestPlain(liftContext(c))
+		suggestions := onSuggest(liftContext(c))
 		out := make([]types.Suggestion, len(suggestions))
 		for i, s := range suggestions {
-			out[i] = types.Suggestion{Text: s.Text, Tooltip: lowerOptString(s.Tooltip)}
+			out[i] = types.Suggestion{Text: s.Text, Tooltip: s.Tooltip.lowerOpt()}
 		}
 		return cm.ToList(out)
 	}
 	e.Status = func(p types.Ping) cm.Option[types.StatusOverride] {
-		if o := statusPlain(liftPing(p)); o != nil {
+		if o := onStatus(liftPing(p)); o != nil {
 			return cm.Some(o.lower())
 		}
 		return cm.None[types.StatusOverride]()
@@ -280,10 +257,28 @@ func init() {
 		}
 		return cm.None[types.HTTPResponse]()
 	}
+	e.Chat = func(a types.ChatAttempt) types.Decision { return onChat(liftChatAttempt(a)).lower() }
+	e.Kick = func(c types.Context) types.Decision { return onKick(liftContext(c)).lower() }
 	e.Join = func(c types.Context) { onJoin(liftContext(c)) }
 	e.AfterTransfer = func(c types.Context) { onAfterTransfer(liftContext(c)) }
 	e.Disconnect = func(c types.Context) { onDisconnect(liftContext(c)) }
 	e.Message = func(m types.BusMessage) { onMessage(liftBusMessage(m)) }
 	e.Timer = func(h uint64) { onTimer(h) }
 	e.Event = func(ev types.RiftEvent) { onEvent(Event{Subject: ev.Subject, PayloadJSON: ev.PayloadJSON}) }
+	e.Dialog = func(r types.DialogResponse) { onDialog(liftDialogResponse(r)) }
+	e.JobDone = func(handle uint64, outcome bytesResult) {
+		if err := outcome.Err(); err != nil {
+			onJobDone(handle, nil, JobError(*err))
+			return
+		}
+		onJobDone(handle, outcome.OK().Slice(), nil)
+	}
+	e.WorkInit = func(configJSON string) unitResult { return lowerUnit(onWorkInit(configJSON)) }
+	e.Work = func(payload cm.List[uint8]) bytesResult {
+		result, err := onWork(payload.Slice())
+		if err != nil {
+			return cm.Err[bytesResult](err.Error())
+		}
+		return cm.OK[bytesResult](cm.ToList(result))
+	}
 }

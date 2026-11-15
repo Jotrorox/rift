@@ -8,14 +8,15 @@
 //     repeating 1000 ms timer with timers.every(1000), subscribes to the bus
 //     subject hello.ping without a queue group (a failed subscription fails
 //     init) and returns this registration:
-//   - command hello, permission hello.use, suggest players;
+//   - command hello, no aliases, permission hello.use, suggest players, not
+//     for the console;
 //   - hooks login, command, join, message, timer, so the host skips every
 //     other hook.
-//   - login(ctx) returns deny("You are not welcome here.") when ctx.name
+//   - login(ctx) returns deny(plain("You are not welcome here.")) when ctx.name
 //     equals the configured deny name exactly, otherwise continue.
-//   - command(ctx) returns message("Hello, <ctx.name>!").
-//   - join(ctx) calls players.message(ctx.uuid, "Welcome, <ctx.name>!"), then
-//     store.increment("hello", "joins", 1). Host errors are ignored.
+//   - command(ctx) returns message(plain("Hello, <ctx.name>!")).
+//   - join(ctx) calls players.message(ctx.uuid, plain("Welcome, <ctx.name>!")),
+//     then store.increment("hello", "joins", 1). Host errors are ignored.
 //   - message(msg): when msg.reply is set, publishes msg.payload unchanged to
 //     that subject (no reply subject of its own); otherwise does nothing.
 //     Publish errors are ignored.
@@ -53,19 +54,19 @@ func init() {
 		}, nil
 	})
 
-	rift.OnLogin(func(ctx rift.Context) rift.Action {
+	rift.OnLogin(func(ctx rift.Context) rift.Decision {
 		if denySet && ctx.Name == deny {
-			return rift.Deny("You are not welcome here.")
+			return rift.Deny(rift.Plain("You are not welcome here."))
 		}
 		return rift.Continue()
 	})
 
-	rift.OnCommand(func(ctx rift.Context) rift.Action {
-		return rift.Message("Hello, " + ctx.Name + "!")
+	rift.OnCommand(func(ctx rift.Context) rift.Decision {
+		return rift.Message(rift.Plain("Hello, " + ctx.Name + "!"))
 	})
 
 	rift.OnJoin(func(ctx rift.Context) {
-		_, _ = rift.SendMessage(ctx.UUID, "Welcome, "+ctx.Name+"!")
+		_, _ = rift.SendMessage(ctx.UUID, rift.Plain("Welcome, "+ctx.Name+"!"))
 		_, _ = rift.StoreIncrement("hello", "joins", 1)
 	})
 

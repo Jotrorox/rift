@@ -463,6 +463,11 @@ impl Authority {
         store::load_user(&self.database.lock(), uuid)
     }
 
+    /// The instance database the store lives in, for the tables beside it.
+    pub fn database_handle(&self) -> &Arc<Database> {
+        &self.database
+    }
+
     /// The UUID of the player named `name` (ASCII case ignored): an online
     /// player first, otherwise the most recent last-seen name.
     pub fn user_by_name(&self, name: &str) -> Result<Option<Uuid>, PermError> {

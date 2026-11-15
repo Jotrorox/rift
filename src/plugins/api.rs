@@ -1,4 +1,4 @@
-//! Engine-neutral mirrors of the `rift:plugin@0.1.0` WIT types
+//! Engine-neutral mirrors of the `rift:plugin@0.2.0` WIT types
 //! (`wit/rift-plugin.wit`). Engines translate their own values (Lua tables,
 //! wasmtime bindgen records) into these; the host never sees engine values.
 //! Core types are reused where their shape already matches the contract.
@@ -11,8 +11,26 @@ pub use crate::{
     protocol::Suggestion,
 };
 
-/// The `rift:plugin` package version this host implements.
-pub const API_VERSION: &str = "0.1";
+/// The `rift:plugin` track this host implements: what a manifest's `api`
+/// names.
+pub const API_VERSION: &str = "0.2";
+/// The exact `rift:plugin` package version, for a manifest's `min_api` and
+/// `meta.api`.
+pub const CONTRACT_VERSION: &str = "0.2.0";
+
+/// `major.minor.patch` as numbers, or `None` for anything else.
+pub fn parse_version(version: &str) -> Option<[u32; 3]> {
+    let mut parts = version.split('.');
+    let mut numbers = [0; 3];
+    for number in &mut numbers {
+        let part = parts.next()?;
+        if part.is_empty() || part.len() > 9 || !part.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        *number = part.parse().ok()?;
+    }
+    parts.next().is_none().then_some(numbers)
+}
 
 /// Log severity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -56,6 +74,44 @@ pub struct PlayerInfo {
     /// for 1.20.2 and newer clients. Components ask `players.locale`.
     #[serde(default)]
     pub locale: Option<String>,
+    /// The address the player connected from, without the port.
+    #[serde(default)]
+    pub ip: String,
+    /// The profile properties the player logged in with (skin and cape).
+    #[serde(default)]
+    pub properties: Vec<ProfileProperty>,
+    /// The language Rift's own messages use for the player: the one a
+    /// plugin set, else the client's locale.
+    #[serde(default)]
+    pub language: Option<String>,
+}
+
+/// One signed property of a player's profile, such as `textures`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileProperty {
+    pub name: String,
+    pub value: String,
+    #[serde(default)]
+    pub signature: Option<String>,
+}
+
+/// What Rift remembers about a player who joined at least once.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayerRecord {
+    /// 32 lowercase hexadecimal digits, without dashes.
+    pub uuid: String,
+    /// The name the player last joined with.
+    pub name: String,
+    /// Unix seconds.
+    pub first_seen: u64,
+    /// Unix seconds: the last join or quit.
+    pub last_seen: u64,
+    /// Empty when `players.record_ip` is off.
+    pub last_ip: String,
+    pub last_server: String,
+    pub online: bool,
+    /// The language a plugin set for the player, if any.
+    pub language: Option<String>,
 }
 
 /// Metadata available right after TCP accept (`route`).
@@ -164,8 +220,25 @@ pub enum SuggestKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandSpec {
     pub name: String,
+    /// Other names the command answers to; hooks always see `name`.
+    #[serde(default)]
+    pub aliases: Vec<String>,
     pub permission: String,
     pub suggest: SuggestKind,
+    /// Whether operators may run the command from the console.
+    #[serde(default)]
+    pub console: bool,
+}
+
+impl CommandSpec {
+    /// The name and every alias.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.name.as_str()).chain(self.aliases.iter().map(String::as_str))
+    }
+
+    pub fn answers_to(&self, name: &str) -> bool {
+        self.names().any(|own| own == name)
+    }
 }
 
 /// Every handler export except the lifecycle ones.
@@ -188,22 +261,23 @@ pub enum Hook {
     Event,
     /// A click on a plugin action of a dialog the plugin showed. Like timer
     /// ticks it is addressed to one plugin, and needs no registration: the
-    /// WIT `hook` enum has no case for it, so WebAssembly plugins built
-    /// against 0.1.0 keep loading.
+    /// WIT `hook` enum has no case for it.
     Dialog,
-    /// A chat message or backend command before the backend sees it. The
-    /// WIT `hook` enum has no case for it either: a plugin registers by
-    /// having a handler (the `chat` export, or `rift.on("chat", ...)`), see
-    /// [`Registration::chat`].
+    /// A chat message or backend command before the backend sees it. An
+    /// empty hook list does not imply it: a plugin lists it (or, in Lua,
+    /// has a handler), see [`Registration::chat`].
     Chat,
-    /// A backend kicked a player in play: where they go next. No WIT case
-    /// either: a plugin registers with a handler (the `kicks` export, or
-    /// `rift.on("kick", ...)`), see [`Registration::kick`].
+    /// A backend kicked a player in play: where they go next. Listed
+    /// explicitly like `chat`, see [`Registration::kick`].
     Kick,
+    /// A background job the plugin started finished. Addressed to that
+    /// plugin and never registered, like `dialog`.
+    #[serde(rename = "job_done")]
+    Job,
 }
 
 impl Hook {
-    pub const ALL: [Hook; 17] = [
+    pub const ALL: [Hook; 18] = [
         Hook::Route,
         Hook::Login,
         Hook::InitialServer,
@@ -221,6 +295,7 @@ impl Hook {
         Hook::Dialog,
         Hook::Chat,
         Hook::Kick,
+        Hook::Job,
     ];
 
     /// The snake_case name used by manifests, Lua and the bus.
@@ -243,6 +318,7 @@ impl Hook {
             Self::Dialog => "dialog",
             Self::Chat => "chat",
             Self::Kick => "kick",
+            Self::Job => "job_done",
         }
     }
 
@@ -262,6 +338,7 @@ impl Hook {
                 | Self::Timer
                 | Self::Event
                 | Self::Dialog
+                | Self::Job
         )
     }
 
@@ -292,13 +369,11 @@ pub struct Registration {
     pub commands: Vec<CommandSpec>,
     /// Events to deliver. An empty list delivers every hook.
     pub hooks: Vec<Hook>,
-    /// Whether the plugin handles `chat`: a component that exports it, a Lua
-    /// plugin with a `chat` handler. Set by the engine, not by the guest's
-    /// registration record, which has no field for it; an empty hook list
-    /// does not imply it.
+    /// Whether the plugin handles `chat`: a component that lists the hook,
+    /// a Lua plugin with a `chat` handler. Set by the engine; an empty hook
+    /// list does not imply it.
     pub chat: bool,
-    /// Whether the plugin handles `kick`: a component that exports `kicks`,
-    /// a Lua plugin with a `kick` handler. Set by the engine, like `chat`.
+    /// Whether the plugin handles `kick`; set by the engine, like `chat`.
     pub kick: bool,
 }
 
@@ -308,7 +383,7 @@ impl Registration {
     /// (see [`Registration::chat`]).
     pub fn wants(&self, hook: Hook) -> bool {
         match hook {
-            Hook::Dialog => true,
+            Hook::Dialog | Hook::Job => true,
             Hook::Chat => self.chat,
             Hook::Kick => self.kick,
             _ => self.hooks.is_empty() || self.hooks.contains(&hook),
@@ -367,6 +442,9 @@ pub enum Event {
     /// A backend kick; `Context::server` is the backend and
     /// `Context::reason` its reason without formatting.
     Kick(Context),
+    /// A background job finished: its handle and what `work` returned.
+    #[serde(rename = "job_done")]
+    Job(u64, Result<Vec<u8>, String>),
 }
 
 impl Event {
@@ -389,6 +467,7 @@ impl Event {
             Self::Dialog(_) => Hook::Dialog,
             Self::Chat(_) => Hook::Chat,
             Self::Kick(_) => Hook::Kick,
+            Self::Job(..) => Hook::Job,
         }
     }
 }
@@ -428,7 +507,8 @@ impl Reply {
             | Hook::Message
             | Hook::Timer
             | Hook::Event
-            | Hook::Dialog => Self::None,
+            | Hook::Dialog
+            | Hook::Job => Self::None,
         }
     }
 }

@@ -80,6 +80,11 @@ struct Entry {
     visible_to: Option<Arc<str>>,
     /// The client's language, once its Client Information arrived.
     locale: Option<String>,
+    /// The language a plugin set for the player, from the directory.
+    language: Option<String>,
+    /// The address the player connected from, without the port.
+    ip: String,
+    properties: Vec<crate::plugins::api::ProfileProperty>,
     server: String,
     protocol: i32,
     actions: mpsc::Sender<PlayerAction>,
@@ -100,6 +105,25 @@ pub struct Players {
     groups: Groups,
     events: Broker,
     permissions: Arc<Authority>,
+    /// Every player who ever joined, online or not.
+    directory: crate::directory::Directory,
+    /// `players.record_ip` of the configuration in effect.
+    record_ip: Arc<std::sync::atomic::AtomicBool>,
+    /// Counts language changes, so sessions notice one without a lock.
+    languages: Arc<std::sync::atomic::AtomicU64>,
+}
+
+/// What a session knows about its player beyond the name.
+#[derive(Debug, Clone, Default)]
+pub struct Profile {
+    /// The address the player connected from, without the port.
+    pub ip: String,
+    pub properties: Vec<crate::plugins::api::ProfileProperty>,
+}
+
+/// The catalogue language for a client locale: `de_DE` is `de_de`.
+pub fn locale_language(locale: &str) -> Option<String> {
+    crate::directory::language_tag(locale).ok()
 }
 
 pub const EVENTS: &str = "rift.events.players";
@@ -138,6 +162,15 @@ impl PlayerHandle {
         self.players.publish(event);
     }
 
+    /// The language Rift's messages use for this player: what a plugin set,
+    /// else the client's locale.
+    pub fn language(&self) -> Option<String> {
+        self.players
+            .lock()
+            .get(&self.id)
+            .and_then(Players::effective_language)
+    }
+
     /// The language the client reported, as the session last read it.
     pub fn set_locale(&self, locale: Option<&str>) {
         if let Some(entry) = self.players.lock().get_mut(&self.id)
@@ -153,9 +186,20 @@ impl Drop for PlayerHandle {
         let removed = self.players.lock().remove(&self.id);
         self.players.permissions.leave(self.uuid);
         if let Some(entry) = removed {
+            let directory = self.players.directory.clone();
+            let (uuid, server) = (entry.uuid.clone(), entry.server.clone());
+            background(move || directory.left(&uuid, &server));
             let event = self.players.event("quit", self.id, &entry, None);
             self.players.publish(event);
         }
+    }
+}
+
+/// Run a directory write off the session's task when there is a runtime.
+fn background(work: impl FnOnce() + Send + 'static) {
+    match tokio::runtime::Handle::try_current() {
+        Ok(runtime) => drop(runtime.spawn_blocking(work)),
+        Err(_) => work(),
     }
 }
 
@@ -354,6 +398,12 @@ impl Players {
         events: Broker,
         permissions: Arc<Authority>,
     ) -> Self {
+        // The table lives beside the permission store, in the same file.
+        let directory = crate::directory::Directory::open(permissions.database_handle().clone())
+            .unwrap_or_else(|error| {
+                eprintln!("rift: the player directory is kept in memory only: {error}");
+                crate::directory::Directory::memory()
+            });
         Self {
             sessions: Arc::default(),
             roster: Arc::default(),
@@ -361,7 +411,101 @@ impl Players {
             groups,
             events,
             permissions,
+            directory,
+            record_ip: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            languages: Arc::default(),
         }
+    }
+
+    /// `players.record_ip`: whether joins remember the player's address.
+    pub fn set_record_ip(&self, record: bool) {
+        self.record_ip
+            .store(record, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Changes whenever a plugin sets a player's language.
+    pub fn language_generation(&self) -> u64 {
+        self.languages.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The language a plugin set for a player, by lowercase UUID; known
+    /// before the player joins.
+    pub fn stored_language(&self, uuid: &str) -> Option<String> {
+        if uuid.is_empty() {
+            return None;
+        }
+        self.directory.language(uuid)
+    }
+
+    fn effective_language(entry: &Entry) -> Option<String> {
+        entry
+            .language
+            .clone()
+            .or_else(|| entry.locale.as_deref().and_then(locale_language))
+    }
+
+    fn record(&self, record: crate::directory::Record) -> crate::plugins::api::PlayerRecord {
+        let online = self.lock().values().any(|entry| entry.uuid == record.uuid);
+        crate::plugins::api::PlayerRecord {
+            uuid: record.uuid,
+            name: record.name,
+            first_seen: record.first_seen,
+            last_seen: record.last_seen,
+            last_ip: record.last_ip,
+            last_server: record.last_server,
+            online,
+            language: record.language,
+        }
+    }
+
+    /// What Rift remembers about a player by UUID or last name, online or
+    /// not.
+    pub fn lookup(
+        &self,
+        target: &str,
+    ) -> Result<Option<crate::plugins::api::PlayerRecord>, String> {
+        Ok(self
+            .directory
+            .lookup(target)?
+            .map(|record| self.record(record)))
+    }
+
+    /// Remembered players whose name starts with `prefix`, most recently
+    /// seen first.
+    pub fn search(
+        &self,
+        prefix: &str,
+        limit: u32,
+    ) -> Result<Vec<crate::plugins::api::PlayerRecord>, String> {
+        Ok(self
+            .directory
+            .search(prefix, limit)?
+            .into_iter()
+            .map(|record| self.record(record))
+            .collect())
+    }
+
+    /// Set (or with `None` clear) the language Rift's messages use for a
+    /// player Rift has seen, by UUID or name. False for an unknown player.
+    pub fn set_language(&self, target: &str, language: Option<&str>) -> Result<bool, String> {
+        let language = language.map(crate::directory::language_tag).transpose()?;
+        let Some(record) = self.directory.lookup(target)? else {
+            return Ok(false);
+        };
+        if !self
+            .directory
+            .set_language(&record.uuid, language.as_deref())?
+        {
+            return Ok(false);
+        }
+        for entry in self.lock().values_mut() {
+            if entry.uuid == record.uuid {
+                entry.language.clone_from(&language);
+            }
+        }
+        self.languages
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(true)
     }
 
     /// Only the owning session changes its entry, one step at a time, so the
@@ -402,6 +546,20 @@ impl Players {
         protocol: i32,
         server: &str,
     ) -> (PlayerHandle, mpsc::Receiver<PlayerAction>) {
+        self.register_with(id, uuid, name, protocol, server, Profile::default())
+    }
+
+    /// [`Players::register`] with the address and profile properties the
+    /// session knows.
+    pub fn register_with(
+        &self,
+        id: u64,
+        uuid: &[u8; 16],
+        name: &str,
+        protocol: i32,
+        server: &str,
+        profile: Profile,
+    ) -> (PlayerHandle, mpsc::Receiver<PlayerAction>) {
         let (actions, receiver) = mpsc::channel(QUEUE);
         let player = rift_permissions::Uuid::from_bytes(*uuid);
         self.permissions
@@ -410,11 +568,24 @@ impl Players {
         // roster record the login created (usually already with this rule).
         let visible_to = self.visibility(uuid, server);
         self.roster.set_visibility(uuid, visible_to.clone());
+        let hex: String = uuid.iter().map(|b| format!("{b:02x}")).collect();
+        // Read before the join is written: a first join has no language.
+        let language = self.directory.language(&hex);
+        {
+            let directory = self.directory.clone();
+            let record_ip = self.record_ip.load(std::sync::atomic::Ordering::Relaxed);
+            let ip = (record_ip && !profile.ip.is_empty()).then(|| profile.ip.clone());
+            let (hex, name, server) = (hex.clone(), name.to_owned(), server.to_owned());
+            background(move || directory.joined(&hex, &name, ip.as_deref(), &server));
+        }
         let entry = Entry {
-            uuid: uuid.iter().map(|b| format!("{b:02x}")).collect(),
+            uuid: hex,
             key: *uuid,
             visible_to,
             locale: None,
+            language,
+            ip: profile.ip,
+            properties: profile.properties,
             name: name.to_owned(),
             server: server.to_owned(),
             protocol,
@@ -662,6 +833,9 @@ impl Players {
             protocol: entry.protocol,
             visible_to: entry.visible_to.as_deref().map(str::to_owned),
             locale: entry.locale.clone(),
+            ip: entry.ip.clone(),
+            properties: entry.properties.clone(),
+            language: Self::effective_language(entry),
         }
     }
 
@@ -805,6 +979,17 @@ impl Players {
         player.raw_set("protocol", entry.protocol)?;
         player.raw_set("visible_to", entry.visible_to.as_deref())?;
         player.raw_set("locale", entry.locale.as_deref())?;
+        player.raw_set("language", Self::effective_language(entry))?;
+        player.raw_set("ip", entry.ip.as_str())?;
+        let properties = lua.create_table_with_capacity(entry.properties.len(), 0)?;
+        for property in &entry.properties {
+            let item = lua.create_table()?;
+            item.raw_set("name", property.name.as_str())?;
+            item.raw_set("value", property.value.as_str())?;
+            item.raw_set("signature", property.signature.as_deref())?;
+            properties.raw_push(item)?;
+        }
+        player.raw_set("properties", properties)?;
         Ok(player)
     }
 
@@ -850,6 +1035,61 @@ impl Players {
                     .map_err(error)?
                     .map(|(id, entry)| Self::info(lua, entry, *id))
                     .transpose()
+            })?,
+        )?;
+
+        // The directory of everyone who ever joined, online or not.
+        fn remembered(
+            lua: &Lua,
+            record: &crate::plugins::api::PlayerRecord,
+        ) -> mlua::Result<Table> {
+            let table = lua.create_table()?;
+            table.raw_set("uuid", record.uuid.as_str())?;
+            table.raw_set("name", record.name.as_str())?;
+            table.raw_set("first_seen", record.first_seen)?;
+            table.raw_set("last_seen", record.last_seen)?;
+            table.raw_set("last_ip", record.last_ip.as_str())?;
+            table.raw_set("last_server", record.last_server.as_str())?;
+            table.raw_set("online", record.online)?;
+            table.raw_set("language", record.language.as_deref())?;
+            Ok(table)
+        }
+        let players = self.clone();
+        api.raw_set(
+            "lookup",
+            lua.create_function(move |lua, target: String| {
+                crate::script::check_deadline(deadline)?;
+                players
+                    .lookup(&target)
+                    .map_err(|message| error(&message))?
+                    .map(|record| remembered(lua, &record))
+                    .transpose()
+            })?,
+        )?;
+        let players = self.clone();
+        api.raw_set(
+            "search",
+            lua.create_function(move |lua, (prefix, limit): (String, Option<u32>)| {
+                crate::script::check_deadline(deadline)?;
+                let list = lua.create_table()?;
+                for record in players
+                    .search(&prefix, limit.unwrap_or(20))
+                    .map_err(|message| error(&message))?
+                {
+                    list.raw_push(remembered(lua, &record)?)?;
+                }
+                Ok(list)
+            })?,
+        )?;
+        let players = self.clone();
+        let spend = budget.clone();
+        api.raw_set(
+            "set_language",
+            lua.create_function(move |_, (target, language): (String, Option<String>)| {
+                spend()?;
+                players
+                    .set_language(&target, language.as_deref())
+                    .map_err(|message| error(&message))
             })?,
         )?;
 

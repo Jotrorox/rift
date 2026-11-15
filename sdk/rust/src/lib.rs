@@ -1,7 +1,7 @@
 //! Guest SDK for Rift WebAssembly plugins.
 //!
 //! A Rift plugin is a WebAssembly component built for `wasm32-wasip2` against
-//! the `plugin` world of `rift:plugin@0.1.5`. This crate ships that WIT,
+//! the `plugin` world of `rift:plugin@0.2.0`. This crate ships that WIT,
 //! generates the bindings and wraps them, so a plugin is an ordinary
 //! `cdylib` crate:
 //!
@@ -10,7 +10,7 @@
 //! crate-type = ["cdylib"]
 //!
 //! [dependencies]
-//! rift-plugin = "0.1"
+//! rift-plugin = "0.2"
 //! ```
 //!
 //! ```no_run
@@ -22,7 +22,12 @@
 //! impl Plugin for Greeter {
 //!     fn init(&mut self, _config: &str) -> Result<Registration, String> {
 //!         Ok(Registration::new()
-//!             .command(CommandSpec::new("greet").permission("greeter.use").suggest(SuggestKind::Players))
+//!             .command(
+//!                 CommandSpec::new("greet")
+//!                     .alias("hi")
+//!                     .permission("greeter.use")
+//!                     .suggest(SuggestKind::Players),
+//!             )
 //!             .hooks([Hook::Command]))
 //!     }
 //!
@@ -53,16 +58,185 @@
 //!
 //! Every [`Plugin`] method has a default that does nothing (`continue`,
 //! `default`, `none` or an empty list). List the hooks you implement in
-//! [`Registration::hooks`] so the host skips the rest; an empty list delivers
-//! every hook.
+//! [`Registration::hooks`] so the host skips the rest. An empty list delivers
+//! every hook except [`Hook::Chat`] and [`Hook::Kick`], which are only ever
+//! delivered when listed. [`Plugin::dialog`] and [`Plugin::job_done`] need no
+//! entry.
+//!
+//! The decision hooks answer with an [`Action`]; each accepts a subset:
+//!
+//! | Hook | Accepts |
+//! | --- | --- |
+//! | `login`, `before_transfer`, `chat` | `Continue`, `deny` |
+//! | `initial_server`, `kick` | `Continue`, `deny`, `server` |
+//! | `command` | `Continue`, `message`, `server`, `queue`, `LeaveQueue` |
 //!
 //! # Host API
 //!
 //! [`players`], [`store`], [`permissions`], [`bus`], [`servers`], [`timers`],
-//! [`log`] and [`meta`] mirror the WIT interfaces of the same names. Errors
-//! are the host's message as a `String`. [`log`] also installs a [`::log`]
-//! logger before `init`, so `log::info!` and friends reach Rift's log.
-//! Plugin configuration arrives as JSON; decode it with [`config()`].
+//! [`background`], [`log`] and [`meta`] mirror the WIT interfaces of the same
+//! names. Errors are the host's message as a `String`. [`log`] also installs
+//! a [`::log`] logger before `init`, so `log::info!` and friends reach Rift's
+//! log. Plugin configuration arrives as JSON; decode it with [`config()`].
+//!
+//! WASI 0.2 (`std::fs` on the granted directories, clocks, random) works
+//! through the standard library. A `wasi:http` helper is not provided.
+//!
+//! # Text
+//!
+//! Everything a player reads is a [`Text`]: [`Text::Plain`], shown exactly
+//! as written, or [`Text::Json`], a JSON text component with colours, line
+//! breaks, hover text and click events. Every function and constructor that
+//! shows text takes `impl Into<Text>`:
+//!
+//! - `&str` and `String` become plain text;
+//! - the [`text`] builders ([`text::mini`] for Rift markup, [`text::legacy`]
+//!   for `&c` codes, [`text::Component`] field by field) and a
+//!   [`serde_json::Value`] become JSON text.
+//!
+//! ```no_run
+//! use rift_plugin::{Action, TitleSpec, players, text};
+//! use serde_json::json;
+//!
+//! players::message("Steve", "Shown <exactly> as written").ok();
+//!
+//! let welcome = text::mini("<gold>Welcome, <player>!</gold> <gray><click:run_command:/spawn>[Spawn]")
+//!     .arg("player", "Steve");
+//! players::message("Steve", welcome).ok();
+//! players::title(
+//!     "Steve",
+//!     &TitleSpec::new(text::mini("<green>Lobby")).subtitle(text::legacy("&7Have fun")),
+//! )
+//! .ok();
+//!
+//! let reply = Action::message(
+//!     text::Component::text("[Accept]")
+//!         .color("green")
+//!         .bold()
+//!         .run_command("/party accept Alex")
+//!         .hover_text("Join Alex's party"),
+//! );
+//! let banned = Action::deny(json!({
+//!     "text": "You are banned\n", "color": "red",
+//!     "extra": [{"text": "Reason: spam", "color": "gray"}],
+//! }));
+//! ```
+//!
+//! Rift spells hover and click events the way each player's client reads
+//! them, so either the 1.21.5+ form (`click_event`, `hover_event`) or the
+//! older one (`clickEvent`, `hoverEvent`) works for every client. Markup is
+//! only ever read from an explicit `{"mini": ...}` object, which
+//! [`text::mini`] writes; a string is always shown as written, so text from
+//! players can be passed safely as plain text or as a markup argument.
+//!
+//! # Chat and kicks
+//!
+//! [`Plugin::chat`] sees every chat message, and every command that reaches
+//! the backend, before the backend does, and may drop it. [`Plugin::kick`]
+//! decides what happens to a player a backend kicked. Both are delivered
+//! only to a registration that lists them:
+//!
+//! ```no_run
+//! use rift_plugin::{Action, ChatAttempt, ChatKind, Context, Hook, Plugin, Registration};
+//!
+//! #[derive(Default)]
+//! struct Mute {
+//!     muted: Vec<String>,
+//! }
+//!
+//! impl Plugin for Mute {
+//!     fn init(&mut self, _config: &str) -> Result<Registration, String> {
+//!         Ok(Registration::new().hooks([Hook::Chat, Hook::Kick]))
+//!     }
+//!
+//!     fn chat(&mut self, attempt: ChatAttempt) -> Action {
+//!         if attempt.kind == ChatKind::Message && self.muted.contains(&attempt.ctx.uuid) {
+//!             return Action::deny("You are muted.");
+//!         }
+//!         Action::Continue
+//!     }
+//!
+//!     fn kick(&mut self, ctx: Context) -> Action {
+//!         match ctx.reason.as_deref() {
+//!             Some(reason) if reason.contains("restarting") => Action::server("lobby"),
+//!             _ => Action::Continue,
+//!         }
+//!     }
+//! }
+//!
+//! rift_plugin::export!(Mute);
+//! ```
+//!
+//! Rift asks a plugin that lists [`Hook::Chat`] about every message of every
+//! player, and starts it only when the proxy sets
+//! `authentication.signed_chat = false`: dropping one signed message would
+//! break the player's signature chain.
+//!
+//! # Background work
+//!
+//! A plugin runs one call at a time, so a slow lookup in `login` would keep
+//! every other hook waiting. The [`background`] module moves such work to
+//! worker instances (manifest `[background] workers = N`): the hook defers
+//! its answer, queues a job and returns; a worker runs [`Plugin::work`];
+//! [`Plugin::job_done`] receives the result and gives the answer.
+//!
+//! ```no_run
+//! use rift_plugin::{Action, Context, Hook, Plugin, Registration, background};
+//! use std::collections::HashMap;
+//!
+//! #[derive(Default)]
+//! struct Bans {
+//!     /// Job handle to the ticket of the login that waits for it.
+//!     waiting: HashMap<u64, u64>,
+//! }
+//!
+//! impl Plugin for Bans {
+//!     fn init(&mut self, _config: &str) -> Result<Registration, String> {
+//!         Ok(Registration::new().hooks([Hook::Login]))
+//!     }
+//!
+//!     fn login(&mut self, ctx: Context) -> Action {
+//!         let Ok(ticket) = background::defer() else {
+//!             return Action::deny("Try again in a moment.");
+//!         };
+//!         match background::run(ctx.uuid.as_bytes()) {
+//!             Ok(job) => {
+//!                 self.waiting.insert(job, ticket);
+//!             }
+//!             Err(_) => {
+//!                 let _ = background::resolve(ticket, Action::deny("Try again in a moment."));
+//!             }
+//!         }
+//!         // Ignored: the answer is the one given to `resolve`.
+//!         Action::Continue
+//!     }
+//!
+//!     fn job_done(&mut self, job: u64, outcome: Result<Vec<u8>, String>) {
+//!         let Some(ticket) = self.waiting.remove(&job) else { return };
+//!         let action = match outcome {
+//!             Ok(reason) if reason.is_empty() => Action::Continue,
+//!             Ok(reason) => Action::deny(String::from_utf8_lossy(&reason).into_owned()),
+//!             Err(_) => Action::deny("Try again in a moment."),
+//!         };
+//!         let _ = background::resolve(ticket, action);
+//!     }
+//!
+//!     // Runs on a worker: another instance, with its own state.
+//!     fn work(&mut self, uuid: Vec<u8>) -> Result<Vec<u8>, String> {
+//!         let uuid = String::from_utf8(uuid).map_err(|error| error.to_string())?;
+//!         // The slow part; an empty answer means "not banned".
+//!         Ok(std::fs::read(format!("/data/bans/{uuid}")).unwrap_or_default())
+//!     }
+//! }
+//!
+//! rift_plugin::export!(Bans);
+//! ```
+//!
+//! A worker is a separate instance of the same component with its own
+//! memory: its state is its own `Default` value, [`Plugin::init`] never runs
+//! there, and it receives no hooks. [`Plugin::work_init`] runs once per
+//! worker before its first job, with the plugin's configuration. The
+//! deferred hook's deadline keeps running while the job does.
 //!
 //! # Dialogs
 //!
@@ -96,115 +270,6 @@
 //! }
 //! # rift_plugin::export!(Rules);
 //! ```
-//!
-//! The dialog functions are new in rift:plugin 0.1.1. A plugin that calls
-//! them needs a Rift that implements 0.1.1; older hosts refuse to load it.
-//! A plugin that does not call them loads on every 0.1 host. The same holds
-//! for the rich text functions of 0.1.2 and [`players::title_json`] of 0.1.4
-//! below.
-//!
-//! WASI 0.2 (`std::fs` on the granted directories, clocks, random) works
-//! through the standard library. A `wasi:http` helper is not provided.
-//!
-//! # Rich text
-//!
-//! Messages, action bars, kicks and deny reasons are plain text by default.
-//! For colours, line breaks, hover text and click events, pass a JSON text
-//! component to the `_json` forms: [`Action::deny_json`],
-//! [`Action::message_json`], [`players::message_json`],
-//! [`players::action_bar_json`], [`players::kick_json`] and
-//! [`players::broadcast_json`]. Rift spells hover and click events the way
-//! each player's client reads them, so either the 1.21.5+ form
-//! (`click_event`, `hover_event`) or the older one (`clickEvent`,
-//! `hoverEvent`) works for every client.
-//!
-//! ```no_run
-//! use rift_plugin::{Action, players};
-//! use serde_json::json;
-//!
-//! let invite = json!([
-//!     {"text": "Alex invited you to their party. "},
-//!     {"text": "[Accept]", "color": "green",
-//!      "click_event": {"action": "run_command", "command": "/party accept Alex"},
-//!      "hover_event": {"action": "show_text", "value": "Join Alex's party"}},
-//! ]);
-//! players::message_json("Sam", &invite.to_string()).ok();
-//!
-//! let banned = Action::deny_json(json!({
-//!     "text": "You are banned\n", "color": "red",
-//!     "extra": [{"text": "Reason: spam", "color": "gray"}],
-//! }));
-//! ```
-//!
-//! The [`text`] builders write that JSON for you: [`text::mini`] for Rift
-//! markup (`<red>`, `<click:...>`, see `docs/text.md`), [`text::legacy`] for
-//! `&c` codes and [`text::Component`] for a component field by field. Markup
-//! is only ever read from an explicit `{"mini": ...}` object, which
-//! [`text::mini`] writes; a bare string is always shown as written, so text
-//! from players can be passed safely as an argument:
-//!
-//! ```no_run
-//! use rift_plugin::{Action, TitleJsonSpec, players, text};
-//!
-//! let welcome = text::mini("<gold>Welcome, <player>!</gold> <gray><click:run_command:/spawn>[Spawn]")
-//!     .arg("player", "Steve");
-//! players::message_json("Steve", &welcome.to_string()).ok();
-//! players::title_json(
-//!     "Steve",
-//!     &TitleJsonSpec::new(text::mini("<green>Lobby")).subtitle(text::legacy("&7Have fun")),
-//! )
-//! .ok();
-//! let reply = Action::message_json(
-//!     text::Component::text("[Accept]")
-//!         .color("green")
-//!         .bold()
-//!         .run_command("/party accept Alex")
-//!         .hover_text("Join Alex's party"),
-//! );
-//! ```
-//!
-//! # Rich suggestions and server-list text
-//!
-//! [`Plugin::suggest_rich`] and [`Plugin::status_rich`] answer `suggest` and
-//! `status` with JSON tooltips, version text and player-sample lines (since
-//! 0.1.4, through the optional `styled` export). Their defaults call
-//! [`Plugin::suggest`] and [`Plugin::status`], so implement whichever form
-//! you need. Hosts before 0.1.4 call the plain hooks; the SDK then shows the
-//! rich text as its words.
-//!
-//! # Chat
-//!
-//! [`Plugin::chat`] sees every chat message, and every command that reaches
-//! the backend, before the backend does, and may drop it (since 0.1.5, on
-//! Rift hosts that implement 0.1.5). It is the one hook a plugin opts into
-//! when it is exported, with `chat` after the type:
-//!
-//! ```no_run
-//! use rift_plugin::{Action, ChatAttempt, ChatKind, Plugin};
-//!
-//! #[derive(Default)]
-//! struct Mute {
-//!     muted: Vec<String>,
-//! }
-//!
-//! impl Plugin for Mute {
-//!     fn chat(&mut self, attempt: ChatAttempt) -> Action {
-//!         if attempt.kind == ChatKind::Message && self.muted.contains(&attempt.ctx.uuid) {
-//!             return Action::Deny("You are muted.".into());
-//!         }
-//!         Action::Continue
-//!     }
-//! }
-//!
-//! rift_plugin::export!(Mute, chat);
-//! ```
-//!
-//! Without `chat` in [`export!`] the component has no `chat` export and Rift
-//! never asks it. With it, Rift asks the plugin about every message of every
-//! player, whatever [`Registration::hooks`] lists, and refuses to start the
-//! plugin unless the proxy sets `authentication.signed_chat = false`:
-//! dropping one signed message would break the player's signature chain.
-//! Hosts before 0.1.5 load such a component and never call the hook.
 
 #![warn(missing_docs)]
 
@@ -215,7 +280,7 @@
 pub mod bindings {
     wit_bindgen::generate!({
         path: "wit",
-        world: "rift:plugin/plugin@0.1.5",
+        world: "rift:plugin/plugin@0.2.0",
         pub_export_macro: true,
         export_macro_name: "__export_rift_plugin",
         default_bindings_module: "rift_plugin::bindings",
@@ -223,36 +288,21 @@ pub mod bindings {
     });
 }
 
-/// The raw generated bindings for the optional `chat` export, which only
-/// `export!(Type, chat)` links into a component.
-#[doc(hidden)]
-#[allow(missing_docs, clippy::all)]
-pub mod chat_bindings {
-    wit_bindgen::generate!({
-        path: "wit",
-        world: "rift:plugin/optional-chat@0.1.5",
-        pub_export_macro: true,
-        export_macro_name: "__export_rift_plugin_chat",
-        default_bindings_module: "rift_plugin::chat_bindings",
-        with: {
-            "rift:plugin/types@0.1.5": crate::bindings::rift::plugin::types,
-        },
-    });
-}
-
 pub use bindings::rift::plugin::types::{
     BossBarSpec, BusMessage, ChatAttempt, ChatKind, CommandSpec, Connection, Context,
-    DialogResponse, Hook, HttpRequest, HttpResponse, Level, Ping, PlayerInfo, Registration,
-    RichStatusOverride, RichSuggestion, RiftEvent, RouteDecision, StatusOverride, SuggestKind,
-    Suggestion, TitleJsonSpec, TitleSpec,
+    DialogResponse, Hook, HttpRequest, HttpResponse, Level, Ping, PlayerInfo, PlayerRecord,
+    ProfileProperty, Registration, RiftEvent, RouteDecision, StatusOverride, SuggestKind,
+    Suggestion, Text, TitleSpec,
 };
 
-/// The answer to a decision hook: the contract's `decision` variant, which is
-/// `action` plus `DenyJson` and `MessageJson` for rich text (since 0.1.2).
+/// The answer to a decision hook: the contract's `decision` variant.
 ///
-/// The SDK answers through the `decisions` export, which hosts from 0.1.2
-/// call. An older host calls the `handler` hooks instead and shows the rich
-/// cases as their plain words.
+/// Each hook accepts a subset; an answer outside it counts as a failed call:
+/// - `login`, `before_transfer`, `chat`: `Continue`, [`deny`](Action::deny)
+/// - `initial_server`, `kick`: `Continue`, [`deny`](Action::deny),
+///   [`server`](Action::server)
+/// - `command`: `Continue`, [`message`](Action::message),
+///   [`server`](Action::server), [`queue`](Action::queue), `LeaveQueue`
 pub type Action = bindings::rift::plugin::types::Decision;
 
 use serde::de::DeserializeOwned;
@@ -298,8 +348,14 @@ pub trait Plugin: Default + 'static {
         Action::Continue
     }
 
-    /// A registered command ran. Accepts `continue`, `message`, `server`,
-    /// `queue` and `leave-queue`.
+    /// A registered command ran; `ctx.command` is its name, also when an
+    /// alias was typed, and `ctx.args` the text after it. Accepts
+    /// `continue`, `message`, `server`, `queue` and `leave-queue`.
+    ///
+    /// For a command registered with [`CommandSpec::console`], `ctx.console`
+    /// tells that the operator console runs it: there is no player then
+    /// (`ctx.uuid` is empty and `ctx.name` is `CONSOLE`), and a `message`
+    /// answer is shown to the operator.
     fn command(&mut self, ctx: Context) -> Action {
         Action::Continue
     }
@@ -315,24 +371,32 @@ pub trait Plugin: Default + 'static {
         None
     }
 
-    /// [`Plugin::suggest`] with JSON text tooltips (since 0.1.4). The default
-    /// answers with [`Plugin::suggest`].
-    fn suggest_rich(&mut self, ctx: Context) -> Vec<RichSuggestion> {
-        self.suggest(ctx)
-            .into_iter()
-            .map(RichSuggestion::from)
-            .collect()
-    }
-
-    /// [`Plugin::status`] with JSON text for the version and the player
-    /// sample (since 0.1.4). The default answers with [`Plugin::status`].
-    fn status_rich(&mut self, ping: Ping) -> Option<RichStatusOverride> {
-        self.status(ping).map(RichStatusOverride::from)
-    }
-
-    /// An authenticated request to `/api/script/*`.
+    /// An authenticated request to `/ext` or `/ext/*` on the web server.
     fn http(&mut self, request: HttpRequest) -> Option<HttpResponse> {
         None
+    }
+
+    /// A player sent a chat message, or a command that neither Rift nor a
+    /// plugin owns, and the backend has not seen it yet. Accepts `continue`,
+    /// which lets it through unchanged, and `deny`, which drops it and shows
+    /// the player the text.
+    ///
+    /// Delivered only when [`Registration::hooks`] lists [`Hook::Chat`]; see
+    /// the [crate documentation](crate#chat-and-kicks) for what that
+    /// requires of the proxy. For a command, `attempt.ctx.command` is the
+    /// root name and `attempt.ctx.args` the rest.
+    fn chat(&mut self, attempt: ChatAttempt) -> Action {
+        Action::Continue
+    }
+
+    /// A backend kicked a player in play: `ctx.server` is the backend and
+    /// `ctx.reason` its reason without formatting. `continue` leaves it to
+    /// `network.on_kick`, `deny` disconnects the player with the text and
+    /// `server` moves them there.
+    ///
+    /// Delivered only when [`Registration::hooks`] lists [`Hook::Kick`].
+    fn kick(&mut self, ctx: Context) -> Action {
+        Action::Continue
     }
 
     /// A player joined.
@@ -358,18 +422,27 @@ pub trait Plugin: Default + 'static {
     /// [`Registration::hooks`].
     fn dialog(&mut self, response: DialogResponse) {}
 
-    /// A player sent a chat message, or a command that neither Rift nor a
-    /// plugin owns, and the backend has not seen it yet (since 0.1.5).
-    /// Accepts `continue`, which lets it through unchanged, and `deny`
-    /// ([`Action::Deny`], [`Action::deny_json`]), which drops it and shows
-    /// the player the text.
+    /// A job started with [`background::run`] finished: `handle` is the one
+    /// `run` returned and `outcome` what [`Plugin::work`] returned on the
+    /// worker, or why the job failed. Delivered without being listed in
+    /// [`Registration::hooks`].
+    fn job_done(&mut self, handle: u64, outcome: Result<Vec<u8>, String>) {}
+
+    /// Background workers only: called once per worker before its first
+    /// job, with the plugin's configuration as JSON.
     ///
-    /// Called only for a plugin exported with `export!(Type, chat)`; see the
-    /// [crate documentation](crate#chat) for what that requires of the
-    /// proxy. For a command, `attempt.ctx.command` is the root name and
-    /// `attempt.ctx.args` the rest.
-    fn chat(&mut self, attempt: ChatAttempt) -> Action {
-        Action::Continue
+    /// A worker is a separate instance of the component. `self` is a fresh
+    /// [`Default`] value that only `work_init` and [`Plugin::work`] ever
+    /// see; [`Plugin::init`] is never called on it.
+    fn work_init(&mut self, config: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Background workers only: one job queued with [`background::run`].
+    /// It may block; the plugin's hooks keep running meanwhile. The result
+    /// reaches [`Plugin::job_done`] on the plugin's main instance.
+    fn work(&mut self, payload: Vec<u8>) -> Result<Vec<u8>, String> {
+        Err("this plugin has no background work".into())
     }
 }
 
@@ -379,12 +452,6 @@ pub trait Plugin: Default + 'static {
 /// ```ignore
 /// rift_plugin::export!(MyPlugin);
 /// ```
-///
-/// `export!(MyPlugin, chat)` also exports [`Plugin::chat`] as the optional
-/// `rift:plugin/chat` interface. Rift asks a component with that export about
-/// every chat message and starts it only with
-/// `authentication.signed_chat = false`, so add it only to a plugin that
-/// moderates chat.
 #[macro_export]
 macro_rules! export {
     ($plugin:ty) => {
@@ -392,13 +459,9 @@ macro_rules! export {
         type __RiftPluginExport = $crate::__private::Adapter<$plugin>;
         $crate::bindings::__export_rift_plugin!(__RiftPluginExport with_types_in $crate::bindings);
     };
-    ($plugin:ty, chat) => {
-        $crate::export!($plugin);
-        $crate::chat_bindings::__export_rift_plugin_chat!(__RiftPluginExport with_types_in $crate::chat_bindings);
-    };
 }
 
-/// Decodes the JSON configuration `init` and `reload` receive.
+/// Decodes the JSON configuration `init`, `reload` and `work_init` receive.
 ///
 /// The host passes `{}` when the plugin has no configuration, so mark
 /// optional fields with `#[serde(default)]`.
@@ -406,8 +469,68 @@ pub fn config<T: DeserializeOwned>(json: &str) -> Result<T, String> {
     serde_json::from_str(json).map_err(|error| format!("invalid plugin configuration: {error}"))
 }
 
+impl Text {
+    /// Plain text of 1..=1024 bytes, shown exactly as written. The same as
+    /// converting a `&str` or `String`.
+    pub fn plain(text: impl Into<String>) -> Self {
+        Self::Plain(text.into())
+    }
+
+    /// A JSON text component of at most 32 KiB that is already JSON text.
+    /// The [`text`] builders and [`serde_json::Value`] convert into this
+    /// with `into()`.
+    pub fn json(json: impl Into<String>) -> Self {
+        Self::Json(json.into())
+    }
+}
+
+impl From<&str> for Text {
+    /// [`Text::Plain`].
+    fn from(text: &str) -> Self {
+        Self::Plain(text.to_owned())
+    }
+}
+
+impl From<String> for Text {
+    /// [`Text::Plain`].
+    fn from(text: String) -> Self {
+        Self::Plain(text)
+    }
+}
+
+impl From<&String> for Text {
+    /// [`Text::Plain`].
+    fn from(text: &String) -> Self {
+        Self::Plain(text.clone())
+    }
+}
+
+impl From<serde_json::Value> for Text {
+    /// [`Text::Json`]: the value is a JSON text component.
+    fn from(component: serde_json::Value) -> Self {
+        Self::Json(component.to_string())
+    }
+}
+
+impl From<&serde_json::Value> for Text {
+    /// [`Text::Json`]: the value is a JSON text component.
+    fn from(component: &serde_json::Value) -> Self {
+        Self::Json(component.to_string())
+    }
+}
+
+impl PartialEq for Text {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Plain(a), Self::Plain(b)) | (Self::Json(a), Self::Json(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
 impl Registration {
-    /// No commands and no hooks (which delivers every hook).
+    /// No commands and no hooks, which delivers every hook except
+    /// [`Hook::Chat`] and [`Hook::Kick`].
     pub fn new() -> Self {
         Self {
             commands: Vec::new(),
@@ -441,22 +564,36 @@ impl Default for Registration {
 }
 
 impl CommandSpec {
-    /// A command without a permission node or suggestions. Without a
-    /// permission every player may see and run it (since 0.1.5; earlier
-    /// hosts reject the registration).
+    /// A command without aliases, permission node or suggestions, for
+    /// players only. Without a permission every player may see and run it.
     ///
     /// Names are 1 to 64 bytes of `a-z0-9_-`; `server` and `hub` are
     /// reserved.
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
+            aliases: Vec::new(),
             permission: String::new(),
             suggest: SuggestKind::None,
+            console: false,
         }
     }
 
+    /// Another name for the command, written like the name. A command has
+    /// at most 16; the hooks always see the name in `ctx.command`.
+    pub fn alias(mut self, alias: impl Into<String>) -> Self {
+        self.aliases.push(alias.into());
+        self
+    }
+
+    /// More names for the command; see [`CommandSpec::alias`].
+    pub fn aliases<S: Into<String>>(mut self, aliases: impl IntoIterator<Item = S>) -> Self {
+        self.aliases.extend(aliases.into_iter().map(Into::into));
+        self
+    }
+
     /// The permission node a player needs to see and run the command. An
-    /// empty node (since 0.1.5) opens the command to every player.
+    /// empty node opens the command to every player.
     pub fn permission(mut self, node: impl Into<String>) -> Self {
         self.permission = node.into();
         self
@@ -467,34 +604,45 @@ impl CommandSpec {
         self.suggest = kind;
         self
     }
+
+    /// Operators may run the command from the console (`rift admin plugins
+    /// run`); [`Plugin::command`] then sees `ctx.console`.
+    pub fn console(mut self) -> Self {
+        self.console = true;
+        self
+    }
 }
 
 impl Action {
-    /// `deny(reason)`: plain text of 1..=1024 bytes.
-    pub fn deny(reason: impl Into<String>) -> Self {
+    /// `deny(reason)`: refuse, and show the player the reason.
+    pub fn deny(reason: impl Into<Text>) -> Self {
         Self::Deny(reason.into())
     }
 
-    /// `deny-json(reason)`: a JSON text component of at most 32 KiB, given
-    /// as a [`serde_json::Value`] or as JSON text.
-    pub fn deny_json(reason: impl ToString) -> Self {
-        Self::DenyJson(reason.to_string())
-    }
-
-    /// `message(text)`: reply to the player who ran a command.
-    pub fn message(text: impl Into<String>) -> Self {
+    /// `message(text)`: reply to whoever ran a command.
+    pub fn message(text: impl Into<Text>) -> Self {
         Self::Message(text.into())
-    }
-
-    /// `message-json(text)`: reply with a JSON text component of at most
-    /// 32 KiB, given as a [`serde_json::Value`] or as JSON text.
-    pub fn message_json(text: impl ToString) -> Self {
-        Self::MessageJson(text.to_string())
     }
 
     /// `server(name)`: send the player to a backend.
     pub fn server(name: impl Into<String>) -> Self {
         Self::Server(name.into())
+    }
+
+    /// `queue(name)`: put the player into the queue for a backend.
+    pub fn queue(name: impl Into<String>) -> Self {
+        Self::Queue(name.into())
+    }
+}
+
+impl PartialEq for Action {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Continue, Self::Continue) | (Self::LeaveQueue, Self::LeaveQueue) => true,
+            (Self::Deny(a), Self::Deny(b)) | (Self::Message(a), Self::Message(b)) => a == b,
+            (Self::Server(a), Self::Server(b)) | (Self::Queue(a), Self::Queue(b)) => a == b,
+            _ => false,
+        }
     }
 }
 
@@ -525,85 +673,67 @@ impl Suggestion {
             tooltip: None,
         }
     }
-}
 
-impl RichSuggestion {
-    /// A suggestion without a tooltip.
-    pub fn new(text: impl Into<String>) -> Self {
-        Self {
-            text: text.into(),
-            tooltip_json: None,
-        }
-    }
-
-    /// A tooltip: a JSON text component, such as a [`text`] builder or a
-    /// [`serde_json::Value`].
-    pub fn tooltip(mut self, tooltip: impl ToString) -> Self {
-        self.tooltip_json = Some(tooltip.to_string());
+    /// The tooltip shown next to the suggestion.
+    pub fn tooltip(mut self, tooltip: impl Into<Text>) -> Self {
+        self.tooltip = Some(tooltip.into());
         self
     }
 }
 
-impl From<Suggestion> for RichSuggestion {
-    /// A plain tooltip becomes a JSON string, which shows it as written.
-    fn from(suggestion: Suggestion) -> Self {
-        Self {
-            text: suggestion.text,
-            tooltip_json: suggestion.tooltip.map(|tooltip| text::quote(&tooltip)),
-        }
-    }
-}
-
-impl From<StatusOverride> for RichStatusOverride {
-    /// Plain version and sample lines become JSON strings, which show them as
-    /// written.
-    fn from(status: StatusOverride) -> Self {
-        Self {
-            motd_json: status.motd_json,
-            version_json: status.version.map(|version| text::quote(&version)),
-            protocol: status.protocol,
-            online: status.online,
-            max_players: status.max_players,
-            sample_json: status
-                .sample
-                .map(|lines| lines.iter().map(|line| text::quote(line)).collect()),
-            favicon: status.favicon,
-        }
-    }
-}
-
-impl Default for RichStatusOverride {
-    /// Replaces nothing.
+impl Default for StatusOverride {
+    /// Replaces nothing. Set the fields to replace:
+    ///
+    /// ```
+    /// use rift_plugin::{StatusOverride, text};
+    ///
+    /// let status = StatusOverride {
+    ///     motd: Some(text::mini("<gold>Rift</gold>\n<gray>Now with plugins").into()),
+    ///     max_players: Some(500),
+    ///     ..Default::default()
+    /// };
+    /// ```
     fn default() -> Self {
         Self {
-            motd_json: None,
-            version_json: None,
+            motd: None,
+            version: None,
             protocol: None,
             online: None,
             max_players: None,
-            sample_json: None,
+            sample: None,
             favicon: None,
         }
     }
 }
 
-impl TitleJsonSpec {
+impl TitleSpec {
     /// A title with the vanilla times (10 ticks fade in, 70 stay, 20 fade
-    /// out). `title` is a JSON text component, such as a [`text`] builder or
-    /// a [`serde_json::Value`]; an empty string shows only the subtitle.
-    pub fn new(title: impl ToString) -> Self {
+    /// out).
+    pub fn new(title: impl Into<Text>) -> Self {
         Self {
-            title_json: title.to_string(),
-            subtitle_json: None,
+            title: Some(title.into()),
+            subtitle: None,
             fade_in: 10,
             stay: 70,
             fade_out: 20,
         }
     }
 
-    /// The subtitle, a JSON text component.
-    pub fn subtitle(mut self, subtitle: impl ToString) -> Self {
-        self.subtitle_json = Some(subtitle.to_string());
+    /// Only a subtitle, with the vanilla times: the title above it stays
+    /// empty.
+    pub fn subtitle_only(subtitle: impl Into<Text>) -> Self {
+        Self {
+            title: None,
+            subtitle: Some(subtitle.into()),
+            fade_in: 10,
+            stay: 70,
+            fade_out: 20,
+        }
+    }
+
+    /// The subtitle.
+    pub fn subtitle(mut self, subtitle: impl Into<Text>) -> Self {
+        self.subtitle = Some(subtitle.into());
         self
     }
 
@@ -616,25 +746,68 @@ impl TitleJsonSpec {
     }
 }
 
-/// The joined players. `target` is a name, a UUID or a connection id.
+/// The joined players, and what Rift remembers about those who left.
+/// `target` is a name, a UUID or a connection id.
 ///
-/// The `_json` functions take a JSON text component as text, for example
-/// `&serde_json::json!({...}).to_string()` or
-/// `&text::mini("<red>Hi").to_string()`; see [rich text](crate#rich-text).
-/// `title_json` (since 0.1.4) takes a [`TitleJsonSpec`].
+/// The functions that show text take anything that converts into a
+/// [`Text`]: a string for plain text, a [`text`]
+/// builder or a [`serde_json::Value`] for a JSON text component. Each
+/// returns whether the player was online.
 ///
-/// `locale` (since 0.1.5) is the language the player's client reported, as
-/// the client spells it (`en_us`), or `None` while Rift does not know it.
-/// The client sends it after login: during configuration from 1.20.2, after
-/// Join Game before. So it is never known in [`Plugin::login`](crate::Plugin::login)
-/// and in [`Plugin::join`](crate::Plugin::join) only for 1.20.2 and newer
-/// clients.
+/// [`PlayerInfo`] carries what Rift knows about an online
+/// player, including `ip`, the profile `properties`, `visible_to`, `locale`
+/// (the language the client reported, `None` until the client has sent it:
+/// never in [`Plugin::login`], and in
+/// [`Plugin::join`] only for 1.20.2 and newer clients)
+/// and `language` (the one set with [`set_language`](players::set_language), else `locale`).
+///
+/// [`lookup`](players::lookup) and [`search`](players::search) answer with a
+/// [`PlayerRecord`] for every player who joined at
+/// least once, online or not.
 pub mod players {
-    pub use crate::bindings::rift::plugin::players::{
-        action_bar, action_bar_json, boss_bar, broadcast, broadcast_json, clear_dialog, dialog,
-        get, kick, kick_json, list, locale, message, message_json, names, tab_list, title,
-        title_json, transfer, visible_to,
+    use crate::Text;
+    use crate::bindings::rift::plugin::players as host;
+    pub use host::{
+        boss_bar, clear_dialog, dialog, get, list, lookup, names, search, set_language, title,
+        transfer,
     };
+
+    /// Send a chat message to a player.
+    pub fn message(target: &str, text: impl Into<Text>) -> Result<bool, String> {
+        host::message(target, &text.into())
+    }
+
+    /// Show text above a player's hotbar.
+    pub fn action_bar(target: &str, text: impl Into<Text>) -> Result<bool, String> {
+        host::action_bar(target, &text.into())
+    }
+
+    /// Disconnect a player with a reason.
+    pub fn kick(target: &str, reason: impl Into<Text>) -> Result<bool, String> {
+        host::kick(target, &reason.into())
+    }
+
+    /// Send a chat message to every player. Returns how many received it.
+    pub fn broadcast(text: impl Into<Text>) -> Result<u32, String> {
+        host::broadcast(&text.into())
+    }
+
+    /// Replace a player's tab-list header and footer. Both `None` restores
+    /// the configured tab list.
+    ///
+    /// ```no_run
+    /// use rift_plugin::{players, text};
+    ///
+    /// players::tab_list("Steve", Some(text::mini("<gold>Rift").into()), Some("Have fun".into())).ok();
+    /// players::tab_list("Steve", None, None).ok();
+    /// ```
+    pub fn tab_list(
+        target: &str,
+        header: Option<Text>,
+        footer: Option<Text>,
+    ) -> Result<bool, String> {
+        host::tab_list(target, header.as_ref(), footer.as_ref())
+    }
 
     /// Show a dialog in the vanilla JSON format (Minecraft 1.21.6+). Returns
     /// false when the player is offline, older than 1.21.6 or has too many
@@ -673,6 +846,10 @@ pub mod store {
 }
 
 /// Rift's permission store: user nodes and group memberships.
+///
+/// `add_group(uuid, group, expires_at)` adds the user to a group, until
+/// `expires_at` Unix seconds when given (see [`meta::time`]
+/// for the current time).
 pub mod permissions {
     pub use crate::bindings::rift::plugin::permissions::{
         add_group, groups, has, list_groups, meta, remove_group, set, set_meta,
@@ -683,7 +860,7 @@ pub mod permissions {
     pub const VISIBLE_TO: &str = "rift.visible-to";
 }
 
-/// The message bus. Subscriptions deliver to [`Plugin::message`](crate::Plugin::message).
+/// The message bus. Subscriptions deliver to [`Plugin::message`].
 pub mod bus {
     use crate::BusMessage;
     pub use crate::bindings::rift::plugin::bus::{
@@ -708,22 +885,58 @@ pub mod servers {
     };
 }
 
-/// Timers fire through [`Plugin::timer`](crate::Plugin::timer) with the
+/// Timers fire through [`Plugin::timer`] with the
 /// returned handle.
 pub mod timers {
     pub use crate::bindings::rift::plugin::timers::{after, cancel, every};
 }
 
-/// Plugin metadata and clocks.
+/// Work that must not hold up the plugin's hooks.
+///
+/// A plugin runs one call at a time, so a hook that waits for a database or
+/// a web service keeps every other hook waiting. Background workers take
+/// that work: each is a separate instance of the component, started when the
+/// manifest sets `[background] workers`. The pattern has three steps (the
+/// [crate documentation](crate#background-work) has a complete example):
+///
+/// 1. In a decision hook (`login`, `initial_server`, `before_transfer`,
+///    `command`, `chat` or `kick`), call [`defer`](background::defer) for a ticket and [`run`](background::run)
+///    with the job's payload, remember the ticket under the job's handle and
+///    return. The hook's own return value is ignored.
+/// 2. A worker calls [`Plugin::work`] with the payload.
+///    It may block.
+/// 3. [`Plugin::job_done`] receives the handle and
+///    the result on the main instance; call [`resolve`](background::resolve) with the ticket and
+///    the answer.
+///
+/// The deferred hook's deadline keeps running: an answer that comes too late
+/// counts as a missed deadline, and [`resolve`](background::resolve) then returns `false`. [`run`](background::run)
+/// also works without [`defer`](background::defer), from any hook, for work nobody waits for.
+pub mod background {
+    use crate::Action;
+    use crate::bindings::rift::plugin::background as host;
+    pub use host::{defer, is_worker, run};
+
+    /// Answer a deferred hook with the ticket [`defer`] returned. Returns
+    /// `false` when nobody waits for the ticket any more: the deadline
+    /// passed, or it was answered already.
+    pub fn resolve(ticket: u64, action: Action) -> Result<bool, String> {
+        host::resolve(ticket, &action)
+    }
+}
+
+/// Plugin metadata and clocks. `api` is the `rift:plugin` version the host
+/// implements, such as `0.2.0`.
 pub mod meta {
     pub use crate::bindings::rift::plugin::meta::{
-        clock, config_dir, data_dir, name, time, version,
+        api, clock, config_dir, data_dir, name, time, version,
     };
 }
 
 /// Rift's log stream, prefixed with the plugin name by the host.
 ///
-/// The SDK installs a [`::log`] logger before [`Plugin::init`](crate::Plugin::init),
+/// The SDK installs a [`::log`] logger before [`Plugin::init`]
+/// (and before [`Plugin::work_init`] on a worker),
 /// so the `log` crate's macros work as usual. They are re-exported here for
 /// plugins that do not depend on `log` themselves:
 /// `rift_plugin::log::info!("ready")`.
@@ -769,10 +982,8 @@ pub mod log {
     }
 }
 
-/// Builders for rich text: each writes the JSON that the `_json` host
-/// functions, [`Action::deny_json`], [`Action::message_json`],
-/// [`TitleJsonSpec`], [`RichSuggestion::tooltip`] and the other `-json`
-/// fields accept.
+/// Builders for JSON text: each converts into a [`Text::Json`](crate::Text),
+/// so it can be passed wherever text is shown.
 ///
 /// - [`text::mini`] writes Rift markup as `{"mini": "...", "args": {...}}`; Rift
 ///   turns it into a component. See `docs/text.md` for the tags.
@@ -781,11 +992,11 @@ pub mod log {
 ///   1.21.5 spellings `click_event` and `hover_event` (Rift rewrites them
 ///   for older clients).
 ///
-/// Every builder implements [`Display`](std::fmt::Display) (its JSON text,
-/// so `to_string()` and [`ToString`] arguments work) and converts into a
-/// [`serde_json::Value`] for use inside other components. A bare string is
-/// never read as markup, so player input passed as an argument or as text
-/// cannot add tags or click events.
+/// Every builder converts into [`Text`] and into a
+/// [`serde_json::Value`] for use inside other components, and implements
+/// [`Display`](std::fmt::Display) (its JSON text). A bare string is never
+/// read as markup, so player input passed as an argument or as text cannot
+/// add tags or click events.
 pub mod text {
     use serde_json::{Map, Value};
     use std::fmt;
@@ -1015,105 +1226,24 @@ pub mod text {
                     builder.to_value()
                 }
             }
+
+            impl From<$builder> for crate::Text {
+                /// [`Text::Json`](crate::Text::Json) with the builder's JSON.
+                fn from(builder: $builder) -> crate::Text {
+                    crate::Text::Json(builder.to_string())
+                }
+            }
+
+            impl From<&$builder> for crate::Text {
+                /// [`Text::Json`](crate::Text::Json) with the builder's JSON.
+                fn from(builder: &$builder) -> crate::Text {
+                    crate::Text::Json(builder.to_string())
+                }
+            }
         )*};
     }
 
     json_text!(Mini, Legacy, Component);
-
-    /// `text` as a JSON string, which the `-json` fields show as written.
-    pub(crate) fn quote(text: &str) -> String {
-        Value::String(text.to_owned()).to_string()
-    }
-
-    /// The text of markup without its tags, for hosts without markup.
-    /// `arg(name, out)` writes an argument's words.
-    pub(crate) fn strip_markup(
-        markup: &str,
-        out: &mut String,
-        mut arg: impl FnMut(&str, &mut String),
-    ) {
-        let chars: Vec<char> = markup.chars().collect();
-        let mut i = 0;
-        while i < chars.len() {
-            let c = chars[i];
-            if c == '\\' && matches!(chars.get(i + 1), Some('<' | '\\')) {
-                out.push(chars[i + 1]);
-                i += 2;
-                continue;
-            }
-            if c != '<' {
-                out.push(c);
-                i += 1;
-                continue;
-            }
-            // A tag runs to the first `>` outside quotes and has no space
-            // outside quotes; anything else is a literal `<`.
-            let mut end = None;
-            let mut quote = None;
-            let mut j = i + 1;
-            while j < chars.len() {
-                match (chars[j], quote) {
-                    (q @ ('\'' | '"'), None) => quote = Some(q),
-                    (q, Some(open)) if q == open => quote = None,
-                    (_, Some(_)) => {}
-                    ('>', None) => {
-                        end = Some(j);
-                        break;
-                    }
-                    (space, None) if space.is_whitespace() => break,
-                    _ => {}
-                }
-                j += 1;
-            }
-            match end {
-                Some(end) if end > i + 1 => {
-                    let tag: String = chars[i + 1..end].iter().collect();
-                    let name = tag
-                        .split(':')
-                        .next()
-                        .unwrap_or_default()
-                        .to_ascii_lowercase();
-                    match name.as_str() {
-                        "newline" | "br" => out.push('\n'),
-                        _ if name.starts_with(['/', '!']) => {}
-                        _ if !tag.contains(':') => arg(&name, out),
-                        _ => {}
-                    }
-                    i = end + 1;
-                }
-                _ => {
-                    out.push('<');
-                    i += 1;
-                }
-            }
-        }
-    }
-
-    /// Legacy text without its codes, for hosts without legacy objects.
-    pub(crate) fn strip_legacy(text: &str, marker: char, out: &mut String) {
-        let chars: Vec<char> = text.chars().collect();
-        let mut i = 0;
-        while i < chars.len() {
-            if chars[i] == marker {
-                match chars.get(i + 1) {
-                    Some('#')
-                        if chars.len() >= i + 8
-                            && chars[i + 2..i + 8].iter().all(|c| c.is_ascii_hexdigit()) =>
-                    {
-                        i += 8;
-                        continue;
-                    }
-                    Some(code) if "0123456789abcdefklmnorx".contains(code.to_ascii_lowercase()) => {
-                        i += 2;
-                        continue;
-                    }
-                    _ => {}
-                }
-            }
-            out.push(chars[i]);
-            i += 1;
-        }
-    }
 }
 
 #[doc(hidden)]
@@ -1128,6 +1258,8 @@ pub mod __private {
         static INSTANCE: RefCell<Option<Box<dyn Any>>> = const { RefCell::new(None) };
     }
 
+    /// Runs `f` on the instance, creating it first when there is none: a
+    /// background worker never sees `init`.
     fn with<P: Plugin, R>(f: impl FnOnce(&mut P) -> R) -> R {
         INSTANCE.with(|slot| {
             let mut slot = slot.borrow_mut();
@@ -1163,55 +1295,40 @@ pub mod __private {
             with(|p: &mut P| p.route(connection))
         }
 
-        // Hosts before 0.1.2 call these; later ones call `decisions`.
-        fn login(ctx: Context) -> PlainAction {
-            plain(with(|p: &mut P| p.login(ctx)))
+        fn login(ctx: Context) -> Action {
+            with(|p: &mut P| p.login(ctx))
         }
 
-        fn initial_server(ctx: Context) -> PlainAction {
-            plain(with(|p: &mut P| p.initial_server(ctx)))
+        fn initial_server(ctx: Context) -> Action {
+            with(|p: &mut P| p.initial_server(ctx))
         }
 
-        fn before_transfer(ctx: Context) -> PlainAction {
-            plain(with(|p: &mut P| p.before_transfer(ctx)))
+        fn before_transfer(ctx: Context) -> Action {
+            with(|p: &mut P| p.before_transfer(ctx))
         }
 
-        fn command(ctx: Context) -> PlainAction {
-            plain(with(|p: &mut P| p.command(ctx)))
+        fn command(ctx: Context) -> Action {
+            with(|p: &mut P| p.command(ctx))
         }
 
-        // Hosts before 0.1.4 call these; later ones call `styled`.
         fn suggest(ctx: Context) -> Vec<Suggestion> {
-            let suggestions = with(|p: &mut P| p.suggest_rich(ctx));
-            suggestions
-                .into_iter()
-                .map(|suggestion| Suggestion {
-                    text: suggestion.text,
-                    tooltip: suggestion
-                        .tooltip_json
-                        .map(|tooltip| words(&tooltip))
-                        .filter(|tooltip| !tooltip.is_empty()),
-                })
-                .collect()
+            with(|p: &mut P| p.suggest(ctx))
         }
 
         fn status(ping: Ping) -> Option<StatusOverride> {
-            let status = with(|p: &mut P| p.status_rich(ping))?;
-            Some(StatusOverride {
-                motd_json: status.motd_json,
-                version: status.version_json.map(|version| words(&version)),
-                protocol: status.protocol,
-                online: status.online,
-                max_players: status.max_players,
-                sample: status
-                    .sample_json
-                    .map(|lines| lines.iter().map(|line| words(line)).collect()),
-                favicon: status.favicon,
-            })
+            with(|p: &mut P| p.status(ping))
         }
 
         fn http(request: HttpRequest) -> Option<HttpResponse> {
             with(|p: &mut P| p.http(request))
+        }
+
+        fn chat(attempt: ChatAttempt) -> Action {
+            with(|p: &mut P| p.chat(attempt))
+        }
+
+        fn kick(ctx: Context) -> Action {
+            with(|p: &mut P| p.kick(ctx))
         }
 
         fn join(ctx: Context) {
@@ -1237,121 +1354,25 @@ pub mod __private {
         fn event(event: RiftEvent) {
             with(|p: &mut P| p.event(event))
         }
-    }
 
-    impl<P: Plugin> crate::bindings::exports::rift::plugin::dialogs::Guest for Adapter<P> {
         fn dialog(response: DialogResponse) {
             with(|p: &mut P| p.dialog(response))
         }
-    }
 
-    impl<P: Plugin> crate::chat_bindings::exports::rift::plugin::chat::Guest for Adapter<P> {
-        fn chat(attempt: ChatAttempt) -> Action {
-            with(|p: &mut P| p.chat(attempt))
-        }
-    }
-
-    impl<P: Plugin> crate::bindings::exports::rift::plugin::decisions::Guest for Adapter<P> {
-        fn login(ctx: Context) -> Action {
-            with(|p: &mut P| p.login(ctx))
+        fn job_done(handle: u64, outcome: Result<Vec<u8>, String>) {
+            with(|p: &mut P| p.job_done(handle, outcome))
         }
 
-        fn initial_server(ctx: Context) -> Action {
-            with(|p: &mut P| p.initial_server(ctx))
+        // A worker instance: `init` never ran here, so the logger is
+        // installed and the instance created on the first of these calls.
+        fn work_init(config_json: String) -> Result<(), String> {
+            crate::log::install();
+            with(|p: &mut P| p.work_init(&config_json))
         }
 
-        fn before_transfer(ctx: Context) -> Action {
-            with(|p: &mut P| p.before_transfer(ctx))
-        }
-
-        fn command(ctx: Context) -> Action {
-            with(|p: &mut P| p.command(ctx))
-        }
-    }
-
-    impl<P: Plugin> crate::bindings::exports::rift::plugin::styled::Guest for Adapter<P> {
-        fn suggest(ctx: Context) -> Vec<RichSuggestion> {
-            with(|p: &mut P| p.suggest_rich(ctx))
-        }
-
-        fn status(ping: Ping) -> Option<RichStatusOverride> {
-            with(|p: &mut P| p.status_rich(ping))
-        }
-    }
-
-    use crate::bindings::rift::plugin::types::Action as PlainAction;
-
-    /// A decision for a host before 0.1.2, which has no rich text: a JSON
-    /// text component becomes its words.
-    pub(crate) fn plain(action: Action) -> PlainAction {
-        match action {
-            Action::Continue => PlainAction::Continue,
-            Action::Deny(reason) => PlainAction::Deny(reason),
-            Action::Server(server) => PlainAction::Server(server),
-            Action::Message(text) => PlainAction::Message(text),
-            Action::Queue(server) => PlainAction::Queue(server),
-            Action::LeaveQueue => PlainAction::LeaveQueue,
-            Action::DenyJson(reason) => PlainAction::Deny(words(&reason)),
-            Action::MessageJson(text) => PlainAction::Message(words(&text)),
-        }
-    }
-
-    /// The visible text of a JSON text component, without formatting. The
-    /// `mini` and `legacy` authoring objects lose their tags and codes.
-    pub(crate) fn words(json: &str) -> String {
-        fn collect(value: &serde_json::Value, out: &mut String) {
-            match value {
-                serde_json::Value::String(text) => out.push_str(text),
-                serde_json::Value::Array(items) => items.iter().for_each(|item| collect(item, out)),
-                serde_json::Value::Object(fields) => {
-                    if let Some(markup) = fields.get("mini").and_then(|value| value.as_str()) {
-                        let args = fields.get("args").and_then(|args| args.as_object());
-                        crate::text::strip_markup(markup, out, |name, out| {
-                            match args.and_then(|args| {
-                                args.iter()
-                                    .find(|(key, _)| key.eq_ignore_ascii_case(name))
-                                    .map(|(_, value)| value)
-                            }) {
-                                Some(serde_json::Value::String(text)) => out.push_str(text),
-                                Some(
-                                    value @ (serde_json::Value::Object(_)
-                                    | serde_json::Value::Array(_)),
-                                ) => collect(value, out),
-                                Some(value) => out.push_str(&value.to_string()),
-                                None => {}
-                            }
-                        });
-                        return;
-                    }
-                    if let Some(legacy) = fields.get("legacy").and_then(|value| value.as_str()) {
-                        let marker = fields
-                            .get("marker")
-                            .and_then(|value| value.as_str())
-                            .and_then(|marker| marker.chars().next())
-                            .unwrap_or('&');
-                        crate::text::strip_legacy(legacy, marker, out);
-                        return;
-                    }
-                    if let Some(text) = ["text", "fallback", "translate"]
-                        .iter()
-                        .find_map(|key| fields.get(*key).and_then(|value| value.as_str()))
-                    {
-                        out.push_str(text);
-                    }
-                    if let Some(extra) = fields.get("extra") {
-                        collect(extra, out);
-                    }
-                }
-                _ => {}
-            }
-        }
-        match serde_json::from_str(json) {
-            Ok(value) => {
-                let mut out = String::new();
-                collect(&value, &mut out);
-                out
-            }
-            Err(_) => json.to_owned(),
+        fn work(payload: Vec<u8>) -> Result<Vec<u8>, String> {
+            crate::log::install();
+            with(|p: &mut P| p.work(payload))
         }
     }
 }
@@ -1359,49 +1380,145 @@ pub mod __private {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn builders_fill_the_wit_records() {
         let registration = Registration::new()
             .command(
                 CommandSpec::new("hello")
+                    .alias("hi")
+                    .aliases(["hey", "yo"])
                     .permission("hello.use")
-                    .suggest(SuggestKind::Players),
+                    .suggest(SuggestKind::Players)
+                    .console(),
             )
-            .hooks([Hook::Login, Hook::Command]);
-        assert_eq!(registration.commands[0].name, "hello");
-        assert_eq!(registration.commands[0].permission, "hello.use");
-        assert!(matches!(
-            registration.commands[0].suggest,
-            SuggestKind::Players
-        ));
-        assert_eq!(registration.hooks, vec![Hook::Login, Hook::Command]);
+            .command(CommandSpec::new("plain"))
+            .hooks([Hook::Login, Hook::Command])
+            .hook(Hook::Chat);
+        let hello = &registration.commands[0];
+        assert_eq!(hello.name, "hello");
+        assert_eq!(hello.aliases, ["hi", "hey", "yo"]);
+        assert_eq!(hello.permission, "hello.use");
+        assert!(matches!(hello.suggest, SuggestKind::Players));
+        assert!(hello.console);
+        let plain = &registration.commands[1];
+        assert!(plain.aliases.is_empty() && plain.permission.is_empty() && !plain.console);
+        assert!(matches!(plain.suggest, SuggestKind::None));
+        assert_eq!(
+            registration.hooks,
+            vec![Hook::Login, Hook::Command, Hook::Chat]
+        );
         assert!(Registration::default().commands.is_empty());
+        assert!(Registration::default().hooks.is_empty());
     }
 
     #[test]
-    fn older_hosts_get_the_words_of_rich_decisions() {
-        use crate::bindings::rift::plugin::types::Action as PlainAction;
-        let banned = Action::deny_json(serde_json::json!({
-            "text": "Banned", "color": "red", "extra": [{"text": ": spam"}],
-        }));
-        assert!(matches!(
-            crate::__private::plain(banned),
-            PlainAction::Deny(reason) if reason == "Banned: spam"
-        ));
-        assert!(matches!(
-            crate::__private::plain(Action::message_json("[\"a\",{\"text\":\"b\"}]")),
-            PlainAction::Message(text) if text == "ab"
-        ));
-        assert!(matches!(
-            crate::__private::plain(Action::deny("x")),
-            PlainAction::Deny(reason) if reason == "x"
-        ));
+    fn strings_are_plain_and_builders_are_json() {
+        assert_eq!(Text::from("<red>hi"), Text::Plain("<red>hi".into()));
+        assert_eq!(Text::from(String::from("a")), Text::plain("a"));
+        assert_eq!(Text::from(&String::from("a")), Text::plain("a"));
+        assert_eq!(
+            Text::from(text::mini("<red>x")),
+            Text::Json(r#"{"mini":"<red>x"}"#.into())
+        );
+        assert_eq!(
+            Text::from(text::legacy("&cx")),
+            Text::json(r#"{"legacy":"&cx","marker":"&"}"#)
+        );
+        assert_eq!(
+            Text::from(&text::Component::text("x").bold()),
+            Text::json(r#"{"bold":true,"text":"x"}"#)
+        );
+        assert_eq!(
+            Text::from(json!({"text": "x"})),
+            Text::json(r#"{"text":"x"}"#)
+        );
+        // A JSON string is still JSON text: shown as written by the host.
+        assert_eq!(Text::from(&json!("a\"b")), Text::json(r#""a\"b""#));
+        assert_ne!(Text::plain("x"), Text::json("x"));
+    }
+
+    #[test]
+    fn actions_take_any_text() {
+        assert_eq!(Action::deny("no"), Action::Deny(Text::Plain("no".into())));
+        assert_eq!(
+            Action::deny(json!({"text": "Banned", "color": "red"})),
+            Action::Deny(Text::Json(r#"{"color":"red","text":"Banned"}"#.into()))
+        );
+        assert_eq!(
+            Action::message(format!("Hi, {}!", "Alex")),
+            Action::Message(Text::Plain("Hi, Alex!".into()))
+        );
+        assert_eq!(
+            Action::message(text::mini("<gold>Hi")),
+            Action::Message(Text::Json(r#"{"mini":"<gold>Hi"}"#.into()))
+        );
+        assert_eq!(Action::server("lobby"), Action::Server("lobby".into()));
+        assert_eq!(Action::queue("game"), Action::Queue("game".into()));
+        assert_ne!(Action::server("a"), Action::queue("a"));
+        assert_ne!(Action::deny("a"), Action::message("a"));
+        assert_ne!(Action::Continue, Action::LeaveQueue);
+    }
+
+    #[test]
+    fn titles_suggestions_and_status_take_any_text() {
+        let title = TitleSpec::new(text::mini("<red>T"))
+            .subtitle("sub")
+            .times(1, 2, 3);
+        assert_eq!(title.title, Some(Text::json(r#"{"mini":"<red>T"}"#)));
+        assert_eq!(title.subtitle, Some(Text::plain("sub")));
+        assert_eq!((title.fade_in, title.stay, title.fade_out), (1, 2, 3));
+        let plain = TitleSpec::new("T");
+        assert_eq!(plain.subtitle, None);
+        assert_eq!((plain.fade_in, plain.stay, plain.fade_out), (10, 70, 20));
+        let subtitle = TitleSpec::subtitle_only("only").times(0, 20, 0);
+        assert_eq!(subtitle.title, None);
+        assert_eq!(subtitle.subtitle, Some(Text::plain("only")));
+        assert_eq!(subtitle.stay, 20);
+
+        assert_eq!(Suggestion::new("a").tooltip, None);
+        assert_eq!(
+            Suggestion::new("a").tooltip("tip").tooltip,
+            Some(Text::plain("tip"))
+        );
+        assert_eq!(
+            Suggestion::new("a").tooltip(text::legacy("&7tip")).tooltip,
+            Some(Text::json(r#"{"legacy":"&7tip","marker":"&"}"#))
+        );
+
+        let status = StatusOverride {
+            version: Some("Rift".into()),
+            sample: Some(vec!["one".into(), text::mini("<green>two").into()]),
+            ..Default::default()
+        };
+        assert_eq!(status.version, Some(Text::plain("Rift")));
+        assert_eq!(status.sample.map(|lines| lines.len()), Some(2));
+        let nothing = StatusOverride::default();
+        assert!(nothing.motd.is_none() && nothing.version.is_none() && nothing.sample.is_none());
+        assert!(nothing.protocol.is_none() && nothing.online.is_none());
+        assert!(nothing.max_players.is_none() && nothing.favicon.is_none());
+    }
+
+    #[test]
+    fn hooks_have_defaults() {
+        #[derive(Default)]
+        struct Nothing;
+        impl Plugin for Nothing {}
+        let mut plugin = Nothing;
+        let registration = plugin.init("{}").unwrap();
+        assert!(registration.commands.is_empty() && registration.hooks.is_empty());
+        assert_eq!(plugin.work_init("{}"), Ok(()));
+        assert_eq!(
+            plugin.work(b"job".to_vec()),
+            Err("this plugin has no background work".to_owned())
+        );
+        plugin.job_done(1, Ok(Vec::new()));
+        plugin.job_done(2, Err("failed".into()));
     }
 
     #[test]
     fn text_builders_write_escaped_json() {
-        use serde_json::json;
         let welcome = text::mini("<gold>Hi \"<player>\"</gold>")
             .arg("player", "St<b>eve\n")
             .arg_component("rank", text::legacy("&cAdmin"));
@@ -1457,51 +1574,6 @@ mod tests {
             value["hover_event"],
             json!({"action": "show_text", "value": "t"})
         );
-    }
-
-    #[test]
-    fn older_hosts_get_the_words_of_rich_text() {
-        use crate::__private::words;
-        let mini = text::mini(
-            "<gold>Hi <player>!</gold><br>a < b \\<c> <hover:show_text:'<red>x y'>z</hover>",
-        )
-        .arg("player", "Steve")
-        .arg_component("unused", text::Component::text("no"));
-        assert_eq!(words(&mini.to_string()), "Hi Steve!\na < b <c> z");
-        assert_eq!(
-            words(&text::legacy("&cRed &#ff8800hex &zkeep").to_string()),
-            "Red hex &zkeep"
-        );
-        assert_eq!(words("\"<red>shown\""), "<red>shown");
-        let rich = RichSuggestion::from(Suggestion {
-            text: "a".into(),
-            tooltip: Some("{\"not\":\"json\"}".into()),
-        });
-        assert_eq!(
-            rich.tooltip_json.as_deref(),
-            Some(r#""{\"not\":\"json\"}""#)
-        );
-        assert_eq!(
-            words(rich.tooltip_json.as_deref().unwrap()),
-            "{\"not\":\"json\"}"
-        );
-        let status = RichStatusOverride::from(StatusOverride {
-            motd_json: None,
-            version: Some("Rift".into()),
-            protocol: None,
-            online: None,
-            max_players: None,
-            sample: Some(vec!["one".into()]),
-            favicon: None,
-        });
-        assert_eq!(status.version_json.as_deref(), Some("\"Rift\""));
-        assert_eq!(status.sample_json, Some(vec!["\"one\"".to_owned()]));
-        let title = TitleJsonSpec::new(text::mini("<red>T"))
-            .subtitle("sub")
-            .times(1, 2, 3);
-        assert_eq!(title.title_json, r#"{"mini":"<red>T"}"#);
-        assert_eq!(title.subtitle_json.as_deref(), Some("sub"));
-        assert_eq!((title.fade_in, title.stay, title.fade_out), (1, 2, 3));
     }
 
     #[test]

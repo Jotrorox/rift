@@ -26,7 +26,6 @@ rift.config.network = { hubs = { "lobby" } }
 rift.config.fallbacks = { survival = { "lobby" }, staff = { "lobby" } }
 
 rift.config.extensions = {
-    api_version = 3,
     -- Relative to this Lua file; use a writable location for production.
     -- Omit storage for process-local state that survives callbacks and reloads.
     storage = { path = "extensions.state" },

@@ -1918,6 +1918,56 @@ fn release_names_map_to_their_protocols() {
 }
 
 #[test]
+fn text_languages_and_the_player_directory_setting_are_checked_at_load() {
+    use crate::text::{Args, Text, catalog::Notice};
+    let config = Config::from_lua(
+        &with_security(
+            "text = { messages = { ['queue.left'] = 'Bye.' }, \
+             languages = { de = { ['queue.left'] = 'Tschüss.' }, ['de-AT'] = { ['queue.left'] = 'Servus.' } } }, \
+             players = { record_ip = false }",
+        ),
+        "languages.lua",
+    )
+    .unwrap();
+    assert!(!config.record_ip);
+    let left = |language| {
+        config
+            .text
+            .render_in(Notice::QueueLeft, &Args::new(), language)
+    };
+    assert_eq!(left(None), Text::Plain("Bye.".into()));
+    assert_eq!(left(Some("de_de")), Text::Plain("Tschüss.".into()));
+    assert_eq!(left(Some("de_at")), Text::Plain("Servus.".into()));
+    assert_eq!(left(Some("fr_fr")), Text::Plain("Bye.".into()));
+    assert!(Config::from_lua(VALID, "defaults.lua").unwrap().record_ip);
+    for (settings, expected) in [
+        (
+            "text = { languages = { de = { ['queue.nope'] = 'x' } } }",
+            "text.languages.de: unknown message \"queue.nope\"",
+        ),
+        (
+            "text = { languages = { de = { ['queue.left'] = '<bolt>' } } }",
+            "text.languages.de[\"queue.left\"]: <bolt> at byte 0: unknown tag",
+        ),
+        (
+            "text = { languages = { d = {} } }",
+            "a language is 2..=16 bytes",
+        ),
+        (
+            "text = { languages = { de = 'Hallo' } }",
+            "text.languages.de must be a table of messages by key",
+        ),
+        ("players = { record_ip = 'no' }", "record_ip"),
+        ("players = { remember = true }", "unknown field"),
+    ] {
+        let error = Config::from_lua(&with_security(settings), "languages.lua")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(expected), "{settings}: {error}");
+    }
+}
+
+#[test]
 fn text_theme_and_messages_are_checked_at_load() {
     use crate::text::{Args, Text, catalog::Notice};
     let config = Config::from_lua(

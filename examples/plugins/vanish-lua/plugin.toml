@@ -3,7 +3,7 @@
 # rift.plugin("vanish-lua", { see = "rift.vanish.see" }).
 name = "vanish-lua"
 version = "0.1.0"
-api = "0.1"
+api = "0.2"
 mode = "persistent"
 engine = "lua"
 entry = "init.lua"

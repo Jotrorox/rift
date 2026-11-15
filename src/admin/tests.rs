@@ -480,13 +480,26 @@ fn plugin_restarts_need_plugins_logs_need_logs_and_reads_need_status() {
             .unwrap_err()
             .contains("permission denied: plugins")
     );
+    // Running a plugin's console command changes the proxy like a restart.
+    let run = value(json!(["plugins", "run", "ban", "Mallory"]));
+    assert!(
+        request(&run, &settings, secret)
+            .unwrap_err()
+            .contains("permission denied: plugins")
+    );
     settings.permissions = ["plugins".into()].into();
     assert!(request(&restart, &settings, secret).is_ok());
+    assert!(request(&run, &settings, secret).is_ok());
     assert!(request(&value(json!(["plugins", "list"])), &settings, secret).is_err());
     let args = |values: &[&str]| values.iter().map(|v| (*v).to_owned()).collect::<Vec<_>>();
     assert_eq!(
         audited(&args(&["plugins", "restart", "hello-lua"])),
         ("plugins restart".to_owned(), "hello-lua".to_owned())
+    );
+    // The audit record names the command, never its arguments.
+    assert_eq!(
+        audited(&args(&["plugins", "run", "ban", "Mallory", "griefing"])),
+        ("plugins run".to_owned(), "ban".to_owned())
     );
     assert_eq!(
         audited(&args(&["plugins", "list"])),

@@ -9,7 +9,9 @@
 use super::Interrupt;
 use crate::plugins::{
     PluginSpec,
-    api::{BossBarSpec, CommandSpec, Hook, Level, PlayerInfo, SuggestKind, TitleSpec},
+    api::{
+        BossBarSpec, CommandSpec, Hook, Level, PlayerInfo, PlayerRecord, SuggestKind, TitleSpec,
+    },
     services::Services,
 };
 use crate::text::Text;
@@ -39,6 +41,9 @@ const EVENTS: &[(&str, Option<Hook>)] = &[
     ("dialog", Some(Hook::Dialog)),
     ("chat", Some(Hook::Chat)),
     ("kick", Some(Hook::Kick)),
+    ("job_done", Some(Hook::Job)),
+    // Background workers only: see `background`.
+    ("work", None),
     ("reload", None),
     ("shutdown", None),
 ];
@@ -92,6 +97,8 @@ pub(super) struct State {
     pub subscriptions: RefCell<BTreeMap<u64, Subscription>>,
     /// Hooks registered so far; fixed once `init` returns.
     pub hooks: RefCell<BTreeSet<Hook>>,
+    /// `rift.background.run(payload, fn)`: what to call with the result.
+    pub job_callbacks: RefCell<BTreeMap<u64, Function>>,
 }
 
 impl State {
@@ -106,6 +113,7 @@ impl State {
             jobs: RefCell::default(),
             subscriptions: RefCell::default(),
             hooks: RefCell::default(),
+            job_callbacks: RefCell::default(),
         }
     }
 
@@ -301,7 +309,33 @@ fn player(lua: &Lua, info: &PlayerInfo) -> mlua::Result<Table> {
     player.raw_set("visible_to", info.visible_to.as_deref())?;
     // nil until the client's Client Information arrives.
     player.raw_set("locale", info.locale.as_deref())?;
+    // What a plugin set, else the client's locale.
+    player.raw_set("language", info.language.as_deref())?;
+    player.raw_set("ip", info.ip.as_str())?;
+    let properties = lua.create_table_with_capacity(info.properties.len(), 0)?;
+    for property in &info.properties {
+        let entry = lua.create_table()?;
+        entry.raw_set("name", property.name.as_str())?;
+        entry.raw_set("value", property.value.as_str())?;
+        entry.raw_set("signature", property.signature.as_deref())?;
+        properties.raw_push(entry)?;
+    }
+    player.raw_set("properties", properties)?;
     Ok(player)
+}
+
+/// What `rift.players.lookup` and `search` return for one player.
+fn record(lua: &Lua, record: &PlayerRecord) -> mlua::Result<Table> {
+    let table = lua.create_table()?;
+    table.raw_set("uuid", record.uuid.as_str())?;
+    table.raw_set("name", record.name.as_str())?;
+    table.raw_set("first_seen", record.first_seen)?;
+    table.raw_set("last_seen", record.last_seen)?;
+    table.raw_set("last_ip", record.last_ip.as_str())?;
+    table.raw_set("last_server", record.last_server.as_str())?;
+    table.raw_set("online", record.online)?;
+    table.raw_set("language", record.language.as_deref())?;
+    Ok(table)
 }
 
 fn level(name: &str) -> mlua::Result<Level> {
@@ -325,7 +359,7 @@ pub(super) fn install(lua: &Lua, state: &Rc<State>, spec: &PluginSpec) -> mlua::
     let globals = lua.globals();
     let rift = lua.create_table()?;
     rift.raw_set("enabled", true)?;
-    rift.raw_set("api_version", 2)?;
+    rift.raw_set("api_version", crate::extensions::API_VERSION)?;
     rift.raw_set("plugin_name", spec.name.as_str())?;
     let meta = lua.create_table()?;
     meta.raw_set("name", spec.name.as_str())?;
@@ -342,6 +376,8 @@ pub(super) fn install(lua: &Lua, state: &Rc<State>, spec: &PluginSpec) -> mlua::
             .config_dir()
             .map(|path| path.display().to_string()),
     )?;
+    // The exact `rift:plugin` version, such as "0.2.0".
+    meta.raw_set("api", state.services.meta().api())?;
     rift.raw_set("meta", meta)?;
 
     registration(lua, &rift, state)?;
@@ -352,6 +388,7 @@ pub(super) fn install(lua: &Lua, state: &Rc<State>, spec: &PluginSpec) -> mlua::
     rift.raw_set("permissions", permissions(lua, state)?)?;
     rift.raw_set("servers", servers(lua, state)?)?;
     rift.raw_set("timers", timers(lua, state)?)?;
+    rift.raw_set("background", background(lua, state)?)?;
     messaging(lua, &rift, state)?;
     super::http::install(lua, &rift, state, spec.manifest.capabilities.network)?;
 
@@ -367,6 +404,7 @@ pub(super) fn install(lua: &Lua, state: &Rc<State>, spec: &PluginSpec) -> mlua::
         "players",
         "servers",
         "timers",
+        "background",
         "text",
     ] {
         loaded.raw_set(format!("rift.{module}"), rift.raw_get::<Table>(module)?)?;
@@ -392,6 +430,16 @@ fn registration(lua: &Lua, rift: &Table, state: &Rc<State>) -> mlua::Result<()> 
             let Value::Function(callback) = callback else {
                 return Err(runtime("rift.on expects a function"));
             };
+            let worker = on.services.is_worker();
+            if worker != (*name == "work") {
+                return Err(runtime(if worker {
+                    format!(
+                        "rift.on(\"{name}\"): a background worker receives no events; it handles only \"work\""
+                    )
+                } else {
+                    "rift.on(\"work\") belongs in the worker script ([background] entry), which runs jobs queued with rift.background.run".to_owned()
+                }));
+            }
             if let Some(hook) = hook {
                 on.hooks.borrow_mut().insert(*hook);
             }
@@ -411,11 +459,14 @@ fn registration(lua: &Lua, rift: &Table, state: &Rc<State>) -> mlua::Result<()> 
             commands.registering("rift.command")?;
             let (Value::String(name), Value::Table(definition)) = (name, definition) else {
                 return Err(runtime(
-                    "rift.command expects a name and { permission = ..., run = function(ctx) ... end }",
+                    "rift.command expects a name and { permission = ..., run = function(ctx) ... end, aliases = { ... }, console = false }",
                 ));
             };
             let name = name.to_str()?.to_owned();
-            crate::extensions::fields(&definition, &["permission", "run", "suggest"])?;
+            crate::extensions::fields(
+                &definition,
+                &["permission", "run", "suggest", "aliases", "console"],
+            )?;
             if commands
                 .commands
                 .borrow()
@@ -461,11 +512,40 @@ fn registration(lua: &Lua, rift: &Table, state: &Rc<State>) -> mlua::Result<()> 
                     )));
                 }
             };
+            let aliases = match definition.raw_get::<Value>("aliases")? {
+                Value::Nil => Vec::new(),
+                Value::Table(entries) => entries
+                    .sequence_values::<String>()
+                    .collect::<mlua::Result<Vec<_>>>()
+                    .ok()
+                    .filter(|aliases| {
+                        aliases.len() == entries.clone().pairs::<Value, Value>().count()
+                    })
+                    .ok_or_else(|| {
+                        runtime(format!("commands.{name}.aliases must be a list of names"))
+                    })?,
+                _ => {
+                    return Err(runtime(format!(
+                        "commands.{name}.aliases must be a list of names"
+                    )));
+                }
+            };
+            let console = match definition.raw_get::<Value>("console")? {
+                Value::Nil => false,
+                Value::Boolean(console) => console,
+                _ => {
+                    return Err(runtime(format!(
+                        "commands.{name}.console must be true or false"
+                    )));
+                }
+            };
             commands.commands.borrow_mut().push(Command {
                 spec: CommandSpec {
                     name,
+                    aliases,
                     permission,
                     suggest,
+                    console,
                 },
                 run,
                 suggest: function,
@@ -703,6 +783,51 @@ fn players(lua: &Lua, state: &Rc<State>) -> mlua::Result<Table> {
         function(lua, state, move |lua, prefix: Option<String>| {
             lua.create_sequence_from(services.players().names(prefix.as_deref()))
         })?,
+    )?;
+    let services = state.services.clone();
+    api.raw_set(
+        "lookup",
+        function(lua, state, move |lua, target: String| {
+            services
+                .players()
+                .lookup(&target)
+                .map_err(runtime)?
+                .map(|found| record(lua, &found))
+                .transpose()
+        })?,
+    )?;
+    let services = state.services.clone();
+    api.raw_set(
+        "search",
+        function(
+            lua,
+            state,
+            move |lua, (prefix, limit): (String, Option<u32>)| {
+                let found = services
+                    .players()
+                    .search(&prefix, limit.unwrap_or(20))
+                    .map_err(runtime)?;
+                let table = lua.create_table_with_capacity(found.len(), 0)?;
+                for found in &found {
+                    table.raw_push(record(lua, found)?)?;
+                }
+                Ok(table)
+            },
+        )?,
+    )?;
+    let services = state.services.clone();
+    api.raw_set(
+        "set_language",
+        function(
+            lua,
+            state,
+            move |_, (target, language): (String, Option<String>)| {
+                services
+                    .players()
+                    .set_language(&target, language.as_deref())
+                    .map_err(runtime)
+            },
+        )?,
     )?;
     // A string is plain text and a table a chat component.
     type Send = fn(&Services, &str, Text) -> Result<bool, String>;
@@ -967,21 +1092,33 @@ fn permissions(lua: &Lua, state: &Rc<State>) -> mlua::Result<Table> {
             },
         )?,
     )?;
-    for (name, add) in [("add_group", true), ("remove_group", false)] {
-        let services = state.services.clone();
-        api.raw_set(
-            name,
-            function(lua, state, move |_, (uuid, group): (String, String)| {
-                let permissions = services.permissions();
-                if add {
-                    permissions.add_group(&uuid, &group)
-                } else {
-                    permissions.remove_group(&uuid, &group)
-                }
+    // `add_group(uuid, group, options?)`: `expires_at` (Unix seconds) or
+    // `expires_in` (seconds from now) end the membership then.
+    let services = state.services.clone();
+    api.raw_set(
+        "add_group",
+        function(
+            lua,
+            state,
+            move |_, (uuid, group, options): (String, String, Value)| {
+                let expires_at = expiry(&options, "add_group", &[])?;
+                services
+                    .permissions()
+                    .add_group_until(&uuid, &group, expires_at)
+                    .map_err(runtime)
+            },
+        )?,
+    )?;
+    let services = state.services.clone();
+    api.raw_set(
+        "remove_group",
+        function(lua, state, move |_, (uuid, group): (String, String)| {
+            services
+                .permissions()
+                .remove_group(&uuid, &group)
                 .map_err(runtime)
-            })?,
-        )?;
-    }
+        })?,
+    )?;
     let services = state.services.clone();
     api.raw_set(
         "groups",
@@ -1047,32 +1184,40 @@ fn permissions(lua: &Lua, state: &Rc<State>) -> mlua::Result<Table> {
     Ok(api)
 }
 
-/// The options table of `set_meta`.
-fn meta_options(options: &Value) -> mlua::Result<(rift_permissions::ContextSet, Option<u64>)> {
-    let Value::Table(options) = options else {
-        return match options {
-            Value::Nil => Ok((rift_permissions::ContextSet::new(), None)),
-            _ => Err(runtime("set_meta options must be a table")),
-        };
+/// `expires_at` or `expires_in` of an options table whose other keys are
+/// `also`; `nil` options mean no expiry.
+fn expiry(options: &Value, verb: &str, also: &[&str]) -> mlua::Result<Option<u64>> {
+    let options = match options {
+        Value::Nil => return Ok(None),
+        Value::Table(options) => options,
+        _ => return Err(runtime(format!("{verb} options must be a table"))),
     };
     for pair in options.pairs::<String, Value>() {
         let (key, _) = pair?;
-        if !matches!(key.as_str(), "contexts" | "expires_in" | "expires_at") {
-            return Err(runtime(format!("unknown set_meta option {key:?}")));
+        if !matches!(key.as_str(), "expires_in" | "expires_at") && !also.contains(&key.as_str()) {
+            return Err(runtime(format!("unknown {verb} option {key:?}")));
         }
     }
-    let contexts = match options.raw_get::<Value>("contexts")? {
-        Value::Nil => rift_permissions::ContextSet::new(),
-        value => crate::permissions::lua::contexts(&value)?,
-    };
-    let expires_at = match (
+    match (
         options.raw_get::<Option<u64>>("expires_at")?,
         options.raw_get::<Option<u64>>("expires_in")?,
     ) {
-        (Some(_), Some(_)) => return Err(runtime("give expires_at or expires_in, not both")),
-        (Some(at), None) => Some(at),
-        (None, Some(seconds)) => Some(rift_permissions::unix_now().saturating_add(seconds)),
-        (None, None) => None,
+        (Some(_), Some(_)) => Err(runtime("give expires_at or expires_in, not both")),
+        (Some(at), None) => Ok(Some(at)),
+        (None, Some(seconds)) => Ok(Some(rift_permissions::unix_now().saturating_add(seconds))),
+        (None, None) => Ok(None),
+    }
+}
+
+/// The options table of `set_meta`.
+fn meta_options(options: &Value) -> mlua::Result<(rift_permissions::ContextSet, Option<u64>)> {
+    let expires_at = expiry(options, "set_meta", &["contexts"])?;
+    let contexts = match options {
+        Value::Table(options) => match options.raw_get::<Value>("contexts")? {
+            Value::Nil => rift_permissions::ContextSet::new(),
+            value => crate::permissions::lua::contexts(&value)?,
+        },
+        _ => rift_permissions::ContextSet::new(),
     };
     Ok((contexts, expires_at))
 }
@@ -1180,6 +1325,70 @@ fn timers(lua: &Lua, state: &Rc<State>) -> mlua::Result<Table> {
             }
             Ok(timers.services.timers().cancel(handle))
         })?,
+    )?;
+    Ok(api)
+}
+
+/// `rift.background`: answers that come later and jobs for the worker
+/// script (`[background]` in the manifest).
+///
+/// - `defer()` inside a decision hook returns a ticket; the hook's own
+///   result is ignored and `resolve(ticket, decision)` answers it, with the
+///   table the hook would have returned (`nil` continues).
+/// - `run(payload, fn?)` queues a string for a worker and returns a handle.
+///   `fn(result, error)` runs in the plugin when the job is done; without
+///   it `rift.on("job_done", fn(handle, result, error))` handlers do.
+/// - `is_worker()` tells the worker script from the plugin.
+fn background(lua: &Lua, state: &Rc<State>) -> mlua::Result<Table> {
+    let api = lua.create_table()?;
+    let services = state.services.clone();
+    api.raw_set(
+        "defer",
+        function(lua, state, move |_, ()| {
+            services.background().defer().map_err(runtime)
+        })?,
+    )?;
+    let services = state.services.clone();
+    api.raw_set(
+        "resolve",
+        function(lua, state, move |_, (ticket, decision): (u64, Value)| {
+            // Which decisions a hook accepts depends on the hook, which the
+            // host checks when it applies the answer; here only the shape.
+            let hook = match &decision {
+                Value::Table(table) if table.contains_key("deny")? => "login",
+                Value::Table(table) if table.contains_key("server")? => "initial_server",
+                _ => "command",
+            };
+            let action = crate::extensions::parse_action(hook, decision)?;
+            services
+                .background()
+                .resolve(ticket, action)
+                .map_err(runtime)
+        })?,
+    )?;
+    let run = state.clone();
+    api.raw_set(
+        "run",
+        function(
+            lua,
+            state,
+            move |_, (payload, callback): (LuaString, Option<Function>)| {
+                let handle = run
+                    .services
+                    .background()
+                    .run(payload.as_bytes().to_vec())
+                    .map_err(runtime)?;
+                if let Some(callback) = callback {
+                    run.job_callbacks.borrow_mut().insert(handle, callback);
+                }
+                Ok(handle)
+            },
+        )?,
+    )?;
+    let services = state.services.clone();
+    api.raw_set(
+        "is_worker",
+        function(lua, state, move |_, ()| Ok(services.is_worker()))?,
     )?;
     Ok(api)
 }
