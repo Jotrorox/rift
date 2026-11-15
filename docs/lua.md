@@ -255,6 +255,8 @@ All imports and handlers share the existing 8 MiB VM memory limit and 100,000
 instruction budget. Every callback first evaluates the configuration again;
 that evaluation has its own 100,000 instructions, and the callback then starts
 with a fresh 100,000, so a heavy configuration cannot starve the callbacks.
+On Linux aarch64 LuaJIT cannot take a memory limit, so only the instruction
+budget applies there; Rift logs one warning at startup.
 `rift check` prints how many instructions the configuration uses. Its cost is
 still paid in time on every callback, against the 50 ms deadline, and `rift
 check` warns when it uses half the budget or more. Configuration evaluation during startup, checks, reloads and

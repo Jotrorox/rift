@@ -95,8 +95,8 @@ What differs is the environment:
   unless `lua.jit = false` (see [below](#the-jit-and-deadlines)). There is no
   instruction budget and no per-call limit on host calls; memory is limited
   only by `lua.memory_limit_mb` (256 MiB unless the manifest says otherwise).
-  On Linux aarch64 LuaJIT cannot take the limit: Rift logs one warning and
-  Lua plugins run without it.
+  On Linux aarch64 LuaJIT cannot take a memory limit: Rift logs one warning
+  and Lua plugins, like configuration scripts, run without one.
 - Each call runs under its `[deadlines]` entry (observers, timers and bus
   messages under 60 seconds). When a call overruns, the host applies
   `on_timeout`, and the plugin is interrupted 100 ms later: the next Rift

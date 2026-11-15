@@ -546,21 +546,8 @@ fn vm(options: &LuaOptions) -> Result<Lua, String> {
         Lua::new_with(libs, VmOptions::default()).map_err(|error| describe(&error))?
     };
     if options.memory_limit_mb > 0 {
-        match lua.set_memory_limit(options.memory_limit_mb as usize * 1024 * 1024) {
-            Ok(_) => {}
-            // LuaJIT refuses a host allocator whose memory lies above 47
-            // bits, which is where Linux on aarch64 puts the heap. The VM then
-            // runs on LuaJIT's own allocator, which has no limit to set.
-            Err(mlua::Error::MemoryControlNotAvailable) => {
-                static WARNED: std::sync::Once = std::sync::Once::new();
-                WARNED.call_once(|| {
-                    log_warn!(
-                        "lua.memory_limit_mb cannot be enforced on this platform; Lua plugins run without a memory limit"
-                    );
-                });
-            }
-            Err(error) => return Err(describe(&error)),
-        }
+        crate::script::limit_memory(&lua, options.memory_limit_mb as usize * 1024 * 1024)
+            .map_err(|error| describe(&error))?;
     }
     Ok(lua)
 }
