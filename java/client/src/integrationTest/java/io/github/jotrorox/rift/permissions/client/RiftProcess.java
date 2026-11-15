@@ -31,11 +31,15 @@ import java.util.concurrent.TimeUnit;
  *
  * <ul>
  *   <li>{@code server.survival-1}: the {@code backend} preset (plus {@code test.>} for the raw bus
- *       tests), speaking for backend {@code survival-1}, whose game port is {@link #backend()};
+ *       tests and {@code _INBOX.jobs.>} for stream reply subjects), speaking for backend {@code survival-1}, whose game port is {@link #backend()};
  *   <li>{@code server.lobby}: the {@code backend} preset with {@code control = true}, so it may
  *       write and run console commands as itself;
- *   <li>{@code raw}: plain {@code test.>} grants for the messaging tests.
+ *   <li>{@code raw}: plain {@code test.>} grants for the messaging tests;
+ *   <li>{@code operator}: {@code control = true} with {@code rift.control.*} and {@code
+ *       rift.events.>}, for the control tests.
  * </ul>
+ *
+ * <p>The memory stream {@code jobs} stores {@code test.jobs.>}.
  *
  * The store is the SQLite file beside the configuration, so revisions survive {@link #stop()} and
  * {@link #launch()}; the messaging port stays the same across restarts.
@@ -44,6 +48,7 @@ final class RiftProcess implements AutoCloseable {
     static final String SURVIVAL_TOKEN = "java-integration-survival-token-0123456789";
     static final String LOBBY_TOKEN = "java-integration-lobby-control-token-012345";
     static final String RAW_TOKEN = "java-integration-raw-token-0123456789abcdef";
+    static final String OPERATOR_TOKEN = "java-integration-operator-token-0123456789";
     static final String ADMIN_TOKEN = "java-integration-admin-token-0123456789abc";
 
     private final Path directory;
@@ -75,7 +80,7 @@ final class RiftProcess implements AutoCloseable {
 
     /** Create the configuration without starting the process. */
     static RiftProcess create() throws Exception {
-        Path directory = Files.createTempDirectory("rift-java-it");
+        Path directory = Files.createTempDirectory("rift-it");
         X509Certificate certificate = certificate(directory);
         int port;
         try (DatagramSocket socket = new DatagramSocket(0)) {
@@ -94,14 +99,19 @@ final class RiftProcess implements AutoCloseable {
                         principals = {
                             {
                                 name = 'server.survival-1', token_env = 'RIFT_JAVA_SURVIVAL_TOKEN', preset = 'backend',
-                                publish = { 'test.>' }, subscribe = { 'test.>' },
+                                publish = { 'test.>' }, subscribe = { 'test.>', '_INBOX.jobs.>' },
                             },
                             { name = 'server.lobby', token_env = 'RIFT_JAVA_LOBBY_TOKEN', preset = 'backend', control = true },
                             {
                                 name = 'raw', token_env = 'RIFT_JAVA_RAW_TOKEN',
                                 publish = { '_INBOX.>', 'test.>' }, subscribe = { 'test.>' },
                             },
+                            {
+                                name = 'operator', token_env = 'RIFT_JAVA_OPERATOR_TOKEN', control = true,
+                                publish = { 'rift.control.*' }, subscribe = { 'rift.events.>' },
+                            },
                         },
+                        streams = { jobs = { subjects = { 'test.jobs.>' } } },
                     },
                 }
                 """.formatted(backend.getLocalPort(), port));
@@ -117,6 +127,7 @@ final class RiftProcess implements AutoCloseable {
         environment.put("RIFT_JAVA_SURVIVAL_TOKEN", SURVIVAL_TOKEN);
         environment.put("RIFT_JAVA_LOBBY_TOKEN", LOBBY_TOKEN);
         environment.put("RIFT_JAVA_RAW_TOKEN", RAW_TOKEN);
+        environment.put("RIFT_JAVA_OPERATOR_TOKEN", OPERATOR_TOKEN);
         environment.put("RIFT_ADMIN_TOKEN", ADMIN_TOKEN);
         process = builder.start();
         BlockingQueue<String> lines = new LinkedBlockingQueue<>();

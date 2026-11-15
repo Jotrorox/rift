@@ -30,7 +30,7 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [dependencies]
-rift-plugin = { path = "../rift/sdk/rust" } # sdk/rust in a Rift checkout
+rift-plugin = "0.1.5"
 serde = { version = "1", features = ["derive"] }
 
 [profile.release]
@@ -40,7 +40,10 @@ codegen-units = 1
 strip = true
 ```
 
-The release profile above keeps the component small. Check the result with
+[`rift-plugin`](https://crates.io/crates/rift-plugin) is versioned after the
+plugin contract (`rift:plugin@0.1.5`), not the proxy. Each published version
+has a `sdk/rust/v…` git tag, and in a Rift checkout
+`{ path = "…/sdk/rust" }` works as well. The release profile above keeps the component small. Check the result with
 `wasm-tools component wit my_plugin.wasm`: it exports
 `rift:plugin/handler@0.1.x` and imports the `rift:plugin/*` interfaces it uses.
 
@@ -154,8 +157,9 @@ rift_plugin::export!(Mute, chat);
 command, `attempt.ctx.command` is the root name and `attempt.ctx.args` the
 rest. Answer `Action::Continue`, `Action::deny` or `Action::deny_json`. With
 `export!(Mute)` the component has no `chat` export and the method is never
-called. With `export!(Mute, chat)` Rift asks the plugin about every message
-and starts it only when the proxy sets `authentication.signed_chat = false`.
+called. With `export!(Mute, chat)` Rift asks the plugin about every message;
+with signed chat, the first deny costs that player their
+[chat signing](plugins.md#chat).
 
 ## Rich text builders
 

@@ -214,7 +214,7 @@ address.
 | Situation | What happens |
 | --- | --- |
 | The controller connection drops | The agent **keeps its servers running** and reconnects. On every (re)connection the controller sends its instance list: the agent stops servers no longer assigned to it and deletes unassigned disposable directories. |
-| The controller restarts or shuts down | Remote servers keep running and are **adopted** again after the restart. An administrator stop that was saved before the restart still wins. Local servers stop, as before. |
+| The controller restarts or shuts down | Remote servers keep running and are **adopted** again after the restart. An administrator stop that was saved before the restart still wins. Local servers stop, as before, unless they have [`keep_running`](managed-servers.md#servers-that-outlive-the-proxy); those keep running and are adopted in the same way, without an agent. |
 | A node is unreachable (no snapshot for 10 s) | Its servers show `unknown` and refuse new players. Disposable groups create replacement capacity on other nodes and retire empty unreachable instances. **Persistent instances stay tied to their node** and never move automatically, because their data is there; persistent groups do not shrink while one of their nodes is unreachable. Recovery waits for the node instead of spending restart retries. |
 | The node comes back | Servers that are still running return to `running`. Servers that exited meanwhile are recovered with their normal restart policy. |
 | A server crashes on a node | Reported as a failure with its exit status and recovered on the same node within `restart_retries`. |
@@ -272,7 +272,8 @@ address.
   servers; remote files are limited to 512 KiB through the web console.
 - Control subject and CLI: `rift.control.nodes` and `rift admin nodes` (grant
   `servers`).
-- Java: `RiftControl.nodes()` in rift-java.
+- Java: `RiftControl.nodes()` in the `rift-control` artifact (see
+  [control and events](messaging.md#java-control-and-events)).
 
 ### Wire protocol
 

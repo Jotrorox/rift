@@ -629,6 +629,9 @@ jobs:
         run: python tests/provisioning_wire.py --binary target/release/rift
       - name: Verify SQLite instance recovery
         run: python tests/instance_persistence_wire.py --binary target/release/rift
+      - name: Verify servers that outlive the proxy
+        if: runner.os != 'Windows'
+        run: python tests/kept_servers_wire.py --binary target/release/rift
       - name: Verify BungeeCord plugin-message compatibility
         run: python tests/bungeecord_wire.py --binary target/release/rift
       - name: Stage, archive and smoke-test executable

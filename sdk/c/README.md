@@ -88,9 +88,8 @@ pointers where `NULL` means `none`.
 `exports_rift_plugin_chat_chat(rift_chat_attempt_t *, rift_decision_t *)` sees
 chat messages and backend commands before the backend does and may drop them
 (since 0.1.5; see [docs/plugins-c.md](../../docs/plugins-c.md#chat)). A
-component that exports `chat` is asked about every message of every player and
-starts only with `authentication.signed_chat = false`, so the export is not in
-the default build. `RIFT_CHAT=1 sdk/c/build.sh ...` (or
+component that exports `chat` is asked about every message of every player, so
+the export is not in the default build. `RIFT_CHAT=1 sdk/c/build.sh ...` (or
 `rift_add_chat_plugin()` in CMake) defines `RIFT_CHAT` and links
 `chat/rift_plugin.c` and `chat/rift_plugin_component_type.o` instead of the
 default bindings.

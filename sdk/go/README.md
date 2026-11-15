@@ -39,8 +39,7 @@ A plugin that imports [`rift/chat`](rift/chat/chat.go) handles the chat hook
 (`chat.OnChat`, since 0.1.5; see
 [docs/plugins-go.md](../../docs/plugins-go.md#chat)) and is built with
 `--wit-world plugin-chat` instead. A component with that export is asked about
-every chat message and starts only with `authentication.signed_chat = false`,
-so the `rift` package alone never exports it.
+every chat message, so the `rift` package alone never exports it.
 
 `--wit-package` also accepts a packaged WIT (`wasm-tools component wit
 --wasm -o rift-plugin.wasm wit`). Check the result with
@@ -51,7 +50,7 @@ Add this module to your plugin's `go.mod` (inside this repository use a
 `replace` directive, as hello-go does):
 
 ```sh
-go get github.com/Jotrorox/rift/sdk/go
+go get github.com/Jotrorox/rift/sdk/go@v0.1.5
 ```
 
 ## Writing a plugin

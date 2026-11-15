@@ -118,9 +118,9 @@ void exports_rift_plugin_chat_chat(rift_chat_attempt_t *attempt, rift_decision_t
 command, `attempt->ctx.command` is the root name and `attempt->ctx.args` the
 rest. Answer with `rift_decision_continue`, `rift_decision_deny` or
 `rift_decision_deny_json`. The weak default lets everything through. Rift asks
-a plugin built with `RIFT_CHAT` about every message and starts it only when
-the proxy sets `authentication.signed_chat = false`; the same source built
-without `RIFT_CHAT` is never asked.
+a plugin built with `RIFT_CHAT` about every message; with signed chat, the
+first deny costs that player their [chat signing](plugins.md#chat). The same
+source built without `RIFT_CHAT` is never asked.
 
 ## Rich text builders
 

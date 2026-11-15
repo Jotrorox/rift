@@ -2,7 +2,7 @@
 
 This page describes the events, commands, permissions, queues and host
 services that plugins use, as the configuration script sees them: player
-callbacks with a verified identity, permission-checked commands, FIFO queues,
+callbacks with a verified identity, permission-checked commands, priority queues,
 durable state, scheduled jobs and bus decisions, in API versions 1 to 3.
 Persistent [Lua](plugins-lua.md) and WebAssembly plugins receive the same
 events through the [plugin contract](plugins.md), with the same validation;
@@ -10,7 +10,7 @@ events through the [plugin contract](plugins.md), with the same validation;
 order and the trust model.
 
 [`examples/extensions.lua`](../examples/extensions.lua) is a runnable authenticated
-network with a FIFO survival queue, a staff-only server, durable visit counters,
+network with a survival queue, a staff-only server, durable visit counters,
 recurring jobs, permission groups and optional HTTP permission refresh.
 It uses the existing Paper/Velocity forwarding setup in
 [`examples/online.lua`](../examples/online.lua). Run `rift --check
@@ -49,7 +49,7 @@ server names are errors; Rift never treats an error as permission to proceed.
 | `after_transfer(ctx)` | When an admitted transfer attempt completes or fails | `server` (source), `target`, `reason`, `success` | `nil` |
 | `disconnect(ctx)` | Session teardown, including an authenticated login that never joined | Last committed `server`, or nil; `reason = "session_closed"` | `nil` |
 | `dialog(ctx)` | A click on a plugin action of a [dialog](dialogs.md) the script showed (API v2+) | `server`, `action`, `values`, `payload` | `nil` |
-| `chat(ctx)` | A chat message, or a command on its way to the backend, before the backend sees it. Needs `authentication.signed_chat = false`; see [chat](plugins.md#chat) | `server`, `kind` (`"message"` or `"command"`), `text`; for a command also `command` and `args` | `{ deny = "reason" }` drops it and shows the player the reason |
+| `chat(ctx)` | A chat message, or a command on its way to the backend, before the backend sees it. With signed chat, the first deny costs that player their chat signing; see [chat](plugins.md#chat) | `server`, `kind` (`"message"` or `"command"`), `text`; for a command also `command` and `args` | `{ deny = "reason" }` drops it and shows the player the reason |
 | `kick(ctx)` | A backend kicked the player in play, on a [network](operations.md#maintenance-and-transfers) session. The player is still connected to Rift | `server` (the backend that kicked), `reason` (its kick text without formatting) | `{ server = "name" }` moves the player there (a group picks an instance), `{ deny = "reason" }` disconnects them with that text; `nil` applies `network.on_kick` |
 
 Common player context fields are `api_version` (1, 2 or 3), `authenticated = true`, `uuid`
@@ -76,7 +76,9 @@ For a new player the order is:
 
 1. Legacy `on_route`, handshake, maintenance/rate admission and login parsing.
 2. Mojang identity verification and encryption. A claimed Login Start UUID is
-   never passed to an extension as an authenticated identity.
+   never passed to an extension as an authenticated identity. With
+   `maintenance_permission` set, maintenance is decided here instead of in
+   step 1.
 3. `login`, then `initial_server` (each Lua first, then [persistent plugins](plugins.md#dispatch-order), then its [bus decision](#decisions-answered-over-the-message-bus)),
    access checks and duplicate-name reservation.
 4. Initial backend capacity reservation, connect, login, configuration and Join Game.
@@ -150,7 +152,7 @@ the existing bounded, nonblocking broker API. Publications already delivered
 before a callback fails are not rolled back.
 
 Rust owns session identity, committed server, pending transfer, permissions,
-capacity leases and FIFO tickets. API v1 retains its original admission state
+capacity leases and queue tickets. API v1 retains its original admission state
 contract. API v2 also owns shared storage and job scheduling, and API v3 adds
 writes to the permission store. Each store/permission mutation and HTTP request
 takes effect independently; later callback failure does not roll it back.
@@ -824,7 +826,7 @@ Paper or through another Rift process.
 
 Queues may also target service groups. For a group, the configured capacity is
 per registered instance: `queues = { games = 20 }` allows 40 group slots with
-two instances. FIFO order and leases apply across concrete instance names, so
+two instances. Queue order and leases apply across concrete instance names, so
 direct connections cannot bypass the group queue. Adding or removing instances
 updates capacity without changing tickets; transfers within a group retain the
 player's existing group slot. A group with no instances can collect tickets,
@@ -837,8 +839,28 @@ switching queues removes the old ticket only when the new request succeeds.
 Each queue allows 1024 tickets and a five-minute wait. `/queue leave` in the
 example cancels the ticket. Disconnects and successful transfers remove it.
 
+Tickets are ordered by priority, highest first, then by arrival. A player's
+priority is the integer in their [meta](permissions.md#model) value
+`queue_priority`, so a rank can carry it; `queue_priority.<destination>`
+replaces it for one backend or service group. Unset, or not an integer, is 0,
+and negative values go behind players without one:
+
+```sh
+/perms group vip meta set queue_priority 10
+/perms group staff meta set queue_priority 100
+/perms group vip meta set queue_priority.event 0   # no head start for the event server
+```
+
+Meta resolves as usual: the player's own value, then their highest-weight
+group, in the contexts the proxy knows for them. A player who joins a queue
+later goes in front of tickets with a lower priority and behind those with the
+same or a higher one, and the reported position counts from there. The priority
+is read when the ticket is created; a rank change applies to the next ticket.
+With a steady supply of higher priorities a low one may wait out its five
+minutes.
+
 The session checks its ticket once per second while it is in a usable world.
-The FIFO head may enter when capacity is free; new direct entries cannot jump
+The queue head may enter when capacity is free; new direct entries cannot jump
 queued players. One head completes entry before the next head is considered.
 Admission rechecks permissions through `before_transfer`, static access and
 health. Exhausted capacity retains the ticket. Other transfer failures remove
@@ -846,10 +868,21 @@ the ticket and tell the player; a partially completed protocol transition can
 require disconnect. A stopped/reconfiguring client is bounded by the existing
 session phase deadline.
 
+A player whose permission `rift.queue.bypass`, or
+`rift.queue.bypass.<destination>` for one backend or service group, resolves to
+`true` enters although the capacity is used up or others are queued: on the
+initial join, with `/server` and on every transfer. A queue on a service group
+is bypassed with the group's node, also when the player targets one of its
+instances. Their slot still counts as used, so the destination stays over
+capacity until enough players leave, and queued players wait that much longer.
+Destination names are lowercased in the node. The node is checked like
+[server access](permissions.md#server-access), in the contexts the proxy knows
+for the player, and `*` or `rift.*` include it.
+
 Try the example with capacity 1 and two accounts: both initially enter lobby;
 `/queue` moves the first account to survival; the second waits in lobby. Returning
 the first account with `/hub` frees its slot and admits the second. `/server
-survival` cannot bypass that queue. `/staff`, `/server staff` and the staff
+survival` cannot bypass that queue without the bypass permission. `/staff`, `/server staff` and the staff
 hostname deny an account without `network.staff`.
 
 ## Reload behavior

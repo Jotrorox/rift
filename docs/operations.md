@@ -142,6 +142,7 @@ admin = {
     permissions = { "status", "servers", "maintenance", "drain", "transfer", "reload", "shutdown", "plugins", "logs", "perms" },
 },
 maintenance = false,
+maintenance_permission = "rift.maintenance.bypass", -- Omit to turn everyone away.
 draining = {}, -- For example, { "survival" } blocks new attachments to survival.
 metrics = "127.0.0.1:9090",
 login_rate_limit = {
@@ -672,7 +673,7 @@ isolation and cannot detect changes incompatible with an already running process
 | Shutdown deadline | New value applies to the later shutdown drain |
 | `web`, `status`, standalone `metrics`, web bearer token | Can enable, disable or move live; replacement sockets bind before commit |
 | Gameplay listeners, operational `admin` bind/token variable/permissions | Restart required; incompatible reload rejects the entire candidate |
-| `managed_servers` definitions or addresses of managed backends | Restart required; running processes and their lifecycle policy remain attached to the original definition |
+| `managed_servers` definitions or addresses of managed backends | Restart required; running processes and their lifecycle policy remain attached to the original definition. A server with `keep_running` survives that restart with the process it has; stop and start it to apply a changed command or environment |
 | `service_groups`, `templates` and scaling policies | Apply live while each registered instance keeps its process definition, storage policy and an in-range port; otherwise the reload names the instance to remove first. Create and remove instances with admin or web operations |
 | `instance_database` | Bundled SQLite file, default `rift.sqlite3` beside the config; restores registrations before scaling. Path changes require a restart |
 | `nodes` and `messaging` | Restart required; agents keep their servers running while the controller restarts and are adopted again. See [multiple hosts](nodes.md) |
@@ -719,6 +720,21 @@ status. Backend draining preserves players already attached, prevents new
 attachments to that backend (including fallback and explicit transfers), and
 allows eligible configured fallbacks to accept new players. Wait for the backend
 player count to reach zero or transfer supported clients before stopping it.
+
+To let staff in during maintenance, name a permission node:
+
+```lua
+maintenance_permission = "rift.maintenance.bypass",
+```
+
+Players for whom the node resolves to `true` (granted directly, through a
+group or by a wildcard such as `rift.*`) log in as usual; everyone else gets
+the maintenance message. Only global grants count, as for
+[server access](permissions.md#server-access) at login. Without the option
+logins are refused before the player is identified. With it Rift reads the
+login and, in online mode, authenticates it first, so each refused login costs
+a Mojang session lookup; the login rate limit still applies beforehand. In
+offline mode names are unverified, so anyone claiming a staff name passes.
 
 For a managed backend, check both players and attachments before stopping:
 
@@ -785,6 +801,9 @@ These runtime controls are useful for a maintenance window. To preserve policy
 across process restarts, change `maintenance`/`draining` in the configuration and
 validate/reload it as well. A graceful full-process stop is available through
 `rift admin shutdown`, `systemctl stop rift`, Compose `stop`, or Ctrl-C.
+`rift admin shutdown all` also stops managed servers with
+[`keep_running`](managed-servers.md#servers-that-outlive-the-proxy), which the
+others leave running.
 
 ## Shutdown, upgrade and rollback
 
@@ -796,6 +815,14 @@ SIGTERM/SIGINT forces remaining sessions closed immediately. Look for
 during the drain. **Keep the supervisor stop deadline longer than Rift's drain**:
 40 seconds in the examples. Apply systemd edits with `systemctl daemon-reload`.
 See systemd's [`ExecReload` and `TimeoutStopSec` documentation](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html).
+
+Local managed servers stop with Rift, after the drain. Servers with
+[`keep_running`](managed-servers.md#servers-that-outlive-the-proxy) do not:
+they keep running through a shutdown, an upgrade or a crash, and the next Rift
+adopts them, so a restart costs players their connection but not the loaded
+worlds. This needs `KillMode=process` in the systemd unit; with the default
+`KillMode=control-group` the unit's stop kills them. `rift admin shutdown all`
+stops Rift together with its kept servers, with `shutdown` permission.
 
 Verify and extract the new release archive into a separate directory. Record
 both release tags and retain the previous archive. From the candidate directory:
@@ -809,6 +836,8 @@ sudo cp -p /usr/local/bin/rift /var/backups/rift/rift.previous
 sudo cp -p /etc/rift/rift.lua /var/backups/rift/rift.lua.previous
 # Announce/prepare the maintenance window, then allow graceful drain.
 sudo systemctl stop rift
+# Copy the database only while Rift is stopped; a new release may migrate it.
+sudo cp -p /var/lib/rift/rift.sqlite3 /var/backups/rift/rift.sqlite3.previous
 sudo install -m 0755 ./rift /usr/local/bin/rift
 sudo systemctl start rift
 sudo systemctl status rift
@@ -817,22 +846,38 @@ sudo journalctl -u rift -n 50 --no-pager
 
 Confirm metrics, backend health and a real client login before declaring the
 upgrade complete. Preserve `admin.env` securely when changing its format or secret.
-If validation/startup or the client check fails, restore the matched binary/config:
+If validation/startup or the client check fails, restore the matched binary,
+config and database:
 
 ```sh
 sudo systemctl stop rift
 sudo install -m 0755 /var/backups/rift/rift.previous /usr/local/bin/rift
 sudo install -o root -g rift -m 0640 /var/backups/rift/rift.lua.previous /etc/rift/rift.lua
+sudo install -o rift -g rift -m 0600 /var/backups/rift/rift.sqlite3.previous /var/lib/rift/rift.sqlite3
 sudo -u rift /usr/local/bin/rift --check /etc/rift/rift.lua
 sudo systemctl start rift
 sudo journalctl -u rift -n 50 --no-pager
 ```
 
-For containers, retain the previous versioned image and matching config, build a
+**The database only moves forward.** `instance_database` (`rift.sqlite3`) holds
+instance registrations and the permission store. A new release migrates its
+schema in place at the first start and there is no downgrade: the previous
+binary refuses the migrated file with
+`instance database <path>: unsupported schema version N of <component>` and
+does not start. Rolling back the binary therefore means restoring the copy
+taken above, which discards registrations and permission changes made since
+the upgrade. Take the copy with Rift stopped: the file uses a rollback journal,
+so a stopped Rift leaves one complete file and no `-wal` companion. Where the
+path differs, use the configured `instance_database`; the `.lock` file beside
+it holds no data and needs no backup. The [changelog](../CHANGELOG.md) names
+each release that changes the schema.
+
+For containers, copy `rift.sqlite3` out of the stopped container's volume the
+same way before starting the new image. Retain the previous versioned image and matching config, build a
 new image under a different `RIFT_IMAGE` tag, and run its one-shot `check` command
 before stopping the running container. Stop gracefully, then run `up -d` with the
-new tag. Roll back by restoring the previous config, selecting the previous
-image tag, validating it and running `up -d --no-build`. Avoid rebuilding or
+new tag. Roll back by restoring the previous config and database copy,
+selecting the previous image tag, validating it and running `up -d --no-build`. Avoid rebuilding or
 reusing the previous tag until the upgrade is verified. A process replacement
 disconnects sessions; configuration reload alone preserves them.
 

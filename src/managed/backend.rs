@@ -1,7 +1,8 @@
 //! Process handling behind the supervision worker: a child of this process
 //! ([`Local`]) or a process run by a `rift node` agent ([`Remote`]). The worker
-//! keeps phases, retries, readiness deadlines and idle stops for both.
-use std::{fs::OpenOptions, io, process::Stdio, time::Duration};
+//! keeps phases, retries, readiness deadlines and idle stops for both. A local
+//! server with `keep_running` outlives this process; see [`kept`].
+use std::{fs::OpenOptions, io, process::Stdio, sync::atomic::Ordering, time::Duration};
 
 use tokio::{
     io::AsyncWriteExt,
@@ -9,7 +10,7 @@ use tokio::{
     process::{Child, Command},
 };
 
-use super::{LOG_FILE, Server, lock, loopback_address};
+use super::{LOG_FILE, Server, kept, lock, loopback_address};
 use crate::config::ProcessEnvironment;
 use crate::node::{Nodes, protocol};
 
@@ -56,27 +57,46 @@ pub(super) trait ProcessBackend: Send + 'static {
         command: &str,
     ) -> impl Future<Output = io::Result<()>> + Send;
     /// A running process this worker did not start, which it may take over:
-    /// remote servers keep running while the controller restarts.
-    fn adoptable(&self, server: &Server) -> Option<Option<u32>>;
+    /// remote servers and local ones with `keep_running` keep running while
+    /// the controller restarts.
+    fn adoptable(&mut self, server: &Server) -> Option<Option<u32>>;
     fn adopt(&mut self, server: &Server, pid: Option<u32>);
-    /// On controller shutdown, local processes stop; remote ones keep running
-    /// and are adopted again after the controller reconnects.
-    fn survives_controller(&self) -> bool;
+    /// On controller shutdown, local processes stop unless they have
+    /// `keep_running`; remote ones keep running. Both are adopted again by
+    /// the next controller.
+    fn survives_controller(&self, server: &Server) -> bool;
 }
 
 #[derive(Debug, Default)]
 pub(super) struct Local {
     child: Option<Child>,
+    /// A `keep_running` process an earlier proxy started. It is no child of
+    /// this one: its status is polled and its exit status is never known.
+    adopted: Option<kept::Kept>,
+    /// The recorded process `adoptable` found, until `adopt` takes it.
+    candidate: Option<kept::Kept>,
+    /// Whether the server directory was searched for such a process. Every
+    /// process started later is this worker's own.
+    searched: bool,
     logins: super::LoginSlot,
 }
 
 impl Local {
     pub(super) fn new(logins: super::LoginSlot) -> Self {
         Self {
-            child: None,
             logins,
+            ..Self::default()
         }
     }
+}
+
+/// Run blocking work on a kept process (see [`kept`]) off the runtime.
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> io::Result<T> + Send + 'static,
+) -> io::Result<T> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(io::Error::other)?
 }
 
 /// The server's environment plus what Rift sets for it: `RIFT_SERVER_NAME`,
@@ -112,11 +132,14 @@ fn with_login(
 
 impl ProcessBackend for Local {
     fn owns(&self) -> bool {
-        self.child.is_some()
+        self.child.is_some() || self.adopted.is_some()
     }
 
     fn pid(&self) -> Option<u32> {
-        self.child.as_ref().and_then(Child::id)
+        match &self.adopted {
+            Some(process) => Some(process.pid()),
+            None => self.child.as_ref().and_then(Child::id),
+        }
     }
 
     fn available(&self) -> io::Result<()> {
@@ -142,13 +165,38 @@ impl ProcessBackend for Local {
             }
             Err(error) => return Err(error),
         }
-        let (environment, _) = with_login(&self.logins, server, Some(&server.config.directory))?;
-        self.child = Some(spawn(
+        let directory = &server.config.directory;
+        let (environment, _) = with_login(&self.logins, server, Some(directory))?;
+        self.searched = true;
+        let console = if server.config.keep_running {
+            if !kept::SUPPORTED {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "keep_running requires Linux or macOS",
+                ));
+            }
+            Some(kept::console(directory)?)
+        } else {
+            None
+        };
+        let kept = console.is_some();
+        let mut child = spawn_with(
             &server.config.command,
-            &server.config.directory,
+            directory,
             &environment,
             &server.config.isolation,
-        )?);
+            console,
+        )?;
+        // Without its record the next proxy could not adopt the process.
+        if kept
+            && let Some(pid) = child.id()
+            && let Err(error) = kept::record(directory, pid)
+        {
+            let _ = kill(&mut child).await;
+            kept::forget(directory);
+            return Err(error);
+        }
+        self.child = Some(child);
         Ok(())
     }
 
@@ -159,11 +207,26 @@ impl ProcessBackend for Local {
         accepted(tokio::time::timeout(wait, TcpStream::connect(address)).await)
     }
 
-    async fn status(&mut self, _server: &Server) -> Status {
+    async fn status(&mut self, server: &Server) -> Status {
+        if let Some(process) = &self.adopted {
+            if process.alive() {
+                return Status::Running;
+            }
+            self.adopted = None;
+            kept::forget(&server.config.directory);
+            return Status::Exited {
+                status: "no longer running; an adopted process leaves no exit status".into(),
+                success: false,
+            };
+        }
         let Some(process) = self.child.as_mut() else {
             return Status::Idle;
         };
-        match process.try_wait() {
+        let status = process.try_wait();
+        if server.config.keep_running && !matches!(status, Ok(None)) {
+            kept::forget(&server.config.directory);
+        }
+        match status {
             Ok(Some(status)) => {
                 self.child = None;
                 Status::Exited {
@@ -184,32 +247,66 @@ impl ProcessBackend for Local {
         }
     }
 
-    async fn stop(&mut self, _server: &Server, grace: Duration) -> io::Result<()> {
-        match self.child.take() {
-            Some(process) => stop_child(process, grace).await,
-            None => Ok(()),
+    async fn stop(&mut self, server: &Server, grace: Duration) -> io::Result<()> {
+        let directory = server.config.directory.clone();
+        let result = if let Some(process) = self.adopted.take() {
+            let directory = directory.clone();
+            blocking(move || process.stop(&directory, grace)).await
+        } else if let Some(process) = self.child.take() {
+            if server.config.keep_running {
+                // A kept server reads its console from the FIFO, not a pipe.
+                let directory = directory.clone();
+                let _ = blocking(move || kept::write_console(&directory, "stop")).await;
+            }
+            stop_child(process, grace).await
+        } else {
+            return Ok(());
+        };
+        if server.config.keep_running && result.is_ok() {
+            kept::forget(&directory);
         }
+        result
     }
 
-    async fn kill(&mut self, _server: &Server) {
-        if let Some(mut process) = self.child.take() {
+    async fn kill(&mut self, server: &Server) {
+        if let Some(process) = self.adopted.take() {
+            let _ = blocking(move || process.kill()).await;
+        } else if let Some(mut process) = self.child.take() {
             let _ = kill(&mut process).await;
             let _ = process.wait().await;
+        } else {
+            return;
+        }
+        if server.config.keep_running {
+            kept::forget(&server.config.directory);
         }
     }
 
-    async fn send_command(&mut self, _server: &Server, command: &str) -> io::Result<()> {
+    async fn send_command(&mut self, server: &Server, command: &str) -> io::Result<()> {
+        if server.config.keep_running && self.owns() {
+            let (directory, command) = (server.config.directory.clone(), command.to_owned());
+            return blocking(move || kept::write_console(&directory, &command)).await;
+        }
         write_console(&mut self.child, command).await
     }
 
-    fn adoptable(&self, _server: &Server) -> Option<Option<u32>> {
-        None
+    fn adoptable(&mut self, server: &Server) -> Option<Option<u32>> {
+        if self.searched || self.owns() || !server.config.keep_running {
+            return None;
+        }
+        self.candidate = kept::recorded(&server.config.directory);
+        // A record that names no running process of this server is stale.
+        self.searched = self.candidate.is_none();
+        self.candidate.as_ref().map(|process| Some(process.pid()))
     }
 
-    fn adopt(&mut self, _server: &Server, _pid: Option<u32>) {}
+    fn adopt(&mut self, _server: &Server, _pid: Option<u32>) {
+        self.adopted = self.candidate.take();
+        self.searched = true;
+    }
 
-    fn survives_controller(&self) -> bool {
-        false
+    fn survives_controller(&self, server: &Server) -> bool {
+        server.config.keep_running && !server.stop_kept.load(Ordering::Acquire)
     }
 }
 
@@ -250,6 +347,21 @@ pub(crate) fn spawn(
     environment: &ProcessEnvironment,
     isolation: &crate::config::Isolation,
 ) -> io::Result<Child> {
+    spawn_with(command, directory, environment, isolation, None)
+}
+
+/// [`spawn`], or with `console` a server that keeps running without Rift
+/// (`keep_running`): it reads `console` (see [`kept::console`]) instead of a
+/// pipe, leads its own session instead of only its own group, and neither a
+/// dropped handle nor Rift's death kills it. Its log and isolation are the
+/// same.
+fn spawn_with(
+    command: &[String],
+    directory: &std::path::Path,
+    environment: &ProcessEnvironment,
+    isolation: &crate::config::Isolation,
+    console: Option<std::fs::File>,
+) -> io::Result<Child> {
     let (program, arguments) = command.split_first().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -258,17 +370,20 @@ pub(crate) fn spawn(
     })?;
     super::rotate_log_reporting(directory);
     let log = open_log(directory)?;
+    let kept = console.is_some();
     let mut command = Command::new(program);
     command
         .args(arguments)
         .current_dir(directory)
-        .stdin(Stdio::piped())
+        .stdin(console.map_or_else(Stdio::piped, Stdio::from))
         .stderr(Stdio::from(log.try_clone()?))
         .stdout(Stdio::from(log))
-        .kill_on_drop(true);
+        .kill_on_drop(!kept);
     apply_environment(command.as_std_mut(), environment);
     #[cfg(unix)]
-    command.process_group(0);
+    if !kept {
+        command.process_group(0);
+    }
     // Built before fork; it lives until this function returns, after the
     // child has exec'd.
     let _sandbox = sandbox(isolation, directory, &arguments_with(program, arguments))?;
@@ -280,15 +395,36 @@ pub(crate) fn spawn(
         // async-signal-safe calls, building errors without allocating.
         unsafe {
             command.pre_exec(move || {
-                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                // Rift may have died before the signal was armed.
-                if libc::getppid() != parent {
-                    return Err(io::Error::from_raw_os_error(libc::ESRCH));
+                if kept {
+                    // A new session is also a new process group.
+                    if libc::setsid() < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                } else {
+                    if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    // Rift may have died before the signal was armed.
+                    if libc::getppid() != parent {
+                        return Err(io::Error::from_raw_os_error(libc::ESRCH));
+                    }
                 }
                 if let Some(ruleset) = ruleset {
                     super::landlock::Sandbox::enter(ruleset)?;
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
+    if kept {
+        // SAFETY: runs in the forked child before exec and only makes an
+        // async-signal-safe call.
+        unsafe {
+            command.pre_exec(|| {
+                // A new session is also a new process group.
+                if libc::setsid() < 0 {
+                    return Err(io::Error::last_os_error());
                 }
                 Ok(())
             });
@@ -715,7 +851,7 @@ impl ProcessBackend for Remote {
         .map(|_| ())
     }
 
-    fn adoptable(&self, server: &Server) -> Option<Option<u32>> {
+    fn adoptable(&mut self, server: &Server) -> Option<Option<u32>> {
         if self.running.is_some() {
             return None;
         }
@@ -732,7 +868,7 @@ impl ProcessBackend for Remote {
         }
     }
 
-    fn survives_controller(&self) -> bool {
+    fn survives_controller(&self, _server: &Server) -> bool {
         true
     }
 }

@@ -12,8 +12,7 @@
 #
 # A plugin that handles the chat hook uses rift_add_chat_plugin() instead: it
 # defines RIFT_CHAT and links the bindings in chat/, which export
-# `rift:plugin/chat`. Rift starts such a plugin only with
-# `authentication.signed_chat = false`.
+# `rift:plugin/chat`.
 #
 # The target is a component ready to load: wasi-sdk links components
 # directly for wasm32-wasip2.

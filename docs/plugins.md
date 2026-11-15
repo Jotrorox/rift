@@ -166,8 +166,7 @@ messages and events, but a plugin whose registration lists a player hook,
 registers a command or has an empty hook list fails to start (it is not
 retried), so a ban list cannot silently allow everyone; `rift check` and `rift
 check --strict` warn when persistent plugins are configured without it.
-Turning `online_mode` or `signed_chat` on or off restarts every persistent
-plugin. Answers are
+Turning `online_mode` on or off restarts every persistent plugin. Answers are
 validated exactly like Lua results and bus replies: strings are 1–1024 bytes,
 JSON text components (the `deny-json` and `message-json` answers of the
 optional `decisions` export, which a WebAssembly component that has it answers
@@ -234,27 +233,31 @@ no plugin and no script handles chat, sessions do not even parse chat packets.
 
 **Chat must be unsigned.** A backend that verifies a player's chat counts
 every signed message; when the proxy withholds one, the backend rejects all
-that follow and disconnects the player. So a `chat` handler needs
-[`authentication.signed_chat = false`](network-protocol.md#unsigned-chat),
-which keeps the signing material from backends:
+that follow and disconnects the player. So the player whose message is
+denied gives up chat signing, in one of two ways
+([unsigned chat](network-protocol.md#unsigned-chat)):
 
-- A plugin with a handler fails to start while `signed_chat` is `true`, with
-  `the chat hook needs authentication.signed_chat = false` (it is not
-  retried); `rift check --strict` refuses a component that exports `chat`. A
-  configuration whose script defines `chat` does not load.
-- Paper backends also need `enforce-secure-profile=false` in
-  `server.properties`, or they refuse every chat message of players without a
-  signing key.
-- Players lose two things, on the whole network: their chat is shown to
-  others as not secure (the client's unsigned-message marker), and chat
-  reporting stops working.
-- `signed_chat` applies to connections made after it changed. A player who
-  connected while it was `true` keeps a signed chat session with the backend
-  until they reconnect: for that player Rift asks the hook only about packets
-  that carry no signature (commands without signed arguments, and all chat of
-  clients before 1.19) and forwards signed ones without asking. The hook
-  covers every message of players who connected after the setting became
-  `false`.
+- **With signed chat**, the default, players sign until the hook first denies
+  a signed message or command of theirs. Rift then logs that player in to
+  their server again without their signing material: they see the world load
+  once, as for a server switch, and their chat is unsigned until they
+  reconnect to the proxy. Everything the hook lets through stays signed, and
+  nobody else is affected. A mute costs the muted player one reload at their
+  first message; a filter costs it whoever first trips it.
+- **With `authentication.signed_chat = false`**, no backend ever learns
+  anybody's signing material, so nothing has to be repaired and nobody sees a
+  reload. Choose it when the hook denies often.
+- Chat without signing is shown to others as not secure (the client's
+  unsigned-message marker) and cannot be reported.
+- Paper backends need `enforce-secure-profile=false` in `server.properties`
+  either way, or they refuse every chat message of a player without a signing
+  key: the muted player could not chat after the mute ends.
+- Rift asks the hook about a packet the backend verifies only while it can
+  attach a backend again. On a client protocol without server switching, and
+  while a switch is under way, such packets are forwarded without asking;
+  packets without a signature (commands without signed arguments, and all
+  chat of clients before 1.19) always come to the hook.
+- `signed_chat` applies to connections made after it changed.
 
 The deadline is 50 ms (`deadlines.chat`, 1–10 000 ms). A missed deadline or a
 failure applies `on_timeout` and `on_failure`; with `deny`, the default, the

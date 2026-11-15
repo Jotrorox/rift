@@ -62,6 +62,36 @@ impl Network<'_> {
         timeout(WRITE, session.send_text(&reason)).await?
     }
 
+    /// Log the player in to `current` again after a signed chat packet was
+    /// withheld from it ([`Session::chat_chain_broken`]): the backend's
+    /// signature chain cannot be repaired, and the new login carries no
+    /// signing material. Not a transfer, so no transfer hook runs and no
+    /// queue slot is taken. If `current` cannot be reached, the player moves
+    /// on as after an outage.
+    pub async fn reattach<C: AsyncRead + AsyncWrite + Unpin>(
+        &self,
+        session: &mut Session<C, TcpStream>,
+        current: &str,
+        event: &mut Connection,
+    ) -> io::Result<String> {
+        session.detach_backend();
+        match self
+            .attach(session, current, &[current.to_owned()], event, None)
+            .await
+        {
+            Err(error)
+                if error.kind() != io::ErrorKind::PermissionDenied && session.can_switch() =>
+            {
+                let target = self
+                    .switch(session, current, &self.recovery_candidates(current), event)
+                    .await?;
+                self.metrics.fallbacks.inc();
+                Ok(target)
+            }
+            result => result,
+        }
+    }
+
     pub async fn dialog<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin>(
         &self,
         session: &Session<C, B>,
@@ -523,6 +553,20 @@ impl Network<'_> {
         event: &mut Connection,
         reason: &str,
     ) -> io::Result<String> {
+        self.attach(session, current, candidates, event, Some(reason))
+            .await
+    }
+
+    /// [`Self::switch_for`], or without a `reason` a new login to `current`
+    /// itself ([`Self::reattach`]).
+    async fn attach<C: AsyncRead + AsyncWrite + Unpin>(
+        &self,
+        session: &mut Session<C, TcpStream>,
+        current: &str,
+        candidates: &[String],
+        event: &mut Connection,
+        reason: Option<&str>,
+    ) -> io::Result<String> {
         if !session.can_switch() {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -538,7 +582,7 @@ impl Network<'_> {
         let available: Vec<_> = expanded
             .iter()
             .filter(|server| {
-                server.as_str() != current
+                (reason.is_none() || server.as_str() != current)
                     && self.snapshot.admits(server, &identity.name, uuid)
                     && self.snapshot.reachable(server)
             })
@@ -557,7 +601,8 @@ impl Network<'_> {
             rift::text::notice_error(io::ErrorKind::NotConnected, Notice::SwitchNoServer)
         };
         for (index, name) in candidates.iter().enumerate() {
-            if let Some(extension) = &mut session.extension
+            if let Some(reason) = reason
+                && let Some(extension) = &mut session.extension
                 && let Err(error) = extension.before_transfer(name, reason).await
             {
                 last_error = error;

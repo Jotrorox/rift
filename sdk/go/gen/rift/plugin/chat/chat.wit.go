@@ -9,10 +9,10 @@
 // is needed. So only components that moderate chat export it; the SDKs leave
 // it out unless a plugin asks for it (worlds `plugin-chat` and `core-chat`).
 //
-// Withholding one signed message breaks a player's signature chain, so a
-// component that exports `chat` starts only with
-// `authentication.signed_chat = false`, which makes backends take chat as
-// unsigned. Commands that Rift or a plugin owns never come here. The
+// Withholding one signed message breaks a player's signature chain, so
+// unless the proxy sets `authentication.signed_chat = false`, the first deny
+// costs that player their chat signing until they reconnect. Commands that
+// Rift or a plugin owns never come here. The
 // deadline is 50 ms unless the manifest sets `deadlines.chat`; a missed
 // deadline or a failure applies the manifest's policy, where `deny` drops
 // the message.

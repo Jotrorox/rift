@@ -1245,6 +1245,7 @@ fn with_admin_options(options: &str) -> String {
 fn administrator_options_have_explicit_permissions_and_no_environment_dependency() {
     let defaults = Config::from_lua(&with_admin_options(""), "admin.lua").unwrap();
     assert!(!defaults.maintenance);
+    assert!(defaults.maintenance_permission.is_none());
     assert!(defaults.draining.is_empty());
     assert!(defaults.admin.is_none());
     assert!(defaults.login_rate_limit.is_none());
@@ -1253,6 +1254,7 @@ fn administrator_options_have_explicit_permissions_and_no_environment_dependency
         &with_admin_options(
             "
         maintenance = true,
+        maintenance_permission = 'Rift.Maintenance.Bypass',
         draining = { 'lobby' },
         login_rate_limit = { per_ip_per_second = 3, per_ip_burst = 6 },
         admin = {
@@ -1266,6 +1268,10 @@ fn administrator_options_have_explicit_permissions_and_no_environment_dependency
     )
     .unwrap();
     assert!(config.maintenance);
+    assert_eq!(
+        config.maintenance_permission.as_deref(),
+        Some("rift.maintenance.bypass")
+    );
     assert_eq!(config.draining, BTreeSet::from(["lobby".into()]));
     assert_eq!(config.login_rate_limit.unwrap().per_ip_burst, 6);
     let admin = config.admin.unwrap();
@@ -1287,6 +1293,10 @@ fn administrator_options_have_explicit_permissions_and_no_environment_dependency
 fn malformed_administrator_options_are_actionable() {
     for (options, expected) in [
         ("maintenance = 'true'", "maintenance: expected a boolean"),
+        (
+            "maintenance_permission = 'rift.*'",
+            "maintenance_permission: expected a permission node",
+        ),
         ("draining = { 'missing' }", "draining: unknown backend"),
         (
             "draining = { 'lobby', 'lobby' }",
@@ -2125,7 +2135,7 @@ fn client_versions_are_set_for_the_proxy_a_backend_and_a_service_group() {
 }
 
 #[test]
-fn a_script_chat_hook_needs_unsigned_chat() {
+fn a_script_chat_hook_loads_with_signed_and_unsigned_chat() {
     let source = |authentication: &str, chat: &str| {
         format!(
             "return {{ listeners = {{ public = '127.0.0.1:0' }}, backends = {{ lobby = '127.0.0.1:1' }}, routes = {{ public = 'lobby' }}, authentication = {{ online_mode = true{authentication} }}, forwarding = {{ mode = 'velocity', secret_env = 'TEST_SECRET' }}, extensions = {{ api_version = 2, chat = {chat} }} }}"
@@ -2133,15 +2143,7 @@ fn a_script_chat_hook_needs_unsigned_chat() {
     };
     let handler = "function(ctx) return { deny = 'muted' } end";
     for authentication in ["", ", signed_chat = true"] {
-        let error = Config::from_lua(&source(authentication, handler), "chat.lua")
-            .unwrap_err()
-            .to_string();
-        assert!(
-            error.contains(
-                "extensions.chat: the chat hook needs authentication.signed_chat = false"
-            ),
-            "{error}"
-        );
+        Config::from_lua(&source(authentication, handler), "chat.lua").unwrap();
     }
     let config = Config::from_lua(&source(", signed_chat = false", handler), "chat.lua").unwrap();
     let extensions = config.extensions.as_ref().unwrap();

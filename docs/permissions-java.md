@@ -18,7 +18,8 @@ Everything is published to a Maven repository on GitHub Pages, group
 | `rift-permissions-api` | Interfaces and immutable values, no dependencies, no Bukkit imports | Every plugin, as `compileOnly` |
 | `rift-permissions-test` | An in-memory implementation with builders, plus a MockBukkit helper | Plugin tests |
 | `rift-permissions-client` | Replica, resolver, JSON codec and bus integration | Standalone Java services |
-| `rift-messaging` | The QUIC client for Rift's [messaging bus](messaging-protocol.md) | Standalone Java services |
+| `rift-messaging` | The QUIC client for Rift's [messaging bus](messaging-protocol.md), [retained streams](messaging.md#java-streams) included | Standalone Java services |
+| `rift-control` | [`RiftControl` and `RiftEvents`](messaging.md#java-control-and-events): status, maintenance, drain, transfer, reload, nodes and typed events | Operator tools and services with a `control` login |
 | `rift-permissions-paper` | The RiftPerms plugin jar (also attached to each GitHub release) | Server operators |
 
 Versions follow the proxy's releases: use the API version of the RiftPerms

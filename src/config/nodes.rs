@@ -358,6 +358,31 @@ rift.config.templates.bedwars={server_jar='paper.jar'}",
     }
 
     #[test]
+    fn keep_running_is_for_persistent_and_disposable_servers_on_this_host() {
+        for (extra, expected) in [
+            (
+                "rift.config.nodes.node1={address='10.0.0.11',labels={'games'}}
+rift.config.service_groups.g={command={'java'},port_range={30000,30009},nodes={labels={'games'}},keep_running=true}",
+                "service_groups.g.keep_running: servers on a node already keep running",
+            ),
+            (
+                "rift.config.nodes.node1={address='10.0.0.11'}
+rift.config.backends.survival='10.0.0.11:25570'
+rift.config.managed_servers.survival={node='node1',directory='survival',command={'java'},keep_running=true}",
+                "managed_servers.survival.keep_running: servers on a node already keep running",
+            ),
+            (
+                "rift.config.service_groups.g={template='t',storage='ephemeral',port_range={30000,30009},keep_running=true}
+rift.config.templates.t={server_jar='paper.jar'}",
+                "service_groups.g.keep_running: ephemeral instances are deleted when their run ends",
+            ),
+        ] {
+            let error = config(extra).unwrap_err().to_string();
+            assert!(error.contains(expected), "{extra}: {error}");
+        }
+    }
+
+    #[test]
     fn invalid_nodes_and_selectors_are_rejected() {
         for (extra, expected) in [
             (

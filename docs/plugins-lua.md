@@ -123,8 +123,8 @@ What differs is the environment:
   [chat](plugins.md#chat): the handler receives every chat message and backend
   command as `ctx` with `ctx.kind` (`"message"` or `"command"`) and `ctx.text`
   (for a command also `ctx.command` and `ctx.args`), and returns nil or
-  `{ deny = "reason" }`, which drops it. A plugin with this handler starts
-  only with `authentication.signed_chat = false`.
+  `{ deny = "reason" }`, which drops it. With signed chat, the first deny
+  costs that player their chat signing.
 - `rift.on("kick", fn)` registers the plugin for backend kicks in play: `ctx.server`
   is the backend that kicked the player and `ctx.reason` its text without
   formatting. Return `{ server = "lobby" }` to move the player there,

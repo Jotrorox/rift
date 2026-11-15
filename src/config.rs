@@ -20,7 +20,7 @@ pub use messaging::{MessagingConfig, MessagingPrincipal, MessagingStream, Messag
 pub use nodes::{LOCAL_NODE, NodeConfig, NodeSelector, Placement, valid_node_directory};
 pub use permissions::PermissionsConfig;
 pub use services::{
-    GroupMode, GroupState, InstanceStorage, ServiceGroup, ServiceInstance, ServiceScaling,
+    Balance, GroupMode, GroupState, InstanceStorage, ServiceGroup, ServiceInstance, ServiceScaling,
 };
 pub use status::{
     StatusBackend, StatusConfig, StatusExposure, StatusLink, StatusPage, StatusPanels,
@@ -96,6 +96,9 @@ pub struct Config {
     pub metrics: Option<SocketAddr>,
     pub admin: Option<Admin>,
     pub maintenance: bool,
+    /// The permission node whose holders may log in during maintenance;
+    /// `None` turns everyone away before their identity is known.
+    pub maintenance_permission: Option<String>,
     pub draining: BTreeSet<String>,
     /// Whether players may join backends that run another Minecraft version.
     pub translation: Translation,
@@ -556,6 +559,7 @@ impl Config {
             metrics: None,
             admin: None,
             maintenance: false,
+            maintenance_permission: None,
             draining: BTreeSet::new(),
             translation: Translation::default(),
             web: None,
@@ -726,6 +730,7 @@ impl Config {
                     "metrics",
                     "admin",
                     "maintenance",
+                    "maintenance_permission",
                     "draining",
                     "translation",
                     "web",
@@ -840,7 +845,6 @@ impl Config {
                         config_json,
                         // Set below, once `authentication` is parsed.
                         online_mode: false,
-                        signed_chat: true,
                     };
                     spec.check_grants()
                         .map_err(|error| format!("plugin {}: {error}", spec.name))?;
@@ -991,6 +995,11 @@ impl Config {
                 Value::Boolean(value) => value,
                 _ => return Err("maintenance: expected a boolean".into()),
             };
+            let maintenance_permission = permission_node(
+                root.get("maintenance_permission")
+                    .map_err(|e| e.to_string())?,
+                "maintenance_permission",
+            )?;
             let draining = match root.get::<Value>("draining").map_err(|e| e.to_string())? {
                 Value::Nil => BTreeSet::new(),
                 value => string_set(value, "draining")?,
@@ -1057,7 +1066,6 @@ impl Config {
             let authentication = authentication(&root)?;
             for plugin in &mut plugins {
                 plugin.online_mode = authentication.online_mode;
-                plugin.signed_chat = authentication.signed_chat;
             }
             let forwarding = forwarding(&root)?;
             Ok(Self {
@@ -1095,6 +1103,7 @@ impl Config {
                 metrics,
                 admin,
                 maintenance,
+                maintenance_permission,
                 draining,
                 translation,
                 web,
@@ -1190,13 +1199,6 @@ impl Config {
         if let Some(extensions) = &self.extensions {
             if !self.authentication.online_mode {
                 return Err(invalid("extensions requires authentication.online_mode"));
-            }
-            if self.authentication.signed_chat && extensions.hook_names().any(|hook| hook == "chat")
-            {
-                return Err(invalid(format!(
-                    "extensions.chat: {}",
-                    crate::plugins::worker::CHAT_NEEDS_UNSIGNED
-                )));
             }
             if extensions.legacy_grants().is_some() {
                 return Err(invalid(

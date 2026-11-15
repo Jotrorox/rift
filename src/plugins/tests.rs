@@ -202,7 +202,6 @@ fn spec(root: &Path, name: &str, extra: &str, config_json: &str) -> PluginSpec {
         config_json: config_json.into(),
         fingerprint: "one".into(),
         online_mode: true,
-        signed_chat: true,
     }
 }
 
@@ -1530,11 +1529,6 @@ fn moderator(event: &Event, _: &services::Services) -> Result<Reply, CallError> 
     }))
 }
 
-fn unsigned(mut spec: PluginSpec) -> PluginSpec {
-    spec.signed_chat = false;
-    spec
-}
-
 #[tokio::test]
 async fn chat_reaches_only_plugins_that_handle_it_and_accepts_continue_and_deny() {
     use crate::extensions::ChatKind;
@@ -1546,8 +1540,8 @@ async fn chat_reaches_only_plugins_that_handle_it_and_accepts_continue_and_deny(
     mocks.plan("lenient", Plan::new(moderator).hooks(&[Hook::Timer]).chat());
     let broker = Broker::default();
     let plugins = vec![
-        unsigned(spec(&root, "everything", "", "{}")),
-        unsigned(spec(&root, "mute", "", "{}")),
+        spec(&root, "everything", "", "{}"),
+        spec(&root, "mute", "", "{}"),
     ];
     let runtime = runtime(&config("", plugins), &mocks, &broker).await;
     assert!(runtime.plugins().may_handle(Hook::Chat));
@@ -1600,7 +1594,7 @@ async fn chat_reaches_only_plugins_that_handle_it_and_accepts_continue_and_deny(
     // The manifest decides otherwise.
     let policies =
         "[deadlines]\nchat = 20\n[failure]\non_timeout = \"continue\"\non_failure = \"continue\"\n";
-    let plugins = vec![unsigned(spec(&root, "lenient", policies, "{}"))];
+    let plugins = vec![spec(&root, "lenient", policies, "{}")];
     let runtime = self::runtime(&config("", plugins), &mocks, &broker).await;
     let player = session(&runtime, 1);
     for text in ["server", "slow"] {
@@ -1614,23 +1608,19 @@ async fn chat_reaches_only_plugins_that_handle_it_and_accepts_continue_and_deny(
 }
 
 #[tokio::test]
-async fn chat_plugins_start_only_with_unsigned_chat_and_online_mode() {
+async fn chat_plugins_start_only_with_online_mode() {
     let root = directory();
     let mocks = Mocks::default();
     mocks.plan("mute", Plan::new(moderator).hooks(&[Hook::Timer]).chat());
     mocks.plan("timer", Plan::new(moderator).hooks(&[Hook::Timer]));
     let broker = Broker::default();
-    // `signed_chat` is true unless the configuration says otherwise.
+    // Signed chat, the default, does not keep a chat plugin from starting.
     let signed = config("", vec![spec(&root, "mute", "", "{}")]);
-    let runtime = Extensions::with_engines(&signed, broker.clone(), None, mocks.engines()).unwrap();
-    let error = runtime.plugins().start().await.unwrap_err().to_string();
-    assert!(
-        error.contains("registration: the chat hook needs authentication.signed_chat = false"),
-        "{error}"
-    );
-    assert!(!runtime.plugins().may_handle(Hook::Chat));
+    let runtime = self::runtime(&signed, &mocks, &broker).await;
+    assert!(runtime.plugins().may_handle(Hook::Chat));
+    runtime.plugins().shutdown().await;
 
-    let mut offline = unsigned(spec(&root, "mute", "", "{}"));
+    let mut offline = spec(&root, "mute", "", "{}");
     offline.online_mode = false;
     let offline = config("", vec![offline]);
     let runtime =
@@ -1641,8 +1631,7 @@ async fn chat_plugins_start_only_with_unsigned_chat_and_online_mode() {
         "{error}"
     );
 
-    // A plugin without a chat handler starts with signed chat and costs
-    // sessions nothing.
+    // A plugin without a chat handler costs sessions nothing.
     let plain = config("", vec![spec(&root, "timer", "", "{}")]);
     let runtime = self::runtime(&plain, &mocks, &broker).await;
     assert_eq!(runtime.plugins().active()[0].status(), Status::Running);
@@ -1661,7 +1650,9 @@ async fn chat_plugins_start_only_with_unsigned_chat_and_online_mode() {
 
     // Changing the setting restarts the plugin, so the check runs again.
     let before = spec(&root, "mute", "", "{}");
-    assert!(!before.same_artifact(&unsigned(before.clone())));
+    let mut after = before.clone();
+    after.online_mode = false;
+    assert!(!before.same_artifact(&after));
 }
 
 #[tokio::test]
