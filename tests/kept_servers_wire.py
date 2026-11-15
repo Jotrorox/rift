@@ -112,9 +112,14 @@ def check(binary):
             ready(proxy, "third.log")
             eventually(lambda: port_free(kept["port"]), "adopted server stopped")
             assert (directory / "instances/kept-1/stop-requested.txt").exists()
+            # The port is free as soon as the process exits; the proxy records the stop after.
+            eventually(lambda: servers()["kept-1"]["state"] == "stopped", "adopted server recorded as stopped")
             server = servers()["kept-1"]
-            assert server["state"] == "stopped" and server["automatic_enabled"] is False, server
-            assert not (directory / "instances/kept-1/rift-process.json").exists()
+            assert server["automatic_enabled"] is False, server
+            eventually(
+                lambda: not (directory / "instances/kept-1/rift-process.json").exists(),
+                "process record removed",
+            )
             operation("start", "kept-1")
             eventually(lambda: running("kept-1"), "explicit restart")
             assert servers()["kept-1"]["pid"] != pid
@@ -126,9 +131,9 @@ def check(binary):
         update("UPDATE instances SET phase='removing' WHERE name='kept-1'")
         with start("fourth.log") as proxy:
             ready(proxy, "fourth.log")
-            assert "kept-1" not in servers()
-            assert port_free(kept["port"])
-            assert not (directory / "instances/kept-1").exists()
+            eventually(lambda: "kept-1" not in servers(), "removed instance gone")
+            eventually(lambda: port_free(kept["port"]), "removed server stopped")
+            eventually(lambda: not (directory / "instances/kept-1").exists(), "removed directory deleted")
             again = operation("create", "kept")
             eventually(lambda: running(again["name"]), "new kept instance started")
             shutdown(proxy, "all")
