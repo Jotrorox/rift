@@ -146,8 +146,42 @@ assert_eq!(message.payload, "hello");
 `Client::publish` waits for broker acceptance. `Publisher::publish` pipelines
 unconfirmed writes for throughput; `flush` checks acceptance of earlier writes.
 Neither means a live subscriber has finished processing. Each subscription and
-request has its own QUIC stream. Other languages can implement the small binary
-protocol using a QUIC library; there is no Java/JavaScript SDK in this change.
+request has its own QUIC stream. Java has the bundled `rift-messaging` client
+(see [Java clients](#java-clients)); other languages can implement the small
+binary protocol using a QUIC library.
+
+### Java clients
+
+`rift-messaging` is the same client for the JVM (Java 21 or newer), from the
+Maven repository described under [artifacts](permissions-java.md#artifacts):
+
+```kotlin
+dependencies {
+    implementation("io.github.jotrorox.rift:rift-messaging:0.1.0")
+    implementation("io.github.jotrorox.rift:rift-control:0.1.0") // RiftControl, RiftEvents
+}
+```
+
+```java
+MessagingClient bus = MessagingClient.builder()
+        .address("127.0.0.1", 4222).serverName("localhost")
+        .trust(Path.of("messaging-cert.pem"))
+        .token(System.getenv("RIFT_PAPER_TOKEN"))
+        .build();   // or builder().fromEnvironment() on a server Rift manages
+bus.connected().join();
+bus.subscribe("game.player.*", null, message -> System.out.println(message.text()));
+bus.publish("game.player.join", "hello".getBytes(StandardCharsets.UTF_8));
+```
+
+The client connects in the background, reconnects with backoff and
+re-establishes its subscriptions. Every operation returns a
+`CompletableFuture` that completes on a client thread, never on a server
+thread; publications and requests fail fast while disconnected and are never
+retried. `rift-control` adds typed access to the [control
+subjects](#java-control-and-events) on top of it, and the client itself
+reads and writes [retained streams](#java-streams). A Paper plugin that
+only needs servers, players and messages should use the [network
+API](network-java.md) RiftPerms provides instead of shading a bus client.
 
 ## Lua plugins
 
@@ -321,6 +355,62 @@ themselves (see [server state](#server-state)).
 query status to get current state. A timed-out command may already have executed;
 check status before retrying a mutation. No automatic mutation retry is performed.
 
+### Java: control and events
+
+`RiftControl` in the `rift-control` artifact wraps these subjects for a
+[Java client](#java-clients) whose login has `control = true` and a publish
+grant for `rift.control.*`:
+
+```java
+RiftControl control = new RiftControl(bus);
+
+control.status().thenAccept(status -> {
+    status.playersOnline();
+    status.backend("lobby").ifPresent(lobby -> log(lobby.up() + " " + lobby.draining()));
+    status.player("Alice").ifPresent(alice -> control.transfer(alice.connectionId(), "survival"));
+});
+control.maintenance(true);              // completes with the state Rift reports
+control.drain("survival", true);
+control.transfer("Alice", "lobby");     // looks the connection up in status first
+control.reload();
+control.nodes().thenAccept(nodes -> nodes.forEach(node ->
+        log(node.name() + " " + node.state() + " " + node.instances() + "/" + node.maxInstances())));
+
+// Every other subject of the table, and ones a newer Rift adds:
+control.execute("create", Map.of("group", new Json.Str("lobby")));
+```
+
+Each call is one request and returns a `CompletableFuture`. It fails with
+`ControlException` when Rift answered `{"ok":false,…}` (`getMessage()` is
+`<command>: <error>`), with `TimeoutException` when no reply came within the
+timeout (45 s by default, `withTimeout` changes it, at most 120 s), and with
+another `MessagingException` when the bus refused the request, such as a
+missing grant. Nothing is retried. `execute` returns the reply's `data` as the
+`Json` value model of `rift-permissions-client`; `ProxyStatus` and `NodeInfo`
+keep the whole object in `raw()` for fields these types do not name.
+
+`RiftEvents` types the `rift.events.*` subjects. Its login needs a subscribe
+grant such as `rift.events.>`:
+
+```java
+RiftEvents.subscribe(bus, RiftEvents.ALL, event -> {
+    switch (event) {
+        case RiftEvents.Player player -> log(player.kind() + " " + player.name() + " " + player.server());
+        case RiftEvents.ServerState state -> log(state.server() + " is " + state.state().orElse("idle"));
+        case RiftEvents.Instance instance -> log(instance.name() + (instance.created() ? " created" : " removed"));
+        case RiftEvents.Lifecycle lifecycle -> log("proxy " + lifecycle.state());
+        case RiftEvents.Reload reload -> log("revision " + reload.revision());
+        case RiftEvents.Control command -> log(command.command() + (command.ok() ? " ok" : " refused"));
+    }
+});
+```
+
+The subscription survives reconnects, but events published while
+disconnected are lost; read `status()` again after one. `rift.events.permissions`
+and `rift.events.plugins` have no type here and are skipped: subscribe to
+them with `MessagingClient.subscribe`, or use the
+[permission API](permissions-java.md) for permission changes.
+
 ## Server state
 
 A backend reports what it is doing on `rift.server.state`: a state label such
@@ -430,6 +520,33 @@ in the directory beside the instance database (`rift.perms-changes/` next to
 latest 100,000 changes. Read it with a durable consumer on stream
 `rift.perms.changes` and filter `rift.perms.changes`; the `backend` preset
 grants that.
+
+### Java: streams
+
+The [Java client](#java-clients) has the same operations:
+
+```java
+bus.streamPublish("jobs", "game.jobs.build", payload)
+        .thenAccept(stored -> log("stored as " + stored.sequence()));
+
+ConsumerConfig config = ConsumerConfig.builder("game.jobs.>")
+        .ackWait(Duration.ofSeconds(60))
+        .maxAckPending(32)
+        .build();
+StreamConsumer worker = bus.consumer("jobs", "builder", config).join();
+for (Delivery job : worker.fetch(16).join()) {
+    build(job.message().payload());   // job.isRedelivery() when it was fetched before
+    worker.ack(job).join();           // only after processing
+}
+worker.delete();                      // when the consumer is no longer needed
+```
+
+`fetch` returns what is available now, up to 256 records, and does not wait
+for new ones, so a worker polls. A `StreamConsumer` stays usable across
+reconnects because Rift holds its position; calls fail fast while
+disconnected. Rift refuses with a `MessagingException`: an unknown stream, a
+subject the stream does not store, or the same consumer name reopened with
+different settings.
 
 Retention bounds apply regardless of unacknowledged messages: records evicted by
 count/byte limits cannot be redelivered. File storage persists records and consumer

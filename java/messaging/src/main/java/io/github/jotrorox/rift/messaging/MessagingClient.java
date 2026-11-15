@@ -31,7 +31,7 @@ import java.util.function.Consumer;
 /**
  * A client for Rift's messaging bus over QUIC ({@code docs/messaging-protocol.md}): TLS 1.3 with
  * explicitly trusted certificates, ALPN {@code rift-messaging/1}, token authentication,
- * publish, request/reply and subscriptions.
+ * publish, request/reply, subscriptions and retained streams.
  *
  * <p>The client connects in the background and reconnects with exponential backoff after a
  * failure; subscriptions are re-established on every new connection before listeners hear
@@ -167,6 +167,116 @@ public final class MessagingClient implements AutoCloseable {
             });
         }
         return managed.first;
+    }
+
+    /**
+     * Append a record to a retained stream and wait for the stream's durability boundary. This does
+     * not also publish to live subscribers.
+     *
+     * @param stream a configured stream
+     * @param subject a literal subject the stream stores
+     * @param payload at most the stream's {@code max_payload_bytes}
+     * @return the stored record's sequence and time; fails with {@link MessagingException} when Rift
+     *     refuses it (an unknown stream, a subject the stream does not store)
+     */
+    public CompletableFuture<StoredRecord> streamPublish(String stream, String subject, byte[] payload) {
+        return streamPublish(stream, subject, null, payload);
+    }
+
+    /**
+     * @param stream a configured stream
+     * @param subject a literal subject the stream stores
+     * @param reply an {@code _INBOX.} subject covered by this identity's subscribe grants, stored with
+     *     the record, or null
+     * @param payload at most the stream's {@code max_payload_bytes}
+     * @return the stored record's sequence and time
+     */
+    public CompletableFuture<StoredRecord> streamPublish(String stream, String subject, String reply, byte[] payload) {
+        streamName(stream, "stream");
+        Session current = session;
+        return current == null ? notConnected() : current.streamPublish(stream, subject, reply, payload);
+    }
+
+    /**
+     * Create or reopen a durable consumer owned by this identity. Reopening with the same name and
+     * settings resumes where the consumer left off.
+     *
+     * @param stream a configured stream
+     * @param name the consumer's name: 1 to 96 ASCII letters, digits, {@code _}, {@code -} or
+     *     {@code .}
+     * @param config the consumer's settings
+     * @return the consumer once Rift accepted it; fails with {@link MessagingException} when Rift
+     *     refuses it (an unknown stream, different settings under the same name, too many consumers)
+     */
+    public CompletableFuture<StreamConsumer> consumer(String stream, String name, ConsumerConfig config) {
+        streamName(stream, "stream");
+        streamName(name, "name");
+        Objects.requireNonNull(config, "config");
+        Session current = session;
+        if (current == null) {
+            return notConnected();
+        }
+        return current.consumerOpen(stream, name, config).thenApply(opened -> new RemoteConsumer(stream, name));
+    }
+
+    private static void streamName(String name, String what) {
+        Objects.requireNonNull(name, what);
+        boolean valid = !name.isEmpty() && name.length() <= 96;
+        for (int i = 0; valid && i < name.length(); i++) {
+            char c = name.charAt(i);
+            valid = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+                    || c == '_' || c == '-' || c == '.';
+        }
+        if (!valid) {
+            throw new IllegalArgumentException(what + " must be 1 to 96 ASCII letters, digits, '_', '-' or '.'");
+        }
+    }
+
+    /** A consumer Rift holds; every call runs on whichever connection is current. */
+    private final class RemoteConsumer implements StreamConsumer {
+        private final String stream;
+        private final String name;
+
+        RemoteConsumer(String stream, String name) {
+            this.stream = stream;
+            this.name = name;
+        }
+
+        @Override
+        public String stream() {
+            return stream;
+        }
+
+        @Override
+        public String name() {
+            return name;
+        }
+
+        @Override
+        public CompletableFuture<List<Delivery>> fetch(int limit) {
+            if (limit < 1 || limit > Frames.MAX_FETCH) {
+                throw new IllegalArgumentException("fetch limit must be 1 to " + Frames.MAX_FETCH);
+            }
+            Session current = session;
+            return current == null ? notConnected() : current.fetch(stream, name, limit);
+        }
+
+        @Override
+        public CompletableFuture<Void> ack(long sequence) {
+            Session current = session;
+            return current == null ? notConnected() : current.ack(stream, name, sequence);
+        }
+
+        @Override
+        public CompletableFuture<Void> delete() {
+            Session current = session;
+            return current == null ? notConnected() : current.consumerDelete(stream, name);
+        }
+
+        @Override
+        public String toString() {
+            return "StreamConsumer[stream=" + stream + ", name=" + name + "]";
+        }
     }
 
     /**
