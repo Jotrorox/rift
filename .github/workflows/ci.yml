@@ -592,6 +592,11 @@ jobs:
               . "$HOME/.cargo/env"
               # Files the later steps and the cache must own, also on failure.
               trap "chown -R \"\$OWNER\" target /root/.cargo/registry /root/.cargo/git" EXIT
+              # LuaJIT flushes the instruction cache through libgcc on
+              # aarch64, which a self-contained musl link leaves out.
+              if [ "$(uname -m)" = aarch64 ]; then
+                export RUSTFLAGS="-C link-arg=-lgcc"
+              fi
               cargo build --locked --release
             '
       - name: Require a static executable
