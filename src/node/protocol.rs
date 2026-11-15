@@ -105,6 +105,41 @@ pub struct Start {
     /// Agents from before this field start the server unconfined.
     #[serde(default, skip_serializing_if = "IsolationSpec::is_off")]
     pub isolation: IsolationSpec,
+    /// The server's `memory_limit`, enforced by the agent in its own cgroup.
+    /// Agents from before this field start the server without a limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_limit: Option<MemoryLimitSpec>,
+}
+
+/// [`crate::config::MemoryLimit`] on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryLimitSpec {
+    pub mb: u64,
+    #[serde(default)]
+    pub required: bool,
+}
+
+impl From<crate::config::MemoryLimit> for MemoryLimitSpec {
+    fn from(limit: crate::config::MemoryLimit) -> Self {
+        Self {
+            mb: limit.megabytes as u64,
+            required: limit.required,
+        }
+    }
+}
+
+impl TryFrom<MemoryLimitSpec> for crate::config::MemoryLimit {
+    type Error = io::Error;
+    fn try_from(spec: MemoryLimitSpec) -> io::Result<Self> {
+        let megabytes = usize::try_from(spec.mb)
+            .ok()
+            .filter(|megabytes| (Self::MIN_MB..=Self::MAX_MB).contains(megabytes))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid memory limit"))?;
+        Ok(Self {
+            megabytes,
+            required: spec.required,
+        })
+    }
 }
 
 /// [`crate::config::Isolation`] on the wire; paths are the node's.

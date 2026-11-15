@@ -25,6 +25,8 @@ use crate::{
 };
 
 mod backend;
+#[cfg(target_os = "linux")]
+pub mod cgroup;
 mod kept;
 /// Landlock confinement of managed servers (Linux).
 #[cfg(target_os = "linux")]

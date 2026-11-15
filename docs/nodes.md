@@ -204,7 +204,8 @@ new instance it:
 
 Template folders, plugins and jars used on nodes must live in
 `template_storage` (`local/templates` by default), since that is what the web
-API serves. Templates are not sent over the message bus: its 1 MiB payload
+API serves. Folders [checked out from git](managed-servers.md#template-folders-from-git)
+are there already, so only the controller needs `git` and repository access. Templates are not sent over the message bus: its 1 MiB payload
 limit makes it the wrong channel for files. Persistent instances are prepared
 once; later starts reuse their directory and only refresh the port and bind
 address.
@@ -254,6 +255,10 @@ address.
   agent on the node's kernel; `rift check` on the controller cannot tell what
   that kernel offers. Agents older than the controller start every server
   unconfined.
+- A server's [`memory_limit`](managed-servers.md#memory-limits) is enforced
+  by the agent in its own cgroup, so the agent needs a delegated one (run it
+  from a systemd unit with `Delegate=memory`). Agents older than the
+  controller start every server without a limit, a `required` one included.
 - Servers on a node do not inherit the agent's secrets: the variables named by
   `--token-env` and `--forwarding-secret-env` are removed from every server's
   environment. A server's `env` and `inherit_env` travel with its start

@@ -29,10 +29,35 @@ Restart=on-failure
 RestartSec=5s
 # Two sockets per relay, plus listeners, metrics and runtime overhead.
 LimitNOFILE=8192
+# Lets Rift put each managed server with a memory_limit into its own cgroup
+# below this unit. DelegateSubgroup needs systemd 254; older versions ignore
+# it and Rift moves itself into the same subgroup.
+Delegate=memory
+DelegateSubgroup=rift
+UMask=0077
 NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
+PrivateDevices=true
+ProtectProc=invisible
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+LockPersonality=true
+SystemCallArchitectures=native
+RemoveIPC=true
+# Left out on purpose: MemoryDenyWriteExecute (LuaJIT and the JVM generate
+# code), ProtectKernelTunables and ProtectControlGroups (both make the
+# delegated cgroup read-only), and a SystemCallFilter (managed servers are
+# arbitrary JVMs and Landlock needs its own system calls).
 
 [Install]
 WantedBy=multi-user.target

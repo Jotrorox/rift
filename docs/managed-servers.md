@@ -94,6 +94,7 @@ rift.config.managed_servers.survival = {
 | `inherit_env` | Everything | `false` inherits nothing from Rift; a list such as `{ "PATH", "HOME", "JAVA_HOME" }` inherits only those. Rift's own secrets are never inherited either way. |
 | `messaging` | None | `{ preset = "backend", publish = {...}, subscribe = {...} }`: give the server (each instance of a group) its own bus login; see [bus logins](#bus-logins-for-instances). |
 | `isolation` | `"off"` | `"landlock"` or `"required"`, or `{ mode = ..., read = {...}, write = {...} }`: confine the process to its own directory; see [isolation](#isolation). |
+| `memory_limit` | None | A hard limit in MiB on the server's whole process tree, or `{ mb = ..., required = true }`; Linux, enforced with a cgroup. See [memory limits](#memory-limits). |
 | `keep_running` | `false` | Keep the process running when Rift shuts down, restarts or dies, and adopt it again afterwards; Linux and macOS, this host only. See [servers that outlive the proxy](#servers-that-outlive-the-proxy). |
 
 Commands run without a shell: arguments containing spaces remain single
@@ -480,6 +481,62 @@ directories. Remove instances explicitly to clean them up and create fresh games
 See [examples/templates.lua](../examples/templates.lua) for persistent survival
 and disposable game groups using one asset template.
 
+## Template folders from git
+
+Template folders can live in a git repository instead of being copied to the
+host by hand. Name the repository under `template_sources`; Rift checks it out
+into `template_storage/<name>` (`local/templates/<name>` by default), and
+templates use the folders in it like any others:
+
+```lua
+local config = require("rift.config")
+config.template_sources.network = {
+    git = "https://github.com/example/network-templates.git",
+    ref = "main", -- a branch or tag; or rev = "<full commit id>" to pin
+}
+config.templates.lobby = {
+    software = { type = "paper", version = "1.21.8" },
+    configs = { "local/templates/network/Global/server", "local/templates/network/Lobby/default" },
+    plugins = { "local/templates/network/plugins/hub.jar" },
+    accept_eula = true,
+}
+```
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `git` | Yes | `https://…`, `ssh://…`, `user@host:path` or `file://…`. Plain `http://` and `git://` are refused, as is a password or token in the URL |
+| `ref` | No | A branch or tag. Without `ref` and `rev`, the repository's default branch |
+| `rev` | No | A full commit id (40 or 64 lowercase hex digits). The checkout must be exactly this commit; not combined with `ref` |
+
+Rift fetches a source the first time an instance needs one of its folders,
+before it reserves a port or name, and again after you change the source's
+definition (a new `rev`, for example). It does **not** follow a branch on its
+own: instances never change because someone pushed. Pull new commits with
+`rift admin sync network` or `POST /api/template-sources/network/sync`; the
+next instances use them, existing instances keep their files. `rift admin
+templates` and `GET /api/templates` list each source with its commit and
+whether it is synced. `rift check` and configuration loading never fetch.
+
+A sync fetches only the wanted commit, builds the new folder beside the old
+one and swaps them, so a failed fetch leaves the previous checkout in place.
+The folder holds the repository's files only; git's own data is kept in
+`software_cache` as `git-<name>` and never reaches an instance or a node. A
+sync replaces the whole folder, including edits made there through the
+dashboard's Files page: change the repository instead. Symbolic links in the
+repository arrive as plain files (provisioning rejects links), and submodules
+are not fetched.
+
+Rift runs the host's `git` (install it on the controller; nodes fetch template
+folders from the controller as usual and need none) as Rift's user, with that
+user's git configuration but without Rift's secrets in its environment. For a
+private repository give that user an SSH deploy key or a
+[credential helper](https://git-scm.com/docs/gitcredentials); a missing
+credential fails the sync instead of prompting. Under the supplied systemd
+unit the service account has no home directory, so point
+`Environment=GIT_SSH_COMMAND=ssh -i /etc/rift/deploy_key -o UserKnownHostsFile=/etc/rift/known_hosts`
+at files it can read. Pin `rev` where the repository's contents must not
+change without a configuration change.
+
 ## Automatic server software and CloudNet-style folders
 
 Instead of a local `server_jar`, a template can name server software. Rift
@@ -708,8 +765,57 @@ host gives it (`isolation service_groups.lobby: landlock ABI 6 (filesystem,
 signals)`) or the fallback and what it means. A plugin that writes outside its
 directory (a world on another disk, a shared database file) needs that path in
 `write`; check the server log after enabling isolation. Changing `isolation`
-is a change of the process definition, like `command`. `memory_mb` sets the
-heap and placement only; Rift does not yet enforce a process memory limit.
+is a change of the process definition, like `command`.
+
+## Memory limits
+
+`memory_mb` on a template group sets the Java heap (`-Xms`/`-Xmx`) and what
+placement counts against a node. It limits nothing: the JVM uses memory beyond
+its heap, and a custom `command` can use any amount. `memory_limit` is the
+enforced limit, on the server's whole process tree:
+
+```lua
+rift.config.service_groups.lobby = {
+    -- ...
+    memory_mb = 2048,    -- the heap
+    memory_limit = 3072, -- the process: heap, metaspace, threads, native memory
+    -- or: memory_limit = { mb = 3072, required = true },
+}
+```
+
+The value is in MiB (`64` through `16777216`) and works on managed servers
+and service groups, with any command. On a group with `memory_mb` it must be
+larger than the heap; leave the JVM a quarter of the heap or 512 MiB beyond
+it, whichever is more, and more for servers with many plugins. A server that
+reaches its limit is killed by the kernel, all of its processes together, and
+Rift recovers it like any other unexpected exit (`restart_retries`). Swap does
+not extend the limit.
+
+Rift enforces the limit with a cgroup v2 group per server and needs no
+privilege for it, only a cgroup it may manage: the one it runs in, delegated
+to its user. The supplied [systemd unit](../examples/rift.service) does that
+with `Delegate=memory`; for a manual start use
+`systemd-run --user --scope -p Delegate=yes rift --config rift.lua`. Rift
+moves itself into a `rift` subgroup and puts each limited server into
+`rift-server-<name>` beside it. Nothing else may run in Rift's cgroup, since
+Rift never moves a process it did not start. Java reads the limit from the
+cgroup and sizes its defaults from it.
+
+| `memory_limit` | Linux with a delegated cgroup v2 group | Elsewhere (macOS, Windows, cgroup v1, no delegation, most containers) |
+| --- | --- | --- |
+| not set (default) | unlimited | unlimited |
+| `3072` or `{ mb = 3072 }` | limited | **starts unlimited** and logs why on every start |
+| `{ mb = 3072, required = true }` | limited | **refuses to start**, with the reason as the start failure |
+
+`rift check` prints, for every server and group with a limit, what this host
+gives it (`memory_limit service_groups.lobby: 3072 MiB, cgroup v2 below
+/sys/fs/cgroup/system.slice/rift.service`) or the fallback. A container
+usually mounts `/sys/fs/cgroup` read-only; limit the container instead, or run
+servers on [nodes](nodes.md). On a node the agent applies the limit in its own
+delegated cgroup. With [`keep_running`](#servers-that-outlive-the-proxy) under
+systemd, use systemd 254 or newer: the unit's `DelegateSubgroup=rift` is what
+lets a restarted Rift join a cgroup that still holds running servers. Changing
+`memory_limit` is a change of the process definition, like `command`.
 
 ## Servers that outlive the proxy
 

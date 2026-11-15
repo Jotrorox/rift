@@ -85,4 +85,5 @@ pub mod service_state;
 pub mod session;
 pub mod software;
 pub mod tab_list;
+pub mod template_source;
 pub mod text;

@@ -157,8 +157,9 @@ server runs, including with `ui = false`.
 
 ## Authentication and access
 
-A non-loopback bind requires `web.token` or at least one named operator token.
-Tokens contain 16–4096 printable, non-whitespace ASCII characters. A loopback
+A non-loopback bind requires `web.token` (or `web.token_env`) or at least one
+named operator token. Tokens contain 16–4096 printable, non-whitespace ASCII
+characters. A loopback
 bind may omit both: Rift then generates a random token when it starts and prints
 it once to standard error:
 
@@ -209,6 +210,29 @@ rift.config.web = {
     },
 }
 ```
+
+To keep tokens out of the Lua source, which `/api/config`, deployment history
+and backups all contain, name an environment variable instead:
+
+```lua
+rift.config.web = {
+    listen = "0.0.0.0:8080",
+    token_env = "RIFT_WEB_TOKEN",
+    operators = {
+        observer = { token_env = "RIFT_WEB_TOKEN_OBSERVER", permissions = { "read", "logs" } },
+    },
+}
+```
+
+`token_env` replaces `token` on the web service or on an operator; set one of
+the two, and give every token its own variable. Rift reads the variable from its own
+environment; restart it with a new value to rotate the token without touching
+the configuration. While a variable is unset or does not hold a valid token, that
+token is refused (Rift says so at startup and on reload) and no token is
+generated in its place. Like Rift's other secrets, these variables are removed
+from the environment of every managed server, and `rift check --strict`
+verifies that each is set. With the supplied systemd unit, put them in the
+root-owned `EnvironmentFile`.
 
 | Permission | Access |
 | --- | --- |
@@ -291,8 +315,9 @@ Errors use `{"error":"description"}`. `GET /api` provides endpoint discovery.
 | `POST /api/groups/{name}/stop` | Stop a whole group with `{}`: keep new players out, pause scaling and stop every empty instance now and the others once their players leave; returns `202` with the same shape |
 | `PUT /api/groups/{name}/mode` | Set `{"mode": "dev"}` or `{"mode": "active"}`; returns `200` with `{group, suspended, mode, dev_permission}` |
 | `GET /api/operations/{id}` | Retrieve instance or download operation state and its completed result; requires current `servers` permission and the operation's group scope |
-| `GET /api/templates` | `{templates: [...]}` with names, the groups using them, counts of config layers and plugins, and `software` with its download cache state (`cached`, `resolved_version`, `build`, `size`, `sha256`); never includes asset paths |
+| `GET /api/templates` | `{templates: [...]}` with names, the groups using them, counts of config layers and plugins, and `software` with its download cache state (`cached`, `resolved_version`, `build`, `size`, `sha256`); never includes asset paths. Unrestricted operators also get `sources`: each git template source with its `git` address, `ref` or `rev`, `commit`, `synced_at` and `synced` |
 | `POST /api/templates/{name}/download` | Download (`{}`) or refresh (`{"refresh":true}`) a template's server software ahead of instance creation; `servers` permission, returns `202` with an operation to poll |
+| `POST /api/template-sources/{name}/sync` | Fetch a [git template source](managed-servers.md#template-folders-from-git) with `{}` and replace its folder in `template_storage`; `files` permission and unrestricted scope, returns `202` with an operation to poll (polling needs `servers`) |
 | `GET /api/software/{type}/versions` | Release names for `paper`, `folia`, `purpur`, `vanilla` or `fabric`, newest first, fetched upstream and cached for 10 minutes; `servers` permission |
 | `GET /api/files/templates/{path}` | List a folder in `template_storage` as `{path, entries, truncated}`, or download a file (at most 64 MiB); `files` permission and unrestricted scope. `?manifest` returns `{files: [{path, size, sha256}], directories}` for the whole tree, which node agents use to fetch only changed files |
 | `PUT /api/files/templates/{path}` | Write the raw request body to a file (at most 64 MiB), creating parent folders; add `?directory` to create a folder instead |

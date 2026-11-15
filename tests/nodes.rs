@@ -414,6 +414,7 @@ async fn agents_refuse_unlisted_programs_and_paths_outside_their_root() {
             environment: Default::default(),
             bus_certificate: None,
             isolation: Default::default(),
+            memory_limit: None,
         })
     };
     let wait = Duration::from_secs(5);

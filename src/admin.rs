@@ -315,7 +315,7 @@ fn request(value: &Value, settings: &Admin, secret: &str) -> Result<Vec<String>,
     let permission = match (command.as_str(), args.get(1).map(String::as_str)) {
         (
             "start" | "stop" | "groups" | "group" | "create" | "remove" | "templates" | "download"
-            | "nodes",
+            | "sync" | "nodes",
             _,
         ) => "servers",
         // Restarting a plugin changes the running proxy; its log tail may
@@ -464,7 +464,29 @@ pub(crate) fn templates(snapshot: &Snapshot) -> Value {
                 .map(|(name, _)| name)
                 .collect::<Vec<_>>(),
         })
+    }).collect::<Vec<_>>(),
+    "sources": config.template_sources.iter().map(|(name, source)| {
+        rift::template_source::status(&config.template_storage, &config.software_cache, name, source)
     }).collect::<Vec<_>>()})
+}
+
+/// Fetch a git template source and replace its checkout, so the next
+/// instances are built from the repository's current files.
+pub(crate) async fn sync_template_source(snapshot: &Snapshot, name: &str) -> Result<Value, String> {
+    let config = &snapshot.config;
+    let source = config
+        .template_sources
+        .get(name)
+        .ok_or_else(|| format!("unknown template source {name:?}"))?;
+    rift::template_source::sync(
+        &config.template_storage,
+        &config.software_cache,
+        name,
+        source,
+    )
+    .await
+    .map(|status| json!({"source": status}))
+    .map_err(|error| format!("syncing template source {name} failed: {error}"))
 }
 
 /// Download a template's software into the cache, outside the instance
@@ -602,6 +624,7 @@ pub(crate) async fn execute(
         [command, rest @ ..] if command == "plugins" => plugins(&snapshot, rest, actor),
         [command, template] if command == "download" => download_template(&snapshot, template, false).await,
         [command, template, refresh] if command == "download" && refresh == "refresh" => download_template(&snapshot, template, true).await,
+        [command, source] if command == "sync" => sync_template_source(&snapshot, source).await,
         [command, group] if command == "create" => {
             let (reply, receiver) = oneshot::channel();
             commands.try_send(Command::CreateInstance { group: group.clone(), reply })
@@ -675,7 +698,7 @@ pub(crate) async fn execute(
             commands.try_send(Command::Reload(reply)).map_err(|_| "administrator command queue is full or shutting down")?;
             receiver.await.map_err(|_| "proxy is shutting down".to_owned())?
         }
-        _ => Err("usage: status | servers | groups | nodes | templates | download <template> [refresh] | create <group> | remove <instance> | start <backend> | stop <backend> | group start|stop <group> | group mode <group> active|dev | maintenance on/off | drain <backend> on/off | transfer <connection-id> <backend> | plugins list | plugins status <name> | plugins logs <name> | plugins restart <name> | plugins run <command> [arguments] | perms <command> | reload | shutdown".into()),
+        _ => Err("usage: status | servers | groups | nodes | templates | download <template> [refresh] | sync <template-source> | create <group> | remove <instance> | start <backend> | stop <backend> | group start|stop <group> | group mode <group> active|dev | maintenance on/off | drain <backend> on/off | transfer <connection-id> <backend> | plugins list | plugins status <name> | plugins logs <name> | plugins restart <name> | plugins run <command> [arguments] | perms <command> | reload | shutdown".into()),
     }
 }
 
@@ -735,7 +758,7 @@ pub async fn serve(
                                     {
                                         deadline += server.start_timeout;
                                     }
-                                    if matches!(args.first().map(String::as_str), Some("create" | "download")) {
+                                    if matches!(args.first().map(String::as_str), Some("create" | "download" | "sync")) {
                                         deadline += DOWNLOAD_DEADLINE;
                                     }
                                     if let [command, name] = args.as_slice()
@@ -820,7 +843,7 @@ pub async fn client(args: &[String]) -> io::Result<()> {
     let deadline = if args.first().is_some_and(|command| {
         matches!(
             command.as_str(),
-            "transfer" | "remove" | "create" | "download"
+            "transfer" | "remove" | "create" | "download" | "sync"
         )
     }) {
         Duration::from_secs(24 * 60 * 60 + 45)

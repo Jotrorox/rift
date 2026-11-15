@@ -15,7 +15,9 @@ use tokio::sync::Semaphore;
 pub use crate::message_script::MessageScript;
 pub use crate::server_list::{ServerList, StatusScript};
 pub use crate::{http_script::HttpScript, script::RouteScript};
-pub use managed::{InstanceMessaging, Isolation, IsolationMode, ManagedServer, ProcessEnvironment};
+pub use managed::{
+    InstanceMessaging, Isolation, IsolationMode, ManagedServer, MemoryLimit, ProcessEnvironment,
+};
 pub use messaging::{MessagingConfig, MessagingPrincipal, MessagingStream, MessagingSubscription};
 pub use nodes::{LOCAL_NODE, NodeConfig, NodeSelector, Placement, valid_node_directory};
 pub use permissions::PermissionsConfig;
@@ -58,6 +60,8 @@ pub struct Config {
     pub backends: BTreeMap<String, Backend>,
     pub managed_servers: BTreeMap<String, ManagedServer>,
     pub templates: BTreeMap<String, ServerTemplate>,
+    /// Git repositories checked out into `template_storage/<name>`.
+    pub template_sources: BTreeMap<String, crate::template_source::TemplateSource>,
     pub service_groups: BTreeMap<String, ServiceGroup>,
     pub instances: BTreeMap<String, ServiceInstance>,
     /// Hosts running `rift node`; servers without a node run on this host.
@@ -388,11 +392,78 @@ const RESERVED_OPERATOR_NAMES: &[&str] = &[
     "scaler",
 ];
 
+/// Whether `name` can name an environment variable.
+fn environment_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    bytes
+        .next()
+        .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+        && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+/// Whether `token` can be a web credential: 16..=4096 printable ASCII bytes.
+fn web_token_usable(token: &str) -> bool {
+    (16..=4096).contains(&token.len()) && token.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+/// A web credential given literally or through an environment variable,
+/// which is read on every use: `None` while the variable is unset or holds
+/// something that cannot be a token.
+fn web_token<'a>(
+    literal: Option<&'a str>,
+    variable: Option<&str>,
+) -> Option<std::borrow::Cow<'a, str>> {
+    match (literal, variable) {
+        (Some(token), _) => Some(token.into()),
+        (None, Some(variable)) => std::env::var(variable)
+            .ok()
+            .filter(|token| web_token_usable(token))
+            .map(Into::into),
+        (None, None) => None,
+    }
+}
+
+impl WebConfig {
+    /// The administrator token, if one is configured and available.
+    pub fn token(&self) -> Option<std::borrow::Cow<'_, str>> {
+        web_token(self.token.as_deref(), self.token_env.as_deref())
+    }
+
+    /// Whether an administrator token is configured, set or not.
+    pub fn has_token(&self) -> bool {
+        self.token.is_some() || self.token_env.is_some()
+    }
+
+    /// `(field, variable)` of every credential read from the environment.
+    pub fn token_variables(&self) -> Vec<(String, String)> {
+        let mut variables = Vec::new();
+        if let Some(variable) = &self.token_env {
+            variables.push(("web.token_env".into(), variable.clone()));
+        }
+        for (name, operator) in &self.operators {
+            if let Some(variable) = &operator.token_env {
+                variables.push((format!("web.operators.{name}.token_env"), variable.clone()));
+            }
+        }
+        variables
+    }
+}
+
+impl WebOperator {
+    /// This operator's token, if it is available.
+    pub fn token(&self) -> Option<std::borrow::Cow<'_, str>> {
+        web_token(self.token.as_deref(), self.token_env.as_deref())
+    }
+}
+
 /// Optional administration service. Credentials are mandatory for non-loopback binds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebConfig {
     pub listen: SocketAddr,
     pub token: Option<String>,
+    /// The environment variable holding the token instead of `token`, so the
+    /// secret stays out of the Lua source.
+    pub token_env: Option<String>,
     pub api: bool,
     pub ui: bool,
     pub operators: BTreeMap<String, WebOperator>,
@@ -401,7 +472,9 @@ pub struct WebConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebOperator {
-    pub token: String,
+    /// Exactly one of `token` and `token_env` is set.
+    pub token: Option<String>,
+    pub token_env: Option<String>,
     pub permissions: BTreeSet<String>,
     /// None grants access to every group and static managed server.
     pub groups: Option<BTreeSet<String>>,
@@ -412,6 +485,7 @@ impl Default for WebConfig {
         Self {
             listen: "127.0.0.1:8080".parse().unwrap(),
             token: None,
+            token_env: None,
             api: true,
             ui: true,
             operators: BTreeMap::new(),
@@ -520,10 +594,36 @@ impl Config {
         for (name, node) in &self.nodes {
             variables.push((format!("nodes.{name}.token_env"), node.token_env.clone()));
         }
+        if let Some(web) = &self.web {
+            variables.extend(web.token_variables());
+        }
         if let Some(extensions) = &self.extensions {
             variables.extend(extensions.environment());
         }
         variables
+    }
+
+    /// The git sources whose checkout holds an asset of `template`.
+    pub fn template_sources_of(
+        &self,
+        template: &ServerTemplate,
+    ) -> Vec<(&String, &crate::template_source::TemplateSource)> {
+        let assets = || {
+            template
+                .configs
+                .iter()
+                .chain(&template.plugins)
+                .chain(&template.map)
+                .chain(template.software.is_none().then_some(&template.server_jar))
+        };
+        self.template_sources
+            .iter()
+            .filter(|(name, _)| {
+                let checkout = crate::template_source::checkout_path(&self.template_storage, name);
+                std::path::absolute(&checkout)
+                    .is_ok_and(|checkout| assets().any(|asset| asset.starts_with(&checkout)))
+            })
+            .collect()
     }
 
     pub fn from_addresses(listen: &str, backend: &str) -> io::Result<Self> {
@@ -532,6 +632,7 @@ impl Config {
             backends: BTreeMap::from([("default".into(), Backend::parse(backend)?)]),
             managed_servers: BTreeMap::new(),
             templates: BTreeMap::new(),
+            template_sources: BTreeMap::new(),
             service_groups: BTreeMap::new(),
             instances: BTreeMap::new(),
             nodes: BTreeMap::new(),
@@ -706,6 +807,7 @@ impl Config {
                     "backends",
                     "managed_servers",
                     "templates",
+                    "template_sources",
                     "service_groups",
                     "nodes",
                     "instance_database",
@@ -775,6 +877,7 @@ impl Config {
             let software_cache = directory_option("software_cache", DEFAULT_SOFTWARE_CACHE)?;
             let template_storage = directory_option("template_storage", DEFAULT_TEMPLATE_STORAGE)?;
             let templates = templates::parse(&root, directory, &software_cache)?;
+            let template_sources = templates::parse_sources(&root)?;
             let service_groups = services::parse(&lua, &root, directory)?;
             let nodes = nodes::parse(&root)?;
             let instance_database = match root
@@ -1082,6 +1185,7 @@ impl Config {
                 backends,
                 managed_servers,
                 templates,
+                template_sources,
                 service_groups,
                 instances: BTreeMap::new(),
                 nodes,
@@ -1458,6 +1562,18 @@ impl Config {
             if let Some(token) = &web.token {
                 tokens.insert(token.as_str());
             }
+            let mut variables = BTreeSet::new();
+            if let Some(variable) = &web.token_env {
+                if web.token.is_some() {
+                    return Err(invalid("web: set only one of token and token_env"));
+                }
+                if !environment_name(variable) {
+                    return Err(invalid(
+                        "web.token_env: expected an environment variable name such as RIFT_WEB_TOKEN",
+                    ));
+                }
+                variables.insert(variable);
+            }
             for (name, operator) in &web.operators {
                 if !services::safe_name(name) || RESERVED_OPERATOR_NAMES.contains(&name.as_str()) {
                     return Err(invalid(format!(
@@ -1465,13 +1581,26 @@ impl Config {
                     )));
                 }
                 let path = format!("web.operators.{name}");
-                if !(16..=4096).contains(&operator.token.len())
-                    || !operator.token.bytes().all(|b| b.is_ascii_graphic())
-                    || !tokens.insert(&operator.token)
-                {
-                    return Err(invalid(format!(
-                        "{path}.token: expected a unique secret of 16..=4096 printable bytes"
-                    )));
+                match (&operator.token, &operator.token_env) {
+                    (Some(token), None) => {
+                        if !web_token_usable(token) || !tokens.insert(token) {
+                            return Err(invalid(format!(
+                                "{path}.token: expected a unique secret of 16..=4096 printable bytes"
+                            )));
+                        }
+                    }
+                    (None, Some(variable)) => {
+                        if !environment_name(variable) || !variables.insert(variable) {
+                            return Err(invalid(format!(
+                                "{path}.token_env: expected an environment variable name no other web token uses, such as RIFT_WEB_TOKEN_STAFF"
+                            )));
+                        }
+                    }
+                    _ => {
+                        return Err(invalid(format!(
+                            "{path}: set exactly one of token and token_env"
+                        )));
+                    }
                 }
                 if let Some(permission) = operator
                     .permissions
@@ -1499,16 +1628,15 @@ impl Config {
                 }
             }
             if let Some(token) = &web.token {
-                if !(16..=4096).contains(&token.len())
-                    || !token.bytes().all(|byte| byte.is_ascii_graphic())
-                {
+                if !web_token_usable(token) {
                     return Err(invalid(
                         "web.token: expected 16..=4096 printable ASCII bytes without whitespace",
                     ));
                 }
-            } else if web.operators.is_empty() && !web.listen.ip().is_loopback() {
+            } else if !web.has_token() && web.operators.is_empty() && !web.listen.ip().is_loopback()
+            {
                 return Err(invalid(
-                    "web.token: required when web.listen is not loopback",
+                    "web.token: required when web.listen is not loopback (or web.token_env)",
                 ));
             }
         }
@@ -1878,6 +2006,7 @@ fn web_options(root: &Table, base: &Path) -> Result<Option<WebConfig>, String> {
             "enabled",
             "listen",
             "token",
+            "token_env",
             "api",
             "ui",
             "operators",
@@ -1892,6 +2021,13 @@ fn web_options(root: &Table, base: &Path) -> Result<Option<WebConfig>, String> {
         Value::Nil => None,
         value => Some(string(value, "web.token")?),
     };
+    let optional = |table: &Table, key: &str, path: &str| -> Result<Option<String>, String> {
+        match table.raw_get::<Value>(key).map_err(|e| e.to_string())? {
+            Value::Nil => Ok(None),
+            value => string(value, &format!("{path}.{key}")).map(Some),
+        }
+    };
+    let token_env = optional(&table, "token_env", "web")?;
     // Names, credentials and grants are checked by `Config::validate`.
     let mut operators = BTreeMap::new();
     if let Some(values) = options_map(&table, "operators")? {
@@ -1900,11 +2036,13 @@ fn web_options(root: &Table, base: &Path) -> Result<Option<WebConfig>, String> {
             let name = string(name, "web.operators key")?;
             let path = format!("web.operators.{name}");
             let value = self::table(value, &path)?;
-            fields(&value, &["token", "permissions", "groups"], &path)?;
-            let token = string(
-                value.raw_get("token").map_err(|e| e.to_string())?,
-                &format!("{path}.token"),
+            fields(
+                &value,
+                &["token", "token_env", "permissions", "groups"],
+                &path,
             )?;
+            let token = optional(&value, "token", &path)?;
+            let token_env = optional(&value, "token_env", &path)?;
             let permissions = string_set(
                 value.raw_get("permissions").map_err(|e| e.to_string())?,
                 &format!("{path}.permissions"),
@@ -1920,6 +2058,7 @@ fn web_options(root: &Table, base: &Path) -> Result<Option<WebConfig>, String> {
                 name,
                 WebOperator {
                     token,
+                    token_env,
                     permissions,
                     groups,
                 },
@@ -1929,6 +2068,7 @@ fn web_options(root: &Table, base: &Path) -> Result<Option<WebConfig>, String> {
     let config = WebConfig {
         listen: service_listen(&table, "web", WebConfig::default().listen)?,
         token,
+        token_env,
         api: boolean(&table, "web", "api", true)?,
         ui: boolean(&table, "web", "ui", true)?,
         operators,

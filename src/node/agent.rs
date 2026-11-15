@@ -675,8 +675,17 @@ impl Agent {
                 .insert("RIFT_BUS_CERT".into(), path.to_string_lossy().into_owned());
         }
         let isolation = crate::config::Isolation::try_from(&start.isolation)?;
-        let child =
-            crate::managed::spawn_process(&start.command, &directory, &environment, &isolation)?;
+        let memory_limit = start
+            .memory_limit
+            .map(crate::config::MemoryLimit::try_from)
+            .transpose()?;
+        let child = crate::managed::spawn_process(
+            &start.command,
+            &directory,
+            &environment,
+            &isolation,
+            memory_limit.map(|limit| (start.server.as_str(), limit)),
+        )?;
         let pid = child.id();
         processes.insert(
             start.server.clone(),

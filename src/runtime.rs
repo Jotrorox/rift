@@ -2164,6 +2164,27 @@ async fn create_instance(group: String, snapshot: &Arc<Snapshot>) -> InstanceRes
             "service group reached scaling.max_instances",
         ));
     }
+    // Check out template folders that come from git and are not there yet;
+    // nodes fetch them from this host's template storage.
+    if let Some(template) = definition
+        .template
+        .as_ref()
+        .and_then(|template| config.templates.get(template))
+    {
+        for (name, source) in config.template_sources_of(template) {
+            rift::template_source::ensure(
+                &config.template_storage,
+                &config.software_cache,
+                name,
+                source,
+            )
+            .await
+            .map_err(|error| Error {
+                status: 502,
+                message: format!("syncing template source {name} failed: {error}"),
+            })?;
+        }
+    }
     if definition.nodes.is_some() {
         return create_remote_instance(group, config, snapshot).await;
     }

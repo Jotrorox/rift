@@ -64,6 +64,7 @@ environment as the service (for example `sudo -u rift --preserve-env=...` or
 - **Secrets:** every variable the configuration names is set and has the length
   startup requires: `forwarding.secret_env` (1–1024 bytes, for `velocity` and `bungeeguard`), `admin.token_env`,
   `messaging.principals[].token_env` and `nodes.*.token_env` (32–1024 bytes),
+  `web.token_env` and `web.operators.*.token_env` (16–1024 bytes),
   and `extensions.integrations.*.headers_env` (a valid header value). Output
   names the variables, never their values.
 - **Instance database:** `instance_database` opens read-only, passes SQLite's
@@ -513,8 +514,23 @@ directory, which survives service stops and restarts. Every file-based startup
 opens this database, even without service groups; the default location beside
 the root-owned config is not writable. `rift check` validates configuration
 without opening the database; run `sudo -u rift rift check --strict
-/etc/rift/rift.lua` to verify that the database opens or can be created. LuaJIT uses
-executable memory, so do not add `MemoryDenyWriteExecute=true` to this unit.
+/etc/rift/rift.lua` to verify that the database opens or can be created.
+
+The unit runs Rift, and the managed servers it starts, without capabilities,
+without access to `/home`, device nodes, kernel logs or modules, other users'
+processes in `/proc`, or new namespaces, and with a private `/tmp`; everything
+outside `/var/lib/rift` is read-only. Point `software_cache`,
+`template_storage` and server directories at paths below the state directory,
+or add them with `ReadWritePaths=`. `systemd-analyze security rift` lists what
+remains. Three settings are left out on purpose, so do not add them:
+`MemoryDenyWriteExecute=true` (LuaJIT and the JVMs of managed servers generate
+code), `ProtectKernelTunables=true` and `ProtectControlGroups=true` (both make
+the unit's cgroup read-only, which disables
+[memory limits](managed-servers.md#memory-limits)), and a `SystemCallFilter=`
+(managed servers are arbitrary programs, and
+[isolation](managed-servers.md#isolation) needs Landlock's system calls).
+`Delegate=memory` gives Rift the unit's cgroup to place limited servers in;
+`DelegateSubgroup=rift` needs systemd 254 and is ignored by older versions.
 
 ## Log levels
 
@@ -557,6 +573,7 @@ it line by line.
 
 Rift reads its secrets from environment variables: `admin.token_env`, every
 `messaging.principals[].token_env`, every `nodes.*.token_env`,
+`web.token_env`, every `web.operators.*.token_env`,
 `forwarding.secret_env` and the `headers_env` of
 `extensions.integrations`. A `rift node` agent reads `--token-env` and
 `--forwarding-secret-env`. Rift removes exactly these variables from the
@@ -598,6 +615,22 @@ off the host, or run servers on [nodes](nodes.md) under a separate account. macO
 of the same user can read Rift's environment.
 
 ## Container example
+
+Each release publishes a multi-platform image (`linux/amd64` and
+`linux/arm64`) built from the Dockerfile below and the release's own glibc
+executables, with a build provenance attestation:
+
+```sh
+docker pull ghcr.io/jotrorox/rift:0.1.0   # or :latest for the newest release
+gh attestation verify oci://ghcr.io/jotrorox/rift:0.1.0 --repo Jotrorox/rift
+```
+
+Release candidates are published under their own version tag
+(`0.1.0-rc.1`) and never as `latest`. The image contains Rift only: it has no
+Java, so use it for the proxy and run game servers on [nodes](nodes.md) or
+other hosts, or build your own image on top of it for managed servers. To use
+it with the Compose example, set `RIFT_IMAGE=ghcr.io/jotrorox/rift:0.1.0` and
+start with `docker compose -f examples/compose.yaml up -d --no-build`.
 
 The supplied [Dockerfile](../examples/Dockerfile) packages the glibc Linux
 release binary on Ubuntu 24.04 (any base with glibc 2.35 or newer works; the

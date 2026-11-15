@@ -4,6 +4,8 @@ description = "Rift's permission model, resolver, LuckPerms codec and bus wire t
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [dependencies]
 serde.workspace = true
