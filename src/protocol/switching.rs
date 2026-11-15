@@ -198,10 +198,12 @@ pub(crate) struct ChatAttempt {
     /// Whether the packet carries a message signature or at least one
     /// argument signature. A backend that verifies the player's chat counts
     /// such a packet in the signature chain, so withholding it invalidates
-    /// everything the player signs afterwards. It may be dropped only when
-    /// the backend takes the player's chat as unsigned: with
+    /// everything the player signs afterwards. Dropping it is harmless only
+    /// when the backend takes the player's chat as unsigned: with
     /// `authentication.signed_chat = false`, or across a translation step
-    /// that removes signing. An unsigned packet may always be dropped.
+    /// that removes signing. Otherwise the session must attach its backend
+    /// again without the signing material. An unsigned packet may always be
+    /// dropped.
     pub signed: bool,
     /// The acknowledgement the backend must still receive if the packet is
     /// dropped: the packet's last-seen update, as a separate packet. `None`

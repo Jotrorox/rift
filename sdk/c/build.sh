@@ -4,8 +4,7 @@
 #   sdk/c/build.sh -o plugin.wasm my_plugin.c [more.c ...] [extra clang flags]
 #
 # RIFT_CHAT=1 builds a plugin that handles the chat hook: it defines RIFT_CHAT
-# and links the bindings in chat/, which export `rift:plugin/chat`. Rift
-# starts such a plugin only with `authentication.signed_chat = false`.
+# and links the bindings in chat/, which export `rift:plugin/chat`.
 #
 # WASI_SDK_PATH selects the wasi-sdk installation (default /opt/wasi-sdk);
 # CFLAGS defaults to -O2 -Wall -Wextra and LDFLAGS to -Wl,--strip-debug

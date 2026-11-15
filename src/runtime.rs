@@ -248,8 +248,9 @@ impl Snapshot {
         })
     }
 
-    /// Resolve a service group at admission time, sharing load across its
-    /// instances while retaining the full list for startup/connect fallback.
+    /// Resolve a service group at admission time, ordering its instances by
+    /// the group's `balance` while retaining the full list for
+    /// startup/connect fallback.
     pub fn candidates(&self, destinations: &[String]) -> Vec<String> {
         let loads: BTreeMap<_, _> = self
             .managed
@@ -262,8 +263,11 @@ impl Snapshot {
             .iter()
             .flat_map(|destination| {
                 let mut names = self.config.destination_names(destination);
-                if self.config.service_groups.contains_key(destination) {
-                    names.sort_by_key(|name| (loads.get(name).copied().unwrap_or(0), name.clone()));
+                if let Some(group) = self.config.service_groups.get(destination) {
+                    let limit = self.config.instance_capacity(destination);
+                    group.balance.sort(&mut names, limit, |name| {
+                        loads.get(name).copied().unwrap_or(0)
+                    });
                 }
                 names
             })
@@ -938,6 +942,32 @@ pub async fn handle(
                 addresses: &live_snapshot.addresses,
                 metrics: &metrics,
             };
+            if session.chat_chain_broken() && session.can_switch() {
+                // A chat hook dropped a signed packet. Before the backend
+                // sees the player's next one, it gets a login without their
+                // signing material.
+                match network
+                    .reattach(&mut session, &current_backend, event)
+                    .await
+                {
+                    Ok(target) => {
+                        current_address =
+                            live_snapshot.config.backends[&target].address().to_owned();
+                        current_backend = target;
+                        phase_deadline = Deadline::now() + Duration::from_secs(30);
+                        continue;
+                    }
+                    Err(error) => {
+                        let reason = if error.kind() == io::ErrorKind::PermissionDenied {
+                            rift::text::reason(&error)
+                        } else {
+                            catalog::notice(Notice::ConnectionLostNoFallback)
+                        };
+                        let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect_text(&reason)).await;
+                        return Err(error);
+                    }
+                }
+            }
             event.stage = if transfer_reply.is_some() {
                 "transfer"
             } else {
@@ -2828,6 +2858,8 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         metrics.clone(),
     );
     let mut failure = None;
+    // `rift admin shutdown all` also stops servers with `keep_running`.
+    let mut stop_kept = false;
     let mut service_check = tokio::time::interval(Duration::from_secs(1));
     let mut scaling_check = tokio::time::interval(Duration::from_millis(100));
     scaling_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -2869,7 +2901,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                 admin::Command::Reload(reply) => (control::Operation::Reload, None, Some(reply), "local-admin".to_owned()),
                 admin::Command::CreateInstance { group, reply } => (control::Operation::CreateInstance { group }, None, Some(reply), "local-admin".to_owned()),
                 admin::Command::RemoveInstance { name, reply } => (control::Operation::RemoveInstance { name }, None, Some(reply), "local-admin".to_owned()),
-                admin::Command::Shutdown(ack) => { let _ = timeout(Duration::from_secs(2), ack).await; break; }
+                admin::Command::Shutdown { ack, kept } => { stop_kept = kept; let _ = timeout(Duration::from_secs(2), ack).await; break; }
             },
             result = background.join_next(), if !background.is_empty() => {
                 failure = Some(io::Error::other(format!("control service stopped unexpectedly: {result:?}")));
@@ -3038,7 +3070,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
             | admin::Command::RemoveInstance { reply, .. } => {
                 let _ = reply.send(Err("proxy is shutting down".into()));
             }
-            admin::Command::Shutdown(_) => {}
+            admin::Command::Shutdown { .. } => {}
         }
     }
     requests.close();
@@ -3101,7 +3133,11 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         });
         change.respond(response);
     }
-    snapshot.managed.shutdown().await;
+    if stop_kept {
+        snapshot.managed.shutdown_all().await;
+    } else {
+        snapshot.managed.shutdown().await;
+    }
     eprintln!("rift: shutdown complete");
     match failure {
         Some(error) => Err(error),

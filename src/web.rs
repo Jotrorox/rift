@@ -1343,6 +1343,9 @@ fn definition_values(config: &Config) -> Value {
                 json!({"mode": s.isolation.mode.as_str(), "read": s.isolation.read, "write": s.isolation.write})
             };
         }
+        if s.keep_running {
+            value["keep_running"] = json!(true);
+        }
         if let Some(messaging) = &s.messaging {
             value["messaging"] =
                 json!({"publish": messaging.publish, "subscribe": messaging.subscribe});
@@ -1369,6 +1372,9 @@ fn definition_values(config: &Config) -> Value {
             }
             if let Some(scaling) = &group.scaling {
                 value["scaling"] = admin::scaling_values(scaling);
+            }
+            if group.balance != rift::config::Balance::default() {
+                value["balance"] = json!(group.balance.as_str());
             }
             // Present only when the group sets it; absent follows the proxy.
             if let Some(clients) = &group.translation {

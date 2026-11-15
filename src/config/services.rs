@@ -17,6 +17,7 @@ pub struct ServiceGroup {
     /// Nodes that run this group's instances; `None` runs them on this host.
     pub nodes: Option<NodeSelector>,
     pub placement: Placement,
+    pub balance: Balance,
     /// The client versions translated for this group's instances; `None`
     /// follows `translation.clients`.
     pub translation: Option<ClientVersions>,
@@ -32,6 +33,41 @@ pub struct ServiceScaling {
     pub target_occupancy_percent: usize,
     pub queue_threshold: usize,
     pub cooldown: Duration,
+}
+
+/// How players sent to a service group are shared across its instances.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Balance {
+    /// The instance with the fewest players.
+    #[default]
+    LeastPlayers,
+    /// The fullest instance that still has room.
+    Fill,
+}
+
+impl Balance {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LeastPlayers => "least_players",
+            Self::Fill => "fill",
+        }
+    }
+
+    /// Order `names` for admission given each instance's `load`. `fill`
+    /// puts instances below `limit` first, fullest first, and the others
+    /// after them with the fewest players first; no limit means every
+    /// instance has room. Ties go to the first name.
+    pub fn sort(self, names: &mut [String], limit: Option<usize>, load: impl Fn(&str) -> usize) {
+        names.sort_by_cached_key(|name| {
+            let load = load(name);
+            let full = limit.is_some_and(|limit| load >= limit);
+            let order = match self {
+                Self::Fill if !full => usize::MAX - load,
+                _ => load,
+            };
+            (self == Self::Fill && full, order, name.clone())
+        });
+    }
 }
 
 /// Persistent worlds retain their data when their process or instance stops.
@@ -140,6 +176,7 @@ pub(super) fn parse(
     let mut scaling_policies = BTreeMap::new();
     let mut defaults = BTreeMap::new();
     let mut placements = BTreeMap::new();
+    let mut balances = BTreeMap::new();
     let mut translations = BTreeMap::new();
     for pair in values.pairs::<Value, Value>() {
         let (name, value) = pair.map_err(|e| e.to_string())?;
@@ -170,6 +207,14 @@ pub(super) fn parse(
             placement => nodes::parse_placement(placement, &format!("{path}.placement"))?,
         };
         placements.insert(name.clone(), (selector, placement));
+        let balance = match value
+            .raw_get::<Value>("balance")
+            .map_err(|e| e.to_string())?
+        {
+            Value::Nil => Balance::default(),
+            balance => parse_balance(balance, &format!("{path}.balance"))?,
+        };
+        balances.insert(name.clone(), balance);
         let translation = match value
             .raw_get::<Value>("translation")
             .map_err(|e| e.to_string())?
@@ -272,6 +317,7 @@ pub(super) fn parse(
                         | b"memory_mb"
                         | b"nodes"
                         | b"placement"
+                        | b"balance"
                         | b"translation"
                 )
             }) {
@@ -328,6 +374,7 @@ pub(super) fn parse(
             let scaling = scaling_policies.remove(&name).unwrap();
             let (memory_mb, default_directory) = defaults.remove(&name).unwrap();
             let (nodes, placement) = placements.remove(&name).unwrap();
+            let balance = balances.remove(&name).unwrap();
             let translation = translations.remove(&name).unwrap();
             (
                 name,
@@ -342,11 +389,20 @@ pub(super) fn parse(
                     default_directory,
                     nodes,
                     placement,
+                    balance,
                     translation,
                 },
             )
         })
         .collect::<BTreeMap<_, _>>())
+}
+
+fn parse_balance(value: Value, path: &str) -> Result<Balance, String> {
+    match string(value, path)?.as_str() {
+        "least_players" => Ok(Balance::LeastPlayers),
+        "fill" => Ok(Balance::Fill),
+        _ => Err(format!("{path}: expected 'least_players' or 'fill'")),
+    }
 }
 
 fn parse_scaling(
@@ -550,6 +606,17 @@ pub(super) fn validate(config: &Config) -> Result<(), String> {
                 "{path}.storage: ephemeral instances run on this host only; use 'disposable' with nodes"
             ));
         }
+        // A kept server would lose its directory when the next proxy starts.
+        if group.server.keep_running && group.storage == InstanceStorage::Ephemeral {
+            return Err(format!(
+                "{path}.keep_running: ephemeral instances are deleted when their run ends and stop with the proxy; use 'disposable' or 'persistent'"
+            ));
+        }
+        if group.server.keep_running && group.nodes.is_some() {
+            return Err(format!(
+                "{path}.keep_running: servers on a node already keep running while the proxy restarts; remove it"
+            ));
+        }
         if !safe_name(name) || name.len() > 107 {
             return Err(format!(
                 "{path}: names must contain 1..=107 ASCII letters, digits, underscores or hyphens"
@@ -710,6 +777,15 @@ impl Config {
             .filter(|(_, instance)| instance.group == group)
             .map(|(name, _)| name.clone())
             .collect()
+    }
+
+    /// The players one instance of `group` has room for when balancing: its
+    /// `scaling.capacity_per_instance`, else the group's queue capacity.
+    pub fn instance_capacity(&self, group: &str) -> Option<usize> {
+        let scaling = self.service_groups.get(group)?.scaling.as_ref();
+        scaling
+            .map(|scaling| scaling.capacity_per_instance)
+            .or_else(|| self.extensions.as_ref()?.queues.get(group).copied())
     }
 
     /// Expand a destination into its current concrete backend names.
@@ -1089,6 +1165,59 @@ mod tests {
         assert_eq!(group.server.start_timeout, Duration::from_millis(456));
         assert_eq!(group.server.stop_timeout, Duration::from_millis(789));
         assert_eq!(group.server.restart_delay, Duration::from_millis(321));
+    }
+
+    #[test]
+    fn balance_parses_and_orders_instances() {
+        let parse = |definition: &str| {
+            Config::from_lua(
+                &group_source(&format!(
+                    "directory='servers/{{name}}',command={{'java'}},port_range={{25600,25602}}{definition}"
+                )),
+                "balance.lua",
+            )
+        };
+        let balance = |config: &Config| config.service_groups["lobby"].balance;
+        assert_eq!(balance(&parse("").unwrap()), Balance::LeastPlayers);
+        assert_eq!(
+            balance(&parse(",balance='least_players'").unwrap()),
+            Balance::LeastPlayers
+        );
+        let fill = parse(",balance='fill'").unwrap();
+        assert_eq!(balance(&fill), Balance::Fill);
+        assert_eq!(fill.instance_capacity("lobby"), None);
+        assert_eq!(
+            parse(",balance='fill',scaling={capacity_per_instance=7}")
+                .unwrap()
+                .instance_capacity("lobby"),
+            Some(7)
+        );
+        for bad in ["'random'", "'Fill'", "true"] {
+            let error = parse(&format!(",balance={bad}")).unwrap_err().to_string();
+            assert!(
+                error.contains("service_groups.lobby.balance: expected"),
+                "{error}"
+            );
+        }
+        assert!(
+            parse(",balance='random'")
+                .unwrap_err()
+                .to_string()
+                .contains("service_groups.lobby.balance: expected 'least_players' or 'fill'")
+        );
+
+        let loads = BTreeMap::from([("a", 3), ("b", 10), ("c", 7), ("d", 0), ("e", 12), ("f", 7)]);
+        let order = |balance: Balance, limit| {
+            let mut names: Vec<String> = loads.keys().map(|name| (*name).to_owned()).collect();
+            balance.sort(&mut names, limit, |name| loads[name]);
+            names.concat()
+        };
+        assert_eq!(order(Balance::LeastPlayers, Some(10)), "dacfbe");
+        assert_eq!(order(Balance::LeastPlayers, None), "dacfbe");
+        // The fullest with room first; full ones last, least players first.
+        assert_eq!(order(Balance::Fill, Some(10)), "cfadbe");
+        assert_eq!(order(Balance::Fill, Some(1)), "dacfbe");
+        assert_eq!(order(Balance::Fill, None), "ebcfad");
     }
 
     #[test]

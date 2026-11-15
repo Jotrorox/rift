@@ -599,7 +599,7 @@ isolation and cannot detect changes incompatible with an already running process
 | Shutdown deadline | New value applies to the later shutdown drain |
 | `web`, `status`, standalone `metrics`, web bearer token | Can enable, disable or move live; replacement sockets bind before commit |
 | Gameplay listeners, operational `admin` bind/token variable/permissions | Restart required; incompatible reload rejects the entire candidate |
-| `managed_servers` definitions or addresses of managed backends | Restart required; running processes and their lifecycle policy remain attached to the original definition |
+| `managed_servers` definitions or addresses of managed backends | Restart required; running processes and their lifecycle policy remain attached to the original definition. A server with `keep_running` survives that restart with the process it has; stop and start it to apply a changed command or environment |
 | `service_groups`, `templates` and scaling policies | Apply live while each registered instance keeps its process definition, storage policy and an in-range port; otherwise the reload names the instance to remove first. Create and remove instances with admin or web operations |
 | `instance_database` | Bundled SQLite file, default `rift.sqlite3` beside the config; restores registrations before scaling. Path changes require a restart |
 | `nodes` and `messaging` | Restart required; agents keep their servers running while the controller restarts and are adopted again. See [multiple hosts](nodes.md) |
@@ -727,6 +727,9 @@ These runtime controls are useful for a maintenance window. To preserve policy
 across process restarts, change `maintenance`/`draining` in the configuration and
 validate/reload it as well. A graceful full-process stop is available through
 `rift admin shutdown`, `systemctl stop rift`, Compose `stop`, or Ctrl-C.
+`rift admin shutdown all` also stops managed servers with
+[`keep_running`](managed-servers.md#servers-that-outlive-the-proxy), which the
+others leave running.
 
 ## Shutdown, upgrade and rollback
 
@@ -738,6 +741,14 @@ SIGTERM/SIGINT forces remaining sessions closed immediately. Look for
 during the drain. **Keep the supervisor stop deadline longer than Rift's drain**:
 40 seconds in the examples. Apply systemd edits with `systemctl daemon-reload`.
 See systemd's [`ExecReload` and `TimeoutStopSec` documentation](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html).
+
+Local managed servers stop with Rift, after the drain. Servers with
+[`keep_running`](managed-servers.md#servers-that-outlive-the-proxy) do not:
+they keep running through a shutdown, an upgrade or a crash, and the next Rift
+adopts them, so a restart costs players their connection but not the loaded
+worlds. This needs `KillMode=process` in the systemd unit; with the default
+`KillMode=control-group` the unit's stop kills them. `rift admin shutdown all`
+stops Rift together with its kept servers, with `shutdown` permission.
 
 Verify and extract the new release archive into a separate directory. Record
 both release tags and retain the previous archive. From the candidate directory:

@@ -268,15 +268,7 @@ pub fn precompile(spec: &PluginSpec) -> Result<String, String> {
     let started = Instant::now();
     let (wasm, key) = read(spec)?;
     let component = compile(spec, &wasm)?;
-    let pre = prepare(spec, &component)?;
-    if pre.chat.is_some() && spec.signed_chat {
-        // What `init` would refuse, known here from the exports alone.
-        return Err(format!(
-            "{} exports chat: {}",
-            entry_name(spec),
-            super::worker::CHAT_NEEDS_UNSIGNED
-        ));
-    }
+    prepare(spec, &component)?;
     let serialized = component
         .serialize()
         .map_err(|error| format!("cannot serialize the compiled component: {error}"))?;

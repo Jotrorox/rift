@@ -2135,7 +2135,7 @@ fn client_versions_are_set_for_the_proxy_a_backend_and_a_service_group() {
 }
 
 #[test]
-fn a_script_chat_hook_needs_unsigned_chat() {
+fn a_script_chat_hook_loads_with_signed_and_unsigned_chat() {
     let source = |authentication: &str, chat: &str| {
         format!(
             "return {{ listeners = {{ public = '127.0.0.1:0' }}, backends = {{ lobby = '127.0.0.1:1' }}, routes = {{ public = 'lobby' }}, authentication = {{ online_mode = true{authentication} }}, forwarding = {{ mode = 'velocity', secret_env = 'TEST_SECRET' }}, extensions = {{ api_version = 2, chat = {chat} }} }}"
@@ -2143,15 +2143,7 @@ fn a_script_chat_hook_needs_unsigned_chat() {
     };
     let handler = "function(ctx) return { deny = 'muted' } end";
     for authentication in ["", ", signed_chat = true"] {
-        let error = Config::from_lua(&source(authentication, handler), "chat.lua")
-            .unwrap_err()
-            .to_string();
-        assert!(
-            error.contains(
-                "extensions.chat: the chat hook needs authentication.signed_chat = false"
-            ),
-            "{error}"
-        );
+        Config::from_lua(&source(authentication, handler), "chat.lua").unwrap();
     }
     let config = Config::from_lua(&source(", signed_chat = false", handler), "chat.lua").unwrap();
     let extensions = config.extensions.as_ref().unwrap();

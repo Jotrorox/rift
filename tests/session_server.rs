@@ -493,19 +493,6 @@ fn a_chat_hook_drops_what_it_denies_and_tells_the_player() {
     assert!(delivered.recv_timeout(Duration::from_millis(200)).is_err());
 }
 
-/// A configuration whose script handles chat does not load while chat is
-/// signed.
-#[test]
-fn a_script_chat_hook_fails_startup_while_chat_is_signed() {
-    let (_paper, paper_address) = local_listener();
-    let hook = "extensions = { api_version = 2, chat = function(ctx) end },";
-    let output = proxy_with(paper_address, None, "", hook).failure();
-    assert!(
-        output.contains("extensions.chat: the chat hook needs authentication.signed_chat = false"),
-        "{output:?}"
-    );
-}
-
 #[test]
 fn a_session_the_local_server_rejects_never_reaches_a_backend() {
     let (sessions, session_address) = local_listener();

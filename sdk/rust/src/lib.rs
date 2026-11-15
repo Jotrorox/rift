@@ -201,9 +201,10 @@
 //!
 //! Without `chat` in [`export!`] the component has no `chat` export and Rift
 //! never asks it. With it, Rift asks the plugin about every message of every
-//! player, whatever [`Registration::hooks`] lists, and refuses to start the
-//! plugin unless the proxy sets `authentication.signed_chat = false`:
-//! dropping one signed message would break the player's signature chain.
+//! player, whatever [`Registration::hooks`] lists. Dropping one signed
+//! message breaks the player's signature chain, so unless the proxy sets
+//! `authentication.signed_chat = false`, the first deny costs that player
+//! their chat signing until they reconnect.
 //! Hosts before 0.1.5 load such a component and never call the hook.
 
 #![warn(missing_docs)]
@@ -382,9 +383,7 @@ pub trait Plugin: Default + 'static {
 ///
 /// `export!(MyPlugin, chat)` also exports [`Plugin::chat`] as the optional
 /// `rift:plugin/chat` interface. Rift asks a component with that export about
-/// every chat message and starts it only with
-/// `authentication.signed_chat = false`, so add it only to a plugin that
-/// moderates chat.
+/// every chat message, so add it only to a plugin that moderates chat.
 #[macro_export]
 macro_rules! export {
     ($plugin:ty) => {

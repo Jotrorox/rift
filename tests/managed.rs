@@ -76,8 +76,10 @@ fn managed_process_helper() {
     // too soon to count as stable.
     // `crash` exits with a failure status, `finish` cleanly, like a game
     // that ended.
+    // A helper with `keep_running` outlives its test's supervisor; it ends
+    // with the fixture directory instead.
     let mut probed_at = None;
-    while !stopping.load(Ordering::Acquire) {
+    while !stopping.load(Ordering::Acquire) && Path::new("helper-config").exists() {
         if fs::remove_file("crash").is_ok()
             || (mode == "flap"
                 && probed_at.is_some_and(|at: Instant| at.elapsed() >= Duration::from_millis(300)))
@@ -242,6 +244,7 @@ impl Fixture {
                 environment: Default::default(),
                 messaging: None,
                 isolation: Default::default(),
+                keep_running: false,
             },
         );
         Self {
@@ -1042,6 +1045,243 @@ async fn ephemeral_instances_run_from_a_fresh_copy_and_delete_it_when_the_proces
     rift::provisioning::remove(&config, "mini-1").unwrap();
     manager.shutdown().await;
     let _ = fs::remove_dir_all(&root);
+}
+
+/// Tests of `keep_running`: the helper outlives one supervisor and the next
+/// one over the same directory adopts it, as after a proxy restart.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod kept {
+    use super::*;
+
+    const RECORD: &str = "rift-process.json";
+    const CONSOLE: &str = "rift-console";
+
+    fn fixture(mode: &str) -> Fixture {
+        let mut fixture = Fixture::new(0, mode).expect_graceful_stop();
+        fixture.definition().keep_running = true;
+        fixture
+    }
+
+    fn listening(fixture: &Fixture) -> bool {
+        std::net::TcpStream::connect(fixture.address).is_ok()
+    }
+
+    async fn wait_command(fixture: &Fixture, command: &str) {
+        let deadline = Instant::now() + EVENT_DEADLINE;
+        while fs::read_to_string(fixture.directory.join("last-command"))
+            .ok()
+            .as_deref()
+            != Some(command)
+        {
+            assert!(
+                Instant::now() < deadline,
+                "console never received {command}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Long enough for a supervisor to have adopted what it is going to.
+    async fn assert_not_adopted(manager: &ManagedServers) {
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let snapshot = manager.snapshot();
+        assert_eq!(snapshot[0].state, "stopped", "{snapshot:?}");
+        assert_eq!(snapshot[0].pid, None);
+    }
+
+    #[tokio::test]
+    async fn kept_server_outlives_its_proxy_and_the_next_one_adopts_it() {
+        let fixture = fixture("normal");
+        let (record, console) = (
+            fixture.directory.join(RECORD),
+            fixture.directory.join(CONSOLE),
+        );
+        let first = fixture.manager();
+        first.start("default").await.unwrap();
+        let pid = first.snapshot()[0].pid.unwrap();
+        first.console("default", "say first".into()).await.unwrap();
+        wait_command(&fixture, "say first").await;
+        // An orderly shutdown leaves the server running and recorded.
+        first.shutdown().await;
+        drop(first);
+        assert!(listening(&fixture));
+        assert!(record.exists());
+
+        // The next supervisor takes it over without starting anything.
+        let second = fixture.manager();
+        wait_state(&second, "running").await;
+        assert_eq!(second.snapshot()[0].pid, Some(pid));
+        second.start("default").await.unwrap();
+        assert_eq!(fixture.starts(), 1);
+        // Console and logs work on a process that is no child of this one.
+        let cursor = second.logs("default", None).await.unwrap()["cursor"].as_u64();
+        second
+            .console("default", "say adopted".into())
+            .await
+            .unwrap();
+        wait_command(&fixture, "say adopted").await;
+        let deadline = Instant::now() + EVENT_DEADLINE;
+        loop {
+            let log = second.logs("default", cursor).await.unwrap();
+            if log["text"]
+                .as_str()
+                .unwrap()
+                .contains("command: say adopted")
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline, "no output after adoption");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // A supervisor that goes away without a shutdown, as in a crash,
+        // leaves it running too.
+        drop(second);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(listening(&fixture));
+
+        // Stop works through the console and cleans up.
+        let third = fixture.manager();
+        wait_state(&third, "running").await;
+        assert_eq!(third.snapshot()[0].pid, Some(pid));
+        third.stop("default").await.unwrap();
+        assert!(fixture.directory.join("graceful-stop").exists());
+        assert_eq!(third.snapshot()[0].state, "stopped");
+        assert!(!listening(&fixture));
+        assert!(!record.exists() && fs::symlink_metadata(&console).is_err());
+
+        // A new start is this supervisor's own child, which `shutdown_all`
+        // stops together with the proxy.
+        third.start("default").await.unwrap();
+        assert_eq!(fixture.starts(), 2);
+        assert_ne!(third.snapshot()[0].pid, Some(pid));
+        third.shutdown_all().await;
+        assert!(!listening(&fixture));
+        assert!(!record.exists() && fs::symlink_metadata(&console).is_err());
+    }
+
+    #[tokio::test]
+    async fn stale_reused_and_foreign_records_are_never_adopted() {
+        let mut fixture = fixture("normal");
+        let record = fixture.directory.join(RECORD);
+        // A stale record whose pid now belongs to another process, here this
+        // test: nothing is adopted, and a start begins a new server.
+        fs::write(
+            &record,
+            format!("{{\"pid\":{},\"started\":\"0\"}}", std::process::id()),
+        )
+        .unwrap();
+        let manager = fixture.manager();
+        assert_not_adopted(&manager).await;
+        manager.start("default").await.unwrap();
+        assert_eq!(fixture.starts(), 1);
+        assert_ne!(manager.snapshot()[0].pid, Some(std::process::id()));
+        manager.shutdown().await;
+        let genuine = fs::read_to_string(&record).unwrap();
+
+        let refused = |manager: ManagedServers| async move {
+            assert_not_adopted(&manager).await;
+            let error = manager.start("default").await.unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
+            assert!(
+                error
+                    .to_string()
+                    .contains("will not adopt an unowned process"),
+                "{error}"
+            );
+            manager.shutdown().await;
+        };
+        // The right pid with another start time is a reused pid; the port
+        // it holds is refused like any unowned process.
+        let mut reused: serde_json::Value = serde_json::from_str(&genuine).unwrap();
+        reused["started"] = "0".into();
+        fs::write(&record, reused.to_string()).unwrap();
+        refused(fixture.manager()).await;
+        // A genuine record in another server's directory names a process
+        // that does not run there.
+        let other = self::fixture("normal");
+        fs::write(other.directory.join(RECORD), &genuine).unwrap();
+        let foreign = TcpListener::bind(other.address).unwrap();
+        refused(other.manager()).await;
+        assert_eq!(other.starts(), 0);
+        drop(foreign);
+        // Without the setting a record is not even read.
+        fs::write(&record, &genuine).unwrap();
+        fixture.definition().keep_running = false;
+        refused(fixture.manager()).await;
+        assert_eq!(fixture.starts(), 1);
+        assert!(listening(&fixture));
+
+        fixture.definition().keep_running = true;
+        let manager = fixture.manager();
+        wait_state(&manager, "running").await;
+        manager.shutdown_all().await;
+        assert!(!listening(&fixture));
+    }
+
+    #[tokio::test]
+    async fn adopted_servers_follow_restart_and_idle_policy() {
+        let mut fixture = fixture("normal");
+        fixture.definition().restart_delay = Duration::from_secs(1);
+        let first = fixture.manager();
+        first.start("default").await.unwrap();
+        let pid = first.snapshot()[0].pid;
+        first.shutdown().await;
+
+        // An adopted process leaves no exit status, so its exit is a failure
+        // and is recovered like one.
+        let second = fixture.manager();
+        wait_state(&second, "running").await;
+        fs::write(fixture.directory.join("crash"), "").unwrap();
+        wait_state(&second, "failed").await;
+        let error = second.snapshot()[0].last_error.clone().unwrap();
+        assert!(error.contains("leaves no exit status"), "{error}");
+        wait_state(&second, "running").await;
+        assert_eq!(fixture.starts(), 2);
+        assert_eq!(second.snapshot()[0].restart_attempts, 1);
+        assert_ne!(second.snapshot()[0].pid, pid);
+        second.shutdown().await;
+        assert!(listening(&fixture));
+
+        // Idle shutdown applies to an adopted server.
+        fixture.definition().idle_timeout = Some(Duration::from_millis(300));
+        let third = fixture.manager();
+        wait_state(&third, "running").await;
+        wait_state(&third, "stopped").await;
+        assert!(fixture.directory.join("graceful-stop").exists());
+        assert!(!listening(&fixture));
+        assert!(third.snapshot()[0].automatic_start);
+        third.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn stubborn_adopted_process_is_killed_after_graceful_deadline() {
+        let mut fixture = fixture("stubborn");
+        fixture.definition().stop_timeout = Duration::from_millis(150);
+        let first = fixture.manager();
+        first.start("default").await.unwrap();
+        first.shutdown().await;
+        let second = fixture.manager();
+        wait_state(&second, "running").await;
+        let start = Instant::now();
+        second.stop("default").await.unwrap();
+        assert!(start.elapsed() >= Duration::from_millis(150));
+        assert!(start.elapsed() < Duration::from_secs(2));
+        assert!(!listening(&fixture));
+        assert!(!fixture.directory.join("graceful-stop").exists());
+        assert!(!fixture.directory.join(RECORD).exists());
+        second.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn servers_without_keep_running_leave_no_record_and_stop_with_the_proxy() {
+        let fixture = Fixture::new(0, "normal");
+        let manager = fixture.manager();
+        manager.start("default").await.unwrap();
+        assert!(!fixture.directory.join(RECORD).exists());
+        assert!(fs::symlink_metadata(fixture.directory.join(CONSOLE)).is_err());
+        manager.shutdown().await;
+        assert!(!listening(&fixture));
+    }
 }
 
 fn empty_manager(fixture: &Fixture) -> ManagedServers {
