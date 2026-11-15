@@ -223,6 +223,26 @@ pub(crate) fn check_deadline(deadline: Instant) -> mlua::Result<()> {
     Ok(())
 }
 
+/// Caps a VM's memory where LuaJIT allows it. LuaJIT refuses a host allocator
+/// whose memory lies above 47 bits, which is where Linux on aarch64 puts the
+/// heap; the VM then runs on LuaJIT's own allocator, which has no limit to
+/// set. That is logged once rather than keeping the proxy from starting.
+pub(crate) fn limit_memory(lua: &Lua, bytes: usize) -> mlua::Result<()> {
+    match lua.set_memory_limit(bytes) {
+        Ok(_) => Ok(()),
+        Err(mlua::Error::MemoryControlNotAvailable) => {
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                log_warn!(
+                    "Lua memory limits cannot be enforced on this platform; configuration scripts and Lua plugins run without one"
+                );
+            });
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
 /// Configuration evaluation and routing share the same restricted environment.
 pub(crate) fn load(source: &ScriptSource, deadline: Instant) -> mlua::Result<(Lua, Value)> {
     if source.entry.source.len() > MAX_SOURCE_BYTES {
@@ -233,7 +253,7 @@ pub(crate) fn load(source: &ScriptSource, deadline: Instant) -> mlua::Result<(Lu
         StdLib::MATH | StdLib::STRING | StdLib::TABLE | StdLib::JIT,
         LuaOptions::default(),
     )?;
-    lua.set_memory_limit(MEMORY_LIMIT)?;
+    limit_memory(&lua, MEMORY_LIMIT)?;
     let globals = lua.globals();
     // LuaJIT traces can bypass instruction hooks. Disable compilation before
     // loading user code, then remove every route back to the JIT library.

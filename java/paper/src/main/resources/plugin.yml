@@ -11,3 +11,7 @@ commands:
     description: Manage Rift permissions; the proxy parses, authorises and applies the command
     usage: /perms <user|group|track|check|trace|...>
     aliases: [rp]
+permissions:
+  rift.chat.color:
+    description: Use legacy colour codes (&c, &l, &#ff8800) in chat when RiftPerms formats it
+    default: false

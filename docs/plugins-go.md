@@ -218,8 +218,8 @@ command (`rift.ChatCommand`), `attempt.Ctx.Command` is the root name and
 `attempt.Ctx.Args` the rest. `chat` answers `Continue` or `Deny`. `kick`
 answers `Continue` (leave it to `network.on_kick`), `Deny` (disconnect with
 the text) or `Server`. Rift asks a plugin that lists `chat` about every
-message of every player and starts it only when the proxy sets
-`authentication.signed_chat = false`.
+message of every player; with signed chat, the first deny costs that player
+their [chat signing](plugins.md#chat).
 
 ## Background work
 

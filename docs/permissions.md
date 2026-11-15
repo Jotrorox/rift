@@ -29,7 +29,7 @@ and last; a negated `inherit` node is the only way to opt a user out.
 | --- | --- | --- |
 | `permission` | pattern, `true`/`false` | Grant or deny `a.b`, `a.*` or `*` |
 | `inherit` | group, `true`/`false` | Inherit a group; `false` blocks it on every path |
-| `prefix`, `suffix` | priority, text | Chat decoration; the highest priority wins |
+| `prefix`, `suffix` | priority, text | Chat decoration; the highest priority wins. Also shown in the [network tab list](operations.md#tab-list-header-footer-and-network-wide-players) |
 | `meta` | key, value | Arbitrary key/value data such as `homes = "5"` |
 | `weight` | integer | Groups only; the same as the group's weight |
 | `display_name` | text | Groups only |
@@ -240,6 +240,11 @@ Permission wildcards do the work of server globs: guard each backend with its
 own node (`rift.server.build`, `rift.server.vip`) and grant `rift.server.*` to
 a group that may go everywhere. A dynamic group's instances (`lobby-1`,
 `lobby-2`) share the group's rule.
+
+[Queues](extensions.md#queue-behavior) read two more things from the store: the
+meta value `queue_priority` (or `queue_priority.<destination>`) orders a
+player's ticket, and the node `rift.queue.bypass` (or
+`rift.queue.bypass.<destination>`) lets them enter a full destination.
 
 `server_permission` must resolve to `true` for a player to list or join servers
 with `/server`; other players are told they lack permission and get no

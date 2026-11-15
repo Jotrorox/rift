@@ -55,6 +55,56 @@ fn group_candidates_balance_load_inherit_access_and_expand_fallbacks() {
     );
 }
 
+#[test]
+fn fill_balance_prefers_the_fullest_instance_with_room() {
+    let candidates = |scaling: &str, queue: Option<usize>| {
+        let mut config = Config::from_lua(
+            &format!(
+                "return {{listeners={{public='127.0.0.1:0'}},backends={{}},routes={{public='lobby'}},
+                service_groups={{lobby={{directory='servers/{{name}}',command={{'java'}},port_range={{25001,25003}},balance='fill'{scaling}}}}}}}"
+            ),
+            "fill.lua",
+        )
+        .unwrap();
+        for (name, port) in [("lobby-1", 25001), ("lobby-2", 25002), ("lobby-3", 25003)] {
+            config.add_instance("lobby", name, port).unwrap();
+        }
+        let mut snapshot = Snapshot::new(config, None).unwrap();
+        // Extensions need online mode; only the queue capacity matters here.
+        if let Some(capacity) = queue {
+            let extensions = Config::from_lua(
+                &format!(
+                    "return {{listeners={{public='127.0.0.1:0'}},backends={{lobby='127.0.0.1:1'}},routes={{public='lobby'}},
+                    authentication={{online_mode=true}},forwarding={{mode='velocity',secret_env='TEST_SECRET'}},
+                    extensions={{api_version=1,queues={{lobby={capacity}}}}}}}"
+                ),
+                "fill-queues.lua",
+            )
+            .unwrap();
+            snapshot.config.extensions = extensions.extensions;
+        }
+        let _players = [
+            snapshot.players.register([1; 16], "Alice", "lobby-2"),
+            snapshot.players.register([2; 16], "Bob", "lobby-2"),
+            snapshot.players.register([3; 16], "Carol", "lobby-3"),
+        ];
+        snapshot.candidates(&["lobby".into()])
+    };
+    let scaling =
+        |capacity| format!(",scaling={{capacity_per_instance={capacity},min_instances=0}}");
+    assert_eq!(candidates("", None), ["lobby-2", "lobby-3", "lobby-1"]);
+    // The room limit is scaling's capacity, else the group's queue capacity.
+    assert_eq!(
+        candidates(&scaling(2), None),
+        ["lobby-3", "lobby-1", "lobby-2"]
+    );
+    assert_eq!(candidates("", Some(1)), ["lobby-1", "lobby-3", "lobby-2"]);
+    assert_eq!(
+        candidates(&scaling(3), Some(1)),
+        ["lobby-2", "lobby-3", "lobby-1"]
+    );
+}
+
 #[tokio::test]
 async fn stale_backend_candidates_fail_before_health_lookup_or_process_admission() {
     let snapshot = Arc::new(Snapshot::new(config(), None).unwrap());
@@ -827,4 +877,221 @@ fn access_rule_groups_and_permissions_are_validated() {
             .to_string();
         assert!(message.contains(error), "{rule}: {message}");
     }
+}
+
+/// With signed chat, a denied signed message costs the player their chat
+/// signing: Rift logs them in to the same server again. That is no transfer,
+/// so neither the transfer policy nor the server's queue is consulted.
+#[tokio::test]
+async fn a_denied_signed_chat_message_logs_the_player_in_to_their_server_again() {
+    use rift::{
+        auth::AuthenticatedProfile,
+        extensions::{Context, Extensions},
+        protocol::{Codec, Handshake, NextState, Packet, Reader, write_string, write_varint},
+        session::SessionEvent,
+    };
+    use tokio::{
+        io::{AsyncRead, DuplexStream},
+        net::TcpListener,
+        time::{Duration, timeout},
+    };
+    async fn read(stream: &mut (impl AsyncRead + Unpin)) -> Packet {
+        Reader::default()
+            .read(stream, Codec::default())
+            .await
+            .unwrap()
+            .unwrap()
+    }
+    // A 1.21.11 Chat Message with a signature and a last-seen update.
+    fn signed_chat(text: &str) -> Packet {
+        let mut data = Vec::new();
+        write_string(text, &mut data);
+        data.extend(1_800_000_000_000_i64.to_be_bytes());
+        data.extend(1_i64.to_be_bytes());
+        data.push(1);
+        data.extend([1; 256]);
+        write_varint(0, &mut data);
+        data.extend([0, 0, 0, 0]);
+        Packet::new(0x08, data)
+    }
+    timeout(Duration::from_secs(5), async {
+        let lobby = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut cfg = config();
+        cfg.backends.insert(
+            "lobby".into(),
+            // Declared, so that no status ping asks the backend for it.
+            rift::routing::Backend::parse(&lobby.local_addr().unwrap().to_string())
+                .unwrap()
+                .with_version(rift::protocol::ProtocolVersion::new(774).unwrap()),
+        );
+        let snapshot = Arc::new(Snapshot::new(cfg.clone(), None).unwrap());
+        let extension_config = Config::from_lua(
+            r#"return {
+            listeners={public='127.0.0.1:0'}, backends={lobby='127.0.0.1:1'}, routes={public='lobby'},
+            authentication={online_mode=true},forwarding={mode='velocity',secret_env='TEST_SECRET'},
+            extensions={api_version=2, queues={lobby=1},
+                chat=function(ctx) if ctx.text == 'muted' then return {deny='You are muted.'} end end,
+                before_transfer=function() return {deny='No transfers'} end
+            }
+        }"#,
+            "network-chat.lua",
+        )
+        .unwrap();
+        let extensions =
+            Extensions::new(&extension_config, snapshot.messaging.clone(), None).unwrap();
+        let profile = AuthenticatedProfile {
+            uuid: [7; 16],
+            name: "Player".into(),
+            properties: vec![],
+        };
+        let metrics = Metrics::default();
+        let network = Network {
+            snapshot: &snapshot,
+            addresses: &[],
+            metrics: &metrics,
+        };
+        let (mut client, input) = tokio::io::duplex(65536);
+        let handshake = Handshake {
+            protocol: 774,
+            address: "play.test".into(),
+            port: 25565,
+            next_state: NextState::Login,
+        };
+        let codec = Codec::default();
+        codec.write(&mut client, &handshake.packet()).await.unwrap();
+        let mut session: Session<DuplexStream, TcpStream> = Session::accept(input).await.unwrap();
+        session.enable_network().unwrap();
+        session.set_extension(
+            extensions
+                .session(Context::authenticated(1, &profile))
+                .unwrap(),
+        );
+        let mut login = Vec::new();
+        write_string("Player", &mut login);
+        login.extend([7; 16]);
+        codec.write(&mut client, &Packet::new(0, login)).await.unwrap();
+        session.read_login_start().await.unwrap();
+        let mut event = Connection::new("public", "127.0.0.1:1234".parse().unwrap());
+        network
+            .connect_initial(
+                &mut session,
+                &["lobby".into()],
+                &mut (Instant::now() + Duration::from_secs(1)),
+                &mut event,
+            )
+            .await
+            .unwrap();
+        let mut success = vec![7; 16];
+        write_string("Player", &mut success);
+        success.push(0);
+        let success = Packet::new(2, success);
+        let mut join = vec![0, 0, 0, 1, 0, 1];
+        write_string("minecraft:overworld", &mut join);
+        join.extend([20, 8, 8, 0, 1, 0, 0]);
+        write_string("minecraft:overworld", &mut join);
+        join.extend([0; 8]);
+        join.extend([0, 255, 0, 0, 0, 0, 63, 0]);
+        let join = Packet::new(0x30, join);
+        let (mut backend, _) = lobby.accept().await.unwrap();
+        read(&mut backend).await;
+        read(&mut backend).await;
+        codec.write(&mut backend, &success).await.unwrap();
+        session.forward().await.unwrap();
+        read(&mut client).await;
+        codec.write(&mut client, &Packet::empty(3)).await.unwrap();
+        session.forward().await.unwrap();
+        read(&mut backend).await;
+        codec.write(&mut backend, &Packet::empty(3)).await.unwrap();
+        session.forward().await.unwrap();
+        read(&mut client).await;
+        codec.write(&mut client, &Packet::empty(3)).await.unwrap();
+        session.forward().await.unwrap();
+        read(&mut backend).await;
+        codec.write(&mut backend, &join).await.unwrap();
+        session.forward().await.unwrap();
+        read(&mut client).await;
+        session.extension.as_mut().unwrap().ready("lobby").await;
+        assert!(session.can_switch());
+
+        // An allowed message stays signed and the session whole.
+        let hello = signed_chat("hello");
+        codec.write(&mut client, &hello).await.unwrap();
+        let SessionEvent::Chat(chat) = session.forward().await.unwrap() else {
+            panic!("signed chat was not held")
+        };
+        network.chat(&mut session, chat).await.unwrap();
+        session.forward().await.unwrap();
+        assert_eq!(read(&mut backend).await, hello);
+        assert!(session.signed_chat() && !session.chat_chain_broken());
+
+        codec.write(&mut client, &signed_chat("muted")).await.unwrap();
+        let SessionEvent::Chat(chat) = session.forward().await.unwrap() else {
+            panic!("signed chat was not held")
+        };
+        network.chat(&mut session, chat).await.unwrap();
+        let notice = read(&mut client).await;
+        let reason = b"You are muted.";
+        assert!(
+            notice.data.windows(reason.len()).any(|window| window == reason),
+            "{notice:?}"
+        );
+        assert!(session.chat_chain_broken());
+
+        let again = async {
+            let (mut again, _) = lobby.accept().await.unwrap();
+            read(&mut again).await;
+            read(&mut again).await;
+            codec.write(&mut again, &success).await.unwrap();
+            assert_eq!(read(&mut again).await, Packet::empty(3));
+            assert_eq!(read(&mut client).await, Packet::empty(0x74));
+            codec.write(&mut client, &Packet::empty(0x0f)).await.unwrap();
+            assert_eq!(read(&mut client).await, Packet::new(8, vec![0]));
+            again
+        };
+        let (result, mut again) = tokio::join!(
+            network.reattach(&mut session, "lobby", &mut event),
+            again
+        );
+        assert_eq!(result.unwrap(), "lobby");
+        assert!(!session.chat_chain_broken());
+        assert!(!session.signed_chat());
+        // The first connection is closed without the withheld message.
+        assert!(
+            Reader::default()
+                .read(&mut backend, codec)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        codec.write(&mut again, &Packet::empty(3)).await.unwrap();
+        session.forward().await.unwrap();
+        assert_eq!(read(&mut client).await, Packet::empty(3));
+        codec.write(&mut client, &Packet::empty(3)).await.unwrap();
+        session.forward().await.unwrap();
+        assert_eq!(read(&mut again).await, Packet::empty(3));
+        codec.write(&mut again, &join).await.unwrap();
+        session.forward().await.unwrap();
+        assert_eq!(read(&mut client).await, join);
+        assert!(session.can_switch());
+
+        // Unsigned towards this login: denied and allowed messages alike
+        // leave the session as it is.
+        for (text, arrives) in [("muted", false), ("hello", true)] {
+            let packet = signed_chat(text);
+            codec.write(&mut client, &packet).await.unwrap();
+            let SessionEvent::Chat(chat) = session.forward().await.unwrap() else {
+                panic!("chat was not held")
+            };
+            network.chat(&mut session, chat).await.unwrap();
+            assert!(!session.chat_chain_broken());
+            if arrives {
+                session.forward().await.unwrap();
+                assert_eq!(read(&mut again).await, packet);
+            } else {
+                read(&mut client).await;
+            }
+        }
+    })
+    .await
+    .unwrap();
 }

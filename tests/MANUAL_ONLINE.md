@@ -215,8 +215,7 @@ Setup, per server:
      configuration (`allow_chat_reports = false`) with Velocity forwarding
      and the same secret ([setup](../docs/permissions-pumpkin.md)).
 2. Start Rift with this configuration (`RIFT_FORWARDING_SECRET` set to the
-   forwarding secret). `rift check` accepts it, and refuses it with
-   `signed_chat = true`:
+   forwarding secret):
 
    ```lua
    rift.config.listeners = { public = "127.0.0.1:25565" }
@@ -263,6 +262,18 @@ Steps and what to record for each server:
    `Out-of-order chat packet`, or similar).
 4. Keep playing for a minute and chat again; switch servers and back if a
    second backend is configured.
+
+5. Stop Rift, set `signed_chat = true` (or remove the setting), start it and
+   join again. Send a chat message. Expected: it arrives signed, without the
+   not-secure marker.
+6. Run `/muteme` and send one chat message. Expected: `You are muted.`, then
+   the world loads once, as for a server switch, and the player is back where
+   they stood; the server log shows them leave and join. Send four more:
+   each answers `You are muted.` and nothing reloads.
+7. Run `/unmuteme` and send several chat messages and a backend command.
+   Expected: all arrive, marked as not secure, and **the player is not
+   kicked**. A second player who was never muted still chats signed.
+8. Reconnect the first player and chat. Expected: signed again.
 
 Record the Rift commit, the server build, the client version, and for every
 step what the sender, the second client and the server log showed, including

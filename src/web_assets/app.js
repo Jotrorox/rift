@@ -466,6 +466,7 @@
     ["port_range.0", "First port", "number"], ["port_range.1", "Last port", "number"],
     ["template", "Template (optional)", "text"], ["storage", "Storage", ["persistent", "disposable", "ephemeral"]],
     ["autostart", "Start new instances automatically", "boolean"], ["start_on_connect", "Start on player connection", "boolean"],
+    ["keep_running", "Keep running while the proxy restarts (Linux and macOS)", "boolean"],
     ["idle_timeout_ms", "Idle timeout (ms; 0 disables)", "number"], ["start_timeout_ms", "Startup timeout (ms)", "number"],
     ["stop_timeout_ms", "Stop timeout (ms)", "number"], ["restart_delay_ms", "Recovery delay (ms)", "number"], ["restart_retries", "Recovery attempts", "number"],
     ["scaling_enabled", "Automatic scaling", "boolean"],

@@ -167,8 +167,9 @@ void exports_rift_plugin_handler_kick(rift_context_t *ctx, rift_decision_t *ret)
 command, `attempt->ctx.command` is the root name and `attempt->ctx.args` the
 rest. `chat` answers `continue` or `deny`. `kick` answers `continue` (leave it
 to `network.on_kick`), `deny` (disconnect with the text) or `server`. Rift
-asks a plugin that lists `chat` about every message of every player and
-starts it only when the proxy sets `authentication.signed_chat = false`.
+asks a plugin that lists `chat` about every message of every player; with
+signed chat, the first deny costs that player their
+[chat signing](plugins.md#chat).
 
 ## Background work
 

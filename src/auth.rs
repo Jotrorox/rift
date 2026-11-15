@@ -198,8 +198,8 @@ impl Authenticator {
         let (http, session_url) = match std::env::var_os(TEST_SESSION_URL_ENV) {
             Some(value) => {
                 let url = test_session_url(value.to_str().unwrap_or(""))?;
-                eprintln!(
-                    "rift: warning: {TEST_SESSION_URL_ENV} is set: logins are verified by {url}, not by Mojang. This build is for tests only."
+                log_warn!(
+                    "{TEST_SESSION_URL_ENV} is set: logins are verified by {url}, not by Mojang. This build is for tests only."
                 );
                 let http = test_session_client(timeout).map_err(|_| {
                     io::Error::other("Could not initialize authentication HTTP client.")

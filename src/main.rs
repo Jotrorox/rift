@@ -4,12 +4,19 @@
 // full disk behind a redirect. A diagnostic is never worth that. In the
 // control loop such a panic would skip the connection drain and leave managed
 // servers running without their supervisor. Keep in step with lib.rs.
+//
+// Diagnostics of the running proxy go through the library's `log_*!` macros
+// (rift::log); `eprintln!` is for output that answers a command.
 macro_rules! eprintln {
     ($($arg:tt)*) => {{
         use ::std::io::Write as _;
         let _ = ::std::writeln!(::std::io::stderr().lock(), $($arg)*);
     }};
 }
+
+// `log_error!`, `log_warn!`, `log_info!` and `log_debug!` in every module.
+#[macro_use(log_debug, log_error, log_info, log_warn)]
+extern crate rift;
 
 mod admin;
 mod admission;
@@ -70,7 +77,15 @@ const USAGE: &str = "Usage: rift [<listen-ip:port> <backend-ip:port> [--translat
     IPv6: rift '[::]:25565' '[::1]:25566'";
 
 fn main() -> ExitCode {
-    // First, while this is the only thread and before any secret is read.
+    rift::log::install_panic_hook();
+    // Reads two environment variables and nothing else, so the hardening
+    // below still runs before any thread or secret; its warnings then come
+    // out in the format the operator chose.
+    if let Err(error) = rift::log::init() {
+        eprintln!("rift: {error}");
+        return ExitCode::FAILURE;
+    }
+    // While this is the only thread and before any secret is read.
     rift::environment::harden_process();
     let args: Vec<String> = env::args().skip(1).collect();
     // `rift dev` sets its token variables before any thread exists.

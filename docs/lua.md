@@ -38,7 +38,7 @@ named `template`, and a `storage` policy (`persistent` by default, `disposable`
 for games whose generated directory should be deleted on removal, or `ephemeral`
 for games that start every run from a fresh copy deleted when the process ends).
 Disposable and ephemeral groups require a template. Routes can target the group to spread logins across
-its runtime instances. Asset paths resolve relative to the configuration file.
+its runtime instances, or with `balance = "fill"` to fill one instance after another. Asset paths resolve relative to the configuration file.
 Templates and group policies can change live when existing instances retain
 their process definitions and storage policy. Remove affected instances before
 changing those settings. Creating/removing instances also works live. Provisioning never accepts the Minecraft EULA automatically.
@@ -252,6 +252,8 @@ All imports and handlers share the existing 8 MiB VM memory limit and 100,000
 instruction budget. Every callback first evaluates the configuration again;
 that evaluation has its own 100,000 instructions, and the callback then starts
 with a fresh 100,000, so a heavy configuration cannot starve the callbacks.
+On Linux aarch64 LuaJIT cannot take a memory limit, so only the instruction
+budget applies there; Rift logs one warning at startup.
 `rift check` prints how many instructions the configuration uses. Its cost is
 still paid in time on every callback, against the 50 ms deadline, and `rift
 check` warns when it uses half the budget or more. Configuration evaluation during startup, checks, reloads and

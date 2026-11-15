@@ -736,11 +736,10 @@ async fn invalid_artifacts_fail_with_a_reason() {
     assert!(super::precompile(&config.plugins[0]).is_err());
 }
 
-/// A component says that it handles `chat` in its registration, which only
-/// `init` returns: compiling it ahead of time passes while chat is signed,
-/// and starting it is what `authentication.signed_chat` refuses.
+/// `rift check --strict` accepts a component with and without a `chat`
+/// export.
 #[tokio::test]
-async fn precompiling_a_chat_component_does_not_know_its_hooks() {
+async fn precompiling_accepts_a_chat_component() {
     let (Some(chat), Some(plain)) = (conformance_chat_guest(), conformance_guest()) else {
         return;
     };
@@ -748,11 +747,7 @@ async fn precompiling_a_chat_component_does_not_know_its_hooks() {
     let folder = root.join("plugins/mute");
     std::fs::create_dir_all(&folder).unwrap();
     install_conformance(chat, &folder, "mute", "");
-    let mut spec = conformance::installed(&folder, "{}");
-    assert!(spec.signed_chat);
-    super::precompile(&spec).unwrap();
-    spec.signed_chat = false;
-    super::precompile(&spec).unwrap();
+    super::precompile(&conformance::installed(&folder, "{}")).unwrap();
 
     let folder = root.join("plugins/plain");
     std::fs::create_dir_all(&folder).unwrap();

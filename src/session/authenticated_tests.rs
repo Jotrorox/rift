@@ -461,19 +461,189 @@ async fn chat_hook_drops_denied_chat_and_forwards_the_rest_unchanged_matrix() {
     }
 }
 
+/// With signed chat the hook still sees signed packets while the owner can
+/// attach a backend again. Allowed ones keep the chain whole; the first
+/// denied one breaks it, and the session gives up signing for good.
 #[tokio::test]
-async fn chat_hook_is_not_asked_where_dropping_is_unsafe_or_nobody_handles_chat_matrix() {
-    use crate::extensions::{Action, ChatKind};
+async fn chat_hook_denying_signed_chat_breaks_the_chain_and_unsigns_the_session_matrix() {
+    use crate::extensions::Action;
     for number in 761..=777 {
         timeout(Duration::from_secs(10), async {
-            // Connected while chat was signed: the backend has the player's
-            // chat session, so a signed packet must not be withheld.
             let (mut session, mut client, mut backend) = authenticated_session_for(number).await;
             assert!(session.signed_chat());
             session.set_extension(chat_extension(true));
             compression(&mut session, &mut client, &mut backend, 256).await;
             verified_play(&mut session, &mut client, &mut backend).await;
             let codec = session.backend().unwrap().codec;
+            serverbound(
+                &mut session,
+                &mut client,
+                &mut backend,
+                &chat_session(number, 1),
+            )
+            .await;
+
+            // An allowed message reaches the backend as the client signed it.
+            let hello = signed_chat_text(number, 1, "hello");
+            let chat = held(&mut session, &mut client, &hello).await;
+            assert_eq!(answer_chat(&mut session, &chat).await, Action::Continue);
+            assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+            assert_eq!(receive(&mut backend, codec).await, hello);
+            assert!(session.signed_chat() && !session.chat_chain_broken());
+
+            // A held packet nobody can ask the hook about goes through.
+            let unanswered = signed_chat_text(number, 2, "muted");
+            held(&mut session, &mut client, &unanswered).await;
+            assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+            assert_eq!(receive(&mut backend, codec).await, unanswered);
+            assert!(!session.chat_chain_broken());
+
+            // A denied one is withheld: the backend's chain is broken.
+            let muted = signed_chat_text(number, 3, "muted");
+            let chat = held(&mut session, &mut client, &muted).await;
+            assert_ne!(answer_chat(&mut session, &chat).await, Action::Continue);
+            assert!(session.chat_chain_broken());
+            assert!(!session.signed_chat());
+            assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+            assert_eq!(
+                receive(&mut backend, codec).await,
+                acknowledgement_of(number, 19)
+            );
+
+            // Until a backend is attached again, nothing signed reaches this
+            // one, allowed or not, and no new chat session either.
+            let after = signed_chat_text(number, 4, "hello");
+            let chat = held(&mut session, &mut client, &after).await;
+            assert_eq!(answer_chat(&mut session, &chat).await, Action::Continue);
+            assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+            assert_eq!(
+                receive(&mut backend, codec).await,
+                acknowledgement_of(number, 19)
+            );
+            session
+                .client
+                .codec
+                .write(&mut client, &chat_session(number, 2))
+                .await
+                .unwrap();
+            assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+            nothing_reaches(&mut backend, codec).await;
+            let plain = acknowledgement(number);
+            serverbound(&mut session, &mut client, &mut backend, &plain).await;
+        })
+        .await
+        .unwrap_or_else(|_| panic!("signed chat hook protocol {number} timed out"));
+    }
+}
+
+/// The owner's answer to a broken chain: it attaches the backend again. The
+/// new login carries on unsigned, and the hook is asked about everything.
+#[tokio::test]
+async fn a_broken_chat_chain_is_repaired_by_attaching_the_backend_again() {
+    use crate::extensions::Action;
+    timeout(Duration::from_secs(5), async {
+        let number = 774;
+        let (mut session, mut client, mut first) = authenticated_session_for(number).await;
+        session.set_extension(chat_extension(true));
+        compression(&mut session, &mut client, &mut first, 256).await;
+        verified_play(&mut session, &mut client, &mut first).await;
+        let muted = signed_chat_text(number, 1, "muted");
+        let chat = held(&mut session, &mut client, &muted).await;
+        assert_ne!(answer_chat(&mut session, &chat).await, Action::Continue);
+        assert!(session.chat_chain_broken());
+
+        session.detach_backend();
+        drop(first);
+        assert!(session.can_switch());
+        let (replacement, mut second) = tokio::io::duplex(65536);
+        let codec = Codec::default();
+        let client_codec = session.client.codec;
+        let (result, ()) = tokio::join!(session.connect_backend(replacement), async {
+            receive(&mut second, codec).await;
+            assert_eq!(receive(&mut second, codec).await, login_start());
+            codec
+                .write(&mut second, &velocity_request(i32::MIN))
+                .await
+                .unwrap();
+            assert!(validate_velocity_response(
+                &receive(&mut second, codec).await,
+                i32::MIN,
+                b"shared-secret"
+            ));
+            codec.write(&mut second, &login_success()).await.unwrap();
+            assert_eq!(receive(&mut second, codec).await, Packet::empty(3));
+            assert_eq!(
+                receive(&mut client, client_codec).await,
+                Packet::empty(0x74)
+            );
+            client_codec
+                .write(&mut client, &Packet::empty(0x0f))
+                .await
+                .unwrap();
+            assert_eq!(
+                receive(&mut client, client_codec).await,
+                Packet::new(8, vec![0])
+            );
+        });
+        result.unwrap();
+        assert!(!session.chat_chain_broken());
+        assert!(!session.signed_chat());
+        codec.write(&mut second, &Packet::empty(3)).await.unwrap();
+        session.forward().await.unwrap();
+        assert_eq!(receive(&mut client, client_codec).await, Packet::empty(3));
+        client_codec
+            .write(&mut client, &Packet::empty(3))
+            .await
+            .unwrap();
+        session.forward().await.unwrap();
+        assert_eq!(receive(&mut second, codec).await, Packet::empty(3));
+        let join = verified_join_game(number, 2);
+        codec.write(&mut second, &join).await.unwrap();
+        session.forward().await.unwrap();
+        assert_eq!(receive(&mut client, client_codec).await, join);
+        assert!(session.can_switch());
+
+        // The client's new chat session stays with the proxy, so this
+        // backend verifies nothing: the hook may drop and allow at will.
+        client_codec
+            .write(&mut client, &chat_session(number, 2))
+            .await
+            .unwrap();
+        assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+        nothing_reaches(&mut second, codec).await;
+        let muted = signed_chat_text(number, 2, "muted");
+        let chat = held(&mut session, &mut client, &muted).await;
+        assert_ne!(answer_chat(&mut session, &chat).await, Action::Continue);
+        assert!(!session.chat_chain_broken());
+        assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+        assert_eq!(
+            receive(&mut second, codec).await,
+            acknowledgement_of(number, 19)
+        );
+        let hello = signed_chat_text(number, 3, "hello");
+        let chat = held(&mut session, &mut client, &hello).await;
+        assert_eq!(answer_chat(&mut session, &chat).await, Action::Continue);
+        assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
+        assert_eq!(receive(&mut second, codec).await, hello);
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn chat_hook_is_not_asked_where_dropping_is_unsafe_or_nobody_handles_chat_matrix() {
+    use crate::extensions::{Action, ChatKind};
+    for number in 761..=777 {
+        timeout(Duration::from_secs(10), async {
+            // The backend has the player's chat session and the owner cannot
+            // attach another backend: a signed packet must not be withheld.
+            let (mut session, mut client, mut backend) = authenticated_session_for(number).await;
+            assert!(session.signed_chat());
+            session.set_extension(chat_extension(true));
+            compression(&mut session, &mut client, &mut backend, 256).await;
+            verified_play(&mut session, &mut client, &mut backend).await;
+            let codec = session.backend().unwrap().codec;
+            session.network = false;
             for packet in [
                 chat_session(number, 1),
                 signed_chat_text(number, 1, "muted"),
@@ -488,7 +658,9 @@ async fn chat_hook_is_not_asked_where_dropping_is_unsafe_or_nobody_handles_chat_
             assert_ne!(answer_chat(&mut session, &chat).await, Action::Continue);
             assert_eq!(session.forward().await.unwrap(), SessionEvent::Packet);
             assert_eq!(receive(&mut backend, codec).await, acknowledgement(number));
+            assert!(session.signed_chat() && !session.chat_chain_broken());
             // Rift's own commands never come to the hook.
+            session.network = true;
             session
                 .client
                 .codec

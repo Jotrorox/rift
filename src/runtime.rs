@@ -248,8 +248,9 @@ impl Snapshot {
         })
     }
 
-    /// Resolve a service group at admission time, sharing load across its
-    /// instances while retaining the full list for startup/connect fallback.
+    /// Resolve a service group at admission time, ordering its instances by
+    /// the group's `balance` while retaining the full list for
+    /// startup/connect fallback.
     pub fn candidates(&self, destinations: &[String]) -> Vec<String> {
         let loads: BTreeMap<_, _> = self
             .managed
@@ -262,8 +263,11 @@ impl Snapshot {
             .iter()
             .flat_map(|destination| {
                 let mut names = self.config.destination_names(destination);
-                if self.config.service_groups.contains_key(destination) {
-                    names.sort_by_key(|name| (loads.get(name).copied().unwrap_or(0), name.clone()));
+                if let Some(group) = self.config.service_groups.get(destination) {
+                    let limit = self.config.instance_capacity(destination);
+                    group.balance.sort(&mut names, limit, |name| {
+                        loads.get(name).copied().unwrap_or(0)
+                    });
                 }
                 names
             })
@@ -351,7 +355,7 @@ impl Snapshot {
             if let Some(store) = &self.instance_store
                 && let Err(error) = store.set_group_state(&name, Default::default())
             {
-                eprintln!("rift: state of removed service group {name} not cleared: {error}");
+                log_error!("state of removed service group {name} not cleared: {error}");
             }
         }
     }
@@ -945,6 +949,32 @@ pub async fn handle(
                 addresses: &live_snapshot.addresses,
                 metrics: &metrics,
             };
+            if session.chat_chain_broken() && session.can_switch() {
+                // A chat hook dropped a signed packet. Before the backend
+                // sees the player's next one, it gets a login without their
+                // signing material.
+                match network
+                    .reattach(&mut session, &current_backend, event)
+                    .await
+                {
+                    Ok(target) => {
+                        current_address =
+                            live_snapshot.config.backends[&target].address().to_owned();
+                        current_backend = target;
+                        phase_deadline = Deadline::now() + Duration::from_secs(30);
+                        continue;
+                    }
+                    Err(error) => {
+                        let reason = if error.kind() == io::ErrorKind::PermissionDenied {
+                            rift::text::reason(&error)
+                        } else {
+                            catalog::notice(Notice::ConnectionLostNoFallback)
+                        };
+                        let _ = timeout(HANDSHAKE_TIMEOUT, session.disconnect_text(&reason)).await;
+                        return Err(error);
+                    }
+                }
+            }
             event.stage = if transfer_reply.is_some() {
                 "transfer"
             } else {
@@ -1729,17 +1759,19 @@ pub(crate) async fn accept(
             biased;
             _ = stop.changed() => break,
             result = sessions.join_next(), if !sessions.is_empty() => {
-                if let Some(Err(error)) = result { eprintln!("rift: connection task: {error}"); }
+                // A join error is a session that panicked or was aborted.
+                if let Some(Err(error)) = result { log_error!("connection task: {error}"); }
             }
             accepted = listener.accept() => {
                 let (client, peer) = match accepted {
                     Ok(connection) => connection,
                     Err(error) => {
-                        eprintln!("rift: accept: {error}");
+                        log_warn!("accept: {error}");
                         sleep(Duration::from_millis(100)).await;
                         continue;
                     }
                 };
+                log_debug!("connection from {peer} on listener {name}");
                 let mut event = Connection::new(&name, peer);
                 metrics.accepted.inc();
                 let snapshot = current.borrow().clone();
@@ -2081,7 +2113,7 @@ impl InstanceChange {
             && self.admin_reply.is_none()
             && let Err(error) = &response
         {
-            eprintln!("rift: automatic scaling failed: {}", error.message);
+            log_error!("automatic scaling failed: {}", error.message);
         }
         if let Some(reply) = self.admin_reply {
             let _ = reply.send(
@@ -2215,7 +2247,7 @@ async fn create_instance(group: String, snapshot: &Arc<Snapshot>) -> InstanceRes
         // Start newly provisioned capacity immediately. The per-group
         // cooldown bounds provisioning, not process readiness.
         if let Err(error) = next.managed.request_scale_start(&name) {
-            eprintln!("rift: automatic start of {name} rejected: {error}");
+            log_warn!("automatic start of {name} rejected: {error}");
         }
     }
     let response = serde_json::json!({
@@ -2339,7 +2371,7 @@ async fn create_remote_instance(
         && !group.server.autostart
         && let Err(error) = next.managed.request_scale_start(&name)
     {
-        eprintln!("rift: automatic start of {name} rejected: {error}");
+        log_warn!("automatic start of {name} rejected: {error}");
     }
     let response = serde_json::json!({
         "name": name,
@@ -2469,10 +2501,10 @@ async fn reconcile_nodes(current: watch::Receiver<Arc<Snapshot>>) {
                         let changed = result["stopped"].as_array().is_some_and(|v| !v.is_empty())
                             || result["removed"].as_array().is_some_and(|v| !v.is_empty());
                         if changed {
-                            eprintln!("rift: node {node} reconciled: {result}");
+                            log_info!("node {node} reconciled: {result}");
                         }
                     }
-                    Err(error) => eprintln!("rift: node {node} reconciliation failed: {error}"),
+                    Err(error) => log_error!("node {node} reconciliation failed: {error}"),
                 }
             });
         }
@@ -2505,11 +2537,11 @@ async fn audit_plugins(
                     )
                     .await
                 {
-                    eprintln!("rift: plugin lifecycle audit failed: {error}");
+                    log_error!("plugin lifecycle audit failed: {error}");
                 }
             }
             Err(RecvError::Lagged(missed)) => {
-                eprintln!("rift: {missed} plugin lifecycle change(s) were not audited");
+                log_warn!("{missed} plugin lifecycle change(s) were not audited");
             }
             Err(RecvError::Closed) => return,
         }
@@ -2669,9 +2701,10 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                 permissions.migrate_once(|| rift::extensions::upgrade_nodes(&config))?
                 && applied.ops > 0
             {
-                eprintln!(
-                    "rift: copied {} permission changes from the extension store into revision {}",
-                    applied.ops, applied.revision
+                log_info!(
+                    "copied {} permission changes from the extension store into revision {}",
+                    applied.ops,
+                    applied.revision
                 );
             }
             let store = Arc::new(rift::instance_store::Store::new(database)?);
@@ -2824,10 +2857,10 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
     snapshot.extensions.plugins().start().await?;
     // Before the listener lines: connection diagnostics follow those.
     if let Some(warning) = crate::check::offline_mode(&snapshot.config) {
-        eprintln!("rift: warning: {warning}");
+        log_warn!("{warning}");
     }
     for (name, listener) in listeners {
-        eprintln!("rift: listening on {}", listener.local_addr()?);
+        log_info!("listening on {}", listener.local_addr()?);
         tasks.spawn(accept(
             listener,
             name,
@@ -2842,13 +2875,13 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         .map(rift::message_script::MessageHandler::script_updates);
     let message_task = message_handler.map(|handler| tokio::spawn(handler.run()));
     if let Some(server) = &messaging_server {
-        eprintln!(
-            "rift: messaging QUIC on {}",
+        log_info!(
+            "messaging QUIC on {}",
             server.local_addr().map_err(io::Error::other)?
         );
     }
     if let Some(listener) = admin_listener {
-        eprintln!("rift: admin on {}", listener.local_addr()?);
+        log_info!("admin on {}", listener.local_addr()?);
         background.spawn(admin::serve(
             listener,
             snapshot.config.admin.clone().unwrap(),
@@ -2871,6 +2904,8 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         metrics.clone(),
     );
     let mut failure = None;
+    // `rift admin shutdown all` also stops servers with `keep_running`.
+    let mut stop_kept = false;
     let mut service_check = tokio::time::interval(Duration::from_secs(1));
     let mut scaling_check = tokio::time::interval(Duration::from_millis(100));
     scaling_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -2882,7 +2917,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
             event = signals.next() => match event {
                 Event::Shutdown => break,
                 Event::Reload => {
-                    if app.path.is_none() { eprintln!("rift: reload ignored: no configuration file selected"); continue; }
+                    if app.path.is_none() { log_warn!("reload ignored: no configuration file selected"); continue; }
                     if instance_change.is_some() { reload_pending = true; continue; }
                     (control::Operation::Reload, None, None, "signal".to_owned())
                 }
@@ -2912,7 +2947,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                 admin::Command::Reload(reply) => (control::Operation::Reload, None, Some(reply), "local-admin".to_owned()),
                 admin::Command::CreateInstance { group, reply } => (control::Operation::CreateInstance { group }, None, Some(reply), "local-admin".to_owned()),
                 admin::Command::RemoveInstance { name, reply } => (control::Operation::RemoveInstance { name }, None, Some(reply), "local-admin".to_owned()),
-                admin::Command::Shutdown(ack) => { let _ = timeout(Duration::from_secs(2), ack).await; break; }
+                admin::Command::Shutdown { ack, kept } => { stop_kept = kept; let _ = timeout(Duration::from_secs(2), ack).await; break; }
             },
             result = background.join_next(), if !background.is_empty() => {
                 failure = Some(io::Error::other(format!("control service stopped unexpectedly: {result:?}")));
@@ -2927,13 +2962,13 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                     Some(crate::scaling::Change::Instance(operation)) => (operation, None, None, "scaler".to_owned()),
                     Some(crate::scaling::Change::Start(name)) => {
                         if let Err(error) = snapshot.managed.request_scale_start(&name) {
-                            eprintln!("rift: automatic start of {name} rejected: {error}");
+                            log_warn!("automatic start of {name} rejected: {error}");
                         }
                         continue;
                     }
                     Some(crate::scaling::Change::Stop(name)) => {
                         if let Err(error) = snapshot.managed.request_stop(&name) {
-                            eprintln!("rift: stop of {name} in a stopped group rejected: {error}");
+                            log_warn!("stop of {name} in a stopped group rejected: {error}");
                         }
                         continue;
                     }
@@ -2997,7 +3032,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                 let was_online = snapshot.config.authentication.online_mode;
                 publish(&mut snapshot, next, &current, &mut health, &metrics).await;
                 if was_online && let Some(warning) = crate::check::offline_mode(&snapshot.config) {
-                    eprintln!("rift: warning: {warning}");
+                    log_warn!("{warning}");
                 }
                 snapshot.prune_groups();
                 services.commit(&snapshot.config, prepared, &app);
@@ -3005,8 +3040,8 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                 if let Some(source) = snapshot.source.as_deref()
                     && let Err(error) = app.workflows.deploy_async(source, &actor, action).await
                 {
-                    eprintln!(
-                        "rift: configuration applied but deployment history could not be written: {error}"
+                    log_error!(
+                        "configuration applied but deployment history could not be written: {error}"
                     );
                 }
                 metrics.reloads.inc();
@@ -3017,7 +3052,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                 );
                 match plugin_failure {
                     None => {
-                        eprintln!("rift: configuration reloaded");
+                        log_info!("configuration reloaded");
                         Ok(snapshot.revision.clone())
                     }
                     // The configuration is committed and cannot be taken
@@ -3030,7 +3065,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                             "configuration applied as revision {}, but plugins were not updated and the previous plugins keep running: {error}",
                             snapshot.revision
                         );
-                        eprintln!("rift: {message}");
+                        log_error!("{message}");
                         Err(control::Error {
                             status: 500,
                             message,
@@ -3040,7 +3075,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
             }
             Err(error) => {
                 metrics.reload_failures.inc();
-                eprintln!("rift: reload rejected: {}", error.message);
+                log_warn!("reload rejected: {}", error.message);
                 Err(error)
             }
         };
@@ -3055,7 +3090,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
                 .audit_async("signal", "reload", "", outcome, status)
                 .await
             {
-                eprintln!("rift: signal reload audit failed: {error}");
+                log_error!("signal reload audit failed: {error}");
             }
         }
         if let Some(reply) = admin_reply {
@@ -3081,7 +3116,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
             | admin::Command::RemoveInstance { reply, .. } => {
                 let _ = reply.send(Err("proxy is shutting down".into()));
             }
-            admin::Command::Shutdown(_) => {}
+            admin::Command::Shutdown { .. } => {}
         }
     }
     requests.close();
@@ -3098,7 +3133,7 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         "rift.events.lifecycle",
         serde_json::json!({"state":"draining"}),
     );
-    eprintln!("rift: draining {} connections", metrics.active.get());
+    log_info!("draining {} connections", metrics.active.get());
     extension_jobs.shutdown().await;
     permission_sweeper.abort();
     if let Some(task) = message_task {
@@ -3118,12 +3153,12 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         result = timeout(snapshot.config.shutdown_timeout, drained) => {
             if result.is_err() {
                 metrics.forced_shutdowns.inc();
-                eprintln!("rift: shutdown deadline reached; closing {} connections", metrics.active.get());
+                log_warn!("shutdown deadline reached; closing {} connections", metrics.active.get());
             }
         }
         _ = signals.shutdown() => {
             metrics.forced_shutdowns.inc();
-            eprintln!("rift: second shutdown signal; closing remaining connections");
+            log_warn!("second shutdown signal; closing remaining connections");
         }
     }
     tasks.shutdown().await;
@@ -3144,8 +3179,12 @@ pub async fn serve(config: Config, source: Option<PathBuf>) -> io::Result<()> {
         });
         change.respond(response);
     }
-    snapshot.managed.shutdown().await;
-    eprintln!("rift: shutdown complete");
+    if stop_kept {
+        snapshot.managed.shutdown_all().await;
+    } else {
+        snapshot.managed.shutdown().await;
+    }
+    log_info!("shutdown complete");
     match failure {
         Some(error) => Err(error),
         None => Ok(()),

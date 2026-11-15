@@ -337,10 +337,10 @@ impl Bus {
         match serde_json::to_vec(body) {
             Ok(payload) => {
                 if let Err(error) = self.broker.publish(subject, Bytes::from(payload)) {
-                    eprintln!("rift: cannot publish {subject}: {error}");
+                    log_error!("cannot publish {subject}: {error}");
                 }
             }
-            Err(error) => eprintln!("rift: cannot encode {subject}: {error}"),
+            Err(error) => log_error!("cannot encode {subject}: {error}"),
         }
     }
 
@@ -382,14 +382,14 @@ impl Bus {
             let message = match subscription.recv().await {
                 Ok(message) => message,
                 Err(error) => {
-                    eprintln!("rift: permission requests on {subject}: {error}; resubscribing");
+                    log_warn!("permission requests on {subject}: {error}; resubscribing");
                     match self.broker.subscribe(subject, None) {
                         Ok(fresh) => {
                             subscription = fresh;
                             continue;
                         }
                         Err(error) => {
-                            eprintln!("rift: cannot resubscribe to {subject}: {error}");
+                            log_error!("cannot resubscribe to {subject}: {error}");
                             return;
                         }
                     }
@@ -462,9 +462,10 @@ impl Bus {
         if let Err(refusal) = &answer
             && message.reply.is_none()
         {
-            eprintln!(
-                "rift: {subject} from {} refused: {}",
-                caller.principal, refusal.message
+            log_warn!(
+                "{subject} from {} refused: {}",
+                caller.principal,
+                refusal.message
             );
         }
         let Some(reply) = message.reply.as_deref() else {
@@ -667,8 +668,8 @@ impl Bus {
         }
         if !dropped.is_empty() {
             dropped.dedup();
-            eprintln!(
-                "rift: {} reported contexts outside permissions.contexts.external, dropped: {}",
+            log_warn!(
+                "{} reported contexts outside permissions.contexts.external, dropped: {}",
                 caller.principal,
                 dropped.join(", ")
             );
@@ -745,8 +746,8 @@ impl Bus {
                     self.publish(&wire::update_subject(subject.uuid), &*subject);
                 }
                 Err(broadcast::error::RecvError::Lagged(missed)) => {
-                    eprintln!(
-                        "rift: the permission bus fell {missed} notifications behind; republishing from the change log"
+                    log_warn!(
+                        "the permission bus fell {missed} notifications behind; republishing from the change log"
                     );
                     self.recover().await;
                 }
@@ -767,8 +768,8 @@ impl Bus {
         if let Some(stream) = self.changes.get()
             && let Err(error) = stream.publish(wire::CHANGES, None, payload).await
         {
-            eprintln!(
-                "rift: cannot append revision {} to {}: {error}",
+            log_error!(
+                "cannot append revision {} to {}: {error}",
                 event.revision,
                 wire::CHANGES
             );
@@ -796,7 +797,7 @@ impl Bus {
             let events = match events {
                 Ok(Ok(events)) => events,
                 Ok(Err(error)) => {
-                    eprintln!("rift: cannot read the permission change log: {error}");
+                    log_error!("cannot read the permission change log: {error}");
                     break;
                 }
                 Err(_) => break,

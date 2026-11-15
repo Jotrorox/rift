@@ -94,6 +94,7 @@ rift.config.managed_servers.survival = {
 | `inherit_env` | Everything | `false` inherits nothing from Rift; a list such as `{ "PATH", "HOME", "JAVA_HOME" }` inherits only those. Rift's own secrets are never inherited either way. |
 | `messaging` | None | `{ preset = "backend", publish = {...}, subscribe = {...} }`: give the server (each instance of a group) its own bus login; see [bus logins](#bus-logins-for-instances). |
 | `isolation` | `"off"` | `"landlock"` or `"required"`, or `{ mode = ..., read = {...}, write = {...} }`: confine the process to its own directory; see [isolation](#isolation). |
+| `keep_running` | `false` | Keep the process running when Rift shuts down, restarts or dies, and adopt it again afterwards; Linux and macOS, this host only. See [servers that outlive the proxy](#servers-that-outlive-the-proxy). |
 
 Commands run without a shell: arguments containing spaces remain single
 arguments, and `$VARIABLE`, `~`, redirection and shell operators are not expanded.
@@ -184,6 +185,24 @@ instances, for example `translation = "newer"`, `translation = false` or
 `translation.clients`. It can be changed while instances run, here or under
 *Groups & templates* in the web interface.
 
+`balance` chooses the instance for a player sent to the group (a route, a hub,
+a fallback, `/server lobby` or a transfer). Sending them to `lobby-1` by name
+is not balanced.
+
+| `balance` | Picks |
+| --- | --- |
+| `least_players` (default) | the instance with the fewest players |
+| `fill` | the instance with the most players that still has room, so lobbies fill one after another and empty ones can be [scaled down](#automatic-scaling) or stopped when idle |
+
+For `fill`, an instance has room below the group's
+`scaling.capacity_per_instance`, or without `scaling` below the
+[queue capacity](extensions.md#queue-behavior) configured for the group. With
+neither there is no limit and the fullest instance always comes first.
+Instances at or over the limit come last, the one with the fewest players
+first. Players count together with attachments in progress, ties go to the
+first name, and the other instances remain alternatives when the chosen one is
+unavailable.
+
 Without an asset template, creation makes a working directory when needed;
 prepare its jar, EULA acceptance, plugins and backend settings before starting.
 An absolute jar path can share a jar across these directories. This existing
@@ -234,8 +253,8 @@ and rejects creation when no port remains. By default it stays stopped until
 an eligible login or explicit start; group `autostart = true` starts it after
 creation. Instances support the existing
 `start`, `stop`, `drain` and transfer commands. Routing to `lobby` chooses an
-eligible instance by occupancy with deterministic ties and tries alternatives
-when an instance is unavailable. Routing directly to `lobby-1` targets that
+eligible instance by occupancy, as the group's `balance` says, with
+deterministic ties and tries alternatives when an instance is unavailable. Routing directly to `lobby-1` targets that
 instance. A group without a scaling policy has no destination until an instance
 is created.
 
@@ -271,7 +290,9 @@ Startup restores all registrations before process autostart or scaling. It
 checks group existence, name collisions, port ranges, directory/storage policy
 and ownership markers. A saved port occupied by another process or configured
 backend/listener stops startup with the instance and port named. Rift retains
-the record and its files; correct the conflict and restart. Ports are retained
+the record and its files; correct the conflict and restart. A port held by the
+instance's own [`keep_running`](#servers-that-outlive-the-proxy) server is no
+conflict: Rift adopts that server. Ports are retained
 even for explicitly stopped instances. Existing instances retain their original
 template ownership when the group's template changes; their worlds are not
 reseeded.
@@ -298,7 +319,7 @@ group, even after the instance is removed. Completed results remain available
 for 10 minutes and are lost on proxy restart. Tracking capacity exhaustion
 returns `503` without submitting work. See [HTTP services](http.md) for limits
 and response details. Group listings
-include names, port ranges, instance names, `template`, `storage` and `scaling`;
+include names, port ranges, instance names, `template`, `storage`, `balance` and `scaling`;
 server
 listings also include each instance's group, address, port, template and storage.
 Static servers report persistent storage and no template. Neither listing
@@ -451,7 +472,9 @@ changing those settings. Static managed definitions require a restart;
 ordinary routes and policies can reload while instances remain registered.
 
 Proxy shutdown stops disposable processes and retains their registrations and
-directories; it does not reset games. Ephemeral instances keep their
+directories; it does not reset games. With
+[`keep_running`](#servers-that-outlive-the-proxy) the processes are not stopped
+either: a game in progress continues, and the restarted proxy adopts it. Ephemeral instances keep their
 registrations but not their copies. After a restart, Rift restores their owned
 directories. Remove instances explicitly to clean them up and create fresh games.
 See [examples/templates.lua](../examples/templates.lua) for persistent survival
@@ -688,6 +711,98 @@ directory (a world on another disk, a shared database file) needs that path in
 is a change of the process definition, like `command`. `memory_mb` sets the
 heap and placement only; Rift does not yet enforce a process memory limit.
 
+## Servers that outlive the proxy
+
+By default every local server stops with Rift. `keep_running = true` on a
+managed server or service group lets its processes keep running while Rift
+shuts down, restarts, is upgraded or crashes, and has the next Rift adopt them
+again, the way servers on a [node](nodes.md) already do:
+
+```lua
+rift.config.managed_servers.survival = {
+    directory = "servers/survival",
+    command = { "java", "-Xmx2G", "-jar", "paper.jar", "nogui" },
+    keep_running = true,
+}
+```
+
+Players lose their connection when the proxy goes away, but the worlds stay
+loaded, and they rejoin running servers as soon as the proxy is back. The
+setting works on Linux and macOS; elsewhere, and for servers on a node (which
+keep running anyway), the configuration is rejected. `storage = "ephemeral"`
+cannot be combined with it; use `disposable` or `persistent`. Like `command`,
+it is part of the process definition: static servers take it on a restart of
+Rift, groups while they have no instances.
+
+A kept server does not depend on Rift's process:
+
+- It leads its own session, so neither Ctrl-C in Rift's terminal nor Rift's
+  death reaches it. A kill still reaches its whole process group.
+- Output goes to `rift-server.log` as for every server; rotation, the log
+  endpoints and the dashboard console keep working after adoption.
+- Console input arrives through the FIFO `rift-console` in the server
+  directory instead of a pipe from Rift. `rift admin`, the dashboard and a
+  graceful `stop` write to it.
+- [`isolation`](#isolation), `env` and `inherit_env` apply unchanged.
+
+**Adoption.** When Rift starts such a server it records the process in
+`rift-process.json` in the server directory: its pid and its start time. A
+starting Rift adopts the recorded process only if that pid still has that start
+time, leads its own session and runs in the server directory. A stale record, a
+pid the system has since given to another process, and a record copied from
+another directory are ignored, and a port held by anything else is refused as
+before: Rift never adopts or signals a process it did not start. The record and
+the FIFO are removed when the server stops. Do not delete `rift-process.json`
+while the server runs; without it Rift cannot find the process again, and the
+server has to be stopped by hand.
+
+An adopted server is `starting` until its port accepts connections, within
+`start_timeout_ms`, and then `running` with its pid. Idle shutdown, stop, drain,
+removal and scaling apply to it as to any other server. Rift is not its parent,
+so it polls the process, and two things differ:
+
+- Its exit status is unknown. An exit counts as a failure and is recovered
+  within `restart_retries`, also where a child that exits with status 0 would
+  simply become `stopped`. The restarted process is Rift's child again.
+- Stop writes `stop` to the console and, after `stop_timeout_ms`, kills the
+  process group, as for a child.
+
+Administrator intent still wins. A server stopped with `rift admin stop`, the
+dashboard or a group stop is not running, so there is nothing to adopt, and for
+service instances the saved stop keeps it stopped after the restart. An
+instance that the database says is stopped but that is found running (Rift was
+killed between the two) is adopted and stopped. An instance whose removal was
+interrupted is stopped during startup recovery before its files are deleted.
+A server that was still starting when Rift shut down in an orderly way is
+stopped, like any interrupted start.
+
+A kept server runs with the command, environment and isolation it was started
+with. To apply a changed definition, or to turn `keep_running` off, stop the
+server and start it again; a server left running after the setting was removed
+is not adopted, and its start fails because the port is in use. Its bus login
+stays valid across the restart; give `messaging.listen` a fixed port so the
+address in `RIFT_BUS_ADDRESS` stays the same.
+
+**Stopping everything.** `rift admin shutdown`, SIGTERM and Ctrl-C leave kept
+servers running. To stop Rift and its kept servers together, use:
+
+```sh
+rift admin shutdown all
+```
+
+It drains sessions like `shutdown` and then stops every local server, kept or
+not, with the usual `stop` and `stop_timeout_ms`. It sets no stop intent, so
+the servers start again as configured with the next Rift. To stop single
+servers first, use `rift admin stop <backend>` or `rift admin group stop
+<group>`; those are remembered for service instances.
+
+Under systemd, `KillMode=control-group` (the default, and the supplied unit's
+setting) kills every process of the unit when it stops or restarts, kept
+servers included. Set `KillMode=process` in the unit to let them survive
+`systemctl restart rift`; `systemctl stop rift` then leaves them running too,
+so stop them with `rift admin shutdown all`. In a container, the servers end
+with the container whatever the setting says.
+
 ## Servers on other hosts
 
 Managed servers and service groups can also run on other machines through
@@ -702,7 +817,8 @@ Simultaneous requests share the same supervised process and wait for its startup
 Readiness means that the configured TCP port accepts a connection; it does not
 guarantee completion of plugin initialization or a successful Minecraft login.
 An already occupied backend port is a startup failure: Rift does not adopt the
-existing process or send it shutdown commands.
+existing process or send it shutdown commands. The one exception is a process
+Rift itself started with [`keep_running`](#servers-that-outlive-the-proxy).
 
 Output from the child is appended to `rift-server.log` in its directory. The
 log must be a regular file: Rift refuses to start a server whose log is a
@@ -748,7 +864,9 @@ with autostart or scaling. Idle stops and ordinary proxy shutdown do not set
 explicit stop intent. Static managed servers retain their configuration-driven
 startup behavior across proxy restarts.
 An orderly Rift shutdown drains proxy sessions before shutting down its managed
-children. Run Rift under an operating-system service manager for recovery from
+children. Servers with [`keep_running`](#servers-that-outlive-the-proxy) are
+the exception to this paragraph: they outlive an orderly shutdown and a killed
+Rift alike. Run Rift under an operating-system service manager for recovery from
 host failure or an uncatchable proxy termination. If Rift is killed with
 `SIGKILL` or by the OOM killer, Linux kills its managed children too. On other
 systems they keep running and hold their ports, so the next start fails until
@@ -837,7 +955,9 @@ changes can still reload under the existing configuration rules.
 ## Test the lifecycle
 
 `cargo test --test managed` exercises real child processes for cancellation,
-concurrent starts, failed startup, graceful and forced shutdown, and idle policy.
+concurrent starts, failed startup, graceful and forced shutdown, and idle policy,
+and on Linux and macOS the adoption of `keep_running` servers by a second
+supervisor.
 After building Rift, run the Minecraft wire scenario without downloads:
 
 ```sh
@@ -845,6 +965,7 @@ python3 tests/managed_wire.py --binary target/debug/rift
 python3 tests/services_wire.py --binary target/debug/rift
 python3 tests/scaling_wire.py --binary target/debug/rift
 python3 tests/provisioning_wire.py --binary target/debug/rift
+python3 tests/kept_servers_wire.py --binary target/debug/rift   # Linux and macOS
 ```
 
 The service-group scenario also checks concurrent allocation, balancing, live

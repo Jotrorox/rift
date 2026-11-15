@@ -20,10 +20,20 @@ use tokio::{
 pub type Reply = oneshot::Sender<Result<Value, String>>;
 pub enum Command {
     Reload(Reply),
-    CreateInstance { group: String, reply: Reply },
-    RemoveInstance { name: String, reply: Reply },
+    CreateInstance {
+        group: String,
+        reply: Reply,
+    },
+    RemoveInstance {
+        name: String,
+        reply: Reply,
+    },
     // The handler confirms that the response has been written before shutdown begins.
-    Shutdown(oneshot::Receiver<()>),
+    /// `kept` also stops local servers with `keep_running` (`shutdown all`).
+    Shutdown {
+        ack: oneshot::Receiver<()>,
+        kept: bool,
+    },
 }
 
 pub struct Transfer {
@@ -425,6 +435,7 @@ pub(crate) fn service_groups(snapshot: &Snapshot) -> Value {
             "scaling":group.scaling.as_ref().map(scaling_values),
             "nodes":group.nodes.as_ref().map(|nodes| json!({"names":nodes.names,"labels":nodes.labels})),
             "placement":group.nodes.as_ref().map(|_| group.placement.as_str()),
+            "balance":group.balance.as_str(),
             "instances":snapshot.config.instances.iter()
                 .filter(|(_, instance)| instance.group == *name)
                 .map(|(name, _)| name)
@@ -708,10 +719,11 @@ pub async fn serve(
                                 let audit = workflows.audit_async("local-admin", &permission, &target, "requested", 0).await;
                                 if audit.is_err() {
                                     Err("operator audit unavailable; command was not submitted".into())
-                                } else if args == ["shutdown"] {
+                                } else if args == ["shutdown"] || args == ["shutdown", "all"] {
+                                    let kept = args.len() == 2;
                                     let (ack, receiver) = oneshot::channel();
-                                    match commands.try_send(Command::Shutdown(receiver)) {
-                                        Ok(()) => {shutdown_ack = Some(ack); Ok(json!({"shutdown":"draining"}))}
+                                    match commands.try_send(Command::Shutdown { ack: receiver, kept }) {
+                                        Ok(()) => {shutdown_ack = Some(ack); Ok(if kept { json!({"shutdown":"draining","kept_servers":"stopping"}) } else { json!({"shutdown":"draining"}) })}
                                         Err(_) => Err("proxy is already shutting down or busy".into()),
                                     }
                                 } else {
@@ -748,7 +760,7 @@ pub async fn serve(
                             workflows.deny_async(401).await
                         };
                         if let Err(error) = audit {
-                            eprintln!("rift: local administrator audit failed: {error}");
+                            log_error!("local administrator audit failed: {error}");
                         }
                         let response = match result {
                             Ok(data) => { events::admin("admin_command", "ok", &permission, &"command completed"); json!({"ok":true,"data":data}) }

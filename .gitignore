@@ -5,3 +5,8 @@ __pycache__/
 /java/**/.gradle/
 /java/.kotlin/
 /java/build-logic/.kotlin/
+
+# Local test deployments; they hold forwarding secrets.
+/testing/
+.DS_Store
+.idea/

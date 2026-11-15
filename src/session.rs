@@ -380,6 +380,9 @@ struct HeldPacket {
     raw: Option<RawFrame>,
     /// What the backend must still receive if the packet is dropped.
     acknowledgement: Option<Packet>,
+    /// The backend verifies this packet and counts it in the player's
+    /// signature chain: dropping it breaks the chain.
+    chained: bool,
 }
 
 /// A click on a plugin action of a dialog Rift showed, for its owner.
@@ -469,6 +472,10 @@ pub struct Session<C, B> {
     /// The chat packet reported as [`SessionEvent::Chat`], until its owner
     /// releases or drops it.
     held_chat: Option<HeldPacket>,
+    /// A signed chat packet was withheld from a backend that verifies the
+    /// player's chat: it rejects whatever the player signs next. Cleared by
+    /// the next backend, which is attached without the signing material.
+    chat_chain_broken: bool,
     /// The backend Disconnect reported as [`SessionEvent::BackendKicked`],
     /// with its reason, until it is delivered or the player moves on.
     held_kick: Option<(Packet, crate::text::Text)>,
@@ -517,6 +524,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             dialog: None,
             suggestions: SuggestionBudget::default(),
             held_chat: None,
+            chat_chain_broken: false,
             held_kick: None,
         })
     }
@@ -661,10 +669,25 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         self.signed_chat = signed_chat;
     }
 
-    /// Whether backends learn this player's chat signing material. Fixed when
-    /// the session begins: a reload of the setting reaches new sessions only.
+    /// Whether backends learn this player's chat signing material. A reload
+    /// of the setting reaches new sessions only; a session whose signed chat
+    /// packet was dropped turns it off for itself (see [`Self::drop_chat`]).
     pub fn signed_chat(&self) -> bool {
         self.signed_chat
+    }
+
+    /// Whether the backend still verifies this player's chat although a
+    /// signed packet was withheld from it. The owner must attach a backend
+    /// again, the same one included ([`Self::detach_backend`]), before the
+    /// player's next signed packet can be let through.
+    pub fn chat_chain_broken(&self) -> bool {
+        self.chat_chain_broken
+    }
+
+    /// Close the backend connection of a joined player so that the owner can
+    /// attach one again, as after a backend outage.
+    pub fn detach_backend(&mut self) {
+        self.backend = None;
     }
 
     /// Forward the chat packet held for [`SessionEvent::Chat`] to the backend
@@ -674,6 +697,10 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
     pub async fn release_chat(&mut self) -> io::Result<()> {
         if self.held_chat.is_none() {
             return Ok(());
+        }
+        if self.chat_chain_broken && self.held_chat.as_ref().is_some_and(|held| held.chained) {
+            // The backend would reject it and disconnect the player.
+            return self.drop_chat().await;
         }
         let version = self.version()?;
         // Cancel-safe: the packet stays held until it can be queued.
@@ -697,12 +724,35 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
         if let Some(backend) = self.backend.as_mut() {
             backend.flush_pending().await?;
         }
-        if let (Some(held), Some(backend)) = (self.held_chat.take(), self.backend.as_mut())
-            && let Some(acknowledgement) = held.acknowledgement
+        let Some(held) = self.held_chat.take() else {
+            return Ok(());
+        };
+        if held.chained {
+            // The chain is broken for good. Later backends get no signing
+            // material, and this one must be attached again without it.
+            self.signed_chat = false;
+            self.chat_chain_broken = true;
+            if let Some(forwarding) = &self.forwarding {
+                self.forwarding = Some(forwarding.for_backend(version));
+            }
+        }
+        if let (Some(acknowledgement), Some(backend)) =
+            (held.acknowledgement, self.backend.as_mut())
         {
             backend.queue(version, Direction::Serverbound, &acknowledgement)?;
         }
         Ok(())
+    }
+
+    /// Settle a held chat packet where nobody can ask the `chat` hook: a
+    /// packet the backend verifies goes through, so that its chain stays
+    /// whole; any other is dropped.
+    async fn pass_chat(&mut self) -> io::Result<()> {
+        if self.held_chat.as_ref().is_some_and(|held| held.chained) {
+            self.release_chat().await
+        } else {
+            self.drop_chat().await
+        }
     }
 
     /// Send the kick held for [`SessionEvent::BackendKicked`] and close the
@@ -979,7 +1029,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                             // Dialog clicks are dropped like commands: the old world is going away.
                             SessionEvent::Packet | SessionEvent::ProxyCommand(_) | SessionEvent::Suggestions(_) | SessionEvent::BungeeCord(_) | SessionEvent::Dialog(_) => {}
                             // Nobody can ask the hook here, so chat is not let through.
-                            SessionEvent::Chat(_) => self.drop_chat().await?,
+                            SessionEvent::Chat(_) => self.pass_chat().await?,
                             SessionEvent::BackendClosed | SessionEvent::BackendFailed => {}
                             // Mid-switch a kick stays authoritative, as unheld.
                             SessionEvent::BackendKicked(_) => {
@@ -1088,6 +1138,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                 self.replay_client_options(&mut backend, State::Play)
                     .await?;
                 self.backend = Some(backend);
+                self.chat_chain_broken = false;
                 self.backend_error = None;
                 self.joined = true;
                 self.switch_in_progress = false;
@@ -1138,6 +1189,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
             }
         }
         self.backend = Some(backend);
+        self.chat_chain_broken = false;
         self.backend_error = None;
         // The player is on another backend; the kick is history.
         self.held_kick = None;
@@ -1232,7 +1284,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                     | SessionEvent::Dialog(_),
                 )) => {}
                 // Nobody can ask the hook here, so chat is not let through.
-                Poll::Ready(Ok(SessionEvent::Chat(_))) => self.drop_chat().await?,
+                Poll::Ready(Ok(SessionEvent::Chat(_))) => self.pass_chat().await?,
                 Poll::Ready(Ok(SessionEvent::BackendClosed | SessionEvent::BackendFailed)) => {
                     return Ok(());
                 }
@@ -1670,7 +1722,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                         .suggest(name, args, servers)
                         .await
                         .unwrap_or_else(|error| {
-                            eprintln!("rift: {error}");
+                            log_error!("{error}");
                             Vec::new()
                         })
                 }
@@ -1712,7 +1764,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
     pub async fn forward(&mut self) -> io::Result<SessionEvent> {
         let version = self.version()?;
         // An owner that did not answer a held chat packet has not allowed it.
-        self.drop_chat().await?;
+        self.pass_chat().await?;
         loop {
             let backend = self
                 .backend
@@ -1869,9 +1921,19 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                     }
                     // What is left of chat is the backend's: messages, and
                     // commands neither Rift nor a plugin owns. A `chat` hook
-                    // sees it first, on the client's own protocol, when
-                    // dropping it is safe: this session's signing material
-                    // was withheld, or the packet carries no signature.
+                    // sees it first, on the client's own protocol. Dropping
+                    // is harmless when this session's signing material was
+                    // withheld or the packet carries no signature. Dropping
+                    // a packet the backend verifies breaks the chain, which
+                    // only attaching the backend again repairs, so the hook
+                    // sees those only while the owner can switch backends.
+                    let chained = self.signed_chat || self.chat_chain_broken;
+                    // can_switch(), by field: `backend` is borrowed.
+                    let switchable = self.network
+                        && self.joined
+                        && !self.switch_in_progress
+                        && !self.client_eof
+                        && self.client.state.settled(State::Play);
                     if phase == State::Play
                         && let Some(caps) = version.switching()
                         && caps.is_chat(&packet)
@@ -1880,12 +1942,13 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                             .as_ref()
                             .is_some_and(|extension| extension.handles_chat())
                         && let Some(attempt) = caps.parse_chat(&packet)?
-                        && (!self.signed_chat || !attempt.signed)
+                        && (!chained || !attempt.signed || switchable)
                     {
                         self.held_chat = Some(HeldPacket {
                             packet,
                             raw,
                             acknowledgement: attempt.ack,
+                            chained: chained && attempt.signed,
                         });
                         return Ok(SessionEvent::Chat(HeldChat {
                             kind: match attempt.kind {

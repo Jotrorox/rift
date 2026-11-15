@@ -46,3 +46,21 @@ fallback_file: fallback.json
 vault: true
 # Register the %rift_...% PlaceholderAPI expansion when PlaceholderAPI is installed.
 placeholders: true
+
+# Chat and the tab list. Both are off, so a chat or tab plugin you already run
+# is not disturbed; turn one on to let RiftPerms show prefixes and suffixes
+# itself. Formats are legacy text like the prefixes (&6, &l, &#ffaa00) with
+# {prefix}, {suffix}, {name}, {display_name} and {group} (the primary group).
+chat:
+  enabled: false
+  # {message} is what the player typed. Colour codes in it stay plain text
+  # unless the player has rift.chat.color.
+  format: "{prefix}{name}{suffix}&7: &r{message}"
+
+tab:
+  enabled: false
+  # A player's name in the tab list. "" leaves the names alone.
+  format: "{prefix}{name}{suffix}"
+  # Sort the list by the weight of each player's primary group, heaviest
+  # first, then by name. Needs Paper 1.21.2 or newer.
+  sort: true

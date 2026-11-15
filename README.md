@@ -36,7 +36,9 @@ Managed Minecraft processes need their own Java runtime and explicit EULA accept
 ## Quick start
 
 Download the archive for your platform (`rift-linux-x86_64.tar.gz`,
-`rift-macos-aarch64.tar.gz` or `rift-windows-x86_64.zip`) and `SHA256SUMS` from
+`rift-linux-aarch64.tar.gz`, `rift-macos-aarch64.tar.gz` or
+`rift-windows-x86_64.zip`; Linux hosts with a glibc older than 2.35 take the
+[`-musl` archive](docs/operations.md#which-linux-build)) and `SHA256SUMS` from
 [Releases](https://github.com/Jotrorox/rift/releases). Check it
 ([verification](docs/operations.md#verifying-a-download)), extract it into an
 empty directory, then run:
@@ -100,12 +102,12 @@ Restart Paper after changing these settings. Rift verifies accounts with Mojang,
 handles client encryption, and forwards player identities to Paper. Failed
 verification never falls back to offline authentication.
 
+The plugin [`chat` hook](docs/plugins.md#chat) for mutes and filters works with
+signed chat: only a player whose message it denies loses chat signing, until
+they reconnect, and their Paper backends need `enforce-secure-profile=false`.
 `authentication.signed_chat` (default `true`) can be set to `false` to keep
-players' chat signing keys and sessions from every backend, so that backends
-treat all chat as unsigned and the proxy may drop single messages, which the
-plugin [`chat` hook](docs/plugins.md#chat) needs for mutes and filters. Players'
-chat then shows as not secure and chat reporting stops working, and Paper
-backends need `enforce-secure-profile=false`; see
+every player's chat signing keys and sessions from every backend instead. Chat
+without signing shows as not secure and cannot be reported; see
 [unsigned chat](docs/network-protocol.md#unsigned-chat).
 
 Online mode works on every supported version, 1.8.9 through 26.3. Velocity
@@ -189,7 +191,7 @@ three ways to run code:
   decisions.
 
 Plugins get login and transfer decisions, lifecycle events, commands with UUID
-permission checks, FIFO server queues, durable namespaced state, timers,
+permission checks, server queues with rank priority, durable namespaced state, timers,
 permissions, the message bus and an online-player API for messages, titles,
 action bars, tab lists, kicks, broadcasts and transfers. Messages, kicks and
 deny reasons can be rich text: colours, line breaks, hover text and click

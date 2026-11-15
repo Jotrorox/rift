@@ -749,7 +749,7 @@ const (
 	HookEvent
 
 	// Never implied by an empty list: Rift asks about every message of
-	// every player, and only with `authentication.signed_chat = false`.
+	// every player.
 	HookChat
 
 	// Never implied by an empty list.

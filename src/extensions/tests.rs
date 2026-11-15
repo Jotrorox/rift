@@ -34,6 +34,16 @@ fn grant(runtime: &Extensions, who: &str, nodes: &[&str]) {
         runtime.permissions().apply(Actor::Cli, change).unwrap();
     }
 }
+/// Set a meta value on the player of `context(id)`, or with `group` on that
+/// permission group.
+fn set_meta(runtime: &Extensions, subject: SubjectRef, key: &str, value: &str) {
+    let node = Node::meta(key, value).unwrap();
+    let change = rift_permissions::Change::SetNode { subject, node };
+    runtime.permissions().apply(Actor::Cli, change).unwrap();
+}
+fn player(id: u8) -> SubjectRef {
+    SubjectRef::User(Uuid::from_bytes([id; 16]))
+}
 fn context(id: u64) -> Context {
     Context::authenticated(
         id,
@@ -53,7 +63,7 @@ fn queue_pressure_excludes_expired_cancelled_and_disconnected_tickets() {
     first.enqueue("game").unwrap();
     second.enqueue("game").unwrap();
     assert_eq!(runtime.queue_lengths()["game"], 2);
-    runtime.host.lock().unwrap().queues.get_mut("game").unwrap()[0].1 =
+    runtime.host.lock().unwrap().queues.get_mut("game").unwrap()[0].entered =
         Instant::now() - Duration::from_secs(301);
     assert_eq!(runtime.queue_lengths()["game"], 1);
     assert!(first.queued_target().is_err()); // retain the existing expiry notification
@@ -245,6 +255,131 @@ async fn a_hidden_player_is_missing_for_viewers_without_the_node() {
     drop(hidden);
     let _again = join(staff, "Staff", "lobby-1");
     check_hidden("lobby-1");
+}
+
+/// Network tab list entries show the listed player's prefix and suffix,
+/// resolved in that player's contexts, and follow permission changes and
+/// server switches. A player with neither keeps the plain entry.
+#[tokio::test]
+async fn network_tab_entries_show_the_prefix_and_suffix_of_the_listed_player() {
+    use crate::players::Viewer;
+    use rift_permissions::Change;
+    use serde_json::json;
+    let runtime = runtime("api_version=1");
+    let players = runtime.players().clone();
+    let roster = players.roster().clone();
+    let authority = runtime.permissions().clone();
+    let watcher = tokio::spawn(players.clone().watch());
+    let (alice, bob, carol) = ([1; 16], [2; 16], [3; 16]);
+    let user = SubjectRef::User(Uuid::from_bytes(bob));
+    let apply = |change| authority.apply(Actor::Cli, change).unwrap();
+    apply(Change::CreateGroup {
+        name: "vip".into(),
+        weight: 10,
+        display_name: None,
+    });
+    apply(Change::SetNode {
+        subject: SubjectRef::Group("vip".into()),
+        node: Node::prefix(100, "&6[VIP] ").unwrap(),
+    });
+    apply(Change::SetNode {
+        subject: user.clone(),
+        node: Node::inherit("vip", true).unwrap(),
+    });
+    apply(Change::SetNode {
+        subject: user.clone(),
+        node: Node::suffix(1, " &7*")
+            .unwrap()
+            .with_context("server", "game")
+            .unwrap(),
+    });
+    let join = |uuid: [u8; 16], name: &str, server: &str| {
+        let record = roster.register(uuid, name, server).unwrap();
+        let (handle, actions) = players.register(u64::from(uuid[0]), &uuid, name, 774, server);
+        (record, handle, actions)
+    };
+    let _alice = join(alice, "Alice", "lobby");
+    let bob_session = join(bob, "Bob", "game");
+    let _carol = join(carol, "Carol", "game");
+    let tab = crate::tab_list::TabList {
+        network: true,
+        ..Default::default()
+    };
+    let entries = |server: &str| {
+        crate::tab_list::view(&roster, Viewer::System, Some(&tab), None, "Alice", server)
+            .players
+            .unwrap()
+    };
+    let listed = entries("lobby");
+    assert_eq!(listed.len(), 2);
+    assert_eq!(listed[0].name, "Bob");
+    assert_eq!(
+        listed[0].display.as_deref(),
+        Some(&json!({"text": "", "extra": [
+            {"text": "[VIP] Bob ", "color": "gold"},
+            {"text": "*", "color": "gray"},
+        ]}))
+    );
+    assert_eq!(listed[0].order, 10);
+    // No prefix and no suffix: the entry Rift always sent.
+    assert_eq!(
+        listed[1],
+        crate::protocol::TabEntry {
+            uuid: carol,
+            name: "Carol".into(),
+            properties: Arc::new([]),
+            display: None,
+            order: 0,
+        }
+    );
+    // A permission change reaches the roster and rebuilds every view.
+    tokio::task::yield_now().await; // The watcher subscribes.
+    let before = roster.generation();
+    apply(Change::SetNode {
+        subject: user.clone(),
+        node: Node::prefix(200, "&c[Admin] ").unwrap(),
+    });
+    timeout(Duration::from_secs(5), async {
+        while roster.get(&bob).unwrap().display == listed[0].display {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_ne!(roster.generation(), before);
+    let bob_entry = |server: &str| entries(server).remove(0);
+    assert_eq!(
+        bob_entry("lobby").display.as_deref(),
+        Some(&json!({"text": "", "extra": [
+            {"text": "[Admin] Bob ", "color": "red"},
+            {"text": "*", "color": "gray"},
+        ]}))
+    );
+    // A switch resolves in the new server's contexts: no suffix off `game`.
+    let mut carol_view = entries("game");
+    assert!(carol_view.iter().all(|entry| entry.name != "Bob"));
+    bob_session.1.set_server("lobby");
+    bob_session.0.set_server("lobby");
+    carol_view = entries("game");
+    let moved = carol_view.iter().find(|entry| entry.name == "Bob").unwrap();
+    assert_eq!(
+        moved.display.as_deref(),
+        Some(&json!({"text": "[Admin] Bob", "color": "red"}))
+    );
+    // Without either the display name goes away again.
+    apply(Change::ClearSubject {
+        subject: user,
+        contexts: None,
+    });
+    timeout(Duration::from_secs(5), async {
+        while roster.get(&bob).unwrap().display.is_some() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(roster.get(&bob).unwrap().order, 0);
+    watcher.abort();
 }
 
 #[test]
@@ -666,6 +801,118 @@ async fn fifo_capacity_cannot_be_bypassed_and_drop_releases_tickets_and_leases()
 }
 
 #[tokio::test]
+async fn queue_tickets_are_ordered_by_rank_priority_then_arrival() {
+    let runtime = runtime("api_version=1, queues={game=1, lobby=1}");
+    let apply = |change| runtime.permissions().apply(Actor::Cli, change).unwrap();
+    apply(rift_permissions::Change::CreateGroup {
+        name: "vip".into(),
+        weight: 10,
+        display_name: None,
+    });
+    set_meta(
+        &runtime,
+        SubjectRef::Group("vip".into()),
+        "queue_priority",
+        "5",
+    );
+    for id in [4, 5, 6] {
+        apply(rift_permissions::Change::SetNode {
+            subject: player(id),
+            node: Node::inherit("vip", true).unwrap(),
+        });
+    }
+    // A per-destination value wins over the general one; nonsense is 0.
+    set_meta(&runtime, player(6), "queue_priority.game", "-1");
+    set_meta(&runtime, player(7), "queue_priority", "high");
+    set_meta(&runtime, player(8), "queue_priority.game", "9");
+    let mut occupant = runtime.session(context(1)).unwrap();
+    occupant.reserve("game").unwrap();
+    occupant.ready("game").await;
+    let sessions: Vec<_> = (2..=8)
+        .map(|id| runtime.session(context(id)).unwrap())
+        .collect();
+    let positions: Vec<_> = sessions
+        .iter()
+        .map(|session| session.enqueue("game").unwrap())
+        .collect();
+    // 2 and 3 arrive first; the VIPs 4 and 5 go in front of them in arrival
+    // order, 6 behind everyone, 7 with the unranked, 8 to the head.
+    assert_eq!(positions, [1, 2, 1, 2, 5, 5, 1]);
+    let order = |runtime: &Extensions| -> Vec<u64> {
+        let host = runtime.host.lock().unwrap();
+        host.queues["game"].iter().map(|ticket| ticket.id).collect()
+    };
+    assert_eq!(order(&runtime), [8, 4, 5, 2, 3, 7, 6]);
+    // Asking again reports the current position and keeps the ticket.
+    assert_eq!(sessions[0].enqueue("game").unwrap(), 4);
+    assert_eq!(runtime.queue_lengths()["game"], 7);
+    // Priority is read when the ticket is created.
+    set_meta(&runtime, player(2), "queue_priority", "100");
+    assert_eq!(sessions[0].enqueue("game").unwrap(), 4);
+    // Only the head may enter once capacity is free.
+    drop(occupant);
+    assert!(sessions[2].reserve("game").is_err());
+    assert_eq!(sessions[2].queued_target().unwrap(), None);
+    assert_eq!(
+        sessions[6].queued_target().unwrap().as_deref(),
+        Some("game")
+    );
+    sessions[6].reserve("game").unwrap();
+    // A new ticket reads the new priority; the override for game does not
+    // apply to another queue.
+    assert_eq!(sessions[4].enqueue("lobby").unwrap(), 1);
+    assert_eq!(sessions[1].enqueue("lobby").unwrap(), 2);
+    assert_eq!(sessions[0].enqueue("lobby").unwrap(), 1);
+    assert_eq!(order(&runtime), [8, 4, 5, 7]);
+    runtime.host.lock().unwrap().queues.get_mut("game").unwrap()[1].entered =
+        Instant::now() - Duration::from_secs(301);
+    assert_eq!(runtime.queue_lengths()["game"], 3);
+    assert!(sessions[2].queued_target().is_err());
+    assert_eq!(order(&runtime), [8, 5, 7]);
+}
+
+#[tokio::test]
+async fn queue_bypass_permission_enters_full_and_queued_destinations() {
+    let source = "return {listeners={public='127.0.0.1:0'},backends={lobby='127.0.0.1:25001',game='127.0.0.1:25002'},routes={public='lobby'},authentication={online_mode=true},forwarding={mode='velocity',secret_env='TEST_SECRET'},service_groups={arena={command={'unused'},directory='instances/{name}',port_range={26000,26003}}},extensions={api_version=1,queues={game=1,arena=1}}}";
+    let mut config = Config::from_lua(source, "queue-bypass.lua").unwrap();
+    config.add_instance("arena", "arena-1", 26000).unwrap();
+    let runtime = Extensions::new(&config, Broker::new(Default::default()).unwrap(), None).unwrap();
+    runtime.update_destinations(&config);
+    let staff = Uuid::from_bytes([3; 16]).to_string();
+    let builder = Uuid::from_bytes([4; 16]).to_string();
+    grant(&runtime, &staff, &["rift.queue.bypass"]);
+    grant(&runtime, &builder, &["rift.queue.bypass.arena"]);
+    let mut occupant = runtime.session(context(1)).unwrap();
+    occupant.reserve("game").unwrap();
+    occupant.ready("game").await;
+    let waiting = runtime.session(context(2)).unwrap();
+    waiting.enqueue("game").unwrap();
+    let mut staff = runtime.session(context(3)).unwrap();
+    let builder = runtime.session(context(4)).unwrap();
+    assert!(waiting.reserve("game").is_err());
+    assert!(builder.reserve("game").is_err()); // only arena
+    staff.before_transfer("game", "command").await.unwrap();
+    staff.ready("game").await;
+    // The lease counts: the head still waits after one of two players leaves.
+    drop(occupant);
+    assert_eq!(waiting.queued_target().unwrap(), None);
+    assert!(waiting.reserve("game").is_err());
+    drop(staff);
+    assert_eq!(waiting.queued_target().unwrap().as_deref(), Some("game"));
+    // A group's permission covers its instances, queued players or not.
+    let mut first = runtime.session(context(5)).unwrap();
+    first.reserve("arena-1").unwrap();
+    first.ready("arena-1").await;
+    waiting.enqueue("arena").unwrap();
+    assert!(waiting.reserve("arena-1").is_err());
+    builder.reserve("arena-1").unwrap();
+    builder.release("arena-1");
+    drop(first);
+    builder.reserve("arena").unwrap(); // ahead of the queued head
+    assert!(waiting.reserve("arena-1").is_err());
+}
+
+#[tokio::test]
 async fn aborted_transfer_releases_only_target_and_notifications_are_ordered() {
     let runtime = runtime(
         r#"api_version=1, queues={game=1},
@@ -760,7 +1007,7 @@ async fn local_lua_state_does_not_survive_invocations_and_expired_queue_cleans_u
         player.decision("login").await.unwrap();
     }
     player.enqueue("game").unwrap();
-    runtime.host.lock().unwrap().queues.get_mut("game").unwrap()[0].1 =
+    runtime.host.lock().unwrap().queues.get_mut("game").unwrap()[0].entered =
         Instant::now() - Duration::from_secs(301);
     assert!(player.queued_target().is_err());
     assert!(player.queued_target().unwrap().is_none());

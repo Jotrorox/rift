@@ -1,5 +1,5 @@
 //! Authenticated extensions. Rust owns durable state, permissions, scheduled
-//! work, admission leases and FIFO tickets; Lua invocations remain isolated.
+//! work, admission leases and queue tickets; Lua invocations remain isolated.
 use crate::{
     auth::AuthenticatedProfile,
     config::{Config, PermissionsConfig},
@@ -865,15 +865,13 @@ pub fn upgrade_nodes(config: &Config) -> io::Result<Vec<(SubjectRef, Node)>> {
         let store = storage::Store::open(Some(storage))?;
         for (key, value) in store.namespace(MEMBERSHIPS) {
             let (Ok(uuid), Ok(groups)) = (Uuid::parse(&key), std::str::from_utf8(&value)) else {
-                eprintln!(
-                    "rift: permission upgrade skipped an invalid {MEMBERSHIPS} entry {key:?}"
-                );
+                log_warn!("permission upgrade skipped an invalid {MEMBERSHIPS} entry {key:?}");
                 continue;
             };
             for group in groups.split(',') {
                 match Node::inherit(group, true) {
                     Ok(node) => nodes.push((SubjectRef::User(uuid), node)),
-                    Err(error) => eprintln!("rift: permission upgrade skipped {key}: {error}"),
+                    Err(error) => log_warn!("permission upgrade skipped {key}: {error}"),
                 }
             }
         }
@@ -885,7 +883,15 @@ pub fn upgrade_nodes(config: &Config) -> io::Result<Vec<(SubjectRef, Node)>> {
 #[derive(Default)]
 struct HostState {
     leases: BTreeMap<u64, BTreeSet<String>>,
-    queues: BTreeMap<String, VecDeque<(u64, Instant)>>,
+    /// Tickets by destination: priority descending, then arrival.
+    queues: BTreeMap<String, VecDeque<Ticket>>,
+}
+/// A session's place in a queue. The priority is the one the player had when
+/// the ticket was created.
+struct Ticket {
+    id: u64,
+    entered: Instant,
+    priority: i64,
 }
 #[derive(Clone)]
 pub struct Extensions {
@@ -911,7 +917,7 @@ pub struct Extensions {
     plugins: crate::plugins::Host,
 }
 impl Extensions {
-    /// Live FIFO pressure, excluding expired tickets even while their session
+    /// Live queue pressure, excluding expired tickets even while their session
     /// is busy elsewhere. Scaling must not keep capacity for stale demand.
     pub fn queue_lengths(&self) -> BTreeMap<String, usize> {
         let host = self.host.lock().unwrap();
@@ -921,7 +927,7 @@ impl Extensions {
             .map(|(name, queue)| {
                 let live = queue
                     .iter()
-                    .filter(|(_, entered)| now.duration_since(*entered) < Duration::from_secs(300))
+                    .filter(|ticket| now.duration_since(ticket.entered) < Duration::from_secs(300))
                     .count();
                 (name.clone(), live)
             })
@@ -1129,8 +1135,8 @@ impl Extensions {
         let empty = BTreeMap::new();
         let groups = self.script.as_ref().map_or(&empty, |script| &script.groups);
         if let Err(error) = self.permissions.mirror_config(groups) {
-            eprintln!(
-                "rift: extensions.groups could not be mirrored into the permission store: {error}"
+            log_error!(
+                "extensions.groups could not be mirrored into the permission store: {error}"
             );
         }
     }
@@ -1320,6 +1326,36 @@ impl ExtensionSession {
             .script
             .as_ref()
             .map_or(&NONE, |script| &script.queues)
+    }
+
+    /// Whether the player may enter `destination` although it is full or
+    /// others are queued for it: `rift.queue.bypass` or
+    /// `rift.queue.bypass.<destination>`.
+    fn bypasses(&self, destination: &str) -> bool {
+        self.runtime
+            .permits(&self.context.uuid, "rift.queue.bypass")
+            || self.runtime.permits(
+                &self.context.uuid,
+                &format!("rift.queue.bypass.{}", destination.to_ascii_lowercase()),
+            )
+    }
+
+    /// The player's priority in the queue for `destination`: the meta value
+    /// `queue_priority.<destination>`, else `queue_priority`, in the contexts
+    /// the proxy knows for them. Unset or not an integer is 0.
+    fn queue_priority(&self, destination: &str) -> i64 {
+        let Ok(uuid) = Uuid::parse(&self.context.uuid) else {
+            return 0;
+        };
+        let permissions = &self.runtime.permissions;
+        let meta = permissions.meta(uuid, &permissions.contexts(uuid)).meta;
+        meta.get(&format!(
+            "queue_priority.{}",
+            destination.to_ascii_lowercase()
+        ))
+        .or_else(|| meta.get("queue_priority"))
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(0)
     }
 
     /// Every command Rift answers: the script's, then persistent plugins'.
@@ -1549,7 +1585,7 @@ impl ExtensionSession {
 
     async fn notify(&self, hook: &str, input: &Context) {
         if let Err(error) = self.runtime.call(hook, input, &self.jobs).await {
-            eprintln!("rift: {error}");
+            log_error!("{error}");
         }
     }
     pub async fn before_transfer(&mut self, target: &str, reason: &str) -> io::Result<()> {
@@ -1597,8 +1633,10 @@ impl ExtensionSession {
                 .queues
                 .get(destination)
                 .and_then(|q| q.front())
-                .map(|(id, _)| *id);
-            if used >= capacity || head.is_some_and(|id| id != self.context.id) {
+                .map(|ticket| ticket.id);
+            if (used >= capacity || head.is_some_and(|id| id != self.context.id))
+                && !self.bypasses(destination)
+            {
                 return Err(crate::text::notice_error(
                     io::ErrorKind::WouldBlock,
                     Notice::QueueServerFull,
@@ -1667,7 +1705,7 @@ impl ExtensionSession {
             .await;
         match provided {
             Ok(contexts) => self.runtime.permissions.provide_contexts(uuid, contexts),
-            Err(error) => eprintln!("rift: {error}"),
+            Err(error) => log_error!("{error}"),
         }
     }
 
@@ -1687,9 +1725,10 @@ impl ExtensionSession {
         }) {
             return Err(notice(Notice::QueueAlreadyOn));
         }
+        let priority = self.queue_priority(target);
         let mut host = self.runtime.host.lock().unwrap();
         if let Some(queue) = host.queues.get(target)
-            && let Some(position) = queue.iter().position(|(id, _)| *id == self.context.id)
+            && let Some(position) = queue.iter().position(|ticket| ticket.id == self.context.id)
         {
             return Ok(position + 1);
         }
@@ -1697,28 +1736,40 @@ impl ExtensionSession {
             return Err(notice(Notice::QueueFull));
         }
         for queue in host.queues.values_mut() {
-            queue.retain(|(id, _)| *id != self.context.id);
+            queue.retain(|ticket| ticket.id != self.context.id);
         }
         let queue = host.queues.entry(target.into()).or_default();
-        queue.push_back((self.context.id, Instant::now()));
-        Ok(queue.len())
+        // Behind every ticket of the same or a higher priority.
+        let position = queue.partition_point(|ticket| ticket.priority >= priority);
+        queue.insert(
+            position,
+            Ticket {
+                id: self.context.id,
+                entered: Instant::now(),
+                priority,
+            },
+        );
+        Ok(position + 1)
     }
     pub fn leave_queue(&self) {
         for queue in self.runtime.host.lock().unwrap().queues.values_mut() {
-            queue.retain(|(id, _)| *id != self.context.id);
+            queue.retain(|ticket| ticket.id != self.context.id);
         }
     }
     pub fn queued_target(&self) -> io::Result<Option<String>> {
         let mut host = self.runtime.host.lock().unwrap();
         let mut head = None;
         for (server, queue) in &mut host.queues {
-            if let Some((_, entered)) = queue.iter().find(|(id, _)| *id == self.context.id)
-                && entered.elapsed() >= Duration::from_secs(300)
+            if let Some(ticket) = queue.iter().find(|ticket| ticket.id == self.context.id)
+                && ticket.entered.elapsed() >= Duration::from_secs(300)
             {
-                queue.retain(|(id, _)| *id != self.context.id);
+                queue.retain(|ticket| ticket.id != self.context.id);
                 return Err(notice(Notice::QueueExpired));
             }
-            if queue.front().is_some_and(|(id, _)| *id == self.context.id) {
+            if queue
+                .front()
+                .is_some_and(|ticket| ticket.id == self.context.id)
+            {
                 head = Some(server.clone());
             }
         }
@@ -1761,7 +1812,7 @@ impl Drop for ExtensionSession {
             let mut host = self.runtime.host.lock().unwrap();
             host.leases.remove(&self.context.id);
             for queue in host.queues.values_mut() {
-                queue.retain(|(id, _)| *id != self.context.id);
+                queue.retain(|ticket| ticket.id != self.context.id);
             }
         }
         // Persistent plugins are told without waiting; their queues are bounded.
@@ -1798,7 +1849,7 @@ impl Drop for ExtensionSession {
         // dropping the notification on the first busy moment.
         handle.clone().spawn(async move {
             let Some(permit) = script::acquire_slot(&runtime.slots).await else {
-                eprintln!("rift: extension teardown notification dropped: capacity exhausted");
+                log_warn!("extension teardown notification dropped: capacity exhausted");
                 return;
             };
             let deadline = Instant::now() + script::EXECUTION_TIMEOUT;
@@ -1811,13 +1862,13 @@ impl Drop for ExtensionSession {
                         && let Err(error) =
                             script.evaluate("after_transfer", &transfer, deadline, &runtime)
                     {
-                        eprintln!("rift: {error}");
+                        log_error!("{error}");
                     }
                 }
                 if script.hooks.contains("disconnect")
                     && let Err(error) = script.evaluate("disconnect", &input, deadline, &runtime)
                 {
-                    eprintln!("rift: {error}");
+                    log_error!("{error}");
                 }
             });
         });

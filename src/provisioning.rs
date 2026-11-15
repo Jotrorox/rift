@@ -924,6 +924,24 @@ fn source(path: &Path, destination: &Path, directory: bool) -> io::Result<PathBu
 }
 
 fn validate_tree(path: &Path, reject_marker: bool) -> io::Result<()> {
+    validate_entry(path, reject_marker, true)
+}
+
+/// The console FIFO of a `keep_running` server, directly in its instance
+/// directory: the one special file an instance may hold. A template may not.
+#[cfg(unix)]
+fn kept_console(path: &Path, metadata: &fs::Metadata) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    metadata.file_type().is_fifo()
+        && path.file_name() == Some(std::ffi::OsStr::new(crate::managed::KEPT_CONSOLE_FILE))
+}
+
+#[cfg(not(unix))]
+fn kept_console(_path: &Path, _metadata: &fs::Metadata) -> bool {
+    false
+}
+
+fn validate_entry(path: &Path, reject_marker: bool, root: bool) -> io::Result<()> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.is_file() {
         return Ok(());
@@ -941,7 +959,11 @@ fn validate_tree(path: &Path, reject_marker: bool) -> io::Result<()> {
                 "template may not supply an instance ownership marker",
             ));
         }
-        validate_tree(&entry.path(), reject_marker)?;
+        let path = entry.path();
+        if root && !reject_marker && kept_console(&path, &fs::symlink_metadata(&path)?) {
+            continue;
+        }
+        validate_entry(&path, reject_marker, false)?;
     }
     Ok(())
 }

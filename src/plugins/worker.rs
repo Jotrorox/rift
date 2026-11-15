@@ -432,21 +432,6 @@ pub(crate) fn require_online_mode(registration: &Registration) -> Result<(), Str
     }
 }
 
-/// What the refusal of a `chat` hook says while chat is signed, for plugins
-/// and for the configuration script.
-pub(crate) const CHAT_NEEDS_UNSIGNED: &str = "the chat hook needs authentication.signed_chat = false: with signed chat, withholding one message breaks the player's signature chain and the backend disconnects them at their next message";
-
-/// A `chat` handler may drop messages, which is safe only when backends take
-/// chat as unsigned (`authentication.signed_chat = false`). A plugin that
-/// handles chat must not start otherwise: it could neither act on signed
-/// messages nor drop one without the backend kicking the player.
-pub(crate) fn require_unsigned_chat(registration: &Registration) -> Result<(), String> {
-    if registration.chat {
-        return Err(CHAT_NEEDS_UNSIGNED.into());
-    }
-    Ok(())
-}
-
 /// The same limits the configuration script's commands obey.
 pub(crate) fn validate_registration(registration: &Registration) -> Result<(), String> {
     if registration.commands.len() > 64 {
@@ -788,8 +773,8 @@ impl Instance {
         let _ = self.queue.try_send(Job::Shutdown);
         if tokio::time::timeout(grace, self.exited()).await.is_err() {
             self.shared.stop.store(true, Ordering::Release);
-            eprintln!(
-                "rift: plugin {} did not stop within {} ms; abandoning its thread",
+            log_warn!(
+                "plugin {} did not stop within {} ms; abandoning its thread",
                 self.spec.name,
                 grace.as_millis()
             );
@@ -868,8 +853,8 @@ impl Worker {
             .unwrap_or_else(|| Instant::now() + grace)
             + ABANDON_MARGIN;
         if !self.wait_signal(&previous.shared.exited, until, false) && !self.closing() {
-            eprintln!(
-                "rift: plugin {}: the previous instance did not stop within its {} ms grace period; starting without it",
+            log_warn!(
+                "plugin {}: the previous instance did not stop within its {} ms grace period; starting without it",
                 self.spec.name,
                 grace.as_millis()
             );
@@ -893,8 +878,8 @@ impl Worker {
         if !self.wait_signal(&earlier.shared.settled, earlier.shared.settle_by, true)
             && !self.closing()
         {
-            eprintln!(
-                "rift: plugin {}: plugin {} has not finished starting; claiming commands without waiting for it",
+            log_warn!(
+                "plugin {}: plugin {} has not finished starting; claiming commands without waiting for it",
                 self.spec.name,
                 earlier.name()
             );
@@ -920,7 +905,7 @@ impl Worker {
     }
 
     fn fail(&self, error: String) {
-        eprintln!("rift: plugin {} failed: {error:.2048}", self.spec.name);
+        log_error!("plugin {} failed: {error:.2048}", self.spec.name);
         self.shared.state.lock().unwrap().last_error = Some(error.clone());
         self.shared.status.send_replace(Status::Failed);
         self.publish("failed", Some(&error));
@@ -964,7 +949,7 @@ impl Worker {
                         Served::Shutdown => {
                             let reason = if self.closing() { "stop" } else { "shutdown" };
                             if let Err(panic) = guarded(|| engine.shutdown(reason)) {
-                                eprintln!("rift: plugin {} shutdown {panic}", self.spec.name);
+                                log_warn!("plugin {} shutdown {panic}", self.spec.name);
                             }
                             let _ = guarded(move || drop(engine));
                             services.close();
@@ -1062,13 +1047,6 @@ impl Worker {
                 }
             })
             .and_then(|()| {
-                if self.spec.signed_chat {
-                    require_unsigned_chat(&registration)
-                } else {
-                    Ok(())
-                }
-            })
-            .and_then(|()| {
                 self.registrar
                     .register(self.id, &self.spec.name, self.replaces, &registration)
             })
@@ -1147,11 +1125,7 @@ impl Worker {
                     let fatal = match &result {
                         Err(CallError::Fatal(error)) => Some(format!("{}: {error}", hook.name())),
                         Err(CallError::Handler(error)) if reply.is_none() || deferred => {
-                            eprintln!(
-                                "rift: plugin {}: {}: {error:.2048}",
-                                self.spec.name,
-                                hook.name()
-                            );
+                            log_error!("plugin {}: {}: {error:.2048}", self.spec.name, hook.name());
                             None
                         }
                         _ => None,

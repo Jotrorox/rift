@@ -250,8 +250,9 @@ rift_plugin::export!(Mute);
 `attempt.text` is the message, or the command line without its slash; for a
 command, `attempt.ctx.command` is the root name and `attempt.ctx.args` the
 rest. `chat` answers `Action::Continue` or `Action::deny`. Rift asks a plugin
-that lists `Hook::Chat` about every message of every player and starts it
-only when the proxy sets `authentication.signed_chat = false`.
+that lists `Hook::Chat` about every message of every player; with signed
+chat, the first deny costs that player their
+[chat signing](plugins.md#chat).
 
 In `kick`, `ctx.server` is the backend and `ctx.reason` its reason without
 formatting. `Action::Continue` leaves the kick to `network.on_kick`,

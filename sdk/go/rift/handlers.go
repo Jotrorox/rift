@@ -124,10 +124,10 @@ func OnHTTP(f func(HTTPRequest) *HTTPResponse) {
 // rest; commands that Rift or a plugin owns never come here.
 //
 // Rift asks only a plugin whose registration lists HookChat (the SDK lists it
-// when Hooks is nil), and starts such a plugin only with
-// authentication.signed_chat = false, because dropping one signed message
-// breaks the player's signature chain. The deadline is 50 ms unless the
-// manifest sets deadlines.chat.
+// when Hooks is nil). Dropping one signed message breaks the player's
+// signature chain, so unless the proxy sets authentication.signed_chat =
+// false, the first deny costs that player their chat signing until they
+// reconnect. The deadline is 50 ms unless the manifest sets deadlines.chat.
 func OnChat(f func(ChatAttempt) Decision) {
 	onChat = f
 	handled[HookChat] = true

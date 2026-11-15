@@ -21,14 +21,16 @@ import org.bukkit.plugin.java.JavaPlugin;
  * RiftPerms: Rift's permission service on Paper, Folia and Purpur. It follows the proxy over the
  * messaging bus, answers {@code hasPermission} from the replica through an injected permissible,
  * registers {@link RiftPermissions} with the services manager, and bridges Vault, PlaceholderAPI and
- * {@code /perms}. The same bus connection serves {@link RiftNetwork}, the network API for other
- * plugins.
+ * {@code /perms}. When the configuration asks for it, it also formats chat and the tab list with
+ * prefixes and suffixes. The same bus connection serves {@link RiftNetwork}, the network API for
+ * other plugins.
  */
 public final class RiftPermsPlugin extends JavaPlugin {
     private MessagingClient bus;
     private PermissionsClient client;
     private NetworkClient network;
     private PlayerListener players;
+    private TabList tab;
 
     @Override
     public void onEnable() {
@@ -100,6 +102,21 @@ public final class RiftPermsPlugin extends JavaPlugin {
             }
         });
 
+        if (config.chat().enabled()) {
+            getServer().getPluginManager().registerEvents(new ChatFormatter(client, config.chat().format()), this);
+            getLogger().info("Formatting chat with Rift prefixes and suffixes");
+        }
+        if (config.tab().enabled()) {
+            tab = new TabList(this, client, config.tab());
+            getServer().getPluginManager().registerEvents(tab, this);
+            // Snapshots and contexts reach the list through the player refresh; weights arrive with
+            // the group table, which is fetched after the change that moved them.
+            players.onRefresh(tab::apply);
+            client.onGroups(tab::refreshAll);
+            tab.refreshAll();
+            getLogger().info("Decorating the tab list with Rift prefixes and suffixes");
+        }
+
         PermsCommand perms = new PermsCommand(this, client);
         PluginCommand command = Objects.requireNonNull(getCommand("perms"), "perms is declared in plugin.yml");
         command.setExecutor(perms);
@@ -125,6 +142,10 @@ public final class RiftPermsPlugin extends JavaPlugin {
             return;
         }
         players.restoreAll(getServer().getOnlinePlayers());
+        if (tab != null) {
+            tab.restoreAll(getServer().getOnlinePlayers());
+            tab = null;
+        }
         getServer().getServicesManager().unregisterAll(this);
         RiftPermissionsProvider.unregister(client);
         RiftNetworkProvider.unregister(network);

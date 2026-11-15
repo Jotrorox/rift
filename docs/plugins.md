@@ -114,7 +114,7 @@ entry = "worker.lua"        # engine = "lua" only: the worker script; default "w
 [lua]                       # engine = "lua" only
 ffi = false                 # LuaJIT's FFI; default false
 native_modules = false      # require() of C modules; default false
-memory_limit_mb = 0         # 0..=65536, 0 is unlimited
+memory_limit_mb = 256       # 0..=65536; default 256, 0 is unlimited
 jit = true                  # false: interpret everything so deadlines interrupt every loop
 ```
 
@@ -130,8 +130,8 @@ jit = true                  # false: interpret everything so deadlines interrupt
 | `[background]` | no workers | See [background work](#background-work). |
 | `[failure]` | | `on_timeout` overrides the per-hook default for every hook. |
 | `[capabilities]` | `filesystem = ["data"]`, `network = true`, all of `env` except [Rift's own secrets](operations.md#secrets-and-the-processes-rift-starts) | `data` is `plugins/<name>/data/` (created on start, read-write); `host` is the configuration directory, read-only; an absolute path is read-write and, for WebAssembly, may not contain or lie inside `local/plugincache` or `plugins/`. WebAssembly enforces all three. Lua enforces `env` (`os.getenv`) and `network` (`rift.http.request`) but not `filesystem`: Lua `io` sees what Rift sees. |
-| `[lua]` | | `engine = "lua"` only. See [the JIT and deadlines](plugins-lua.md#the-jit-and-deadlines). |
-| `[wasm]` | | `engine = "wasm"` only: per-instance limits; see [WebAssembly plugins](#webassembly-plugins). |
+| `[lua]` | `memory_limit_mb = 256` | `engine = "lua"` only. See [the JIT and deadlines](plugins-lua.md#the-jit-and-deadlines). |
+| `[wasm]` | `memory_limit_mb = 256` | `engine = "wasm"` only: per-instance limits; see [WebAssembly plugins](#webassembly-plugins). |
 
 `rift check` prints each plugin with its mode and capabilities, so the trust
 each one gets is visible before anything starts. For Lua plugins it marks what
@@ -178,8 +178,7 @@ messages and events, but a plugin whose registration lists a player hook,
 registers a command or has an empty hook list fails to start (it is not
 retried), so a ban list cannot silently allow everyone; `rift check` and `rift
 check --strict` warn when persistent plugins are configured without it.
-Turning `online_mode` or `signed_chat` on or off restarts every persistent
-plugin.
+Turning `online_mode` on or off restarts every persistent plugin.
 
 **Text.** Wherever a plugin gives Rift text for a player (a deny reason, a
 command's message, a suggestion tooltip, a title, the server-list MOTD,
@@ -245,28 +244,31 @@ not even parse chat packets.
 
 **Chat must be unsigned.** A backend that verifies a player's chat counts
 every signed message; when the proxy withholds one, the backend rejects all
-that follow and disconnects the player. So a `chat` handler needs
-[`authentication.signed_chat = false`](network-protocol.md#unsigned-chat),
-which keeps the signing material from backends:
+that follow and disconnects the player. So the player whose message is
+denied gives up chat signing, in one of two ways
+([unsigned chat](network-protocol.md#unsigned-chat)):
 
-- A plugin with a handler fails to start while `signed_chat` is `true`, with
-  `the chat hook needs authentication.signed_chat = false` (it is not
-  retried). A component says that it handles chat only in the registration
-  its `init` returns, so `rift check` cannot tell beforehand. A configuration
-  whose script defines `chat` does not load.
-- Paper backends also need `enforce-secure-profile=false` in
-  `server.properties`, or they refuse every chat message of players without a
-  signing key.
-- Players lose two things, on the whole network: their chat is shown to
-  others as not secure (the client's unsigned-message marker), and chat
-  reporting stops working.
-- `signed_chat` applies to connections made after it changed. A player who
-  connected while it was `true` keeps a signed chat session with the backend
-  until they reconnect: for that player Rift asks the hook only about packets
-  that carry no signature (commands without signed arguments, and all chat of
-  clients before 1.19) and forwards signed ones without asking. The hook
-  covers every message of players who connected after the setting became
-  `false`.
+- **With signed chat**, the default, players sign until the hook first denies
+  a signed message or command of theirs. Rift then logs that player in to
+  their server again without their signing material: they see the world load
+  once, as for a server switch, and their chat is unsigned until they
+  reconnect to the proxy. Everything the hook lets through stays signed, and
+  nobody else is affected. A mute costs the muted player one reload at their
+  first message; a filter costs it whoever first trips it.
+- **With `authentication.signed_chat = false`**, no backend ever learns
+  anybody's signing material, so nothing has to be repaired and nobody sees a
+  reload. Choose it when the hook denies often.
+- Chat without signing is shown to others as not secure (the client's
+  unsigned-message marker) and cannot be reported.
+- Paper backends need `enforce-secure-profile=false` in `server.properties`
+  either way, or they refuse every chat message of a player without a signing
+  key: the muted player could not chat after the mute ends.
+- Rift asks the hook about a packet the backend verifies only while it can
+  attach a backend again. On a client protocol without server switching, and
+  while a switch is under way, such packets are forwarded without asking;
+  packets without a signature (commands without signed arguments, and all
+  chat of clients before 1.19) always come to the hook.
+- `signed_chat` applies to connections made after it changed.
 
 The deadline is 50 ms (`deadlines.chat`, 1–10 000 ms). A missed deadline or a
 failure applies `on_timeout` and `on_failure`; with `deny`, the default, the
@@ -516,7 +518,7 @@ and the SDK guides map it to each language.
 | `bus` | `publish`, `request(subject, payload, timeout_ms)`, `subscribe(subject, queue_group?)`, `unsubscribe`, `stream-publish` | Messages arrive through the `message` hook. At most 256 subscriptions; requests wait at most 60 s. |
 | `servers` | `create`, `remove`, `start`, `stop`, `download`, `control(operation, payload_json)` | The same `rift.control.*` operations as the bus, awaiting the reply (at most 60 s). |
 | `timers` | `every(ms)`, `after(ms)`, `cancel(handle)` | Ticks arrive through the `timer` hook. At least 10 ms; at most 1024 timers. |
-| `log` | `log(level, message)` | Rift's log, prefixed with the plugin name, and the plugin's [log tail](#operator-surface). Control characters are replaced. |
+| `log` | `log(level, message)` | Rift's log, prefixed with the plugin name, and the plugin's [log tail](#operator-surface). Control characters are replaced. The tail keeps every line; Rift's log shows `debug` and `trace` lines only with [`RIFT_LOG_LEVEL=debug`](operations.md#log-levels), which `rift dev` sets. |
 | `background` | `defer()`, `resolve(ticket, decision)`, `run(payload)`, `is-worker()` | [Background work](#background-work). |
 | `meta` | `name`, `version`, `data-dir`, `config-dir`, `clock`, `time`, `api` | `data-dir` and `config-dir` are guest paths (`/data`, `/host` for WebAssembly). `api` is the contract version of the host, such as `0.2.0`. |
 
@@ -568,7 +570,7 @@ Install only plugins you would run as Rift's user.
 
 ```text
 plugin (configuration script): mode script, sandboxed; hooks login, join
-plugin hello-lua 0.1.0: mode persistent, engine lua, trusted; restart on-failure; capabilities filesystem=data(advisory) network=no(rift.http only) env=all(os.getenv only) ffi=false native_modules=false memory_limit_mb=0; Lua io and os are not sandboxed
+plugin hello-lua 0.1.0: mode persistent, engine lua, trusted; restart on-failure; capabilities filesystem=data(advisory) network=no(rift.http only) env=all(os.getenv only) ffi=false native_modules=false memory_limit_mb=256; Lua io and os are not sandboxed
 plugin (bus responders): mode remote; hooks login
 ```
 

@@ -168,9 +168,9 @@
 //! ```
 //!
 //! Rift asks a plugin that lists [`Hook::Chat`] about every message of every
-//! player, and starts it only when the proxy sets
-//! `authentication.signed_chat = false`: dropping one signed message would
-//! break the player's signature chain.
+//! player. Dropping one signed message breaks the player's signature chain,
+//! so unless the proxy sets `authentication.signed_chat = false`, the first
+//! deny costs that player their chat signing until they reconnect.
 //!
 //! # Background work
 //!

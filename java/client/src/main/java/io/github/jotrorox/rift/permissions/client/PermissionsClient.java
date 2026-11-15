@@ -96,6 +96,7 @@ public final class PermissionsClient implements RiftPermissions, AutoCloseable {
     private final Map<Class<?>, List<Consumer<Object>>> listeners = Map.of(
             PermissionChangeEvent.class, new CopyOnWriteArrayList<>(),
             SubjectUpdatedEvent.class, new CopyOnWriteArrayList<>());
+    private final List<Runnable> groupListeners = new CopyOnWriteArrayList<>();
     private final List<ContextCalculator<?>> calculators = new CopyOnWriteArrayList<>();
     private final Set<UUID> online = ConcurrentHashMap.newKeySet();
     private final Set<UUID> missing = ConcurrentHashMap.newKeySet();
@@ -436,6 +437,19 @@ public final class PermissionsClient implements RiftPermissions, AutoCloseable {
 
     // ---- contexts and events ----
 
+    /**
+     * Hear when {@link #groups()} was replaced, which happens some time after the change event that
+     * caused it: weights and display names are only current from then on. Listeners run on the event
+     * thread, like those of {@link #events()}.
+     *
+     * @param listener called after each new group table is readable
+     * @return a subscription that removes the listener
+     */
+    public Subscription onGroups(Runnable listener) {
+        groupListeners.add(Objects.requireNonNull(listener, "listener"));
+        return () -> groupListeners.remove(listener);
+    }
+
     @Override
     public EventBus events() {
         return eventBus;
@@ -718,10 +732,25 @@ public final class PermissionsClient implements RiftPermissions, AutoCloseable {
                 .whenComplete((reply, error) -> {
                     if (error != null) {
                         logger.warning("Cannot fetch the group table: " + unwrap(error).getMessage());
-                    } else {
-                        replica.setGroups(reply.revision(), reply.groups());
+                    } else if (replica.setGroups(reply.revision(), reply.groups())) {
+                        groupsReplaced();
                     }
                 });
+    }
+
+    private void groupsReplaced() {
+        if (groupListeners.isEmpty()) {
+            return;
+        }
+        events.execute(() -> {
+            for (Runnable listener : groupListeners) {
+                try {
+                    listener.run();
+                } catch (RuntimeException e) {
+                    logger.log(Level.WARNING, "A group table listener failed", e);
+                }
+            }
+        });
     }
 
     private void publishRegistrations() {

@@ -110,11 +110,16 @@ impl Default for Capabilities {
     }
 }
 
+/// What `memory_limit_mb` is when a manifest leaves it out: generous for a
+/// plugin, yet a leak ends the plugin instead of the proxy's host. A manifest
+/// asks for no limit with an explicit 0.
+pub const DEFAULT_MEMORY_LIMIT_MB: u32 = 256;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LuaOptions {
     pub ffi: bool,
     pub native_modules: bool,
-    /// 0 means unlimited.
+    /// 0 means unlimited; absent is [`DEFAULT_MEMORY_LIMIT_MB`].
     pub memory_limit_mb: u32,
     /// `false` turns LuaJIT's compiler off so the deadline hook always fires.
     pub jit: bool,
@@ -125,18 +130,26 @@ impl Default for LuaOptions {
         Self {
             ffi: false,
             native_modules: false,
-            memory_limit_mb: 0,
+            memory_limit_mb: DEFAULT_MEMORY_LIMIT_MB,
             jit: true,
         }
     }
 }
 
 /// `[wasm]`: limits for one WebAssembly instance.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WasmOptions {
     /// Linear memory per instance in MiB; 0 means only WebAssembly's
-    /// own 4 GiB bound.
+    /// own 4 GiB bound, absent is [`DEFAULT_MEMORY_LIMIT_MB`].
     pub memory_limit_mb: u32,
+}
+
+impl Default for WasmOptions {
+    fn default() -> Self {
+        Self {
+            memory_limit_mb: DEFAULT_MEMORY_LIMIT_MB,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -424,7 +437,9 @@ impl Manifest {
                     memory_limit_mb: None,
                     jit: None,
                 });
-                let memory_limit_mb = raw.memory_limit_mb.unwrap_or(0);
+                let memory_limit_mb = raw
+                    .memory_limit_mb
+                    .unwrap_or(i64::from(DEFAULT_MEMORY_LIMIT_MB));
                 if !(0..=65_536).contains(&memory_limit_mb) {
                     return Err("lua.memory_limit_mb must be 0..=65536 (0 is unlimited)".into());
                 }
@@ -443,7 +458,9 @@ impl Manifest {
             }
             (_, EngineKind::Lua) => None,
             (raw, EngineKind::Wasm) => {
-                let memory_limit_mb = raw.and_then(|raw| raw.memory_limit_mb).unwrap_or(0);
+                let memory_limit_mb = raw
+                    .and_then(|raw| raw.memory_limit_mb)
+                    .unwrap_or(i64::from(DEFAULT_MEMORY_LIMIT_MB));
                 if !(0..=4096).contains(&memory_limit_mb) {
                     return Err("wasm.memory_limit_mb must be 0..=4096 (0 is unlimited)".into());
                 }
@@ -600,7 +617,7 @@ impl Manifest {
                 lua.ffi, lua.native_modules, lua.memory_limit_mb
             ));
         }
-        if let Some(wasm) = self.wasm.as_ref().filter(|wasm| wasm.memory_limit_mb > 0) {
+        if let Some(wasm) = &self.wasm {
             text.push_str(&format!(" memory_limit_mb={}", wasm.memory_limit_mb));
         }
         text
@@ -732,7 +749,7 @@ mod tests {
         assert_eq!(manifest.wasm, Some(WasmOptions::default()));
         assert_eq!(
             manifest.describe_capabilities(),
-            "filesystem=data network=yes env=all"
+            "filesystem=data network=yes env=all memory_limit_mb=256"
         );
         let lua = Manifest::parse(
             "name = \"a\"\nversion = \"1\"\napi = \"0.2\"\nengine = \"lua\"\n",
@@ -757,6 +774,20 @@ mod tests {
             limited.describe_capabilities(),
             "filesystem=none network=no env=none memory_limit_mb=64"
         );
+        // Leaving the limit out is 256 MiB; only an explicit 0 lifts it.
+        assert_eq!(lua.lua.as_ref().unwrap().memory_limit_mb, 256);
+        let unlimited = Manifest::parse(
+            &format!("{MINIMAL}[wasm]\nmemory_limit_mb = 0\n"),
+            "relaxoban",
+        )
+        .unwrap();
+        assert_eq!(unlimited.wasm, Some(WasmOptions { memory_limit_mb: 0 }));
+        let unlimited = Manifest::parse(
+            "name = \"a\"\nversion = \"1\"\napi = \"0.2\"\nengine = \"lua\"\n[lua]\nmemory_limit_mb = 0\n",
+            "a",
+        )
+        .unwrap();
+        assert_eq!(unlimited.lua.unwrap().memory_limit_mb, 0);
     }
 
     #[test]

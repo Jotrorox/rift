@@ -1,6 +1,8 @@
 //! Process ownership for managed backends. Workers own their processes, so
 //! cancelling a login or an administrator request cannot abandon a start.
 //! Processes run on this host or on a `rift node` agent; see [`backend`].
+//! Local servers with `keep_running` outlive the proxy and are adopted by the
+//! next one, like servers on a node.
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt, io,
@@ -23,11 +25,34 @@ use crate::{
 };
 
 mod backend;
+mod kept;
 /// Landlock confinement of managed servers (Linux).
 #[cfg(target_os = "linux")]
 pub mod landlock;
 use backend::{Local, ProcessBackend, Remote, Status};
 pub(crate) use backend::{spawn as spawn_process, stop_child, write_console};
+#[cfg(unix)]
+pub(crate) use kept::CONSOLE_FILE as KEPT_CONSOLE_FILE;
+pub(crate) use kept::SUPPORTED as KEEP_RUNNING_SUPPORTED;
+
+/// Whether a server Rift started with `keep_running` still runs in
+/// `directory`, so its port is in use by a process Rift will adopt.
+pub(crate) fn kept_running(directory: &Path) -> bool {
+    kept::recorded(directory).is_some()
+}
+
+/// Stop such a server outside a supervisor: `stop` on its console, then a
+/// kill after `grace`. Does nothing without a recorded running process.
+pub(crate) fn stop_kept(directory: &Path, grace: Duration) -> io::Result<()> {
+    match kept::recorded(directory) {
+        Some(process) => {
+            process.stop(directory, grace)?;
+            kept::forget(directory);
+            Ok(())
+        }
+        None => Ok(()),
+    }
+}
 
 /// Observable lifecycle state of a supervised process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,8 +151,11 @@ struct Server {
     sender: mpsc::Sender<Request>,
     receiver: Mutex<Option<mpsc::Receiver<Request>>>,
     shutdown: AtomicBool,
-    /// Controller shutdown rather than removal: remote processes keep running.
+    /// Controller shutdown rather than removal: remote processes and local
+    /// ones with `keep_running` keep running.
     detach: AtomicBool,
+    /// A controller shutdown that also stops local `keep_running` processes.
+    stop_kept: AtomicBool,
     wake: Notify,
     /// Shared with [`Inner::states`]; a new run starts without a report.
     states: crate::service_state::ServiceStates,
@@ -351,7 +379,7 @@ impl ManagedServers {
             && definition.directory.is_dir()
             && let Err(error) = logins.write_certificate(&definition.directory)
         {
-            eprintln!("rift: cannot write the bus certificate for {name}: {error}");
+            log_error!("cannot write the bus certificate for {name}: {error}");
         }
         Ok(())
     }
@@ -838,11 +866,23 @@ impl ManagedServers {
 
     /// The proxy must first drain its sessions. Shutdown then forcibly stops all
     /// processes Rift owns, including ones whose sessions exceeded that deadline.
+    /// Servers on nodes and local ones with `keep_running` keep running for
+    /// the next proxy to adopt.
     pub async fn shutdown(&self) {
+        self.shut_down(false).await;
+    }
+
+    /// [`shutdown`](Self::shutdown), and stop local `keep_running` servers too.
+    pub async fn shutdown_all(&self) {
+        self.shut_down(true).await;
+    }
+
+    async fn shut_down(&self, stop_kept: bool) {
         let servers: Vec<_> = {
             let servers = lock(&self.0.servers);
             self.0.shutdown.store(true, Ordering::Release);
             for server in servers.values() {
+                server.stop_kept.store(stop_kept, Ordering::Release);
                 server.detach.store(true, Ordering::Release);
                 server.shutdown.store(true, Ordering::Release);
                 server.wake.notify_one();
@@ -895,6 +935,7 @@ fn new_server(
         receiver: Mutex::new(Some(receiver)),
         shutdown: AtomicBool::new(false),
         detach: AtomicBool::new(false),
+        stop_kept: AtomicBool::new(false),
         wake: Notify::new(),
         state: Mutex::new(State {
             phase: Phase::Stopped,
@@ -995,8 +1036,8 @@ pub(crate) fn rotate_log(directory: &Path, limit: u64) -> io::Result<bool> {
 /// returning them: a log that cannot be rotated never stops its server.
 pub(crate) fn rotate_log_reporting(directory: &Path) {
     if let Err(error) = rotate_log(directory, LOG_ROTATE_BYTES) {
-        eprintln!(
-            "rift: cannot rotate {}: {error}",
+        log_error!(
+            "cannot rotate {}: {error}",
             directory.join(LOG_FILE).display()
         );
     }
@@ -1192,7 +1233,7 @@ async fn worker<B: ProcessBackend>(
             }
         }
     }
-    if !(server.detach.load(Ordering::Acquire) && backend.survives_controller()) {
+    if !(server.detach.load(Ordering::Acquire) && backend.survives_controller(&server)) {
         let _ = stop_process(&server, &mut backend).await;
     }
     // Reject queued callers promptly instead of executing stale operations.
@@ -1282,8 +1323,9 @@ async fn supervise<B: ProcessBackend>(server: &Server, players: &PlayerRegistry,
     }
 }
 
-/// Take over a remote process that kept running while this worker did not
-/// own it, e.g. across a controller restart. Administrator stops still win.
+/// Take over a process that kept running while this worker did not own it,
+/// e.g. across a controller restart: a remote one, or a local one with
+/// `keep_running`. Administrator stops still win.
 async fn adopt<B: ProcessBackend>(server: &Server, backend: &mut B) {
     if backend.owns() || server.shutdown.load(Ordering::Acquire) {
         return;
@@ -1291,6 +1333,9 @@ async fn adopt<B: ProcessBackend>(server: &Server, backend: &mut B) {
     let Some(pid) = backend.adoptable(server) else {
         return;
     };
+    // A local process may have been starting when its proxy went away, so
+    // its readiness is awaited again. An agent's report means running.
+    let local = server.config.node.is_none();
     let keep = {
         let mut state = lock(&server.state);
         if !matches!(state.phase, Phase::Stopped | Phase::Failed) || state.pending_stop {
@@ -1300,7 +1345,11 @@ async fn adopt<B: ProcessBackend>(server: &Server, backend: &mut B) {
             // A process this worker did not start may have reported
             // anything before; it reports again once it notices.
             server.states.clear(&server.name);
-            state.phase = Phase::Running;
+            state.phase = if local {
+                Phase::Starting
+            } else {
+                Phase::Running
+            };
             state.pid = pid;
             state.recover = true;
             state.retry_at = None;
@@ -1312,6 +1361,9 @@ async fn adopt<B: ProcessBackend>(server: &Server, backend: &mut B) {
     backend.adopt(server, pid);
     if !keep {
         let _ = stop_process(server, backend).await;
+    } else if local {
+        let ready = await_ready(server, backend).await;
+        let _ = settle(server, backend, ready).await;
     }
 }
 
@@ -1369,8 +1421,8 @@ async fn discard_copy<B: ProcessBackend>(server: &Server, backend: &B) {
         .await
         .unwrap_or_else(|error| Err(io::Error::other(error)));
     if let Err(error) = result {
-        eprintln!(
-            "rift: cannot delete the ephemeral copy of {}: {error}",
+        log_error!(
+            "cannot delete the ephemeral copy of {}: {error}",
             server.name
         );
         lock(&server.state)
@@ -1478,6 +1530,15 @@ async fn start_process_inner<B: ProcessBackend>(
         server.states.clear(&server.name);
     }
     let result = spawn_ready(server, backend).await;
+    settle(server, backend, result).await
+}
+
+/// Record how a start, or the adoption of a starting process, ended.
+async fn settle<B: ProcessBackend>(
+    server: &Server,
+    backend: &mut B,
+    result: io::Result<()>,
+) -> io::Result<()> {
     match result {
         Ok(()) => {
             let mut state = lock(&server.state);
@@ -1516,6 +1577,12 @@ async fn spawn_ready<B: ProcessBackend>(server: &Server, backend: &mut B) -> io:
     }
     backend.start(server).await?;
     lock(&server.state).pid = backend.pid();
+    await_ready(server, backend).await
+}
+
+/// Wait until the owned process accepts connections, exits, is stopped or
+/// exceeds its start timeout.
+async fn await_ready<B: ProcessBackend>(server: &Server, backend: &mut B) -> io::Result<()> {
     let deadline = tokio::time::Instant::now() + server.config.start_timeout;
     loop {
         if server.shutdown.load(Ordering::Acquire) || lock(&server.state).pending_stop {

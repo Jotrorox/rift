@@ -9,6 +9,8 @@
 //! each player's visibility rule on both records: the `rift.visible-to` meta
 //! value, resolved in the player's contexts when they log in, join, switch
 //! servers and whenever their permissions change (see [`Players::watch`]).
+//! The roster record's tab list display name, the player's prefix and suffix
+//! around their name, is resolved at the same moments from the join on.
 use super::fields;
 use crate::{
     messaging::Broker,
@@ -154,6 +156,7 @@ impl PlayerHandle {
         let visible_to = self.players.visibility(&entry.key, server);
         entry.visible_to = visible_to.clone();
         self.players.roster.set_visibility(&entry.key, visible_to);
+        self.players.decorate(&entry.key, &entry.name, server);
         let previous = std::mem::replace(&mut entry.server, server.to_owned());
         let event = self
             .players
@@ -578,6 +581,7 @@ impl Players {
             let (hex, name, server) = (hex.clone(), name.to_owned(), server.to_owned());
             background(move || directory.joined(&hex, &name, ip.as_deref(), &server));
         }
+        self.decorate(uuid, name, server);
         let entry = Entry {
             uuid: hex,
             key: *uuid,
@@ -703,6 +707,40 @@ impl Players {
     /// (a login on its first backend). A value that is not a valid node
     /// still hides the player; nobody can hold it.
     pub fn visibility(&self, uuid: &[u8; 16], server: &str) -> Option<Arc<str>> {
+        let value = self.meta_on(uuid, server).meta.remove(VISIBLE_TO)?;
+        let node = rift_permissions::node::normalize_node(value.trim())
+            .unwrap_or_else(|_| value.trim().to_ascii_lowercase());
+        Some(Arc::from(node))
+    }
+
+    /// Put the player's permission prefix and suffix around `name` on their
+    /// roster record, as other servers' network tab lists show them, with the
+    /// weight of their primary group as the list order. The text takes `&`
+    /// codes and a colour carries into the name, as in a chat format. A
+    /// player with neither keeps the plain entry. Resolved like
+    /// [`Players::visibility`].
+    fn decorate(&self, uuid: &[u8; 16], name: &str, server: &str) {
+        let meta = self.meta_on(uuid, server);
+        let (prefix, suffix) = (
+            meta.prefix.unwrap_or_default(),
+            meta.suffix.unwrap_or_default(),
+        );
+        if prefix.is_empty() && suffix.is_empty() {
+            self.roster.set_display(uuid, None, 0);
+            return;
+        }
+        let display = crate::text::legacy::parse(&format!("{prefix}{name}{suffix}"), '&');
+        let order = self
+            .permissions
+            .groups()
+            .get(&meta.primary_group)
+            .map_or(0, |group| group.weight);
+        self.roster
+            .set_display(uuid, Some(Arc::new(display)), order);
+    }
+
+    /// The player's meta on `server`; see [`Players::visibility`].
+    fn meta_on(&self, uuid: &[u8; 16], server: &str) -> rift_permissions::MetaView {
         let player = rift_permissions::Uuid::from_bytes(*uuid);
         let contexts = if self
             .permissions
@@ -719,14 +757,7 @@ impl Players {
             }
             contexts
         };
-        let value = self
-            .permissions
-            .meta(player, &contexts)
-            .meta
-            .remove(VISIBLE_TO)?;
-        let node = rift_permissions::node::normalize_node(value.trim())
-            .unwrap_or_else(|_| value.trim().to_ascii_lowercase());
-        Some(Arc::from(node))
+        self.permissions.meta(player, &contexts)
     }
 
     /// Resolve one online player's rule again; publishes a `visibility`
@@ -736,6 +767,7 @@ impl Players {
         let Some((id, entry)) = sessions.iter_mut().find(|(_, entry)| entry.key == *uuid) else {
             return false;
         };
+        self.decorate(uuid, &entry.name, &entry.server);
         let visible_to = self.visibility(uuid, &entry.server);
         if visible_to == entry.visible_to {
             return false;

@@ -96,8 +96,8 @@ sees chat messages and backend commands before the backend does and may drop
 them; `exports_rift_plugin_handler_kick(rift_context_t *, rift_decision_t *)`
 runs when a backend kicks a player. Rift calls them only when the hook list
 names them (`RIFT_PLUGIN_TYPES_HOOK_CHAT`, `RIFT_PLUGIN_TYPES_HOOK_KICK`). A
-plugin that lists `chat` is asked about every message of every player and
-starts only with `authentication.signed_chat = false`. See
+plugin that lists `chat` is asked about every message of every player; with
+signed chat, the first deny costs that player their chat signing. See
 [docs/plugins-c.md](../../docs/plugins-c.md#chat-and-kick).
 
 ### Background work

@@ -196,11 +196,12 @@ All directories are read-write and nothing else of the host is visible.
 Stdin is empty; stdout and stderr go to Rift's log line by line as
 `rift: plugin <name>: stdout: ...` (stderr at `warn`).
 
-**Limits.** An optional `[wasm]` section caps each instance's memory:
+**Limits.** Each instance's memory is capped at 256 MiB unless a `[wasm]`
+section says otherwise:
 
 ```toml
 [wasm]
-memory_limit_mb = 64   # 1..=4096; 0 or absent keeps WebAssembly's 4 GiB bound
+memory_limit_mb = 64   # 1..=4096; default 256; 0 keeps WebAssembly's 4 GiB bound
 ```
 
 `[deadlines]` bound the awaited hooks, `init`, `reload`, `shutdown` and

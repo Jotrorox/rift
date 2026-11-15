@@ -405,9 +405,10 @@ static inline void rift_decision_free(rift_decision_t *decision) {
 // Rift calls either hook only when `init` lists it
 // (`RIFT_PLUGIN_TYPES_HOOK_CHAT`, `RIFT_PLUGIN_TYPES_HOOK_KICK`): an empty
 // hook list does not imply them. A plugin that lists `chat` is asked about
-// every message of every player and starts only with
-// `authentication.signed_chat = false`, because dropping one signed message
-// would break the player's signature chain.
+// every message of every player. Dropping one signed message breaks the
+// player's signature chain, so unless the proxy sets
+// `authentication.signed_chat = false`, the first deny costs that player
+// their chat signing until they reconnect.
 //
 //   void exports_rift_plugin_handler_chat(rift_chat_attempt_t *attempt, rift_decision_t *ret) {
 //     if (attempt->kind == RIFT_PLUGIN_TYPES_CHAT_KIND_MESSAGE && is_muted(&attempt->ctx.uuid)) {

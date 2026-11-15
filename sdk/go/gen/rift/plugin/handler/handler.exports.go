@@ -74,10 +74,11 @@ var Exports struct {
 	// mutes and filters; only for a registration that lists `chat`.
 	// `continue` passes the packet on unchanged; `deny` drops it and shows
 	// the player the text. Withholding one signed message breaks a player's
-	// signature chain, so a plugin that lists `chat` starts only with
-	// `authentication.signed_chat = false`. Commands that Rift or a plugin
-	// owns never come here. The deadline is 50 ms unless the manifest sets
-	// `deadlines.chat`.
+	// signature chain, so unless the proxy sets
+	// `authentication.signed_chat = false`, the first deny costs that player
+	// their chat signing until they reconnect. Commands that Rift or a
+	// plugin owns never come here. The deadline is 50 ms unless the manifest
+	// sets `deadlines.chat`.
 	//
 	//	chat: func(attempt: chat-attempt) -> decision
 	Chat func(attempt ChatAttempt) (result Decision)

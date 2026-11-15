@@ -358,7 +358,7 @@ typedef uint8_t rift_plugin_types_hook_t;
 #define RIFT_PLUGIN_TYPES_HOOK_TIMER 12
 #define RIFT_PLUGIN_TYPES_HOOK_EVENT 13
 // Never implied by an empty list: Rift asks about every message of
-// every player, and only with `authentication.signed_chat = false`.
+// every player.
 #define RIFT_PLUGIN_TYPES_HOOK_CHAT 14
 // Never implied by an empty list.
 #define RIFT_PLUGIN_TYPES_HOOK_KICK 15
