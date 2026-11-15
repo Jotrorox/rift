@@ -417,6 +417,38 @@ fn server_commands_accept_lifecycle_requests_and_report_completion_separately() 
 }
 
 #[test]
+fn maintenance_admits_only_holders_of_the_bypass_permission() {
+    let fixture = Fixture::new();
+    let backend = TcpListener::bind("127.0.0.1:0").unwrap();
+    fixture.write(&config(
+        &[&backend],
+        "maintenance = true, maintenance_permission = 'Rift.Maintenance.Bypass',",
+        "'status', 'maintenance', 'perms'",
+    ));
+    let process = fixture.spawn();
+    rejected_login(process.front, "maintenance");
+    assert_no_connection(&backend);
+    let granted = process.command(&[
+        "perms",
+        "group",
+        "default",
+        "permission",
+        "set",
+        "rift.maintenance.bypass",
+        "true",
+    ]);
+    assert!(
+        granted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&granted.stderr)
+    );
+    let mut staff = connect_game(process.front);
+    let mut server = accept_game(&backend);
+    exchange(&mut staff, &mut server);
+    assert_eq!(process.ok(&["status"])["maintenance"], true);
+}
+
+#[test]
 fn maintenance_preserves_players_exposes_status_and_can_be_disabled() {
     let fixture = Fixture::new();
     let backend = TcpListener::bind("127.0.0.1:0").unwrap();

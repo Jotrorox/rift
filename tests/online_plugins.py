@@ -13,6 +13,8 @@ from pathlib import Path
 import re
 import shutil
 import tempfile
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -119,12 +121,31 @@ def _verify(path, artifact):
         raise ValueError(f"plugin checksum mismatch: {path}: {actual}")
 
 
+DOWNLOAD_ATTEMPTS = 3
+DOWNLOAD_RETRY_SECONDS = 5
+
+
 def _download(artifact, cache):
     path = cache / artifact["filename"]
     if path.exists() or path.is_symlink():
         # Never trust a warm cache or silently replace evidence of corruption.
         _verify(path, artifact)
         return path
+    # A plugin host's gateway error or timeout gets two more tries. A missing
+    # artifact (4xx), a bad checksum or an unsafe redirect fails at once.
+    for attempt in range(DOWNLOAD_ATTEMPTS):
+        try:
+            return _fetch(artifact, cache, path)
+        except urllib.error.HTTPError as error:
+            if error.code < 500 or attempt == DOWNLOAD_ATTEMPTS - 1:
+                raise
+        except (urllib.error.URLError, TimeoutError):
+            if attempt == DOWNLOAD_ATTEMPTS - 1:
+                raise
+        time.sleep(DOWNLOAD_RETRY_SECONDS * (attempt + 1))
+
+
+def _fetch(artifact, cache, path):
     request = urllib.request.Request(artifact["url"], headers={
         "User-Agent": "rift-online-acceptance/1.0 (https://github.com/Jotrorox/rift)"})
     with tempfile.TemporaryDirectory(prefix=".plugin-download-", dir=cache) as temporary:

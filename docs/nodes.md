@@ -272,7 +272,8 @@ address.
   servers; remote files are limited to 512 KiB through the web console.
 - Control subject and CLI: `rift.control.nodes` and `rift admin nodes` (grant
   `servers`).
-- Java: `RiftControl.nodes()` in rift-java.
+- Java: `RiftControl.nodes()` in the `rift-control` artifact (see
+  [control and events](messaging.md#java-control-and-events)).
 
 ### Wire protocol
 

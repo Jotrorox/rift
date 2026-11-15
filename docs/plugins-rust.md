@@ -30,7 +30,7 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [dependencies]
-rift-plugin = { path = "../rift/sdk/rust" } # sdk/rust in a Rift checkout
+rift-plugin = "0.2.0"
 serde = { version = "1", features = ["derive"] }
 
 [profile.release]
@@ -40,7 +40,10 @@ codegen-units = 1
 strip = true
 ```
 
-The release profile above keeps the component small. Check the result with
+[`rift-plugin`](https://crates.io/crates/rift-plugin) is versioned after the
+plugin contract (`rift:plugin@0.2.0`), not the proxy. Each published version
+has a `sdk/rust/v…` git tag, and in a Rift checkout
+`{ path = "…/sdk/rust" }` works as well. The release profile above keeps the component small. Check the result with
 `wasm-tools component wit my_plugin.wasm`: it exports
 `rift:plugin/handler@0.2.0` and imports the `rift:plugin/*` interfaces it uses.
 

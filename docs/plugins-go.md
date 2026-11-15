@@ -19,7 +19,7 @@ TinyGo's Linux release; `brew install binaryen` on macOS).
 **Use TinyGo 0.42.0** (see [gotchas](#gotchas)):
 
 ```sh
-go get github.com/Jotrorox/rift/sdk/go
+go get github.com/Jotrorox/rift/sdk/go@v0.2.0
 tinygo build -target=wasip2 --wit-package path/to/rift/wit --wit-world plugin -no-debug -o my_plugin.wasm .
 ```
 

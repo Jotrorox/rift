@@ -24,11 +24,21 @@ final class Frames {
     static final int MESSAGE = 7;
     static final int PING = 8;
     static final int REQUEST = 9;
+    static final int STREAM_PUBLISH = 10;
+    static final int STORED = 11;
+    static final int CONSUMER_OPEN = 12;
+    static final int CONSUMER_FETCH = 13;
+    static final int DELIVERY = 14;
+    static final int ACK = 15;
+    static final int CONSUMER_DELETE = 16;
 
     static final int MAX_PAYLOAD = 1024 * 1024;
     static final int MAX_FRAME = MAX_PAYLOAD + 64 * 1024;
     static final int MAX_STRING = 4096;
     static final int MAX_SUBJECT = 1024;
+    static final int MAX_FETCH = 256;
+    static final long MAX_ACK_WAIT_MILLIS = 3_600_000;
+    static final int MAX_ACK_PENDING = 65_536;
     /** The server's error text for a REQUEST that got no reply in time. */
     static final String REQUEST_TIMED_OUT = "request timed out";
 
@@ -50,6 +60,13 @@ final class Frames {
 
         Writer u32(long value) {
             for (int shift = 24; shift >= 0; shift -= 8) {
+                body.write((int) (value >>> shift));
+            }
+            return this;
+        }
+
+        Writer u64(long value) {
+            for (int shift = 56; shift >= 0; shift -= 8) {
                 body.write((int) (value >>> shift));
             }
             return this;
@@ -144,6 +161,14 @@ final class Frames {
             int value = ((body[position] & 0xff) << 8) | (body[position + 1] & 0xff);
             position += 2;
             return value;
+        }
+
+        long u32() throws MessagingException {
+            return ((long) u16() << 16) | u16();
+        }
+
+        long u64() throws MessagingException {
+            return (u32() << 32) | u32();
         }
 
         String string() throws MessagingException {

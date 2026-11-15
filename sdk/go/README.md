@@ -44,7 +44,7 @@ Add this module to your plugin's `go.mod` (inside this repository use a
 `replace` directive, as hello-go does):
 
 ```sh
-go get github.com/Jotrorox/rift/sdk/go
+go get github.com/Jotrorox/rift/sdk/go@v0.2.0
 ```
 
 ## Writing a plugin

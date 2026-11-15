@@ -80,7 +80,9 @@ For a new player the order is:
 
 1. Legacy `on_route`, handshake, maintenance/rate admission and login parsing.
 2. Mojang identity verification and encryption. A claimed Login Start UUID is
-   never passed to an extension as an authenticated identity.
+   never passed to an extension as an authenticated identity. With
+   `maintenance_permission` set, maintenance is decided here instead of in
+   step 1.
 3. `login`, then `initial_server` (each Lua first, then [persistent plugins](plugins.md#dispatch-order), then its [bus decision](#decisions-answered-over-the-message-bus)),
    access checks and duplicate-name reservation.
 4. Initial backend capacity reservation, connect, login, configuration and Join Game.
