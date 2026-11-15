@@ -59,6 +59,8 @@ export const DOCS = [
     blurb: 'Backend switching and recovery for Java 1.8.9 through 26.3.' },
   { slug: 'translation', file: 'docs/translation.md', title: 'Protocol translation', group: 'Reference',
     blurb: 'Players and backends on different Minecraft versions.' },
+  { slug: 'stability', file: 'docs/stability.md', title: 'Stability and versioning', group: 'Reference',
+    blurb: 'Release channels, what a version number promises and how the database upgrades.' },
   { slug: 'performance', file: 'docs/performance.md', title: 'Performance', group: 'Reference',
     blurb: 'CPU, memory and latency against Velocity, with reproducible runs.' },
 ];

@@ -751,6 +751,8 @@ sudo cp -p /usr/local/bin/rift /var/backups/rift/rift.previous
 sudo cp -p /etc/rift/rift.lua /var/backups/rift/rift.lua.previous
 # Announce/prepare the maintenance window, then allow graceful drain.
 sudo systemctl stop rift
+# Copy the database only while Rift is stopped; a new release may migrate it.
+sudo cp -p /var/lib/rift/rift.sqlite3 /var/backups/rift/rift.sqlite3.previous
 sudo install -m 0755 ./rift /usr/local/bin/rift
 sudo systemctl start rift
 sudo systemctl status rift
@@ -759,22 +761,38 @@ sudo journalctl -u rift -n 50 --no-pager
 
 Confirm metrics, backend health and a real client login before declaring the
 upgrade complete. Preserve `admin.env` securely when changing its format or secret.
-If validation/startup or the client check fails, restore the matched binary/config:
+If validation/startup or the client check fails, restore the matched binary,
+config and database:
 
 ```sh
 sudo systemctl stop rift
 sudo install -m 0755 /var/backups/rift/rift.previous /usr/local/bin/rift
 sudo install -o root -g rift -m 0640 /var/backups/rift/rift.lua.previous /etc/rift/rift.lua
+sudo install -o rift -g rift -m 0600 /var/backups/rift/rift.sqlite3.previous /var/lib/rift/rift.sqlite3
 sudo -u rift /usr/local/bin/rift --check /etc/rift/rift.lua
 sudo systemctl start rift
 sudo journalctl -u rift -n 50 --no-pager
 ```
 
-For containers, retain the previous versioned image and matching config, build a
+**The database only moves forward.** `instance_database` (`rift.sqlite3`) holds
+instance registrations and the permission store. A new release migrates its
+schema in place at the first start and there is no downgrade: the previous
+binary refuses the migrated file with
+`instance database <path>: unsupported schema version N of <component>` and
+does not start. Rolling back the binary therefore means restoring the copy
+taken above, which discards registrations and permission changes made since
+the upgrade. Take the copy with Rift stopped: the file uses a rollback journal,
+so a stopped Rift leaves one complete file and no `-wal` companion. Where the
+path differs, use the configured `instance_database`; the `.lock` file beside
+it holds no data and needs no backup. The [changelog](../CHANGELOG.md) names
+each release that changes the schema.
+
+For containers, copy `rift.sqlite3` out of the stopped container's volume the
+same way before starting the new image. Retain the previous versioned image and matching config, build a
 new image under a different `RIFT_IMAGE` tag, and run its one-shot `check` command
 before stopping the running container. Stop gracefully, then run `up -d` with the
-new tag. Roll back by restoring the previous config, selecting the previous
-image tag, validating it and running `up -d --no-build`. Avoid rebuilding or
+new tag. Roll back by restoring the previous config and database copy,
+selecting the previous image tag, validating it and running `up -d --no-build`. Avoid rebuilding or
 reusing the previous tag until the upgrade is verified. A process replacement
 disconnects sessions; configuration reload alone preserves them.
 

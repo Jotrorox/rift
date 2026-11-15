@@ -18,6 +18,7 @@ testing {
             dependencies {
                 implementation(project())
                 implementation(project(":rift-network-client"))
+                implementation(project(":rift-control"))
             }
             targets.configureEach {
                 testTask.configure {
