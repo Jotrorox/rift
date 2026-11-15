@@ -4,6 +4,8 @@ description = "Minecraft Java protocol translation between client and backend ve
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [dependencies]
 flate2 = "1"

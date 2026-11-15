@@ -4,6 +4,8 @@ description = "Rift permissions bus client: handshake, snapshots, updates and of
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [dependencies]
 log = "0.4"

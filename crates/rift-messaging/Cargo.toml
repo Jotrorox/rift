@@ -4,6 +4,8 @@ description = "Client, frame codec and TLS setup of Rift's QUIC messaging protoc
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [dependencies]
 bytes.workspace = true

@@ -347,6 +347,16 @@ pub(super) fn parse(
                 definition
                     .raw_set("command", default_command(memory))
                     .map_err(|e| e.to_string())?;
+                // -Xms and -Xmx are the heap alone; a limit at or below it
+                // kills the server as soon as the heap fills.
+                if let Some(limit) = managed::MemoryLimit::peek(&value)
+                    && limit <= memory
+                {
+                    return Err(format!(
+                        "{path}.memory_limit: must exceed memory_mb ({memory}), which is the Java heap alone; allow for the JVM's own memory, for example {}",
+                        memory + (memory / 4).max(512)
+                    ));
+                }
                 defaults.insert(name.clone(), (Some(memory), default_directory));
             }
             (_, Value::Nil) => {
@@ -938,6 +948,44 @@ mod tests {
             ("isolation='strict'", "expected \"off\""),
             ("isolation={mode='landlock',extra=1}", "isolation"),
             ("isolation=5", "expected a mode or a table"),
+        ] {
+            let error = parse(bad).unwrap_err().to_string();
+            assert!(error.contains(message), "{bad}: {error}");
+        }
+    }
+
+    #[test]
+    fn memory_limit_takes_megabytes_or_a_table_that_can_require_it() {
+        let parse = |definition: &str| {
+            Config::from_lua(
+                &group_source(&format!(
+                    "directory='servers/{{name}}',command={{'java'}},port_range={{25600,25602}},{definition}"
+                )),
+                "memory.lua",
+            )
+            .map(|config| config.service_groups["lobby"].server.memory_limit)
+        };
+        use crate::config::MemoryLimit;
+        assert_eq!(parse("").unwrap(), None);
+        assert_eq!(
+            parse("memory_limit=3072").unwrap(),
+            Some(MemoryLimit {
+                megabytes: 3072,
+                required: false
+            })
+        );
+        assert_eq!(
+            parse("memory_limit={mb=512,required=true}").unwrap(),
+            Some(MemoryLimit {
+                megabytes: 512,
+                required: true
+            })
+        );
+        for (bad, message) in [
+            ("memory_limit=32", "expected 64..="),
+            ("memory_limit='3G'", "memory_limit"),
+            ("memory_limit={required=true}", "memory_limit.mb"),
+            ("memory_limit={mb=512,extra=1}", "memory_limit"),
         ] {
             let error = parse(bad).unwrap_err().to_string();
             assert!(error.contains(message), "{bad}: {error}");

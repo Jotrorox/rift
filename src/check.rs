@@ -28,15 +28,19 @@ impl Report {
 /// the configuration script runs sandboxed, persistent plugins run trusted
 /// with the listed capabilities. Plugins are never initialized here. Returns
 /// lines to print and warnings (engines this build lacks).
-/// One line per managed server or service group that asks for isolation:
-/// what this host's kernel gives it, and the fallback where it gives
-/// nothing. Servers on nodes are confined by their agent's kernel.
+/// One line per managed server or service group that asks for isolation or
+/// a memory limit: what this host's kernel gives it, and the fallback where
+/// it gives nothing. Servers on nodes are confined by their agent's kernel.
 pub fn isolation(config: &Config) -> Vec<String> {
     use rift::config::IsolationMode;
     #[cfg(target_os = "linux")]
     let available = rift::managed::landlock::abi().map(rift::managed::landlock::describe);
     #[cfg(not(target_os = "linux"))]
     let available: Result<String, String> = Err("Landlock exists only on Linux".into());
+    #[cfg(target_os = "linux")]
+    let groups = rift::managed::cgroup::describe();
+    #[cfg(not(target_os = "linux"))]
+    let groups: Result<String, String> = Err("cgroups exist only on Linux".into());
     let mut lines = Vec::new();
     let definitions = config
         .managed_servers
@@ -57,6 +61,24 @@ pub fn isolation(config: &Config) -> Vec<String> {
             )
         }));
     for (path, server, remote) in definitions {
+        if let Some(limit) = server.memory_limit {
+            let megabytes = limit.megabytes;
+            lines.push(if remote {
+                format!("memory_limit {path}: {megabytes} MiB in each node's cgroup, enforced by its agent")
+            } else {
+                match (&groups, limit.required) {
+                    (Ok(description), _) => {
+                        format!("memory_limit {path}: {megabytes} MiB, {description}")
+                    }
+                    (Err(reason), true) => format!(
+                        "memory_limit {path}: unavailable ({reason}); the required limit refuses to start it"
+                    ),
+                    (Err(reason), false) => format!(
+                        "memory_limit {path}: unavailable ({reason}); starts without a limit"
+                    ),
+                }
+            });
+        }
         let mode = server.isolation.mode;
         if mode == IsolationMode::Off {
             continue;
@@ -82,10 +104,10 @@ pub fn isolation(config: &Config) -> Vec<String> {
     if config
         .service_groups
         .values()
-        .any(|group| group.memory_mb.is_some())
+        .any(|group| group.memory_mb.is_some() && group.server.memory_limit.is_none())
     {
         lines.push(
-            "memory_mb sets -Xmx and placement only; Rift does not enforce a process memory limit"
+            "memory_mb sets -Xmx and placement only; set memory_limit to enforce a process memory limit"
                 .into(),
         );
     }
@@ -352,6 +374,9 @@ fn environment(config: &Config, report: &mut Report) {
         }
         let minimum = if field == "forwarding.secret_env" {
             1
+        } else if field.starts_with("web.") {
+            // What the web service accepts as a token.
+            16
         } else {
             32
         };

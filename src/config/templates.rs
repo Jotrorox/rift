@@ -127,6 +127,53 @@ pub(super) fn parse(
     Ok(result)
 }
 
+const MAX_SOURCES: usize = 32;
+
+/// `template_sources.<name> = { git = "https://…", ref = "main" }`, or
+/// `rev = "<commit>"` in place of `ref`.
+pub(super) fn parse_sources(
+    root: &Table,
+) -> Result<BTreeMap<String, crate::template_source::TemplateSource>, String> {
+    let mut result = BTreeMap::new();
+    let Some(values) = options_map(root, "template_sources")? else {
+        return Ok(result);
+    };
+    for pair in values.pairs::<Value, Value>() {
+        let (name, value) = pair.map_err(|error| error.to_string())?;
+        let name = string(name, "template_sources key")?;
+        let path = format!("template_sources.{name}");
+        if !services::safe_name(&name) {
+            return Err(format!(
+                "{path}: names must contain 1..=128 ASCII letters, digits, underscores or hyphens"
+            ));
+        }
+        let values = table(value, &path)?;
+        fields(&values, &["git", "ref", "rev"], &path)?;
+        let field = |key: &str| -> Result<Option<String>, String> {
+            match values
+                .raw_get::<Value>(key)
+                .map_err(|error| error.to_string())?
+            {
+                Value::Nil => Ok(None),
+                value => string(value, &format!("{path}.{key}")).map(Some),
+            }
+        };
+        let source = crate::template_source::TemplateSource {
+            url: field("git")?.ok_or_else(|| format!("{path}.git: required"))?,
+            reference: field("ref")?,
+            revision: field("rev")?,
+        };
+        source
+            .validate()
+            .map_err(|error| format!("{path}.{error}"))?;
+        result.insert(name, source);
+    }
+    if result.len() > MAX_SOURCES {
+        return Err(format!("template_sources: at most {MAX_SOURCES} sources"));
+    }
+    Ok(result)
+}
+
 /// `{ type = "paper", version = "1.21.8" }` or `{ type = "url", url = ..., sha256 = ... }`.
 fn software(value: Value, path: &str) -> Result<crate::software::Software, String> {
     let values = table(value, path)?;
@@ -588,12 +635,25 @@ rift.config.service_groups.lobby={{template='lobby',port_range={{25600,25609}}{g
             ",memory_mb=64",
             ",memory_mb='1G'",
             ",memory_mb=1024,command={'java'}",
+            // The heap alone would fill the limit.
+            ",memory_mb=1024,memory_limit=1024",
+            ",memory_limit={mb=512}",
         ] {
             assert!(
                 Config::from_lua(&base("software={type='paper'}", group), "memory.lua").is_err(),
                 "{group}"
             );
         }
+        assert!(
+            Config::from_lua(
+                &base(
+                    "software={type='paper'}",
+                    ",memory_mb=1024,memory_limit=1536"
+                ),
+                "memory.lua"
+            )
+            .is_ok()
+        );
         assert!(
             Config::from_lua(
                 &base("software={type='paper'}", "").replace(
@@ -604,6 +664,70 @@ rift.config.service_groups.lobby={{template='lobby',port_range={{25600,25609}}{g
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn git_sources_are_validated_and_found_through_the_templates_that_use_them() {
+        let root = std::env::temp_dir().join("rift-template-sources-config");
+        let source = |sources: &str| {
+            format!(
+                "rift.config.listeners.public='127.0.0.1:25565'
+rift.config.routes.public='lobby'
+rift.config.template_sources{sources}
+rift.config.templates.lobby={{software={{type='paper'}},configs={{'local/templates/network/Lobby','local/templates/own'}}}}
+rift.config.templates.plain={{software={{type='paper'}},configs='local/templates/own'}}
+rift.config.service_groups.lobby={{template='lobby',port_range={{25600,25609}}}}"
+            )
+        };
+        let config = Config::from_lua_at(
+            &source(".network={git='https://example.com/org/templates.git',ref='main'}"),
+            &root.join("rift.lua"),
+        )
+        .unwrap();
+        assert_eq!(
+            config.template_sources["network"].reference.as_deref(),
+            Some("main")
+        );
+        let used = |template: &str| {
+            config
+                .template_sources_of(&config.templates[template])
+                .into_iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(used("lobby"), ["network"]);
+        assert!(used("plain").is_empty());
+        for (bad, message) in [
+            (
+                ".network={ref='main'}",
+                "template_sources.network.git: required",
+            ),
+            (
+                ".network={git='http://example.com/t.git'}",
+                "template_sources.network.git",
+            ),
+            (
+                ".network={git='https://example.com/t.git',ref='-x'}",
+                "template_sources.network.ref",
+            ),
+            (
+                ".network={git='https://example.com/t.git',rev='abc'}",
+                "template_sources.network.rev",
+            ),
+            (
+                ".network={git='https://example.com/t.git',depth=1}",
+                "template_sources.network",
+            ),
+            (
+                "['a/b']={git='https://example.com/t.git'}",
+                "names must contain",
+            ),
+        ] {
+            let error = Config::from_lua_at(&source(bad), &root.join("rift.lua"))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(message), "{bad}: {error}");
+        }
     }
 
     #[test]

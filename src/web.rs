@@ -61,7 +61,7 @@ fn generate_token() -> io::Result<String> {
 }
 /// Neither `web.token` nor a named operator is configured.
 fn uses_local_token(settings: &rift::config::WebConfig) -> bool {
-    settings.token.is_none() && settings.operators.is_empty()
+    !settings.has_token() && settings.operators.is_empty()
 }
 impl App {
     pub fn new(
@@ -135,6 +135,21 @@ impl App {
                 "web token for this run: {} (enter it under API access; set web.token to choose a permanent one)",
                 self.local_token
             );
+        }
+    }
+    /// Say which tokens named by `token_env` are refused because their
+    /// variable is unset or cannot be a token. Never prints a value.
+    fn warn_unusable_tokens(config: &Config) {
+        let Some(web) = &config.web else { return };
+        for (field, variable) in web.token_variables() {
+            let usable = std::env::var(&variable).is_ok_and(|token| {
+                (16..=4096).contains(&token.len()) && token.bytes().all(|b| b.is_ascii_graphic())
+            });
+            if !usable {
+                log_warn!(
+                    "{field}: {variable} is not set to 16..=4096 printable ASCII bytes; that token is refused until it is"
+                );
+            }
         }
     }
     fn snapshot(&self) -> Arc<Snapshot> {
@@ -390,6 +405,7 @@ impl Services {
     }
     pub fn commit(&mut self, config: &Config, mut prepared: Prepared, app: &App) {
         app.announce_local_token(config);
+        App::warn_unusable_tokens(config);
         for kind in [Kind::Web, Kind::Status, Kind::Metrics] {
             let desired = kind.address(config);
             if self
@@ -487,6 +503,10 @@ fn router(kind: Kind, address: SocketAddr, mut app: App) -> Router {
             .route("/api/audit", get(audit_records))
             .route("/api/templates", get(templates))
             .route("/api/templates/{name}/download", post(download_template))
+            .route(
+                "/api/template-sources/{name}/sync",
+                post(sync_template_source),
+            )
             .route("/api/software/{kind}/versions", get(software_versions))
             .route(
                 "/api/files/templates",
@@ -682,7 +702,7 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
             .and_then(|h| h.strip_prefix("Bearer "))
             .unwrap_or("");
         let mut access = None;
-        if let Some(token) = &settings.token
+        if let Some(token) = settings.token()
             && equal_token(token.as_bytes(), supplied.as_bytes())
         {
             access = Some(Access {
@@ -692,7 +712,10 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
             });
         }
         for (name, operator) in &settings.operators {
-            if equal_token(operator.token.as_bytes(), supplied.as_bytes()) {
+            if operator
+                .token()
+                .is_some_and(|token| equal_token(token.as_bytes(), supplied.as_bytes()))
+            {
                 access = Some(Access {
                     name: name.clone(),
                     permissions: Some(operator.permissions.clone()),
@@ -761,7 +784,8 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
         } else {
             match segments.as_slice() {
                 ["api", "access"] | ["api"] => "",
-                ["api", "files", ..] => "files",
+                // A sync replaces a folder in template storage.
+                ["api", "files", ..] | ["api", "template-sources", ..] => "files",
                 ["api", "templates", _, "download"] | ["api", "software", ..] => "servers",
                 ["api", "servers", _, "logs"] | ["api", "plugins", _, "logs"] => "logs",
                 ["api", "plugins", _, "restart"] => "plugins",
@@ -879,6 +903,18 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
                     name.chars().take(128).collect(),
                 )
             }
+            // Like the template folders a sync writes: shared by every group.
+            ["api", "template-sources", name, ..] => {
+                let name = decode_name(name).unwrap_or_default();
+                (
+                    access.groups.is_none(),
+                    if snapshot.config.template_sources.contains_key(&name) {
+                        name
+                    } else {
+                        String::new()
+                    },
+                )
+            }
             // Plugins act on the whole proxy: group-scoped operators see none.
             ["api", "plugins", rest @ ..] => {
                 let name = rest
@@ -929,6 +965,7 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
             ["api", "groups", _, "mode"] => "group_mode",
             ["api", "instances", _] => "remove_instance",
             ["api", "templates", _, "download"] => "download_software",
+            ["api", "template-sources", _, "sync"] => "sync_template_source",
             ["api", "definitions", "templates", _] => "edit_template",
             ["api", "definitions", "service_groups", _] => "edit_group",
             ["api", "definitions", "permission_groups", _] => "edit_permission_group",
@@ -1341,6 +1378,13 @@ fn definition_values(config: &Config) -> Value {
                 json!(s.isolation.mode.as_str())
             } else {
                 json!({"mode": s.isolation.mode.as_str(), "read": s.isolation.read, "write": s.isolation.write})
+            };
+        }
+        if let Some(limit) = s.memory_limit {
+            value["memory_limit"] = if limit.required {
+                json!({"mb": limit.megabytes, "required": true})
+            } else {
+                json!(limit.megabytes)
             };
         }
         if s.keep_running {
@@ -1789,6 +1833,10 @@ async fn templates(State(app): State<App>, Extension(access): Extension<Access>)
     let snapshot = app.snapshot();
     match tokio::task::spawn_blocking(move || admin::templates(&snapshot)).await {
         Ok(mut value) => {
+            if access.groups.is_some() {
+                // Repository addresses are not a group's business.
+                value["sources"] = json!([]);
+            }
             if access.groups.is_some()
                 && let Some(templates) = value["templates"].as_array_mut()
             {
@@ -1866,6 +1914,56 @@ async fn download_template(
             record_audit(&app, &access, "download_software", &name, outcome, code).await
         {
             log_error!("download result audit failed: {failure}");
+        }
+        app.operations.complete(&operation_id, reply, 200);
+    });
+    let location = format!("/api/operations/{id}");
+    (
+        StatusCode::ACCEPTED,
+        [(header::LOCATION, location.clone())],
+        Json(json!({"operation_id":id,"status":"pending","poll":location})),
+    )
+        .into_response()
+}
+/// Fetch a git template source and replace its checkout; poll like
+/// instance operations.
+async fn sync_template_source(
+    State(app): State<App>,
+    Extension(access): Extension<Access>,
+    Path(name): Path<String>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    if let Err(failure) = payload(body, &[]) {
+        return failure.into_response();
+    }
+    let snapshot = app.snapshot();
+    if !snapshot.config.template_sources.contains_key(&name) {
+        return error(
+            StatusCode::NOT_FOUND,
+            format!("unknown template source {name:?}"),
+        );
+    }
+    let id = match app.operations.reserve(None, "sync_template_source", &name) {
+        Ok(id) => id,
+        Err(failure) => return failure.into_response(),
+    };
+    let operation_id = id.clone();
+    tokio::spawn(async move {
+        let reply = admin::sync_template_source(&snapshot, &name)
+            .await
+            .map(|value| value.to_string())
+            .map_err(|message| control::Error {
+                status: 502,
+                message,
+            });
+        let (outcome, code) = match &reply {
+            Ok(_) => ("completed", 200),
+            Err(failure) => ("failed", failure.status),
+        };
+        if let Err(failure) =
+            record_audit(&app, &access, "sync_template_source", &name, outcome, code).await
+        {
+            log_error!("sync result audit failed: {failure}");
         }
         app.operations.complete(&operation_id, reply, 200);
     });
@@ -2221,7 +2319,7 @@ async fn standalone_metrics(state: State<App>) -> Response {
 }
 async fn discovery() -> Json<Value> {
     Json(
-        json!({"version":1,"endpoints":["GET /api/access","GET /api/status","GET /api/servers","POST /api/servers/{name}/start","POST /api/servers/{name}/stop","GET /api/servers/{name}/logs","POST /api/servers/{name}/console","GET /api/players","POST /api/players/{player}/message","POST /api/players/{player}/kick","GET /api/groups","GET /api/nodes","GET /api/plugins","GET /api/plugins/{name}","GET /api/plugins/{name}/logs","POST /api/plugins/{name}/restart","POST /api/groups/{name}/instances","GET /api/templates","POST /api/templates/{name}/download","GET /api/software/{type}/versions","GET|PUT|DELETE /api/files/templates/{path}","GET|PUT|DELETE /api/files/servers/{name}/{path}","DELETE /api/instances/{name}","GET /api/definitions","PUT /api/definitions/{section}/{name}","PUT /api/definitions/{section}","GET /api/permissions","POST /api/permissions/members/{uuid}/{group}","DELETE /api/permissions/members/{uuid}/{group}","GET /api/perms/revision","GET /api/perms/backends","GET /api/perms/registered","GET /api/perms/search","GET /api/perms/users","GET|PATCH /api/perms/users/{user}","GET|PUT|DELETE /api/perms/users/{user}/nodes","PUT|DELETE /api/perms/users/{user}/nodes/{id}","GET /api/perms/users/{user}/compiled","GET|POST /api/perms/groups","GET|PATCH|DELETE /api/perms/groups/{name}","GET|PUT|DELETE /api/perms/groups/{name}/nodes","PUT|DELETE /api/perms/groups/{name}/nodes/{id}","GET /api/perms/tracks","GET|PUT|DELETE /api/perms/tracks/{name}","POST /api/perms/tracks/{name}/promote","POST /api/perms/tracks/{name}/demote","GET /api/perms/audit","POST /api/perms/trace","POST /api/perms/apply","POST /api/perms/bulk","POST /api/perms/import","GET /api/perms/export","GET /api/deployments","POST /api/deployments/{id}/rollback","GET /api/audit","GET /api/operations/{id}","GET /api/metrics","GET /api/config","POST /api/config/validate","PUT /api/config","POST /api/reload"],"extensions":"/ext/* -> on_http(request)","source_limit_bytes":control::MAX_SOURCE}),
+        json!({"version":1,"endpoints":["GET /api/access","GET /api/status","GET /api/servers","POST /api/servers/{name}/start","POST /api/servers/{name}/stop","GET /api/servers/{name}/logs","POST /api/servers/{name}/console","GET /api/players","POST /api/players/{player}/message","POST /api/players/{player}/kick","GET /api/groups","GET /api/nodes","GET /api/plugins","GET /api/plugins/{name}","GET /api/plugins/{name}/logs","POST /api/plugins/{name}/restart","POST /api/groups/{name}/instances","GET /api/templates","POST /api/templates/{name}/download","POST /api/template-sources/{name}/sync","GET /api/software/{type}/versions","GET|PUT|DELETE /api/files/templates/{path}","GET|PUT|DELETE /api/files/servers/{name}/{path}","DELETE /api/instances/{name}","GET /api/definitions","PUT /api/definitions/{section}/{name}","PUT /api/definitions/{section}","GET /api/permissions","POST /api/permissions/members/{uuid}/{group}","DELETE /api/permissions/members/{uuid}/{group}","GET /api/perms/revision","GET /api/perms/backends","GET /api/perms/registered","GET /api/perms/search","GET /api/perms/users","GET|PATCH /api/perms/users/{user}","GET|PUT|DELETE /api/perms/users/{user}/nodes","PUT|DELETE /api/perms/users/{user}/nodes/{id}","GET /api/perms/users/{user}/compiled","GET|POST /api/perms/groups","GET|PATCH|DELETE /api/perms/groups/{name}","GET|PUT|DELETE /api/perms/groups/{name}/nodes","PUT|DELETE /api/perms/groups/{name}/nodes/{id}","GET /api/perms/tracks","GET|PUT|DELETE /api/perms/tracks/{name}","POST /api/perms/tracks/{name}/promote","POST /api/perms/tracks/{name}/demote","GET /api/perms/audit","POST /api/perms/trace","POST /api/perms/apply","POST /api/perms/bulk","POST /api/perms/import","GET /api/perms/export","GET /api/deployments","POST /api/deployments/{id}/rollback","GET /api/audit","GET /api/operations/{id}","GET /api/metrics","GET /api/config","POST /api/config/validate","PUT /api/config","POST /api/reload"],"extensions":"/ext/* -> on_http(request)","source_limit_bytes":control::MAX_SOURCE}),
     )
 }
 async fn config_source(State(app): State<App>) -> Json<Value> {

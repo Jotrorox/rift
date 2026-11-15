@@ -28,6 +28,8 @@ resolver = "3"
 version = "0.1.0"
 edition = "2024"
 license = "BSD-2-Clause"
+repository = "https://github.com/Jotrorox/rift"
+homepage = "https://jotrorox.github.io/rift/"
 
 [workspace.dependencies]
 bytes = "1"
@@ -45,9 +47,15 @@ tokio = "1"
 
 [package]
 name = "rift"
+description = "Minecraft Java Edition proxy with Lua configuration, server supervision and a web dashboard"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+# Released as executables on GitHub; the crates.io name belongs to another project.
+publish = false
 
 [dependencies]
 mlua = { version = "0.12", features = ["luajit", "vendored"] }

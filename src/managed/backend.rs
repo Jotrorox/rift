@@ -185,6 +185,10 @@ impl ProcessBackend for Local {
             directory,
             &environment,
             &server.config.isolation,
+            server
+                .config
+                .memory_limit
+                .map(|limit| (server.name.as_str(), limit)),
             console,
         )?;
         // Without its record the next proxy could not adopt the process.
@@ -346,20 +350,29 @@ pub(crate) fn spawn(
     directory: &std::path::Path,
     environment: &ProcessEnvironment,
     isolation: &crate::config::Isolation,
+    memory_limit: Option<(&str, crate::config::MemoryLimit)>,
 ) -> io::Result<Child> {
-    spawn_with(command, directory, environment, isolation, None)
+    spawn_with(
+        command,
+        directory,
+        environment,
+        isolation,
+        memory_limit,
+        None,
+    )
 }
 
 /// [`spawn`], or with `console` a server that keeps running without Rift
 /// (`keep_running`): it reads `console` (see [`kept::console`]) instead of a
 /// pipe, leads its own session instead of only its own group, and neither a
-/// dropped handle nor Rift's death kills it. Its log and isolation are the
-/// same.
+/// dropped handle nor Rift's death kills it. Its log, isolation and memory
+/// limit (`memory_limit`, with the server's name) are the same.
 fn spawn_with(
     command: &[String],
     directory: &std::path::Path,
     environment: &ProcessEnvironment,
     isolation: &crate::config::Isolation,
+    memory_limit: Option<(&str, crate::config::MemoryLimit)>,
     console: Option<std::fs::File>,
 ) -> io::Result<Child> {
     let (program, arguments) = command.split_first().ok_or_else(|| {
@@ -387,10 +400,12 @@ fn spawn_with(
     // Built before fork; it lives until this function returns, after the
     // child has exec'd.
     let _sandbox = sandbox(isolation, directory, &arguments_with(program, arguments))?;
+    let _group = memory_group(memory_limit, directory)?;
     #[cfg(target_os = "linux")]
     {
         let parent = std::process::id() as libc::pid_t;
         let ruleset = _sandbox.as_ref().map(super::landlock::Sandbox::raw);
+        let group = _group.as_ref().map(super::cgroup::Group::raw);
         // SAFETY: runs in the forked child before exec and only makes
         // async-signal-safe calls, building errors without allocating.
         unsafe {
@@ -408,6 +423,11 @@ fn spawn_with(
                     if libc::getppid() != parent {
                         return Err(io::Error::from_raw_os_error(libc::ESRCH));
                     }
+                }
+                // Before anything else the server could allocate, and before
+                // the sandbox, which the open group file is not subject to.
+                if let Some(group) = group {
+                    super::cgroup::Group::enter(group)?;
                 }
                 if let Some(ruleset) = ruleset {
                     super::landlock::Sandbox::enter(ruleset)?;
@@ -525,6 +545,46 @@ fn sandbox(
             log_warn!(
                 "starting {} unconfined: isolation = \"landlock\", but {reason}",
                 directory.display()
+            );
+            Ok(None)
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+type Group = super::cgroup::Group;
+/// Nothing to hold where there are no cgroups.
+#[cfg(not(target_os = "linux"))]
+struct Group;
+
+/// The cgroup `memory_limit` asks for, where Rift can manage one. Without
+/// one the server starts unlimited and Rift says why; a `required` limit
+/// refuses to start it.
+fn memory_group(
+    memory_limit: Option<(&str, crate::config::MemoryLimit)>,
+    directory: &std::path::Path,
+) -> io::Result<Option<Group>> {
+    let Some((server, limit)) = memory_limit else {
+        return Ok(None);
+    };
+    #[cfg(target_os = "linux")]
+    let group = super::cgroup::Group::new(server, limit.megabytes);
+    #[cfg(not(target_os = "linux"))]
+    let group: Result<Group, String> = {
+        let _ = server;
+        Err("cgroups exist only on Linux".to_owned())
+    };
+    match group {
+        Ok(group) => Ok(Some(group)),
+        Err(reason) if limit.required => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("memory_limit is required, but {reason}"),
+        )),
+        Err(reason) => {
+            log_warn!(
+                "starting {} without its memory limit of {} MiB: {reason}",
+                directory.display(),
+                limit.megabytes
             );
             Ok(None)
         }
@@ -767,6 +827,7 @@ impl ProcessBackend for Remote {
                     environment: (&environment).into(),
                     bus_certificate,
                     isolation: (&server.config.isolation).into(),
+                    memory_limit: server.config.memory_limit.map(Into::into),
                 }),
                 COMMAND_WAIT,
             )
@@ -901,6 +962,7 @@ mod tests {
             &directory,
             &ProcessEnvironment::default(),
             &Default::default(),
+            None,
         )
         .unwrap_err();
         assert!(error.to_string().contains("must be a regular file"));
@@ -988,6 +1050,7 @@ mod tests {
                     &directory,
                     &ProcessEnvironment::default(),
                     &Default::default(),
+                    None,
                 )
             })
             .await
@@ -1062,7 +1125,7 @@ mod tests {
                     ("restricted", restricted),
                 ] {
                     let mut child =
-                        spawn(&report(file), &directory, &environment, &Default::default()).unwrap();
+                        spawn(&report(file), &directory, &environment, &Default::default(), None).unwrap();
                     child.wait().await.unwrap();
                 }
             });
@@ -1135,6 +1198,7 @@ mod tests {
             &directory,
             &ProcessEnvironment::default(),
             &isolation(IsolationMode::Landlock),
+            None,
         )
         .unwrap();
         assert!(child.wait().await.unwrap().success());
@@ -1143,6 +1207,7 @@ mod tests {
             &directory,
             &ProcessEnvironment::default(),
             &isolation(IsolationMode::Required),
+            None,
         )
         .unwrap_err();
         assert_eq!(refused.kind(), io::ErrorKind::Unsupported);
@@ -1150,6 +1215,101 @@ mod tests {
             refused.to_string().contains("isolation = \"required\""),
             "{refused}"
         );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    /// Where Rift cannot manage a cgroup, a memory limit starts the server
+    /// unlimited and a required one refuses to start it.
+    #[cfg(not(target_os = "linux"))]
+    #[tokio::test]
+    async fn a_memory_limit_falls_back_or_refuses_without_cgroups() {
+        use crate::config::MemoryLimit;
+        let directory = std::env::temp_dir().join(format!("rift-memory-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let command = ["true".to_owned()];
+        let limit = |required| MemoryLimit {
+            megabytes: 256,
+            required,
+        };
+        let mut child = spawn(
+            &command,
+            &directory,
+            &ProcessEnvironment::default(),
+            &Default::default(),
+            Some(("survival", limit(false))),
+        )
+        .unwrap();
+        assert!(child.wait().await.unwrap().success());
+        let refused = spawn(
+            &command,
+            &directory,
+            &ProcessEnvironment::default(),
+            &Default::default(),
+            Some(("survival", limit(true))),
+        )
+        .unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::Unsupported);
+        assert!(
+            refused.to_string().contains("memory_limit is required"),
+            "{refused}"
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    /// With a delegated cgroup, a limited server runs in a group of its own
+    /// and the kernel kills it at the limit. Without one (most development
+    /// shells and CI runners) only the refusal of a required limit is
+    /// checked. Run it delegated with
+    /// `systemd-run --user --scope -p Delegate=yes cargo test memory_limit`.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_memory_limit_confines_the_server_to_its_own_group() {
+        use crate::config::MemoryLimit;
+        use std::os::unix::process::ExitStatusExt;
+        let directory = std::env::temp_dir().join(format!("rift-memory-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let name = format!("test-{}", std::process::id());
+        let limit = MemoryLimit {
+            megabytes: 64,
+            required: true,
+        };
+        let run = |script: &str| {
+            spawn(
+                &["sh".to_owned(), "-c".to_owned(), script.to_owned()],
+                &directory,
+                &ProcessEnvironment::default(),
+                &Default::default(),
+                Some((&name, limit)),
+            )
+        };
+        if let Err(reason) = super::super::cgroup::describe() {
+            let refused = run("true").unwrap_err();
+            assert_eq!(refused.kind(), io::ErrorKind::Unsupported, "{refused}");
+            eprintln!("skipping the enforcement half: {reason}");
+            let _ = std::fs::remove_dir_all(directory);
+            return;
+        }
+        let mut child = run("cat /proc/self/cgroup > group.txt; \
+             cat \"/sys/fs/cgroup$(sed -n 's/^0:://p' /proc/self/cgroup)/memory.max\" > max.txt")
+        .unwrap();
+        assert!(child.wait().await.unwrap().success());
+        let group = std::fs::read_to_string(directory.join("group.txt")).unwrap();
+        assert!(
+            group.trim_end().ends_with(&format!("/rift-server-{name}")),
+            "{group}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(directory.join("max.txt")).unwrap(),
+            format!("{}\n", 64 * 1024 * 1024)
+        );
+        // `tail` buffers a stream without newlines until memory runs out.
+        let mut child = run("exec tail /dev/zero").unwrap();
+        let status = tokio::time::timeout(Duration::from_secs(60), child.wait())
+            .await
+            .expect("the kernel kills the server at its limit")
+            .unwrap();
+        assert_eq!(status.signal(), Some(libc::SIGKILL), "{status:?}");
         let _ = std::fs::remove_dir_all(directory);
     }
 
@@ -1177,6 +1337,7 @@ mod tests {
                     &directory,
                     &ProcessEnvironment::default(),
                     &Default::default(),
+                    None,
                 )
                 .unwrap();
                 let temporary = directory.join("child.pid.tmp");

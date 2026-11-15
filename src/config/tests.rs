@@ -698,6 +698,7 @@ fn http_services_are_independently_optional_and_have_loopback_defaults() {
             api: false,
             ui: false,
             token: None,
+            token_env: None,
             operators: BTreeMap::new(),
             records_directory: None,
         }
@@ -884,6 +885,11 @@ fn administration_tokens_and_service_field_types_are_validated() {
         ),
         ("web = { token = '0123456789abcdef space' }", "web.token"),
         ("web = { token = 1234567890123456 }", "web.token"),
+        (
+            "web = { token = '0123456789abcdef', token_env = 'RIFT_WEB_TOKEN' }",
+            "only one of token and token_env",
+        ),
+        ("web = { token_env = '1BAD' }", "web.token_env"),
         ("on_http = true", "on_http: expected a function"),
     ] {
         let error = Config::from_lua(&with_options(options), "services.lua")
@@ -900,6 +906,15 @@ fn administration_tokens_and_service_field_types_are_validated() {
         config.web.unwrap().token.as_deref(),
         Some("0123456789abcdef")
     );
+    // A variable satisfies the credential requirement of a public bind and
+    // is read on use, so the token never enters the configuration.
+    let config = Config::from_lua(
+        &with_options("web = { listen = '0.0.0.0:8080', token_env = 'RIFT_TEST_WEB_TOKEN_UNSET' }"),
+        "services.lua",
+    )
+    .unwrap();
+    let web = config.web.unwrap();
+    assert!(web.has_token() && web.token().is_none());
     assert!(
         Config::from_lua(
             &with_options("web = { enabled = false, listen = '0.0.0.0:8080' }"),
@@ -991,6 +1006,25 @@ fn operator_credentials_and_privileged_scopes_are_validated() {
         )
         .is_ok()
     );
+    // A token can come from the environment instead of the source.
+    let from_env = "token_env='RIFT_WEB_TOKEN_STAFF',permissions={'read'}";
+    let config = Config::from_lua(&root.replace("%s", from_env), "operators.lua").unwrap();
+    assert!(config.secret_variables().contains(&(
+        "web.operators.staff.token_env".into(),
+        "RIFT_WEB_TOKEN_STAFF".into()
+    )));
+    for invalid in [
+        "permissions={'read'}",
+        "token='independent-staff-token',token_env='RIFT_WEB_TOKEN_STAFF',permissions={'read'}",
+        "token_env='not a name',permissions={'read'}",
+    ] {
+        assert!(Config::from_lua(&root.replace("%s", invalid), "operators.lua").is_err());
+    }
+    // Two tokens cannot share one variable.
+    let shared = root
+        .replace("%s", from_env)
+        .replace("operators=", "token_env='RIFT_WEB_TOKEN_STAFF',operators=");
+    assert!(Config::from_lua(&shared, "operators.lua").is_err());
     let duplicate = root
         .replace("%s", valid)
         .replace("operators=", "token='independent-staff-token',operators=");

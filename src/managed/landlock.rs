@@ -355,6 +355,7 @@ mod tests {
             &instance,
             &crate::config::ProcessEnvironment::default(),
             &isolation,
+            None,
         )
         .unwrap();
         assert!(child.wait().await.unwrap().success());

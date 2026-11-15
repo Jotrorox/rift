@@ -33,9 +33,73 @@ pub struct ManagedServer {
     pub messaging: Option<InstanceMessaging>,
     /// Whether the process is confined to its own directory.
     pub isolation: Isolation,
+    /// The memory the process and its children may use together.
+    pub memory_limit: Option<MemoryLimit>,
     /// Whether the process keeps running when Rift shuts down or dies, to be
     /// adopted by the next Rift (see `crate::managed`). Local servers only.
     pub keep_running: bool,
+}
+
+/// `memory_limit = 3072`, or `{ mb = 3072, required = true }`: a hard limit
+/// in MiB on the server's whole process tree, enforced by the kernel (see
+/// [`crate::managed::cgroup`]). Where Rift cannot enforce it the server
+/// starts unlimited and Rift logs why, unless the limit is `required`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryLimit {
+    pub megabytes: usize,
+    pub required: bool,
+}
+
+impl MemoryLimit {
+    pub const MIN_MB: usize = 64;
+    pub const MAX_MB: usize = 16_777_216;
+
+    /// The configured number, unchecked, for comparing with a group's heap
+    /// before the definition is parsed.
+    pub(super) fn peek(values: &Table) -> Option<usize> {
+        let number = |value: Value| match value {
+            Value::Integer(megabytes) => usize::try_from(megabytes).ok(),
+            Value::Number(megabytes) if megabytes >= 0.0 => Some(megabytes as usize),
+            _ => None,
+        };
+        match values.raw_get::<Value>("memory_limit").ok()? {
+            Value::Table(table) => number(table.raw_get::<Value>("mb").ok()?),
+            value => number(value),
+        }
+    }
+
+    fn parse(values: &Table, path: &str) -> Result<Option<Self>, String> {
+        let megabytes = |table: &Table, path: &str, key: &str| {
+            integer(table, path, key, 0, Self::MAX_MB).and_then(|megabytes| {
+                if megabytes < Self::MIN_MB {
+                    return Err(format!(
+                        "{path}.{key}: expected {}..={} MiB",
+                        Self::MIN_MB,
+                        Self::MAX_MB
+                    ));
+                }
+                Ok(megabytes)
+            })
+        };
+        match values
+            .raw_get::<Value>("memory_limit")
+            .map_err(|e| e.to_string())?
+        {
+            Value::Nil => Ok(None),
+            Value::Table(table) => {
+                let path = format!("{path}.memory_limit");
+                fields(&table, &["mb", "required"], &path)?;
+                Ok(Some(Self {
+                    megabytes: megabytes(&table, &path, "mb")?,
+                    required: boolean(&table, &path, "required", false)?,
+                }))
+            }
+            _ => Ok(Some(Self {
+                megabytes: megabytes(values, path, "memory_limit")?,
+                required: false,
+            })),
+        }
+    }
 }
 
 /// How a managed server's process is confined; see
@@ -325,6 +389,7 @@ pub(super) fn parse(root: &Table, base: &Path) -> Result<BTreeMap<String, Manage
                 "inherit_env",
                 "messaging",
                 "isolation",
+                "memory_limit",
                 "keep_running",
             ],
             &path,
@@ -402,6 +467,7 @@ pub(super) fn parse(root: &Table, base: &Path) -> Result<BTreeMap<String, Manage
                 environment: ProcessEnvironment::parse(&values, &path)?,
                 messaging: InstanceMessaging::parse(&values, &path)?,
                 isolation: Isolation::parse(&values, &path, base, remote)?,
+                memory_limit: MemoryLimit::parse(&values, &path)?,
                 keep_running: boolean(&values, &path, "keep_running", false)?,
             },
         );

@@ -12,6 +12,26 @@ and are listed under **SDKs**.
 
 ## [Unreleased]
 
+### Added
+
+- `memory_limit` on managed servers and service groups: a hard memory limit
+  on a server's whole process tree, enforced on Linux with a cgroup v2 group
+  per server and applied by node agents too. `{ mb = ..., required = true }`
+  refuses to start a server whose limit cannot be enforced.
+- `template_sources`: template folders checked out from a git repository
+  into `template_storage`, fetched on first use and updated with
+  `rift admin sync <source>` or `POST /api/template-sources/{name}/sync`.
+- `web.token_env` and `web.operators.<name>.token_env` read web tokens from
+  environment variables, so they stay out of the Lua source.
+- Releases publish a container image for `linux/amd64` and `linux/arm64` to
+  `ghcr.io/jotrorox/rift`, with build provenance.
+- `SECURITY.md` with the vulnerability reporting process.
+
+### Changed
+
+- The example systemd unit is hardened further and delegates its cgroup so
+  memory limits work.
+
 ## [0.1.0] - unreleased
 
 The first tagged release. Release candidates are tagged `v0.1.0-rc.N` and

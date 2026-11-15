@@ -17,6 +17,8 @@ layer template folders from `local/templates`, and place instances in
 `local/services` or `temp/services`. Spin servers up from the dashboard,
 `rift admin create`, Lua plugins (`rift.servers.create`) or `rift.control.create`
 on the message bus; the dashboard's Files page edits template and server folders.
+Template folders can come from a git repository (`template_sources`), and
+`memory_limit` caps a server's memory on Linux.
 See [examples/cloud.lua](examples/cloud.lua). Persistent worlds retain
 files after removal; disposable game instances delete their generated files on
 removal. Both retain files across stop/start. Bundled SQLite saves registrations,

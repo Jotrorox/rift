@@ -1,8 +1,12 @@
 # Build from the extracted Linux release archive (or a checkout with the executable saved as rift):
 # docker build -f examples/Dockerfile -t rift:local .
 # The glibc release binaries need glibc 2.35 or newer; the -musl ones run on any base.
-# Use a binary for this image's CPU.
+# Use a binary for this image's CPU. Releases publish this image, built from
+# the glibc binaries for amd64 and arm64, as ghcr.io/jotrorox/rift.
 FROM ubuntu:24.04
+LABEL org.opencontainers.image.title="Rift" \
+      org.opencontainers.image.description="Minecraft Java Edition proxy with Lua configuration" \
+      org.opencontainers.image.licenses="BSD-2-Clause"
 RUN apt-get update \
     && apt-get install --no-install-recommends -y libgcc-s1 \
     && rm -rf /var/lib/apt/lists/*

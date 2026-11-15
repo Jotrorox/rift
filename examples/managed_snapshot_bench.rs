@@ -35,6 +35,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         environment: Default::default(),
         messaging: None,
         isolation: Default::default(),
+        memory_limit: None,
         keep_running: false,
     };
     let names: Vec<_> = (0..SERVERS)
