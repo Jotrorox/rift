@@ -214,6 +214,28 @@ class PluginInstallationTests(unittest.TestCase):
             self.install()
         self.assertEqual(list(self.destination.iterdir()), [])
 
+    def test_gateway_errors_are_retried_and_a_lasting_one_fails(self):
+        failure = urllib.error.HTTPError("https://example.test/busy", 504, "Gateway Time-out", None, None)
+        answers = iter([failure, TimeoutError("timed out")])
+
+        def flaky(request, timeout):
+            return self.response(request, timeout) if (answer := next(answers, None)) is None else self.raise_(answer)
+
+        self.network.side_effect = flaky
+        with patch.object(plugins.time, "sleep") as sleep:
+            self.install("protocol")
+        self.assertEqual(sleep.call_count, 2)
+        self.network.side_effect = failure
+        self.network.reset_mock()
+        with patch.object(plugins.time, "sleep"), self.assertRaises(urllib.error.HTTPError):
+            plugins.install("protocol", self.directory / "other", cache=self.directory / "cold",
+                            manifest=self.manifest)
+        self.assertEqual(self.network.call_count, plugins.DOWNLOAD_ATTEMPTS)
+
+    @staticmethod
+    def raise_(error):
+        raise error
+
     def test_failed_download_cleans_up_temporary_files(self):
         class InterruptedResponse(Response):
             def read(self, size):
