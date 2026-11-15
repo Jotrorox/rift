@@ -108,7 +108,7 @@ env = ["RELAXOBAN_DSN"]     # omit to inherit Rift's environment minus its own s
 [lua]                       # engine = "lua" only
 ffi = false                 # LuaJIT's FFI; default false
 native_modules = false      # require() of C modules; default false
-memory_limit_mb = 0         # 0..=65536, 0 is unlimited
+memory_limit_mb = 256       # 0..=65536; default 256, 0 is unlimited
 jit = true                  # false: interpret everything so deadlines interrupt every loop
 ```
 
@@ -122,8 +122,8 @@ jit = true                  # false: interpret everything so deadlines interrupt
 | `[deadlines]` | per hook | Keys are `init`, `reload`, `shutdown` and the awaited hooks; observers have no deadline and are rejected here. Awaited hooks allow 1–10 000 ms, `http` up to 60 000. |
 | `[failure]` | | `on_timeout` overrides the per-hook default for every hook. |
 | `[capabilities]` | `filesystem = ["data"]`, `network = true`, all of `env` except [Rift's own secrets](operations.md#secrets-and-the-processes-rift-starts) | `data` is `plugins/<name>/data/` (created on start, read-write); `host` is the configuration directory, read-only; an absolute path is read-write and, for WebAssembly, may not contain or lie inside `local/plugincache` or `plugins/`. WebAssembly enforces all three. Lua enforces `env` (`os.getenv`) and `network` (`rift.http.request`) but not `filesystem`: Lua `io` sees what Rift sees. |
-| `[lua]` | | `engine = "lua"` only. See [the JIT and deadlines](plugins-lua.md#the-jit-and-deadlines). |
-| `[wasm]` | | `engine = "wasm"` only: per-instance limits; see [WebAssembly plugins](#webassembly-plugins). |
+| `[lua]` | `memory_limit_mb = 256` | `engine = "lua"` only. See [the JIT and deadlines](plugins-lua.md#the-jit-and-deadlines). |
+| `[wasm]` | `memory_limit_mb = 256` | `engine = "wasm"` only: per-instance limits; see [WebAssembly plugins](#webassembly-plugins). |
 
 `rift check` prints each plugin with its mode and capabilities, so the trust
 each one gets is visible before anything starts. For Lua plugins it marks what
@@ -406,7 +406,7 @@ and the SDK guides map it to each language.
 | `bus` | `publish`, `request(subject, payload, timeout_ms)`, `subscribe(subject, queue_group?)`, `unsubscribe`, `stream-publish` | Messages arrive through the `message` hook. At most 256 subscriptions; requests wait at most 60 s. |
 | `servers` | `create`, `remove`, `start`, `stop`, `download`, `control(operation, payload_json)` | The same `rift.control.*` operations as the bus, awaiting the reply (at most 60 s). |
 | `timers` | `every(ms)`, `after(ms)`, `cancel(handle)` | Ticks arrive through the `timer` hook. At least 10 ms; at most 1024 timers. |
-| `log` | `log(level, message)` | Rift's log, prefixed with the plugin name, and the plugin's [log tail](#operator-surface). Control characters are replaced. |
+| `log` | `log(level, message)` | Rift's log, prefixed with the plugin name, and the plugin's [log tail](#operator-surface). Control characters are replaced. The tail keeps every line; Rift's log shows `debug` and `trace` lines only with [`RIFT_LOG_LEVEL=debug`](operations.md#log-levels), which `rift dev` sets. |
 | `meta` | `name`, `version`, `data-dir`, `config-dir`, `clock`, `time` | `data-dir` and `config-dir` are guest paths (`/data`, `/host` for WebAssembly). |
 
 Calls that wait (bus requests, server operations, store writes) block only the
@@ -457,7 +457,7 @@ Install only plugins you would run as Rift's user.
 
 ```text
 plugin (configuration script): mode script, sandboxed; hooks login, join
-plugin hello-lua 0.1.0: mode persistent, engine lua, trusted; restart on-failure; capabilities filesystem=data(advisory) network=no(rift.http only) env=all(os.getenv only) ffi=false native_modules=false memory_limit_mb=0; Lua io and os are not sandboxed
+plugin hello-lua 0.1.0: mode persistent, engine lua, trusted; restart on-failure; capabilities filesystem=data(advisory) network=no(rift.http only) env=all(os.getenv only) ffi=false native_modules=false memory_limit_mb=256; Lua io and os are not sandboxed
 plugin (bus responders): mode remote; hooks login
 ```
 

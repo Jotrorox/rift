@@ -1722,7 +1722,7 @@ impl<C: AsyncRead + AsyncWrite + Unpin, B: AsyncRead + AsyncWrite + Unpin> Sessi
                         .suggest(name, args, servers)
                         .await
                         .unwrap_or_else(|error| {
-                            eprintln!("rift: {error}");
+                            log_error!("{error}");
                             Vec::new()
                         })
                 }

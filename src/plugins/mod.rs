@@ -673,12 +673,11 @@ impl Host {
                 work.spawn(async move {
                     match instance.reload(spec.config_json.clone()).await {
                         Ok(()) => {
-                            eprintln!("rift: plugin {} reloaded its configuration", spec.name);
+                            log_info!("plugin {} reloaded its configuration", spec.name);
                             monitor.lifecycle(&spec.name, "reloaded", None, None);
                         }
                         Err(error) => {
-                            eprintln!(
-                                "rift: plugin {}: reload failed; it keeps its previous configuration: {error:.2048}",
+                            log_error!("plugin {}: reload failed; it keeps its previous configuration: {error:.2048}",
                                 spec.name
                             );
                             monitor.lifecycle(&spec.name, "reload_failed", None, Some(&error));
@@ -741,7 +740,7 @@ impl Host {
         let broker = self.persistent.base.broker.clone();
         let persistent = Arc::downgrade(&self.persistent);
         let Ok(mut subscription) = broker.subscribe("rift.events.>", None) else {
-            eprintln!("rift: plugins will not receive rift.events: subscription refused");
+            log_warn!("plugins will not receive rift.events: subscription refused");
             return;
         };
         *events = Some(tokio::spawn(async move {
@@ -1130,7 +1129,7 @@ fn apply<T>(
     let message = format!("plugin {}: {}: {error:.2048}", instance.name(), hook.name());
     match policy {
         Policy::Continue => {
-            eprintln!("rift: {message}; skipped (continue)");
+            log_warn!("{message}; skipped (continue)");
             monitor.log(
                 instance.name(),
                 api::Level::Warn,

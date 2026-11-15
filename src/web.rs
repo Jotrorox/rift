@@ -97,8 +97,8 @@ impl App {
                         io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem
                     ) =>
             {
-                eprintln!(
-                    "rift: operator records are in memory; configure web.records_directory on a writable filesystem for retention"
+                log_warn!(
+                    "operator records are in memory; configure web.records_directory on a writable filesystem for retention"
                 );
                 operator::Store::open(None)?
             }
@@ -131,8 +131,8 @@ impl App {
                 .local_token_announced
                 .swap(true, std::sync::atomic::Ordering::Relaxed)
         {
-            eprintln!(
-                "rift: web token for this run: {} (enter it under API access; set web.token to choose a permanent one)",
+            log_info!(
+                "web token for this run: {} (enter it under API access; set web.token to choose a permanent one)",
                 self.local_token
             );
         }
@@ -418,7 +418,7 @@ impl Services {
                         _ = async move { let _ = deadline_signal.changed().await; tokio::time::sleep(Duration::from_secs(3)).await; } => { force.send_replace(true); Ok(()) }
                     }
                 });
-                eprintln!("rift: {} on {actual}", kind.name());
+                log_info!("{} on {actual}", kind.name());
                 self.servers.insert(
                     kind,
                     Server {
@@ -983,7 +983,7 @@ async fn admin_guard(State(app): State<App>, mut request: Request, next: Next) -
             };
             if let Err(error) = record_audit(&app, &access, &action, &target, outcome, status).await
             {
-                eprintln!("rift: operator result audit failed: {error}");
+                log_error!("operator result audit failed: {error}");
             }
         }
         return response;
@@ -1768,7 +1768,7 @@ async fn instance_operation(
             Err(error) => ("failed", error.status),
         };
         if let Err(error) = record_audit(&app, &access, action, &target, outcome, code).await {
-            eprintln!("rift: instance result audit failed: {error}");
+            log_error!("instance result audit failed: {error}");
         }
         app.operations
             .complete(&operation_id, reply, status.as_u16());
@@ -1865,7 +1865,7 @@ async fn download_template(
         if let Err(failure) =
             record_audit(&app, &access, "download_software", &name, outcome, code).await
         {
-            eprintln!("rift: download result audit failed: {failure}");
+            log_error!("download result audit failed: {failure}");
         }
         app.operations.complete(&operation_id, reply, 200);
     });

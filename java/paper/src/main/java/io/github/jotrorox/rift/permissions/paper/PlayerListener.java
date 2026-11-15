@@ -8,6 +8,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.function.Consumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import org.bukkit.entity.Player;
@@ -34,6 +35,7 @@ final class PlayerListener implements Listener {
     private final Duration joinTimeout;
     private final Logger logger;
     private final Map<UUID, Injected> injected = new ConcurrentHashMap<>();
+    private volatile Consumer<Player> refreshed = player -> {};
 
     private record Injected(RiftPermissible permissible, PermissibleBase previous) {}
 
@@ -117,9 +119,17 @@ final class PlayerListener implements Listener {
         player.getScheduler().run(plugin, task -> refresh(player), null);
     }
 
+    /** What else follows a player's snapshot and contexts: called on their thread after each refresh. */
+    void onRefresh(Consumer<Player> listener) {
+        refreshed = listener;
+    }
+
     /** Drop cached contexts and recalculate on the player's own thread (Folia-safe). */
     void refresh(Player player) {
         platform.invalidate(player.getUniqueId());
-        player.getScheduler().run(plugin, task -> player.recalculatePermissions(), null);
+        player.getScheduler().run(plugin, task -> {
+            player.recalculatePermissions();
+            refreshed.accept(player);
+        }, null);
     }
 }

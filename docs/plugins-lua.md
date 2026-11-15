@@ -94,7 +94,9 @@ What differs is the environment:
 - Globals, modules and upvalues persist between calls. The JIT compiler is on
   unless `lua.jit = false` (see [below](#the-jit-and-deadlines)). There is no
   instruction budget and no per-call limit on host calls; memory is limited
-  only by `lua.memory_limit_mb`.
+  only by `lua.memory_limit_mb` (256 MiB unless the manifest says otherwise).
+  On Linux aarch64 LuaJIT cannot take a memory limit: Rift logs one warning
+  and Lua plugins, like configuration scripts, run without one.
 - Each call runs under its `[deadlines]` entry (observers, timers and bus
   messages under 60 seconds). When a call overruns, the host applies
   `on_timeout`, and the plugin is interrupted 100 ms later: the next Rift
@@ -158,7 +160,7 @@ mode:
 | `bus.subscribe`, `bus.unsubscribe` | `rift.subscribe(subject, [queue,] [fn])` and `rift.unsubscribe(handle)`. |
 | `servers.*` | `rift.servers.*` waits for the control service and returns its decoded reply; `rift.servers.control(operation, payload)` reaches any `rift.control.*` operation. |
 | `timers.*` | `rift.timers.every`, `after`, `cancel`, and `rift.every` for named jobs. |
-| `log.log` | `rift.log(level, message)` (`trace`, `debug`, `info`, `warn`, `error`); `print` logs at `info`. Lines reach Rift's log and the plugin's log tail in `rift admin plugins logs` and the dashboard. |
+| `log.log` | `rift.log(level, message)` (`trace`, `debug`, `info`, `warn`, `error`); `print` logs at `info`. Lines reach the plugin's log tail in `rift admin plugins logs` and the dashboard, and Rift's log when [`RIFT_LOG_LEVEL`](operations.md#log-levels) includes their level: `debug` and `trace` show only at `debug`, which `rift dev` turns on. |
 | `meta.*` | `rift.plugin_name` and `rift.meta` (`{ name, version, data_dir, config_dir }`); `rift.clock()` and `rift.time()`. |
 | (Lua only) | `rift.http.request(url, options)` takes any `http`/`https` URL instead of an integration name; options are `method`, `body`, `headers` and `timeout_ms` (default 10 s, at most 60 s). Requires `capabilities.network` (default true). |
 | (script only) | `rift.setup`, `rift.plugin` and `rift.config` configure Rift and exist only in `rift.lua`. |

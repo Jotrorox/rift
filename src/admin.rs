@@ -749,7 +749,7 @@ pub async fn serve(
                             workflows.deny_async(401).await
                         };
                         if let Err(error) = audit {
-                            eprintln!("rift: local administrator audit failed: {error}");
+                            log_error!("local administrator audit failed: {error}");
                         }
                         let response = match result {
                             Ok(data) => { events::admin("admin_command", "ok", &permission, &"command completed"); json!({"ok":true,"data":data}) }

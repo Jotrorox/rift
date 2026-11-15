@@ -522,8 +522,8 @@ fn sandbox(
             format!("isolation = \"required\", but {reason}"),
         )),
         Err(reason) => {
-            eprintln!(
-                "rift: warning: starting {} unconfined: isolation = \"landlock\", but {reason}",
+            log_warn!(
+                "starting {} unconfined: isolation = \"landlock\", but {reason}",
                 directory.display()
             );
             Ok(None)

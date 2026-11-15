@@ -19,6 +19,10 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 PLATFORMS = {
     "linux-x86_64": ("Linux", "x86_64"),
+    "linux-aarch64": ("Linux", "aarch64"),
+    # Statically linked; built in Alpine and staged from the same path.
+    "linux-x86_64-musl": ("Linux", "x86_64"),
+    "linux-aarch64-musl": ("Linux", "aarch64"),
     "macos-aarch64": ("Darwin", "arm64"),
     "windows-x86_64": ("Windows", "AMD64"),
 }

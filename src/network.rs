@@ -54,7 +54,7 @@ impl Network<'_> {
             Ok(Action::Deny(reason)) => reason,
             Ok(_) => return timeout(WRITE, session.release_chat()).await?,
             Err(error) => {
-                eprintln!("rift: {error}");
+                log_error!("{error}");
                 catalog::notice(Notice::ChatFailed)
             }
         };
@@ -124,7 +124,7 @@ impl Network<'_> {
             }
         };
         if let Err(error) = result {
-            eprintln!("rift: dialog: {error}");
+            log_error!("dialog: {error}");
         }
     }
 
@@ -350,7 +350,7 @@ impl Network<'_> {
             }
             other => {
                 if let Err(error) = other {
-                    eprintln!("rift: kick hook: {error}");
+                    log_error!("kick hook: {error}");
                 }
                 match self.snapshot.config.network.on_kick {
                     rift::config::OnKick::Hub => self.recovery_candidates(current),
@@ -725,7 +725,7 @@ impl Network<'_> {
             match extension.command(command).await {
                 Ok(action) => Some(action),
                 Err(error) => {
-                    eprintln!("rift: {error}");
+                    log_error!("{error}");
                     Some(rift::extensions::Action::Message(catalog::notice(
                         Notice::CommandFailed,
                     )))

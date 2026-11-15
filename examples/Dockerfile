@@ -1,6 +1,7 @@
 # Build from the extracted Linux release archive (or a checkout with the executable saved as rift):
 # docker build -f examples/Dockerfile -t rift:local .
-# Ubuntu 24.04 matches the release runner's libc. Use a binary for this image's CPU.
+# The glibc release binaries need glibc 2.35 or newer; the -musl ones run on any base.
+# Use a binary for this image's CPU.
 FROM ubuntu:24.04
 RUN apt-get update \
     && apt-get install --no-install-recommends -y libgcc-s1 \

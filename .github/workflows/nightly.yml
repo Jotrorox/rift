@@ -67,8 +67,12 @@ jobs:
         run: |
           # sha256sum fails here if any expected asset is missing.
           sha256sum \
-            rift-linux-x86_64.tar.gz rift-macos-aarch64.tar.gz rift-windows-x86_64.zip \
-            rift-linux-x86_64 rift-macos-aarch64 rift-windows-x86_64.exe > SHA256SUMS
+            rift-linux-x86_64.tar.gz rift-linux-aarch64.tar.gz \
+            rift-linux-x86_64-musl.tar.gz rift-linux-aarch64-musl.tar.gz \
+            rift-macos-aarch64.tar.gz rift-windows-x86_64.zip \
+            rift-linux-x86_64 rift-linux-aarch64 \
+            rift-linux-x86_64-musl rift-linux-aarch64-musl \
+            rift-macos-aarch64 rift-windows-x86_64.exe > SHA256SUMS
       - name: Attest build provenance for every asset
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:

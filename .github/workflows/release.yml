@@ -89,8 +89,12 @@ jobs:
           version="${RELEASE_TAG#v}"
           # sha256sum fails here if any expected asset is missing.
           sha256sum \
-            rift-linux-x86_64.tar.gz rift-macos-aarch64.tar.gz rift-windows-x86_64.zip \
-            rift-linux-x86_64 rift-macos-aarch64 rift-windows-x86_64.exe \
+            rift-linux-x86_64.tar.gz rift-linux-aarch64.tar.gz \
+            rift-linux-x86_64-musl.tar.gz rift-linux-aarch64-musl.tar.gz \
+            rift-macos-aarch64.tar.gz rift-windows-x86_64.zip \
+            rift-linux-x86_64 rift-linux-aarch64 \
+            rift-linux-x86_64-musl rift-linux-aarch64-musl \
+            rift-macos-aarch64 rift-windows-x86_64.exe \
             "RiftPerms-$version.jar" "rift-maven-$version.zip" > SHA256SUMS
           { echo '```'; cat SHA256SUMS; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       - name: Attest build provenance for every asset

@@ -1,11 +1,11 @@
 # Operating a Rift release
 
-Each release provides these assets for Linux x86_64, macOS ARM64 and Windows x86_64:
+Each release provides these assets for Linux (x86_64 and ARM64), macOS ARM64 and Windows x86_64:
 
 | Asset | Contents |
 | --- | --- |
-| `rift-linux-x86_64.tar.gz`, `rift-macos-aarch64.tar.gz`, `rift-windows-x86_64.zip` | `rift` (`rift.exe` on Windows), `README.md`, `LICENSE`, `THIRD_PARTY_NOTICES`, `docs/` and `examples/` |
-| `rift-linux-x86_64`, `rift-macos-aarch64`, `rift-windows-x86_64.exe` | The same executable on its own, for scripted installs |
+| `rift-linux-x86_64.tar.gz`, `rift-linux-aarch64.tar.gz`, `rift-linux-x86_64-musl.tar.gz`, `rift-linux-aarch64-musl.tar.gz`, `rift-macos-aarch64.tar.gz`, `rift-windows-x86_64.zip` | `rift` (`rift.exe` on Windows), `README.md`, `LICENSE`, `THIRD_PARTY_NOTICES`, `docs/` and `examples/` |
+| `rift-linux-x86_64`, `rift-linux-aarch64`, `rift-linux-x86_64-musl`, `rift-linux-aarch64-musl`, `rift-macos-aarch64`, `rift-windows-x86_64.exe` | The same executable on its own, for scripted installs |
 | `SHA256SUMS` | SHA-256 checksums of every other asset |
 
 Every asset also has a signed [build provenance attestation](#verifying-a-download).
@@ -14,6 +14,20 @@ examples keep working; the raw benchmark samples and the SDK sources stay
 online. Run `rift --license` to view the embedded licenses. The
 [README](../README.md) covers protocol support and backend configuration; this
 guide covers daily administration.
+
+### Which Linux build
+
+| Build | Runs on | Use it when |
+| --- | --- | --- |
+| `rift-linux-x86_64`, `rift-linux-aarch64` | glibc 2.35 or newer: Ubuntu 22.04, Debian 12, Fedora 36, RHEL 10 and later | the host qualifies; this is the faster build |
+| `rift-linux-x86_64-musl`, `rift-linux-aarch64-musl` | any distribution; statically linked, no libc needed | Alpine, RHEL 8 and 9, Debian 11, Amazon Linux 2023, `scratch` or distroless images |
+
+`ldd --version` prints the host's glibc version. A glibc build on an older
+host fails at once with `version 'GLIBC_2.3x' not found`; switch to the musl
+build of the same CPU. The musl build behaves the same, but musl's memory
+allocator is slower under many threads, so prefer the glibc build where it
+runs. Managed servers and plugins are separate processes or sandboxes and work
+with either.
 
 ## First start
 
@@ -318,7 +332,27 @@ display names from their plugins; Rift only adds players the current backend
 does not list, so a player is never listed twice and moving between servers
 needs no cleanup. Entries Rift adds show the player's skin when authentication
 is enabled and the default skin otherwise, with full signal bars and no game
-mode or display name. A player whose
+mode.
+
+A player with a prefix or suffix in Rift's [permissions](permissions.md) is
+listed with them around their name, so players on other servers show their
+rank like the backend's own. The text takes `&` codes (see
+[legacy codes](text.md#legacy-codes)), and a colour carries into the name and
+suffix as in a chat format: `&6[VIP] ` lists `[VIP] Alice` in gold, and
+`&6[VIP] &f` keeps the name white. Rift resolves both for the listed player on
+the server they are on, when they join, on every server switch and whenever
+their permissions change, and updates the entries of players who already see
+them within half a second; a prefix scoped to a `dimension` or `gamemode`
+context follows only those moments. From 1.21.2 these entries also carry the
+weight of the player's primary group as their list order, so the client sorts
+them by weight, highest first, ahead of entries without an order; older
+clients have no list order and sort as they always did. Entries a backend
+lists keep the order that backend gives them. A player with neither a prefix
+nor a suffix, and every player on a network that does not use Rift's
+permissions, is listed by name alone, with no display name or order. There is
+no setting for this.
+
+A player whose
 [visibility rule](permissions.md#visibility) hides them from a viewer is not
 listed to that viewer, nor counted in `{online}` and `{server_online}`; their
 own server's list is the backend's (a vanish plugin there hides them).
@@ -390,7 +424,8 @@ when availability is zero.
 Connection failures produce JSON lines on stderr, with `connection_id`, `backend`,
 `backend_address`, `stage`, `failure`, `error_kind`, `duration_ms` and a readable
 `message`. Backend fields are null if failure occurred before route selection.
-Startup, reload and shutdown messages remain plain text. For a systemd service:
+Startup, reload and shutdown messages remain plain text (see
+[log levels](#log-levels)). For a systemd service:
 
 ```sh
 sudo journalctl -u rift --since '10 minutes ago' -o cat --no-pager \
@@ -462,6 +497,43 @@ without opening the database; run `sudo -u rift rift check --strict
 /etc/rift/rift.lua` to verify that the database opens or can be created. LuaJIT uses
 executable memory, so do not add `MemoryDenyWriteExecute=true` to this unit.
 
+## Log levels
+
+Rift writes its log to stderr, one line per message, each starting with
+`rift: `. The level is part of the text:
+
+| Level | Line | Meaning |
+| --- | --- | --- |
+| `error` | `rift: error: ...` | Work was lost or a guarantee no longer holds: an audit record that could not be written, a plugin that failed, a panic |
+| `warn` | `rift: warning: ...` | Something was refused, dropped or retried and Rift carried on |
+| `info` | `rift: ...` | Lifecycle: listeners, reloads, nodes, servers, shutdown |
+| `debug` | `rift: debug: ...` | Detail for tracing one problem, including plugins' `debug` and `trace` lines |
+
+Two environment variables, read once at startup, control it:
+
+| Variable | Values | Default |
+| --- | --- | --- |
+| `RIFT_LOG_LEVEL` | `error`, `warn`, `info`, `debug`: the least severe level still written | `info` |
+| `RIFT_LOG_FORMAT` | `plain`, or `journal` to put the syslog priority (`<3>`, `<4>`, `<6>`, `<7>`) in front of each line | `plain` |
+
+Any other value stops Rift at startup. With `RIFT_LOG_FORMAT=journal` under
+systemd, the journal stores the priority instead of showing it, so
+`journalctl -u rift -p warning` lists warnings and errors only and errors are
+highlighted. Add both to the unit with `Environment=` lines or to
+`/etc/rift/admin.env`.
+
+Plugin log lines (`rift: plugin <name>: ...`) follow the same filter by their
+own level; a plugin's [log tail](plugins.md#operator-surface) keeps every
+line regardless. The JSON connection-failure lines and the output of commands
+such as `rift check` and `rift admin` are not filtered.
+
+A panic in one of Rift's tasks is logged as a single
+`rift: error: panic in thread <name> at <file>:<line>: <message>` line. The
+task that panicked is gone but the process keeps running, so connections still
+drain and managed servers keep their supervisor; treat the line as a bug to
+report and plan a restart. Set `RUST_BACKTRACE=1` to have the backtrace follow
+it line by line.
+
 ## Secrets and the processes Rift starts
 
 Rift reads its secrets from environment variables: `admin.token_env`, every
@@ -508,8 +580,9 @@ of the same user can read Rift's environment.
 
 ## Container example
 
-The supplied [Dockerfile](../examples/Dockerfile) packages the Linux release
-binary using the release runner's Ubuntu 24.04 runtime baseline. The
+The supplied [Dockerfile](../examples/Dockerfile) packages the glibc Linux
+release binary on Ubuntu 24.04 (any base with glibc 2.35 or newer works; the
+musl binary runs on every base). The
 [Compose example](../examples/compose.yaml) runs as UID/GID 65532 with a read-only
 root filesystem, no Linux capabilities, a read-only config directory, a writable
 `rift-state` volume at `/var/lib/rift` and a 40-second stop deadline.
@@ -532,7 +605,8 @@ docker compose -f examples/compose.yaml logs --tail=50 rift
 The image build runs `rift --version` to detect a wrong architecture or
 incompatible runtime before startup. For a source build, set
 `RIFT_BINARY=target/release/rift`; ensure its architecture/libc match the image.
-The example fixes `platform: linux/amd64` to match the released Linux executable.
+The example fixes `platform: linux/amd64`; change it to `linux/arm64` when you
+build from the `aarch64` archive.
 
 The image creates `/var/lib/rift` with owner 65532:65532 and mode 0700; Docker
 preserves these permissions when initializing the named volume. SQLite creates

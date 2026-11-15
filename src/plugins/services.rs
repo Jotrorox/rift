@@ -167,12 +167,26 @@ impl Services {
             .take(MAX_LOG)
             .map(|c| if c.is_control() && c != '\t' { ' ' } else { c })
             .collect();
+        // The plugin's level decides whether Rift's log shows the line
+        // (RIFT_LOG_LEVEL); the plugin's own log tail keeps every one.
+        let severity = match level {
+            Level::Trace | Level::Debug => crate::log::Level::Debug,
+            Level::Info => crate::log::Level::Info,
+            Level::Warn => crate::log::Level::Warn,
+            Level::Error => crate::log::Level::Error,
+        };
         match level {
-            Level::Info => eprintln!("rift: plugin {}: {message}", self.0.spec.name),
-            level => eprintln!(
-                "rift: plugin {}: {}: {message}",
-                self.0.spec.name,
-                level.as_str()
+            Level::Info => crate::log::raw(
+                severity,
+                format_args!("rift: plugin {}: {message}", self.0.spec.name),
+            ),
+            level => crate::log::raw(
+                severity,
+                format_args!(
+                    "rift: plugin {}: {}: {message}",
+                    self.0.spec.name,
+                    level.as_str()
+                ),
             ),
         }
         self.0.base.monitor.log(&self.0.spec.name, level, message);
@@ -211,8 +225,8 @@ impl Inner {
             // Report the first drop and then every power of two.
             let dropped = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
             if dropped.is_power_of_two() {
-                eprintln!(
-                    "rift: plugin {}: queue full; dropped {dropped} timer or bus event(s) so far",
+                log_warn!(
+                    "plugin {}: queue full; dropped {dropped} timer or bus event(s) so far",
                     self.spec.name
                 );
             }
@@ -961,7 +975,10 @@ impl TimersApi<'_> {
 
 impl Inner {
     fn spec_log(&self, message: &str) {
-        eprintln!("rift: plugin {}: warn: {message}", self.spec.name);
+        crate::log::raw(
+            crate::log::Level::Warn,
+            format_args!("rift: plugin {}: warn: {message}", self.spec.name),
+        );
     }
 }
 

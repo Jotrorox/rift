@@ -120,7 +120,7 @@ impl Nodes {
                         if let Some(node) = protocol::state_node(&message.subject)
                             && let Err(error) = nodes.record(node, &message.payload)
                         {
-                            eprintln!("rift: ignored state from node {node}: {error}");
+                            log_warn!("ignored state from node {node}: {error}");
                         }
                     }
                     // A burst closed this subscriber; the next snapshot repairs state.
@@ -175,7 +175,7 @@ impl Nodes {
         );
         drop(observed);
         if reconnect {
-            eprintln!("rift: node {node} connected");
+            log_info!("node {node} connected");
             lock(&self.0.reconnected).insert(node.to_owned());
             self.0.wake.notify_one();
         }

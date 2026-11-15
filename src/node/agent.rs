@@ -206,8 +206,8 @@ fn check_web(web: &str) -> Result<(), &'static str> {
 pub async fn run(options: Options) -> io::Result<()> {
     let agent = Agent::new(options)?;
     let tls = quic::tls_client_config(&agent.options.ca)?;
-    eprintln!(
-        "rift: node {} serving {} for controller {}",
+    log_info!(
+        "node {} serving {} for controller {}",
         agent.options.name,
         agent.root.display(),
         agent.options.controller
@@ -218,7 +218,7 @@ pub async fn run(options: Options) -> io::Result<()> {
         () = shutdown_signal() => {}
     }
     monitor.abort();
-    eprintln!("rift: node {} stopping its servers", agent.options.name);
+    log_info!("node {} stopping its servers", agent.options.name);
     agent.stop_all().await;
     Ok(())
 }
@@ -323,17 +323,18 @@ impl Agent {
         loop {
             match self.connect(tls.clone()).await {
                 Ok(client) => {
-                    eprintln!("rift: node {} connected to controller", self.options.name);
+                    log_info!("node {} connected to controller", self.options.name);
                     backoff = Duration::from_secs(1);
                     let error = self.clone().serve(client).await;
-                    eprintln!(
-                        "rift: node {} lost the controller connection: {error}; servers keep running",
+                    log_warn!(
+                        "node {} lost the controller connection: {error}; servers keep running",
                         self.options.name
                     );
                 }
-                Err(error) => eprintln!(
-                    "rift: node {} cannot reach controller {}: {error}",
-                    self.options.name, self.options.controller
+                Err(error) => log_warn!(
+                    "node {} cannot reach controller {}: {error}",
+                    self.options.name,
+                    self.options.controller
                 ),
             }
             tokio::time::sleep(backoff).await;
@@ -495,7 +496,7 @@ impl Agent {
             if !exited.is_empty() {
                 let mut exits = self.exits.lock().unwrap_or_else(|e| e.into_inner());
                 for (name, status, success) in exited {
-                    eprintln!("rift: node server {name} exited: {status}");
+                    log_info!("node server {name} exited: {status}");
                     exits.retain(|exit| exit.name != name);
                     exits.push_back(ExitState {
                         name,
@@ -522,7 +523,7 @@ impl Agent {
             .map(|child| crate::managed::stop_child(child, SERVER_STOP_GRACE));
         for result in futures_join(stops).await {
             if let Err(error) = result {
-                eprintln!("rift: stopping a server failed: {error}");
+                log_error!("stopping a server failed: {error}");
             }
         }
     }
@@ -691,7 +692,7 @@ impl Agent {
             .retain(|exit| exit.name != start.server);
         drop(processes);
         let revision = self.bump();
-        eprintln!("rift: node started {} (pid {pid:?})", start.server);
+        log_info!("node started {} (pid {pid:?})", start.server);
         Ok(json!({"pid": pid, "adopted": false, "agent": self.id, "revision": revision}))
     }
 
@@ -730,7 +731,7 @@ impl Agent {
         if !stale.is_empty() {
             self.bump();
             for (name, process) in stale {
-                eprintln!("rift: node stopping {name}: the controller no longer assigns it here");
+                log_info!("node stopping {name}: the controller no longer assigns it here");
                 if let Some(child) = process.child {
                     let _ = crate::managed::stop_child(child, SERVER_STOP_GRACE).await;
                 }
@@ -774,7 +775,7 @@ impl Agent {
         .await
         .map_err(io::Error::other)??;
         for name in &removed {
-            eprintln!("rift: node removed unassigned disposable instance {name}");
+            log_info!("node removed unassigned disposable instance {name}");
         }
         Ok(json!({"stopped": stopped, "removed": removed}))
     }
