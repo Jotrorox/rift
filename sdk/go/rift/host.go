@@ -5,6 +5,7 @@ import (
 
 	"go.bytecodealliance.org/cm"
 
+	"github.com/Jotrorox/rift/sdk/go/gen/rift/plugin/background"
 	"github.com/Jotrorox/rift/sdk/go/gen/rift/plugin/bus"
 	"github.com/Jotrorox/rift/sdk/go/gen/rift/plugin/log"
 	"github.com/Jotrorox/rift/sdk/go/gen/rift/plugin/meta"
@@ -36,6 +37,13 @@ func optional(s string) cm.Option[string] {
 	return cm.Some(s)
 }
 
+func optionalTime(unixSeconds uint64) cm.Option[uint64] {
+	if unixSeconds == 0 {
+		return cm.None[uint64]()
+	}
+	return cm.Some(unixSeconds)
+}
+
 // Players
 
 // Players lists joined players, optionally only those on one server or
@@ -65,33 +73,42 @@ func Player(target string) (*PlayerInfo, error) {
 	return nil, nil
 }
 
-// VisibleTo returns the permission node a viewer needs to see the player,
-// and false when everyone sees them (rift:plugin 0.1.3).
-func VisibleTo(target string) (string, bool, error) {
-	node, err := unwrap(players.VisibleTo(target))
+// Lookup returns what Rift remembers about a player who joined at least
+// once, by UUID or by the name they last joined with (case-insensitive),
+// online or not; nil for a player Rift never saw.
+func Lookup(target string) (*PlayerRecord, error) {
+	found, err := unwrap(players.Lookup(target))
 	if err != nil {
-		return "", false, err
+		return nil, err
 	}
-	if value := node.Some(); value != nil {
-		return *value, true, nil
+	if r := found.Some(); r != nil {
+		record := liftPlayerRecord(*r)
+		return &record, nil
 	}
-	return "", false, nil
+	return nil, nil
 }
 
-// Locale returns the language the player's client reported, as the client
-// spells it ("en_us"), and false while Rift does not know it (rift:plugin
-// 0.1.5). The client sends it after login: during configuration from
-// 1.20.2, after Join Game before. So it is never known in OnLogin and in
-// OnJoin only for 1.20.2 and newer clients.
-func Locale(target string) (string, bool, error) {
-	locale, err := unwrap(players.Locale(target))
+// Search lists remembered players whose name starts with prefix, most
+// recently seen first, at most limit (1..=100).
+func Search(prefix string, limit uint32) ([]PlayerRecord, error) {
+	list, err := unwrap(players.Search(prefix, limit))
 	if err != nil {
-		return "", false, err
+		return nil, err
 	}
-	if value := locale.Some(); value != nil {
-		return *value, true, nil
+	out := make([]PlayerRecord, 0, list.Len())
+	for _, r := range list.Slice() {
+		out = append(out, liftPlayerRecord(r))
 	}
-	return "", false, nil
+	return out, nil
+}
+
+// SetLanguage sets the language Rift's own messages use for a player, online
+// or not: a tag of 2..=16 bytes of a-z0-9_, such as "de" or "de_de"; ""
+// goes back to the client's locale. target is a UUID or a name Rift has
+// seen. The language is remembered across sessions, so it is known in
+// OnLogin. It reports whether the player is known.
+func SetLanguage(target, language string) (bool, error) {
+	return unwrap(players.SetLanguage(target, optional(language)))
 }
 
 // PlayerNames lists joined player names starting with prefix, sorted.
@@ -101,45 +118,28 @@ func PlayerNames(prefix string) []string {
 
 // SendMessage sends a chat message to a player (name, UUID or connection
 // id) and reports whether the player was online.
-func SendMessage(target, text string) (bool, error) { return unwrap(players.Message(target, text)) }
-
-// SendMessageJSON sends a chat message given as a JSON text component of at
-// most 32 KiB, for colours, hover text and click events.
-func SendMessageJSON(target, textJSON string) (bool, error) {
-	return unwrap(players.MessageJSON(target, textJSON))
+func SendMessage(target string, text Text) (bool, error) {
+	return unwrap(players.Message(target, text.lower()))
 }
 
 // SendActionBar shows text above a player's hotbar.
-func SendActionBar(target, text string) (bool, error) {
-	return unwrap(players.ActionBar(target, text))
+func SendActionBar(target string, text Text) (bool, error) {
+	return unwrap(players.ActionBar(target, text.lower()))
 }
 
-// SendActionBarJSON shows a JSON text component above a player's hotbar.
-func SendActionBarJSON(target, textJSON string) (bool, error) {
-	return unwrap(players.ActionBarJSON(target, textJSON))
-}
-
-// SendTitle shows a title to a player.
+// SendTitle shows a title to a player:
+//
+//	rift.SendTitle(target, rift.Title{Title: rift.Mini("<gold>Welcome").Text(), FadeIn: 10, Stay: 70, FadeOut: 20})
 func SendTitle(target string, t Title) (bool, error) {
 	return unwrap(players.Title(target, types.TitleSpec{
-		Title: t.Title, Subtitle: lowerOptString(t.Subtitle), FadeIn: t.FadeIn, Stay: t.Stay, FadeOut: t.FadeOut,
+		Title: t.Title.lowerOpt(), Subtitle: t.Subtitle.lowerOpt(), FadeIn: t.FadeIn, Stay: t.Stay, FadeOut: t.FadeOut,
 	}))
 }
 
-// SendTitleJSON shows a title whose text is JSON text components, such as
-// text builders (rift:plugin 0.1.4):
-//
-//	rift.SendTitleJSON(target, rift.TitleJSON{TitleJSON: rift.Mini("<gold>Welcome").JSON(), FadeIn: 10, Stay: 70, FadeOut: 20})
-func SendTitleJSON(target string, t TitleJSON) (bool, error) {
-	return unwrap(players.TitleJSON(target, types.TitleJSONSpec{
-		TitleJSON: t.TitleJSON, SubtitleJSON: lowerOptString(t.SubtitleJSON), FadeIn: t.FadeIn, Stay: t.Stay, FadeOut: t.FadeOut,
-	}))
-}
-
-// SetTabList sets a player's tab list header and footer (JSON text
-// components); both nil restores the configured tab list.
-func SetTabList(target string, headerJSON, footerJSON *string) (bool, error) {
-	return unwrap(players.TabList(target, lowerOptString(headerJSON), lowerOptString(footerJSON)))
+// SetTabList sets a player's tab list header and footer; the zero Text
+// leaves one out, and both zero restores the configured tab list.
+func SetTabList(target string, header, footer Text) (bool, error) {
+	return unwrap(players.TabList(target, header.lowerOpt(), footer.lowerOpt()))
 }
 
 // SetBossBar shows the boss bar called name to a player; nil removes it.
@@ -147,7 +147,7 @@ func SetBossBar(target, name string, bar *BossBar) (bool, error) {
 	spec := cm.None[types.BossBarSpec]()
 	if bar != nil {
 		spec = cm.Some(types.BossBarSpec{
-			TextJSON: bar.TextJSON, Progress: bar.Progress, Color: bar.Color, Style: bar.Style,
+			Text: bar.Text.lower(), Progress: bar.Progress, Color: bar.Color, Style: bar.Style,
 			DarkenSky: bar.DarkenSky, PlayMusic: bar.PlayMusic, CreateFog: bar.CreateFog,
 		})
 	}
@@ -167,22 +167,15 @@ func ShowDialog(target, dialogJSON string) (bool, error) {
 func ClearDialog(target string) (bool, error) { return unwrap(players.ClearDialog(target)) }
 
 // Kick disconnects a player with a reason.
-func Kick(target, reason string) (bool, error) { return unwrap(players.Kick(target, reason)) }
-
-// KickJSON disconnects a player with a reason given as a JSON text component.
-func KickJSON(target, reasonJSON string) (bool, error) {
-	return unwrap(players.KickJSON(target, reasonJSON))
+func Kick(target string, reason Text) (bool, error) {
+	return unwrap(players.Kick(target, reason.lower()))
 }
 
 // Transfer moves a player to a server.
 func Transfer(target, server string) (bool, error) { return unwrap(players.Transfer(target, server)) }
 
 // Broadcast messages every joined player and returns how many received it.
-func Broadcast(text string) (uint32, error) { return unwrap(players.Broadcast(text)) }
-
-// BroadcastJSON sends a JSON text component to every joined player and
-// returns how many received it.
-func BroadcastJSON(textJSON string) (uint32, error) { return unwrap(players.BroadcastJSON(textJSON)) }
+func Broadcast(text Text) (uint32, error) { return unwrap(players.Broadcast(text.lower())) }
 
 // Store. Namespaces are prefixed with plugin.<name>. by the host.
 
@@ -244,8 +237,14 @@ func SetPermission(uuid, node string, value *bool) error {
 	return err
 }
 
-// AddGroup adds a player to a group and reports whether membership changed.
-func AddGroup(uuid, group string) (bool, error) { return unwrap(permissions.AddGroup(uuid, group)) }
+// AddGroup adds a player to a group, until expiresAt Unix seconds (0 for no
+// expiry; a new expiry replaces an earlier one). It reports whether anything
+// changed:
+//
+//	rift.AddGroup(uuid, "vip", uint64(rift.Time())+30*24*3600)
+func AddGroup(uuid, group string, expiresAt uint64) (bool, error) {
+	return unwrap(permissions.AddGroup(uuid, group, optionalTime(expiresAt)))
+}
 
 // RemoveGroup removes a player from a group and reports whether membership
 // changed.
@@ -265,7 +264,7 @@ func ListGroupsJSON() string { return permissions.ListGroups() }
 const VisibleToKey = "rift.visible-to"
 
 // Meta returns one meta value in the player's current contexts, and false
-// when it is unset (rift:plugin 0.1.3).
+// when it is unset.
 func Meta(uuid, key string) (string, bool) {
 	value := permissions.Meta(uuid, key)
 	if found := value.Some(); found != nil {
@@ -277,17 +276,13 @@ func Meta(uuid, key string) (string, bool) {
 // SetMeta sets the user's meta node key to value in the contexts of
 // contextsJSON ("" for global), expiring at expiresAt Unix seconds (0 for
 // never); remove deletes the node in those contexts instead. It reports
-// whether anything changed (rift:plugin 0.1.3).
+// whether anything changed.
 func SetMeta(uuid, key, value string, remove bool, contextsJSON string, expiresAt uint64) (bool, error) {
 	v := cm.Some(value)
 	if remove {
 		v = cm.None[string]()
 	}
-	expiry := cm.None[uint64]()
-	if expiresAt != 0 {
-		expiry = cm.Some(expiresAt)
-	}
-	return unwrap(permissions.SetMeta(uuid, key, v, optional(contextsJSON), expiry))
+	return unwrap(permissions.SetMeta(uuid, key, v, optional(contextsJSON), optionalTime(expiresAt)))
 }
 
 // Bus
@@ -356,6 +351,35 @@ func After(ms uint32) uint64 { return timers.After(ms) }
 // CancelTimer stops a timer and reports whether it existed.
 func CancelTimer(handle uint64) bool { return timers.Cancel(handle) }
 
+// Background work. A plugin runs one call at a time, so a slow lookup in a
+// hook would keep every other hook waiting. Instead the hook defers its
+// answer, queues the lookup for a background worker and returns; the OnJobDone
+// handler answers with Resolve.
+
+// Defer makes the running decision hook (login, initial-server,
+// before-transfer, command, chat or kick) answer later: the handler's return
+// value is ignored, and the answer is the one given to Resolve with the
+// returned ticket. The hook's deadline keeps running. It is an error outside
+// those hooks or when the call was deferred already.
+func Defer() (ticket uint64, err error) { return unwrap(background.Defer()) }
+
+// Resolve answers a deferred hook. It reports false when nobody waits for the
+// ticket any more: the deadline passed, or it was answered.
+func Resolve(ticket uint64, decision Decision) (bool, error) {
+	return unwrap(background.Resolve(ticket, decision.lower()))
+}
+
+// Run queues payload for the plugin's background workers (manifest
+// [background] workers; an error without any). One of them calls the OnWork
+// handler with it, and the result comes back to this instance's OnJobDone
+// handler with the returned handle. At most 1024 jobs wait at a time.
+func Run(payload []byte) (handle uint64, err error) {
+	return unwrap(background.Run(cm.ToList(payload)))
+}
+
+// IsWorker reports whether this instance is a background worker.
+func IsWorker() bool { return background.IsWorker() }
+
 // Logging, prefixed with the plugin name by the host.
 
 // Log writes message at level.
@@ -392,3 +416,6 @@ func Clock() float64 { return meta.Clock() }
 
 // Time returns Unix time in seconds.
 func Time() int64 { return meta.Time() }
+
+// API returns the rift:plugin version the host implements, such as "0.2.0".
+func API() string { return meta.API() }

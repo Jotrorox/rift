@@ -3,447 +3,207 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Imported Functions from `rift:plugin/players@0.1.5`
+// Imported Functions from `rift:plugin/players@0.2.0`
 
-__attribute__((__import_module__("rift:plugin/players@0.1.5"), __import_name__("list")))
+__attribute__((__import_module__("rift:plugin/players@0.2.0"), __import_name__("list")))
 extern void __wasm_import_rift_plugin_players_list(int32_t, uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/players@0.1.5"), __import_name__("get")))
+__attribute__((__import_module__("rift:plugin/players@0.2.0"), __import_name__("get")))
 extern void __wasm_import_rift_plugin_players_get(uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/players@0.1.5"), __import_name__("names")))
+__attribute__((__import_module__("rift:plugin/players@0.2.0"), __import_name__("names")))
 extern void __wasm_import_rift_plugin_players_names(int32_t, uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/players@0.1.5"), __import_name__("message")))
-extern void __wasm_import_rift_plugin_players_message(uint8_t *, size_t, uint8_t *, size_t, uint8_t *);
+__attribute__((__import_module__("rift:plugin/players@0.2.0"), __import_name__("message")))
+extern void __wasm_import_rift_plugin_players_message(uint8_t *, size_t, int32_t, uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/players@0.1.5"), __import_name__("action-bar")))
-extern void __wasm_import_rift_plugin_players_action_bar(uint8_t *, size_t, uint8_t *, size_t, uint8_t *);
+__attribute__((__import_module__("rift:plugin/players@0.2.0"), __import_name__("action-bar")))
+extern void __wasm_import_rift_plugin_players_action_bar(uint8_t *, size_t, int32_t, uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/players@0.1.5"), __import_name__("title")))
-extern void __wasm_import_rift_plugin_players_title(uint8_t *, size_t, uint8_t *, size_t, int32_t, uint8_t *, size_t, int32_t, int32_t, int32_t, uint8_t *);
+__attribute__((__import_module__("rift:plugin/players@0.2.0"), __import_name__("title")))
+extern void __wasm_import_rift_plugin_players_title(uint8_t *, size_t, int32_t, int32_t, uint8_t *, size_t, int32_t, int32_t, uint8_t *, size_t, int32_t, int32_t, int32_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/players@0.1.5"), __import_name__("tab-list")))
-extern void __wasm_import_rift_plugin_players_tab_list(uint8_t *, size_t, int32_t, uint8_t *, size_t, int32_t, uint8_t *, size_t, uint8_t *);
+__attribute__((__import_module__("rift:plugin/players@0.2.0"), __import_name__("tab-list")))
+extern void __wasm_import_rift_plugin_players_tab_list(uint8_t *, size_t, int32_t, int32_t, uint8_t *, size_t, int32_t, int32_t, uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/players@0.1.5"), __import_name__("boss-bar")))
-extern void __wasm_import_rift_plugin_players_boss_bar(uint8_t *, size_t, uint8_t *, size_t, int32_t, uint8_t *, size_t, float, uint8_t *, size_t, uint8_t *, size_t, int32_t, int32_t, int32_t, uint8_t *);
+__attribute__((__import_module__("rift:plugin/players@0.2.0"), __import_name__("boss-bar")))
+extern void __wasm_import_rift_plugin_players_boss_bar(uint8_t *, size_t, uint8_t *, size_t, int32_t, int32_t, uint8_t *, size_t, float, uint8_t *, size_t, uint8_t *, size_t, int32_t, int32_t, int32_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/players@0.1.5"), __import_name__("kick")))
-extern void __wasm_import_rift_plugin_players_kick(uint8_t *, size_t, uint8_t *, size_t, uint8_t *);
+__attribute__((__import_module__("rift:plugin/players@0.2.0"), __import_name__("kick")))
+extern void __wasm_import_rift_plugin_players_kick(uint8_t *, size_t, int32_t, uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/players@0.1.5"), __import_name__("dialog")))
+__attribute__((__import_module__("rift:plugin/players@0.2.0"), __import_name__("dialog")))
 extern void __wasm_import_rift_plugin_players_dialog(uint8_t *, size_t, uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/players@0.1.5"), __import_name__("clear-dialog")))
+__attribute__((__import_module__("rift:plugin/players@0.2.0"), __import_name__("clear-dialog")))
 extern void __wasm_import_rift_plugin_players_clear_dialog(uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/players@0.1.5"), __import_name__("transfer")))
+__attribute__((__import_module__("rift:plugin/players@0.2.0"), __import_name__("transfer")))
 extern void __wasm_import_rift_plugin_players_transfer(uint8_t *, size_t, uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/players@0.1.5"), __import_name__("broadcast")))
-extern void __wasm_import_rift_plugin_players_broadcast(uint8_t *, size_t, uint8_t *);
+__attribute__((__import_module__("rift:plugin/players@0.2.0"), __import_name__("broadcast")))
+extern void __wasm_import_rift_plugin_players_broadcast(int32_t, uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/players@0.1.5"), __import_name__("message-json")))
-extern void __wasm_import_rift_plugin_players_message_json(uint8_t *, size_t, uint8_t *, size_t, uint8_t *);
+__attribute__((__import_module__("rift:plugin/players@0.2.0"), __import_name__("lookup")))
+extern void __wasm_import_rift_plugin_players_lookup(uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/players@0.1.5"), __import_name__("action-bar-json")))
-extern void __wasm_import_rift_plugin_players_action_bar_json(uint8_t *, size_t, uint8_t *, size_t, uint8_t *);
+__attribute__((__import_module__("rift:plugin/players@0.2.0"), __import_name__("search")))
+extern void __wasm_import_rift_plugin_players_search(uint8_t *, size_t, int32_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/players@0.1.5"), __import_name__("kick-json")))
-extern void __wasm_import_rift_plugin_players_kick_json(uint8_t *, size_t, uint8_t *, size_t, uint8_t *);
+__attribute__((__import_module__("rift:plugin/players@0.2.0"), __import_name__("set-language")))
+extern void __wasm_import_rift_plugin_players_set_language(uint8_t *, size_t, int32_t, uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/players@0.1.5"), __import_name__("broadcast-json")))
-extern void __wasm_import_rift_plugin_players_broadcast_json(uint8_t *, size_t, uint8_t *);
+// Imported Functions from `rift:plugin/store@0.2.0`
 
-__attribute__((__import_module__("rift:plugin/players@0.1.5"), __import_name__("visible-to")))
-extern void __wasm_import_rift_plugin_players_visible_to(uint8_t *, size_t, uint8_t *);
-
-__attribute__((__import_module__("rift:plugin/players@0.1.5"), __import_name__("title-json")))
-extern void __wasm_import_rift_plugin_players_title_json(uint8_t *, size_t, uint8_t *, size_t, int32_t, uint8_t *, size_t, int32_t, int32_t, int32_t, uint8_t *);
-
-__attribute__((__import_module__("rift:plugin/players@0.1.5"), __import_name__("locale")))
-extern void __wasm_import_rift_plugin_players_locale(uint8_t *, size_t, uint8_t *);
-
-// Imported Functions from `rift:plugin/store@0.1.5`
-
-__attribute__((__import_module__("rift:plugin/store@0.1.5"), __import_name__("get")))
+__attribute__((__import_module__("rift:plugin/store@0.2.0"), __import_name__("get")))
 extern void __wasm_import_rift_plugin_store_get(uint8_t *, size_t, uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/store@0.1.5"), __import_name__("set")))
+__attribute__((__import_module__("rift:plugin/store@0.2.0"), __import_name__("set")))
 extern void __wasm_import_rift_plugin_store_set(uint8_t *, size_t, uint8_t *, size_t, uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/store@0.1.5"), __import_name__("delete")))
+__attribute__((__import_module__("rift:plugin/store@0.2.0"), __import_name__("delete")))
 extern void __wasm_import_rift_plugin_store_delete(uint8_t *, size_t, uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/store@0.1.5"), __import_name__("increment")))
+__attribute__((__import_module__("rift:plugin/store@0.2.0"), __import_name__("increment")))
 extern void __wasm_import_rift_plugin_store_increment(uint8_t *, size_t, uint8_t *, size_t, int64_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/store@0.1.5"), __import_name__("list")))
+__attribute__((__import_module__("rift:plugin/store@0.2.0"), __import_name__("list")))
 extern void __wasm_import_rift_plugin_store_list(uint8_t *, size_t, uint8_t *, size_t, uint8_t *);
 
-// Imported Functions from `rift:plugin/permissions@0.1.5`
+// Imported Functions from `rift:plugin/permissions@0.2.0`
 
-__attribute__((__import_module__("rift:plugin/permissions@0.1.5"), __import_name__("has")))
+__attribute__((__import_module__("rift:plugin/permissions@0.2.0"), __import_name__("has")))
 extern int32_t __wasm_import_rift_plugin_permissions_has(uint8_t *, size_t, uint8_t *, size_t);
 
-__attribute__((__import_module__("rift:plugin/permissions@0.1.5"), __import_name__("set")))
+__attribute__((__import_module__("rift:plugin/permissions@0.2.0"), __import_name__("set")))
 extern void __wasm_import_rift_plugin_permissions_set(uint8_t *, size_t, uint8_t *, size_t, int32_t, int32_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/permissions@0.1.5"), __import_name__("add-group")))
-extern void __wasm_import_rift_plugin_permissions_add_group(uint8_t *, size_t, uint8_t *, size_t, uint8_t *);
+__attribute__((__import_module__("rift:plugin/permissions@0.2.0"), __import_name__("add-group")))
+extern void __wasm_import_rift_plugin_permissions_add_group(uint8_t *, size_t, uint8_t *, size_t, int32_t, int64_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/permissions@0.1.5"), __import_name__("remove-group")))
+__attribute__((__import_module__("rift:plugin/permissions@0.2.0"), __import_name__("remove-group")))
 extern void __wasm_import_rift_plugin_permissions_remove_group(uint8_t *, size_t, uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/permissions@0.1.5"), __import_name__("groups")))
+__attribute__((__import_module__("rift:plugin/permissions@0.2.0"), __import_name__("groups")))
 extern void __wasm_import_rift_plugin_permissions_groups(uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/permissions@0.1.5"), __import_name__("list-groups")))
+__attribute__((__import_module__("rift:plugin/permissions@0.2.0"), __import_name__("list-groups")))
 extern void __wasm_import_rift_plugin_permissions_list_groups(uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/permissions@0.1.5"), __import_name__("meta")))
+__attribute__((__import_module__("rift:plugin/permissions@0.2.0"), __import_name__("meta")))
 extern void __wasm_import_rift_plugin_permissions_meta(uint8_t *, size_t, uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/permissions@0.1.5"), __import_name__("set-meta")))
+__attribute__((__import_module__("rift:plugin/permissions@0.2.0"), __import_name__("set-meta")))
 extern void __wasm_import_rift_plugin_permissions_set_meta(uint8_t *, size_t, uint8_t *, size_t, int32_t, uint8_t *, size_t, int32_t, uint8_t *, size_t, int32_t, int64_t, uint8_t *);
 
-// Imported Functions from `rift:plugin/bus@0.1.5`
+// Imported Functions from `rift:plugin/bus@0.2.0`
 
-__attribute__((__import_module__("rift:plugin/bus@0.1.5"), __import_name__("publish")))
+__attribute__((__import_module__("rift:plugin/bus@0.2.0"), __import_name__("publish")))
 extern void __wasm_import_rift_plugin_bus_publish(uint8_t *, size_t, uint8_t *, size_t, int32_t, uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/bus@0.1.5"), __import_name__("request")))
+__attribute__((__import_module__("rift:plugin/bus@0.2.0"), __import_name__("request")))
 extern void __wasm_import_rift_plugin_bus_request(uint8_t *, size_t, uint8_t *, size_t, int32_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/bus@0.1.5"), __import_name__("subscribe")))
+__attribute__((__import_module__("rift:plugin/bus@0.2.0"), __import_name__("subscribe")))
 extern void __wasm_import_rift_plugin_bus_subscribe(uint8_t *, size_t, int32_t, uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/bus@0.1.5"), __import_name__("unsubscribe")))
+__attribute__((__import_module__("rift:plugin/bus@0.2.0"), __import_name__("unsubscribe")))
 extern int32_t __wasm_import_rift_plugin_bus_unsubscribe(int64_t);
 
-__attribute__((__import_module__("rift:plugin/bus@0.1.5"), __import_name__("stream-publish")))
+__attribute__((__import_module__("rift:plugin/bus@0.2.0"), __import_name__("stream-publish")))
 extern void __wasm_import_rift_plugin_bus_stream_publish(uint8_t *, size_t, uint8_t *, size_t, uint8_t *);
 
-// Imported Functions from `rift:plugin/servers@0.1.5`
+// Imported Functions from `rift:plugin/servers@0.2.0`
 
-__attribute__((__import_module__("rift:plugin/servers@0.1.5"), __import_name__("create")))
+__attribute__((__import_module__("rift:plugin/servers@0.2.0"), __import_name__("create")))
 extern void __wasm_import_rift_plugin_servers_create(uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/servers@0.1.5"), __import_name__("remove")))
+__attribute__((__import_module__("rift:plugin/servers@0.2.0"), __import_name__("remove")))
 extern void __wasm_import_rift_plugin_servers_remove(uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/servers@0.1.5"), __import_name__("start")))
+__attribute__((__import_module__("rift:plugin/servers@0.2.0"), __import_name__("start")))
 extern void __wasm_import_rift_plugin_servers_start(uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/servers@0.1.5"), __import_name__("stop")))
+__attribute__((__import_module__("rift:plugin/servers@0.2.0"), __import_name__("stop")))
 extern void __wasm_import_rift_plugin_servers_stop(uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/servers@0.1.5"), __import_name__("download")))
+__attribute__((__import_module__("rift:plugin/servers@0.2.0"), __import_name__("download")))
 extern void __wasm_import_rift_plugin_servers_download(uint8_t *, size_t, uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/servers@0.1.5"), __import_name__("control")))
+__attribute__((__import_module__("rift:plugin/servers@0.2.0"), __import_name__("control")))
 extern void __wasm_import_rift_plugin_servers_control(uint8_t *, size_t, uint8_t *, size_t, uint8_t *);
 
-// Imported Functions from `rift:plugin/timers@0.1.5`
+// Imported Functions from `rift:plugin/timers@0.2.0`
 
-__attribute__((__import_module__("rift:plugin/timers@0.1.5"), __import_name__("every")))
+__attribute__((__import_module__("rift:plugin/timers@0.2.0"), __import_name__("every")))
 extern int64_t __wasm_import_rift_plugin_timers_every(int32_t);
 
-__attribute__((__import_module__("rift:plugin/timers@0.1.5"), __import_name__("after")))
+__attribute__((__import_module__("rift:plugin/timers@0.2.0"), __import_name__("after")))
 extern int64_t __wasm_import_rift_plugin_timers_after(int32_t);
 
-__attribute__((__import_module__("rift:plugin/timers@0.1.5"), __import_name__("cancel")))
+__attribute__((__import_module__("rift:plugin/timers@0.2.0"), __import_name__("cancel")))
 extern int32_t __wasm_import_rift_plugin_timers_cancel(int64_t);
 
-// Imported Functions from `rift:plugin/log@0.1.5`
+// Imported Functions from `rift:plugin/background@0.2.0`
 
-__attribute__((__import_module__("rift:plugin/log@0.1.5"), __import_name__("log")))
+__attribute__((__import_module__("rift:plugin/background@0.2.0"), __import_name__("defer")))
+extern void __wasm_import_rift_plugin_background_defer(uint8_t *);
+
+__attribute__((__import_module__("rift:plugin/background@0.2.0"), __import_name__("resolve")))
+extern void __wasm_import_rift_plugin_background_resolve(int64_t, int32_t, uint8_t *, uint8_t *, size_t, uint8_t *);
+
+__attribute__((__import_module__("rift:plugin/background@0.2.0"), __import_name__("run")))
+extern void __wasm_import_rift_plugin_background_run(uint8_t *, size_t, uint8_t *);
+
+__attribute__((__import_module__("rift:plugin/background@0.2.0"), __import_name__("is-worker")))
+extern int32_t __wasm_import_rift_plugin_background_is_worker(void);
+
+// Imported Functions from `rift:plugin/log@0.2.0`
+
+__attribute__((__import_module__("rift:plugin/log@0.2.0"), __import_name__("log")))
 extern void __wasm_import_rift_plugin_log_log(int32_t, uint8_t *, size_t);
 
-// Imported Functions from `rift:plugin/meta@0.1.5`
+// Imported Functions from `rift:plugin/meta@0.2.0`
 
-__attribute__((__import_module__("rift:plugin/meta@0.1.5"), __import_name__("name")))
+__attribute__((__import_module__("rift:plugin/meta@0.2.0"), __import_name__("name")))
 extern void __wasm_import_rift_plugin_meta_name(uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/meta@0.1.5"), __import_name__("version")))
+__attribute__((__import_module__("rift:plugin/meta@0.2.0"), __import_name__("version")))
 extern void __wasm_import_rift_plugin_meta_version(uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/meta@0.1.5"), __import_name__("data-dir")))
+__attribute__((__import_module__("rift:plugin/meta@0.2.0"), __import_name__("data-dir")))
 extern void __wasm_import_rift_plugin_meta_data_dir(uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/meta@0.1.5"), __import_name__("config-dir")))
+__attribute__((__import_module__("rift:plugin/meta@0.2.0"), __import_name__("config-dir")))
 extern void __wasm_import_rift_plugin_meta_config_dir(uint8_t *);
 
-__attribute__((__import_module__("rift:plugin/meta@0.1.5"), __import_name__("clock")))
+__attribute__((__import_module__("rift:plugin/meta@0.2.0"), __import_name__("clock")))
 extern double __wasm_import_rift_plugin_meta_clock(void);
 
-__attribute__((__import_module__("rift:plugin/meta@0.1.5"), __import_name__("time")))
+__attribute__((__import_module__("rift:plugin/meta@0.2.0"), __import_name__("time")))
 extern int64_t __wasm_import_rift_plugin_meta_time(void);
 
-// Exported Functions from `rift:plugin/dialogs@0.1.5`
+__attribute__((__import_module__("rift:plugin/meta@0.2.0"), __import_name__("api")))
+extern void __wasm_import_rift_plugin_meta_api(uint8_t *);
 
+// Exported Functions from `rift:plugin/handler@0.2.0`
 
-// Exported Functions from `rift:plugin/decisions@0.1.5`
-
-__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/decisions@0.1.5#login")))
-void __wasm_export_exports_rift_plugin_decisions_login_post_return(uint8_t * arg0) {
+__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.2.0#init")))
+void __wasm_export_exports_rift_plugin_handler_init_post_return(uint8_t * arg0) {
   switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + 0))) {
     case 0: {
-      break;
-    }
-    case 1: {
-      if ((*((size_t*) (arg0 + (2*sizeof(void*))))) > 0) {
-        free(*((uint8_t **) (arg0 + sizeof(void*))));
-      }
-      break;
-    }
-    case 2: {
-      if ((*((size_t*) (arg0 + (2*sizeof(void*))))) > 0) {
-        free(*((uint8_t **) (arg0 + sizeof(void*))));
-      }
-      break;
-    }
-    case 3: {
-      if ((*((size_t*) (arg0 + (2*sizeof(void*))))) > 0) {
-        free(*((uint8_t **) (arg0 + sizeof(void*))));
-      }
-      break;
-    }
-    case 4: {
-      if ((*((size_t*) (arg0 + (2*sizeof(void*))))) > 0) {
-        free(*((uint8_t **) (arg0 + sizeof(void*))));
-      }
-      break;
-    }
-    case 5: {
-      break;
-    }
-    case 6: {
-      if ((*((size_t*) (arg0 + (2*sizeof(void*))))) > 0) {
-        free(*((uint8_t **) (arg0 + sizeof(void*))));
-      }
-      break;
-    }
-    case 7: {
-      if ((*((size_t*) (arg0 + (2*sizeof(void*))))) > 0) {
-        free(*((uint8_t **) (arg0 + sizeof(void*))));
-      }
-      break;
-    }
-  }
-}
-
-__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/decisions@0.1.5#initial-server")))
-void __wasm_export_exports_rift_plugin_decisions_initial_server_post_return(uint8_t * arg0) {
-  switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + 0))) {
-    case 0: {
-      break;
-    }
-    case 1: {
-      if ((*((size_t*) (arg0 + (2*sizeof(void*))))) > 0) {
-        free(*((uint8_t **) (arg0 + sizeof(void*))));
-      }
-      break;
-    }
-    case 2: {
-      if ((*((size_t*) (arg0 + (2*sizeof(void*))))) > 0) {
-        free(*((uint8_t **) (arg0 + sizeof(void*))));
-      }
-      break;
-    }
-    case 3: {
-      if ((*((size_t*) (arg0 + (2*sizeof(void*))))) > 0) {
-        free(*((uint8_t **) (arg0 + sizeof(void*))));
-      }
-      break;
-    }
-    case 4: {
-      if ((*((size_t*) (arg0 + (2*sizeof(void*))))) > 0) {
-        free(*((uint8_t **) (arg0 + sizeof(void*))));
-      }
-      break;
-    }
-    case 5: {
-      break;
-    }
-    case 6: {
-      if ((*((size_t*) (arg0 + (2*sizeof(void*))))) > 0) {
-        free(*((uint8_t **) (arg0 + sizeof(void*))));
-      }
-      break;
-    }
-    case 7: {
-      if ((*((size_t*) (arg0 + (2*sizeof(void*))))) > 0) {
-        free(*((uint8_t **) (arg0 + sizeof(void*))));
-      }
-      break;
-    }
-  }
-}
-
-__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/decisions@0.1.5#before-transfer")))
-void __wasm_export_exports_rift_plugin_decisions_before_transfer_post_return(uint8_t * arg0) {
-  switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + 0))) {
-    case 0: {
-      break;
-    }
-    case 1: {
-      if ((*((size_t*) (arg0 + (2*sizeof(void*))))) > 0) {
-        free(*((uint8_t **) (arg0 + sizeof(void*))));
-      }
-      break;
-    }
-    case 2: {
-      if ((*((size_t*) (arg0 + (2*sizeof(void*))))) > 0) {
-        free(*((uint8_t **) (arg0 + sizeof(void*))));
-      }
-      break;
-    }
-    case 3: {
-      if ((*((size_t*) (arg0 + (2*sizeof(void*))))) > 0) {
-        free(*((uint8_t **) (arg0 + sizeof(void*))));
-      }
-      break;
-    }
-    case 4: {
-      if ((*((size_t*) (arg0 + (2*sizeof(void*))))) > 0) {
-        free(*((uint8_t **) (arg0 + sizeof(void*))));
-      }
-      break;
-    }
-    case 5: {
-      break;
-    }
-    case 6: {
-      if ((*((size_t*) (arg0 + (2*sizeof(void*))))) > 0) {
-        free(*((uint8_t **) (arg0 + sizeof(void*))));
-      }
-      break;
-    }
-    case 7: {
-      if ((*((size_t*) (arg0 + (2*sizeof(void*))))) > 0) {
-        free(*((uint8_t **) (arg0 + sizeof(void*))));
-      }
-      break;
-    }
-  }
-}
-
-__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/decisions@0.1.5#command")))
-void __wasm_export_exports_rift_plugin_decisions_command_post_return(uint8_t * arg0) {
-  switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + 0))) {
-    case 0: {
-      break;
-    }
-    case 1: {
-      if ((*((size_t*) (arg0 + (2*sizeof(void*))))) > 0) {
-        free(*((uint8_t **) (arg0 + sizeof(void*))));
-      }
-      break;
-    }
-    case 2: {
-      if ((*((size_t*) (arg0 + (2*sizeof(void*))))) > 0) {
-        free(*((uint8_t **) (arg0 + sizeof(void*))));
-      }
-      break;
-    }
-    case 3: {
-      if ((*((size_t*) (arg0 + (2*sizeof(void*))))) > 0) {
-        free(*((uint8_t **) (arg0 + sizeof(void*))));
-      }
-      break;
-    }
-    case 4: {
-      if ((*((size_t*) (arg0 + (2*sizeof(void*))))) > 0) {
-        free(*((uint8_t **) (arg0 + sizeof(void*))));
-      }
-      break;
-    }
-    case 5: {
-      break;
-    }
-    case 6: {
-      if ((*((size_t*) (arg0 + (2*sizeof(void*))))) > 0) {
-        free(*((uint8_t **) (arg0 + sizeof(void*))));
-      }
-      break;
-    }
-    case 7: {
-      if ((*((size_t*) (arg0 + (2*sizeof(void*))))) > 0) {
-        free(*((uint8_t **) (arg0 + sizeof(void*))));
-      }
-      break;
-    }
-  }
-}
-
-// Exported Functions from `rift:plugin/styled@0.1.5`
-
-__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/styled@0.1.5#suggest")))
-void __wasm_export_exports_rift_plugin_styled_suggest_post_return(uint8_t * arg0) {
-  size_t len = *((size_t*) (arg0 + sizeof(void*)));
-  if (len > 0) {
-    uint8_t *ptr = *((uint8_t **) (arg0 + 0));
-    for (size_t i = 0; i < len; i++) {
-      uint8_t *base = ptr + i * (5*sizeof(void*));
-      (void) base;
-      if ((*((size_t*) (base + sizeof(void*)))) > 0) {
-        free(*((uint8_t **) (base + 0)));
-      }
-      switch ((int32_t) (int32_t) *((uint8_t*) (base + (2*sizeof(void*))))) {
-        case 0: {
-          break;
-        }
-        case 1: {
-          if ((*((size_t*) (base + (4*sizeof(void*))))) > 0) {
-            free(*((uint8_t **) (base + (3*sizeof(void*)))));
+      size_t len3 = *((size_t*) (arg0 + (2*sizeof(void*))));
+      if (len3 > 0) {
+        uint8_t *ptr4 = *((uint8_t **) (arg0 + sizeof(void*)));
+        for (size_t i5 = 0; i5 < len3; i5++) {
+          uint8_t *base = ptr4 + i5 * (10*sizeof(void*));
+          (void) base;
+          if ((*((size_t*) (base + sizeof(void*)))) > 0) {
+            free(*((uint8_t **) (base + 0)));
           }
-          break;
-        }
-      }
-    }
-    free(ptr);
-  }
-}
-
-__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/styled@0.1.5#status")))
-void __wasm_export_exports_rift_plugin_styled_status_post_return(uint8_t * arg0) {
-  switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + 0))) {
-    case 0: {
-      break;
-    }
-    case 1: {
-      switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + sizeof(void*)))) {
-        case 0: {
-          break;
-        }
-        case 1: {
-          if ((*((size_t*) (arg0 + (3*sizeof(void*))))) > 0) {
-            free(*((uint8_t **) (arg0 + (2*sizeof(void*)))));
-          }
-          break;
-        }
-      }
-      switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + (4*sizeof(void*))))) {
-        case 0: {
-          break;
-        }
-        case 1: {
-          if ((*((size_t*) (arg0 + (6*sizeof(void*))))) > 0) {
-            free(*((uint8_t **) (arg0 + (5*sizeof(void*)))));
-          }
-          break;
-        }
-      }
-      switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + (24+7*sizeof(void*))))) {
-        case 0: {
-          break;
-        }
-        case 1: {
-          size_t len = *((size_t*) (arg0 + (24+9*sizeof(void*))));
+          size_t len = *((size_t*) (base + (3*sizeof(void*))));
           if (len > 0) {
-            uint8_t *ptr = *((uint8_t **) (arg0 + (24+8*sizeof(void*))));
+            uint8_t *ptr = *((uint8_t **) (base + (2*sizeof(void*))));
             for (size_t i = 0; i < len; i++) {
               uint8_t *base = ptr + i * (2*sizeof(void*));
               (void) base;
@@ -453,59 +213,25 @@ void __wasm_export_exports_rift_plugin_styled_status_post_return(uint8_t * arg0)
             }
             free(ptr);
           }
-          break;
-        }
-      }
-      switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + (24+10*sizeof(void*))))) {
-        case 0: {
-          break;
-        }
-        case 1: {
-          if ((*((size_t*) (arg0 + (24+12*sizeof(void*))))) > 0) {
-            free(*((uint8_t **) (arg0 + (24+11*sizeof(void*)))));
+          if ((*((size_t*) (base + (5*sizeof(void*))))) > 0) {
+            free(*((uint8_t **) (base + (4*sizeof(void*)))));
           }
-          break;
-        }
-      }
-      break;
-    }
-  }
-}
-
-// Exported Functions from `rift:plugin/handler@0.1.5`
-
-__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.1.5#init")))
-void __wasm_export_exports_rift_plugin_handler_init_post_return(uint8_t * arg0) {
-  switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + 0))) {
-    case 0: {
-      size_t len0 = *((size_t*) (arg0 + (2*sizeof(void*))));
-      if (len0 > 0) {
-        uint8_t *ptr1 = *((uint8_t **) (arg0 + sizeof(void*)));
-        for (size_t i2 = 0; i2 < len0; i2++) {
-          uint8_t *base = ptr1 + i2 * (7*sizeof(void*));
-          (void) base;
-          if ((*((size_t*) (base + sizeof(void*)))) > 0) {
-            free(*((uint8_t **) (base + 0)));
-          }
-          if ((*((size_t*) (base + (3*sizeof(void*))))) > 0) {
-            free(*((uint8_t **) (base + (2*sizeof(void*)))));
-          }
-          switch ((int32_t) (int32_t) *((uint8_t*) (base + (4*sizeof(void*))))) {
+          switch ((int32_t) (int32_t) *((uint8_t*) (base + (6*sizeof(void*))))) {
             case 0: {
               break;
             }
             case 1: {
-              size_t len = *((size_t*) (base + (6*sizeof(void*))));
-              if (len > 0) {
-                uint8_t *ptr = *((uint8_t **) (base + (5*sizeof(void*))));
-                for (size_t i = 0; i < len; i++) {
-                  uint8_t *base = ptr + i * (2*sizeof(void*));
+              size_t len0 = *((size_t*) (base + (8*sizeof(void*))));
+              if (len0 > 0) {
+                uint8_t *ptr1 = *((uint8_t **) (base + (7*sizeof(void*))));
+                for (size_t i2 = 0; i2 < len0; i2++) {
+                  uint8_t *base = ptr1 + i2 * (2*sizeof(void*));
                   (void) base;
                   if ((*((size_t*) (base + sizeof(void*)))) > 0) {
                     free(*((uint8_t **) (base + 0)));
                   }
                 }
-                free(ptr);
+                free(ptr1);
               }
               break;
             }
@@ -520,16 +246,16 @@ void __wasm_export_exports_rift_plugin_handler_init_post_return(uint8_t * arg0) 
             }
           }
         }
-        free(ptr1);
+        free(ptr4);
       }
-      size_t len3 = *((size_t*) (arg0 + (4*sizeof(void*))));
-      if (len3 > 0) {
-        uint8_t *ptr4 = *((uint8_t **) (arg0 + (3*sizeof(void*))));
-        for (size_t i5 = 0; i5 < len3; i5++) {
-          uint8_t *base = ptr4 + i5 * 1;
+      size_t len6 = *((size_t*) (arg0 + (4*sizeof(void*))));
+      if (len6 > 0) {
+        uint8_t *ptr7 = *((uint8_t **) (arg0 + (3*sizeof(void*))));
+        for (size_t i8 = 0; i8 < len6; i8++) {
+          uint8_t *base = ptr7 + i8 * 1;
           (void) base;
         }
-        free(ptr4);
+        free(ptr7);
       }
       break;
     }
@@ -542,7 +268,7 @@ void __wasm_export_exports_rift_plugin_handler_init_post_return(uint8_t * arg0) 
   }
 }
 
-__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.1.5#reload")))
+__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.2.0#reload")))
 void __wasm_export_exports_rift_plugin_handler_reload_post_return(uint8_t * arg0) {
   switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + 0))) {
     case 0: {
@@ -558,7 +284,7 @@ void __wasm_export_exports_rift_plugin_handler_reload_post_return(uint8_t * arg0
 }
 
 
-__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.1.5#route")))
+__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.2.0#route")))
 void __wasm_export_exports_rift_plugin_handler_route_post_return(uint8_t * arg0) {
   switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + 0))) {
     case 0: {
@@ -587,15 +313,26 @@ void __wasm_export_exports_rift_plugin_handler_route_post_return(uint8_t * arg0)
   }
 }
 
-__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.1.5#login")))
+__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.2.0#login")))
 void __wasm_export_exports_rift_plugin_handler_login_post_return(uint8_t * arg0) {
   switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + 0))) {
     case 0: {
       break;
     }
     case 1: {
-      if ((*((size_t*) (arg0 + (2*sizeof(void*))))) > 0) {
-        free(*((uint8_t **) (arg0 + sizeof(void*))));
+      switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + sizeof(void*)))) {
+        case 0: {
+          if ((*((size_t*) (arg0 + (3*sizeof(void*))))) > 0) {
+            free(*((uint8_t **) (arg0 + (2*sizeof(void*)))));
+          }
+          break;
+        }
+        case 1: {
+          if ((*((size_t*) (arg0 + (3*sizeof(void*))))) > 0) {
+            free(*((uint8_t **) (arg0 + (2*sizeof(void*)))));
+          }
+          break;
+        }
       }
       break;
     }
@@ -606,8 +343,19 @@ void __wasm_export_exports_rift_plugin_handler_login_post_return(uint8_t * arg0)
       break;
     }
     case 3: {
-      if ((*((size_t*) (arg0 + (2*sizeof(void*))))) > 0) {
-        free(*((uint8_t **) (arg0 + sizeof(void*))));
+      switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + sizeof(void*)))) {
+        case 0: {
+          if ((*((size_t*) (arg0 + (3*sizeof(void*))))) > 0) {
+            free(*((uint8_t **) (arg0 + (2*sizeof(void*)))));
+          }
+          break;
+        }
+        case 1: {
+          if ((*((size_t*) (arg0 + (3*sizeof(void*))))) > 0) {
+            free(*((uint8_t **) (arg0 + (2*sizeof(void*)))));
+          }
+          break;
+        }
       }
       break;
     }
@@ -623,15 +371,26 @@ void __wasm_export_exports_rift_plugin_handler_login_post_return(uint8_t * arg0)
   }
 }
 
-__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.1.5#initial-server")))
+__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.2.0#initial-server")))
 void __wasm_export_exports_rift_plugin_handler_initial_server_post_return(uint8_t * arg0) {
   switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + 0))) {
     case 0: {
       break;
     }
     case 1: {
-      if ((*((size_t*) (arg0 + (2*sizeof(void*))))) > 0) {
-        free(*((uint8_t **) (arg0 + sizeof(void*))));
+      switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + sizeof(void*)))) {
+        case 0: {
+          if ((*((size_t*) (arg0 + (3*sizeof(void*))))) > 0) {
+            free(*((uint8_t **) (arg0 + (2*sizeof(void*)))));
+          }
+          break;
+        }
+        case 1: {
+          if ((*((size_t*) (arg0 + (3*sizeof(void*))))) > 0) {
+            free(*((uint8_t **) (arg0 + (2*sizeof(void*)))));
+          }
+          break;
+        }
       }
       break;
     }
@@ -642,8 +401,19 @@ void __wasm_export_exports_rift_plugin_handler_initial_server_post_return(uint8_
       break;
     }
     case 3: {
-      if ((*((size_t*) (arg0 + (2*sizeof(void*))))) > 0) {
-        free(*((uint8_t **) (arg0 + sizeof(void*))));
+      switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + sizeof(void*)))) {
+        case 0: {
+          if ((*((size_t*) (arg0 + (3*sizeof(void*))))) > 0) {
+            free(*((uint8_t **) (arg0 + (2*sizeof(void*)))));
+          }
+          break;
+        }
+        case 1: {
+          if ((*((size_t*) (arg0 + (3*sizeof(void*))))) > 0) {
+            free(*((uint8_t **) (arg0 + (2*sizeof(void*)))));
+          }
+          break;
+        }
       }
       break;
     }
@@ -659,15 +429,26 @@ void __wasm_export_exports_rift_plugin_handler_initial_server_post_return(uint8_
   }
 }
 
-__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.1.5#before-transfer")))
+__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.2.0#before-transfer")))
 void __wasm_export_exports_rift_plugin_handler_before_transfer_post_return(uint8_t * arg0) {
   switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + 0))) {
     case 0: {
       break;
     }
     case 1: {
-      if ((*((size_t*) (arg0 + (2*sizeof(void*))))) > 0) {
-        free(*((uint8_t **) (arg0 + sizeof(void*))));
+      switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + sizeof(void*)))) {
+        case 0: {
+          if ((*((size_t*) (arg0 + (3*sizeof(void*))))) > 0) {
+            free(*((uint8_t **) (arg0 + (2*sizeof(void*)))));
+          }
+          break;
+        }
+        case 1: {
+          if ((*((size_t*) (arg0 + (3*sizeof(void*))))) > 0) {
+            free(*((uint8_t **) (arg0 + (2*sizeof(void*)))));
+          }
+          break;
+        }
       }
       break;
     }
@@ -678,8 +459,19 @@ void __wasm_export_exports_rift_plugin_handler_before_transfer_post_return(uint8
       break;
     }
     case 3: {
-      if ((*((size_t*) (arg0 + (2*sizeof(void*))))) > 0) {
-        free(*((uint8_t **) (arg0 + sizeof(void*))));
+      switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + sizeof(void*)))) {
+        case 0: {
+          if ((*((size_t*) (arg0 + (3*sizeof(void*))))) > 0) {
+            free(*((uint8_t **) (arg0 + (2*sizeof(void*)))));
+          }
+          break;
+        }
+        case 1: {
+          if ((*((size_t*) (arg0 + (3*sizeof(void*))))) > 0) {
+            free(*((uint8_t **) (arg0 + (2*sizeof(void*)))));
+          }
+          break;
+        }
       }
       break;
     }
@@ -695,15 +487,26 @@ void __wasm_export_exports_rift_plugin_handler_before_transfer_post_return(uint8
   }
 }
 
-__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.1.5#command")))
+__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.2.0#command")))
 void __wasm_export_exports_rift_plugin_handler_command_post_return(uint8_t * arg0) {
   switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + 0))) {
     case 0: {
       break;
     }
     case 1: {
-      if ((*((size_t*) (arg0 + (2*sizeof(void*))))) > 0) {
-        free(*((uint8_t **) (arg0 + sizeof(void*))));
+      switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + sizeof(void*)))) {
+        case 0: {
+          if ((*((size_t*) (arg0 + (3*sizeof(void*))))) > 0) {
+            free(*((uint8_t **) (arg0 + (2*sizeof(void*)))));
+          }
+          break;
+        }
+        case 1: {
+          if ((*((size_t*) (arg0 + (3*sizeof(void*))))) > 0) {
+            free(*((uint8_t **) (arg0 + (2*sizeof(void*)))));
+          }
+          break;
+        }
       }
       break;
     }
@@ -714,8 +517,19 @@ void __wasm_export_exports_rift_plugin_handler_command_post_return(uint8_t * arg
       break;
     }
     case 3: {
-      if ((*((size_t*) (arg0 + (2*sizeof(void*))))) > 0) {
-        free(*((uint8_t **) (arg0 + sizeof(void*))));
+      switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + sizeof(void*)))) {
+        case 0: {
+          if ((*((size_t*) (arg0 + (3*sizeof(void*))))) > 0) {
+            free(*((uint8_t **) (arg0 + (2*sizeof(void*)))));
+          }
+          break;
+        }
+        case 1: {
+          if ((*((size_t*) (arg0 + (3*sizeof(void*))))) > 0) {
+            free(*((uint8_t **) (arg0 + (2*sizeof(void*)))));
+          }
+          break;
+        }
       }
       break;
     }
@@ -731,13 +545,13 @@ void __wasm_export_exports_rift_plugin_handler_command_post_return(uint8_t * arg
   }
 }
 
-__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.1.5#suggest")))
+__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.2.0#suggest")))
 void __wasm_export_exports_rift_plugin_handler_suggest_post_return(uint8_t * arg0) {
   size_t len = *((size_t*) (arg0 + sizeof(void*)));
   if (len > 0) {
     uint8_t *ptr = *((uint8_t **) (arg0 + 0));
     for (size_t i = 0; i < len; i++) {
-      uint8_t *base = ptr + i * (5*sizeof(void*));
+      uint8_t *base = ptr + i * (6*sizeof(void*));
       (void) base;
       if ((*((size_t*) (base + sizeof(void*)))) > 0) {
         free(*((uint8_t **) (base + 0)));
@@ -747,8 +561,19 @@ void __wasm_export_exports_rift_plugin_handler_suggest_post_return(uint8_t * arg
           break;
         }
         case 1: {
-          if ((*((size_t*) (base + (4*sizeof(void*))))) > 0) {
-            free(*((uint8_t **) (base + (3*sizeof(void*)))));
+          switch ((int32_t) (int32_t) *((uint8_t*) (base + (3*sizeof(void*))))) {
+            case 0: {
+              if ((*((size_t*) (base + (5*sizeof(void*))))) > 0) {
+                free(*((uint8_t **) (base + (4*sizeof(void*)))));
+              }
+              break;
+            }
+            case 1: {
+              if ((*((size_t*) (base + (5*sizeof(void*))))) > 0) {
+                free(*((uint8_t **) (base + (4*sizeof(void*)))));
+              }
+              break;
+            }
           }
           break;
         }
@@ -758,7 +583,7 @@ void __wasm_export_exports_rift_plugin_handler_suggest_post_return(uint8_t * arg
   }
 }
 
-__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.1.5#status")))
+__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.2.0#status")))
 void __wasm_export_exports_rift_plugin_handler_status_post_return(uint8_t * arg0) {
   switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + 0))) {
     case 0: {
@@ -770,36 +595,69 @@ void __wasm_export_exports_rift_plugin_handler_status_post_return(uint8_t * arg0
           break;
         }
         case 1: {
-          if ((*((size_t*) (arg0 + (3*sizeof(void*))))) > 0) {
-            free(*((uint8_t **) (arg0 + (2*sizeof(void*)))));
+          switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + (2*sizeof(void*))))) {
+            case 0: {
+              if ((*((size_t*) (arg0 + (4*sizeof(void*))))) > 0) {
+                free(*((uint8_t **) (arg0 + (3*sizeof(void*)))));
+              }
+              break;
+            }
+            case 1: {
+              if ((*((size_t*) (arg0 + (4*sizeof(void*))))) > 0) {
+                free(*((uint8_t **) (arg0 + (3*sizeof(void*)))));
+              }
+              break;
+            }
           }
           break;
         }
       }
-      switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + (4*sizeof(void*))))) {
+      switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + (5*sizeof(void*))))) {
         case 0: {
           break;
         }
         case 1: {
-          if ((*((size_t*) (arg0 + (6*sizeof(void*))))) > 0) {
-            free(*((uint8_t **) (arg0 + (5*sizeof(void*)))));
+          switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + (6*sizeof(void*))))) {
+            case 0: {
+              if ((*((size_t*) (arg0 + (8*sizeof(void*))))) > 0) {
+                free(*((uint8_t **) (arg0 + (7*sizeof(void*)))));
+              }
+              break;
+            }
+            case 1: {
+              if ((*((size_t*) (arg0 + (8*sizeof(void*))))) > 0) {
+                free(*((uint8_t **) (arg0 + (7*sizeof(void*)))));
+              }
+              break;
+            }
           }
           break;
         }
       }
-      switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + (24+7*sizeof(void*))))) {
+      switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + (24+9*sizeof(void*))))) {
         case 0: {
           break;
         }
         case 1: {
-          size_t len = *((size_t*) (arg0 + (24+9*sizeof(void*))));
+          size_t len = *((size_t*) (arg0 + (24+11*sizeof(void*))));
           if (len > 0) {
-            uint8_t *ptr = *((uint8_t **) (arg0 + (24+8*sizeof(void*))));
+            uint8_t *ptr = *((uint8_t **) (arg0 + (24+10*sizeof(void*))));
             for (size_t i = 0; i < len; i++) {
-              uint8_t *base = ptr + i * (2*sizeof(void*));
+              uint8_t *base = ptr + i * (3*sizeof(void*));
               (void) base;
-              if ((*((size_t*) (base + sizeof(void*)))) > 0) {
-                free(*((uint8_t **) (base + 0)));
+              switch ((int32_t) (int32_t) *((uint8_t*) (base + 0))) {
+                case 0: {
+                  if ((*((size_t*) (base + (2*sizeof(void*))))) > 0) {
+                    free(*((uint8_t **) (base + sizeof(void*))));
+                  }
+                  break;
+                }
+                case 1: {
+                  if ((*((size_t*) (base + (2*sizeof(void*))))) > 0) {
+                    free(*((uint8_t **) (base + sizeof(void*))));
+                  }
+                  break;
+                }
               }
             }
             free(ptr);
@@ -807,13 +665,13 @@ void __wasm_export_exports_rift_plugin_handler_status_post_return(uint8_t * arg0
           break;
         }
       }
-      switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + (24+10*sizeof(void*))))) {
+      switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + (24+12*sizeof(void*))))) {
         case 0: {
           break;
         }
         case 1: {
-          if ((*((size_t*) (arg0 + (24+12*sizeof(void*))))) > 0) {
-            free(*((uint8_t **) (arg0 + (24+11*sizeof(void*)))));
+          if ((*((size_t*) (arg0 + (24+14*sizeof(void*))))) > 0) {
+            free(*((uint8_t **) (arg0 + (24+13*sizeof(void*)))));
           }
           break;
         }
@@ -823,7 +681,7 @@ void __wasm_export_exports_rift_plugin_handler_status_post_return(uint8_t * arg0
   }
 }
 
-__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.1.5#http")))
+__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.2.0#http")))
 void __wasm_export_exports_rift_plugin_handler_http_post_return(uint8_t * arg0) {
   switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + 0))) {
     case 0: {
@@ -841,11 +699,168 @@ void __wasm_export_exports_rift_plugin_handler_http_post_return(uint8_t * arg0) 
   }
 }
 
+__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.2.0#chat")))
+void __wasm_export_exports_rift_plugin_handler_chat_post_return(uint8_t * arg0) {
+  switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + 0))) {
+    case 0: {
+      break;
+    }
+    case 1: {
+      switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + sizeof(void*)))) {
+        case 0: {
+          if ((*((size_t*) (arg0 + (3*sizeof(void*))))) > 0) {
+            free(*((uint8_t **) (arg0 + (2*sizeof(void*)))));
+          }
+          break;
+        }
+        case 1: {
+          if ((*((size_t*) (arg0 + (3*sizeof(void*))))) > 0) {
+            free(*((uint8_t **) (arg0 + (2*sizeof(void*)))));
+          }
+          break;
+        }
+      }
+      break;
+    }
+    case 2: {
+      if ((*((size_t*) (arg0 + (2*sizeof(void*))))) > 0) {
+        free(*((uint8_t **) (arg0 + sizeof(void*))));
+      }
+      break;
+    }
+    case 3: {
+      switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + sizeof(void*)))) {
+        case 0: {
+          if ((*((size_t*) (arg0 + (3*sizeof(void*))))) > 0) {
+            free(*((uint8_t **) (arg0 + (2*sizeof(void*)))));
+          }
+          break;
+        }
+        case 1: {
+          if ((*((size_t*) (arg0 + (3*sizeof(void*))))) > 0) {
+            free(*((uint8_t **) (arg0 + (2*sizeof(void*)))));
+          }
+          break;
+        }
+      }
+      break;
+    }
+    case 4: {
+      if ((*((size_t*) (arg0 + (2*sizeof(void*))))) > 0) {
+        free(*((uint8_t **) (arg0 + sizeof(void*))));
+      }
+      break;
+    }
+    case 5: {
+      break;
+    }
+  }
+}
+
+__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.2.0#kick")))
+void __wasm_export_exports_rift_plugin_handler_kick_post_return(uint8_t * arg0) {
+  switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + 0))) {
+    case 0: {
+      break;
+    }
+    case 1: {
+      switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + sizeof(void*)))) {
+        case 0: {
+          if ((*((size_t*) (arg0 + (3*sizeof(void*))))) > 0) {
+            free(*((uint8_t **) (arg0 + (2*sizeof(void*)))));
+          }
+          break;
+        }
+        case 1: {
+          if ((*((size_t*) (arg0 + (3*sizeof(void*))))) > 0) {
+            free(*((uint8_t **) (arg0 + (2*sizeof(void*)))));
+          }
+          break;
+        }
+      }
+      break;
+    }
+    case 2: {
+      if ((*((size_t*) (arg0 + (2*sizeof(void*))))) > 0) {
+        free(*((uint8_t **) (arg0 + sizeof(void*))));
+      }
+      break;
+    }
+    case 3: {
+      switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + sizeof(void*)))) {
+        case 0: {
+          if ((*((size_t*) (arg0 + (3*sizeof(void*))))) > 0) {
+            free(*((uint8_t **) (arg0 + (2*sizeof(void*)))));
+          }
+          break;
+        }
+        case 1: {
+          if ((*((size_t*) (arg0 + (3*sizeof(void*))))) > 0) {
+            free(*((uint8_t **) (arg0 + (2*sizeof(void*)))));
+          }
+          break;
+        }
+      }
+      break;
+    }
+    case 4: {
+      if ((*((size_t*) (arg0 + (2*sizeof(void*))))) > 0) {
+        free(*((uint8_t **) (arg0 + sizeof(void*))));
+      }
+      break;
+    }
+    case 5: {
+      break;
+    }
+  }
+}
 
 
 
 
 
+
+
+
+
+__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.2.0#work-init")))
+void __wasm_export_exports_rift_plugin_handler_work_init_post_return(uint8_t * arg0) {
+  switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + 0))) {
+    case 0: {
+      break;
+    }
+    case 1: {
+      if ((*((size_t*) (arg0 + (2*sizeof(void*))))) > 0) {
+        free(*((uint8_t **) (arg0 + sizeof(void*))));
+      }
+      break;
+    }
+  }
+}
+
+__attribute__((__weak__, __export_name__("cabi_post_rift:plugin/handler@0.2.0#work")))
+void __wasm_export_exports_rift_plugin_handler_work_post_return(uint8_t * arg0) {
+  switch ((int32_t) (int32_t) *((uint8_t*) (arg0 + 0))) {
+    case 0: {
+      size_t len = *((size_t*) (arg0 + (2*sizeof(void*))));
+      if (len > 0) {
+        uint8_t *ptr = *((uint8_t **) (arg0 + sizeof(void*)));
+        for (size_t i = 0; i < len; i++) {
+          uint8_t *base = ptr + i * 1;
+          (void) base;
+        }
+        free(ptr);
+      }
+      break;
+    }
+    case 1: {
+      if ((*((size_t*) (arg0 + (2*sizeof(void*))))) > 0) {
+        free(*((uint8_t **) (arg0 + sizeof(void*))));
+      }
+      break;
+    }
+  }
+}
 
 // Canonical ABI intrinsics
 
@@ -859,20 +874,63 @@ void *cabi_realloc(void *ptr, size_t old_size, size_t align, size_t new_size) {
 }
 
 __attribute__((__aligned__(sizeof(void*))))
-static uint8_t RET_AREA[(24+13*sizeof(void*))];
+static uint8_t RET_AREA[(24+15*sizeof(void*))];
 
 // Helper Functions
 
-void rift_plugin_types_player_info_free(rift_plugin_types_player_info_t *ptr) {
-  rift_plugin_string_free(&ptr->uuid);
-  rift_plugin_string_free(&ptr->name);
-  rift_plugin_string_free(&ptr->server);
+void rift_plugin_types_text_free(rift_plugin_types_text_t *ptr) {
+  switch ((int32_t) ptr->tag) {
+    case 0: {
+      rift_plugin_string_free(&ptr->val.plain);
+      break;
+    }
+    case 1: {
+      rift_plugin_string_free(&ptr->val.json);
+      break;
+    }
+  }
 }
 
 void rift_plugin_option_string_free(rift_plugin_option_string_t *ptr) {
   if (ptr->is_some) {
     rift_plugin_string_free(&ptr->val);
   }
+}
+
+void rift_plugin_types_profile_property_free(rift_plugin_types_profile_property_t *ptr) {
+  rift_plugin_string_free(&ptr->name);
+  rift_plugin_string_free(&ptr->value);
+  rift_plugin_option_string_free(&ptr->signature);
+}
+
+void rift_plugin_types_list_profile_property_free(rift_plugin_types_list_profile_property_t *ptr) {
+  size_t list_len = ptr->len;
+  if (list_len > 0) {
+    rift_plugin_types_profile_property_t *list_ptr = ptr->ptr;
+    for (size_t i = 0; i < list_len; i++) {
+      rift_plugin_types_profile_property_free(&list_ptr[i]);
+    }
+    free(list_ptr);
+  }
+}
+
+void rift_plugin_types_player_info_free(rift_plugin_types_player_info_t *ptr) {
+  rift_plugin_string_free(&ptr->uuid);
+  rift_plugin_string_free(&ptr->name);
+  rift_plugin_string_free(&ptr->server);
+  rift_plugin_string_free(&ptr->ip);
+  rift_plugin_types_list_profile_property_free(&ptr->properties);
+  rift_plugin_option_string_free(&ptr->visible_to);
+  rift_plugin_option_string_free(&ptr->locale);
+  rift_plugin_option_string_free(&ptr->language);
+}
+
+void rift_plugin_types_player_record_free(rift_plugin_types_player_record_t *ptr) {
+  rift_plugin_string_free(&ptr->uuid);
+  rift_plugin_string_free(&ptr->name);
+  rift_plugin_string_free(&ptr->last_ip);
+  rift_plugin_string_free(&ptr->last_server);
+  rift_plugin_option_string_free(&ptr->language);
 }
 
 void rift_plugin_option_bool_free(rift_plugin_option_bool_t *ptr) {
@@ -894,6 +952,7 @@ void rift_plugin_types_context_free(rift_plugin_types_context_t *ptr) {
   rift_plugin_option_string_free(&ptr->command);
   rift_plugin_string_free(&ptr->args);
   rift_plugin_string_free(&ptr->word);
+  rift_plugin_option_string_free(&ptr->language);
 }
 
 void rift_plugin_types_connection_free(rift_plugin_types_connection_t *ptr) {
@@ -918,10 +977,10 @@ void rift_plugin_types_route_decision_free(rift_plugin_types_route_decision_t *p
   }
 }
 
-void rift_plugin_types_action_free(rift_plugin_types_action_t *ptr) {
+void rift_plugin_types_decision_free(rift_plugin_types_decision_t *ptr) {
   switch ((int32_t) ptr->tag) {
     case 1: {
-      rift_plugin_string_free(&ptr->val.deny);
+      rift_plugin_types_text_free(&ptr->val.deny);
       break;
     }
     case 2: {
@@ -929,7 +988,7 @@ void rift_plugin_types_action_free(rift_plugin_types_action_t *ptr) {
       break;
     }
     case 3: {
-      rift_plugin_string_free(&ptr->val.message);
+      rift_plugin_types_text_free(&ptr->val.message);
       break;
     }
     case 4: {
@@ -939,43 +998,15 @@ void rift_plugin_types_action_free(rift_plugin_types_action_t *ptr) {
   }
 }
 
-void rift_plugin_types_decision_free(rift_plugin_types_decision_t *ptr) {
-  switch ((int32_t) ptr->tag) {
-    case 1: {
-      rift_plugin_string_free(&ptr->val.deny);
-      break;
-    }
-    case 2: {
-      rift_plugin_string_free(&ptr->val.server);
-      break;
-    }
-    case 3: {
-      rift_plugin_string_free(&ptr->val.message);
-      break;
-    }
-    case 4: {
-      rift_plugin_string_free(&ptr->val.queue);
-      break;
-    }
-    case 6: {
-      rift_plugin_string_free(&ptr->val.deny_json);
-      break;
-    }
-    case 7: {
-      rift_plugin_string_free(&ptr->val.message_json);
-      break;
-    }
+void rift_plugin_types_option_text_free(rift_plugin_types_option_text_t *ptr) {
+  if (ptr->is_some) {
+    rift_plugin_types_text_free(&ptr->val);
   }
 }
 
 void rift_plugin_types_suggestion_free(rift_plugin_types_suggestion_t *ptr) {
   rift_plugin_string_free(&ptr->text);
-  rift_plugin_option_string_free(&ptr->tooltip);
-}
-
-void rift_plugin_types_rich_suggestion_free(rift_plugin_types_rich_suggestion_t *ptr) {
-  rift_plugin_string_free(&ptr->text);
-  rift_plugin_option_string_free(&ptr->tooltip_json);
+  rift_plugin_types_option_text_free(&ptr->tooltip);
 }
 
 void rift_plugin_types_ping_free(rift_plugin_types_ping_t *ptr) {
@@ -995,40 +1026,30 @@ void rift_plugin_option_u32_free(rift_plugin_option_u32_t *ptr) {
   }
 }
 
-void rift_plugin_list_string_free(rift_plugin_list_string_t *ptr) {
+void rift_plugin_types_list_text_free(rift_plugin_types_list_text_t *ptr) {
   size_t list_len = ptr->len;
   if (list_len > 0) {
-    rift_plugin_string_t *list_ptr = ptr->ptr;
+    rift_plugin_types_text_t *list_ptr = ptr->ptr;
     for (size_t i = 0; i < list_len; i++) {
-      rift_plugin_string_free(&list_ptr[i]);
+      rift_plugin_types_text_free(&list_ptr[i]);
     }
     free(list_ptr);
   }
 }
 
-void rift_plugin_option_list_string_free(rift_plugin_option_list_string_t *ptr) {
+void rift_plugin_types_option_list_text_free(rift_plugin_types_option_list_text_t *ptr) {
   if (ptr->is_some) {
-    rift_plugin_list_string_free(&ptr->val);
+    rift_plugin_types_list_text_free(&ptr->val);
   }
 }
 
 void rift_plugin_types_status_override_free(rift_plugin_types_status_override_t *ptr) {
-  rift_plugin_option_string_free(&ptr->motd_json);
-  rift_plugin_option_string_free(&ptr->version);
+  rift_plugin_types_option_text_free(&ptr->motd);
+  rift_plugin_types_option_text_free(&ptr->version);
   rift_plugin_option_s32_free(&ptr->protocol);
   rift_plugin_option_u32_free(&ptr->online);
   rift_plugin_option_u32_free(&ptr->max_players);
-  rift_plugin_option_list_string_free(&ptr->sample);
-  rift_plugin_option_string_free(&ptr->favicon);
-}
-
-void rift_plugin_types_rich_status_override_free(rift_plugin_types_rich_status_override_t *ptr) {
-  rift_plugin_option_string_free(&ptr->motd_json);
-  rift_plugin_option_string_free(&ptr->version_json);
-  rift_plugin_option_s32_free(&ptr->protocol);
-  rift_plugin_option_u32_free(&ptr->online);
-  rift_plugin_option_u32_free(&ptr->max_players);
-  rift_plugin_option_list_string_free(&ptr->sample_json);
+  rift_plugin_types_option_list_text_free(&ptr->sample);
   rift_plugin_option_string_free(&ptr->favicon);
 }
 
@@ -1083,6 +1104,17 @@ void rift_plugin_types_rift_event_free(rift_plugin_types_rift_event_t *ptr) {
   rift_plugin_string_free(&ptr->payload_json);
 }
 
+void rift_plugin_list_string_free(rift_plugin_list_string_t *ptr) {
+  size_t list_len = ptr->len;
+  if (list_len > 0) {
+    rift_plugin_string_t *list_ptr = ptr->ptr;
+    for (size_t i = 0; i < list_len; i++) {
+      rift_plugin_string_free(&list_ptr[i]);
+    }
+    free(list_ptr);
+  }
+}
+
 void rift_plugin_types_suggest_kind_free(rift_plugin_types_suggest_kind_t *ptr) {
   switch ((int32_t) ptr->tag) {
     case 1: {
@@ -1094,6 +1126,7 @@ void rift_plugin_types_suggest_kind_free(rift_plugin_types_suggest_kind_t *ptr) 
 
 void rift_plugin_types_command_spec_free(rift_plugin_types_command_spec_t *ptr) {
   rift_plugin_string_free(&ptr->name);
+  rift_plugin_list_string_free(&ptr->aliases);
   rift_plugin_string_free(&ptr->permission);
   rift_plugin_types_suggest_kind_free(&ptr->suggest);
 }
@@ -1125,19 +1158,14 @@ void rift_plugin_types_registration_free(rift_plugin_types_registration_t *ptr) 
 }
 
 void rift_plugin_types_boss_bar_spec_free(rift_plugin_types_boss_bar_spec_t *ptr) {
-  rift_plugin_string_free(&ptr->text_json);
+  rift_plugin_types_text_free(&ptr->text);
   rift_plugin_string_free(&ptr->color);
   rift_plugin_string_free(&ptr->style);
 }
 
 void rift_plugin_types_title_spec_free(rift_plugin_types_title_spec_t *ptr) {
-  rift_plugin_string_free(&ptr->title);
-  rift_plugin_option_string_free(&ptr->subtitle);
-}
-
-void rift_plugin_types_title_json_spec_free(rift_plugin_types_title_json_spec_t *ptr) {
-  rift_plugin_string_free(&ptr->title_json);
-  rift_plugin_option_string_free(&ptr->subtitle_json);
+  rift_plugin_types_option_text_free(&ptr->title);
+  rift_plugin_types_option_text_free(&ptr->subtitle);
 }
 
 void rift_plugin_types_chat_attempt_free(rift_plugin_types_chat_attempt_t *ptr) {
@@ -1156,16 +1184,20 @@ void rift_plugin_players_player_info_free(rift_plugin_players_player_info_t *ptr
   rift_plugin_types_player_info_free(ptr);
 }
 
+void rift_plugin_players_player_record_free(rift_plugin_players_player_record_t *ptr) {
+  rift_plugin_types_player_record_free(ptr);
+}
+
 void rift_plugin_players_title_spec_free(rift_plugin_players_title_spec_t *ptr) {
   rift_plugin_types_title_spec_free(ptr);
 }
 
-void rift_plugin_players_title_json_spec_free(rift_plugin_players_title_json_spec_t *ptr) {
-  rift_plugin_types_title_json_spec_free(ptr);
-}
-
 void rift_plugin_players_boss_bar_spec_free(rift_plugin_players_boss_bar_spec_t *ptr) {
   rift_plugin_types_boss_bar_spec_free(ptr);
+}
+
+void rift_plugin_players_text_free(rift_plugin_players_text_t *ptr) {
+  rift_plugin_types_text_free(ptr);
 }
 
 void rift_plugin_players_list_player_info_free(rift_plugin_players_list_player_info_t *ptr) {
@@ -1208,6 +1240,12 @@ void rift_plugin_players_result_bool_string_free(rift_plugin_players_result_bool
   }
 }
 
+void rift_plugin_players_option_text_free(rift_plugin_players_option_text_t *ptr) {
+  if (ptr->is_some) {
+    rift_plugin_players_text_free(&ptr->val);
+  }
+}
+
 void rift_plugin_players_option_boss_bar_spec_free(rift_plugin_players_option_boss_bar_spec_t *ptr) {
   if (ptr->is_some) {
     rift_plugin_players_boss_bar_spec_free(&ptr->val);
@@ -1221,9 +1259,34 @@ void rift_plugin_players_result_u32_string_free(rift_plugin_players_result_u32_s
   }
 }
 
-void rift_plugin_players_result_option_string_string_free(rift_plugin_players_result_option_string_string_t *ptr) {
+void rift_plugin_players_option_player_record_free(rift_plugin_players_option_player_record_t *ptr) {
+  if (ptr->is_some) {
+    rift_plugin_players_player_record_free(&ptr->val);
+  }
+}
+
+void rift_plugin_players_result_option_player_record_string_free(rift_plugin_players_result_option_player_record_string_t *ptr) {
   if (!ptr->is_err) {
-    rift_plugin_option_string_free(&ptr->val.ok);
+    rift_plugin_players_option_player_record_free(&ptr->val.ok);
+  } else {
+    rift_plugin_string_free(&ptr->val.err);
+  }
+}
+
+void rift_plugin_players_list_player_record_free(rift_plugin_players_list_player_record_t *ptr) {
+  size_t list_len = ptr->len;
+  if (list_len > 0) {
+    rift_plugin_players_player_record_t *list_ptr = ptr->ptr;
+    for (size_t i = 0; i < list_len; i++) {
+      rift_plugin_players_player_record_free(&list_ptr[i]);
+    }
+    free(list_ptr);
+  }
+}
+
+void rift_plugin_players_result_list_player_record_string_free(rift_plugin_players_result_list_player_record_string_t *ptr) {
+  if (!ptr->is_err) {
+    rift_plugin_players_list_player_record_free(&ptr->val.ok);
   } else {
     rift_plugin_string_free(&ptr->val.err);
   }
@@ -1309,49 +1372,8 @@ void rift_plugin_servers_result_string_string_free(rift_plugin_servers_result_st
   }
 }
 
-void exports_rift_plugin_dialogs_dialog_response_free(exports_rift_plugin_dialogs_dialog_response_t *ptr) {
-  rift_plugin_types_dialog_response_free(ptr);
-}
-
-void exports_rift_plugin_decisions_context_free(exports_rift_plugin_decisions_context_t *ptr) {
-  rift_plugin_types_context_free(ptr);
-}
-
-void exports_rift_plugin_decisions_decision_free(exports_rift_plugin_decisions_decision_t *ptr) {
+void rift_plugin_background_decision_free(rift_plugin_background_decision_t *ptr) {
   rift_plugin_types_decision_free(ptr);
-}
-
-void exports_rift_plugin_styled_context_free(exports_rift_plugin_styled_context_t *ptr) {
-  rift_plugin_types_context_free(ptr);
-}
-
-void exports_rift_plugin_styled_rich_suggestion_free(exports_rift_plugin_styled_rich_suggestion_t *ptr) {
-  rift_plugin_types_rich_suggestion_free(ptr);
-}
-
-void exports_rift_plugin_styled_ping_free(exports_rift_plugin_styled_ping_t *ptr) {
-  rift_plugin_types_ping_free(ptr);
-}
-
-void exports_rift_plugin_styled_rich_status_override_free(exports_rift_plugin_styled_rich_status_override_t *ptr) {
-  rift_plugin_types_rich_status_override_free(ptr);
-}
-
-void exports_rift_plugin_styled_list_rich_suggestion_free(exports_rift_plugin_styled_list_rich_suggestion_t *ptr) {
-  size_t list_len = ptr->len;
-  if (list_len > 0) {
-    exports_rift_plugin_styled_rich_suggestion_t *list_ptr = ptr->ptr;
-    for (size_t i = 0; i < list_len; i++) {
-      exports_rift_plugin_styled_rich_suggestion_free(&list_ptr[i]);
-    }
-    free(list_ptr);
-  }
-}
-
-void exports_rift_plugin_styled_option_rich_status_override_free(exports_rift_plugin_styled_option_rich_status_override_t *ptr) {
-  if (ptr->is_some) {
-    exports_rift_plugin_styled_rich_status_override_free(&ptr->val);
-  }
 }
 
 void exports_rift_plugin_handler_context_free(exports_rift_plugin_handler_context_t *ptr) {
@@ -1366,8 +1388,8 @@ void exports_rift_plugin_handler_route_decision_free(exports_rift_plugin_handler
   rift_plugin_types_route_decision_free(ptr);
 }
 
-void exports_rift_plugin_handler_action_free(exports_rift_plugin_handler_action_t *ptr) {
-  rift_plugin_types_action_free(ptr);
+void exports_rift_plugin_handler_decision_free(exports_rift_plugin_handler_decision_t *ptr) {
+  rift_plugin_types_decision_free(ptr);
 }
 
 void exports_rift_plugin_handler_suggestion_free(exports_rift_plugin_handler_suggestion_t *ptr) {
@@ -1400,6 +1422,14 @@ void exports_rift_plugin_handler_rift_event_free(exports_rift_plugin_handler_rif
 
 void exports_rift_plugin_handler_registration_free(exports_rift_plugin_handler_registration_t *ptr) {
   rift_plugin_types_registration_free(ptr);
+}
+
+void exports_rift_plugin_handler_dialog_response_free(exports_rift_plugin_handler_dialog_response_t *ptr) {
+  rift_plugin_types_dialog_response_free(ptr);
+}
+
+void exports_rift_plugin_handler_chat_attempt_free(exports_rift_plugin_handler_chat_attempt_t *ptr) {
+  rift_plugin_types_chat_attempt_free(ptr);
 }
 
 void exports_rift_plugin_handler_result_registration_string_free(exports_rift_plugin_handler_result_registration_string_t *ptr) {
@@ -1437,6 +1467,14 @@ void exports_rift_plugin_handler_option_status_override_free(exports_rift_plugin
 void exports_rift_plugin_handler_option_http_response_free(exports_rift_plugin_handler_option_http_response_t *ptr) {
   if (ptr->is_some) {
     exports_rift_plugin_handler_http_response_free(&ptr->val);
+  }
+}
+
+void exports_rift_plugin_handler_result_list_u8_string_free(exports_rift_plugin_handler_result_list_u8_string_t *ptr) {
+  if (!ptr->is_err) {
+    rift_plugin_list_u8_free(&ptr->val.ok);
+  } else {
+    rift_plugin_string_free(&ptr->val.err);
   }
 }
 
@@ -1513,33 +1551,75 @@ bool rift_plugin_players_list(rift_plugin_string_t *maybe_server, rift_plugin_pl
 
 bool rift_plugin_players_get(rift_plugin_string_t *target, rift_plugin_players_option_player_info_t *ret, rift_plugin_string_t *err) {
   __attribute__((__aligned__(8)))
-  uint8_t ret_area[(32+6*sizeof(void*))];
+  uint8_t ret_area[(24+20*sizeof(void*))];
   uint8_t *ptr = (uint8_t *) &ret_area;
   __wasm_import_rift_plugin_players_get((uint8_t *) (*target).ptr, (*target).len, ptr);
   rift_plugin_players_result_option_player_info_string_t result;
   switch ((int32_t) *((uint8_t*) (ptr + 0))) {
     case 0: {
       result.is_err = false;
-      rift_plugin_players_option_player_info_t option;
+      rift_plugin_players_option_player_info_t option3;
       switch ((int32_t) *((uint8_t*) (ptr + 8))) {
         case 0: {
-          option.is_some = false;
+          option3.is_some = false;
           break;
         }
         case 1: {
-          option.is_some = true;
-          option.val = (rift_plugin_types_player_info_t) {
+          option3.is_some = true;
+          rift_plugin_option_string_t option0;
+          switch ((int32_t) *((uint8_t*) (ptr + (24+11*sizeof(void*))))) {
+            case 0: {
+              option0.is_some = false;
+              break;
+            }
+            case 1: {
+              option0.is_some = true;
+              option0.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (ptr + (24+12*sizeof(void*))))), (*((size_t*) (ptr + (24+13*sizeof(void*))))) };
+              break;
+            }
+          }
+          rift_plugin_option_string_t option1;
+          switch ((int32_t) *((uint8_t*) (ptr + (24+14*sizeof(void*))))) {
+            case 0: {
+              option1.is_some = false;
+              break;
+            }
+            case 1: {
+              option1.is_some = true;
+              option1.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (ptr + (24+15*sizeof(void*))))), (*((size_t*) (ptr + (24+16*sizeof(void*))))) };
+              break;
+            }
+          }
+          rift_plugin_option_string_t option2;
+          switch ((int32_t) *((uint8_t*) (ptr + (24+17*sizeof(void*))))) {
+            case 0: {
+              option2.is_some = false;
+              break;
+            }
+            case 1: {
+              option2.is_some = true;
+              option2.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (ptr + (24+18*sizeof(void*))))), (*((size_t*) (ptr + (24+19*sizeof(void*))))) };
+              break;
+            }
+          }
+
+          option3.val = (rift_plugin_types_player_info_t) {
             (uint64_t) (uint64_t) (*((int64_t*) (ptr + 16))),
             (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (ptr + 24))), (*((size_t*) (ptr + (24+1*sizeof(void*))))) },
             (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (ptr + (24+2*sizeof(void*))))), (*((size_t*) (ptr + (24+3*sizeof(void*))))) },
             (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (ptr + (24+4*sizeof(void*))))), (*((size_t*) (ptr + (24+5*sizeof(void*))))) },
             (int32_t) *((int32_t*) (ptr + (24+6*sizeof(void*)))),
+            (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (ptr + (24+7*sizeof(void*))))), (*((size_t*) (ptr + (24+8*sizeof(void*))))) },
+            (rift_plugin_types_list_profile_property_t) (rift_plugin_types_list_profile_property_t) { (rift_plugin_types_profile_property_t*)(*((uint8_t **) (ptr + (24+9*sizeof(void*))))), (*((size_t*) (ptr + (24+10*sizeof(void*))))) },
+            (rift_plugin_option_string_t) option0,
+            (rift_plugin_option_string_t) option1,
+            (rift_plugin_option_string_t) option2,
           };
           break;
         }
       }
 
-      result.val.ok = option;
+      result.val.ok = option3;
       break;
     }
     case 1: {
@@ -1582,11 +1662,30 @@ void rift_plugin_players_names(rift_plugin_string_t *maybe_prefix, rift_plugin_l
   *ret = (rift_plugin_list_string_t) { (rift_plugin_string_t*)(*((uint8_t **) (ptr + 0))), (*((size_t*) (ptr + sizeof(void*)))) };
 }
 
-bool rift_plugin_players_message(rift_plugin_string_t *target, rift_plugin_string_t *text, bool *ret, rift_plugin_string_t *err) {
+bool rift_plugin_players_message(rift_plugin_string_t *target, rift_plugin_players_text_t *text, bool *ret, rift_plugin_string_t *err) {
   __attribute__((__aligned__(sizeof(void*))))
   uint8_t ret_area[(3*sizeof(void*))];
+  int32_t variant;
+  uint8_t * variant1;
+  size_t variant2;
+  switch ((int32_t) (*text).tag) {
+    case 0: {
+      const rift_plugin_string_t *payload = &(*text).val.plain;
+      variant = 0;
+      variant1 = (uint8_t *) (*payload).ptr;
+      variant2 = (*payload).len;
+      break;
+    }
+    case 1: {
+      const rift_plugin_string_t *payload0 = &(*text).val.json;
+      variant = 1;
+      variant1 = (uint8_t *) (*payload0).ptr;
+      variant2 = (*payload0).len;
+      break;
+    }
+  }
   uint8_t *ptr = (uint8_t *) &ret_area;
-  __wasm_import_rift_plugin_players_message((uint8_t *) (*target).ptr, (*target).len, (uint8_t *) (*text).ptr, (*text).len, ptr);
+  __wasm_import_rift_plugin_players_message((uint8_t *) (*target).ptr, (*target).len, variant, variant1, variant2, ptr);
   rift_plugin_players_result_bool_string_t result;
   switch ((int32_t) *((uint8_t*) (ptr + 0))) {
     case 0: {
@@ -1609,11 +1708,30 @@ bool rift_plugin_players_message(rift_plugin_string_t *target, rift_plugin_strin
   }
 }
 
-bool rift_plugin_players_action_bar(rift_plugin_string_t *target, rift_plugin_string_t *text, bool *ret, rift_plugin_string_t *err) {
+bool rift_plugin_players_action_bar(rift_plugin_string_t *target, rift_plugin_players_text_t *text, bool *ret, rift_plugin_string_t *err) {
   __attribute__((__aligned__(sizeof(void*))))
   uint8_t ret_area[(3*sizeof(void*))];
+  int32_t variant;
+  uint8_t * variant1;
+  size_t variant2;
+  switch ((int32_t) (*text).tag) {
+    case 0: {
+      const rift_plugin_string_t *payload = &(*text).val.plain;
+      variant = 0;
+      variant1 = (uint8_t *) (*payload).ptr;
+      variant2 = (*payload).len;
+      break;
+    }
+    case 1: {
+      const rift_plugin_string_t *payload0 = &(*text).val.json;
+      variant = 1;
+      variant1 = (uint8_t *) (*payload0).ptr;
+      variant2 = (*payload0).len;
+      break;
+    }
+  }
   uint8_t *ptr = (uint8_t *) &ret_area;
-  __wasm_import_rift_plugin_players_action_bar((uint8_t *) (*target).ptr, (*target).len, (uint8_t *) (*text).ptr, (*text).len, ptr);
+  __wasm_import_rift_plugin_players_action_bar((uint8_t *) (*target).ptr, (*target).len, variant, variant1, variant2, ptr);
   rift_plugin_players_result_bool_string_t result;
   switch ((int32_t) *((uint8_t*) (ptr + 0))) {
     case 0: {
@@ -1640,20 +1758,77 @@ bool rift_plugin_players_title(rift_plugin_string_t *target, rift_plugin_players
   __attribute__((__aligned__(sizeof(void*))))
   uint8_t ret_area[(3*sizeof(void*))];
   int32_t option;
-  uint8_t * option1;
-  size_t option2;
-  if (((*title).subtitle).is_some) {
-    const rift_plugin_string_t *payload0 = &((*title).subtitle).val;
+  int32_t option5;
+  uint8_t * option6;
+  size_t option7;
+  if (((*title).title).is_some) {
+    const rift_plugin_types_text_t *payload0 = &((*title).title).val;
+    int32_t variant;
+    uint8_t * variant3;
+    size_t variant4;
+    switch ((int32_t) (*payload0).tag) {
+      case 0: {
+        const rift_plugin_string_t *payload1 = &(*payload0).val.plain;
+        variant = 0;
+        variant3 = (uint8_t *) (*payload1).ptr;
+        variant4 = (*payload1).len;
+        break;
+      }
+      case 1: {
+        const rift_plugin_string_t *payload2 = &(*payload0).val.json;
+        variant = 1;
+        variant3 = (uint8_t *) (*payload2).ptr;
+        variant4 = (*payload2).len;
+        break;
+      }
+    }
     option = 1;
-    option1 = (uint8_t *) (*payload0).ptr;
-    option2 = (*payload0).len;
+    option5 = variant;
+    option6 = variant3;
+    option7 = variant4;
   } else {
     option = 0;
-    option1 = 0;
-    option2 = 0;
+    option5 = 0;
+    option6 = 0;
+    option7 = 0;
+  }
+  int32_t option15;
+  int32_t option16;
+  uint8_t * option17;
+  size_t option18;
+  if (((*title).subtitle).is_some) {
+    const rift_plugin_types_text_t *payload9 = &((*title).subtitle).val;
+    int32_t variant12;
+    uint8_t * variant13;
+    size_t variant14;
+    switch ((int32_t) (*payload9).tag) {
+      case 0: {
+        const rift_plugin_string_t *payload10 = &(*payload9).val.plain;
+        variant12 = 0;
+        variant13 = (uint8_t *) (*payload10).ptr;
+        variant14 = (*payload10).len;
+        break;
+      }
+      case 1: {
+        const rift_plugin_string_t *payload11 = &(*payload9).val.json;
+        variant12 = 1;
+        variant13 = (uint8_t *) (*payload11).ptr;
+        variant14 = (*payload11).len;
+        break;
+      }
+    }
+    option15 = 1;
+    option16 = variant12;
+    option17 = variant13;
+    option18 = variant14;
+  } else {
+    option15 = 0;
+    option16 = 0;
+    option17 = 0;
+    option18 = 0;
   }
   uint8_t *ptr = (uint8_t *) &ret_area;
-  __wasm_import_rift_plugin_players_title((uint8_t *) (*target).ptr, (*target).len, (uint8_t *) ((*title).title).ptr, ((*title).title).len, option, option1, option2, (*title).fade_in, (*title).stay, (*title).fade_out, ptr);
+  __wasm_import_rift_plugin_players_title((uint8_t *) (*target).ptr, (*target).len, option, option5, option6, option7, option15, option16, option17, option18, (*title).fade_in, (*title).stay, (*title).fade_out, ptr);
   rift_plugin_players_result_bool_string_t result;
   switch ((int32_t) *((uint8_t*) (ptr + 0))) {
     case 0: {
@@ -1676,45 +1851,89 @@ bool rift_plugin_players_title(rift_plugin_string_t *target, rift_plugin_players
   }
 }
 
-bool rift_plugin_players_tab_list(rift_plugin_string_t *target, rift_plugin_string_t *maybe_header_json, rift_plugin_string_t *maybe_footer_json, bool *ret, rift_plugin_string_t *err) {
+bool rift_plugin_players_tab_list(rift_plugin_string_t *target, rift_plugin_players_text_t *maybe_header, rift_plugin_players_text_t *maybe_footer, bool *ret, rift_plugin_string_t *err) {
   __attribute__((__aligned__(sizeof(void*))))
   uint8_t ret_area[(3*sizeof(void*))];
-  rift_plugin_option_string_t header_json;
-  header_json.is_some = maybe_header_json != NULL;if (maybe_header_json) {
-    header_json.val = *maybe_header_json;
+  rift_plugin_players_option_text_t header;
+  header.is_some = maybe_header != NULL;if (maybe_header) {
+    header.val = *maybe_header;
   }
-  rift_plugin_option_string_t footer_json;
-  footer_json.is_some = maybe_footer_json != NULL;if (maybe_footer_json) {
-    footer_json.val = *maybe_footer_json;
+  rift_plugin_players_option_text_t footer;
+  footer.is_some = maybe_footer != NULL;if (maybe_footer) {
+    footer.val = *maybe_footer;
   }
   int32_t option;
-  uint8_t * option1;
-  size_t option2;
-  if ((header_json).is_some) {
-    const rift_plugin_string_t *payload0 = &(header_json).val;
-    option = 1;
-    option1 = (uint8_t *) (*payload0).ptr;
-    option2 = (*payload0).len;
-  } else {
-    option = 0;
-    option1 = 0;
-    option2 = 0;
-  }
   int32_t option5;
   uint8_t * option6;
   size_t option7;
-  if ((footer_json).is_some) {
-    const rift_plugin_string_t *payload4 = &(footer_json).val;
-    option5 = 1;
-    option6 = (uint8_t *) (*payload4).ptr;
-    option7 = (*payload4).len;
+  if ((header).is_some) {
+    const rift_plugin_players_text_t *payload0 = &(header).val;
+    int32_t variant;
+    uint8_t * variant3;
+    size_t variant4;
+    switch ((int32_t) (*payload0).tag) {
+      case 0: {
+        const rift_plugin_string_t *payload1 = &(*payload0).val.plain;
+        variant = 0;
+        variant3 = (uint8_t *) (*payload1).ptr;
+        variant4 = (*payload1).len;
+        break;
+      }
+      case 1: {
+        const rift_plugin_string_t *payload2 = &(*payload0).val.json;
+        variant = 1;
+        variant3 = (uint8_t *) (*payload2).ptr;
+        variant4 = (*payload2).len;
+        break;
+      }
+    }
+    option = 1;
+    option5 = variant;
+    option6 = variant3;
+    option7 = variant4;
   } else {
+    option = 0;
     option5 = 0;
     option6 = 0;
     option7 = 0;
   }
+  int32_t option15;
+  int32_t option16;
+  uint8_t * option17;
+  size_t option18;
+  if ((footer).is_some) {
+    const rift_plugin_players_text_t *payload9 = &(footer).val;
+    int32_t variant12;
+    uint8_t * variant13;
+    size_t variant14;
+    switch ((int32_t) (*payload9).tag) {
+      case 0: {
+        const rift_plugin_string_t *payload10 = &(*payload9).val.plain;
+        variant12 = 0;
+        variant13 = (uint8_t *) (*payload10).ptr;
+        variant14 = (*payload10).len;
+        break;
+      }
+      case 1: {
+        const rift_plugin_string_t *payload11 = &(*payload9).val.json;
+        variant12 = 1;
+        variant13 = (uint8_t *) (*payload11).ptr;
+        variant14 = (*payload11).len;
+        break;
+      }
+    }
+    option15 = 1;
+    option16 = variant12;
+    option17 = variant13;
+    option18 = variant14;
+  } else {
+    option15 = 0;
+    option16 = 0;
+    option17 = 0;
+    option18 = 0;
+  }
   uint8_t *ptr = (uint8_t *) &ret_area;
-  __wasm_import_rift_plugin_players_tab_list((uint8_t *) (*target).ptr, (*target).len, option, option1, option2, option5, option6, option7, ptr);
+  __wasm_import_rift_plugin_players_tab_list((uint8_t *) (*target).ptr, (*target).len, option, option5, option6, option7, option15, option16, option17, option18, ptr);
   rift_plugin_players_result_bool_string_t result;
   switch ((int32_t) *((uint8_t*) (ptr + 0))) {
     case 0: {
@@ -1745,44 +1964,66 @@ bool rift_plugin_players_boss_bar(rift_plugin_string_t *target, rift_plugin_stri
     bar.val = *maybe_bar;
   }
   int32_t option;
-  uint8_t * option1;
-  size_t option2;
-  float option3;
-  uint8_t * option4;
-  size_t option5;
+  int32_t option5;
   uint8_t * option6;
   size_t option7;
-  int32_t option8;
-  int32_t option9;
-  int32_t option10;
+  float option8;
+  uint8_t * option9;
+  size_t option10;
+  uint8_t * option11;
+  size_t option12;
+  int32_t option13;
+  int32_t option14;
+  int32_t option15;
   if ((bar).is_some) {
     const rift_plugin_players_boss_bar_spec_t *payload0 = &(bar).val;
+    int32_t variant;
+    uint8_t * variant3;
+    size_t variant4;
+    switch ((int32_t) ((*payload0).text).tag) {
+      case 0: {
+        const rift_plugin_string_t *payload1 = &((*payload0).text).val.plain;
+        variant = 0;
+        variant3 = (uint8_t *) (*payload1).ptr;
+        variant4 = (*payload1).len;
+        break;
+      }
+      case 1: {
+        const rift_plugin_string_t *payload2 = &((*payload0).text).val.json;
+        variant = 1;
+        variant3 = (uint8_t *) (*payload2).ptr;
+        variant4 = (*payload2).len;
+        break;
+      }
+    }
     option = 1;
-    option1 = (uint8_t *) ((*payload0).text_json).ptr;
-    option2 = ((*payload0).text_json).len;
-    option3 = (*payload0).progress;
-    option4 = (uint8_t *) ((*payload0).color).ptr;
-    option5 = ((*payload0).color).len;
-    option6 = (uint8_t *) ((*payload0).style).ptr;
-    option7 = ((*payload0).style).len;
-    option8 = (*payload0).darken_sky;
-    option9 = (*payload0).play_music;
-    option10 = (*payload0).create_fog;
+    option5 = variant;
+    option6 = variant3;
+    option7 = variant4;
+    option8 = (*payload0).progress;
+    option9 = (uint8_t *) ((*payload0).color).ptr;
+    option10 = ((*payload0).color).len;
+    option11 = (uint8_t *) ((*payload0).style).ptr;
+    option12 = ((*payload0).style).len;
+    option13 = (*payload0).darken_sky;
+    option14 = (*payload0).play_music;
+    option15 = (*payload0).create_fog;
   } else {
     option = 0;
-    option1 = 0;
-    option2 = 0;
-    option3 = 0;
-    option4 = 0;
     option5 = 0;
     option6 = 0;
     option7 = 0;
     option8 = 0;
     option9 = 0;
     option10 = 0;
+    option11 = 0;
+    option12 = 0;
+    option13 = 0;
+    option14 = 0;
+    option15 = 0;
   }
   uint8_t *ptr = (uint8_t *) &ret_area;
-  __wasm_import_rift_plugin_players_boss_bar((uint8_t *) (*target).ptr, (*target).len, (uint8_t *) (*name).ptr, (*name).len, option, option1, option2, option3, option4, option5, option6, option7, option8, option9, option10, ptr);
+  __wasm_import_rift_plugin_players_boss_bar((uint8_t *) (*target).ptr, (*target).len, (uint8_t *) (*name).ptr, (*name).len, option, option5, option6, option7, option8, option9, option10, option11, option12, option13, option14, option15, ptr);
   rift_plugin_players_result_bool_string_t result;
   switch ((int32_t) *((uint8_t*) (ptr + 0))) {
     case 0: {
@@ -1805,11 +2046,30 @@ bool rift_plugin_players_boss_bar(rift_plugin_string_t *target, rift_plugin_stri
   }
 }
 
-bool rift_plugin_players_kick(rift_plugin_string_t *target, rift_plugin_string_t *reason, bool *ret, rift_plugin_string_t *err) {
+bool rift_plugin_players_kick(rift_plugin_string_t *target, rift_plugin_players_text_t *reason, bool *ret, rift_plugin_string_t *err) {
   __attribute__((__aligned__(sizeof(void*))))
   uint8_t ret_area[(3*sizeof(void*))];
+  int32_t variant;
+  uint8_t * variant1;
+  size_t variant2;
+  switch ((int32_t) (*reason).tag) {
+    case 0: {
+      const rift_plugin_string_t *payload = &(*reason).val.plain;
+      variant = 0;
+      variant1 = (uint8_t *) (*payload).ptr;
+      variant2 = (*payload).len;
+      break;
+    }
+    case 1: {
+      const rift_plugin_string_t *payload0 = &(*reason).val.json;
+      variant = 1;
+      variant1 = (uint8_t *) (*payload0).ptr;
+      variant2 = (*payload0).len;
+      break;
+    }
+  }
   uint8_t *ptr = (uint8_t *) &ret_area;
-  __wasm_import_rift_plugin_players_kick((uint8_t *) (*target).ptr, (*target).len, (uint8_t *) (*reason).ptr, (*reason).len, ptr);
+  __wasm_import_rift_plugin_players_kick((uint8_t *) (*target).ptr, (*target).len, variant, variant1, variant2, ptr);
   rift_plugin_players_result_bool_string_t result;
   switch ((int32_t) *((uint8_t*) (ptr + 0))) {
     case 0: {
@@ -1913,11 +2173,30 @@ bool rift_plugin_players_transfer(rift_plugin_string_t *target, rift_plugin_stri
   }
 }
 
-bool rift_plugin_players_broadcast(rift_plugin_string_t *text, uint32_t *ret, rift_plugin_string_t *err) {
+bool rift_plugin_players_broadcast(rift_plugin_players_text_t *text, uint32_t *ret, rift_plugin_string_t *err) {
   __attribute__((__aligned__(sizeof(void*))))
   uint8_t ret_area[(3*sizeof(void*))];
+  int32_t variant;
+  uint8_t * variant1;
+  size_t variant2;
+  switch ((int32_t) (*text).tag) {
+    case 0: {
+      const rift_plugin_string_t *payload = &(*text).val.plain;
+      variant = 0;
+      variant1 = (uint8_t *) (*payload).ptr;
+      variant2 = (*payload).len;
+      break;
+    }
+    case 1: {
+      const rift_plugin_string_t *payload0 = &(*text).val.json;
+      variant = 1;
+      variant1 = (uint8_t *) (*payload0).ptr;
+      variant2 = (*payload0).len;
+      break;
+    }
+  }
   uint8_t *ptr = (uint8_t *) &ret_area;
-  __wasm_import_rift_plugin_players_broadcast((uint8_t *) (*text).ptr, (*text).len, ptr);
+  __wasm_import_rift_plugin_players_broadcast(variant, variant1, variant2, ptr);
   rift_plugin_players_result_u32_string_t result;
   switch ((int32_t) *((uint8_t*) (ptr + 0))) {
     case 0: {
@@ -1940,137 +2219,78 @@ bool rift_plugin_players_broadcast(rift_plugin_string_t *text, uint32_t *ret, ri
   }
 }
 
-bool rift_plugin_players_message_json(rift_plugin_string_t *target, rift_plugin_string_t *text_json, bool *ret, rift_plugin_string_t *err) {
-  __attribute__((__aligned__(sizeof(void*))))
-  uint8_t ret_area[(3*sizeof(void*))];
+bool rift_plugin_players_lookup(rift_plugin_string_t *target, rift_plugin_players_option_player_record_t *ret, rift_plugin_string_t *err) {
+  __attribute__((__aligned__(8)))
+  uint8_t ret_area[(32+12*sizeof(void*))];
   uint8_t *ptr = (uint8_t *) &ret_area;
-  __wasm_import_rift_plugin_players_message_json((uint8_t *) (*target).ptr, (*target).len, (uint8_t *) (*text_json).ptr, (*text_json).len, ptr);
-  rift_plugin_players_result_bool_string_t result;
+  __wasm_import_rift_plugin_players_lookup((uint8_t *) (*target).ptr, (*target).len, ptr);
+  rift_plugin_players_result_option_player_record_string_t result;
   switch ((int32_t) *((uint8_t*) (ptr + 0))) {
     case 0: {
       result.is_err = false;
-      result.val.ok = (int32_t) *((uint8_t*) (ptr + sizeof(void*)));
-      break;
-    }
-    case 1: {
-      result.is_err = true;
-      result.val.err = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (ptr + sizeof(void*)))), (*((size_t*) (ptr + (2*sizeof(void*))))) };
-      break;
-    }
-  }
-  if (!result.is_err) {
-    *ret = result.val.ok;
-    return 1;
-  } else {
-    *err = result.val.err;
-    return 0;
-  }
-}
-
-bool rift_plugin_players_action_bar_json(rift_plugin_string_t *target, rift_plugin_string_t *text_json, bool *ret, rift_plugin_string_t *err) {
-  __attribute__((__aligned__(sizeof(void*))))
-  uint8_t ret_area[(3*sizeof(void*))];
-  uint8_t *ptr = (uint8_t *) &ret_area;
-  __wasm_import_rift_plugin_players_action_bar_json((uint8_t *) (*target).ptr, (*target).len, (uint8_t *) (*text_json).ptr, (*text_json).len, ptr);
-  rift_plugin_players_result_bool_string_t result;
-  switch ((int32_t) *((uint8_t*) (ptr + 0))) {
-    case 0: {
-      result.is_err = false;
-      result.val.ok = (int32_t) *((uint8_t*) (ptr + sizeof(void*)));
-      break;
-    }
-    case 1: {
-      result.is_err = true;
-      result.val.err = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (ptr + sizeof(void*)))), (*((size_t*) (ptr + (2*sizeof(void*))))) };
-      break;
-    }
-  }
-  if (!result.is_err) {
-    *ret = result.val.ok;
-    return 1;
-  } else {
-    *err = result.val.err;
-    return 0;
-  }
-}
-
-bool rift_plugin_players_kick_json(rift_plugin_string_t *target, rift_plugin_string_t *reason_json, bool *ret, rift_plugin_string_t *err) {
-  __attribute__((__aligned__(sizeof(void*))))
-  uint8_t ret_area[(3*sizeof(void*))];
-  uint8_t *ptr = (uint8_t *) &ret_area;
-  __wasm_import_rift_plugin_players_kick_json((uint8_t *) (*target).ptr, (*target).len, (uint8_t *) (*reason_json).ptr, (*reason_json).len, ptr);
-  rift_plugin_players_result_bool_string_t result;
-  switch ((int32_t) *((uint8_t*) (ptr + 0))) {
-    case 0: {
-      result.is_err = false;
-      result.val.ok = (int32_t) *((uint8_t*) (ptr + sizeof(void*)));
-      break;
-    }
-    case 1: {
-      result.is_err = true;
-      result.val.err = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (ptr + sizeof(void*)))), (*((size_t*) (ptr + (2*sizeof(void*))))) };
-      break;
-    }
-  }
-  if (!result.is_err) {
-    *ret = result.val.ok;
-    return 1;
-  } else {
-    *err = result.val.err;
-    return 0;
-  }
-}
-
-bool rift_plugin_players_broadcast_json(rift_plugin_string_t *text_json, uint32_t *ret, rift_plugin_string_t *err) {
-  __attribute__((__aligned__(sizeof(void*))))
-  uint8_t ret_area[(3*sizeof(void*))];
-  uint8_t *ptr = (uint8_t *) &ret_area;
-  __wasm_import_rift_plugin_players_broadcast_json((uint8_t *) (*text_json).ptr, (*text_json).len, ptr);
-  rift_plugin_players_result_u32_string_t result;
-  switch ((int32_t) *((uint8_t*) (ptr + 0))) {
-    case 0: {
-      result.is_err = false;
-      result.val.ok = (uint32_t) (*((int32_t*) (ptr + sizeof(void*))));
-      break;
-    }
-    case 1: {
-      result.is_err = true;
-      result.val.err = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (ptr + sizeof(void*)))), (*((size_t*) (ptr + (2*sizeof(void*))))) };
-      break;
-    }
-  }
-  if (!result.is_err) {
-    *ret = result.val.ok;
-    return 1;
-  } else {
-    *err = result.val.err;
-    return 0;
-  }
-}
-
-bool rift_plugin_players_visible_to(rift_plugin_string_t *target, rift_plugin_option_string_t *ret, rift_plugin_string_t *err) {
-  __attribute__((__aligned__(sizeof(void*))))
-  uint8_t ret_area[(4*sizeof(void*))];
-  uint8_t *ptr = (uint8_t *) &ret_area;
-  __wasm_import_rift_plugin_players_visible_to((uint8_t *) (*target).ptr, (*target).len, ptr);
-  rift_plugin_players_result_option_string_string_t result;
-  switch ((int32_t) *((uint8_t*) (ptr + 0))) {
-    case 0: {
-      result.is_err = false;
-      rift_plugin_option_string_t option;
-      switch ((int32_t) *((uint8_t*) (ptr + sizeof(void*)))) {
+      rift_plugin_players_option_player_record_t option0;
+      switch ((int32_t) *((uint8_t*) (ptr + 8))) {
         case 0: {
-          option.is_some = false;
+          option0.is_some = false;
           break;
         }
         case 1: {
-          option.is_some = true;
-          option.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (ptr + (2*sizeof(void*))))), (*((size_t*) (ptr + (3*sizeof(void*))))) };
+          option0.is_some = true;
+          rift_plugin_option_string_t option;
+          switch ((int32_t) *((uint8_t*) (ptr + (32+9*sizeof(void*))))) {
+            case 0: {
+              option.is_some = false;
+              break;
+            }
+            case 1: {
+              option.is_some = true;
+              option.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (ptr + (32+10*sizeof(void*))))), (*((size_t*) (ptr + (32+11*sizeof(void*))))) };
+              break;
+            }
+          }
+
+          option0.val = (rift_plugin_types_player_record_t) {
+            (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (ptr + 16))), (*((size_t*) (ptr + (16+1*sizeof(void*))))) },
+            (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (ptr + (16+2*sizeof(void*))))), (*((size_t*) (ptr + (16+3*sizeof(void*))))) },
+            (uint64_t) (uint64_t) (*((int64_t*) (ptr + (16+4*sizeof(void*))))),
+            (uint64_t) (uint64_t) (*((int64_t*) (ptr + (24+4*sizeof(void*))))),
+            (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (ptr + (32+4*sizeof(void*))))), (*((size_t*) (ptr + (32+5*sizeof(void*))))) },
+            (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (ptr + (32+6*sizeof(void*))))), (*((size_t*) (ptr + (32+7*sizeof(void*))))) },
+            (bool) (int32_t) *((uint8_t*) (ptr + (32+8*sizeof(void*)))),
+            (rift_plugin_option_string_t) option,
+          };
           break;
         }
       }
 
-      result.val.ok = option;
+      result.val.ok = option0;
+      break;
+    }
+    case 1: {
+      result.is_err = true;
+      result.val.err = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (ptr + 8))), (*((size_t*) (ptr + (8+1*sizeof(void*))))) };
+      break;
+    }
+  }
+  if (!result.is_err) {
+    *ret = result.val.ok;
+    return 1;
+  } else {
+    *err = result.val.err;
+    return 0;
+  }
+}
+
+bool rift_plugin_players_search(rift_plugin_string_t *prefix, uint32_t limit, rift_plugin_players_list_player_record_t *ret, rift_plugin_string_t *err) {
+  __attribute__((__aligned__(sizeof(void*))))
+  uint8_t ret_area[(3*sizeof(void*))];
+  uint8_t *ptr = (uint8_t *) &ret_area;
+  __wasm_import_rift_plugin_players_search((uint8_t *) (*prefix).ptr, (*prefix).len, (int32_t) (limit), ptr);
+  rift_plugin_players_result_list_player_record_string_t result;
+  switch ((int32_t) *((uint8_t*) (ptr + 0))) {
+    case 0: {
+      result.is_err = false;
+      result.val.ok = (rift_plugin_players_list_player_record_t) { (rift_plugin_players_player_record_t*)(*((uint8_t **) (ptr + sizeof(void*)))), (*((size_t*) (ptr + (2*sizeof(void*))))) };
       break;
     }
     case 1: {
@@ -2088,14 +2308,18 @@ bool rift_plugin_players_visible_to(rift_plugin_string_t *target, rift_plugin_op
   }
 }
 
-bool rift_plugin_players_title_json(rift_plugin_string_t *target, rift_plugin_players_title_json_spec_t *title, bool *ret, rift_plugin_string_t *err) {
+bool rift_plugin_players_set_language(rift_plugin_string_t *target, rift_plugin_string_t *maybe_language, bool *ret, rift_plugin_string_t *err) {
   __attribute__((__aligned__(sizeof(void*))))
   uint8_t ret_area[(3*sizeof(void*))];
+  rift_plugin_option_string_t language;
+  language.is_some = maybe_language != NULL;if (maybe_language) {
+    language.val = *maybe_language;
+  }
   int32_t option;
   uint8_t * option1;
   size_t option2;
-  if (((*title).subtitle_json).is_some) {
-    const rift_plugin_string_t *payload0 = &((*title).subtitle_json).val;
+  if ((language).is_some) {
+    const rift_plugin_string_t *payload0 = &(language).val;
     option = 1;
     option1 = (uint8_t *) (*payload0).ptr;
     option2 = (*payload0).len;
@@ -2105,52 +2329,12 @@ bool rift_plugin_players_title_json(rift_plugin_string_t *target, rift_plugin_pl
     option2 = 0;
   }
   uint8_t *ptr = (uint8_t *) &ret_area;
-  __wasm_import_rift_plugin_players_title_json((uint8_t *) (*target).ptr, (*target).len, (uint8_t *) ((*title).title_json).ptr, ((*title).title_json).len, option, option1, option2, (*title).fade_in, (*title).stay, (*title).fade_out, ptr);
+  __wasm_import_rift_plugin_players_set_language((uint8_t *) (*target).ptr, (*target).len, option, option1, option2, ptr);
   rift_plugin_players_result_bool_string_t result;
   switch ((int32_t) *((uint8_t*) (ptr + 0))) {
     case 0: {
       result.is_err = false;
       result.val.ok = (int32_t) *((uint8_t*) (ptr + sizeof(void*)));
-      break;
-    }
-    case 1: {
-      result.is_err = true;
-      result.val.err = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (ptr + sizeof(void*)))), (*((size_t*) (ptr + (2*sizeof(void*))))) };
-      break;
-    }
-  }
-  if (!result.is_err) {
-    *ret = result.val.ok;
-    return 1;
-  } else {
-    *err = result.val.err;
-    return 0;
-  }
-}
-
-bool rift_plugin_players_locale(rift_plugin_string_t *target, rift_plugin_option_string_t *ret, rift_plugin_string_t *err) {
-  __attribute__((__aligned__(sizeof(void*))))
-  uint8_t ret_area[(4*sizeof(void*))];
-  uint8_t *ptr = (uint8_t *) &ret_area;
-  __wasm_import_rift_plugin_players_locale((uint8_t *) (*target).ptr, (*target).len, ptr);
-  rift_plugin_players_result_option_string_string_t result;
-  switch ((int32_t) *((uint8_t*) (ptr + 0))) {
-    case 0: {
-      result.is_err = false;
-      rift_plugin_option_string_t option;
-      switch ((int32_t) *((uint8_t*) (ptr + sizeof(void*)))) {
-        case 0: {
-          option.is_some = false;
-          break;
-        }
-        case 1: {
-          option.is_some = true;
-          option.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (ptr + (2*sizeof(void*))))), (*((size_t*) (ptr + (3*sizeof(void*))))) };
-          break;
-        }
-      }
-
-      result.val.ok = option;
       break;
     }
     case 1: {
@@ -2358,11 +2542,25 @@ bool rift_plugin_permissions_set(rift_plugin_string_t *uuid, rift_plugin_string_
   }
 }
 
-bool rift_plugin_permissions_add_group(rift_plugin_string_t *uuid, rift_plugin_string_t *group, bool *ret, rift_plugin_string_t *err) {
+bool rift_plugin_permissions_add_group(rift_plugin_string_t *uuid, rift_plugin_string_t *group, uint64_t *maybe_expires_at, bool *ret, rift_plugin_string_t *err) {
   __attribute__((__aligned__(sizeof(void*))))
   uint8_t ret_area[(3*sizeof(void*))];
+  rift_plugin_option_u64_t expires_at;
+  expires_at.is_some = maybe_expires_at != NULL;if (maybe_expires_at) {
+    expires_at.val = *maybe_expires_at;
+  }
+  int32_t option;
+  int64_t option1;
+  if ((expires_at).is_some) {
+    const uint64_t *payload0 = &(expires_at).val;
+    option = 1;
+    option1 = (int64_t) (*payload0);
+  } else {
+    option = 0;
+    option1 = 0;
+  }
   uint8_t *ptr = (uint8_t *) &ret_area;
-  __wasm_import_rift_plugin_permissions_add_group((uint8_t *) (*uuid).ptr, (*uuid).len, (uint8_t *) (*group).ptr, (*group).len, ptr);
+  __wasm_import_rift_plugin_permissions_add_group((uint8_t *) (*uuid).ptr, (*uuid).len, (uint8_t *) (*group).ptr, (*group).len, option, option1, ptr);
   rift_plugin_players_result_bool_string_t result;
   switch ((int32_t) *((uint8_t*) (ptr + 0))) {
     case 0: {
@@ -2848,6 +3046,182 @@ bool rift_plugin_timers_cancel(uint64_t handle) {
   return ret;
 }
 
+bool rift_plugin_background_defer(uint64_t *ret, rift_plugin_string_t *err) {
+  __attribute__((__aligned__(8)))
+  uint8_t ret_area[(8+2*sizeof(void*))];
+  uint8_t *ptr = (uint8_t *) &ret_area;
+  __wasm_import_rift_plugin_background_defer(ptr);
+  rift_plugin_bus_result_u64_string_t result;
+  switch ((int32_t) *((uint8_t*) (ptr + 0))) {
+    case 0: {
+      result.is_err = false;
+      result.val.ok = (uint64_t) (*((int64_t*) (ptr + 8)));
+      break;
+    }
+    case 1: {
+      result.is_err = true;
+      result.val.err = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (ptr + 8))), (*((size_t*) (ptr + (8+1*sizeof(void*))))) };
+      break;
+    }
+  }
+  if (!result.is_err) {
+    *ret = result.val.ok;
+    return 1;
+  } else {
+    *err = result.val.err;
+    return 0;
+  }
+}
+
+bool rift_plugin_background_resolve(uint64_t ticket, rift_plugin_background_decision_t *decision, bool *ret, rift_plugin_string_t *err) {
+  __attribute__((__aligned__(sizeof(void*))))
+  uint8_t ret_area[(3*sizeof(void*))];
+  int32_t variant14;
+  uint8_t * variant15;
+  uint8_t * variant16;
+  size_t variant17;
+  switch ((int32_t) (*decision).tag) {
+    case 0: {
+      variant14 = 0;
+      variant15 = 0;
+      variant16 = 0;
+      variant17 = 0;
+      break;
+    }
+    case 1: {
+      const rift_plugin_types_text_t *payload0 = &(*decision).val.deny;
+      int32_t variant;
+      uint8_t * variant3;
+      size_t variant4;
+      switch ((int32_t) (*payload0).tag) {
+        case 0: {
+          const rift_plugin_string_t *payload1 = &(*payload0).val.plain;
+          variant = 0;
+          variant3 = (uint8_t *) (*payload1).ptr;
+          variant4 = (*payload1).len;
+          break;
+        }
+        case 1: {
+          const rift_plugin_string_t *payload2 = &(*payload0).val.json;
+          variant = 1;
+          variant3 = (uint8_t *) (*payload2).ptr;
+          variant4 = (*payload2).len;
+          break;
+        }
+      }
+      variant14 = 1;
+      variant15 = (uint8_t *) variant;
+      variant16 = variant3;
+      variant17 = variant4;
+      break;
+    }
+    case 2: {
+      const rift_plugin_string_t *payload5 = &(*decision).val.server;
+      variant14 = 2;
+      variant15 = (uint8_t *) (*payload5).ptr;
+      variant16 = (uint8_t *) (*payload5).len;
+      variant17 = 0;
+      break;
+    }
+    case 3: {
+      const rift_plugin_types_text_t *payload6 = &(*decision).val.message;
+      int32_t variant9;
+      uint8_t * variant10;
+      size_t variant11;
+      switch ((int32_t) (*payload6).tag) {
+        case 0: {
+          const rift_plugin_string_t *payload7 = &(*payload6).val.plain;
+          variant9 = 0;
+          variant10 = (uint8_t *) (*payload7).ptr;
+          variant11 = (*payload7).len;
+          break;
+        }
+        case 1: {
+          const rift_plugin_string_t *payload8 = &(*payload6).val.json;
+          variant9 = 1;
+          variant10 = (uint8_t *) (*payload8).ptr;
+          variant11 = (*payload8).len;
+          break;
+        }
+      }
+      variant14 = 3;
+      variant15 = (uint8_t *) variant9;
+      variant16 = variant10;
+      variant17 = variant11;
+      break;
+    }
+    case 4: {
+      const rift_plugin_string_t *payload12 = &(*decision).val.queue;
+      variant14 = 4;
+      variant15 = (uint8_t *) (*payload12).ptr;
+      variant16 = (uint8_t *) (*payload12).len;
+      variant17 = 0;
+      break;
+    }
+    case 5: {
+      variant14 = 5;
+      variant15 = 0;
+      variant16 = 0;
+      variant17 = 0;
+      break;
+    }
+  }
+  uint8_t *ptr = (uint8_t *) &ret_area;
+  __wasm_import_rift_plugin_background_resolve((int64_t) (ticket), variant14, variant15, variant16, variant17, ptr);
+  rift_plugin_players_result_bool_string_t result;
+  switch ((int32_t) *((uint8_t*) (ptr + 0))) {
+    case 0: {
+      result.is_err = false;
+      result.val.ok = (int32_t) *((uint8_t*) (ptr + sizeof(void*)));
+      break;
+    }
+    case 1: {
+      result.is_err = true;
+      result.val.err = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (ptr + sizeof(void*)))), (*((size_t*) (ptr + (2*sizeof(void*))))) };
+      break;
+    }
+  }
+  if (!result.is_err) {
+    *ret = result.val.ok;
+    return 1;
+  } else {
+    *err = result.val.err;
+    return 0;
+  }
+}
+
+bool rift_plugin_background_run(rift_plugin_list_u8_t *payload, uint64_t *ret, rift_plugin_string_t *err) {
+  __attribute__((__aligned__(8)))
+  uint8_t ret_area[(8+2*sizeof(void*))];
+  uint8_t *ptr = (uint8_t *) &ret_area;
+  __wasm_import_rift_plugin_background_run((uint8_t *) (*payload).ptr, (*payload).len, ptr);
+  rift_plugin_bus_result_u64_string_t result;
+  switch ((int32_t) *((uint8_t*) (ptr + 0))) {
+    case 0: {
+      result.is_err = false;
+      result.val.ok = (uint64_t) (*((int64_t*) (ptr + 8)));
+      break;
+    }
+    case 1: {
+      result.is_err = true;
+      result.val.err = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (ptr + 8))), (*((size_t*) (ptr + (8+1*sizeof(void*))))) };
+      break;
+    }
+  }
+  if (!result.is_err) {
+    *ret = result.val.ok;
+    return 1;
+  } else {
+    *err = result.val.err;
+    return 0;
+  }
+}
+
+bool rift_plugin_background_is_worker(void) {
+  int32_t ret = __wasm_import_rift_plugin_background_is_worker();
+  return ret;
+}
+
 void rift_plugin_log_log(rift_plugin_log_level_t level, rift_plugin_string_t *message) {
   __wasm_import_rift_plugin_log_log((int32_t) level, (uint8_t *) (*message).ptr, (*message).len);
 }
@@ -2907,918 +3281,15 @@ int64_t rift_plugin_meta_time(void) {
   return ret;
 }
 
-__attribute__((__export_name__("rift:plugin/dialogs@0.1.5#dialog")))
-void __wasm_export_exports_rift_plugin_dialogs_dialog(uint8_t * arg) {
-  rift_plugin_option_string_t option;
-  switch ((int32_t) *((uint8_t*) (arg + (8+11*sizeof(void*))))) {
-    case 0: {
-      option.is_some = false;
-      break;
-    }
-    case 1: {
-      option.is_some = true;
-      option.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+12*sizeof(void*))))), (*((size_t*) (arg + (8+13*sizeof(void*))))) };
-      break;
-    }
-  }
-  rift_plugin_option_string_t option0;
-  switch ((int32_t) *((uint8_t*) (arg + (8+14*sizeof(void*))))) {
-    case 0: {
-      option0.is_some = false;
-      break;
-    }
-    case 1: {
-      option0.is_some = true;
-      option0.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+15*sizeof(void*))))), (*((size_t*) (arg + (8+16*sizeof(void*))))) };
-      break;
-    }
-  }
-  rift_plugin_option_string_t option1;
-  switch ((int32_t) *((uint8_t*) (arg + (8+17*sizeof(void*))))) {
-    case 0: {
-      option1.is_some = false;
-      break;
-    }
-    case 1: {
-      option1.is_some = true;
-      option1.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+18*sizeof(void*))))), (*((size_t*) (arg + (8+19*sizeof(void*))))) };
-      break;
-    }
-  }
-  rift_plugin_option_string_t option2;
-  switch ((int32_t) *((uint8_t*) (arg + (8+20*sizeof(void*))))) {
-    case 0: {
-      option2.is_some = false;
-      break;
-    }
-    case 1: {
-      option2.is_some = true;
-      option2.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+21*sizeof(void*))))), (*((size_t*) (arg + (8+22*sizeof(void*))))) };
-      break;
-    }
-  }
-  rift_plugin_option_bool_t option3;
-  switch ((int32_t) *((uint8_t*) (arg + (8+23*sizeof(void*))))) {
-    case 0: {
-      option3.is_some = false;
-      break;
-    }
-    case 1: {
-      option3.is_some = true;
-      option3.val = (int32_t) *((uint8_t*) (arg + (9+23*sizeof(void*))));
-      break;
-    }
-  }
-  rift_plugin_option_string_t option4;
-  switch ((int32_t) *((uint8_t*) (arg + (8+24*sizeof(void*))))) {
-    case 0: {
-      option4.is_some = false;
-      break;
-    }
-    case 1: {
-      option4.is_some = true;
-      option4.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+25*sizeof(void*))))), (*((size_t*) (arg + (8+26*sizeof(void*))))) };
-      break;
-    }
-  }
-  rift_plugin_option_string_t option5;
-  switch ((int32_t) *((uint8_t*) (arg + (8+36*sizeof(void*))))) {
-    case 0: {
-      option5.is_some = false;
-      break;
-    }
-    case 1: {
-      option5.is_some = true;
-      option5.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+37*sizeof(void*))))), (*((size_t*) (arg + (8+38*sizeof(void*))))) };
-      break;
-    }
-  }
-  exports_rift_plugin_dialogs_dialog_response_t arg6 = (rift_plugin_types_dialog_response_t) {
-    (rift_plugin_types_context_t) (rift_plugin_types_context_t) {
-      (uint64_t) (uint64_t) (*((int64_t*) (arg + 0))),
-      (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + 8))), (*((size_t*) (arg + (8+1*sizeof(void*))))) },
-      (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+2*sizeof(void*))))), (*((size_t*) (arg + (8+3*sizeof(void*))))) },
-      (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+4*sizeof(void*))))), (*((size_t*) (arg + (8+5*sizeof(void*))))) },
-      (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+6*sizeof(void*))))), (*((size_t*) (arg + (8+7*sizeof(void*))))) },
-      (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+8*sizeof(void*))))), (*((size_t*) (arg + (8+9*sizeof(void*))))) },
-      (int32_t) *((int32_t*) (arg + (8+10*sizeof(void*)))),
-      (rift_plugin_option_string_t) option,
-      (rift_plugin_option_string_t) option0,
-      (rift_plugin_option_string_t) option1,
-      (rift_plugin_option_string_t) option2,
-      (rift_plugin_option_bool_t) option3,
-      (rift_plugin_option_string_t) option4,
-      (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+27*sizeof(void*))))), (*((size_t*) (arg + (8+28*sizeof(void*))))) },
-      (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+29*sizeof(void*))))), (*((size_t*) (arg + (8+30*sizeof(void*))))) },
-      (uint32_t) (uint32_t) (*((int32_t*) (arg + (8+31*sizeof(void*))))),
-    },
-    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+32*sizeof(void*))))), (*((size_t*) (arg + (8+33*sizeof(void*))))) },
-    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+34*sizeof(void*))))), (*((size_t*) (arg + (8+35*sizeof(void*))))) },
-    (rift_plugin_option_string_t) option5,
-  };
-  exports_rift_plugin_dialogs_dialog(&arg6);
-  free(arg);
+void rift_plugin_meta_api(rift_plugin_string_t *ret) {
+  __attribute__((__aligned__(sizeof(void*))))
+  uint8_t ret_area[(2*sizeof(void*))];
+  uint8_t *ptr = (uint8_t *) &ret_area;
+  __wasm_import_rift_plugin_meta_api(ptr);
+  *ret = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (ptr + 0))), (*((size_t*) (ptr + sizeof(void*)))) };
 }
 
-__attribute__((__export_name__("rift:plugin/decisions@0.1.5#login")))
-uint8_t * __wasm_export_exports_rift_plugin_decisions_login(uint8_t * arg) {
-  rift_plugin_option_string_t option;
-  switch ((int32_t) *((uint8_t*) (arg + (8+11*sizeof(void*))))) {
-    case 0: {
-      option.is_some = false;
-      break;
-    }
-    case 1: {
-      option.is_some = true;
-      option.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+12*sizeof(void*))))), (*((size_t*) (arg + (8+13*sizeof(void*))))) };
-      break;
-    }
-  }
-  rift_plugin_option_string_t option0;
-  switch ((int32_t) *((uint8_t*) (arg + (8+14*sizeof(void*))))) {
-    case 0: {
-      option0.is_some = false;
-      break;
-    }
-    case 1: {
-      option0.is_some = true;
-      option0.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+15*sizeof(void*))))), (*((size_t*) (arg + (8+16*sizeof(void*))))) };
-      break;
-    }
-  }
-  rift_plugin_option_string_t option1;
-  switch ((int32_t) *((uint8_t*) (arg + (8+17*sizeof(void*))))) {
-    case 0: {
-      option1.is_some = false;
-      break;
-    }
-    case 1: {
-      option1.is_some = true;
-      option1.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+18*sizeof(void*))))), (*((size_t*) (arg + (8+19*sizeof(void*))))) };
-      break;
-    }
-  }
-  rift_plugin_option_string_t option2;
-  switch ((int32_t) *((uint8_t*) (arg + (8+20*sizeof(void*))))) {
-    case 0: {
-      option2.is_some = false;
-      break;
-    }
-    case 1: {
-      option2.is_some = true;
-      option2.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+21*sizeof(void*))))), (*((size_t*) (arg + (8+22*sizeof(void*))))) };
-      break;
-    }
-  }
-  rift_plugin_option_bool_t option3;
-  switch ((int32_t) *((uint8_t*) (arg + (8+23*sizeof(void*))))) {
-    case 0: {
-      option3.is_some = false;
-      break;
-    }
-    case 1: {
-      option3.is_some = true;
-      option3.val = (int32_t) *((uint8_t*) (arg + (9+23*sizeof(void*))));
-      break;
-    }
-  }
-  rift_plugin_option_string_t option4;
-  switch ((int32_t) *((uint8_t*) (arg + (8+24*sizeof(void*))))) {
-    case 0: {
-      option4.is_some = false;
-      break;
-    }
-    case 1: {
-      option4.is_some = true;
-      option4.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+25*sizeof(void*))))), (*((size_t*) (arg + (8+26*sizeof(void*))))) };
-      break;
-    }
-  }
-  exports_rift_plugin_decisions_context_t arg5 = (rift_plugin_types_context_t) {
-    (uint64_t) (uint64_t) (*((int64_t*) (arg + 0))),
-    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + 8))), (*((size_t*) (arg + (8+1*sizeof(void*))))) },
-    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+2*sizeof(void*))))), (*((size_t*) (arg + (8+3*sizeof(void*))))) },
-    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+4*sizeof(void*))))), (*((size_t*) (arg + (8+5*sizeof(void*))))) },
-    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+6*sizeof(void*))))), (*((size_t*) (arg + (8+7*sizeof(void*))))) },
-    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+8*sizeof(void*))))), (*((size_t*) (arg + (8+9*sizeof(void*))))) },
-    (int32_t) *((int32_t*) (arg + (8+10*sizeof(void*)))),
-    (rift_plugin_option_string_t) option,
-    (rift_plugin_option_string_t) option0,
-    (rift_plugin_option_string_t) option1,
-    (rift_plugin_option_string_t) option2,
-    (rift_plugin_option_bool_t) option3,
-    (rift_plugin_option_string_t) option4,
-    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+27*sizeof(void*))))), (*((size_t*) (arg + (8+28*sizeof(void*))))) },
-    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+29*sizeof(void*))))), (*((size_t*) (arg + (8+30*sizeof(void*))))) },
-    (uint32_t) (uint32_t) (*((int32_t*) (arg + (8+31*sizeof(void*))))),
-  };
-  exports_rift_plugin_decisions_decision_t ret;
-  exports_rift_plugin_decisions_login(&arg5, &ret);
-  free(arg);
-  uint8_t *ptr = (uint8_t *) &RET_AREA;
-  switch ((int32_t) (ret).tag) {
-    case 0: {
-      *((int8_t*)(ptr + 0)) = 0;
-      break;
-    }
-    case 1: {
-      const rift_plugin_string_t *payload6 = &(ret).val.deny;
-      *((int8_t*)(ptr + 0)) = 1;
-      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload6).len;
-      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload6).ptr;
-      break;
-    }
-    case 2: {
-      const rift_plugin_string_t *payload7 = &(ret).val.server;
-      *((int8_t*)(ptr + 0)) = 2;
-      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload7).len;
-      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload7).ptr;
-      break;
-    }
-    case 3: {
-      const rift_plugin_string_t *payload8 = &(ret).val.message;
-      *((int8_t*)(ptr + 0)) = 3;
-      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload8).len;
-      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload8).ptr;
-      break;
-    }
-    case 4: {
-      const rift_plugin_string_t *payload9 = &(ret).val.queue;
-      *((int8_t*)(ptr + 0)) = 4;
-      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload9).len;
-      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload9).ptr;
-      break;
-    }
-    case 5: {
-      *((int8_t*)(ptr + 0)) = 5;
-      break;
-    }
-    case 6: {
-      const rift_plugin_string_t *payload11 = &(ret).val.deny_json;
-      *((int8_t*)(ptr + 0)) = 6;
-      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload11).len;
-      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload11).ptr;
-      break;
-    }
-    case 7: {
-      const rift_plugin_string_t *payload12 = &(ret).val.message_json;
-      *((int8_t*)(ptr + 0)) = 7;
-      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload12).len;
-      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload12).ptr;
-      break;
-    }
-  }
-  return ptr;
-}
-
-__attribute__((__export_name__("rift:plugin/decisions@0.1.5#initial-server")))
-uint8_t * __wasm_export_exports_rift_plugin_decisions_initial_server(uint8_t * arg) {
-  rift_plugin_option_string_t option;
-  switch ((int32_t) *((uint8_t*) (arg + (8+11*sizeof(void*))))) {
-    case 0: {
-      option.is_some = false;
-      break;
-    }
-    case 1: {
-      option.is_some = true;
-      option.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+12*sizeof(void*))))), (*((size_t*) (arg + (8+13*sizeof(void*))))) };
-      break;
-    }
-  }
-  rift_plugin_option_string_t option0;
-  switch ((int32_t) *((uint8_t*) (arg + (8+14*sizeof(void*))))) {
-    case 0: {
-      option0.is_some = false;
-      break;
-    }
-    case 1: {
-      option0.is_some = true;
-      option0.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+15*sizeof(void*))))), (*((size_t*) (arg + (8+16*sizeof(void*))))) };
-      break;
-    }
-  }
-  rift_plugin_option_string_t option1;
-  switch ((int32_t) *((uint8_t*) (arg + (8+17*sizeof(void*))))) {
-    case 0: {
-      option1.is_some = false;
-      break;
-    }
-    case 1: {
-      option1.is_some = true;
-      option1.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+18*sizeof(void*))))), (*((size_t*) (arg + (8+19*sizeof(void*))))) };
-      break;
-    }
-  }
-  rift_plugin_option_string_t option2;
-  switch ((int32_t) *((uint8_t*) (arg + (8+20*sizeof(void*))))) {
-    case 0: {
-      option2.is_some = false;
-      break;
-    }
-    case 1: {
-      option2.is_some = true;
-      option2.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+21*sizeof(void*))))), (*((size_t*) (arg + (8+22*sizeof(void*))))) };
-      break;
-    }
-  }
-  rift_plugin_option_bool_t option3;
-  switch ((int32_t) *((uint8_t*) (arg + (8+23*sizeof(void*))))) {
-    case 0: {
-      option3.is_some = false;
-      break;
-    }
-    case 1: {
-      option3.is_some = true;
-      option3.val = (int32_t) *((uint8_t*) (arg + (9+23*sizeof(void*))));
-      break;
-    }
-  }
-  rift_plugin_option_string_t option4;
-  switch ((int32_t) *((uint8_t*) (arg + (8+24*sizeof(void*))))) {
-    case 0: {
-      option4.is_some = false;
-      break;
-    }
-    case 1: {
-      option4.is_some = true;
-      option4.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+25*sizeof(void*))))), (*((size_t*) (arg + (8+26*sizeof(void*))))) };
-      break;
-    }
-  }
-  exports_rift_plugin_decisions_context_t arg5 = (rift_plugin_types_context_t) {
-    (uint64_t) (uint64_t) (*((int64_t*) (arg + 0))),
-    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + 8))), (*((size_t*) (arg + (8+1*sizeof(void*))))) },
-    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+2*sizeof(void*))))), (*((size_t*) (arg + (8+3*sizeof(void*))))) },
-    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+4*sizeof(void*))))), (*((size_t*) (arg + (8+5*sizeof(void*))))) },
-    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+6*sizeof(void*))))), (*((size_t*) (arg + (8+7*sizeof(void*))))) },
-    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+8*sizeof(void*))))), (*((size_t*) (arg + (8+9*sizeof(void*))))) },
-    (int32_t) *((int32_t*) (arg + (8+10*sizeof(void*)))),
-    (rift_plugin_option_string_t) option,
-    (rift_plugin_option_string_t) option0,
-    (rift_plugin_option_string_t) option1,
-    (rift_plugin_option_string_t) option2,
-    (rift_plugin_option_bool_t) option3,
-    (rift_plugin_option_string_t) option4,
-    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+27*sizeof(void*))))), (*((size_t*) (arg + (8+28*sizeof(void*))))) },
-    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+29*sizeof(void*))))), (*((size_t*) (arg + (8+30*sizeof(void*))))) },
-    (uint32_t) (uint32_t) (*((int32_t*) (arg + (8+31*sizeof(void*))))),
-  };
-  exports_rift_plugin_decisions_decision_t ret;
-  exports_rift_plugin_decisions_initial_server(&arg5, &ret);
-  free(arg);
-  uint8_t *ptr = (uint8_t *) &RET_AREA;
-  switch ((int32_t) (ret).tag) {
-    case 0: {
-      *((int8_t*)(ptr + 0)) = 0;
-      break;
-    }
-    case 1: {
-      const rift_plugin_string_t *payload6 = &(ret).val.deny;
-      *((int8_t*)(ptr + 0)) = 1;
-      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload6).len;
-      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload6).ptr;
-      break;
-    }
-    case 2: {
-      const rift_plugin_string_t *payload7 = &(ret).val.server;
-      *((int8_t*)(ptr + 0)) = 2;
-      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload7).len;
-      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload7).ptr;
-      break;
-    }
-    case 3: {
-      const rift_plugin_string_t *payload8 = &(ret).val.message;
-      *((int8_t*)(ptr + 0)) = 3;
-      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload8).len;
-      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload8).ptr;
-      break;
-    }
-    case 4: {
-      const rift_plugin_string_t *payload9 = &(ret).val.queue;
-      *((int8_t*)(ptr + 0)) = 4;
-      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload9).len;
-      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload9).ptr;
-      break;
-    }
-    case 5: {
-      *((int8_t*)(ptr + 0)) = 5;
-      break;
-    }
-    case 6: {
-      const rift_plugin_string_t *payload11 = &(ret).val.deny_json;
-      *((int8_t*)(ptr + 0)) = 6;
-      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload11).len;
-      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload11).ptr;
-      break;
-    }
-    case 7: {
-      const rift_plugin_string_t *payload12 = &(ret).val.message_json;
-      *((int8_t*)(ptr + 0)) = 7;
-      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload12).len;
-      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload12).ptr;
-      break;
-    }
-  }
-  return ptr;
-}
-
-__attribute__((__export_name__("rift:plugin/decisions@0.1.5#before-transfer")))
-uint8_t * __wasm_export_exports_rift_plugin_decisions_before_transfer(uint8_t * arg) {
-  rift_plugin_option_string_t option;
-  switch ((int32_t) *((uint8_t*) (arg + (8+11*sizeof(void*))))) {
-    case 0: {
-      option.is_some = false;
-      break;
-    }
-    case 1: {
-      option.is_some = true;
-      option.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+12*sizeof(void*))))), (*((size_t*) (arg + (8+13*sizeof(void*))))) };
-      break;
-    }
-  }
-  rift_plugin_option_string_t option0;
-  switch ((int32_t) *((uint8_t*) (arg + (8+14*sizeof(void*))))) {
-    case 0: {
-      option0.is_some = false;
-      break;
-    }
-    case 1: {
-      option0.is_some = true;
-      option0.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+15*sizeof(void*))))), (*((size_t*) (arg + (8+16*sizeof(void*))))) };
-      break;
-    }
-  }
-  rift_plugin_option_string_t option1;
-  switch ((int32_t) *((uint8_t*) (arg + (8+17*sizeof(void*))))) {
-    case 0: {
-      option1.is_some = false;
-      break;
-    }
-    case 1: {
-      option1.is_some = true;
-      option1.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+18*sizeof(void*))))), (*((size_t*) (arg + (8+19*sizeof(void*))))) };
-      break;
-    }
-  }
-  rift_plugin_option_string_t option2;
-  switch ((int32_t) *((uint8_t*) (arg + (8+20*sizeof(void*))))) {
-    case 0: {
-      option2.is_some = false;
-      break;
-    }
-    case 1: {
-      option2.is_some = true;
-      option2.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+21*sizeof(void*))))), (*((size_t*) (arg + (8+22*sizeof(void*))))) };
-      break;
-    }
-  }
-  rift_plugin_option_bool_t option3;
-  switch ((int32_t) *((uint8_t*) (arg + (8+23*sizeof(void*))))) {
-    case 0: {
-      option3.is_some = false;
-      break;
-    }
-    case 1: {
-      option3.is_some = true;
-      option3.val = (int32_t) *((uint8_t*) (arg + (9+23*sizeof(void*))));
-      break;
-    }
-  }
-  rift_plugin_option_string_t option4;
-  switch ((int32_t) *((uint8_t*) (arg + (8+24*sizeof(void*))))) {
-    case 0: {
-      option4.is_some = false;
-      break;
-    }
-    case 1: {
-      option4.is_some = true;
-      option4.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+25*sizeof(void*))))), (*((size_t*) (arg + (8+26*sizeof(void*))))) };
-      break;
-    }
-  }
-  exports_rift_plugin_decisions_context_t arg5 = (rift_plugin_types_context_t) {
-    (uint64_t) (uint64_t) (*((int64_t*) (arg + 0))),
-    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + 8))), (*((size_t*) (arg + (8+1*sizeof(void*))))) },
-    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+2*sizeof(void*))))), (*((size_t*) (arg + (8+3*sizeof(void*))))) },
-    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+4*sizeof(void*))))), (*((size_t*) (arg + (8+5*sizeof(void*))))) },
-    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+6*sizeof(void*))))), (*((size_t*) (arg + (8+7*sizeof(void*))))) },
-    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+8*sizeof(void*))))), (*((size_t*) (arg + (8+9*sizeof(void*))))) },
-    (int32_t) *((int32_t*) (arg + (8+10*sizeof(void*)))),
-    (rift_plugin_option_string_t) option,
-    (rift_plugin_option_string_t) option0,
-    (rift_plugin_option_string_t) option1,
-    (rift_plugin_option_string_t) option2,
-    (rift_plugin_option_bool_t) option3,
-    (rift_plugin_option_string_t) option4,
-    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+27*sizeof(void*))))), (*((size_t*) (arg + (8+28*sizeof(void*))))) },
-    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+29*sizeof(void*))))), (*((size_t*) (arg + (8+30*sizeof(void*))))) },
-    (uint32_t) (uint32_t) (*((int32_t*) (arg + (8+31*sizeof(void*))))),
-  };
-  exports_rift_plugin_decisions_decision_t ret;
-  exports_rift_plugin_decisions_before_transfer(&arg5, &ret);
-  free(arg);
-  uint8_t *ptr = (uint8_t *) &RET_AREA;
-  switch ((int32_t) (ret).tag) {
-    case 0: {
-      *((int8_t*)(ptr + 0)) = 0;
-      break;
-    }
-    case 1: {
-      const rift_plugin_string_t *payload6 = &(ret).val.deny;
-      *((int8_t*)(ptr + 0)) = 1;
-      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload6).len;
-      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload6).ptr;
-      break;
-    }
-    case 2: {
-      const rift_plugin_string_t *payload7 = &(ret).val.server;
-      *((int8_t*)(ptr + 0)) = 2;
-      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload7).len;
-      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload7).ptr;
-      break;
-    }
-    case 3: {
-      const rift_plugin_string_t *payload8 = &(ret).val.message;
-      *((int8_t*)(ptr + 0)) = 3;
-      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload8).len;
-      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload8).ptr;
-      break;
-    }
-    case 4: {
-      const rift_plugin_string_t *payload9 = &(ret).val.queue;
-      *((int8_t*)(ptr + 0)) = 4;
-      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload9).len;
-      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload9).ptr;
-      break;
-    }
-    case 5: {
-      *((int8_t*)(ptr + 0)) = 5;
-      break;
-    }
-    case 6: {
-      const rift_plugin_string_t *payload11 = &(ret).val.deny_json;
-      *((int8_t*)(ptr + 0)) = 6;
-      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload11).len;
-      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload11).ptr;
-      break;
-    }
-    case 7: {
-      const rift_plugin_string_t *payload12 = &(ret).val.message_json;
-      *((int8_t*)(ptr + 0)) = 7;
-      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload12).len;
-      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload12).ptr;
-      break;
-    }
-  }
-  return ptr;
-}
-
-__attribute__((__export_name__("rift:plugin/decisions@0.1.5#command")))
-uint8_t * __wasm_export_exports_rift_plugin_decisions_command(uint8_t * arg) {
-  rift_plugin_option_string_t option;
-  switch ((int32_t) *((uint8_t*) (arg + (8+11*sizeof(void*))))) {
-    case 0: {
-      option.is_some = false;
-      break;
-    }
-    case 1: {
-      option.is_some = true;
-      option.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+12*sizeof(void*))))), (*((size_t*) (arg + (8+13*sizeof(void*))))) };
-      break;
-    }
-  }
-  rift_plugin_option_string_t option0;
-  switch ((int32_t) *((uint8_t*) (arg + (8+14*sizeof(void*))))) {
-    case 0: {
-      option0.is_some = false;
-      break;
-    }
-    case 1: {
-      option0.is_some = true;
-      option0.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+15*sizeof(void*))))), (*((size_t*) (arg + (8+16*sizeof(void*))))) };
-      break;
-    }
-  }
-  rift_plugin_option_string_t option1;
-  switch ((int32_t) *((uint8_t*) (arg + (8+17*sizeof(void*))))) {
-    case 0: {
-      option1.is_some = false;
-      break;
-    }
-    case 1: {
-      option1.is_some = true;
-      option1.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+18*sizeof(void*))))), (*((size_t*) (arg + (8+19*sizeof(void*))))) };
-      break;
-    }
-  }
-  rift_plugin_option_string_t option2;
-  switch ((int32_t) *((uint8_t*) (arg + (8+20*sizeof(void*))))) {
-    case 0: {
-      option2.is_some = false;
-      break;
-    }
-    case 1: {
-      option2.is_some = true;
-      option2.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+21*sizeof(void*))))), (*((size_t*) (arg + (8+22*sizeof(void*))))) };
-      break;
-    }
-  }
-  rift_plugin_option_bool_t option3;
-  switch ((int32_t) *((uint8_t*) (arg + (8+23*sizeof(void*))))) {
-    case 0: {
-      option3.is_some = false;
-      break;
-    }
-    case 1: {
-      option3.is_some = true;
-      option3.val = (int32_t) *((uint8_t*) (arg + (9+23*sizeof(void*))));
-      break;
-    }
-  }
-  rift_plugin_option_string_t option4;
-  switch ((int32_t) *((uint8_t*) (arg + (8+24*sizeof(void*))))) {
-    case 0: {
-      option4.is_some = false;
-      break;
-    }
-    case 1: {
-      option4.is_some = true;
-      option4.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+25*sizeof(void*))))), (*((size_t*) (arg + (8+26*sizeof(void*))))) };
-      break;
-    }
-  }
-  exports_rift_plugin_decisions_context_t arg5 = (rift_plugin_types_context_t) {
-    (uint64_t) (uint64_t) (*((int64_t*) (arg + 0))),
-    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + 8))), (*((size_t*) (arg + (8+1*sizeof(void*))))) },
-    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+2*sizeof(void*))))), (*((size_t*) (arg + (8+3*sizeof(void*))))) },
-    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+4*sizeof(void*))))), (*((size_t*) (arg + (8+5*sizeof(void*))))) },
-    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+6*sizeof(void*))))), (*((size_t*) (arg + (8+7*sizeof(void*))))) },
-    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+8*sizeof(void*))))), (*((size_t*) (arg + (8+9*sizeof(void*))))) },
-    (int32_t) *((int32_t*) (arg + (8+10*sizeof(void*)))),
-    (rift_plugin_option_string_t) option,
-    (rift_plugin_option_string_t) option0,
-    (rift_plugin_option_string_t) option1,
-    (rift_plugin_option_string_t) option2,
-    (rift_plugin_option_bool_t) option3,
-    (rift_plugin_option_string_t) option4,
-    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+27*sizeof(void*))))), (*((size_t*) (arg + (8+28*sizeof(void*))))) },
-    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+29*sizeof(void*))))), (*((size_t*) (arg + (8+30*sizeof(void*))))) },
-    (uint32_t) (uint32_t) (*((int32_t*) (arg + (8+31*sizeof(void*))))),
-  };
-  exports_rift_plugin_decisions_decision_t ret;
-  exports_rift_plugin_decisions_command(&arg5, &ret);
-  free(arg);
-  uint8_t *ptr = (uint8_t *) &RET_AREA;
-  switch ((int32_t) (ret).tag) {
-    case 0: {
-      *((int8_t*)(ptr + 0)) = 0;
-      break;
-    }
-    case 1: {
-      const rift_plugin_string_t *payload6 = &(ret).val.deny;
-      *((int8_t*)(ptr + 0)) = 1;
-      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload6).len;
-      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload6).ptr;
-      break;
-    }
-    case 2: {
-      const rift_plugin_string_t *payload7 = &(ret).val.server;
-      *((int8_t*)(ptr + 0)) = 2;
-      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload7).len;
-      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload7).ptr;
-      break;
-    }
-    case 3: {
-      const rift_plugin_string_t *payload8 = &(ret).val.message;
-      *((int8_t*)(ptr + 0)) = 3;
-      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload8).len;
-      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload8).ptr;
-      break;
-    }
-    case 4: {
-      const rift_plugin_string_t *payload9 = &(ret).val.queue;
-      *((int8_t*)(ptr + 0)) = 4;
-      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload9).len;
-      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload9).ptr;
-      break;
-    }
-    case 5: {
-      *((int8_t*)(ptr + 0)) = 5;
-      break;
-    }
-    case 6: {
-      const rift_plugin_string_t *payload11 = &(ret).val.deny_json;
-      *((int8_t*)(ptr + 0)) = 6;
-      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload11).len;
-      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload11).ptr;
-      break;
-    }
-    case 7: {
-      const rift_plugin_string_t *payload12 = &(ret).val.message_json;
-      *((int8_t*)(ptr + 0)) = 7;
-      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload12).len;
-      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload12).ptr;
-      break;
-    }
-  }
-  return ptr;
-}
-
-__attribute__((__export_name__("rift:plugin/styled@0.1.5#suggest")))
-uint8_t * __wasm_export_exports_rift_plugin_styled_suggest(uint8_t * arg) {
-  rift_plugin_option_string_t option;
-  switch ((int32_t) *((uint8_t*) (arg + (8+11*sizeof(void*))))) {
-    case 0: {
-      option.is_some = false;
-      break;
-    }
-    case 1: {
-      option.is_some = true;
-      option.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+12*sizeof(void*))))), (*((size_t*) (arg + (8+13*sizeof(void*))))) };
-      break;
-    }
-  }
-  rift_plugin_option_string_t option0;
-  switch ((int32_t) *((uint8_t*) (arg + (8+14*sizeof(void*))))) {
-    case 0: {
-      option0.is_some = false;
-      break;
-    }
-    case 1: {
-      option0.is_some = true;
-      option0.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+15*sizeof(void*))))), (*((size_t*) (arg + (8+16*sizeof(void*))))) };
-      break;
-    }
-  }
-  rift_plugin_option_string_t option1;
-  switch ((int32_t) *((uint8_t*) (arg + (8+17*sizeof(void*))))) {
-    case 0: {
-      option1.is_some = false;
-      break;
-    }
-    case 1: {
-      option1.is_some = true;
-      option1.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+18*sizeof(void*))))), (*((size_t*) (arg + (8+19*sizeof(void*))))) };
-      break;
-    }
-  }
-  rift_plugin_option_string_t option2;
-  switch ((int32_t) *((uint8_t*) (arg + (8+20*sizeof(void*))))) {
-    case 0: {
-      option2.is_some = false;
-      break;
-    }
-    case 1: {
-      option2.is_some = true;
-      option2.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+21*sizeof(void*))))), (*((size_t*) (arg + (8+22*sizeof(void*))))) };
-      break;
-    }
-  }
-  rift_plugin_option_bool_t option3;
-  switch ((int32_t) *((uint8_t*) (arg + (8+23*sizeof(void*))))) {
-    case 0: {
-      option3.is_some = false;
-      break;
-    }
-    case 1: {
-      option3.is_some = true;
-      option3.val = (int32_t) *((uint8_t*) (arg + (9+23*sizeof(void*))));
-      break;
-    }
-  }
-  rift_plugin_option_string_t option4;
-  switch ((int32_t) *((uint8_t*) (arg + (8+24*sizeof(void*))))) {
-    case 0: {
-      option4.is_some = false;
-      break;
-    }
-    case 1: {
-      option4.is_some = true;
-      option4.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+25*sizeof(void*))))), (*((size_t*) (arg + (8+26*sizeof(void*))))) };
-      break;
-    }
-  }
-  exports_rift_plugin_styled_context_t arg5 = (rift_plugin_types_context_t) {
-    (uint64_t) (uint64_t) (*((int64_t*) (arg + 0))),
-    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + 8))), (*((size_t*) (arg + (8+1*sizeof(void*))))) },
-    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+2*sizeof(void*))))), (*((size_t*) (arg + (8+3*sizeof(void*))))) },
-    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+4*sizeof(void*))))), (*((size_t*) (arg + (8+5*sizeof(void*))))) },
-    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+6*sizeof(void*))))), (*((size_t*) (arg + (8+7*sizeof(void*))))) },
-    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+8*sizeof(void*))))), (*((size_t*) (arg + (8+9*sizeof(void*))))) },
-    (int32_t) *((int32_t*) (arg + (8+10*sizeof(void*)))),
-    (rift_plugin_option_string_t) option,
-    (rift_plugin_option_string_t) option0,
-    (rift_plugin_option_string_t) option1,
-    (rift_plugin_option_string_t) option2,
-    (rift_plugin_option_bool_t) option3,
-    (rift_plugin_option_string_t) option4,
-    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+27*sizeof(void*))))), (*((size_t*) (arg + (8+28*sizeof(void*))))) },
-    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+29*sizeof(void*))))), (*((size_t*) (arg + (8+30*sizeof(void*))))) },
-    (uint32_t) (uint32_t) (*((int32_t*) (arg + (8+31*sizeof(void*))))),
-  };
-  exports_rift_plugin_styled_list_rich_suggestion_t ret;
-  exports_rift_plugin_styled_suggest(&arg5, &ret);
-  free(arg);
-  uint8_t *ptr = (uint8_t *) &RET_AREA;
-  *((size_t*)(ptr + sizeof(void*))) = (ret).len;
-  *((uint8_t **)(ptr + 0)) = (uint8_t *) (ret).ptr;
-  return ptr;
-}
-
-__attribute__((__export_name__("rift:plugin/styled@0.1.5#status")))
-uint8_t * __wasm_export_exports_rift_plugin_styled_status(uint8_t * arg, size_t arg0, uint8_t * arg1, size_t arg2, int32_t arg3, uint8_t * arg4, size_t arg5, int32_t arg6, uint8_t * arg7, size_t arg8, int32_t arg9, int64_t arg10, int64_t arg11) {
-  rift_plugin_option_string_t option;
-  switch (arg6) {
-    case 0: {
-      option.is_some = false;
-      break;
-    }
-    case 1: {
-      option.is_some = true;
-      option.val = (rift_plugin_string_t) { (uint8_t*)(arg7), (arg8) };
-      break;
-    }
-  }
-  exports_rift_plugin_styled_ping_t arg12 = (rift_plugin_types_ping_t) {
-    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(arg), (arg0) },
-    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(arg1), (arg2) },
-    (int32_t) arg3,
-    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(arg4), (arg5) },
-    (rift_plugin_option_string_t) option,
-    (bool) arg9,
-    (uint64_t) (uint64_t) (arg10),
-    (uint64_t) (uint64_t) (arg11),
-  };
-  exports_rift_plugin_styled_rich_status_override_t val;
-  bool ret = exports_rift_plugin_styled_status(&arg12, &val);
-
-  exports_rift_plugin_styled_option_rich_status_override_t ret13;
-  ret13.is_some = ret;
-  ret13.val = val;
-  uint8_t *ptr = (uint8_t *) &RET_AREA;
-  if ((ret13).is_some) {
-    const exports_rift_plugin_styled_rich_status_override_t *payload14 = &(ret13).val;
-    *((int8_t*)(ptr + 0)) = 1;
-    if (((*payload14).motd_json).is_some) {
-      const rift_plugin_string_t *payload16 = &((*payload14).motd_json).val;
-      *((int8_t*)(ptr + sizeof(void*))) = 1;
-      *((size_t*)(ptr + (3*sizeof(void*)))) = (*payload16).len;
-      *((uint8_t **)(ptr + (2*sizeof(void*)))) = (uint8_t *) (*payload16).ptr;
-    } else {
-      *((int8_t*)(ptr + sizeof(void*))) = 0;
-    }
-    if (((*payload14).version_json).is_some) {
-      const rift_plugin_string_t *payload18 = &((*payload14).version_json).val;
-      *((int8_t*)(ptr + (4*sizeof(void*)))) = 1;
-      *((size_t*)(ptr + (6*sizeof(void*)))) = (*payload18).len;
-      *((uint8_t **)(ptr + (5*sizeof(void*)))) = (uint8_t *) (*payload18).ptr;
-    } else {
-      *((int8_t*)(ptr + (4*sizeof(void*)))) = 0;
-    }
-    if (((*payload14).protocol).is_some) {
-      const int32_t *payload20 = &((*payload14).protocol).val;
-      *((int8_t*)(ptr + (7*sizeof(void*)))) = 1;
-      *((int32_t*)(ptr + (4+7*sizeof(void*)))) = *payload20;
-    } else {
-      *((int8_t*)(ptr + (7*sizeof(void*)))) = 0;
-    }
-    if (((*payload14).online).is_some) {
-      const uint32_t *payload22 = &((*payload14).online).val;
-      *((int8_t*)(ptr + (8+7*sizeof(void*)))) = 1;
-      *((int32_t*)(ptr + (12+7*sizeof(void*)))) = (int32_t) (*payload22);
-    } else {
-      *((int8_t*)(ptr + (8+7*sizeof(void*)))) = 0;
-    }
-    if (((*payload14).max_players).is_some) {
-      const uint32_t *payload24 = &((*payload14).max_players).val;
-      *((int8_t*)(ptr + (16+7*sizeof(void*)))) = 1;
-      *((int32_t*)(ptr + (20+7*sizeof(void*)))) = (int32_t) (*payload24);
-    } else {
-      *((int8_t*)(ptr + (16+7*sizeof(void*)))) = 0;
-    }
-    if (((*payload14).sample_json).is_some) {
-      const rift_plugin_list_string_t *payload26 = &((*payload14).sample_json).val;
-      *((int8_t*)(ptr + (24+7*sizeof(void*)))) = 1;
-      *((size_t*)(ptr + (24+9*sizeof(void*)))) = (*payload26).len;
-      *((uint8_t **)(ptr + (24+8*sizeof(void*)))) = (uint8_t *) (*payload26).ptr;
-    } else {
-      *((int8_t*)(ptr + (24+7*sizeof(void*)))) = 0;
-    }
-    if (((*payload14).favicon).is_some) {
-      const rift_plugin_string_t *payload28 = &((*payload14).favicon).val;
-      *((int8_t*)(ptr + (24+10*sizeof(void*)))) = 1;
-      *((size_t*)(ptr + (24+12*sizeof(void*)))) = (*payload28).len;
-      *((uint8_t **)(ptr + (24+11*sizeof(void*)))) = (uint8_t *) (*payload28).ptr;
-    } else {
-      *((int8_t*)(ptr + (24+10*sizeof(void*)))) = 0;
-    }
-  } else {
-    *((int8_t*)(ptr + 0)) = 0;
-  }
-  return ptr;
-}
-
-__attribute__((__export_name__("rift:plugin/handler@0.1.5#init")))
+__attribute__((__export_name__("rift:plugin/handler@0.2.0#init")))
 uint8_t * __wasm_export_exports_rift_plugin_handler_init(uint8_t * arg, size_t arg0) {
   rift_plugin_string_t arg1 = (rift_plugin_string_t) { (uint8_t*)(arg), (arg0) };
   exports_rift_plugin_handler_result_registration_string_t ret;
@@ -3846,7 +3317,7 @@ uint8_t * __wasm_export_exports_rift_plugin_handler_init(uint8_t * arg, size_t a
   return ptr;
 }
 
-__attribute__((__export_name__("rift:plugin/handler@0.1.5#reload")))
+__attribute__((__export_name__("rift:plugin/handler@0.2.0#reload")))
 uint8_t * __wasm_export_exports_rift_plugin_handler_reload(uint8_t * arg, size_t arg0) {
   rift_plugin_string_t arg1 = (rift_plugin_string_t) { (uint8_t*)(arg), (arg0) };
   exports_rift_plugin_handler_result_void_string_t ret;
@@ -3866,13 +3337,13 @@ uint8_t * __wasm_export_exports_rift_plugin_handler_reload(uint8_t * arg, size_t
   return ptr;
 }
 
-__attribute__((__export_name__("rift:plugin/handler@0.1.5#shutdown")))
+__attribute__((__export_name__("rift:plugin/handler@0.2.0#shutdown")))
 void __wasm_export_exports_rift_plugin_handler_shutdown(uint8_t * arg, size_t arg0) {
   rift_plugin_string_t arg1 = (rift_plugin_string_t) { (uint8_t*)(arg), (arg0) };
   exports_rift_plugin_handler_shutdown(&arg1);
 }
 
-__attribute__((__export_name__("rift:plugin/handler@0.1.5#route")))
+__attribute__((__export_name__("rift:plugin/handler@0.2.0#route")))
 uint8_t * __wasm_export_exports_rift_plugin_handler_route(uint8_t * arg, size_t arg0, uint8_t * arg1, size_t arg2, uint8_t * arg3, size_t arg4, int32_t arg5, uint8_t * arg6, size_t arg7, uint8_t * arg8, size_t arg9, int32_t arg10, int32_t arg11, uint8_t * arg12, size_t arg13) {
   rift_plugin_option_string_t option;
   switch (arg11) {
@@ -3928,7 +3399,7 @@ uint8_t * __wasm_export_exports_rift_plugin_handler_route(uint8_t * arg, size_t 
   return ptr;
 }
 
-__attribute__((__export_name__("rift:plugin/handler@0.1.5#login")))
+__attribute__((__export_name__("rift:plugin/handler@0.2.0#login")))
 uint8_t * __wasm_export_exports_rift_plugin_handler_login(uint8_t * arg) {
   rift_plugin_option_string_t option;
   switch ((int32_t) *((uint8_t*) (arg + (8+11*sizeof(void*))))) {
@@ -4002,7 +3473,19 @@ uint8_t * __wasm_export_exports_rift_plugin_handler_login(uint8_t * arg) {
       break;
     }
   }
-  exports_rift_plugin_handler_context_t arg5 = (rift_plugin_types_context_t) {
+  rift_plugin_option_string_t option5;
+  switch ((int32_t) *((uint8_t*) (arg + (8+32*sizeof(void*))))) {
+    case 0: {
+      option5.is_some = false;
+      break;
+    }
+    case 1: {
+      option5.is_some = true;
+      option5.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+33*sizeof(void*))))), (*((size_t*) (arg + (8+34*sizeof(void*))))) };
+      break;
+    }
+  }
+  exports_rift_plugin_handler_context_t arg6 = (rift_plugin_types_context_t) {
     (uint64_t) (uint64_t) (*((int64_t*) (arg + 0))),
     (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + 8))), (*((size_t*) (arg + (8+1*sizeof(void*))))) },
     (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+2*sizeof(void*))))), (*((size_t*) (arg + (8+3*sizeof(void*))))) },
@@ -4019,9 +3502,11 @@ uint8_t * __wasm_export_exports_rift_plugin_handler_login(uint8_t * arg) {
     (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+27*sizeof(void*))))), (*((size_t*) (arg + (8+28*sizeof(void*))))) },
     (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+29*sizeof(void*))))), (*((size_t*) (arg + (8+30*sizeof(void*))))) },
     (uint32_t) (uint32_t) (*((int32_t*) (arg + (8+31*sizeof(void*))))),
+    (rift_plugin_option_string_t) option5,
+    (bool) (int32_t) *((uint8_t*) (arg + (8+35*sizeof(void*)))),
   };
-  exports_rift_plugin_handler_action_t ret;
-  exports_rift_plugin_handler_login(&arg5, &ret);
+  exports_rift_plugin_handler_decision_t ret;
+  exports_rift_plugin_handler_login(&arg6, &ret);
   free(arg);
   uint8_t *ptr = (uint8_t *) &RET_AREA;
   switch ((int32_t) (ret).tag) {
@@ -4030,31 +3515,59 @@ uint8_t * __wasm_export_exports_rift_plugin_handler_login(uint8_t * arg) {
       break;
     }
     case 1: {
-      const rift_plugin_string_t *payload6 = &(ret).val.deny;
+      const rift_plugin_types_text_t *payload7 = &(ret).val.deny;
       *((int8_t*)(ptr + 0)) = 1;
-      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload6).len;
-      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload6).ptr;
+      switch ((int32_t) (*payload7).tag) {
+        case 0: {
+          const rift_plugin_string_t *payload8 = &(*payload7).val.plain;
+          *((int8_t*)(ptr + sizeof(void*))) = 0;
+          *((size_t*)(ptr + (3*sizeof(void*)))) = (*payload8).len;
+          *((uint8_t **)(ptr + (2*sizeof(void*)))) = (uint8_t *) (*payload8).ptr;
+          break;
+        }
+        case 1: {
+          const rift_plugin_string_t *payload9 = &(*payload7).val.json;
+          *((int8_t*)(ptr + sizeof(void*))) = 1;
+          *((size_t*)(ptr + (3*sizeof(void*)))) = (*payload9).len;
+          *((uint8_t **)(ptr + (2*sizeof(void*)))) = (uint8_t *) (*payload9).ptr;
+          break;
+        }
+      }
       break;
     }
     case 2: {
-      const rift_plugin_string_t *payload7 = &(ret).val.server;
+      const rift_plugin_string_t *payload10 = &(ret).val.server;
       *((int8_t*)(ptr + 0)) = 2;
-      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload7).len;
-      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload7).ptr;
+      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload10).len;
+      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload10).ptr;
       break;
     }
     case 3: {
-      const rift_plugin_string_t *payload8 = &(ret).val.message;
+      const rift_plugin_types_text_t *payload11 = &(ret).val.message;
       *((int8_t*)(ptr + 0)) = 3;
-      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload8).len;
-      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload8).ptr;
+      switch ((int32_t) (*payload11).tag) {
+        case 0: {
+          const rift_plugin_string_t *payload12 = &(*payload11).val.plain;
+          *((int8_t*)(ptr + sizeof(void*))) = 0;
+          *((size_t*)(ptr + (3*sizeof(void*)))) = (*payload12).len;
+          *((uint8_t **)(ptr + (2*sizeof(void*)))) = (uint8_t *) (*payload12).ptr;
+          break;
+        }
+        case 1: {
+          const rift_plugin_string_t *payload13 = &(*payload11).val.json;
+          *((int8_t*)(ptr + sizeof(void*))) = 1;
+          *((size_t*)(ptr + (3*sizeof(void*)))) = (*payload13).len;
+          *((uint8_t **)(ptr + (2*sizeof(void*)))) = (uint8_t *) (*payload13).ptr;
+          break;
+        }
+      }
       break;
     }
     case 4: {
-      const rift_plugin_string_t *payload9 = &(ret).val.queue;
+      const rift_plugin_string_t *payload14 = &(ret).val.queue;
       *((int8_t*)(ptr + 0)) = 4;
-      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload9).len;
-      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload9).ptr;
+      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload14).len;
+      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload14).ptr;
       break;
     }
     case 5: {
@@ -4065,7 +3578,7 @@ uint8_t * __wasm_export_exports_rift_plugin_handler_login(uint8_t * arg) {
   return ptr;
 }
 
-__attribute__((__export_name__("rift:plugin/handler@0.1.5#initial-server")))
+__attribute__((__export_name__("rift:plugin/handler@0.2.0#initial-server")))
 uint8_t * __wasm_export_exports_rift_plugin_handler_initial_server(uint8_t * arg) {
   rift_plugin_option_string_t option;
   switch ((int32_t) *((uint8_t*) (arg + (8+11*sizeof(void*))))) {
@@ -4139,7 +3652,19 @@ uint8_t * __wasm_export_exports_rift_plugin_handler_initial_server(uint8_t * arg
       break;
     }
   }
-  exports_rift_plugin_handler_context_t arg5 = (rift_plugin_types_context_t) {
+  rift_plugin_option_string_t option5;
+  switch ((int32_t) *((uint8_t*) (arg + (8+32*sizeof(void*))))) {
+    case 0: {
+      option5.is_some = false;
+      break;
+    }
+    case 1: {
+      option5.is_some = true;
+      option5.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+33*sizeof(void*))))), (*((size_t*) (arg + (8+34*sizeof(void*))))) };
+      break;
+    }
+  }
+  exports_rift_plugin_handler_context_t arg6 = (rift_plugin_types_context_t) {
     (uint64_t) (uint64_t) (*((int64_t*) (arg + 0))),
     (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + 8))), (*((size_t*) (arg + (8+1*sizeof(void*))))) },
     (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+2*sizeof(void*))))), (*((size_t*) (arg + (8+3*sizeof(void*))))) },
@@ -4156,9 +3681,11 @@ uint8_t * __wasm_export_exports_rift_plugin_handler_initial_server(uint8_t * arg
     (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+27*sizeof(void*))))), (*((size_t*) (arg + (8+28*sizeof(void*))))) },
     (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+29*sizeof(void*))))), (*((size_t*) (arg + (8+30*sizeof(void*))))) },
     (uint32_t) (uint32_t) (*((int32_t*) (arg + (8+31*sizeof(void*))))),
+    (rift_plugin_option_string_t) option5,
+    (bool) (int32_t) *((uint8_t*) (arg + (8+35*sizeof(void*)))),
   };
-  exports_rift_plugin_handler_action_t ret;
-  exports_rift_plugin_handler_initial_server(&arg5, &ret);
+  exports_rift_plugin_handler_decision_t ret;
+  exports_rift_plugin_handler_initial_server(&arg6, &ret);
   free(arg);
   uint8_t *ptr = (uint8_t *) &RET_AREA;
   switch ((int32_t) (ret).tag) {
@@ -4167,31 +3694,59 @@ uint8_t * __wasm_export_exports_rift_plugin_handler_initial_server(uint8_t * arg
       break;
     }
     case 1: {
-      const rift_plugin_string_t *payload6 = &(ret).val.deny;
+      const rift_plugin_types_text_t *payload7 = &(ret).val.deny;
       *((int8_t*)(ptr + 0)) = 1;
-      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload6).len;
-      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload6).ptr;
+      switch ((int32_t) (*payload7).tag) {
+        case 0: {
+          const rift_plugin_string_t *payload8 = &(*payload7).val.plain;
+          *((int8_t*)(ptr + sizeof(void*))) = 0;
+          *((size_t*)(ptr + (3*sizeof(void*)))) = (*payload8).len;
+          *((uint8_t **)(ptr + (2*sizeof(void*)))) = (uint8_t *) (*payload8).ptr;
+          break;
+        }
+        case 1: {
+          const rift_plugin_string_t *payload9 = &(*payload7).val.json;
+          *((int8_t*)(ptr + sizeof(void*))) = 1;
+          *((size_t*)(ptr + (3*sizeof(void*)))) = (*payload9).len;
+          *((uint8_t **)(ptr + (2*sizeof(void*)))) = (uint8_t *) (*payload9).ptr;
+          break;
+        }
+      }
       break;
     }
     case 2: {
-      const rift_plugin_string_t *payload7 = &(ret).val.server;
+      const rift_plugin_string_t *payload10 = &(ret).val.server;
       *((int8_t*)(ptr + 0)) = 2;
-      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload7).len;
-      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload7).ptr;
+      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload10).len;
+      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload10).ptr;
       break;
     }
     case 3: {
-      const rift_plugin_string_t *payload8 = &(ret).val.message;
+      const rift_plugin_types_text_t *payload11 = &(ret).val.message;
       *((int8_t*)(ptr + 0)) = 3;
-      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload8).len;
-      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload8).ptr;
+      switch ((int32_t) (*payload11).tag) {
+        case 0: {
+          const rift_plugin_string_t *payload12 = &(*payload11).val.plain;
+          *((int8_t*)(ptr + sizeof(void*))) = 0;
+          *((size_t*)(ptr + (3*sizeof(void*)))) = (*payload12).len;
+          *((uint8_t **)(ptr + (2*sizeof(void*)))) = (uint8_t *) (*payload12).ptr;
+          break;
+        }
+        case 1: {
+          const rift_plugin_string_t *payload13 = &(*payload11).val.json;
+          *((int8_t*)(ptr + sizeof(void*))) = 1;
+          *((size_t*)(ptr + (3*sizeof(void*)))) = (*payload13).len;
+          *((uint8_t **)(ptr + (2*sizeof(void*)))) = (uint8_t *) (*payload13).ptr;
+          break;
+        }
+      }
       break;
     }
     case 4: {
-      const rift_plugin_string_t *payload9 = &(ret).val.queue;
+      const rift_plugin_string_t *payload14 = &(ret).val.queue;
       *((int8_t*)(ptr + 0)) = 4;
-      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload9).len;
-      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload9).ptr;
+      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload14).len;
+      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload14).ptr;
       break;
     }
     case 5: {
@@ -4202,7 +3757,7 @@ uint8_t * __wasm_export_exports_rift_plugin_handler_initial_server(uint8_t * arg
   return ptr;
 }
 
-__attribute__((__export_name__("rift:plugin/handler@0.1.5#before-transfer")))
+__attribute__((__export_name__("rift:plugin/handler@0.2.0#before-transfer")))
 uint8_t * __wasm_export_exports_rift_plugin_handler_before_transfer(uint8_t * arg) {
   rift_plugin_option_string_t option;
   switch ((int32_t) *((uint8_t*) (arg + (8+11*sizeof(void*))))) {
@@ -4276,7 +3831,19 @@ uint8_t * __wasm_export_exports_rift_plugin_handler_before_transfer(uint8_t * ar
       break;
     }
   }
-  exports_rift_plugin_handler_context_t arg5 = (rift_plugin_types_context_t) {
+  rift_plugin_option_string_t option5;
+  switch ((int32_t) *((uint8_t*) (arg + (8+32*sizeof(void*))))) {
+    case 0: {
+      option5.is_some = false;
+      break;
+    }
+    case 1: {
+      option5.is_some = true;
+      option5.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+33*sizeof(void*))))), (*((size_t*) (arg + (8+34*sizeof(void*))))) };
+      break;
+    }
+  }
+  exports_rift_plugin_handler_context_t arg6 = (rift_plugin_types_context_t) {
     (uint64_t) (uint64_t) (*((int64_t*) (arg + 0))),
     (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + 8))), (*((size_t*) (arg + (8+1*sizeof(void*))))) },
     (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+2*sizeof(void*))))), (*((size_t*) (arg + (8+3*sizeof(void*))))) },
@@ -4293,9 +3860,11 @@ uint8_t * __wasm_export_exports_rift_plugin_handler_before_transfer(uint8_t * ar
     (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+27*sizeof(void*))))), (*((size_t*) (arg + (8+28*sizeof(void*))))) },
     (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+29*sizeof(void*))))), (*((size_t*) (arg + (8+30*sizeof(void*))))) },
     (uint32_t) (uint32_t) (*((int32_t*) (arg + (8+31*sizeof(void*))))),
+    (rift_plugin_option_string_t) option5,
+    (bool) (int32_t) *((uint8_t*) (arg + (8+35*sizeof(void*)))),
   };
-  exports_rift_plugin_handler_action_t ret;
-  exports_rift_plugin_handler_before_transfer(&arg5, &ret);
+  exports_rift_plugin_handler_decision_t ret;
+  exports_rift_plugin_handler_before_transfer(&arg6, &ret);
   free(arg);
   uint8_t *ptr = (uint8_t *) &RET_AREA;
   switch ((int32_t) (ret).tag) {
@@ -4304,31 +3873,59 @@ uint8_t * __wasm_export_exports_rift_plugin_handler_before_transfer(uint8_t * ar
       break;
     }
     case 1: {
-      const rift_plugin_string_t *payload6 = &(ret).val.deny;
+      const rift_plugin_types_text_t *payload7 = &(ret).val.deny;
       *((int8_t*)(ptr + 0)) = 1;
-      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload6).len;
-      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload6).ptr;
+      switch ((int32_t) (*payload7).tag) {
+        case 0: {
+          const rift_plugin_string_t *payload8 = &(*payload7).val.plain;
+          *((int8_t*)(ptr + sizeof(void*))) = 0;
+          *((size_t*)(ptr + (3*sizeof(void*)))) = (*payload8).len;
+          *((uint8_t **)(ptr + (2*sizeof(void*)))) = (uint8_t *) (*payload8).ptr;
+          break;
+        }
+        case 1: {
+          const rift_plugin_string_t *payload9 = &(*payload7).val.json;
+          *((int8_t*)(ptr + sizeof(void*))) = 1;
+          *((size_t*)(ptr + (3*sizeof(void*)))) = (*payload9).len;
+          *((uint8_t **)(ptr + (2*sizeof(void*)))) = (uint8_t *) (*payload9).ptr;
+          break;
+        }
+      }
       break;
     }
     case 2: {
-      const rift_plugin_string_t *payload7 = &(ret).val.server;
+      const rift_plugin_string_t *payload10 = &(ret).val.server;
       *((int8_t*)(ptr + 0)) = 2;
-      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload7).len;
-      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload7).ptr;
+      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload10).len;
+      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload10).ptr;
       break;
     }
     case 3: {
-      const rift_plugin_string_t *payload8 = &(ret).val.message;
+      const rift_plugin_types_text_t *payload11 = &(ret).val.message;
       *((int8_t*)(ptr + 0)) = 3;
-      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload8).len;
-      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload8).ptr;
+      switch ((int32_t) (*payload11).tag) {
+        case 0: {
+          const rift_plugin_string_t *payload12 = &(*payload11).val.plain;
+          *((int8_t*)(ptr + sizeof(void*))) = 0;
+          *((size_t*)(ptr + (3*sizeof(void*)))) = (*payload12).len;
+          *((uint8_t **)(ptr + (2*sizeof(void*)))) = (uint8_t *) (*payload12).ptr;
+          break;
+        }
+        case 1: {
+          const rift_plugin_string_t *payload13 = &(*payload11).val.json;
+          *((int8_t*)(ptr + sizeof(void*))) = 1;
+          *((size_t*)(ptr + (3*sizeof(void*)))) = (*payload13).len;
+          *((uint8_t **)(ptr + (2*sizeof(void*)))) = (uint8_t *) (*payload13).ptr;
+          break;
+        }
+      }
       break;
     }
     case 4: {
-      const rift_plugin_string_t *payload9 = &(ret).val.queue;
+      const rift_plugin_string_t *payload14 = &(ret).val.queue;
       *((int8_t*)(ptr + 0)) = 4;
-      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload9).len;
-      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload9).ptr;
+      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload14).len;
+      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload14).ptr;
       break;
     }
     case 5: {
@@ -4339,7 +3936,7 @@ uint8_t * __wasm_export_exports_rift_plugin_handler_before_transfer(uint8_t * ar
   return ptr;
 }
 
-__attribute__((__export_name__("rift:plugin/handler@0.1.5#command")))
+__attribute__((__export_name__("rift:plugin/handler@0.2.0#command")))
 uint8_t * __wasm_export_exports_rift_plugin_handler_command(uint8_t * arg) {
   rift_plugin_option_string_t option;
   switch ((int32_t) *((uint8_t*) (arg + (8+11*sizeof(void*))))) {
@@ -4413,7 +4010,19 @@ uint8_t * __wasm_export_exports_rift_plugin_handler_command(uint8_t * arg) {
       break;
     }
   }
-  exports_rift_plugin_handler_context_t arg5 = (rift_plugin_types_context_t) {
+  rift_plugin_option_string_t option5;
+  switch ((int32_t) *((uint8_t*) (arg + (8+32*sizeof(void*))))) {
+    case 0: {
+      option5.is_some = false;
+      break;
+    }
+    case 1: {
+      option5.is_some = true;
+      option5.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+33*sizeof(void*))))), (*((size_t*) (arg + (8+34*sizeof(void*))))) };
+      break;
+    }
+  }
+  exports_rift_plugin_handler_context_t arg6 = (rift_plugin_types_context_t) {
     (uint64_t) (uint64_t) (*((int64_t*) (arg + 0))),
     (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + 8))), (*((size_t*) (arg + (8+1*sizeof(void*))))) },
     (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+2*sizeof(void*))))), (*((size_t*) (arg + (8+3*sizeof(void*))))) },
@@ -4430,9 +4039,11 @@ uint8_t * __wasm_export_exports_rift_plugin_handler_command(uint8_t * arg) {
     (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+27*sizeof(void*))))), (*((size_t*) (arg + (8+28*sizeof(void*))))) },
     (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+29*sizeof(void*))))), (*((size_t*) (arg + (8+30*sizeof(void*))))) },
     (uint32_t) (uint32_t) (*((int32_t*) (arg + (8+31*sizeof(void*))))),
+    (rift_plugin_option_string_t) option5,
+    (bool) (int32_t) *((uint8_t*) (arg + (8+35*sizeof(void*)))),
   };
-  exports_rift_plugin_handler_action_t ret;
-  exports_rift_plugin_handler_command(&arg5, &ret);
+  exports_rift_plugin_handler_decision_t ret;
+  exports_rift_plugin_handler_command(&arg6, &ret);
   free(arg);
   uint8_t *ptr = (uint8_t *) &RET_AREA;
   switch ((int32_t) (ret).tag) {
@@ -4441,31 +4052,59 @@ uint8_t * __wasm_export_exports_rift_plugin_handler_command(uint8_t * arg) {
       break;
     }
     case 1: {
-      const rift_plugin_string_t *payload6 = &(ret).val.deny;
+      const rift_plugin_types_text_t *payload7 = &(ret).val.deny;
       *((int8_t*)(ptr + 0)) = 1;
-      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload6).len;
-      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload6).ptr;
+      switch ((int32_t) (*payload7).tag) {
+        case 0: {
+          const rift_plugin_string_t *payload8 = &(*payload7).val.plain;
+          *((int8_t*)(ptr + sizeof(void*))) = 0;
+          *((size_t*)(ptr + (3*sizeof(void*)))) = (*payload8).len;
+          *((uint8_t **)(ptr + (2*sizeof(void*)))) = (uint8_t *) (*payload8).ptr;
+          break;
+        }
+        case 1: {
+          const rift_plugin_string_t *payload9 = &(*payload7).val.json;
+          *((int8_t*)(ptr + sizeof(void*))) = 1;
+          *((size_t*)(ptr + (3*sizeof(void*)))) = (*payload9).len;
+          *((uint8_t **)(ptr + (2*sizeof(void*)))) = (uint8_t *) (*payload9).ptr;
+          break;
+        }
+      }
       break;
     }
     case 2: {
-      const rift_plugin_string_t *payload7 = &(ret).val.server;
+      const rift_plugin_string_t *payload10 = &(ret).val.server;
       *((int8_t*)(ptr + 0)) = 2;
-      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload7).len;
-      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload7).ptr;
+      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload10).len;
+      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload10).ptr;
       break;
     }
     case 3: {
-      const rift_plugin_string_t *payload8 = &(ret).val.message;
+      const rift_plugin_types_text_t *payload11 = &(ret).val.message;
       *((int8_t*)(ptr + 0)) = 3;
-      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload8).len;
-      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload8).ptr;
+      switch ((int32_t) (*payload11).tag) {
+        case 0: {
+          const rift_plugin_string_t *payload12 = &(*payload11).val.plain;
+          *((int8_t*)(ptr + sizeof(void*))) = 0;
+          *((size_t*)(ptr + (3*sizeof(void*)))) = (*payload12).len;
+          *((uint8_t **)(ptr + (2*sizeof(void*)))) = (uint8_t *) (*payload12).ptr;
+          break;
+        }
+        case 1: {
+          const rift_plugin_string_t *payload13 = &(*payload11).val.json;
+          *((int8_t*)(ptr + sizeof(void*))) = 1;
+          *((size_t*)(ptr + (3*sizeof(void*)))) = (*payload13).len;
+          *((uint8_t **)(ptr + (2*sizeof(void*)))) = (uint8_t *) (*payload13).ptr;
+          break;
+        }
+      }
       break;
     }
     case 4: {
-      const rift_plugin_string_t *payload9 = &(ret).val.queue;
+      const rift_plugin_string_t *payload14 = &(ret).val.queue;
       *((int8_t*)(ptr + 0)) = 4;
-      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload9).len;
-      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload9).ptr;
+      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload14).len;
+      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload14).ptr;
       break;
     }
     case 5: {
@@ -4476,7 +4115,7 @@ uint8_t * __wasm_export_exports_rift_plugin_handler_command(uint8_t * arg) {
   return ptr;
 }
 
-__attribute__((__export_name__("rift:plugin/handler@0.1.5#suggest")))
+__attribute__((__export_name__("rift:plugin/handler@0.2.0#suggest")))
 uint8_t * __wasm_export_exports_rift_plugin_handler_suggest(uint8_t * arg) {
   rift_plugin_option_string_t option;
   switch ((int32_t) *((uint8_t*) (arg + (8+11*sizeof(void*))))) {
@@ -4550,7 +4189,19 @@ uint8_t * __wasm_export_exports_rift_plugin_handler_suggest(uint8_t * arg) {
       break;
     }
   }
-  exports_rift_plugin_handler_context_t arg5 = (rift_plugin_types_context_t) {
+  rift_plugin_option_string_t option5;
+  switch ((int32_t) *((uint8_t*) (arg + (8+32*sizeof(void*))))) {
+    case 0: {
+      option5.is_some = false;
+      break;
+    }
+    case 1: {
+      option5.is_some = true;
+      option5.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+33*sizeof(void*))))), (*((size_t*) (arg + (8+34*sizeof(void*))))) };
+      break;
+    }
+  }
+  exports_rift_plugin_handler_context_t arg6 = (rift_plugin_types_context_t) {
     (uint64_t) (uint64_t) (*((int64_t*) (arg + 0))),
     (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + 8))), (*((size_t*) (arg + (8+1*sizeof(void*))))) },
     (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+2*sizeof(void*))))), (*((size_t*) (arg + (8+3*sizeof(void*))))) },
@@ -4567,9 +4218,11 @@ uint8_t * __wasm_export_exports_rift_plugin_handler_suggest(uint8_t * arg) {
     (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+27*sizeof(void*))))), (*((size_t*) (arg + (8+28*sizeof(void*))))) },
     (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+29*sizeof(void*))))), (*((size_t*) (arg + (8+30*sizeof(void*))))) },
     (uint32_t) (uint32_t) (*((int32_t*) (arg + (8+31*sizeof(void*))))),
+    (rift_plugin_option_string_t) option5,
+    (bool) (int32_t) *((uint8_t*) (arg + (8+35*sizeof(void*)))),
   };
   exports_rift_plugin_handler_list_suggestion_t ret;
-  exports_rift_plugin_handler_suggest(&arg5, &ret);
+  exports_rift_plugin_handler_suggest(&arg6, &ret);
   free(arg);
   uint8_t *ptr = (uint8_t *) &RET_AREA;
   *((size_t*)(ptr + sizeof(void*))) = (ret).len;
@@ -4577,7 +4230,7 @@ uint8_t * __wasm_export_exports_rift_plugin_handler_suggest(uint8_t * arg) {
   return ptr;
 }
 
-__attribute__((__export_name__("rift:plugin/handler@0.1.5#status")))
+__attribute__((__export_name__("rift:plugin/handler@0.2.0#status")))
 uint8_t * __wasm_export_exports_rift_plugin_handler_status(uint8_t * arg, size_t arg0, uint8_t * arg1, size_t arg2, int32_t arg3, uint8_t * arg4, size_t arg5, int32_t arg6, uint8_t * arg7, size_t arg8, int32_t arg9, int64_t arg10, int64_t arg11) {
   rift_plugin_option_string_t option;
   switch (arg6) {
@@ -4611,58 +4264,86 @@ uint8_t * __wasm_export_exports_rift_plugin_handler_status(uint8_t * arg, size_t
   if ((ret13).is_some) {
     const exports_rift_plugin_handler_status_override_t *payload14 = &(ret13).val;
     *((int8_t*)(ptr + 0)) = 1;
-    if (((*payload14).motd_json).is_some) {
-      const rift_plugin_string_t *payload16 = &((*payload14).motd_json).val;
+    if (((*payload14).motd).is_some) {
+      const rift_plugin_types_text_t *payload16 = &((*payload14).motd).val;
       *((int8_t*)(ptr + sizeof(void*))) = 1;
-      *((size_t*)(ptr + (3*sizeof(void*)))) = (*payload16).len;
-      *((uint8_t **)(ptr + (2*sizeof(void*)))) = (uint8_t *) (*payload16).ptr;
+      switch ((int32_t) (*payload16).tag) {
+        case 0: {
+          const rift_plugin_string_t *payload17 = &(*payload16).val.plain;
+          *((int8_t*)(ptr + (2*sizeof(void*)))) = 0;
+          *((size_t*)(ptr + (4*sizeof(void*)))) = (*payload17).len;
+          *((uint8_t **)(ptr + (3*sizeof(void*)))) = (uint8_t *) (*payload17).ptr;
+          break;
+        }
+        case 1: {
+          const rift_plugin_string_t *payload18 = &(*payload16).val.json;
+          *((int8_t*)(ptr + (2*sizeof(void*)))) = 1;
+          *((size_t*)(ptr + (4*sizeof(void*)))) = (*payload18).len;
+          *((uint8_t **)(ptr + (3*sizeof(void*)))) = (uint8_t *) (*payload18).ptr;
+          break;
+        }
+      }
     } else {
       *((int8_t*)(ptr + sizeof(void*))) = 0;
     }
     if (((*payload14).version).is_some) {
-      const rift_plugin_string_t *payload18 = &((*payload14).version).val;
-      *((int8_t*)(ptr + (4*sizeof(void*)))) = 1;
-      *((size_t*)(ptr + (6*sizeof(void*)))) = (*payload18).len;
-      *((uint8_t **)(ptr + (5*sizeof(void*)))) = (uint8_t *) (*payload18).ptr;
+      const rift_plugin_types_text_t *payload20 = &((*payload14).version).val;
+      *((int8_t*)(ptr + (5*sizeof(void*)))) = 1;
+      switch ((int32_t) (*payload20).tag) {
+        case 0: {
+          const rift_plugin_string_t *payload21 = &(*payload20).val.plain;
+          *((int8_t*)(ptr + (6*sizeof(void*)))) = 0;
+          *((size_t*)(ptr + (8*sizeof(void*)))) = (*payload21).len;
+          *((uint8_t **)(ptr + (7*sizeof(void*)))) = (uint8_t *) (*payload21).ptr;
+          break;
+        }
+        case 1: {
+          const rift_plugin_string_t *payload22 = &(*payload20).val.json;
+          *((int8_t*)(ptr + (6*sizeof(void*)))) = 1;
+          *((size_t*)(ptr + (8*sizeof(void*)))) = (*payload22).len;
+          *((uint8_t **)(ptr + (7*sizeof(void*)))) = (uint8_t *) (*payload22).ptr;
+          break;
+        }
+      }
     } else {
-      *((int8_t*)(ptr + (4*sizeof(void*)))) = 0;
+      *((int8_t*)(ptr + (5*sizeof(void*)))) = 0;
     }
     if (((*payload14).protocol).is_some) {
-      const int32_t *payload20 = &((*payload14).protocol).val;
-      *((int8_t*)(ptr + (7*sizeof(void*)))) = 1;
-      *((int32_t*)(ptr + (4+7*sizeof(void*)))) = *payload20;
+      const int32_t *payload24 = &((*payload14).protocol).val;
+      *((int8_t*)(ptr + (9*sizeof(void*)))) = 1;
+      *((int32_t*)(ptr + (4+9*sizeof(void*)))) = *payload24;
     } else {
-      *((int8_t*)(ptr + (7*sizeof(void*)))) = 0;
+      *((int8_t*)(ptr + (9*sizeof(void*)))) = 0;
     }
     if (((*payload14).online).is_some) {
-      const uint32_t *payload22 = &((*payload14).online).val;
-      *((int8_t*)(ptr + (8+7*sizeof(void*)))) = 1;
-      *((int32_t*)(ptr + (12+7*sizeof(void*)))) = (int32_t) (*payload22);
+      const uint32_t *payload26 = &((*payload14).online).val;
+      *((int8_t*)(ptr + (8+9*sizeof(void*)))) = 1;
+      *((int32_t*)(ptr + (12+9*sizeof(void*)))) = (int32_t) (*payload26);
     } else {
-      *((int8_t*)(ptr + (8+7*sizeof(void*)))) = 0;
+      *((int8_t*)(ptr + (8+9*sizeof(void*)))) = 0;
     }
     if (((*payload14).max_players).is_some) {
-      const uint32_t *payload24 = &((*payload14).max_players).val;
-      *((int8_t*)(ptr + (16+7*sizeof(void*)))) = 1;
-      *((int32_t*)(ptr + (20+7*sizeof(void*)))) = (int32_t) (*payload24);
+      const uint32_t *payload28 = &((*payload14).max_players).val;
+      *((int8_t*)(ptr + (16+9*sizeof(void*)))) = 1;
+      *((int32_t*)(ptr + (20+9*sizeof(void*)))) = (int32_t) (*payload28);
     } else {
-      *((int8_t*)(ptr + (16+7*sizeof(void*)))) = 0;
+      *((int8_t*)(ptr + (16+9*sizeof(void*)))) = 0;
     }
     if (((*payload14).sample).is_some) {
-      const rift_plugin_list_string_t *payload26 = &((*payload14).sample).val;
-      *((int8_t*)(ptr + (24+7*sizeof(void*)))) = 1;
-      *((size_t*)(ptr + (24+9*sizeof(void*)))) = (*payload26).len;
-      *((uint8_t **)(ptr + (24+8*sizeof(void*)))) = (uint8_t *) (*payload26).ptr;
+      const rift_plugin_types_list_text_t *payload30 = &((*payload14).sample).val;
+      *((int8_t*)(ptr + (24+9*sizeof(void*)))) = 1;
+      *((size_t*)(ptr + (24+11*sizeof(void*)))) = (*payload30).len;
+      *((uint8_t **)(ptr + (24+10*sizeof(void*)))) = (uint8_t *) (*payload30).ptr;
     } else {
-      *((int8_t*)(ptr + (24+7*sizeof(void*)))) = 0;
+      *((int8_t*)(ptr + (24+9*sizeof(void*)))) = 0;
     }
     if (((*payload14).favicon).is_some) {
-      const rift_plugin_string_t *payload28 = &((*payload14).favicon).val;
-      *((int8_t*)(ptr + (24+10*sizeof(void*)))) = 1;
-      *((size_t*)(ptr + (24+12*sizeof(void*)))) = (*payload28).len;
-      *((uint8_t **)(ptr + (24+11*sizeof(void*)))) = (uint8_t *) (*payload28).ptr;
+      const rift_plugin_string_t *payload34 = &((*payload14).favicon).val;
+      *((int8_t*)(ptr + (24+12*sizeof(void*)))) = 1;
+      *((size_t*)(ptr + (24+14*sizeof(void*)))) = (*payload34).len;
+      *((uint8_t **)(ptr + (24+13*sizeof(void*)))) = (uint8_t *) (*payload34).ptr;
     } else {
-      *((int8_t*)(ptr + (24+10*sizeof(void*)))) = 0;
+      *((int8_t*)(ptr + (24+12*sizeof(void*)))) = 0;
     }
   } else {
     *((int8_t*)(ptr + 0)) = 0;
@@ -4670,7 +4351,7 @@ uint8_t * __wasm_export_exports_rift_plugin_handler_status(uint8_t * arg, size_t
   return ptr;
 }
 
-__attribute__((__export_name__("rift:plugin/handler@0.1.5#http")))
+__attribute__((__export_name__("rift:plugin/handler@0.2.0#http")))
 uint8_t * __wasm_export_exports_rift_plugin_handler_http(uint8_t * arg, size_t arg0, uint8_t * arg1, size_t arg2, uint8_t * arg3, size_t arg4, uint8_t * arg5, size_t arg6, uint8_t * arg7, size_t arg8, uint8_t * arg9, size_t arg10) {
   exports_rift_plugin_handler_http_request_t arg11 = (rift_plugin_types_http_request_t) {
     (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(arg), (arg0) },
@@ -4701,7 +4382,369 @@ uint8_t * __wasm_export_exports_rift_plugin_handler_http(uint8_t * arg, size_t a
   return ptr;
 }
 
-__attribute__((__export_name__("rift:plugin/handler@0.1.5#join")))
+__attribute__((__export_name__("rift:plugin/handler@0.2.0#chat")))
+uint8_t * __wasm_export_exports_rift_plugin_handler_chat(uint8_t * arg) {
+  rift_plugin_option_string_t option;
+  switch ((int32_t) *((uint8_t*) (arg + (8+11*sizeof(void*))))) {
+    case 0: {
+      option.is_some = false;
+      break;
+    }
+    case 1: {
+      option.is_some = true;
+      option.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+12*sizeof(void*))))), (*((size_t*) (arg + (8+13*sizeof(void*))))) };
+      break;
+    }
+  }
+  rift_plugin_option_string_t option0;
+  switch ((int32_t) *((uint8_t*) (arg + (8+14*sizeof(void*))))) {
+    case 0: {
+      option0.is_some = false;
+      break;
+    }
+    case 1: {
+      option0.is_some = true;
+      option0.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+15*sizeof(void*))))), (*((size_t*) (arg + (8+16*sizeof(void*))))) };
+      break;
+    }
+  }
+  rift_plugin_option_string_t option1;
+  switch ((int32_t) *((uint8_t*) (arg + (8+17*sizeof(void*))))) {
+    case 0: {
+      option1.is_some = false;
+      break;
+    }
+    case 1: {
+      option1.is_some = true;
+      option1.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+18*sizeof(void*))))), (*((size_t*) (arg + (8+19*sizeof(void*))))) };
+      break;
+    }
+  }
+  rift_plugin_option_string_t option2;
+  switch ((int32_t) *((uint8_t*) (arg + (8+20*sizeof(void*))))) {
+    case 0: {
+      option2.is_some = false;
+      break;
+    }
+    case 1: {
+      option2.is_some = true;
+      option2.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+21*sizeof(void*))))), (*((size_t*) (arg + (8+22*sizeof(void*))))) };
+      break;
+    }
+  }
+  rift_plugin_option_bool_t option3;
+  switch ((int32_t) *((uint8_t*) (arg + (8+23*sizeof(void*))))) {
+    case 0: {
+      option3.is_some = false;
+      break;
+    }
+    case 1: {
+      option3.is_some = true;
+      option3.val = (int32_t) *((uint8_t*) (arg + (9+23*sizeof(void*))));
+      break;
+    }
+  }
+  rift_plugin_option_string_t option4;
+  switch ((int32_t) *((uint8_t*) (arg + (8+24*sizeof(void*))))) {
+    case 0: {
+      option4.is_some = false;
+      break;
+    }
+    case 1: {
+      option4.is_some = true;
+      option4.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+25*sizeof(void*))))), (*((size_t*) (arg + (8+26*sizeof(void*))))) };
+      break;
+    }
+  }
+  rift_plugin_option_string_t option5;
+  switch ((int32_t) *((uint8_t*) (arg + (8+32*sizeof(void*))))) {
+    case 0: {
+      option5.is_some = false;
+      break;
+    }
+    case 1: {
+      option5.is_some = true;
+      option5.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+33*sizeof(void*))))), (*((size_t*) (arg + (8+34*sizeof(void*))))) };
+      break;
+    }
+  }
+  exports_rift_plugin_handler_chat_attempt_t arg6 = (rift_plugin_types_chat_attempt_t) {
+    (rift_plugin_types_context_t) (rift_plugin_types_context_t) {
+      (uint64_t) (uint64_t) (*((int64_t*) (arg + 0))),
+      (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + 8))), (*((size_t*) (arg + (8+1*sizeof(void*))))) },
+      (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+2*sizeof(void*))))), (*((size_t*) (arg + (8+3*sizeof(void*))))) },
+      (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+4*sizeof(void*))))), (*((size_t*) (arg + (8+5*sizeof(void*))))) },
+      (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+6*sizeof(void*))))), (*((size_t*) (arg + (8+7*sizeof(void*))))) },
+      (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+8*sizeof(void*))))), (*((size_t*) (arg + (8+9*sizeof(void*))))) },
+      (int32_t) *((int32_t*) (arg + (8+10*sizeof(void*)))),
+      (rift_plugin_option_string_t) option,
+      (rift_plugin_option_string_t) option0,
+      (rift_plugin_option_string_t) option1,
+      (rift_plugin_option_string_t) option2,
+      (rift_plugin_option_bool_t) option3,
+      (rift_plugin_option_string_t) option4,
+      (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+27*sizeof(void*))))), (*((size_t*) (arg + (8+28*sizeof(void*))))) },
+      (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+29*sizeof(void*))))), (*((size_t*) (arg + (8+30*sizeof(void*))))) },
+      (uint32_t) (uint32_t) (*((int32_t*) (arg + (8+31*sizeof(void*))))),
+      (rift_plugin_option_string_t) option5,
+      (bool) (int32_t) *((uint8_t*) (arg + (8+35*sizeof(void*)))),
+    },
+    (rift_plugin_types_chat_kind_t) (int32_t) *((uint8_t*) (arg + (8+36*sizeof(void*)))),
+    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+37*sizeof(void*))))), (*((size_t*) (arg + (8+38*sizeof(void*))))) },
+  };
+  exports_rift_plugin_handler_decision_t ret;
+  exports_rift_plugin_handler_chat(&arg6, &ret);
+  free(arg);
+  uint8_t *ptr = (uint8_t *) &RET_AREA;
+  switch ((int32_t) (ret).tag) {
+    case 0: {
+      *((int8_t*)(ptr + 0)) = 0;
+      break;
+    }
+    case 1: {
+      const rift_plugin_types_text_t *payload7 = &(ret).val.deny;
+      *((int8_t*)(ptr + 0)) = 1;
+      switch ((int32_t) (*payload7).tag) {
+        case 0: {
+          const rift_plugin_string_t *payload8 = &(*payload7).val.plain;
+          *((int8_t*)(ptr + sizeof(void*))) = 0;
+          *((size_t*)(ptr + (3*sizeof(void*)))) = (*payload8).len;
+          *((uint8_t **)(ptr + (2*sizeof(void*)))) = (uint8_t *) (*payload8).ptr;
+          break;
+        }
+        case 1: {
+          const rift_plugin_string_t *payload9 = &(*payload7).val.json;
+          *((int8_t*)(ptr + sizeof(void*))) = 1;
+          *((size_t*)(ptr + (3*sizeof(void*)))) = (*payload9).len;
+          *((uint8_t **)(ptr + (2*sizeof(void*)))) = (uint8_t *) (*payload9).ptr;
+          break;
+        }
+      }
+      break;
+    }
+    case 2: {
+      const rift_plugin_string_t *payload10 = &(ret).val.server;
+      *((int8_t*)(ptr + 0)) = 2;
+      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload10).len;
+      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload10).ptr;
+      break;
+    }
+    case 3: {
+      const rift_plugin_types_text_t *payload11 = &(ret).val.message;
+      *((int8_t*)(ptr + 0)) = 3;
+      switch ((int32_t) (*payload11).tag) {
+        case 0: {
+          const rift_plugin_string_t *payload12 = &(*payload11).val.plain;
+          *((int8_t*)(ptr + sizeof(void*))) = 0;
+          *((size_t*)(ptr + (3*sizeof(void*)))) = (*payload12).len;
+          *((uint8_t **)(ptr + (2*sizeof(void*)))) = (uint8_t *) (*payload12).ptr;
+          break;
+        }
+        case 1: {
+          const rift_plugin_string_t *payload13 = &(*payload11).val.json;
+          *((int8_t*)(ptr + sizeof(void*))) = 1;
+          *((size_t*)(ptr + (3*sizeof(void*)))) = (*payload13).len;
+          *((uint8_t **)(ptr + (2*sizeof(void*)))) = (uint8_t *) (*payload13).ptr;
+          break;
+        }
+      }
+      break;
+    }
+    case 4: {
+      const rift_plugin_string_t *payload14 = &(ret).val.queue;
+      *((int8_t*)(ptr + 0)) = 4;
+      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload14).len;
+      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload14).ptr;
+      break;
+    }
+    case 5: {
+      *((int8_t*)(ptr + 0)) = 5;
+      break;
+    }
+  }
+  return ptr;
+}
+
+__attribute__((__export_name__("rift:plugin/handler@0.2.0#kick")))
+uint8_t * __wasm_export_exports_rift_plugin_handler_kick(uint8_t * arg) {
+  rift_plugin_option_string_t option;
+  switch ((int32_t) *((uint8_t*) (arg + (8+11*sizeof(void*))))) {
+    case 0: {
+      option.is_some = false;
+      break;
+    }
+    case 1: {
+      option.is_some = true;
+      option.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+12*sizeof(void*))))), (*((size_t*) (arg + (8+13*sizeof(void*))))) };
+      break;
+    }
+  }
+  rift_plugin_option_string_t option0;
+  switch ((int32_t) *((uint8_t*) (arg + (8+14*sizeof(void*))))) {
+    case 0: {
+      option0.is_some = false;
+      break;
+    }
+    case 1: {
+      option0.is_some = true;
+      option0.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+15*sizeof(void*))))), (*((size_t*) (arg + (8+16*sizeof(void*))))) };
+      break;
+    }
+  }
+  rift_plugin_option_string_t option1;
+  switch ((int32_t) *((uint8_t*) (arg + (8+17*sizeof(void*))))) {
+    case 0: {
+      option1.is_some = false;
+      break;
+    }
+    case 1: {
+      option1.is_some = true;
+      option1.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+18*sizeof(void*))))), (*((size_t*) (arg + (8+19*sizeof(void*))))) };
+      break;
+    }
+  }
+  rift_plugin_option_string_t option2;
+  switch ((int32_t) *((uint8_t*) (arg + (8+20*sizeof(void*))))) {
+    case 0: {
+      option2.is_some = false;
+      break;
+    }
+    case 1: {
+      option2.is_some = true;
+      option2.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+21*sizeof(void*))))), (*((size_t*) (arg + (8+22*sizeof(void*))))) };
+      break;
+    }
+  }
+  rift_plugin_option_bool_t option3;
+  switch ((int32_t) *((uint8_t*) (arg + (8+23*sizeof(void*))))) {
+    case 0: {
+      option3.is_some = false;
+      break;
+    }
+    case 1: {
+      option3.is_some = true;
+      option3.val = (int32_t) *((uint8_t*) (arg + (9+23*sizeof(void*))));
+      break;
+    }
+  }
+  rift_plugin_option_string_t option4;
+  switch ((int32_t) *((uint8_t*) (arg + (8+24*sizeof(void*))))) {
+    case 0: {
+      option4.is_some = false;
+      break;
+    }
+    case 1: {
+      option4.is_some = true;
+      option4.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+25*sizeof(void*))))), (*((size_t*) (arg + (8+26*sizeof(void*))))) };
+      break;
+    }
+  }
+  rift_plugin_option_string_t option5;
+  switch ((int32_t) *((uint8_t*) (arg + (8+32*sizeof(void*))))) {
+    case 0: {
+      option5.is_some = false;
+      break;
+    }
+    case 1: {
+      option5.is_some = true;
+      option5.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+33*sizeof(void*))))), (*((size_t*) (arg + (8+34*sizeof(void*))))) };
+      break;
+    }
+  }
+  exports_rift_plugin_handler_context_t arg6 = (rift_plugin_types_context_t) {
+    (uint64_t) (uint64_t) (*((int64_t*) (arg + 0))),
+    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + 8))), (*((size_t*) (arg + (8+1*sizeof(void*))))) },
+    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+2*sizeof(void*))))), (*((size_t*) (arg + (8+3*sizeof(void*))))) },
+    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+4*sizeof(void*))))), (*((size_t*) (arg + (8+5*sizeof(void*))))) },
+    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+6*sizeof(void*))))), (*((size_t*) (arg + (8+7*sizeof(void*))))) },
+    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+8*sizeof(void*))))), (*((size_t*) (arg + (8+9*sizeof(void*))))) },
+    (int32_t) *((int32_t*) (arg + (8+10*sizeof(void*)))),
+    (rift_plugin_option_string_t) option,
+    (rift_plugin_option_string_t) option0,
+    (rift_plugin_option_string_t) option1,
+    (rift_plugin_option_string_t) option2,
+    (rift_plugin_option_bool_t) option3,
+    (rift_plugin_option_string_t) option4,
+    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+27*sizeof(void*))))), (*((size_t*) (arg + (8+28*sizeof(void*))))) },
+    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+29*sizeof(void*))))), (*((size_t*) (arg + (8+30*sizeof(void*))))) },
+    (uint32_t) (uint32_t) (*((int32_t*) (arg + (8+31*sizeof(void*))))),
+    (rift_plugin_option_string_t) option5,
+    (bool) (int32_t) *((uint8_t*) (arg + (8+35*sizeof(void*)))),
+  };
+  exports_rift_plugin_handler_decision_t ret;
+  exports_rift_plugin_handler_kick(&arg6, &ret);
+  free(arg);
+  uint8_t *ptr = (uint8_t *) &RET_AREA;
+  switch ((int32_t) (ret).tag) {
+    case 0: {
+      *((int8_t*)(ptr + 0)) = 0;
+      break;
+    }
+    case 1: {
+      const rift_plugin_types_text_t *payload7 = &(ret).val.deny;
+      *((int8_t*)(ptr + 0)) = 1;
+      switch ((int32_t) (*payload7).tag) {
+        case 0: {
+          const rift_plugin_string_t *payload8 = &(*payload7).val.plain;
+          *((int8_t*)(ptr + sizeof(void*))) = 0;
+          *((size_t*)(ptr + (3*sizeof(void*)))) = (*payload8).len;
+          *((uint8_t **)(ptr + (2*sizeof(void*)))) = (uint8_t *) (*payload8).ptr;
+          break;
+        }
+        case 1: {
+          const rift_plugin_string_t *payload9 = &(*payload7).val.json;
+          *((int8_t*)(ptr + sizeof(void*))) = 1;
+          *((size_t*)(ptr + (3*sizeof(void*)))) = (*payload9).len;
+          *((uint8_t **)(ptr + (2*sizeof(void*)))) = (uint8_t *) (*payload9).ptr;
+          break;
+        }
+      }
+      break;
+    }
+    case 2: {
+      const rift_plugin_string_t *payload10 = &(ret).val.server;
+      *((int8_t*)(ptr + 0)) = 2;
+      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload10).len;
+      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload10).ptr;
+      break;
+    }
+    case 3: {
+      const rift_plugin_types_text_t *payload11 = &(ret).val.message;
+      *((int8_t*)(ptr + 0)) = 3;
+      switch ((int32_t) (*payload11).tag) {
+        case 0: {
+          const rift_plugin_string_t *payload12 = &(*payload11).val.plain;
+          *((int8_t*)(ptr + sizeof(void*))) = 0;
+          *((size_t*)(ptr + (3*sizeof(void*)))) = (*payload12).len;
+          *((uint8_t **)(ptr + (2*sizeof(void*)))) = (uint8_t *) (*payload12).ptr;
+          break;
+        }
+        case 1: {
+          const rift_plugin_string_t *payload13 = &(*payload11).val.json;
+          *((int8_t*)(ptr + sizeof(void*))) = 1;
+          *((size_t*)(ptr + (3*sizeof(void*)))) = (*payload13).len;
+          *((uint8_t **)(ptr + (2*sizeof(void*)))) = (uint8_t *) (*payload13).ptr;
+          break;
+        }
+      }
+      break;
+    }
+    case 4: {
+      const rift_plugin_string_t *payload14 = &(ret).val.queue;
+      *((int8_t*)(ptr + 0)) = 4;
+      *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload14).len;
+      *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload14).ptr;
+      break;
+    }
+    case 5: {
+      *((int8_t*)(ptr + 0)) = 5;
+      break;
+    }
+  }
+  return ptr;
+}
+
+__attribute__((__export_name__("rift:plugin/handler@0.2.0#join")))
 void __wasm_export_exports_rift_plugin_handler_join(uint8_t * arg) {
   rift_plugin_option_string_t option;
   switch ((int32_t) *((uint8_t*) (arg + (8+11*sizeof(void*))))) {
@@ -4775,7 +4818,19 @@ void __wasm_export_exports_rift_plugin_handler_join(uint8_t * arg) {
       break;
     }
   }
-  exports_rift_plugin_handler_context_t arg5 = (rift_plugin_types_context_t) {
+  rift_plugin_option_string_t option5;
+  switch ((int32_t) *((uint8_t*) (arg + (8+32*sizeof(void*))))) {
+    case 0: {
+      option5.is_some = false;
+      break;
+    }
+    case 1: {
+      option5.is_some = true;
+      option5.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+33*sizeof(void*))))), (*((size_t*) (arg + (8+34*sizeof(void*))))) };
+      break;
+    }
+  }
+  exports_rift_plugin_handler_context_t arg6 = (rift_plugin_types_context_t) {
     (uint64_t) (uint64_t) (*((int64_t*) (arg + 0))),
     (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + 8))), (*((size_t*) (arg + (8+1*sizeof(void*))))) },
     (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+2*sizeof(void*))))), (*((size_t*) (arg + (8+3*sizeof(void*))))) },
@@ -4792,12 +4847,14 @@ void __wasm_export_exports_rift_plugin_handler_join(uint8_t * arg) {
     (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+27*sizeof(void*))))), (*((size_t*) (arg + (8+28*sizeof(void*))))) },
     (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+29*sizeof(void*))))), (*((size_t*) (arg + (8+30*sizeof(void*))))) },
     (uint32_t) (uint32_t) (*((int32_t*) (arg + (8+31*sizeof(void*))))),
+    (rift_plugin_option_string_t) option5,
+    (bool) (int32_t) *((uint8_t*) (arg + (8+35*sizeof(void*)))),
   };
-  exports_rift_plugin_handler_join(&arg5);
+  exports_rift_plugin_handler_join(&arg6);
   free(arg);
 }
 
-__attribute__((__export_name__("rift:plugin/handler@0.1.5#after-transfer")))
+__attribute__((__export_name__("rift:plugin/handler@0.2.0#after-transfer")))
 void __wasm_export_exports_rift_plugin_handler_after_transfer(uint8_t * arg) {
   rift_plugin_option_string_t option;
   switch ((int32_t) *((uint8_t*) (arg + (8+11*sizeof(void*))))) {
@@ -4871,7 +4928,19 @@ void __wasm_export_exports_rift_plugin_handler_after_transfer(uint8_t * arg) {
       break;
     }
   }
-  exports_rift_plugin_handler_context_t arg5 = (rift_plugin_types_context_t) {
+  rift_plugin_option_string_t option5;
+  switch ((int32_t) *((uint8_t*) (arg + (8+32*sizeof(void*))))) {
+    case 0: {
+      option5.is_some = false;
+      break;
+    }
+    case 1: {
+      option5.is_some = true;
+      option5.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+33*sizeof(void*))))), (*((size_t*) (arg + (8+34*sizeof(void*))))) };
+      break;
+    }
+  }
+  exports_rift_plugin_handler_context_t arg6 = (rift_plugin_types_context_t) {
     (uint64_t) (uint64_t) (*((int64_t*) (arg + 0))),
     (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + 8))), (*((size_t*) (arg + (8+1*sizeof(void*))))) },
     (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+2*sizeof(void*))))), (*((size_t*) (arg + (8+3*sizeof(void*))))) },
@@ -4888,12 +4957,14 @@ void __wasm_export_exports_rift_plugin_handler_after_transfer(uint8_t * arg) {
     (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+27*sizeof(void*))))), (*((size_t*) (arg + (8+28*sizeof(void*))))) },
     (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+29*sizeof(void*))))), (*((size_t*) (arg + (8+30*sizeof(void*))))) },
     (uint32_t) (uint32_t) (*((int32_t*) (arg + (8+31*sizeof(void*))))),
+    (rift_plugin_option_string_t) option5,
+    (bool) (int32_t) *((uint8_t*) (arg + (8+35*sizeof(void*)))),
   };
-  exports_rift_plugin_handler_after_transfer(&arg5);
+  exports_rift_plugin_handler_after_transfer(&arg6);
   free(arg);
 }
 
-__attribute__((__export_name__("rift:plugin/handler@0.1.5#disconnect")))
+__attribute__((__export_name__("rift:plugin/handler@0.2.0#disconnect")))
 void __wasm_export_exports_rift_plugin_handler_disconnect(uint8_t * arg) {
   rift_plugin_option_string_t option;
   switch ((int32_t) *((uint8_t*) (arg + (8+11*sizeof(void*))))) {
@@ -4967,7 +5038,19 @@ void __wasm_export_exports_rift_plugin_handler_disconnect(uint8_t * arg) {
       break;
     }
   }
-  exports_rift_plugin_handler_context_t arg5 = (rift_plugin_types_context_t) {
+  rift_plugin_option_string_t option5;
+  switch ((int32_t) *((uint8_t*) (arg + (8+32*sizeof(void*))))) {
+    case 0: {
+      option5.is_some = false;
+      break;
+    }
+    case 1: {
+      option5.is_some = true;
+      option5.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+33*sizeof(void*))))), (*((size_t*) (arg + (8+34*sizeof(void*))))) };
+      break;
+    }
+  }
+  exports_rift_plugin_handler_context_t arg6 = (rift_plugin_types_context_t) {
     (uint64_t) (uint64_t) (*((int64_t*) (arg + 0))),
     (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + 8))), (*((size_t*) (arg + (8+1*sizeof(void*))))) },
     (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+2*sizeof(void*))))), (*((size_t*) (arg + (8+3*sizeof(void*))))) },
@@ -4984,12 +5067,14 @@ void __wasm_export_exports_rift_plugin_handler_disconnect(uint8_t * arg) {
     (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+27*sizeof(void*))))), (*((size_t*) (arg + (8+28*sizeof(void*))))) },
     (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+29*sizeof(void*))))), (*((size_t*) (arg + (8+30*sizeof(void*))))) },
     (uint32_t) (uint32_t) (*((int32_t*) (arg + (8+31*sizeof(void*))))),
+    (rift_plugin_option_string_t) option5,
+    (bool) (int32_t) *((uint8_t*) (arg + (8+35*sizeof(void*)))),
   };
-  exports_rift_plugin_handler_disconnect(&arg5);
+  exports_rift_plugin_handler_disconnect(&arg6);
   free(arg);
 }
 
-__attribute__((__export_name__("rift:plugin/handler@0.1.5#message")))
+__attribute__((__export_name__("rift:plugin/handler@0.2.0#message")))
 void __wasm_export_exports_rift_plugin_handler_message(int64_t arg, uint8_t * arg0, size_t arg1, uint8_t * arg2, size_t arg3, int32_t arg4, uint8_t * arg5, size_t arg6) {
   rift_plugin_option_string_t option;
   switch (arg4) {
@@ -5012,18 +5097,210 @@ void __wasm_export_exports_rift_plugin_handler_message(int64_t arg, uint8_t * ar
   exports_rift_plugin_handler_message(&arg7);
 }
 
-__attribute__((__export_name__("rift:plugin/handler@0.1.5#timer")))
+__attribute__((__export_name__("rift:plugin/handler@0.2.0#timer")))
 void __wasm_export_exports_rift_plugin_handler_timer(int64_t arg) {
   exports_rift_plugin_handler_timer((uint64_t) (arg));
 }
 
-__attribute__((__export_name__("rift:plugin/handler@0.1.5#event")))
+__attribute__((__export_name__("rift:plugin/handler@0.2.0#event")))
 void __wasm_export_exports_rift_plugin_handler_event(uint8_t * arg, size_t arg0, uint8_t * arg1, size_t arg2) {
   exports_rift_plugin_handler_rift_event_t arg3 = (rift_plugin_types_rift_event_t) {
     (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(arg), (arg0) },
     (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(arg1), (arg2) },
   };
   exports_rift_plugin_handler_event(&arg3);
+}
+
+__attribute__((__export_name__("rift:plugin/handler@0.2.0#dialog")))
+void __wasm_export_exports_rift_plugin_handler_dialog(uint8_t * arg) {
+  rift_plugin_option_string_t option;
+  switch ((int32_t) *((uint8_t*) (arg + (8+11*sizeof(void*))))) {
+    case 0: {
+      option.is_some = false;
+      break;
+    }
+    case 1: {
+      option.is_some = true;
+      option.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+12*sizeof(void*))))), (*((size_t*) (arg + (8+13*sizeof(void*))))) };
+      break;
+    }
+  }
+  rift_plugin_option_string_t option0;
+  switch ((int32_t) *((uint8_t*) (arg + (8+14*sizeof(void*))))) {
+    case 0: {
+      option0.is_some = false;
+      break;
+    }
+    case 1: {
+      option0.is_some = true;
+      option0.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+15*sizeof(void*))))), (*((size_t*) (arg + (8+16*sizeof(void*))))) };
+      break;
+    }
+  }
+  rift_plugin_option_string_t option1;
+  switch ((int32_t) *((uint8_t*) (arg + (8+17*sizeof(void*))))) {
+    case 0: {
+      option1.is_some = false;
+      break;
+    }
+    case 1: {
+      option1.is_some = true;
+      option1.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+18*sizeof(void*))))), (*((size_t*) (arg + (8+19*sizeof(void*))))) };
+      break;
+    }
+  }
+  rift_plugin_option_string_t option2;
+  switch ((int32_t) *((uint8_t*) (arg + (8+20*sizeof(void*))))) {
+    case 0: {
+      option2.is_some = false;
+      break;
+    }
+    case 1: {
+      option2.is_some = true;
+      option2.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+21*sizeof(void*))))), (*((size_t*) (arg + (8+22*sizeof(void*))))) };
+      break;
+    }
+  }
+  rift_plugin_option_bool_t option3;
+  switch ((int32_t) *((uint8_t*) (arg + (8+23*sizeof(void*))))) {
+    case 0: {
+      option3.is_some = false;
+      break;
+    }
+    case 1: {
+      option3.is_some = true;
+      option3.val = (int32_t) *((uint8_t*) (arg + (9+23*sizeof(void*))));
+      break;
+    }
+  }
+  rift_plugin_option_string_t option4;
+  switch ((int32_t) *((uint8_t*) (arg + (8+24*sizeof(void*))))) {
+    case 0: {
+      option4.is_some = false;
+      break;
+    }
+    case 1: {
+      option4.is_some = true;
+      option4.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+25*sizeof(void*))))), (*((size_t*) (arg + (8+26*sizeof(void*))))) };
+      break;
+    }
+  }
+  rift_plugin_option_string_t option5;
+  switch ((int32_t) *((uint8_t*) (arg + (8+32*sizeof(void*))))) {
+    case 0: {
+      option5.is_some = false;
+      break;
+    }
+    case 1: {
+      option5.is_some = true;
+      option5.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+33*sizeof(void*))))), (*((size_t*) (arg + (8+34*sizeof(void*))))) };
+      break;
+    }
+  }
+  rift_plugin_option_string_t option6;
+  switch ((int32_t) *((uint8_t*) (arg + (8+40*sizeof(void*))))) {
+    case 0: {
+      option6.is_some = false;
+      break;
+    }
+    case 1: {
+      option6.is_some = true;
+      option6.val = (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+41*sizeof(void*))))), (*((size_t*) (arg + (8+42*sizeof(void*))))) };
+      break;
+    }
+  }
+  exports_rift_plugin_handler_dialog_response_t arg7 = (rift_plugin_types_dialog_response_t) {
+    (rift_plugin_types_context_t) (rift_plugin_types_context_t) {
+      (uint64_t) (uint64_t) (*((int64_t*) (arg + 0))),
+      (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + 8))), (*((size_t*) (arg + (8+1*sizeof(void*))))) },
+      (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+2*sizeof(void*))))), (*((size_t*) (arg + (8+3*sizeof(void*))))) },
+      (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+4*sizeof(void*))))), (*((size_t*) (arg + (8+5*sizeof(void*))))) },
+      (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+6*sizeof(void*))))), (*((size_t*) (arg + (8+7*sizeof(void*))))) },
+      (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+8*sizeof(void*))))), (*((size_t*) (arg + (8+9*sizeof(void*))))) },
+      (int32_t) *((int32_t*) (arg + (8+10*sizeof(void*)))),
+      (rift_plugin_option_string_t) option,
+      (rift_plugin_option_string_t) option0,
+      (rift_plugin_option_string_t) option1,
+      (rift_plugin_option_string_t) option2,
+      (rift_plugin_option_bool_t) option3,
+      (rift_plugin_option_string_t) option4,
+      (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+27*sizeof(void*))))), (*((size_t*) (arg + (8+28*sizeof(void*))))) },
+      (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+29*sizeof(void*))))), (*((size_t*) (arg + (8+30*sizeof(void*))))) },
+      (uint32_t) (uint32_t) (*((int32_t*) (arg + (8+31*sizeof(void*))))),
+      (rift_plugin_option_string_t) option5,
+      (bool) (int32_t) *((uint8_t*) (arg + (8+35*sizeof(void*)))),
+    },
+    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+36*sizeof(void*))))), (*((size_t*) (arg + (8+37*sizeof(void*))))) },
+    (rift_plugin_string_t) (rift_plugin_string_t) { (uint8_t*)(*((uint8_t **) (arg + (8+38*sizeof(void*))))), (*((size_t*) (arg + (8+39*sizeof(void*))))) },
+    (rift_plugin_option_string_t) option6,
+  };
+  exports_rift_plugin_handler_dialog(&arg7);
+  free(arg);
+}
+
+__attribute__((__export_name__("rift:plugin/handler@0.2.0#job-done")))
+void __wasm_export_exports_rift_plugin_handler_job_done(int64_t arg, int32_t arg0, uint8_t * arg1, size_t arg2) {
+  exports_rift_plugin_handler_result_list_u8_string_t result;
+  switch (arg0) {
+    case 0: {
+      result.is_err = false;
+      result.val.ok = (rift_plugin_list_u8_t) { (uint8_t*)(arg1), (arg2) };
+      break;
+    }
+    case 1: {
+      result.is_err = true;
+      result.val.err = (rift_plugin_string_t) { (uint8_t*)(arg1), (arg2) };
+      break;
+    }
+  }
+  exports_rift_plugin_handler_result_list_u8_string_t arg3 = result;
+  exports_rift_plugin_handler_job_done((uint64_t) (arg), &arg3);
+}
+
+__attribute__((__export_name__("rift:plugin/handler@0.2.0#work-init")))
+uint8_t * __wasm_export_exports_rift_plugin_handler_work_init(uint8_t * arg, size_t arg0) {
+  rift_plugin_string_t arg1 = (rift_plugin_string_t) { (uint8_t*)(arg), (arg0) };
+  exports_rift_plugin_handler_result_void_string_t ret;
+  rift_plugin_string_t err;
+  ret.is_err = !exports_rift_plugin_handler_work_init(&arg1, &err);
+  if (ret.is_err) {
+    ret.val.err = err;
+  }
+  uint8_t *ptr = (uint8_t *) &RET_AREA;
+  if ((ret).is_err) {
+    const rift_plugin_string_t *payload2 = &(ret).val.err;*((int8_t*)(ptr + 0)) = 1;
+    *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload2).len;
+    *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload2).ptr;
+  } else {
+    *((int8_t*)(ptr + 0)) = 0;
+  }
+  return ptr;
+}
+
+__attribute__((__export_name__("rift:plugin/handler@0.2.0#work")))
+uint8_t * __wasm_export_exports_rift_plugin_handler_work(uint8_t * arg, size_t arg0) {
+  rift_plugin_list_u8_t arg1 = (rift_plugin_list_u8_t) { (uint8_t*)(arg), (arg0) };
+  exports_rift_plugin_handler_result_list_u8_string_t ret;
+  rift_plugin_list_u8_t ok;
+  rift_plugin_string_t err;
+  ret.is_err = !exports_rift_plugin_handler_work(&arg1, &ok, &err);
+  if (ret.is_err) {
+    ret.val.err = err;
+  }
+  if (!ret.is_err) {
+    ret.val.ok = ok;
+  }
+  uint8_t *ptr = (uint8_t *) &RET_AREA;
+  if ((ret).is_err) {
+    const rift_plugin_string_t *payload3 = &(ret).val.err;*((int8_t*)(ptr + 0)) = 1;
+    *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload3).len;
+    *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload3).ptr;
+  } else {
+    const rift_plugin_list_u8_t *payload2 = &(ret).val.ok;*((int8_t*)(ptr + 0)) = 0;
+    *((size_t*)(ptr + (2*sizeof(void*)))) = (*payload2).len;
+    *((uint8_t **)(ptr + sizeof(void*))) = (uint8_t *) (*payload2).ptr;
+  }
+  return ptr;
 }
 
 // Ensure that the *_component_type.o object is linked in

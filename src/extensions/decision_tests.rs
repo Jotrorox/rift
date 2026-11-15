@@ -77,14 +77,12 @@ fn decision_configuration_is_validated() {
             "{invalid}"
         );
     }
-    let v1 = source("decisions = { login = { subject = 'a' } }")
-        .replace("api_version = 2", "api_version = 1");
-    assert!(
-        Config::from_lua(&v1, "v1.lua")
-            .unwrap_err()
-            .to_string()
-            .contains("requires api_version = 2")
-    );
+    // The level a script names no longer limits what it may configure.
+    for version in ["api_version = 1", "api_version = 3"] {
+        let source =
+            source("decisions = { login = { subject = 'a' } }").replace("api_version = 2", version);
+        Config::from_lua(&source, "any-version.lua").unwrap();
+    }
     setup(
         "decisions = { login = { subject = 'relaxoban.login', timeout_ms = 2000, on_timeout = 'deny', on_no_responders = 'deny', deny_message = 'retry', max_in_flight = 256 }, initial_server = { subject = 'a' }, before_transfer = { subject = 'network.transfer', timeout_ms = 300, on_timeout = 'allow' } }",
     );

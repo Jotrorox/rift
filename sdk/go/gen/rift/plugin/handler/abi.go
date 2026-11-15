@@ -5,6 +5,7 @@ package handler
 import (
 	"github.com/Jotrorox/rift/sdk/go/gen/rift/plugin/types"
 	"go.bytecodealliance.org/cm"
+	"strconv"
 	"unsafe"
 )
 
@@ -67,4 +68,14 @@ func lift_RiftEvent(f0 *uint8, f1 uint32, f2 *uint8, f3 uint32) (v types.RiftEve
 	v.Subject = cm.LiftString[string](f0, f1)
 	v.PayloadJSON = cm.LiftString[string](f2, f3)
 	return
+}
+
+func lift_ResultListU8String(f0 uint32, f1 uint32, f2 uint32) (v cm.Result[cm.List[uint8], cm.List[uint8], string]) {
+	switch f0 {
+	case 0:
+		return cm.OK[cm.Result[cm.List[uint8], cm.List[uint8], string]](cm.LiftList[cm.List[uint8]](cm.U32ToPointer[uint8](f1), (uint32)(f2)))
+	case 1:
+		return cm.Err[cm.Result[cm.List[uint8], cm.List[uint8], string]](cm.LiftString[string](cm.U32ToPointer[uint8](f1), (uint32)(f2)))
+	}
+	panic("lift result: unknown case: " + strconv.Itoa(int(f0)))
 }

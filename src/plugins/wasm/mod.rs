@@ -1,12 +1,11 @@
 //! `engine = "wasm"`: WebAssembly components on Wasmtime.
 //!
 //! A plugin is a component built against the `plugin` world of
-//! `rift:plugin@0.1` (`wit/rift-plugin.wit`); components built against 0.1.0
-//! load too, without the exports later 0.1 releases added. Each instance owns one
+//! `rift:plugin@0.2` (`wit/rift-plugin.wit`). Each instance owns one
 //! [`Store`] and one component instance, created on the plugin's own thread
 //! and called synchronously, one call at a time, by the worker.
 //!
-//! - [`bindings`]: the host traits of the `base` world, forwarding to
+//! - [`bindings`]: the host traits of the `core` world, forwarding to
 //!   [`Services`], and conversions to the neutral [`api`] types.
 //! - [`wasi`]: the WASI 0.2 command imports (TinyGo needs the whole set) and
 //!   `wasi:http`, restricted by the manifest's `[capabilities]`.
@@ -35,13 +34,7 @@ use super::{
     services::Services,
     worker::{CallError, Engine as PluginEngine},
 };
-use bindings::{
-    Base as Core, BasePre,
-    optional::{Optional, OptionalIndices},
-    optional_chat::{OptionalChat, OptionalChatIndices},
-    optional_decisions::{OptionalDecisions, OptionalDecisionsIndices},
-    optional_styled::{OptionalStyled, OptionalStyledIndices},
-};
+use bindings::{Core, CorePre};
 use std::{
     collections::HashMap,
     path::Path,
@@ -146,93 +139,42 @@ fn compile(spec: &PluginSpec, wasm: &[u8]) -> Result<Component, String> {
     })
 }
 
-/// A component with its imports resolved: the required handler exports,
-/// and the optional ones it has.
-#[derive(Clone)]
-struct CorePre {
-    base: BasePre<State>,
-    /// `None` for a component without the `dialogs` export (built against
-    /// rift:plugin 0.1.0).
-    optional: Option<OptionalIndices>,
-    /// `None` for a component without the `decisions` export (built against
-    /// rift:plugin 0.1.0 or 0.1.1).
-    decisions: Option<OptionalDecisionsIndices>,
-    /// `None` for a component without the `styled` export (built against
-    /// rift:plugin 0.1.0 to 0.1.3).
-    styled: Option<OptionalStyledIndices>,
-    /// `None` for a component without the `chat` export: one built against
-    /// rift:plugin 0.1.0 to 0.1.4, or one that does not moderate chat.
-    chat: Option<OptionalChatIndices>,
-}
-
-/// One instance's exports: the required ones and the optional ones it has.
-struct Instance {
-    core: Core,
-    optional: Option<Optional>,
-    decisions: Option<OptionalDecisions>,
-    styled: Option<OptionalStyled>,
-    chat: Option<OptionalChat>,
-}
-
-impl CorePre {
-    fn instantiate(&self, store: &mut Store<State>) -> wasmtime::Result<Instance> {
-        let instance = self.base.instance_pre().instantiate(&mut *store)?;
-        let core = Core::new(&mut *store, &instance)?;
-        let optional = match &self.optional {
-            Some(indices) => Some(indices.load(&mut *store, &instance)?),
-            None => None,
-        };
-        let decisions = match &self.decisions {
-            Some(indices) => Some(indices.load(&mut *store, &instance)?),
-            None => None,
-        };
-        let styled = match &self.styled {
-            Some(indices) => Some(indices.load(&mut *store, &instance)?),
-            None => None,
-        };
-        let chat = match &self.chat {
-            Some(indices) => Some(indices.load(&mut *store, &instance)?),
-            None => None,
-        };
-        Ok(Instance {
-            core,
-            optional,
-            decisions,
-            styled,
-            chat,
-        })
-    }
+/// Whether `wasm` imports or exports `rift:plugin` 0.1, which this Rift no
+/// longer hosts: the reason is clearer than a list of missing imports.
+fn built_for_old_contract(component: &Component) -> bool {
+    let engine = component.engine();
+    let ty = component.component_type();
+    ty.imports(engine)
+        .map(|(name, _)| name.to_owned())
+        .chain(ty.exports(engine).map(|(name, _)| name.to_owned()))
+        .any(|name| name.starts_with("rift:plugin/") && name.contains("@0.1."))
 }
 
 /// Resolve every import against the linker and find the handler exports.
-fn prepare(spec: &PluginSpec, component: &Component) -> Result<CorePre, String> {
-    let base = linker()?
+fn prepare(spec: &PluginSpec, component: &Component) -> Result<CorePre<State>, String> {
+    if built_for_old_contract(component) {
+        return Err(format!(
+            "{} was built against rift:plugin 0.1; this Rift implements {}. Rebuild it against the 0.2 SDK (see docs/plugins.md, \"Moving from 0.1\")",
+            entry_name(spec),
+            api::CONTRACT_VERSION
+        ));
+    }
+    linker()?
         .instantiate_pre(component)
-        .and_then(BasePre::new)
+        .and_then(CorePre::new)
         .map_err(|error| {
             format!(
                 "{} does not fit this Rift's rift:plugin {} host: {error:#}",
                 entry_name(spec),
-                api::API_VERSION
+                api::CONTRACT_VERSION
             )
-        })?;
-    let optional = OptionalIndices::new(base.instance_pre()).ok();
-    let decisions = OptionalDecisionsIndices::new(base.instance_pre()).ok();
-    let styled = OptionalStyledIndices::new(base.instance_pre()).ok();
-    let chat = OptionalChatIndices::new(base.instance_pre()).ok();
-    Ok(CorePre {
-        base,
-        optional,
-        decisions,
-        styled,
-        chat,
-    })
+        })
 }
 
 /// The plugin's component, ready to instantiate: from memory, from the disk
 /// cache or freshly compiled (and then cached).
-fn load(spec: &PluginSpec) -> Result<CorePre, String> {
-    type Loaded = HashMap<String, (String, CorePre)>;
+fn load(spec: &PluginSpec) -> Result<CorePre<State>, String> {
+    type Loaded = HashMap<String, (String, CorePre<State>)>;
     static LOADED: OnceLock<Mutex<Loaded>> = OnceLock::new();
     let loaded = LOADED.get_or_init(Mutex::default);
     let (wasm, key) = read(spec)?;
@@ -315,14 +257,8 @@ pub(crate) fn create(
         "instantiation",
         Some(spec.manifest.init_deadline()),
     );
-    let Instance {
-        core,
-        optional,
-        decisions,
-        styled,
-        chat,
-    } = match pre.instantiate(&mut store) {
-        Ok(instance) => instance,
+    let core = match pre.instantiate(&mut store) {
+        Ok(core) => core,
         Err(error) => {
             let reason = describe(&mut store, error);
             stdout.finish();
@@ -333,10 +269,6 @@ pub(crate) fn create(
     Ok(Box::new(WasmEngine {
         store,
         core,
-        optional,
-        decisions,
-        styled,
-        chat,
         manifest: spec.manifest.clone(),
         registration: None,
         broken: None,
@@ -358,11 +290,6 @@ fn describe(store: &mut Store<State>, error: wasmtime::Error) -> String {
 struct WasmEngine {
     store: Store<State>,
     core: Core,
-    /// The optional exports this component has.
-    optional: Option<Optional>,
-    decisions: Option<OptionalDecisions>,
-    styled: Option<OptionalStyled>,
-    chat: Option<OptionalChat>,
     manifest: Manifest,
     registration: Option<Registration>,
     /// Set by the first trap: the instance's state is suspect from then on.
@@ -392,10 +319,7 @@ impl PluginEngine for WasmEngine {
         let guest = self.core.rift_plugin_handler();
         match guest.call_init(&mut self.store, config_json) {
             Ok(Ok(registration)) => {
-                let mut registration = bindings::registration(registration);
-                // The export is the registration: the WIT record has no
-                // field for it and the `hook` enum no case.
-                registration.chat = self.chat.is_some();
+                let registration = bindings::registration(registration);
                 self.registration = Some(registration.clone());
                 Ok(registration)
             }
@@ -426,158 +350,110 @@ impl PluginEngine for WasmEngine {
             Some(self.manifest.run_limit(hook)),
         );
         let store = &mut self.store;
-        if let Event::Dialog(context) = event {
-            // A component built against 0.1.0 has no `dialogs` export; it
-            // cannot have shown a dialog either.
-            let Some(optional) = &self.optional else {
-                return Ok(Reply::None);
-            };
-            return optional
-                .rift_plugin_dialogs()
-                .call_dialog(store, &bindings::dialog_response(context))
-                .map(|()| Reply::None)
-                .map_err(|error| CallError::Fatal(self.fail(error)));
-        }
-        if let Event::Kick(_) = event {
-            // The contract has no `kick` export yet.
-            return Ok(Reply::default_for(hook));
-        }
-        if let Event::Chat(context) = event {
-            // Only a component that exports `chat` wants the hook.
-            let Some(chat) = &self.chat else {
-                return Ok(Reply::default_for(hook));
-            };
-            let decision = chat
-                .rift_plugin_chat()
-                .call_chat(store, &bindings::chat_attempt(context))
-                .map_err(|error| CallError::Fatal(self.fail(error)))?;
-            return bindings::decision(decision)
-                .map(Reply::Action)
-                .map_err(|error| CallError::Handler(format!("invalid decision: {error}")));
-        }
-        // The `decisions` export, when the component has it, answers the
-        // decision hooks with rich text instead of `handler`.
-        let mut invalid = None;
-        if let Some(decisions) = &self.decisions {
-            let guest = decisions.rift_plugin_decisions();
-            let mut decide = |decision| match bindings::decision(decision) {
-                Ok(action) => Reply::Action(action),
-                Err(error) => {
-                    invalid = Some(error);
-                    Reply::Action(crate::extensions::Action::Continue)
-                }
-            };
-            let result = match &event {
-                Event::Login(context) => Some(
-                    guest
-                        .call_login(&mut *store, &bindings::context(context.clone()))
-                        .map(&mut decide),
-                ),
-                Event::InitialServer(context) => Some(
-                    guest
-                        .call_initial_server(&mut *store, &bindings::context(context.clone()))
-                        .map(&mut decide),
-                ),
-                Event::BeforeTransfer(context) => Some(
-                    guest
-                        .call_before_transfer(&mut *store, &bindings::context(context.clone()))
-                        .map(&mut decide),
-                ),
-                Event::Command(context) => Some(
-                    guest
-                        .call_command(&mut *store, &bindings::context(context.clone()))
-                        .map(&mut decide),
-                ),
-                _ => None,
-            };
-            if let Some(result) = result {
-                let reply = result.map_err(|error| CallError::Fatal(self.fail(error)))?;
-                return match invalid {
-                    Some(error) => Err(CallError::Handler(format!("invalid decision: {error}"))),
-                    None => Ok(reply),
-                };
-            }
-        }
-        // The `styled` export, when the component has it, answers `suggest`
-        // and `status` with rich text instead of `handler`.
-        if let Some(styled) = &self.styled {
-            let guest = styled.rift_plugin_styled();
-            let result = match &event {
-                Event::Suggest(context) => Some(
-                    guest
-                        .call_suggest(&mut *store, &bindings::context(context.clone()))
-                        .map(|list| {
-                            bindings::rich_suggestions(list)
-                                .map(Reply::Suggestions)
-                                .map_err(|error| format!("invalid suggestions: {error}"))
-                        }),
-                ),
-                Event::Status(ping) => Some(
-                    guest
-                        .call_status(&mut *store, &bindings::ping(ping.clone()))
-                        .map(|status| {
-                            status
-                                .map(bindings::rich_status_override)
-                                .transpose()
-                                .map(Reply::Status)
-                                .map_err(|error| format!("invalid status: {error}"))
-                        }),
-                ),
-                _ => None,
-            };
-            if let Some(result) = result {
-                let reply = result.map_err(|error| CallError::Fatal(self.fail(error)))?;
-                return reply.map_err(CallError::Handler);
-            }
-        }
-        let decide = |action| Reply::Action(bindings::action(action));
         let guest = self.core.rift_plugin_handler();
-        let result = match event {
+        // A trap is fatal; an answer that does not convert is the plugin's
+        // error, like any invalid answer.
+        type Answer = wasmtime::Result<Result<Reply, String>>;
+        let decide =
+            |decision: wasmtime::Result<bindings::rift::plugin::types::Decision>| -> Answer {
+                decision.map(|decision| {
+                    bindings::decision(decision)
+                        .map(Reply::Action)
+                        .map_err(|error| format!("invalid decision: {error}"))
+                })
+            };
+        let done = |result: wasmtime::Result<()>| -> Answer { result.map(|()| Ok(Reply::None)) };
+        let result: Answer = match event {
             Event::Route(connection) => guest
                 .call_route(store, &bindings::connection(connection))
-                .map(|decision| Reply::Route(bindings::route_decision(decision))),
-            Event::Login(context) => guest
-                .call_login(store, &bindings::context(context))
-                .map(decide),
-            Event::InitialServer(context) => guest
-                .call_initial_server(store, &bindings::context(context))
-                .map(decide),
-            Event::BeforeTransfer(context) => guest
-                .call_before_transfer(store, &bindings::context(context))
-                .map(decide),
-            Event::Command(context) => guest
-                .call_command(store, &bindings::context(context))
-                .map(decide),
-            Event::Suggest(context) => guest
-                .call_suggest(store, &bindings::context(context))
-                .map(|list| Reply::Suggestions(bindings::suggestions(list))),
+                .map(|decision| Ok(Reply::Route(bindings::route_decision(decision)))),
+            Event::Login(context) => decide(guest.call_login(store, &bindings::context(context))),
+            Event::InitialServer(context) => {
+                decide(guest.call_initial_server(store, &bindings::context(context)))
+            }
+            Event::BeforeTransfer(context) => {
+                decide(guest.call_before_transfer(store, &bindings::context(context)))
+            }
+            Event::Command(context) => {
+                decide(guest.call_command(store, &bindings::context(context)))
+            }
+            Event::Chat(context) => {
+                decide(guest.call_chat(store, &bindings::chat_attempt(context)))
+            }
+            Event::Kick(context) => decide(guest.call_kick(store, &bindings::context(context))),
+            Event::Suggest(context) => {
+                guest
+                    .call_suggest(store, &bindings::context(context))
+                    .map(|list| {
+                        bindings::suggestions(list)
+                            .map(Reply::Suggestions)
+                            .map_err(|error| format!("invalid suggestions: {error}"))
+                    })
+            }
             Event::Status(ping) => guest
                 .call_status(store, &bindings::ping(ping))
-                .map(|status| Reply::Status(status.map(bindings::status_override))),
+                .map(|status| {
+                    status
+                        .map(bindings::status_override)
+                        .transpose()
+                        .map(Reply::Status)
+                        .map_err(|error| format!("invalid status: {error}"))
+                }),
             Event::Http(request) => guest
                 .call_http(store, &bindings::http_request(request))
-                .map(|response| Reply::Http(response.map(bindings::http_response))),
-            Event::Join(context) => guest
-                .call_join(store, &bindings::context(context))
-                .map(|()| Reply::None),
-            Event::AfterTransfer(context) => guest
-                .call_after_transfer(store, &bindings::context(context))
-                .map(|()| Reply::None),
-            Event::Disconnect(context) => guest
-                .call_disconnect(store, &bindings::context(context))
-                .map(|()| Reply::None),
-            Event::Message(message) => guest
-                .call_message(store, &bindings::bus_message(message))
-                .map(|()| Reply::None),
-            Event::Timer(handle) => guest.call_timer(store, handle).map(|()| Reply::None),
-            Event::Event(event) => guest
-                .call_event(store, &bindings::rift_event(event))
-                .map(|()| Reply::None),
-            Event::Dialog(_) | Event::Chat(_) | Event::Kick(_) => {
-                unreachable!("dispatched above")
+                .map(|response| Ok(Reply::Http(response.map(bindings::http_response)))),
+            Event::Join(context) => done(guest.call_join(store, &bindings::context(context))),
+            Event::AfterTransfer(context) => {
+                done(guest.call_after_transfer(store, &bindings::context(context)))
             }
+            Event::Disconnect(context) => {
+                done(guest.call_disconnect(store, &bindings::context(context)))
+            }
+            Event::Message(message) => {
+                done(guest.call_message(store, &bindings::bus_message(message)))
+            }
+            Event::Timer(handle) => done(guest.call_timer(store, handle)),
+            Event::Event(event) => done(guest.call_event(store, &bindings::rift_event(event))),
+            Event::Dialog(context) => {
+                done(guest.call_dialog(store, &bindings::dialog_response(context)))
+            }
+            Event::Job(handle, outcome) => done(guest.call_job_done(
+                store,
+                handle,
+                outcome.as_ref().map(Vec::as_slice).map_err(String::as_str),
+            )),
         };
-        result.map_err(|error| CallError::Fatal(self.fail(error)))
+        result
+            .map_err(|error| CallError::Fatal(self.fail(error)))?
+            .map_err(CallError::Handler)
+    }
+
+    fn work_init(&mut self, config_json: &str) -> Result<(), String> {
+        limits::arm(
+            &mut self.store,
+            "work-init",
+            Some(self.manifest.init_deadline()),
+        );
+        let guest = self.core.rift_plugin_handler();
+        match guest.call_work_init(&mut self.store, config_json) {
+            Ok(result) => result,
+            Err(error) => Err(self.fail(error)),
+        }
+    }
+
+    fn work(&mut self, payload: Vec<u8>) -> Result<Vec<u8>, CallError> {
+        if let Some(reason) = &self.broken {
+            return Err(CallError::Fatal(reason.clone()));
+        }
+        limits::arm(&mut self.store, "work", Some(self.manifest.work_deadline()));
+        let guest = self.core.rift_plugin_handler();
+        match guest.call_work(&mut self.store, &payload) {
+            Ok(Ok(result)) if result.len() > super::services::MAX_JOB_BYTES => Err(
+                CallError::Handler("work: the result is larger than 4 MiB".into()),
+            ),
+            Ok(result) => result.map_err(CallError::Handler),
+            Err(error) => Err(CallError::Fatal(self.fail(error))),
+        }
     }
 
     fn reload(&mut self, config_json: &str) -> Result<(), String> {

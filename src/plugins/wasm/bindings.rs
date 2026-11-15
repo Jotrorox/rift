@@ -1,68 +1,19 @@
-//! Host bindings for `rift:plugin@0.1.5`: generated types and traits, the
+//! Host bindings for `rift:plugin@0.2.0`: generated types and traits, the
 //! trait implementations that forward every import to
 //! [`Services`](crate::plugins::services::Services), and conversions between
 //! the generated types and the engine-neutral [`api`] types. WASI is linked
 //! separately (see [`super::wasi`]).
-//!
-//! The host binds world `base` (every import and the `handler` export that
-//! every component has) and, separately, worlds `optional` (`dialogs`),
-//! `optional-decisions` (`decisions`), `optional-styled` (`styled`) and
-//! `optional-chat` (`chat`), whose exports a component built against an older
-//! 0.1 lacks, and `chat` every component that does not moderate chat; see
-//! [`Optional::load`].
 use super::State;
-use crate::plugins::api;
+use crate::{plugins::api, text::Text};
 
 wasmtime::component::bindgen!({
     path: "wit",
-    world: "rift:plugin/base",
+    world: "rift:plugin/core",
 });
 
-/// The optional exports (`dialogs`, since 0.1.1), sharing `base`'s types.
-pub(super) mod optional {
-    wasmtime::component::bindgen!({
-        path: "wit",
-        world: "rift:plugin/optional",
-        with: {
-            "rift:plugin/types": super::rift::plugin::types,
-        },
-    });
-}
-
-/// The optional `decisions` export (since 0.1.2), sharing `base`'s types.
-pub(super) mod optional_decisions {
-    wasmtime::component::bindgen!({
-        path: "wit",
-        world: "rift:plugin/optional-decisions",
-        with: {
-            "rift:plugin/types": super::rift::plugin::types,
-        },
-    });
-}
-
-/// The optional `styled` export (since 0.1.4), sharing `base`'s types.
-pub(super) mod optional_styled {
-    wasmtime::component::bindgen!({
-        path: "wit",
-        world: "rift:plugin/optional-styled",
-        with: {
-            "rift:plugin/types": super::rift::plugin::types,
-        },
-    });
-}
-
-/// The optional `chat` export (since 0.1.5), sharing `base`'s types.
-pub(super) mod optional_chat {
-    wasmtime::component::bindgen!({
-        path: "wit",
-        world: "rift:plugin/optional-chat",
-        with: {
-            "rift:plugin/types": super::rift::plugin::types,
-        },
-    });
-}
-
-use self::rift::plugin::{bus, log, meta, permissions, players, servers, store, timers, types};
+use self::rift::plugin::{
+    background, bus, log, meta, permissions, players, servers, store, timers, types,
+};
 
 /// Guest paths of the granted directories (`meta.data-dir`, `meta.config-dir`).
 pub(super) const DATA_DIR: &str = "/data";
@@ -80,19 +31,52 @@ fn level(level: types::Level) -> api::Level {
     }
 }
 
-fn title(title: types::TitleSpec) -> api::TitleSpec {
-    api::TitleSpec {
-        title: crate::text::Text::Plain(title.title),
-        subtitle: title.subtitle.map(crate::text::Text::Plain),
+/// Guest text, checked: plain text as written, or a JSON text component
+/// (markup objects included).
+pub(super) fn text(text: types::Text, label: &str) -> Result<Text, String> {
+    match text {
+        types::Text::Plain(text) => Text::plain(&text, label),
+        types::Text::Json(json) => {
+            let trimmed = json.trim_start();
+            if !trimmed.starts_with(['{', '[', '"']) {
+                return Err(format!(
+                    "{label}: json text must be a JSON text component (an object, an array or a string)"
+                ));
+            }
+            Text::json(&json, label)
+        }
+    }
+}
+
+/// Guest text for the host functions that still take JSON: a plain string
+/// becomes a JSON string, which is shown as written.
+fn text_json(text: types::Text) -> String {
+    match text {
+        types::Text::Plain(text) => serde_json::Value::String(text).to_string(),
+        types::Text::Json(json) => json,
+    }
+}
+
+/// A title: an absent text is an empty plain one, which is left out.
+fn title(title: types::TitleSpec) -> Result<api::TitleSpec, String> {
+    Ok(api::TitleSpec {
+        title: match title.title {
+            Some(title) => text(title, "title")?,
+            None => Text::Plain(String::new()),
+        },
+        subtitle: title
+            .subtitle
+            .map(|subtitle| text(subtitle, "subtitle"))
+            .transpose()?,
         fade_in: title.fade_in,
         stay: title.stay,
         fade_out: title.fade_out,
-    }
+    })
 }
 
 fn boss_bar(bar: types::BossBarSpec) -> api::BossBarSpec {
     api::BossBarSpec {
-        text_json: bar.text_json,
+        text_json: text_json(bar.text),
         progress: bar.progress,
         color: bar.color,
         style: bar.style,
@@ -118,6 +102,8 @@ pub(super) fn hook(hook: types::Hook) -> api::Hook {
         types::Hook::Message => api::Hook::Message,
         types::Hook::Timer => api::Hook::Timer,
         types::Hook::Event => api::Hook::Event,
+        types::Hook::Chat => api::Hook::Chat,
+        types::Hook::Kick => api::Hook::Kick,
     }
 }
 
@@ -132,21 +118,23 @@ fn suggest_kind(kind: types::SuggestKind) -> api::SuggestKind {
 }
 
 pub(super) fn registration(registration: types::Registration) -> api::Registration {
+    let hooks: Vec<_> = registration.hooks.into_iter().map(hook).collect();
     api::Registration {
         commands: registration
             .commands
             .into_iter()
             .map(|command| api::CommandSpec {
                 name: command.name,
+                aliases: command.aliases,
                 permission: command.permission,
                 suggest: suggest_kind(command.suggest),
+                console: command.console,
             })
             .collect(),
-        hooks: registration.hooks.into_iter().map(hook).collect(),
-        // Set by the engine from the component's exports.
-        chat: false,
-        // No export answers `kick` yet; components keep its default.
-        kick: false,
+        // Never implied by an empty list, so listing them is the claim.
+        chat: hooks.contains(&api::Hook::Chat),
+        kick: hooks.contains(&api::Hook::Kick),
+        hooks,
     }
 }
 
@@ -158,101 +146,57 @@ pub(super) fn route_decision(decision: types::RouteDecision) -> api::RouteDecisi
     }
 }
 
-pub(super) fn action(action: types::Action) -> api::Action {
-    match action {
-        types::Action::Continue => api::Action::Continue,
-        types::Action::Deny(reason) => api::Action::Deny(reason.into()),
-        types::Action::Server(server) => api::Action::Server(server),
-        types::Action::Message(text) => api::Action::Message(text.into()),
-        types::Action::Queue(server) => api::Action::Queue(server),
-        types::Action::LeaveQueue => api::Action::LeaveQueue,
-    }
-}
-
-/// The `decisions` export's answer. Fails for a `-json` case whose text is
-/// not a valid text component; the host then treats the decision like any
-/// other invalid one.
+/// A decision. Fails for text that is not valid; the host then treats the
+/// decision like any other invalid one.
 pub(super) fn decision(decision: types::Decision) -> Result<api::Action, String> {
-    use crate::text::Text;
     Ok(match decision {
         types::Decision::Continue => api::Action::Continue,
-        types::Decision::Deny(reason) => api::Action::Deny(reason.into()),
+        types::Decision::Deny(reason) => api::Action::Deny(text(reason, "deny reason")?),
         types::Decision::Server(server) => api::Action::Server(server),
-        types::Decision::Message(text) => api::Action::Message(text.into()),
+        types::Decision::Message(message) => api::Action::Message(text(message, "message")?),
         types::Decision::Queue(server) => api::Action::Queue(server),
         types::Decision::LeaveQueue => api::Action::LeaveQueue,
-        types::Decision::DenyJson(reason) => api::Action::Deny(Text::json(&reason, "deny reason")?),
-        types::Decision::MessageJson(text) => api::Action::Message(Text::json(&text, "message")?),
     })
 }
 
-pub(super) fn suggestions(suggestions: Vec<types::Suggestion>) -> Vec<api::Suggestion> {
-    suggestions
-        .into_iter()
-        .map(|suggestion| api::Suggestion {
-            text: suggestion.text,
-            tooltip: suggestion.tooltip.map(crate::text::Text::Plain),
-        })
-        .collect()
-}
-
-pub(super) fn status_override(status: types::StatusOverride) -> api::StatusOverride {
-    api::StatusOverride {
-        motd_json: status.motd_json,
-        version: status.version.map(crate::text::Text::Plain),
-        protocol: status.protocol,
-        online: status.online,
-        max_players: status.max_players,
-        sample: status
-            .sample
-            .map(|lines| lines.into_iter().map(crate::text::Text::Plain).collect()),
-        favicon: status.favicon,
-    }
-}
-
-/// The `styled` export's suggestions. An empty or blank `tooltip-json` is no
-/// tooltip; an invalid one fails the whole answer.
-pub(super) fn rich_suggestions(
-    suggestions: Vec<types::RichSuggestion>,
+/// Suggestions. An invalid tooltip fails the whole answer.
+pub(super) fn suggestions(
+    suggestions: Vec<types::Suggestion>,
 ) -> Result<Vec<api::Suggestion>, String> {
     suggestions
         .into_iter()
         .map(|suggestion| {
-            let tooltip = match suggestion.tooltip_json {
-                Some(json) if !json.trim().is_empty() => {
-                    Some(crate::text::Text::json(&json, "suggestion tooltip")?)
-                }
-                _ => None,
-            };
             Ok(api::Suggestion {
                 text: suggestion.text,
-                tooltip,
+                tooltip: suggestion
+                    .tooltip
+                    .map(|tooltip| text(tooltip, "suggestion tooltip"))
+                    .transpose()?,
             })
         })
         .collect()
 }
 
-/// The `styled` export's status override. Fails for a version or sample
-/// line that is not a valid text component.
-pub(super) fn rich_status_override(
-    status: types::RichStatusOverride,
+/// A status override. Fails for a version or sample line that is not valid
+/// text.
+pub(super) fn status_override(
+    status: types::StatusOverride,
 ) -> Result<api::StatusOverride, String> {
-    use crate::text::Text;
     Ok(api::StatusOverride {
-        motd_json: status.motd_json,
+        motd_json: status.motd.map(text_json),
         version: status
-            .version_json
-            .map(|version| Text::json(&version, "status version"))
+            .version
+            .map(|version| text(version, "status version"))
             .transpose()?,
         protocol: status.protocol,
         online: status.online,
         max_players: status.max_players,
         sample: status
-            .sample_json
+            .sample
             .map(|lines| {
                 lines
-                    .iter()
-                    .map(|line| Text::json(line, "status sample line"))
+                    .into_iter()
+                    .map(|line| text(line, "status sample line"))
                     .collect::<Result<Vec<_>, _>>()
             })
             .transpose()?,
@@ -277,6 +221,32 @@ fn player_info(player: api::PlayerInfo) -> types::PlayerInfo {
         name: player.name,
         server: player.server,
         protocol: player.protocol,
+        ip: player.ip,
+        properties: player
+            .properties
+            .into_iter()
+            .map(|property| types::ProfileProperty {
+                name: property.name,
+                value: property.value,
+                signature: property.signature,
+            })
+            .collect(),
+        visible_to: player.visible_to,
+        locale: player.locale,
+        language: player.language,
+    }
+}
+
+fn player_record(record: api::PlayerRecord) -> types::PlayerRecord {
+    types::PlayerRecord {
+        uuid: record.uuid,
+        name: record.name,
+        first_seen: record.first_seen,
+        last_seen: record.last_seen,
+        last_ip: record.last_ip,
+        last_server: record.last_server,
+        online: record.online,
+        language: record.language,
     }
 }
 
@@ -298,6 +268,8 @@ pub(super) fn context(context: api::Context) -> types::Context {
         args: context.args,
         word: context.word,
         position: u32::try_from(context.position).unwrap_or(u32::MAX),
+        language: context.language,
+        console: context.console,
     }
 }
 
@@ -406,44 +378,32 @@ impl players::Host for State {
         self.services.players().names(prefix.as_deref())
     }
 
-    fn message(&mut self, target: String, text: String) -> Result<bool, String> {
-        self.services.players().message(&target, &text)
+    fn message(&mut self, target: String, message: types::Text) -> Result<bool, String> {
+        self.services
+            .players()
+            .message_text(&target, text(message, "message")?)
     }
 
-    fn message_json(&mut self, target: String, text_json: String) -> Result<bool, String> {
-        self.services.players().message_json(&target, &text_json)
-    }
-
-    fn action_bar(&mut self, target: String, text: String) -> Result<bool, String> {
-        self.services.players().action_bar(&target, &text)
-    }
-
-    fn action_bar_json(&mut self, target: String, text_json: String) -> Result<bool, String> {
-        self.services.players().action_bar_json(&target, &text_json)
+    fn action_bar(&mut self, target: String, message: types::Text) -> Result<bool, String> {
+        self.services
+            .players()
+            .action_bar_text(&target, text(message, "action bar text")?)
     }
 
     fn title(&mut self, target: String, spec: types::TitleSpec) -> Result<bool, String> {
-        self.services.players().title(&target, &title(spec))
-    }
-
-    fn title_json(&mut self, target: String, spec: types::TitleJsonSpec) -> Result<bool, String> {
-        self.services.players().title_json(
-            &target,
-            &spec.title_json,
-            spec.subtitle_json.as_deref(),
-            [spec.fade_in, spec.stay, spec.fade_out],
-        )
+        self.services.players().title(&target, &title(spec)?)
     }
 
     fn tab_list(
         &mut self,
         target: String,
-        header_json: Option<String>,
-        footer_json: Option<String>,
+        header: Option<types::Text>,
+        footer: Option<types::Text>,
     ) -> Result<bool, String> {
+        let (header, footer) = (header.map(text_json), footer.map(text_json));
         self.services
             .players()
-            .tab_list(&target, header_json.as_deref(), footer_json.as_deref())
+            .tab_list(&target, header.as_deref(), footer.as_deref())
     }
 
     fn boss_bar(
@@ -466,32 +426,35 @@ impl players::Host for State {
         self.services.players().clear_dialog(&target)
     }
 
-    fn kick(&mut self, target: String, reason: String) -> Result<bool, String> {
-        self.services.players().kick(&target, &reason)
-    }
-
-    fn kick_json(&mut self, target: String, reason_json: String) -> Result<bool, String> {
-        self.services.players().kick_json(&target, &reason_json)
+    fn kick(&mut self, target: String, reason: types::Text) -> Result<bool, String> {
+        self.services
+            .players()
+            .kick_text(&target, text(reason, "kick reason")?)
     }
 
     fn transfer(&mut self, target: String, server: String) -> Result<bool, String> {
         self.services.players().transfer(&target, &server)
     }
 
-    fn broadcast(&mut self, text: String) -> Result<u32, String> {
-        self.services.players().broadcast(&text)
+    fn broadcast(&mut self, message: types::Text) -> Result<u32, String> {
+        self.services
+            .players()
+            .broadcast_text(text(message, "message")?, None)
     }
 
-    fn broadcast_json(&mut self, text_json: String) -> Result<u32, String> {
-        self.services.players().broadcast_json(&text_json)
+    fn lookup(&mut self, target: String) -> Result<Option<types::PlayerRecord>, String> {
+        Ok(self.services.players().lookup(&target)?.map(player_record))
     }
 
-    fn visible_to(&mut self, target: String) -> Result<Option<String>, String> {
-        self.services.players().visible_to(&target)
+    fn search(&mut self, prefix: String, limit: u32) -> Result<Vec<types::PlayerRecord>, String> {
+        let records = self.services.players().search(&prefix, limit)?;
+        Ok(records.into_iter().map(player_record).collect())
     }
 
-    fn locale(&mut self, target: String) -> Result<Option<String>, String> {
-        self.services.players().locale(&target)
+    fn set_language(&mut self, target: String, language: Option<String>) -> Result<bool, String> {
+        self.services
+            .players()
+            .set_language(&target, language.as_deref())
     }
 }
 
@@ -530,8 +493,15 @@ impl permissions::Host for State {
         self.services.permissions().set(&uuid, &node, value)
     }
 
-    fn add_group(&mut self, uuid: String, group: String) -> Result<bool, String> {
-        self.services.permissions().add_group(&uuid, &group)
+    fn add_group(
+        &mut self,
+        uuid: String,
+        group: String,
+        expires_at: Option<u64>,
+    ) -> Result<bool, String> {
+        self.services
+            .permissions()
+            .add_group_until(&uuid, &group, expires_at)
     }
 
     fn remove_group(&mut self, uuid: String, group: String) -> Result<bool, String> {
@@ -646,6 +616,25 @@ impl timers::Host for State {
     }
 }
 
+impl background::Host for State {
+    fn defer(&mut self) -> Result<u64, String> {
+        self.services.background().defer()
+    }
+
+    fn resolve(&mut self, ticket: u64, answer: types::Decision) -> Result<bool, String> {
+        let action = decision(answer).map_err(|error| format!("resolve: {error}"))?;
+        self.services.background().resolve(ticket, action)
+    }
+
+    fn run(&mut self, payload: Vec<u8>) -> Result<u64, String> {
+        self.services.background().run(payload)
+    }
+
+    fn is_worker(&mut self) -> bool {
+        self.services.is_worker()
+    }
+}
+
 impl log::Host for State {
     fn log(&mut self, severity: types::Level, message: String) {
         self.services.log(level(severity), &message);
@@ -679,6 +668,10 @@ impl meta::Host for State {
     fn time(&mut self) -> i64 {
         self.services.meta().time()
     }
+
+    fn api(&mut self) -> String {
+        self.services.meta().api().to_owned()
+    }
 }
 
 #[cfg(test)]
@@ -706,13 +699,23 @@ mod tests {
         .into_iter()
         .map(hook)
         .collect();
-        // `dialog`, `chat` and `kick` have no WIT case, so 0.1.0 components
-        // keep loading.
-        assert_eq!(names, api::Hook::ALL[..api::Hook::ALL.len() - 3]);
-        assert_eq!(
-            api::Hook::ALL[api::Hook::ALL.len() - 3..],
-            [api::Hook::Dialog, api::Hook::Chat, api::Hook::Kick]
-        );
+        // `dialog` and `job_done` have no WIT case: they need no listing.
+        assert_eq!(names, api::Hook::ALL[..14]);
+        assert_eq!(hook(types::Hook::Chat), api::Hook::Chat);
+        assert_eq!(hook(types::Hook::Kick), api::Hook::Kick);
+        let listed = registration(types::Registration {
+            commands: vec![types::CommandSpec {
+                name: "ban".into(),
+                aliases: vec!["b".into()],
+                permission: String::new(),
+                suggest: types::SuggestKind::Players,
+                console: true,
+            }],
+            hooks: vec![types::Hook::Chat],
+        });
+        assert!(listed.chat && !listed.kick);
+        assert!(listed.commands[0].console);
+        assert!(listed.commands[0].answers_to("b"));
         let attempt = chat_attempt(api::Context {
             id: 9,
             command: Some("msg".into()),
@@ -732,11 +735,15 @@ mod tests {
             name: "Alex".into(),
             position: 2,
             server: Some("lobby".into()),
+            language: Some("de".into()),
+            console: true,
             ..Default::default()
         });
         assert_eq!(converted.connection_id, 9);
         assert_eq!(converted.position, 2);
         assert_eq!(converted.server.as_deref(), Some("lobby"));
+        assert_eq!(converted.language.as_deref(), Some("de"));
+        assert!(converted.console);
         assert_eq!(
             route_decision(types::RouteDecision::Reject(Some("no".into()))),
             api::RouteDecision::Reject {
@@ -761,50 +768,44 @@ mod tests {
     }
 
     #[test]
-    fn styled_answers_convert_their_rich_text() {
-        use crate::text::Text;
-        let suggestions = rich_suggestions(vec![
-            types::RichSuggestion {
-                text: "a".into(),
-                tooltip_json: Some(r#"{"text":"Tip","color":"red"}"#.into()),
-            },
-            types::RichSuggestion {
-                text: "b".into(),
-                tooltip_json: Some("  ".into()),
-            },
-            types::RichSuggestion {
-                text: "c".into(),
-                tooltip_json: Some("as written".into()),
-            },
-            types::RichSuggestion {
-                text: "d".into(),
-                tooltip_json: None,
-            },
-        ])
-        .unwrap();
+    fn text_is_plain_or_a_checked_component() {
+        // Plain text is never parsed, whatever it looks like.
         assert_eq!(
-            suggestions[0].tooltip,
-            Some(Text::Component(
-                serde_json::json!({"text": "Tip", "color": "red"})
-            ))
+            text(types::Text::Plain("{not json".into()), "message").unwrap(),
+            Text::Plain("{not json".into())
         );
-        assert_eq!(suggestions[1].tooltip, None);
-        assert!(suggestions[2].tooltip.is_some());
-        assert_eq!(suggestions[3].tooltip, None);
-        let error = rich_suggestions(vec![types::RichSuggestion {
-            text: "x".into(),
-            tooltip_json: Some("{nope".into()),
-        }])
-        .unwrap_err();
+        assert_eq!(
+            text(
+                types::Text::Json(r#"{"text":"Tip","color":"red"}"#.into()),
+                "message"
+            )
+            .unwrap(),
+            Text::Component(serde_json::json!({"text": "Tip", "color": "red"}))
+        );
+        let error = text(types::Text::Json("{nope".into()), "suggestion tooltip").unwrap_err();
         assert!(error.contains("suggestion tooltip"), "{error}");
+        let error = text(types::Text::Json("as written".into()), "message").unwrap_err();
+        assert!(error.contains("JSON text component"), "{error}");
+        assert!(text(types::Text::Plain(String::new()), "message").is_err());
 
-        let status = rich_status_override(types::RichStatusOverride {
-            motd_json: Some("\"motd\"".into()),
-            version_json: Some(r#"{"text":"Rift","color":"gold"}"#.into()),
+        assert_eq!(
+            decision(types::Decision::Deny(types::Text::Plain("no".into()))).unwrap(),
+            api::Action::Deny("no".into())
+        );
+        assert!(decision(types::Decision::Message(types::Text::Json("[1,".into()))).is_err());
+
+        let status = status_override(types::StatusOverride {
+            motd: Some(types::Text::Plain("motd".into())),
+            version: Some(types::Text::Json(
+                r#"{"text":"Rift","color":"gold"}"#.into(),
+            )),
             protocol: Some(774),
             online: Some(1),
             max_players: Some(2),
-            sample_json: Some(vec!["\"one\"".into(), "two".into()]),
+            sample: Some(vec![
+                types::Text::Plain("one".into()),
+                types::Text::Json("\"two\"".into()),
+            ]),
             favicon: None,
         })
         .unwrap();
@@ -816,20 +817,15 @@ mod tests {
             ))
         );
         assert_eq!(status.sample.as_ref().map(Vec::len), Some(2));
-        assert_eq!(
-            (status.protocol, status.online, status.max_players),
-            (Some(774), Some(1), Some(2))
-        );
-        let error = rich_status_override(types::RichStatusOverride {
-            motd_json: None,
-            version_json: None,
-            protocol: None,
-            online: None,
-            max_players: None,
-            sample_json: Some(vec!["[1,".into()]),
-            favicon: None,
+        let title = title(types::TitleSpec {
+            title: None,
+            subtitle: Some(types::Text::Plain("sub".into())),
+            fade_in: 1,
+            stay: 2,
+            fade_out: 3,
         })
-        .unwrap_err();
-        assert!(error.contains("status sample line"), "{error}");
+        .unwrap();
+        assert_eq!(title.title, Text::Plain(String::new()));
+        assert_eq!(title.subtitle, Some(Text::Plain("sub".into())));
     }
 }

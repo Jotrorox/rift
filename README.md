@@ -201,7 +201,7 @@ Permissions live in Rift's [permission store](docs/permissions.md):
 LuckPerms-style users, groups, weights, contexts, temporary nodes, tracks,
 prefixes and meta, with change events and LuckPerms import, managed with
 `/perms`, `rift admin perms`, `/api/perms` and the dashboard. `rift.lua`
-reaches it through `rift.permissions` with `extensions.api_version = 3`, and
+reaches it through `rift.permissions`, and
 Paper and Pumpkin backends check it through their adapters.
 
 ```lua

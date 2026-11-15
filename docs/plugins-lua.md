@@ -28,7 +28,7 @@ my-network/
 # plugins/hello-lua/plugin.toml
 name = "hello-lua"
 version = "0.1.0"
-api = "0.1"
+api = "0.2"
 engine = "lua"
 
 [capabilities]
@@ -119,7 +119,7 @@ What differs is the environment:
   `shutdown` (called with the reason). Handlers run in registration order: for
   decision events the first non-nil result wins; observers all run and must
   return nil.
-- `rift.on("chat", fn)` (contract 0.1.5) registers the plugin for
+- `rift.on("chat", fn)` registers the plugin for
   [chat](plugins.md#chat): the handler receives every chat message and backend
   command as `ctx` with `ctx.kind` (`"message"` or `"command"`) and `ctx.text`
   (for a command also `ctx.command` and `ctx.args`), and returns nil or
@@ -130,12 +130,16 @@ What differs is the environment:
   formatting. Return `{ server = "lobby" }` to move the player there,
   `{ deny = "reason" }` to disconnect them with that text, or nil to leave it
   to [`network.on_kick`](operations.md#maintenance-and-transfers).
-  WebAssembly components cannot handle `kick` yet: the contract has no export
-  for it.
-- `rift.command(name, { permission, run, suggest })` also accepts a list of
-  strings as `suggest`. `permission` is required; `permission = ""` (contract
-  0.1.5) opens the command to every player. A command name belongs to exactly one owner across the
-  configuration script and all plugins.
+- `rift.command(name, { permission, run, suggest, aliases, console })` also
+  accepts a list of strings as `suggest`. `permission` is required;
+  `permission = ""` opens the command to every player. `aliases` is a list of
+  up to 16 other names for the command; `ctx.command` is always the command's
+  own name. `console = true` lets operators run it with
+  `rift admin plugins run <command> [arguments]`: `ctx.console` is then true,
+  `ctx.name` is `CONSOLE` and `ctx.uuid` is empty, and only a `message` result
+  is accepted ([commands](plugins.md#commands)). A command name or alias
+  belongs to exactly one owner across the configuration script and all
+  plugins.
 - `rift.on` and `rift.command` work only while the entry script runs.
   `rift.every(name, every_ms, fn)`, `rift.subscribe(subject, [queue,] [fn])`
   (returns a handle for `rift.unsubscribe`) and `rift.timers.every(ms, [fn])`,
@@ -143,7 +147,7 @@ What differs is the environment:
   handlers, as long as the entry script created at least one timer (or
   subscription) or registered `rift.on("timer")` (or `"message"`): hooks are
   fixed once the entry script finishes. Timer functions receive the handle;
-  `rift.every` functions receive `{ api_version = 2, job = name }`; messages
+  `rift.every` functions receive `{ api_version = 3, job = name }`; messages
   are `{ subject, payload, reply, subscription, handle }`.
 
 ## Host API
@@ -153,21 +157,85 @@ mode:
 
 | Contract | In a persistent Lua plugin |
 | --- | --- |
-| `players.*` | `rift.players.list`, `get`, `names`, `message`, `action_bar`, `title`, `tab_list`, `boss_bar`, `dialog`, `clear_dialog`, `kick`, `transfer`, `broadcast`, as in API v2. `players.locale` is the `locale` field of the player tables that `list` and `get` return (since 0.1.5): the client's language (`en_us`), or nil while Rift does not know it, which is always the case in `login` and, for clients before 1.20.2, in `join` ([timing](plugins.md#host-api)). `message`, `action_bar`, `kick` and `broadcast`, like `deny` and `message` results, take a chat component table in place of the string ([rich text](extensions.md#rich-text)). Clicks on the plugin's [dialogs](dialogs.md) reach its `rift.on("dialog", fn)` handlers. |
+| `players.*` | `rift.players.list`, `get`, `names`, `message`, `action_bar`, `title`, `tab_list`, `boss_bar`, `dialog`, `clear_dialog`, `kick`, `transfer`, `broadcast`, as in `rift.lua`. The player tables that `list` and `get` return have `uuid`, `name`, `server`, `connection_id`, `protocol`, `ip`, `properties` (a list of `{ name, value, signature }`; `textures` is the skin), `visible_to`, `locale` and `language`. `locale` is the client's language (`en_us`), or nil while Rift does not know it, which is always the case in `login` and, for clients before 1.20.2, in `join` ([timing](plugins.md#host-api)); `language` is what a plugin set for the player, else the locale. `rift.players.lookup(target)` returns what Rift remembers about a player, online or not (`{ uuid, name, first_seen, last_seen, last_ip, last_server, online, language }`, or nil), `rift.players.search(prefix, limit?)` a list of such tables (20 unless `limit` says otherwise, at most 100), and `rift.players.set_language(target, language_or_nil)` sets the language of Rift's own messages for a player ([directory and languages](plugins.md#the-player-directory-and-languages)); `ctx.language` carries it in every hook. `message`, `action_bar`, `kick` and `broadcast`, like `deny` and `message` results, take a chat component table in place of the string ([rich text](extensions.md#rich-text)). Clicks on the plugin's [dialogs](dialogs.md) reach its `rift.on("dialog", fn)` handlers. |
 | `store.*` | `rift.store.*`. Namespaces are private (`plugin.<name>.<namespace>`). `delete` returns whether the entry existed, `increment`'s delta defaults to 1, and `rift.store.list(namespace, prefix)` returns `{ key, value }` entries sorted by key. |
-| `permissions.*` | `rift.permissions.*`. `groups` returns effective groups, including inherited ones and `default`; `rift.permissions.list_groups()` returns every group of the [permission store](permissions.md#persistent-plugins). Lua also has `rift.permissions.check(uuid, node, contexts?)` (true, false or nil), `rift.permissions.meta(uuid, contexts?)` and `rift.permissions.set_meta(uuid, key, value_or_nil, { contexts?, expires_in?, expires_at? })`. Player tables carry `visible_to`, the node a viewer needs to see a [hidden](permissions.md#visibility) player, or nil. |
+| `permissions.*` | `rift.permissions.*`. `groups` returns effective groups, including inherited ones and `default`; `rift.permissions.list_groups()` returns every group of the [permission store](permissions.md#persistent-plugins). Lua also has `rift.permissions.check(uuid, node, contexts?)` (true, false or nil), `rift.permissions.meta(uuid, contexts?)` and `rift.permissions.set_meta(uuid, key, value_or_nil, { contexts?, expires_in?, expires_at? })`. `rift.permissions.add_group(uuid, group, { expires_in?, expires_at? })` makes the membership end after that many seconds or at that Unix time; adding again replaces the expiry. Player tables carry `visible_to`, the node a viewer needs to see a [hidden](permissions.md#visibility) player, or nil. |
 | `bus.publish`, `bus.request` | `rift.publish(subject, payload, reply?)` returns `{ delivered = n }`; `rift.request(subject, payload, timeout_ms)` waits for a reply. |
 | `bus.subscribe`, `bus.unsubscribe` | `rift.subscribe(subject, [queue,] [fn])` and `rift.unsubscribe(handle)`. |
 | `servers.*` | `rift.servers.*` waits for the control service and returns its decoded reply; `rift.servers.control(operation, payload)` reaches any `rift.control.*` operation. |
 | `timers.*` | `rift.timers.every`, `after`, `cancel`, and `rift.every` for named jobs. |
 | `log.log` | `rift.log(level, message)` (`trace`, `debug`, `info`, `warn`, `error`); `print` logs at `info`. Lines reach the plugin's log tail in `rift admin plugins logs` and the dashboard, and Rift's log when [`RIFT_LOG_LEVEL`](operations.md#log-levels) includes their level: `debug` and `trace` show only at `debug`, which `rift dev` turns on. |
-| `meta.*` | `rift.plugin_name` and `rift.meta` (`{ name, version, data_dir, config_dir }`); `rift.clock()` and `rift.time()`. |
+| `background.*` | `rift.background.defer()`, `resolve(ticket, decision)`, `run(payload, [fn])` and `is_worker()`: see [background work](#background-work). |
+| `meta.*` | `rift.plugin_name` and `rift.meta` (`{ name, version, data_dir, config_dir, api }`, `api` being the contract version of the host, such as `"0.2.0"`); `rift.clock()` and `rift.time()`. |
 | (Lua only) | `rift.http.request(url, options)` takes any `http`/`https` URL instead of an integration name; options are `method`, `body`, `headers` and `timeout_ms` (default 10 s, at most 60 s). Requires `capabilities.network` (default true). |
 | (script only) | `rift.setup`, `rift.plugin` and `rift.config` configure Rift and exist only in `rift.lua`. |
 
 The `status` input lacks `peer_addr`, which the plugin contract does not carry.
 Errors raised by Rift functions reach `pcall` and `rift.try` as message
 strings.
+
+## Background work
+
+One Lua state runs one call at a time, so a slow lookup in `login` delays the
+plugin's `chat` handler past its 50 ms. With `[background]` in the manifest,
+the lookup runs in a worker and the hook answers when it is done
+([how it works](plugins.md#background-work)):
+
+```toml
+# plugin.toml
+[deadlines]
+login = 3000          # the deferred answer still has to come in time
+
+[background]
+workers = 2           # each is its own Lua state running worker.lua
+```
+
+```lua
+-- init.lua
+rift.on("login", function(ctx)
+    local ticket = rift.background.defer()  -- this hook's result is now ignored
+    rift.background.run(ctx.uuid, function(result, err)
+        if err then
+            rift.log("warn", "ban lookup failed: " .. err)
+            rift.background.resolve(ticket, nil)             -- continue
+        elseif result ~= "" then
+            rift.background.resolve(ticket, { deny = result })
+        else
+            rift.background.resolve(ticket, nil)
+        end
+    end)
+end)
+```
+
+```lua
+-- worker.lua: receives the plugin name and configuration like init.lua
+local name, config = ...
+
+rift.on("work", function(uuid)
+    -- This may block: it runs in a worker, not in the plugin.
+    local reply = rift.http.request(config.bans_url .. "/" .. uuid)
+    return reply.status == 200 and reply.body or ""
+end)
+```
+
+- `rift.background.defer()` works once per call in `login`, `initial_server`,
+  `before_transfer`, `chat`, `kick` and a command's `run`, and returns a
+  ticket. `rift.background.resolve(ticket, decision)` takes what the hook
+  would have returned (nil continues) and returns false when nobody waits any
+  more, because the deadline passed.
+- `rift.background.run(payload, fn)` queues a string for a worker and returns
+  a handle. `fn(result, err)` runs in the plugin when the job is done, with
+  one of the two nil. Without `fn`, `rift.on("job_done", fn)` handlers receive
+  `(handle, result, err)`.
+- The worker script handles `rift.on("work", fn)`: `fn(payload)` returns a
+  string (nil is the empty string); a Lua error fails the job, and its
+  message is the `err` of the callback. A job has 30 s unless
+  `deadlines.work` says otherwise.
+- A worker shares nothing with the plugin: no globals, no upvalues, only the
+  strings that go in and out. It has the host API (`rift.store`,
+  `rift.permissions`, `rift.http`, `rift.request`, `rift.log`), but no events,
+  timers, subscriptions or commands, and `rift.background.is_worker()` is
+  true there.
 
 ## The JIT and deadlines
 
@@ -218,7 +286,8 @@ developing.
   there crashes Rift.
 - **Blocking calls block only the plugin.** `rift.request`, `rift.servers.*`,
   `rift.http.request` and store writes wait on the plugin's own thread; other
-  calls to the same plugin queue behind them and may time out.
+  calls to the same plugin queue behind them and may time out. Move slow work
+  into a [background worker](#background-work).
 - **One state, one thread.** Calls never overlap, so plain Lua tables are
   safe; coroutines work but never run in parallel.
 - **Hooks are fixed after `init`.** Register every `rift.on` event and at least

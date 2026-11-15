@@ -64,9 +64,6 @@ impl Drop for StateFile {
 fn v2_schema_rejects_unsupported_versions_and_malformed_jobs() {
     for invalid in [
         "api_version=4",
-        "api_version=1, jobs={}",
-        "api_version=1, storage={path='state.json'}",
-        "api_version=1, integrations={}",
         "api_version=2, typo=true",
         "api_version=2, jobs={tick={every_ms=99,run=function() end}}",
         "api_version=2, jobs={tick={every_ms=86400001,run=function() end}}",
@@ -83,6 +80,9 @@ fn v2_schema_rejects_unsupported_versions_and_malformed_jobs() {
         );
     }
     config("api_version=2, jobs={tick={every_ms=100,run=function() end}}");
+    // Every level, and none, configures the whole API.
+    config("api_version=1, jobs={}, integrations={}, groups={}");
+    config("jobs={tick={every_ms=100,run=function() end}}");
 }
 
 #[test]
@@ -111,8 +111,9 @@ fn loading_configuration_cannot_execute_runtime_side_effects() {
 fn reload_rejects_storage_version_and_capacity_changes_before_opening_new_storage() {
     let old = runtime("api_version=2");
     let state = StateFile::new();
+    // The level a script names is not part of what a reload compares.
+    Extensions::new(&config("api_version=1"), old.broker.clone(), Some(&old)).unwrap();
     for extension in [
-        "api_version=1".to_owned(),
         "api_version=2, queues={game=1}".to_owned(),
         format!("api_version=2, storage={{path={}}}", state.lua_path()),
     ] {
@@ -121,23 +122,25 @@ fn reload_rejects_storage_version_and_capacity_changes_before_opening_new_storag
     }
 }
 
+/// The host API does not depend on the level a script names.
 #[tokio::test]
-async fn v1_callbacks_cannot_access_v2_host_capabilities() {
-    for operation in [
-        "rift.store.set('test','key','value')",
-        "rift.permissions.check('01010101010101010101010101010101','route.game')",
-        "rift.http.request('account',{})",
-        "rift.players.list()",
-    ] {
-        let runtime = runtime(&format!("api_version=1,login=function() {operation} end"));
-        assert!(
+async fn every_api_version_has_the_whole_host_api() {
+    for version in ["api_version=1,", "api_version=2,", "api_version=3,", ""] {
+        let runtime = runtime(&format!(
+            "{version}login=function(ctx)
+                assert(#rift.players.list() == 0)
+                rift.permissions.check(ctx.uuid, 'route.game')
+            end"
+        ));
+        assert_eq!(
             runtime
                 .session(context(1))
                 .unwrap()
                 .decision("login")
                 .await
-                .is_err(),
-            "{operation}"
+                .unwrap(),
+            Action::Continue,
+            "{version}"
         );
     }
 }
@@ -150,7 +153,7 @@ async fn captured_store_functions_preserve_binary_values_across_calls_and_reload
             source(
                 r#"api_version=2,
         login=function(ctx)
-            assert(ctx.api_version == 2)
+            assert(ctx.api_version == 3)
             local count=increment('visits',ctx.uuid,1)
             set('profiles',ctx.uuid,ctx.name..string.char(0,255)..tostring(count))
         end,
@@ -440,7 +443,7 @@ async fn v1_commands_are_authorized_by_the_permission_store() {
     let old = runtime(
         r#"api_version=1,
         commands={game={permission='route.game',run=function(ctx)
-            assert(ctx.api_version==1 and ctx.has_permission('route.game'))
+            assert(ctx.api_version==3 and ctx.has_permission('route.game'))
             return {server='game'}
         end}}"#,
     );
@@ -482,7 +485,7 @@ fn old_source() -> String {
 async fn scheduler_uses_job_context_delays_first_run_and_stops_on_shutdown() {
     let runtime = runtime(
         r#"api_version=2,jobs={tick={every_ms=100,run=function(ctx)
-        assert(ctx.api_version==2 and ctx.job=='tick')
+        assert(ctx.api_version==3 and ctx.job=='tick')
         assert(ctx.uuid==nil and ctx.name==nil and ctx.authenticated==nil and ctx.connection_id==nil)
         local count=rift.store.increment('jobs',ctx.job,1)
         rift.publish('ticks',tostring(count))
@@ -713,7 +716,6 @@ fn startup_and_reload_require_headers_env_variables() {
 #[test]
 fn permission_group_schema_is_validated_and_legacy_grants_rejected() {
     for invalid in [
-        "api_version=1, groups={}",
         "api_version=2, groups={staff=true}",
         "api_version=2, groups={Staff={}}",
         "api_version=2, groups={staff={typo=true}}",
@@ -732,7 +734,6 @@ fn permission_group_schema_is_validated_and_legacy_grants_rejected() {
         "api_version=2, groups={staff={suffix={text='x', typo=1}}}",
         "api_version=2, groups={staff={meta={homes={}}}}",
         "api_version=2, groups={staff={meta={['bad key']='1'}}}",
-        "api_version=2, on_permission_change=function() end",
         "api_version=3, on_permission_change=true",
         "api_version=3, context_providers={server=function() end}",
         "api_version=3, context_providers={region=true}",
@@ -1163,7 +1164,7 @@ fn player_filters_and_transfers_accept_service_groups() {
 }
 
 #[tokio::test]
-async fn message_and_http_handlers_reach_players_only_with_api_v2() {
+async fn message_and_http_handlers_reach_players_at_every_api_version() {
     for version in [1, 2] {
         let config = Config::from_lua(
             &format!(
@@ -1203,20 +1204,11 @@ async fn message_and_http_handlers_reach_players_only_with_api_v2() {
         broker
             .publish("chat", bytes::Bytes::from_static(b"cross-server"))
             .unwrap();
-        if version == 2 {
-            assert_eq!(response.unwrap().unwrap().body, "1");
-            assert_eq!(
-                timeout(Duration::from_secs(2), alice.recv()).await.unwrap(),
-                Some(PlayerAction::Message("cross-server".into()))
-            );
-        } else {
-            assert!(response.unwrap_err().to_string().contains("on_http"));
-            assert!(
-                timeout(Duration::from_millis(200), alice.recv())
-                    .await
-                    .is_err()
-            );
-        }
+        assert_eq!(response.unwrap().unwrap().body, "1");
+        assert_eq!(
+            timeout(Duration::from_secs(2), alice.recv()).await.unwrap(),
+            Some(PlayerAction::Message("cross-server".into()))
+        );
         worker.abort();
     }
 }
@@ -1450,7 +1442,7 @@ async fn players_api_shows_dialogs_and_the_script_receives_clicks() {
 }
 
 #[tokio::test]
-async fn invalid_dialogs_fail_the_callback_and_dialog_handlers_need_api_v2() {
+async fn invalid_dialogs_fail_the_callback_and_dialog_handlers_register() {
     let runtime = runtime(
         r#"api_version=2, login=function(ctx)
         require('rift.players').dialog('Alice', { type = 'notice', title = 'x', after_action = 'none' })
@@ -1466,18 +1458,12 @@ async fn invalid_dialogs_fail_the_callback_and_dialog_handlers_need_api_v2() {
     assert!(error.to_string().contains("pauses the game"), "{error}");
     assert!(drain(&mut alice).is_empty());
 
-    let error = Config::from_lua(
+    // A dialog handler needs no particular level.
+    Config::from_lua(
         &source("api_version=1, dialog=function(ctx) end"),
         "dialog-v1.lua",
     )
-    .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("extensions.dialog requires api_version = 2"),
-        "{error}"
-    );
-    // rift.on("dialog") implies API v2, like rift.every.
+    .unwrap();
     let config = Config::from_lua(
         "rift.setup({ listeners = { public = '127.0.0.1:0' }, backends = { lobby = '127.0.0.1:25001' }, routes = { public = 'lobby' }, authentication = { online_mode = true }, forwarding = { mode = 'velocity', secret_env = 'TEST_SECRET' } })
         for _, event in ipairs({ 'join', 'login', 'disconnect', 'after_transfer' }) do rift.on(event, function(ctx) end) end

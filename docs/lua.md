@@ -157,7 +157,6 @@ end)
 
 -- Requires online authentication, forwarding and a permission grant.
 rift.config.extensions = {
-    api_version = 2,
     groups = { default = { permissions = { ["greeting.hello"] = true } } },
 }
 rift.command("hello", {
@@ -166,8 +165,7 @@ rift.command("hello", {
 })
 ```
 
-Authenticated event and command registration creates `extensions` and defaults
-its `api_version` to 1 when absent. Explicit versions are still validated.
+Authenticated event and command registration creates `extensions` when absent.
 `rift.command(name, definition)` uses the existing command schema and permission
 checks, including `permission = ""` for a command open to every player. Duplicate names, including collisions with `extensions.commands`, fail
 validation. Settings and registrations belong in initialization, outside runtime
@@ -221,9 +219,9 @@ run for unbounded time outside the instruction budget) and `table.sort`.
   `to_legacy`, `plain`, `to_mini` and `escape` convert text. See
   [styled text](text.md).
 - `rift.publish`, `rift.enabled` and `rift.servers` (callbacks only),
-  `rift.store`, `rift.http` and `rift.players` (API v2 and v3 extension
+  `rift.store`, `rift.http` and `rift.players` (extension
   callbacks; `rift.players` also in `on_message` and `on_http`), and
-  `rift.permissions` (API v3 extension callbacks; its `on_change` and
+  `rift.permissions` (extension callbacks; its `on_change` and
   `contexts.provide` registrations run during configuration, see
   [permissions](permissions.md#lua-api)).
 
@@ -245,9 +243,8 @@ Each callback builds a fresh VM from that immutable snapshot. Even a `require`
 inside a callback uses the saved file contents; it never reads live files.
 Modules, globals and upvalues do not persist between callbacks. A successful
 reload captures edited modules and plugins even when `rift.lua` did not change.
-Existing player sessions retain their original code. API v1 also pins permissions;
-API v2 supports live grants, durable state, jobs, HTTP integrations and online
-player actions as described
+Existing player sessions retain their original code. Live grants, durable
+state, jobs, HTTP integrations and online player actions are described
 in the [plugin event API](extensions.md). A failed reload preserves the active
 configuration.
 

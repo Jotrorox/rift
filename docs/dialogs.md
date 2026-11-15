@@ -12,9 +12,9 @@ Every plugin mode can do it:
 
 | Mode | Show | Close | Receive clicks |
 | --- | --- | --- | --- |
-| `rift.lua` (API v2+) | `rift.players.dialog(player, dialog)` | `rift.players.clear_dialog(player)` | `rift.on("dialog", fn)` or `extensions.dialog` |
+| `rift.lua` | `rift.players.dialog(player, dialog)` | `rift.players.clear_dialog(player)` | `rift.on("dialog", fn)` or `extensions.dialog` |
 | Persistent Lua | `rift.players.dialog(player, dialog)` | `rift.players.clear_dialog(player)` | `rift.on("dialog", fn)` |
-| WebAssembly | `players.dialog(target, dialog-json)` | `players.clear-dialog(target)` | the `dialogs` export ([Rust](plugins-rust.md), [C](plugins-c.md), [Go](plugins-go.md)) |
+| WebAssembly | `players.dialog(target, dialog-json)` | `players.clear-dialog(target)` | the `dialog` hook of `handler` ([Rust](plugins-rust.md), [C](plugins-c.md), [Go](plugins-go.md)) |
 
 `dialog` is a table (Lua) or JSON text in the vanilla dialog format, the one
 data packs use in `data/<namespace>/dialog/*.json` (see the

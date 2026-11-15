@@ -10,7 +10,6 @@ end)
 -- Authenticated commands use the same module. Enable online authentication in
 -- lua/config/network.lua before enabling this registration and permission grant:
 -- rift.config.extensions = {
---     api_version = 3,
 --     groups = { default = { permissions = { ["greeting.hello"] = true } } },
 -- }
 -- rift.command("hello", {

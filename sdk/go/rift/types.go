@@ -1,15 +1,14 @@
 package rift
 
 import (
-	"strings"
-
 	"go.bytecodealliance.org/cm"
 
 	"github.com/Jotrorox/rift/sdk/go/gen/rift/plugin/types"
 )
 
 // Hook names an event a plugin receives. List the hooks a plugin implements
-// in Registration.Hooks.
+// in Registration.Hooks. HookChat and HookKick are never implied by an empty
+// list.
 type Hook = types.Hook
 
 const (
@@ -27,6 +26,8 @@ const (
 	HookMessage        = types.HookMessage
 	HookTimer          = types.HookTimer
 	HookEvent          = types.HookEvent
+	HookChat           = types.HookChat
+	HookKick           = types.HookKick
 )
 
 // Level is a log severity.
@@ -55,10 +56,17 @@ type Context struct {
 	Target        *string // before-transfer, after-transfer: the destination
 	Reason        *string // before-transfer: why; disconnect: why the session closed
 	Success       *bool   // after-transfer: whether the transfer completed
-	Command       *string // command, suggest: the command name
-	Args          string  // command, suggest: the text after the command name
+	Command       *string // command, suggest, and chat for a command: the command name
+	Args          string  // the text after the command name
 	Word          string  // suggest: the argument being completed
 	Position      uint32  // suggest: its 1-based position
+	// Language is the language set for the player with SetLanguage, known
+	// from login on, else the client's locale once it is known.
+	Language *string
+	// Console is true when the operator console runs the command (command,
+	// suggest): ConnectionID is 0, UUID is empty and Name is "CONSOLE". Only
+	// commands registered with CommandSpec.Console get here.
+	Console bool
 }
 
 // Connection is the metadata available right after TCP accept.
@@ -101,153 +109,65 @@ func (d RouteDecision) lower() types.RouteDecision {
 	}
 }
 
-// Action answers a decision hook. Each hook accepts a subset:
-//   - login, before-transfer: Continue, Deny, DenyJSON
-//   - initial-server: Continue, Deny, DenyJSON, Server
-//   - command: Continue, Message, MessageJSON, Server, Queue, LeaveQueue
-//   - chat (package chat): Continue, Deny, DenyJSON
-type Action struct {
+// Decision answers a decision hook. Each hook accepts a subset:
+//   - login, before-transfer, chat: Continue, Deny
+//   - initial-server, kick: Continue, Deny, Server
+//   - command: Continue, Message, Server, Queue, LeaveQueue
+type Decision struct {
 	kind  uint8
 	value string
+	text  Text
 }
 
 const (
-	actionContinue uint8 = iota
-	actionDeny
-	actionServer
-	actionMessage
-	actionQueue
-	actionLeaveQueue
-	actionDenyJSON
-	actionMessageJSON
+	decisionContinue uint8 = iota
+	decisionDeny
+	decisionServer
+	decisionMessage
+	decisionQueue
+	decisionLeaveQueue
 )
 
 // Continue lets the event proceed unchanged.
-func Continue() Action { return Action{kind: actionContinue} }
+func Continue() Decision { return Decision{kind: decisionContinue} }
 
-// Deny refuses the login or transfer with a reason shown to the player.
-func Deny(reason string) Action { return Action{kind: actionDeny, value: reason} }
-
-// DenyJSON refuses the login or transfer with a JSON text component of at
-// most 32 KiB, for colours, line breaks and hover text.
-func DenyJSON(reason string) Action { return Action{kind: actionDenyJSON, value: reason} }
+// Deny refuses the login or transfer, drops the chat message or disconnects
+// the kicked player, with a reason shown to the player.
+func Deny(reason Text) Decision { return Decision{kind: decisionDeny, text: reason} }
 
 // Server sends the player to a server.
-func Server(name string) Action { return Action{kind: actionServer, value: name} }
+func Server(name string) Decision { return Decision{kind: decisionServer, value: name} }
 
 // Message replies to a command with a chat message.
-func Message(text string) Action { return Action{kind: actionMessage, value: text} }
-
-// MessageJSON replies to a command with a JSON text component of at most
-// 32 KiB, for colours, hover text and click events.
-func MessageJSON(text string) Action { return Action{kind: actionMessageJSON, value: text} }
+func Message(text Text) Decision { return Decision{kind: decisionMessage, text: text} }
 
 // Queue puts the player into a server's queue.
-func Queue(server string) Action { return Action{kind: actionQueue, value: server} }
+func Queue(server string) Decision { return Decision{kind: decisionQueue, value: server} }
 
 // LeaveQueue removes the player from their queue.
-func LeaveQueue() Action { return Action{kind: actionLeaveQueue} }
+func LeaveQueue() Decision { return Decision{kind: decisionLeaveQueue} }
 
-func (a Action) lower() types.Action {
-	switch a.kind {
-	case actionDeny:
-		return types.ActionDeny(a.value)
-	case actionServer:
-		return types.ActionServer(a.value)
-	case actionMessage:
-		return types.ActionMessage(a.value)
-	case actionQueue:
-		return types.ActionQueue(a.value)
-	case actionLeaveQueue:
-		return types.ActionLeaveQueue()
-	// Hosts before rift:plugin 0.1.2 call the handler hooks and have no
-	// rich text: they get the component's words.
-	case actionDenyJSON:
-		return types.ActionDeny(componentWords(a.value))
-	case actionMessageJSON:
-		return types.ActionMessage(componentWords(a.value))
-	default:
-		return types.ActionContinue()
-	}
-}
-
-// lowerDecision is the answer of the decisions export (rift:plugin 0.1.2).
-func (a Action) lowerDecision() types.Decision {
-	switch a.kind {
-	case actionDeny:
-		return types.DecisionDeny(a.value)
-	case actionServer:
-		return types.DecisionServer(a.value)
-	case actionMessage:
-		return types.DecisionMessage(a.value)
-	case actionQueue:
-		return types.DecisionQueue(a.value)
-	case actionLeaveQueue:
+func (d Decision) lower() types.Decision {
+	switch d.kind {
+	case decisionDeny:
+		return types.DecisionDeny(d.text.lower())
+	case decisionServer:
+		return types.DecisionServer(d.value)
+	case decisionMessage:
+		return types.DecisionMessage(d.text.lower())
+	case decisionQueue:
+		return types.DecisionQueue(d.value)
+	case decisionLeaveQueue:
 		return types.DecisionLeaveQueue()
-	case actionDenyJSON:
-		return types.DecisionDenyJSON(a.value)
-	case actionMessageJSON:
-		return types.DecisionMessageJSON(a.value)
 	default:
 		return types.DecisionContinue()
 	}
 }
 
-// Decision is the action as the contract's decision variant. It is for
-// package chat, which answers the chat export with it; plugins return
-// Actions.
-func (a Action) Decision() types.Decision { return a.lowerDecision() }
-
-// componentWords is the visible text of a JSON text component, without
-// formatting; text that is not a valid component is returned as it is. It
-// uses the configuration scanner rather than encoding/json, which would add
-// hundreds of kilobytes to every plugin.
-func componentWords(text string) string {
-	p := &jsonScanner{s: text}
-	var out strings.Builder
-	if !p.words(&out, 0) {
-		return text
-	}
-	p.ws()
-	if p.i != len(p.s) {
-		return text
-	}
-	return out.String()
-}
-
 // Suggestion is one completion offered by the suggest hook.
 type Suggestion struct {
 	Text    string
-	Tooltip *string
-}
-
-// RichSuggestion is a Suggestion whose tooltip is a JSON text component
-// (rift:plugin 0.1.4), offered by an OnRichSuggest handler. Use a text
-// builder: TooltipJSON: rift.Ptr(rift.Mini("<gray>A server").JSON()).
-type RichSuggestion struct {
-	Text        string
-	TooltipJSON *string // nil or "" for no tooltip
-}
-
-func (s Suggestion) rich() RichSuggestion {
-	out := RichSuggestion{Text: s.Text}
-	if s.Tooltip != nil {
-		quoted := jsonQuote(*s.Tooltip)
-		out.TooltipJSON = &quoted
-	}
-	return out
-}
-
-// plain is the suggestion for a host before rift:plugin 0.1.4: the
-// tooltip's words.
-func (s RichSuggestion) plain() Suggestion {
-	out := Suggestion{Text: s.Text}
-	if s.TooltipJSON != nil {
-		if words := componentWords(*s.TooltipJSON); words != "" {
-			out.Tooltip = &words
-		}
-	}
-	return out
+	Tooltip Text // the zero Text for no tooltip
 }
 
 // SuggestKind says how a command's arguments are completed.
@@ -288,22 +208,33 @@ func (s SuggestKind) lower() types.SuggestKind {
 
 // CommandSpec registers a proxy command.
 type CommandSpec struct {
-	Name       string // 1..=64 bytes of a-z0-9_-; "server" and "hub" are reserved
-	Permission string // the node a player needs to see and run the command; empty (since 0.1.5) for every player
+	Name string // 1..=64 bytes of a-z0-9_-; "server" and "hub" are reserved
+	// Aliases are other names for the command, each like Name, at most 16.
+	// The hooks always see Name in Context.Command.
+	Aliases    []string
+	Permission string // the node a player needs to see and run the command; empty for every player
 	Suggest    SuggestKind
+	// Console lets operators run the command from the console (rift admin
+	// plugins run); the hook then sees Context.Console.
+	Console bool
 }
 
 // Registration is what the init hook returns.
 type Registration struct {
 	Commands []CommandSpec
-	// Hooks to deliver. An empty list delivers every hook.
+	// Hooks to deliver. An empty list delivers every hook except HookChat
+	// and HookKick; nil lets the SDK list the hooks that have a handler. The
+	// dialog and job-done handlers need no entry.
 	Hooks []Hook
 }
 
 func (r Registration) lower() types.Registration {
 	commands := make([]types.CommandSpec, len(r.Commands))
 	for i, c := range r.Commands {
-		commands[i] = types.CommandSpec{Name: c.Name, Permission: c.Permission, Suggest: c.Suggest.lower()}
+		commands[i] = types.CommandSpec{
+			Name: c.Name, Aliases: cm.ToList(c.Aliases), Permission: c.Permission,
+			Suggest: c.Suggest.lower(), Console: c.Console,
+		}
 	}
 	return types.Registration{Commands: cm.ToList(commands), Hooks: cm.ToList(r.Hooks)}
 }
@@ -320,105 +251,46 @@ type Ping struct {
 	MaxPlayers  uint64
 }
 
-// StatusOverride replaces fields of one ping response; nil fields keep the
-// configured value.
+// StatusOverride replaces fields of one ping response; nil fields and zero
+// Texts keep the configured value. Clients show the version and the sample
+// lines as § codes.
 type StatusOverride struct {
-	MotdJSON   *string // a JSON text component or a JSON string
-	Version    *string
+	Motd       Text
+	Version    Text
 	Protocol   *int32
 	Online     *uint32
 	MaxPlayers *uint32
-	Sample     []string // nil keeps the sample; use an empty slice to clear it
-	Favicon    *string  // a data:image/png;base64,... URI
-}
-
-// RichStatusOverride is a StatusOverride whose version and player-sample
-// lines are JSON text components (rift:plugin 0.1.4), returned by an
-// OnRichStatus handler. Clients show them as § codes.
-type RichStatusOverride struct {
-	MotdJSON    *string // a JSON text component or a JSON string
-	VersionJSON *string
-	Protocol    *int32
-	Online      *uint32
-	MaxPlayers  *uint32
-	SampleJSON  []string // nil keeps the sample; use an empty slice to clear it
-	Favicon     *string  // a data:image/png;base64,... URI
-}
-
-func (s StatusOverride) rich() RichStatusOverride {
-	out := RichStatusOverride{
-		MotdJSON: s.MotdJSON, Protocol: s.Protocol, Online: s.Online, MaxPlayers: s.MaxPlayers, Favicon: s.Favicon,
-	}
-	if s.Version != nil {
-		quoted := jsonQuote(*s.Version)
-		out.VersionJSON = &quoted
-	}
-	if s.Sample != nil {
-		out.SampleJSON = make([]string, len(s.Sample))
-		for i, line := range s.Sample {
-			out.SampleJSON[i] = jsonQuote(line)
-		}
-	}
-	return out
-}
-
-// plain is the override for a host before rift:plugin 0.1.4: the words of
-// the version and sample lines.
-func (s RichStatusOverride) plain() StatusOverride {
-	out := StatusOverride{
-		MotdJSON: s.MotdJSON, Protocol: s.Protocol, Online: s.Online, MaxPlayers: s.MaxPlayers, Favicon: s.Favicon,
-	}
-	if s.VersionJSON != nil {
-		words := componentWords(*s.VersionJSON)
-		out.Version = &words
-	}
-	if s.SampleJSON != nil {
-		out.Sample = make([]string, len(s.SampleJSON))
-		for i, line := range s.SampleJSON {
-			out.Sample[i] = componentWords(line)
-		}
-	}
-	return out
-}
-
-func (s RichStatusOverride) lower() types.RichStatusOverride {
-	out := types.RichStatusOverride{
-		MotdJSON:    lowerOptString(s.MotdJSON),
-		VersionJSON: lowerOptString(s.VersionJSON),
-		Protocol:    lowerOpt(s.Protocol),
-		Online:      lowerOpt(s.Online),
-		MaxPlayers:  lowerOpt(s.MaxPlayers),
-		Favicon:     lowerOptString(s.Favicon),
-	}
-	if s.SampleJSON != nil {
-		out.SampleJSON = cm.Some(cm.ToList(s.SampleJSON))
-	}
-	return out
+	Sample     []Text  // nil keeps the sample; use an empty slice to clear it
+	Favicon    *string // a data:image/png;base64,... URI
 }
 
 func (s StatusOverride) lower() types.StatusOverride {
 	out := types.StatusOverride{
-		MotdJSON:   lowerOptString(s.MotdJSON),
-		Version:    lowerOptString(s.Version),
+		Motd:       s.Motd.lowerOpt(),
+		Version:    s.Version.lowerOpt(),
 		Protocol:   lowerOpt(s.Protocol),
 		Online:     lowerOpt(s.Online),
 		MaxPlayers: lowerOpt(s.MaxPlayers),
 		Favicon:    lowerOptString(s.Favicon),
 	}
 	if s.Sample != nil {
-		out.Sample = cm.Some(cm.ToList(s.Sample))
+		sample := make([]types.Text, len(s.Sample))
+		for i, line := range s.Sample {
+			sample[i] = line.lower()
+		}
+		out.Sample = cm.Some(cm.ToList(sample))
 	}
 	return out
 }
 
-// HTTPRequest is an authenticated request to /api/script/* on the web server.
+// HTTPRequest is an authenticated request to /ext or /ext/* on the web server.
 type HTTPRequest struct {
 	Method      string
 	Path        string
 	Query       string
 	Body        string
 	Headers     [][2]string
-	ContextJSON string // the authenticated principal and scopes, as a JSON object
+	ContextJSON string // the status object plus "operator", the authenticated caller, as a JSON object
 }
 
 // HTTPResponse answers an HTTPRequest.
@@ -462,8 +334,7 @@ const (
 )
 
 // ChatAttempt is a chat message or backend command a player sent, before
-// the backend sees it: the input of the chat hook (package chat,
-// rift:plugin 0.1.5).
+// the backend sees it: the input of the OnChat handler.
 type ChatAttempt struct {
 	// Ctx is the player; Server is their current backend. For a command,
 	// Command is the root name and Args the rest.
@@ -473,15 +344,18 @@ type ChatAttempt struct {
 	Text string
 }
 
-// LiftChatAttempt converts the generated record. It is for package chat.
-func LiftChatAttempt(a types.ChatAttempt) ChatAttempt {
-	return ChatAttempt{Ctx: liftContext(a.Ctx), Kind: a.Kind, Text: a.Text}
-}
-
 // Event mirrors a rift.events.* publication.
 type Event struct {
 	Subject     string // for example rift.events.players
 	PayloadJSON string // the event body as a JSON object
+}
+
+// ProfileProperty is one property of a player's profile, as the session
+// server signed it.
+type ProfileProperty struct {
+	Name      string // for example "textures", the skin and cape
+	Value     string
+	Signature *string
 }
 
 // PlayerInfo is a joined player in the process-wide directory.
@@ -491,23 +365,39 @@ type PlayerInfo struct {
 	Name         string
 	Server       string // the backend the player is connected to
 	Protocol     int32
+	IP           string // the address the player connected from, without the port
+	Properties   []ProfileProperty
+	// VisibleTo is the permission node a viewer needs to see the player (their
+	// rift.visible-to meta), or nil when everyone sees them. Players and
+	// Player return hidden players too.
+	VisibleTo *string
+	// Locale is the language the player's client reported, as the client
+	// spells it ("en_us"), or nil while Rift does not know it: the client
+	// sends it after login.
+	Locale *string
+	// Language is the language Rift's own messages use for the player: the
+	// one set with SetLanguage, else Locale.
+	Language *string
 }
 
-// TitleJSON is a title with JSON text components (rift:plugin 0.1.4), shown
-// with SendTitleJSON; times are ticks. An empty TitleJSON shows only the
-// subtitle.
-type TitleJSON struct {
-	TitleJSON    string
-	SubtitleJSON *string
-	FadeIn       int32
-	Stay         int32
-	FadeOut      int32
+// PlayerRecord is what Rift remembers about a player who joined at least
+// once, online or not.
+type PlayerRecord struct {
+	UUID       string
+	Name       string // the name the player last joined with
+	FirstSeen  uint64 // Unix seconds
+	LastSeen   uint64 // Unix seconds: the last join or quit
+	LastIP     string // empty when players.record_ip is off
+	LastServer string
+	Online     bool
+	Language   *string // the language set with SetLanguage, if any
 }
 
-// Title is a title shown to one player; times are ticks.
+// Title is a title shown to one player; times are ticks. Set at least one of
+// Title and Subtitle; without Title only the subtitle is shown.
 type Title struct {
-	Title    string
-	Subtitle *string
+	Title    Text
+	Subtitle Text
 	FadeIn   int32
 	Stay     int32
 	FadeOut  int32
@@ -515,13 +405,17 @@ type Title struct {
 
 // BossBar is a boss bar shown to one player.
 type BossBar struct {
-	TextJSON  string  // a plain string or a JSON text component
+	Text      Text
 	Progress  float32 // 0.0 to 1.0
 	Color     string  // pink, blue, red, green, yellow, purple or white
 	Style     string  // progress, notched_6, notched_10, notched_12 or notched_20
 	DarkenSky bool
 	PlayMusic bool
 	CreateFog bool
+}
+
+func liftChatAttempt(a types.ChatAttempt) ChatAttempt {
+	return ChatAttempt{Ctx: liftContext(a.Ctx), Kind: a.Kind, Text: a.Text}
 }
 
 func liftDialogResponse(r types.DialogResponse) DialogResponse {
@@ -551,6 +445,8 @@ func liftContext(c types.Context) Context {
 		Args:          c.Args,
 		Word:          c.Word,
 		Position:      c.Position,
+		Language:      liftOpt(c.Language),
+		Console:       c.Console,
 	}
 }
 
@@ -596,7 +492,22 @@ func liftBusMessage(m types.BusMessage) BusMessage {
 }
 
 func liftPlayerInfo(p types.PlayerInfo) PlayerInfo {
-	return PlayerInfo{ConnectionID: p.ConnectionID, UUID: p.UUID, Name: p.Name, Server: p.Server, Protocol: p.Protocol}
+	properties := make([]ProfileProperty, 0, p.Properties.Len())
+	for _, prop := range p.Properties.Slice() {
+		properties = append(properties, ProfileProperty{Name: prop.Name, Value: prop.Value, Signature: liftOpt(prop.Signature)})
+	}
+	return PlayerInfo{
+		ConnectionID: p.ConnectionID, UUID: p.UUID, Name: p.Name, Server: p.Server, Protocol: p.Protocol,
+		IP: p.IP, Properties: properties,
+		VisibleTo: liftOpt(p.VisibleTo), Locale: liftOpt(p.Locale), Language: liftOpt(p.Language),
+	}
+}
+
+func liftPlayerRecord(r types.PlayerRecord) PlayerRecord {
+	return PlayerRecord{
+		UUID: r.UUID, Name: r.Name, FirstSeen: r.FirstSeen, LastSeen: r.LastSeen,
+		LastIP: r.LastIP, LastServer: r.LastServer, Online: r.Online, Language: liftOpt(r.Language),
+	}
 }
 
 func liftOpt[T any](o cm.Option[T]) *T {

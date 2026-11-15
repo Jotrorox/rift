@@ -2,7 +2,7 @@
 # hello.c for the behaviour); the build writes hello_c.wasm next to this file.
 name = "hello-c"
 version = "0.1.0"
-api = "0.1"
+api = "0.2"
 mode = "persistent"
 engine = "wasm"
 entry = "hello_c.wasm"

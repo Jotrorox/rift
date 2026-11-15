@@ -68,7 +68,7 @@ pub(crate) trait Fixture: Sync {
 
     /// Write the conformance guest into `folder` (`<root>/plugins/<name>`,
     /// already created): a `plugin.toml` with `name`, `version = "1"`,
-    /// `api = "0.1"`, this engine and its entry, then `extra` verbatim (TOML
+    /// `api = "0.2"`, this engine and its entry, then `extra` verbatim (TOML
     /// top-level keys such as `hot_reload` and `[deadlines]`/`[failure]`
     /// tables), then any tables of the engine's own, and the guest itself.
     fn install(&self, folder: &Path, name: &str, extra: &str);
@@ -631,8 +631,10 @@ pub(crate) async fn commands_check_permissions(fixture: &dyn Fixture) {
         registration.commands,
         [CommandSpec {
             name: "hello".into(),
+            aliases: Vec::new(),
             permission: "test.command".into(),
             suggest: SuggestKind::Fixed(vec!["alpha".into(), "beta".into()]),
+            console: false,
         }]
     );
     let player = session(&runtime, 1);
@@ -1100,8 +1102,10 @@ pub(crate) async fn hello_example(engines: Engines, example: &Path) {
         registration.commands,
         [CommandSpec {
             name: "hello".into(),
+            aliases: Vec::new(),
             permission: "hello.use".into(),
             suggest: SuggestKind::Players,
+            console: false,
         }]
     );
     assert_eq!(

@@ -36,12 +36,12 @@ the minor version carries the compatibility promise:
 | --- | --- | --- |
 | Lua configuration (`rift.lua`) and `extensions` hooks | `extensions.api_version` | A configuration that passes `rift check` on one release passes on later patch releases with the same behaviour. |
 | Command line and `rift admin` | Rift's version | Commands, flags and exit codes are kept. Human-readable output is not an interface; use the JSON forms in scripts. |
-| Plugin contract | `rift:plugin@0.1.x` and `api = "0.1"` in `plugin.toml` | Additive on the `0.1` track: a component built against any `0.1` version loads on every later one. See [plugins](plugins.md). |
+| Plugin contract | `rift:plugin@0.2.x` and `api = "0.2"` in `plugin.toml` | Additive on the `0.2` track: a component built against any `0.2` version loads on every later one. See [plugins](plugins.md). |
 | Messaging protocol | 1 | Additive within a protocol version. See the [messaging protocol](messaging-protocol.md). |
 | Permissions protocol | 1 | Additive within a protocol version. See the [permissions protocol](permissions-protocol.md#versioning). |
 | HTTP API | Rift's version | Documented endpoints and fields are kept; fields may be added. See [HTTP](http.md). |
 | Java artifacts (`io.github.jotrorox.rift`) | Rift's version | Source and binary compatible across patch releases. |
-| Rust, Go and C SDKs | The plugin contract version they implement | Source compatible on the `0.1` track. |
+| Rust, Go and C SDKs | The plugin contract version they implement | Source compatible on the `0.2` track. |
 
 Not covered: log text, the dashboard's markup, metric label order, the layout
 of files under `local/` and `temp/`, internal Rust APIs of the `rift` crate,

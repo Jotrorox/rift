@@ -6,7 +6,7 @@ import (
 	"go.bytecodealliance.org/cm"
 )
 
-// Exports represents the caller-defined exports from "rift:plugin/handler@0.1.5".
+// Exports represents the caller-defined exports from "rift:plugin/handler@0.2.0".
 var Exports struct {
 	// Init represents the caller-defined, exported function "init".
 	//
@@ -35,23 +35,23 @@ var Exports struct {
 
 	// Login represents the caller-defined, exported function "login".
 	//
-	//	login: func(ctx: context) -> action
-	Login func(ctx Context) (result Action)
+	//	login: func(ctx: context) -> decision
+	Login func(ctx Context) (result Decision)
 
 	// InitialServer represents the caller-defined, exported function "initial-server".
 	//
-	//	initial-server: func(ctx: context) -> action
-	InitialServer func(ctx Context) (result Action)
+	//	initial-server: func(ctx: context) -> decision
+	InitialServer func(ctx Context) (result Decision)
 
 	// BeforeTransfer represents the caller-defined, exported function "before-transfer".
 	//
-	//	before-transfer: func(ctx: context) -> action
-	BeforeTransfer func(ctx Context) (result Action)
+	//	before-transfer: func(ctx: context) -> decision
+	BeforeTransfer func(ctx Context) (result Decision)
 
 	// Command represents the caller-defined, exported function "command".
 	//
-	//	command: func(ctx: context) -> action
-	Command func(ctx Context) (result Action)
+	//	command: func(ctx: context) -> decision
+	Command func(ctx Context) (result Decision)
 
 	// Suggest represents the caller-defined, exported function "suggest".
 	//
@@ -67,6 +67,31 @@ var Exports struct {
 	//
 	//	http: func(request: http-request) -> option<http-response>
 	HTTP func(request HTTPRequest) (result cm.Option[HTTPResponse])
+
+	// Chat represents the caller-defined, exported function "chat".
+	//
+	// A chat message or a backend command before the backend sees it, for
+	// mutes and filters; only for a registration that lists `chat`.
+	// `continue` passes the packet on unchanged; `deny` drops it and shows
+	// the player the text. Withholding one signed message breaks a player's
+	// signature chain, so unless the proxy sets
+	// `authentication.signed_chat = false`, the first deny costs that player
+	// their chat signing until they reconnect. Commands that Rift or a
+	// plugin owns never come here. The deadline is 50 ms unless the manifest
+	// sets `deadlines.chat`.
+	//
+	//	chat: func(attempt: chat-attempt) -> decision
+	Chat func(attempt ChatAttempt) (result Decision)
+
+	// Kick represents the caller-defined, exported function "kick".
+	//
+	// A backend kicked a player in play; only for a registration that lists
+	// `kick`. `ctx.server` is the backend and `ctx.reason` its reason
+	// without formatting. `continue` leaves it to `network.on_kick`, `deny`
+	// disconnects the player with the text, `server` moves them there.
+	//
+	//	kick: func(ctx: context) -> decision
+	Kick func(ctx Context) (result Decision)
 
 	// Join represents the caller-defined, exported function "join".
 	//
@@ -97,4 +122,38 @@ var Exports struct {
 	//
 	//	event: func(event: rift-event)
 	Event func(event RiftEvent)
+
+	// Dialog represents the caller-defined, exported function "dialog".
+	//
+	// A player clicked a plugin action of a dialog this plugin showed.
+	//
+	//	dialog: func(response: dialog-response)
+	Dialog func(response DialogResponse)
+
+	// JobDone represents the caller-defined, exported function "job-done".
+	//
+	// A job started with `background.run` finished: what `work` returned,
+	// or why it failed.
+	//
+	//	job-done: func(handle: u64, outcome: result<list<u8>, string>)
+	JobDone func(handle uint64, outcome cm.Result[cm.List[uint8], cm.List[uint8], string])
+
+	// WorkInit represents the caller-defined, exported function "work-init".
+	//
+	// Background workers only (manifest `[background] workers`): each is
+	// its own instance of the component with its own memory, and receives
+	// no hooks and makes no registration. `work-init` runs once per worker
+	// before its first job, with the plugin's configuration.
+	//
+	//	work-init: func(config-json: string) -> result<_, string>
+	WorkInit func(configJSON string) (result cm.Result[string, struct{}, string])
+
+	// Work represents the caller-defined, exported function "work".
+	//
+	// One job queued with `background.run`, on a worker. It may block: the
+	// plugin's hooks keep running meanwhile. The limit is 30 s unless the
+	// manifest sets `deadlines.work`.
+	//
+	//	work: func(payload: list<u8>) -> result<list<u8>, string>
+	Work func(payload cm.List[uint8]) (result cm.Result[cm.List[uint8], cm.List[uint8], string])
 }

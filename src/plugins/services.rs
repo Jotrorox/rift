@@ -8,7 +8,7 @@
 //! called from an async task.
 use super::{
     PluginSpec,
-    api::{BossBarSpec, BusMessage, Event, Level, PlayerInfo, TitleSpec},
+    api::{BossBarSpec, BusMessage, Event, Level, PlayerInfo, PlayerRecord, Reply, TitleSpec},
     manifest::Filesystem,
     worker::{Queue, Shared},
 };
@@ -44,6 +44,8 @@ const STORE_WAIT: Duration = Duration::from_secs(5);
 /// How long `servers.*` waits for the control service's reply.
 const CONTROL_WAIT: Duration = Duration::from_secs(60);
 const MAX_LOG: usize = 4096;
+/// One background job's payload, and its result.
+pub(crate) const MAX_JOB_BYTES: usize = 4 * 1024 * 1024;
 
 /// What every instance shares: the process-wide directory, store,
 /// permissions and bus. Lives across reload generations.
@@ -76,10 +78,14 @@ struct Inner {
     queue: Queue,
     handle: tokio::runtime::Handle,
     shared: Arc<Shared>,
-    next: AtomicU64,
+    next: Arc<AtomicU64>,
     tasks: Mutex<BTreeMap<u64, Task>>,
-    closed: AtomicBool,
+    /// Shared with the instance's background workers: they stop with it.
+    closed: Arc<AtomicBool>,
     dropped: AtomicU64,
+    /// A background worker: no hooks, timers, subscriptions or jobs of its
+    /// own.
+    worker: bool,
 }
 
 impl Drop for Inner {
@@ -109,11 +115,40 @@ impl Services {
             queue,
             handle,
             shared,
-            next: AtomicU64::new(1),
+            next: Arc::new(AtomicU64::new(1)),
             tasks: Mutex::default(),
-            closed: AtomicBool::new(false),
+            closed: Arc::default(),
             dropped: AtomicU64::new(0),
+            worker: false,
         }))
+    }
+
+    /// The host API of one of this instance's background workers: the same
+    /// plugin, stopped together with the instance, without anything that
+    /// would deliver events to the worker.
+    pub(crate) fn worker(&self) -> Self {
+        Self(Arc::new(Inner {
+            spec: self.0.spec.clone(),
+            base: self.0.base.clone(),
+            queue: self.0.queue.clone(),
+            handle: self.0.handle.clone(),
+            shared: self.0.shared.clone(),
+            next: self.0.next.clone(),
+            tasks: Mutex::default(),
+            closed: self.0.closed.clone(),
+            dropped: AtomicU64::new(0),
+            worker: true,
+        }))
+    }
+
+    /// Whether this is the host API of a background worker
+    /// (`background.is-worker`).
+    pub fn is_worker(&self) -> bool {
+        self.0.worker
+    }
+
+    pub fn background(&self) -> BackgroundApi<'_> {
+        BackgroundApi(&self.0)
     }
 
     /// End every subscription and timer. The instance's engine is gone, even
@@ -409,6 +444,27 @@ impl PlayersApi<'_> {
 
     /// `players.visible-to`: the node a viewer needs to see the player (the
     /// resolved `rift.visible-to` meta), or `None` when everyone sees them.
+    /// `players.lookup`: what Rift remembers about a player, online or not.
+    pub fn lookup(&self, target: &str) -> Result<Option<PlayerRecord>, String> {
+        self.players().lookup(target)
+    }
+
+    /// `players.search`: remembered players by name prefix.
+    pub fn search(&self, prefix: &str, limit: u32) -> Result<Vec<PlayerRecord>, String> {
+        self.players().search(prefix, limit)
+    }
+
+    /// `players.set-language`: the language Rift's messages use for a
+    /// player; `None` goes back to the client's locale.
+    pub fn set_language(&self, target: &str, language: Option<&str>) -> Result<bool, String> {
+        self.players().set_language(target, language)
+    }
+
+    /// The language Rift's messages use for an online player.
+    pub fn language(&self, target: &str) -> Result<Option<String>, String> {
+        Ok(self.get(target)?.and_then(|player| player.language))
+    }
+
     pub fn visible_to(&self, target: &str) -> Result<Option<String>, String> {
         Ok(self.get(target)?.and_then(|player| player.visible_to))
     }
@@ -659,8 +715,20 @@ impl PermissionsApi<'_> {
 
     /// `add-group`: a global `inherit` node. Returns whether anything changed.
     pub fn add_group(&self, uuid: &str, group: &str) -> Result<bool, String> {
+        self.add_group_until(uuid, group, None)
+    }
+
+    /// `add-group` with an expiry in Unix seconds: the membership ends then.
+    /// Adding again replaces the expiry (`None` makes it permanent).
+    pub fn add_group_until(
+        &self,
+        uuid: &str,
+        group: &str,
+        expires_at: Option<u64>,
+    ) -> Result<bool, String> {
         let user = SubjectRef::User(Uuid::parse(uuid).map_err(|error| error.to_string())?);
-        let node = self.node(Node::inherit(group, true))?;
+        let mut node = self.node(Node::inherit(group, true))?;
+        node.expires_at = expires_at;
         self.apply(Change::SetNode {
             subject: user,
             node,
@@ -769,6 +837,9 @@ impl BusApi<'_> {
     pub fn subscribe(&self, subject: &str, queue_group: Option<&str>) -> Result<u64, String> {
         if self.0.closed.load(Ordering::Acquire) {
             return Err("plugin is stopping".into());
+        }
+        if self.0.worker {
+            return Err("a background worker receives no messages; subscribe in the plugin".into());
         }
         if self.0.count(|kind| matches!(kind, Kind::Subscription)) >= MAX_SUBSCRIPTIONS {
             return Err(format!(
@@ -927,6 +998,11 @@ pub struct TimersApi<'a>(&'a Arc<Inner>);
 impl TimersApi<'_> {
     fn start(&self, ms: u32, repeat: bool) -> u64 {
         let id = self.0.handle();
+        if self.0.worker {
+            self.0
+                .spec_log("timer not started: a background worker receives no timer ticks");
+            return id;
+        }
         if self.0.closed.load(Ordering::Acquire)
             || self.0.count(|kind| matches!(kind, Kind::Timer)) >= MAX_TIMERS
         {
@@ -1015,10 +1091,65 @@ impl MetaApi<'_> {
         crate::script::started().elapsed().as_secs_f64()
     }
 
+    /// The exact `rift:plugin` version this host implements.
+    pub fn api(&self) -> &'static str {
+        super::api::CONTRACT_VERSION
+    }
+
     /// Unix time in seconds.
     pub fn time(&self) -> i64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_secs() as i64)
+    }
+}
+
+/// `background`: deferred answers and jobs for the plugin's workers.
+pub struct BackgroundApi<'a>(&'a Arc<Inner>);
+
+impl BackgroundApi<'_> {
+    fn main(&self, what: &str) -> Result<(), String> {
+        if self.0.worker {
+            return Err(format!("{what}: not available in a background worker"));
+        }
+        Ok(())
+    }
+
+    /// `defer`: the running decision hook answers later, through
+    /// [`BackgroundApi::resolve`] with the returned ticket.
+    pub fn defer(&self) -> Result<u64, String> {
+        self.main("defer")?;
+        let ticket = self.0.handle();
+        self.0.shared.background.defer(ticket)?;
+        Ok(ticket)
+    }
+
+    /// `resolve`: answer a deferred hook. False when nobody waits for the
+    /// ticket any more. The host validates the decision like any answer.
+    pub fn resolve(&self, ticket: u64, action: super::api::Action) -> Result<bool, String> {
+        self.main("resolve")?;
+        Ok(self
+            .0
+            .shared
+            .background
+            .resolve(ticket, Reply::Action(action)))
+    }
+
+    /// `run`: queue `payload` for a background worker; the result arrives
+    /// as [`Event::Job`] with the returned handle.
+    pub fn run(&self, payload: Vec<u8>) -> Result<u64, String> {
+        self.main("run")?;
+        if payload.len() > MAX_JOB_BYTES {
+            return Err(format!(
+                "background.run: a payload has at most {} MiB",
+                MAX_JOB_BYTES / (1024 * 1024)
+            ));
+        }
+        let handle = self.0.handle();
+        self.0
+            .shared
+            .background
+            .run(super::worker::BackgroundJob { handle, payload })?;
+        Ok(handle)
     }
 }

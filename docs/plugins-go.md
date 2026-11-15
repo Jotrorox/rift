@@ -19,7 +19,7 @@ TinyGo's Linux release; `brew install binaryen` on macOS).
 **Use TinyGo 0.42.0** (see [gotchas](#gotchas)):
 
 ```sh
-go get github.com/Jotrorox/rift/sdk/go@v0.1.5
+go get github.com/Jotrorox/rift/sdk/go@v0.2.0
 tinygo build -target=wasip2 --wit-package path/to/rift/wit --wit-world plugin -no-debug -o my_plugin.wasm .
 ```
 
@@ -51,14 +51,14 @@ func init() {
 			Commands: []rift.CommandSpec{{Name: "hello", Permission: "hello.use", Suggest: rift.SuggestPlayers()}},
 		}, nil
 	})
-	rift.OnLogin(func(ctx rift.Context) rift.Action {
+	rift.OnLogin(func(ctx rift.Context) rift.Decision {
 		if deny != "" && ctx.Name == deny {
-			return rift.Deny("You are not welcome here.")
+			return rift.Deny(rift.Plain("You are not welcome here."))
 		}
 		return rift.Continue()
 	})
-	rift.OnCommand(func(ctx rift.Context) rift.Action {
-		return rift.Message("Hello, " + ctx.Name + "!")
+	rift.OnCommand(func(ctx rift.Context) rift.Decision {
+		return rift.Message(rift.Plain("Hello, " + ctx.Name + "!"))
 	})
 }
 
@@ -69,7 +69,7 @@ func main() {}
 # plugins/my-plugin/plugin.toml
 name = "my-plugin"
 version = "0.1.0"
-api = "0.1"
+api = "0.2"
 engine = "wasm"
 entry = "my_plugin.wasm"
 
@@ -88,105 +88,254 @@ Lua examples.
 
 | Contract | Go |
 | --- | --- |
-| `handler` exports | `rift.OnInit`, `rift.OnLogin`, `rift.OnCommand`, ... set from a package `init` function. The host calls exports right after instantiation and never runs `main`, which must exist but stays empty. |
-| `registration` | `rift.Registration{Commands, Hooks}`. Leave `Hooks` nil and the SDK lists exactly the hooks you set a handler for. |
-| `action` | `rift.Continue()`, `rift.Deny`, `rift.DenyJSON`, `rift.Server`, `rift.Message`, `rift.MessageJSON`, `rift.Queue`, `rift.LeaveQueue()` (the `JSON` forms take a JSON text component, see [rich text](extensions.md#rich-text)); `route` answers are `rift.RouteDefault()`, `rift.RouteBackend`, `rift.RouteReject`. |
-| `players` | `rift.Players`, `rift.Player`, `rift.PlayerNames`, `rift.Locale` (since 0.1.5; the client's language, and false while Rift does not know it, which is always the case in `OnLogin` and, for clients before 1.20.2, in `OnJoin`; see [timing](plugins.md#host-api)), `rift.SendMessage`, `rift.SendMessageJSON`, `rift.SendActionBar`, `rift.SendActionBarJSON`, `rift.SendTitle`, `rift.SendTitleJSON` (since 0.1.4), `rift.SetTabList`, `rift.SetBossBar`, `rift.ShowDialog`, `rift.ClearDialog`, `rift.Kick`, `rift.KickJSON`, `rift.Transfer`, `rift.Broadcast`, `rift.BroadcastJSON`. |
-| `dialogs` export | `rift.OnDialog(func(rift.DialogResponse))` receives clicks on the plugin's [dialogs](dialogs.md); it needs no hook in the registration. |
-| `styled` export | `rift.OnRichSuggest(func(rift.Context) []rift.RichSuggestion)` and `rift.OnRichStatus(func(rift.Ping) *rift.RichStatusOverride)` (since 0.1.4) replace `OnSuggest` and `OnStatus` with JSON text tooltips, version and sample lines. Without them the SDK answers `styled` with the plain handlers; hosts before 0.1.4 get the rich text's words. |
-| `chat` export | `chat.OnChat(func(rift.ChatAttempt) rift.Action)` in package `sdk/go/rift/chat` (since 0.1.5), for a plugin built with `--wit-world plugin-chat`; see [chat](#chat). |
-| rich text | `rift.Mini`, `rift.Legacy`, `rift.Component`, `rift.Plain`, `rift.RawJSON` (below); `rift.Ptr(v)` for optional fields. |
+| `handler` exports | `rift.OnInit`, `rift.OnLogin`, `rift.OnCommand`, ... set from a package `init` function. The host calls exports right after instantiation and never runs `main`, which must exist but stays empty. Every hook has a default. |
+| `registration` | `rift.Registration{Commands, Hooks}`. Leave `Hooks` nil and the SDK lists exactly the hooks you set a handler for; see [commands](#commands) and [chat and kick](#chat-and-kick). |
+| `text` | `rift.Plain`, `rift.JSON` and the builders `rift.Mini`, `rift.Legacy`, `rift.Component`; see [text](#text). |
+| `decision` | `rift.Continue()`, `rift.Deny(text)`, `rift.Server(name)`, `rift.Message(text)`, `rift.Queue(server)`, `rift.LeaveQueue()`; `route` answers are `rift.RouteDefault()`, `rift.RouteBackend`, `rift.RouteReject`. |
+| `suggest`, `status` | `rift.OnSuggest` returns `[]rift.Suggestion{{Text, Tooltip}}`; `rift.OnStatus` returns a `*rift.StatusOverride` whose `Motd`, `Version` and `Sample` are texts, or nil. |
+| `chat`, `kick` | `rift.OnChat(func(rift.ChatAttempt) rift.Decision)` and `rift.OnKick(func(rift.Context) rift.Decision)`, delivered only when the hook list names them; see [chat and kick](#chat-and-kick). |
+| `dialog` | `rift.ShowDialog`, `rift.ClearDialog`; clicks on the plugin's [dialogs](dialogs.md) reach `rift.OnDialog(func(rift.DialogResponse))`, which needs no hook in the registration. |
+| `players` | `rift.Players`, `rift.Player`, `rift.PlayerNames`, `rift.SendMessage`, `rift.SendActionBar`, `rift.SendTitle`, `rift.SetTabList`, `rift.SetBossBar`, `rift.Kick`, `rift.Transfer`, `rift.Broadcast`, `rift.Lookup`, `rift.Search`, `rift.SetLanguage`; see [players, languages and groups](#players-languages-and-groups). |
+| `background` | `rift.Defer`, `rift.Resolve`, `rift.Run`, `rift.IsWorker` with `rift.OnWork`, `rift.OnWorkInit` and `rift.OnJobDone`; see [background work](#background-work). |
 | `store` | `rift.StoreGet`, `StoreSet`, `StoreDelete`, `StoreIncrement`, `StoreList`. |
-| `permissions` | `rift.HasPermission`, `SetPermission`, `AddGroup`, `RemoveGroup`, `Groups`, `ListGroupsJSON`. |
+| `permissions` | `rift.HasPermission`, `SetPermission`, `AddGroup`, `RemoveGroup`, `Groups`, `ListGroupsJSON`, `Meta`, `SetMeta`. |
 | `bus` | `rift.Publish`, `Reply`, `Request`, `Subscribe`, `Unsubscribe`, `StreamPublish`. |
 | `servers` | `rift.ServerCreate`, `ServerRemove`, `ServerStart`, `ServerStop`, `TemplateDownload`, `Control`. |
 | `timers` | `rift.Every`, `After`, `CancelTimer`. |
-| `log`, `meta` | `rift.Log(level, msg)` and `Tracef` ... `Errorf`; `rift.Name`, `Version`, `DataDir`, `ConfigDir`, `Clock`, `Time`. |
+| `log`, `meta` | `rift.Log(level, msg)` and `Tracef` ... `Errorf`; `rift.Name`, `Version`, `DataDir`, `ConfigDir`, `Clock`, `Time`, and `rift.API()`, the contract version the host implements (`0.2.0`). |
 | `result<T, string>` | `(T, error)` with a `rift.HostError`. |
+| `option<T>` | Parameters: `""` for an optional string, `0` for an optional Unix time, the zero `rift.Text{}` for an optional text. Record fields: pointers (`rift.Ptr(v)` makes one) and zero texts. |
 | configuration JSON | `rift.ConfigString(json, "key")` returns `(value, ok, err)` with a built-in parser; `rift.DecodeConfig(json, &cfg)` uses `encoding/json`, which adds about 850 KB. |
 
+## Text
 
-## Chat
-
-The chat hook sees chat messages, and the commands that reach the backend,
-before the backend does ([the hook](plugins.md#chat)). Exporting it is the
-registration, so it lives in a package of its own: a plugin that imports
-`sdk/go/rift/chat` exports `rift:plugin/chat`, and one that does not is never
-asked.
+Everything a player reads is a `rift.Text`: plain text of 1..=1024 bytes,
+shown exactly as written, or a JSON text component of at most 32 KiB
+([rich text](extensions.md#rich-text)). Messages, action bars, titles, tab
+lists, boss bars, kick reasons, `Deny` and `Message` decisions, suggestion
+tooltips and the server-list fields all take one.
 
 ```go
-import (
-	"github.com/Jotrorox/rift/sdk/go/rift"
-	"github.com/Jotrorox/rift/sdk/go/rift/chat"
-)
-
-func init() {
-	chat.OnChat(func(attempt rift.ChatAttempt) rift.Action {
-		if attempt.Kind == rift.ChatMessage && muted[attempt.Ctx.UUID] {
-			return rift.Deny("You are muted.")
-		}
-		return rift.Continue()
-	})
-}
+rift.SendMessage(ctx.UUID, rift.Plain("Welcome back."))
+rift.SendActionBar(ctx.UUID, rift.JSON(`{"text":"Lobby","color":"green"}`))
+return rift.Deny(rift.Plain("You are banned."))
 ```
 
-Build such a plugin against world `plugin-chat`, which has the export:
-
-```sh
-tinygo build -target=wasip2 --wit-package path/to/rift/wit --wit-world plugin-chat -no-debug -o mute.wasm .
-```
-
-`attempt.Text` is the message, or the command line without its slash; for a
-command, `attempt.Ctx.Command` is the root name and `attempt.Ctx.Args` the
-rest. Answer `rift.Continue()`, `rift.Deny` or `rift.DenyJSON`. Rift asks the
-plugin about every message; with signed chat, the first deny costs that
-player their [chat signing](plugins.md#chat).
-
-## Rich text builders
-
-The `JSON` functions and answers take a JSON text component. The builders
-write one, escaping every string, without `encoding/json`:
+The builders write a JSON component, escaping every string, without
+`encoding/json`; their `Text()` method returns the `rift.Text`:
 
 ```go
 // Rift markup, written as {"mini": "...", "args": {...}}; see docs/text.md.
-welcome := rift.Mini("<gold>Welcome, <player>!</gold> <gray><click:run_command:/spawn>[Spawn]").
-	Arg("player", ctx.Name).                      // shown as written, never parsed
+welcome := rift.Mini("<gold>Welcome, <rank> <player>!</gold> <gray><click:run_command:/spawn>[Spawn]").
+	Arg("player", ctx.Name).                       // shown as written, never parsed
 	ArgComponent("rank", rift.Legacy("&c[Admin]")) // a component argument
-rift.SendMessageJSON(ctx.UUID, welcome.JSON())
+rift.SendMessage(ctx.UUID, welcome.Text())
 
 // Legacy codes, written as {"legacy": "...", "marker": "&"}; .Marker('§') for another marker.
-rift.SendTitleJSON(ctx.UUID, rift.TitleJSON{
-	TitleJSON:    rift.Mini("<green>Lobby").JSON(),
-	SubtitleJSON: rift.Ptr(rift.Legacy("&7Have fun").JSON()),
-	FadeIn: 10, Stay: 70, FadeOut: 20,
+rift.SendTitle(ctx.UUID, rift.Title{
+	Title:    rift.Mini("<green>Lobby").Text(),
+	Subtitle: rift.Legacy("&7Have fun").Text(),
+	FadeIn:   10, Stay: 70, FadeOut: 20,
 })
 
 // A component field by field (1.21.5 spellings; Rift converts for older clients).
 accept := rift.Component("[Accept]").Color("green").Bold().
 	RunCommand("/party accept Alex").HoverText("Join Alex's party").
 	Extra(rift.Plain(" or ignore it"))
-return rift.MessageJSON(accept.JSON())
+return rift.Message(accept.Text())
 ```
 
 `rift.Component` has `Color`, `Bold`, `Italic`, `Underlined`, `Strikethrough`,
 `Obfuscated`, `RunCommand`, `SuggestCommand`, `OpenURL`, `CopyToClipboard`,
 `HoverText` (plain), `Hover` (a component), `Insertion`, `Extra` (children)
 and `Field` (any other key, raw JSON). Builders nest through the `TextJSON`
-interface (`JSON() string`), which `rift.Plain` (text as written) and
-`rift.RawJSON` (hand-written JSON) also implement.
+interface (`JSON() string`), which `rift.Text` implements too.
 
-Rich tooltips and server-list text use the same builders:
+The zero `rift.Text{}` is "none" where text is optional: leave out a title's
+`Subtitle`, a suggestion's `Tooltip`, a tab list footer or the texts of a
+`rift.StatusOverride`.
 
 ```go
-rift.OnRichSuggest(func(ctx rift.Context) []rift.RichSuggestion {
-	return []rift.RichSuggestion{{Text: "lobby", TooltipJSON: rift.Ptr(rift.Mini("<gray>The main lobby").JSON())}}
+rift.OnSuggest(func(ctx rift.Context) []rift.Suggestion {
+	return []rift.Suggestion{{Text: "lobby", Tooltip: rift.Mini("<gray>The main lobby").Text()}}
+})
+rift.OnStatus(func(ping rift.Ping) *rift.StatusOverride {
+	return &rift.StatusOverride{
+		Motd:   rift.Mini("<gold>My network").Text(),
+		Sample: []rift.Text{rift.Plain("§7Hello")},
+	}
 })
 ```
 
-Markup is only read from an explicit `mini` object: a bare string, as in
-`rift.MessageJSON("<red>hi")`, is shown as written. Pass player input with
-`Arg`, never by concatenating it into the markup. The tags are listed in
-[Text and markup](text.md).
+Markup is only read from a `mini` object: `rift.Plain("<red>hi")` is shown as
+written. Pass player input with `Arg` or `rift.Plain`, never by concatenating
+it into markup. The tags are listed in [Text and markup](text.md).
+
+## Commands
+
+A `rift.CommandSpec` has other names in `Aliases` (at most 16), and `Console`
+lets operators run the command from the console:
+
+```go
+rift.CommandSpec{
+	Name: "find", Aliases: []string{"whereis"}, Permission: "find.use",
+	Suggest: rift.SuggestPlayers(), Console: true,
+}
+```
+
+The hooks always see `find` in `ctx.Command`, whichever name was typed. For a
+console run `ctx.Console` is true, `ctx.Name` is `CONSOLE`, `ctx.UUID` is
+empty and `ctx.ConnectionID` is 0; a `rift.Message` decision is printed for
+the operator. `Suggest` is one of `rift.SuggestNone()`, `SuggestFixed(...)`,
+`SuggestPlayers()`, `SuggestServers()` and `SuggestDynamic()`, which asks
+`rift.OnSuggest`.
+
+## Chat and kick
+
+`rift.OnChat` sees chat messages, and the commands that reach the backend,
+before the backend does ([the hook](plugins.md#chat)); `rift.OnKick` runs when
+a backend kicks a player in play. Both are delivered only to a plugin whose
+hook list names `rift.HookChat` and `rift.HookKick`: an empty list means every
+hook except these two. With `Hooks` nil the SDK lists them when the handler
+is set.
+
+```go
+rift.OnChat(func(attempt rift.ChatAttempt) rift.Decision {
+	if attempt.Kind == rift.ChatMessage && muted[attempt.Ctx.UUID] {
+		return rift.Deny(rift.Plain("You are muted."))
+	}
+	return rift.Continue()
+})
+
+rift.OnKick(func(ctx rift.Context) rift.Decision {
+	// ctx.Server is the backend that kicked, ctx.Reason its reason.
+	return rift.Server("lobby")
+})
+```
+
+`attempt.Text` is the message, or the command line without its slash; for a
+command (`rift.ChatCommand`), `attempt.Ctx.Command` is the root name and
+`attempt.Ctx.Args` the rest. `chat` answers `Continue` or `Deny`. `kick`
+answers `Continue` (leave it to `network.on_kick`), `Deny` (disconnect with
+the text) or `Server`. Rift asks a plugin that lists `chat` about every
+message of every player; with signed chat, the first deny costs that player
+their [chat signing](plugins.md#chat).
+
+## Background work
+
+A plugin runs one call at a time, so a hook that blocks holds up every other
+hook. A decision hook can defer its answer instead, hand the slow part to a
+background worker and return. Workers are further instances of the same
+component, enabled in the manifest:
+
+```toml
+[background]
+workers = 2
+```
+
+A worker has its own memory and globals. Its package `init` functions run,
+so the handlers are set, but it never gets `init` or any hook: only the
+`rift.OnWorkInit` handler once, with the plugin configuration, and then the
+`rift.OnWork` handler once per job. `OnWork` may block (30 s unless the
+manifest sets `deadlines.work`); its result returns to the main instance
+through `rift.OnJobDone`.
+
+```go
+// Main instance: the login tickets waiting for a job, by job handle.
+var pending = map[uint64]uint64{}
+
+func init() {
+	// Main instance: defer the answer and queue the lookup.
+	rift.OnLogin(func(ctx rift.Context) rift.Decision {
+		ticket, err := rift.Defer()
+		if err != nil {
+			return rift.Continue()
+		}
+		handle, err := rift.Run([]byte(ctx.UUID))
+		if err != nil {
+			rift.Resolve(ticket, rift.Continue())
+		} else {
+			pending[handle] = ticket
+		}
+		return rift.Continue() // ignored once the hook is deferred
+	})
+
+	// Worker: the slow part. payload is the UUID queued above.
+	rift.OnWork(func(payload []byte) ([]byte, error) {
+		banned, err := banDatabaseHas(string(payload)) // may block
+		if err != nil {
+			return nil, err
+		}
+		if banned {
+			return []byte("1"), nil
+		}
+		return []byte("0"), nil
+	})
+
+	// Main instance: answer the deferred login.
+	rift.OnJobDone(func(handle uint64, result []byte, err error) {
+		ticket, ok := pending[handle]
+		if !ok {
+			return
+		}
+		delete(pending, handle)
+		decision := rift.Continue()
+		if err == nil && string(result) == "1" {
+			decision = rift.Deny(rift.Plain("You are banned."))
+		}
+		rift.Resolve(ticket, decision)
+	})
+}
+```
+
+- `rift.Defer` works in `OnLogin`, `OnInitialServer`, `OnBeforeTransfer`,
+  `OnCommand`, `OnChat` and `OnKick`, once per call. A hook that does not
+  defer answers with its return value as usual.
+- The hook's deadline keeps running while the job does. An answer after it
+  counts as a missed deadline (`on_timeout`), and `rift.Resolve` then returns
+  false.
+- `rift.Run` fails without workers in the manifest and when 1024 jobs wait
+  already. `OnJobDone` reports a failed job with a `rift.JobError`: the error
+  `OnWork` returned, or the host's reason. Without an `OnWork` handler every
+  job fails with `rift.ErrNoWork`.
+- `rift.IsWorker()` tells the two kinds of instance apart in code they share.
+  `OnJobDone` needs no entry in the hook list.
+
+## Players, languages and groups
+
+`rift.Player` and `rift.Players` return `rift.PlayerInfo` with the player's
+`IP`, profile `Properties`, `VisibleTo`, the client's `Locale` and the
+`Language` Rift's own messages use for them. `Locale` is nil while Rift does
+not know it: the client sends it after login, so it is unset in `OnLogin`
+and, for clients before 1.20.2, in `OnJoin`.
+
+`rift.Lookup` and `rift.Search` read what Rift remembers about every player
+who joined at least once, online or not:
+
+```go
+record, err := rift.Lookup("Alex") // a UUID, or the last name, case-insensitive
+if err == nil && record != nil && !record.Online {
+	rift.Infof("%s was last seen on %s", record.Name, record.LastServer)
+}
+recent, _ := rift.Search("al", 10) // by name prefix, most recently seen first, 1..=100
+```
+
+A `rift.PlayerRecord` has `UUID`, `Name`, `FirstSeen` and `LastSeen` (Unix
+seconds), `LastIP` (empty when `players.record_ip` is off), `LastServer`,
+`Online` and `Language`.
+
+`rift.SetLanguage(target, "de_de")` sets the language of Rift's own messages
+for a player, online or not (a tag of 2..=16 bytes of `a-z0-9_`); `""` goes
+back to the client's locale. It is remembered across sessions, so
+`ctx.Language` has it from `OnLogin` on.
+
+`rift.AddGroup` takes an expiry in Unix seconds, `0` for none; a new expiry
+replaces an earlier one:
+
+```go
+rift.AddGroup(ctx.UUID, "vip", uint64(rift.Time())+30*24*3600) // for 30 days
+rift.AddGroup(ctx.UUID, "builder", 0)                          // until removed
+```
 
 ## Gotchas
 

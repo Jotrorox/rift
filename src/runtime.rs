@@ -794,6 +794,11 @@ pub async fn handle(
             context.protocol = session.handshake.protocol;
             context.default_server = (!unmatched).then(|| primary.clone());
             session.set_extension(snapshot.extensions.session(context).unwrap());
+            // What a plugin set in an earlier session, so that even a
+            // refused login is told why in the player's language.
+            if let Some(extension) = &session.extension {
+                rift::text::catalog::set_language(extension.context.language.as_deref());
+            }
             let decisions = async {
                 use rift::extensions::Action;
                 let extension = session.extension.as_ref().unwrap();
@@ -916,6 +921,8 @@ pub async fn handle(
         let mut directory = None;
         // The locale the directory was last told, to tell it only changes.
         let mut published_locale: Option<String> = None;
+        // The directory's language generation the session last looked at.
+        let mut language_generation = snapshot.extensions.players().language_generation();
         let mut actions: Option<mpsc::Receiver<rift::extensions::PlayerAction>> = None;
         let mut transfer_reply: Option<admin::TransferReply> = None;
         // An administrator may select a backend added after this session's
@@ -1377,16 +1384,42 @@ pub async fn handle(
                             if let Some(identity) = session.identity()
                                 && let Some(uuid) = identity.uuid
                             {
-                                let (handle, receiver) = snapshot.extensions.players().register(
-                                    event.id(),
-                                    &uuid,
-                                    &identity.name,
-                                    session.handshake.protocol,
-                                    &current_backend,
-                                );
+                                let profile = rift::extensions::Profile {
+                                    ip: peer.ip().to_canonical().to_string(),
+                                    properties: session
+                                        .authenticated_profile()
+                                        .map(|profile| {
+                                            profile
+                                                .properties
+                                                .iter()
+                                                .map(|property| {
+                                                    rift::plugins::api::ProfileProperty {
+                                                        name: property.name.clone(),
+                                                        value: property.value.clone(),
+                                                        signature: property.signature.clone(),
+                                                    }
+                                                })
+                                                .collect()
+                                        })
+                                        .unwrap_or_default(),
+                                };
+                                let (handle, receiver) =
+                                    snapshot.extensions.players().register_with(
+                                        event.id(),
+                                        &uuid,
+                                        &identity.name,
+                                        session.handshake.protocol,
+                                        &current_backend,
+                                        profile,
+                                    );
                                 // 1.20.2+ clients said it during configuration.
                                 handle.set_locale(session.locale());
                                 published_locale = session.locale().map(str::to_owned);
+                                let language = handle.language();
+                                rift::text::catalog::set_language(language.as_deref());
+                                if let Some(extension) = &mut session.extension {
+                                    extension.context.language = language;
+                                }
                                 directory = Some(handle);
                                 actions = Some(receiver);
                                 // Joining set the proxy contexts to `server` alone.
@@ -1424,11 +1457,20 @@ pub async fn handle(
                     }
                     // Client Information arrives after Join Game on older
                     // clients and again whenever the language setting changes.
+                    let languages = snapshot.extensions.players().language_generation();
                     if let Some(directory) = &directory
-                        && session.locale() != published_locale.as_deref()
+                        && (session.locale() != published_locale.as_deref()
+                            || languages != language_generation)
                     {
                         directory.set_locale(session.locale());
                         published_locale = session.locale().map(str::to_owned);
+                        language_generation = languages;
+                        // A plugin's choice first, else the client's locale.
+                        let language = directory.language();
+                        rift::text::catalog::set_language(language.as_deref());
+                        if let Some(extension) = &mut session.extension {
+                            extension.context.language = language;
+                        }
                     }
                 }
                 Ok(SessionEvent::BungeeCord(request)) => {
@@ -1777,7 +1819,8 @@ pub(crate) async fn accept(
                         Ok(true)
                     };
                     let result = match result {
-                        Ok(true) => handle(&mut client, &name, snapshot, &addresses, metrics.clone(), &mut event).await,
+                        // Notices on this task are in the player's language.
+                        Ok(true) => rift::text::catalog::session(handle(&mut client, &name, snapshot, &addresses, metrics.clone(), &mut event)).await,
                         Ok(false) => Ok((0, 0)),
                         Err(error) => Err(error),
                     };

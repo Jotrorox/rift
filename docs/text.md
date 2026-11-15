@@ -38,8 +38,8 @@ argument. A `mini` object takes only `mini` and `args`; a `legacy` object only
 | --- | --- |
 | `rift.lua`, extensions, `on_status`, Lua plugins | A table where a string would go, or `rift.text.mini(markup, args)`, which returns a component table |
 | Message bus replies | A JSON object as the `reason`: `{"action": "deny", "reason": {"mini": "<red>Banned"}}` |
-| WebAssembly plugins | The `-json` host functions take the objects as JSON text. The SDK builders write them for you ([Rust](plugins-rust.md), [Go](plugins-go.md), [C](plugins-c.md)) |
-| Configuration | Any text setting (`server_list`, `tab_list`, `deny_message`, ...) takes the tables, and `text.messages` takes markup directly |
+| WebAssembly plugins | The contract's [`text`](plugins.md#events) type is `plain(string)` or `json(string)`, the objects as JSON text. The SDK builders produce the JSON form ([Rust](plugins-rust.md), [Go](plugins-go.md), [C](plugins-c.md)) |
+| Configuration | Any text setting (`server_list`, `tab_list`, `deny_message`, ...) takes the tables, and `text.messages` and `text.languages` take markup directly |
 
 ```lua
 -- Lua: all three are the same message.
@@ -216,6 +216,43 @@ carries, such as a backend's ban screen.
 | `status.maintenance` | – | The network is under maintenance. |
 | `status.unknown_host` | – | No server is configured for this hostname. |
 | `status.unavailable` | – | The server is currently unavailable. Please try again later. |
+
+## Languages
+
+`text.languages` holds the same messages in other languages, by language tag:
+
+```lua
+rift.setup {
+    text = {
+        messages = {
+            ["queue.left"] = "<muted>Left the queue.",
+        },
+        languages = {
+            de = {
+                ["queue.left"] = "<muted>Warteschlange verlassen.",
+                ["queue.joined"] = "<good>In der Warteschlange für <server>. Position: <position>.",
+            },
+            de_at = { ["queue.full"] = "Die Warteschlange ist voll." },
+        },
+    },
+}
+```
+
+A player's session renders Rift's messages in the player's language: the one
+set with `players.set-language` (`rift.players.set_language` in Lua; see
+[the player directory and languages](plugins.md#the-player-directory-and-languages)),
+else the client's locale. For each message Rift takes the first template it
+finds:
+
+1. the exact tag (`de_at`),
+2. its language part (`de`),
+3. `text.messages`,
+4. the built-in English text.
+
+Tags are 2–16 bytes of `a-z`, `0-9` and `_`; `de-DE` is normalized to
+`de_de`. A configuration may hold at most 64 languages with 256 messages
+each. Keys and templates are checked like `text.messages`, when the
+configuration loads.
 
 ## How each client sees it
 

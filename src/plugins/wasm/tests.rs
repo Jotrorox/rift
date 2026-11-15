@@ -6,7 +6,7 @@
 //! - `conformance-rs` (`tests/fixtures/plugins/conformance-rs`), the
 //!   WebAssembly build of the shared conformance guest, for
 //!   [`conformance_tests!`], and `conformance-chat-rs`, the same source
-//!   built with its `chat` export, for the scenarios that handle chat.
+//!   built to list the `chat` hook, for the scenarios that handle chat.
 //! - `hello-rs`, `hello-c` and `hello-go` (`examples/plugins/hello-*`), run
 //!   through the shared [`conformance::hello_example`] and the WebAssembly
 //!   specifics below. `hello-c` and `hello-go` need a toolchain this test
@@ -64,7 +64,7 @@ impl Guest {
         std::fs::write(
             folder.join("plugin.toml"),
             format!(
-                "name = \"{}\"\nversion = \"0.1.0\"\napi = \"0.1\"\nengine = \"wasm\"\nentry = \"plugin.wasm\"\n{manifest_extra}",
+                "name = \"{}\"\nversion = \"0.1.0\"\napi = \"0.2\"\nengine = \"wasm\"\nentry = \"plugin.wasm\"\n{manifest_extra}",
                 self.name
             ),
         )
@@ -278,8 +278,10 @@ pub(crate) async fn hello_conformance(guest: &Guest) {
             kick: false,
             commands: vec![CommandSpec {
                 name: "hello".into(),
+                aliases: Vec::new(),
                 permission: "hello.use".into(),
                 suggest: SuggestKind::Players,
+                console: false,
             }],
             hooks: vec![
                 Hook::Login,
@@ -434,7 +436,7 @@ fn conformance_guest() -> Option<PathBuf> {
         .clone()
 }
 
-/// The conformance guest built with its `chat` export
+/// The conformance guest that lists the `chat` hook
 /// (`tests/fixtures/plugins/conformance-chat-rs`).
 fn conformance_chat_guest() -> Option<PathBuf> {
     static GUEST: OnceLock<Option<PathBuf>> = OnceLock::new();
@@ -459,7 +461,7 @@ fn install_conformance(wasm: PathBuf, folder: &Path, name: &str, extra: &str) {
     std::fs::write(
         folder.join("plugin.toml"),
         format!(
-            "name = \"{name}\"\nversion = \"1\"\napi = \"0.1\"\nengine = \"wasm\"\nentry = \"plugin.wasm\"\n{extra}"
+            "name = \"{name}\"\nversion = \"1\"\napi = \"0.2\"\nengine = \"wasm\"\nentry = \"plugin.wasm\"\n{extra}"
         ),
     )
     .unwrap();
@@ -1025,8 +1027,8 @@ async fn styled_components_answer_with_rich_text_and_titles() {
     runtime.plugins().shutdown().await;
 }
 
-/// `players.locale` (rift:plugin 0.1.5): `none` until the session publishes
-/// the client's language, then what the client last said.
+/// `player-info.locale`: `none` until the session publishes the client's
+/// language, then what the client last said.
 #[tokio::test]
 async fn components_read_the_client_locale_once_it_is_known() {
     let Some(guest) = probe() else { return };
@@ -1053,6 +1055,122 @@ async fn components_read_the_client_locale_once_it_is_known() {
     assert_eq!(
         player.decision("login").await.unwrap(),
         Action::Deny("locale=unknown".into())
+    );
+    runtime.plugins().shutdown().await;
+}
+
+/// What 0.2 added, from a component: an alias, the console sender, the
+/// player directory and languages, a timed group, and a command that
+/// answers from a background worker while the plugin keeps serving hooks.
+#[tokio::test]
+async fn components_defer_answers_to_workers_and_use_the_directory() {
+    let Some(guest) = probe() else { return };
+    let root = directory();
+    let config = configure(
+        &root,
+        &guest,
+        "[background]\nworkers = 2\n[deadlines]\ncommand = 5000\n",
+        "{}",
+    );
+    let runtime = start(&config, &Broker::default()).await;
+    let (_handle, _actions) = runtime.players().register_with(
+        7,
+        &[7; 16],
+        "Alex",
+        774,
+        "lobby",
+        crate::extensions::Profile {
+            ip: "192.0.2.7".into(),
+            properties: Vec::new(),
+        },
+    );
+    wait_for(
+        "the join to reach the directory",
+        Duration::from_secs(5),
+        || runtime.players().lookup("alex").unwrap().is_some(),
+    )
+    .await;
+    let uuid = "07".repeat(16);
+    let message = |text: &str| Action::Message(text.into());
+    let alex = session(&runtime, 7, "Alex");
+    assert_eq!(
+        alex.command("whois ALEX").await.unwrap(),
+        message(&format!(
+            "{uuid} Alex online=true language=- server=lobby ip=192.0.2.7"
+        ))
+    );
+    assert_eq!(
+        alex.command("whois nobody").await.unwrap(),
+        message("unknown")
+    );
+    assert_eq!(
+        alex.command("lang de").await.unwrap(),
+        message("language true")
+    );
+    // Only a command registered for it runs from the console.
+    let plugins = runtime.plugins();
+    assert_eq!(
+        plugins.console("whois Alex").await.unwrap().to_string(),
+        format!("console: {uuid} Alex online=true language=de server=lobby ip=192.0.2.7")
+    );
+    let error = plugins.console("lang en").await.unwrap_err();
+    assert!(error.contains("players only"), "{error}");
+    let expires = rift_permissions::unix_now() + 3600;
+    assert_eq!(
+        alex.command(&format!("tempgroup vip {expires}"))
+            .await
+            .unwrap(),
+        message("added true")
+    );
+    // The alias runs the command; the worker answers through `job_done`.
+    assert_eq!(
+        alex.command("sl hello").await.unwrap(),
+        message("done: HELLO")
+    );
+    assert_eq!(
+        alex.command("slow fail").await.unwrap(),
+        message("failed: worker says no")
+    );
+    // While a worker sleeps, the plugin answers other hooks at once.
+    let started = Instant::now();
+    let (slept, quick) = tokio::join!(alex.command("slow sleep"), async {
+        let answer = alex.command("whois nobody").await;
+        (answer, started.elapsed())
+    });
+    assert_eq!(slept.unwrap(), message("done: SLEPT"));
+    assert_eq!(quick.0.unwrap(), message("unknown"));
+    assert!(
+        quick.1 < Duration::from_millis(250) && started.elapsed() >= Duration::from_millis(300),
+        "{:?} {:?}",
+        quick.1,
+        started.elapsed()
+    );
+    runtime.plugins().shutdown().await;
+}
+
+/// A deferred answer that does not come in time is a missed deadline.
+#[tokio::test]
+async fn a_deferred_answer_past_the_deadline_times_out() {
+    let Some(guest) = probe() else { return };
+    let root = directory();
+    let config = configure(
+        &root,
+        &guest,
+        "[background]\nworkers = 1\n[deadlines]\ncommand = 100\n",
+        "{}",
+    );
+    let runtime = start(&config, &Broker::default()).await;
+    let alex = session(&runtime, 7, "Alex");
+    let started = Instant::now();
+    let late = alex.command("slow sleep").await;
+    assert!(started.elapsed() < Duration::from_millis(280), "{late:?}");
+    assert_ne!(late.ok(), Some(Action::Message("done: SLEPT".into())));
+    // The plugin is still there, and the late answer went nowhere.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(instance(&runtime).status(), Status::Running);
+    assert_eq!(
+        alex.command("whois nobody").await.unwrap(),
+        Action::Message("unknown".into())
     );
     runtime.plugins().shutdown().await;
 }

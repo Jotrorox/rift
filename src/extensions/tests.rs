@@ -383,10 +383,15 @@ async fn network_tab_entries_show_the_prefix_and_suffix_of_the_listed_player() {
 }
 
 #[test]
-fn version_schema_and_authenticated_mode_are_required() {
+fn schema_and_authenticated_mode_are_required() {
+    // `api_version` is optional and no longer selects anything.
+    for valid in ["", "api_version = 1", "api_version = 2", "api_version = 3"] {
+        Config::from_lua(&source(valid), "valid.lua").unwrap();
+    }
     for invalid in [
-        "",
+        "api_version = 0",
         "api_version = 4",
+        "api_version = '2'",
         "api_version = 1, typo = true",
         "api_version = 1, login = true",
         "api_version = 1, commands = { hub = { permission = 'use', run = function() end } }",
@@ -418,7 +423,7 @@ async fn verified_identity_permissions_and_command_arguments_reach_lua() {
     let runtime = runtime(
         r#"api_version = 1,
         login = function(ctx)
-            assert(ctx.api_version == 1 and ctx.authenticated)
+            assert(ctx.api_version == 3 and ctx.authenticated)
             assert(ctx.uuid == '01010101010101010101010101010101' and ctx.name == 'Player1')
             assert(ctx.server == nil)
         end,

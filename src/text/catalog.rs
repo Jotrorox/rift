@@ -14,6 +14,20 @@
 //! }
 //! ```
 //!
+//! `text.languages` holds the same messages in other languages, by tag:
+//!
+//! ```lua
+//! text = {
+//!   languages = {
+//!     de = { ["queue.left"] = "Warteschlange verlassen." },
+//!   },
+//! }
+//! ```
+//!
+//! A player's session renders notices in the player's language (the one a
+//! plugin set with `players.set-language`, else the client's locale): the
+//! exact tag (`de_at`), then its language (`de`), then `text.messages`.
+//!
 //! Templates are checked when the configuration loads: an unknown key, an
 //! unknown tag or an argument the message does not have is an error then,
 //! not when a player triggers it. The defaults keep Rift's wording from
@@ -192,6 +206,8 @@ impl Notice {
 pub struct Catalog {
     styles: Styles,
     messages: BTreeMap<Notice, String>,
+    /// `text.languages`: templates by lowercase language tag.
+    languages: BTreeMap<String, BTreeMap<Notice, String>>,
 }
 
 impl Catalog {
@@ -210,6 +226,7 @@ impl Catalog {
         let mut catalog = Self {
             styles,
             messages: BTreeMap::new(),
+            languages: BTreeMap::new(),
         };
         for (key, template) in messages {
             let notice = Notice::from_key(key).ok_or_else(|| {
@@ -221,9 +238,40 @@ impl Catalog {
         Ok(catalog)
     }
 
+    /// Add the messages of one language (`text.languages[tag]`), checked
+    /// like `text.messages`.
+    pub fn with_language<'a>(
+        mut self,
+        tag: &str,
+        messages: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) -> Result<Self, String> {
+        let language = crate::directory::language_tag(tag)
+            .map_err(|error| format!("text.languages: {tag:?}: {error}"))?;
+        let path = format!("text.languages.{language}");
+        let mut templates = BTreeMap::new();
+        for (key, template) in messages {
+            let notice = Notice::from_key(key).ok_or_else(|| {
+                format!("{path}: unknown message {key:?}; see docs/text.md for the keys")
+            })?;
+            self.check_at(&path, notice, template)?;
+            templates.insert(notice, template.to_owned());
+        }
+        self.languages.insert(language, templates);
+        Ok(self)
+    }
+
+    /// The language tags with messages of their own.
+    pub fn languages(&self) -> impl Iterator<Item = &str> {
+        self.languages.keys().map(String::as_str)
+    }
+
     /// A template must parse with the message's arguments and no others.
     fn check(&self, notice: Notice, template: &str) -> Result<(), String> {
-        let label = format!("text.messages[{:?}]", notice.key());
+        self.check_at("text.messages", notice, template)
+    }
+
+    fn check_at(&self, path: &str, notice: Notice, template: &str) -> Result<(), String> {
+        let label = format!("{path}[{:?}]", notice.key());
         if template.is_empty() || template.len() > 4096 {
             return Err(format!("{label} must contain 1..=4096 bytes"));
         }
@@ -244,15 +292,30 @@ impl Catalog {
             .map_or(notice.default_markup(), String::as_str)
     }
 
+    /// The template for `notice` in `language`: the exact tag, then the
+    /// part before its first `_`, then [`Catalog::markup`].
+    pub fn markup_in(&self, notice: Notice, language: Option<&str>) -> &str {
+        let translated = language.and_then(|tag| {
+            let own = |tag: &str| self.languages.get(tag)?.get(&notice);
+            own(tag).or_else(|| own(tag.split('_').next()?))
+        });
+        translated.map_or_else(|| self.markup(notice), String::as_str)
+    }
+
     /// `notice` with `args` filled in. Text that renders without formatting
     /// stays plain, as Rift sent it before the catalogue.
     pub fn render(&self, notice: Notice, args: &Args) -> Text {
+        self.render_in(notice, args, language().as_deref())
+    }
+
+    /// [`Catalog::render`] in an explicit language instead of the session's.
+    pub fn render_in(&self, notice: Notice, args: &Args, language: Option<&str>) -> Text {
         let label = notice.key();
         let rendered = |template: &str| {
             markup::parse(template, args, &self.styles)
                 .and_then(|component| simplify(component, label))
         };
-        rendered(self.markup(notice))
+        rendered(self.markup_in(notice, language))
             .or_else(|_| rendered(notice.default_markup()))
             .unwrap_or_else(|_| Text::Plain(notice.default_markup().to_owned()))
     }
@@ -325,6 +388,34 @@ pub fn theme() -> Styles {
     LOADING
         .with(|loading| loading.borrow().clone())
         .unwrap_or_else(|| current().styles().clone())
+}
+
+tokio::task_local! {
+    /// The language of the player whose session runs on this task.
+    static LANGUAGE: std::cell::RefCell<Option<String>>;
+}
+
+/// Run a player's session so that notices rendered on its task use the
+/// player's language once [`set_language`] names it.
+pub async fn session<F: Future>(session: F) -> F::Output {
+    LANGUAGE.scope(std::cell::RefCell::new(None), session).await
+}
+
+/// The language of this task's player; nothing happens outside [`session`].
+pub fn set_language(language: Option<&str>) {
+    let _ = LANGUAGE.try_with(|current| {
+        if current.borrow().as_deref() != language {
+            *current.borrow_mut() = language.map(str::to_owned);
+        }
+    });
+}
+
+/// The language of this task's player, if a session set one.
+pub fn language() -> Option<String> {
+    LANGUAGE
+        .try_with(|current| current.borrow().clone())
+        .ok()
+        .flatten()
 }
 
 /// `notice` without arguments.
@@ -407,6 +498,82 @@ mod tests {
                 {"text": " (#1)", "color": "green"},
             ]}))
         );
+    }
+
+    #[test]
+    fn languages_fall_back_from_region_to_language_to_the_default() {
+        let catalog = Catalog::new([], [("queue.left", "Left.")])
+            .unwrap()
+            .with_language(
+                "de",
+                [("queue.left", "Verlassen."), ("queue.full", "Voll.")],
+            )
+            .unwrap()
+            .with_language("de-AT", [("queue.left", "<bad>Servus.")])
+            .unwrap();
+        let text = |notice, language| catalog.render_in(notice, &Args::new(), language);
+        assert_eq!(text(Notice::QueueLeft, None), Text::Plain("Left.".into()));
+        assert_eq!(
+            text(Notice::QueueLeft, Some("de_de")),
+            Text::Plain("Verlassen.".into())
+        );
+        assert!(matches!(
+            text(Notice::QueueLeft, Some("de_at")),
+            Text::Component(_)
+        ));
+        assert_eq!(
+            text(Notice::QueueFull, Some("de_at")),
+            Text::Plain("Voll.".into())
+        );
+        assert_eq!(
+            text(Notice::QueueLeft, Some("fr_fr")),
+            Text::Plain("Left.".into())
+        );
+        // A message a language lacks comes from `text.messages` or English.
+        assert_eq!(
+            text(Notice::QueueExpired, Some("de")),
+            Text::Plain(Notice::QueueExpired.default_markup().into())
+        );
+        assert_eq!(catalog.languages().collect::<Vec<_>>(), ["de", "de_at"]);
+        assert_eq!(
+            Catalog::default()
+                .with_language("de", [("queue.left", "Left <server>")])
+                .unwrap_err(),
+            "text.languages.de[\"queue.left\"]: <server> at byte 5: unknown tag; not built in, \
+             an argument or a style"
+        );
+        assert!(Catalog::default().with_language("x", []).is_err());
+        assert!(
+            Catalog::default()
+                .with_language("de", [("nope", "x")])
+                .unwrap_err()
+                .starts_with("text.languages.de: unknown message")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_renders_in_its_players_language() {
+        let catalog = Catalog::default()
+            .with_language("de", [("queue.left", "Verlassen.")])
+            .unwrap();
+        // Outside a session there is no language to set.
+        set_language(Some("de"));
+        assert_eq!(language(), None);
+        session(async {
+            assert_eq!(
+                catalog.render(Notice::QueueLeft, &Args::new()),
+                Text::Plain("Left the queue.".into())
+            );
+            set_language(Some("de_de"));
+            assert_eq!(language().as_deref(), Some("de_de"));
+            assert_eq!(
+                catalog.render(Notice::QueueLeft, &Args::new()),
+                Text::Plain("Verlassen.".into())
+            );
+            set_language(None);
+            assert_eq!(language(), None);
+        })
+        .await;
     }
 
     #[test]

@@ -68,28 +68,26 @@ bool exports_rift_plugin_handler_init(rift_string_t *config_json, rift_registrat
   return true;
 }
 
-void exports_rift_plugin_handler_login(rift_context_t *ctx, rift_action_t *ret) {
+void exports_rift_plugin_handler_login(rift_context_t *ctx, rift_decision_t *ret) {
   if (deny_set && rift_string_eq_string(&ctx->name, &deny_name)) {
-    rift_action_deny(ret, "You are not welcome here.");
+    rift_decision_deny(ret, rift_text_plain("You are not welcome here."));
   } else {
-    rift_action_continue(ret);
+    rift_decision_continue(ret);
   }
   rift_context_free(ctx);
 }
 
-void exports_rift_plugin_handler_command(rift_context_t *ctx, rift_action_t *ret) {
-  memset(ret, 0, sizeof *ret);
-  ret->tag = RIFT_PLUGIN_TYPES_ACTION_MESSAGE;
-  ret->val.message = rift_string_fmt("Hello, " RIFT_STR_FMT "!", RIFT_STR_ARG(ctx->name));
+void exports_rift_plugin_handler_command(rift_context_t *ctx, rift_decision_t *ret) {
+  rift_decision_message_fmt(ret, "Hello, " RIFT_STR_FMT "!", RIFT_STR_ARG(ctx->name));
   rift_context_free(ctx);
 }
 
 void exports_rift_plugin_handler_join(rift_context_t *ctx) {
-  rift_string_t text = rift_string_fmt("Welcome, " RIFT_STR_FMT "!", RIFT_STR_ARG(ctx->name));
+  rift_text_t text = rift_text_plain_fmt("Welcome, " RIFT_STR_FMT "!", RIFT_STR_ARG(ctx->name));
   rift_string_t err = {NULL, 0};
   bool online;
   if (!rift_plugin_players_message(&ctx->uuid, &text, &online, &err)) rift_string_free(&err);
-  rift_string_free(&text);
+  rift_text_free(&text);
 
   rift_string_t ns = rift_str("hello"), key = rift_str("joins");
   int64_t joins;

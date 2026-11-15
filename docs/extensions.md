@@ -3,7 +3,7 @@
 This page describes the events, commands, permissions, queues and host
 services that plugins use, as the configuration script sees them: player
 callbacks with a verified identity, permission-checked commands, priority queues,
-durable state, scheduled jobs and bus decisions, in API versions 1 to 3.
+durable state, scheduled jobs and bus decisions.
 Persistent [Lua](plugins-lua.md) and WebAssembly plugins receive the same
 events through the [plugin contract](plugins.md), with the same validation;
 [the plugin overview](plugins.md) explains the execution modes, the dispatch
@@ -18,16 +18,17 @@ examples/extensions.lua`, then start with `RIFT_FORWARDING_SECRET` set. Clients
 may use any supported version, 1.8.9–26.3; Velocity forwarding needs 1.13 or
 newer, so use BungeeGuard forwarding for older ones (see the README).
 
-Set `rift.config.plugins = { api_version = 3, ... }` for the current API
-(`api_version = 2` is the same without `rift.permissions`, and `api_version = 1`
-is the original contract), or use
+Set `rift.config.plugins = { ... }`, or use
 `rift.on(event, callback)` and `rift.command(name, definition)` from a script or
-[folder-based plugin](lua.md). `rift.config.plugins` is the preferred name;
+[folder-based plugin](lua.md). There is one script API: every script has
+everything on this page. `api_version` is no longer needed; 1, 2 and 3 are
+still accepted and ignored, and `ctx.api_version` is always 3.
+`rift.config.plugins` is the preferred name;
 `rift.config.extensions` (and an `extensions` field in a returned table) is
 accepted as an alias throughout 0.x, and setting both is an error. Diagnostics
 and the field names on this page call the table `extensions`. Existing returned
 configuration tables still work.
-Unknown versions, fields, invalid registrations and missing online authentication
+Unknown fields, invalid registrations and missing online authentication
 reject the configuration. The existing `on_route`, `on_http` and `on_message`
 interfaces remain available. `on_route` still runs before the handshake and has
 **no authenticated identity**; identity-based policy belongs in these new hooks.
@@ -48,13 +49,16 @@ server names are errors; Rift never treats an error as permission to proceed.
 | `before_transfer(ctx)` | Before each eligible target connection attempt | `server`, `target`, `reason` | `{ deny = "reason" }` |
 | `after_transfer(ctx)` | When an admitted transfer attempt completes or fails | `server` (source), `target`, `reason`, `success` | `nil` |
 | `disconnect(ctx)` | Session teardown, including an authenticated login that never joined | Last committed `server`, or nil; `reason = "session_closed"` | `nil` |
-| `dialog(ctx)` | A click on a plugin action of a [dialog](dialogs.md) the script showed (API v2+) | `server`, `action`, `values`, `payload` | `nil` |
+| `dialog(ctx)` | A click on a plugin action of a [dialog](dialogs.md) the script showed | `server`, `action`, `values`, `payload` | `nil` |
 | `chat(ctx)` | A chat message, or a command on its way to the backend, before the backend sees it. With signed chat, the first deny costs that player their chat signing; see [chat](plugins.md#chat) | `server`, `kind` (`"message"` or `"command"`), `text`; for a command also `command` and `args` | `{ deny = "reason" }` drops it and shows the player the reason |
 | `kick(ctx)` | A backend kicked the player in play, on a [network](operations.md#maintenance-and-transfers) session. The player is still connected to Rift | `server` (the backend that kicked), `reason` (its kick text without formatting) | `{ server = "name" }` moves the player there (a group picks an instance), `{ deny = "reason" }` disconnects them with that text; `nil` applies `network.on_kick` |
 
-Common player context fields are `api_version` (1, 2 or 3), `authenticated = true`, `uuid`
+Common player context fields are `authenticated = true`, `uuid`
 (lowercase 32-digit hex, no hyphens), canonical Mojang `name`, `connection_id`
-(decimal string), `listener`, normalized `hostname`, `peer_ip`, and `protocol`.
+(decimal string), `listener`, normalized `hostname`, `peer_ip`, `protocol` and
+`language`. `language` is what `rift.players.set_language` stored for the
+player, else the client's locale once Rift knows it, else nil (see
+[languages](plugins.md#the-player-directory-and-languages)).
 `ctx.has_permission("node")` returns a boolean from the [permission
 store](permissions.md), in the contexts Rift knows for the player; a node nobody
 set is `false`. Call it with a dot, not a colon.
@@ -145,23 +149,22 @@ Every invocation evaluates the source in a fresh restricted VM. Globals,
 upvalues and context edits disappear when it finishes. Top-level configuration
 code must therefore be deterministic and free of runtime side effects. Local
 modules and plugins load from the saved snapshot. Direct I/O, dynamic/native module
-loading, coroutine scheduling and arbitrary native calls are unavailable. API v2
-exposes the bounded host services below, including host-scheduled jobs.
+loading, coroutine scheduling and arbitrary native calls are unavailable. The
+bounded [host services](#host-services) below, including host-scheduled jobs,
+take their place.
 `rift.publish` becomes available only after source evaluation and uses
 the existing bounded, nonblocking broker API. Publications already delivered
 before a callback fails are not rolled back.
 
 Rust owns session identity, committed server, pending transfer, permissions,
-capacity leases and queue tickets. API v1 retains its original admission state
-contract. API v2 also owns shared storage and job scheduling, and API v3 adds
-writes to the permission store. Each store/permission mutation and HTTP request
-takes effect independently; later callback failure does not roll it back.
+capacity leases, queue tickets, shared storage and job scheduling. Each
+store/permission mutation and HTTP request takes effect independently; later
+callback failure does not roll it back.
 
 ## Permissions and commands
 
 ```lua
 rift.config.plugins = {
-    api_version = 3,
     groups = {
         default = { permissions = { ["network.queue"] = true } },
         staff = { inherits = { "default" }, permissions = { ["network.staff"] = true } },
@@ -178,11 +181,11 @@ rift.config.plugins = {
 Command permissions are checked against the [permission store](permissions.md)
 for the authenticated UUID, in the contexts Rift knows for the player. A node
 nobody set denies. Grant nodes with groups (configured as above, or at runtime),
-with user nodes from `rift.permissions` in API v3, or in the dashboard. The
+with user nodes from `rift.permissions`, or in the dashboard. The
 `extensions.permissions` grant table of earlier versions is rejected; see
 [upgrading](permissions.md#upgrading-from-extensions-api-v2). A command
 permission is a lowercase node without wildcards, or the empty string
-(`permission = ""`, plugin contract 0.1.5) for a command every player may see
+(`permission = ""`) for a command every player may see
 and run, such as a version command. An empty permission is not a node: nothing
 is looked up or registered for it, and `/perms doctor` and `rift check` skip the
 command.
@@ -249,12 +252,10 @@ permission alone does not protect a server against `/server` or admin routing.
 A service with its own database, such as a ban system, can decide `login`,
 `initial_server`, `before_transfer` and `kick` without running in Lua. Rust sends a
 request on the [message bus](messaging.md) and waits asynchronously, so a slow
-responder holds no Lua worker and no extension slot. Decisions require
-`api_version = 2` or later.
+responder holds no Lua worker and no extension slot.
 
 ```lua
 rift.config.plugins = {
-    api_version = 2,
     decisions = {
         login = {
             subject = "relaxoban.login", timeout_ms = 2000,
@@ -331,23 +332,22 @@ principals = {
 [`rift.events.players`](messaging.md#rift-control-subjects) reports joins, server
 switches and quits, so services that only follow players need no Lua at all.
 
-## Host services (API v2 and v3)
+## Host services
 
 These APIs are available only in authenticated extension callbacks and scheduled
-jobs with `api_version = 2` or `3`. They are unavailable in legacy route/HTTP/message
+jobs. They are unavailable in legacy route/HTTP/message
 callbacks, except that `rift.players` also works in `on_message` and `on_http`
-when extensions use API v2 or v3. Configuration loading, `rift check` and candidate reload validation
+when `rift.config.plugins` is set. Configuration loading, `rift check` and candidate reload validation
 never execute jobs, HTTP requests or storage operations. Capture API references
 in initialization freely (`local store = require("rift.store")`); calling them
 there is an error. `require("rift.http")` and `require("rift.players")` work in
-the same way. All methods use a dot, not a colon. API v3 adds
-`rift.permissions`, described in [permissions](permissions.md#lua-api).
+the same way. All methods use a dot, not a colon.
+`rift.permissions` is described in [permissions](permissions.md#lua-api).
 
 ### Persistent state
 
 ```lua
 rift.config.plugins = {
-    api_version = 2,
     storage = { path = "extensions.state" },
     join = function(ctx)
         local visits = rift.store.increment("visits", ctx.uuid, 1)
@@ -373,7 +373,8 @@ converted at startup. The original snapshot is kept as `<file>.v1-backup`; to go
 back to an earlier Rift version, restore it in place of the database.
 Namespaces organize data; they do not isolate mutually untrusted plugins.
 Namespaces beginning with `rift.` are reserved for host-owned data, such as the
-group memberships of API v2 that an upgrade copies into the permission store,
+group memberships that an [upgrade](permissions.md#upgrading-from-extensions-api-v2)
+copies into the permission store,
 and namespaces beginning with `plugin.` hold persistent plugins' private data;
 `rift.store` methods reject both.
 
@@ -441,7 +442,7 @@ rift.config.plugins.jobs = {
 
 Register up to 32 named jobs using lowercase letters, digits, `_`, `-` or `.`
 (1–64 bytes). Each requires `every_ms` (an integer from 100 to 86400000) and a
-`run` function. Its context contains only `api_version` and `job`; it has no
+`run` function. Its context contains `job` (and `api_version`); it has no
 player identity. Return nil. The first run waits a full interval, and each next
 run waits a full interval after completion. Jobs never overlap by name, including
 across reloads. Missed intervals are skipped, never queued for catch-up.
@@ -477,7 +478,7 @@ local response = rift.http.request("directory", {
     method = "GET", path = "0123456789abcdef0123456789abcdef",
 })
 if response.status == 200 then
-    -- API v3; the write commits before the call returns.
+    -- The write commits before the call returns.
     rift.permissions.user("0123456789abcdef0123456789abcdef")
         :set("network.staff", response.body == "allow")
 end
@@ -513,8 +514,8 @@ remaining deadline always takes precedence. There are no automatic retries.
 
 ### Permissions
 
-Permission groups, memberships, live grants and their Lua API (`rift.permissions`
-with `api_version = 3`) are described in [permissions](permissions.md). The
+Permission groups, memberships, live grants and their Lua API
+(`rift.permissions`) are described in [permissions](permissions.md). The
 `extensions.groups` table is mirrored into the permission store on every
 committed reload; [groups as configuration](permissions.md#groups-as-configuration)
 lists its fields. Persistent plugins reach the same store through the
@@ -548,8 +549,10 @@ rift.config.plugins.commands.alert = {
 }
 ```
 
-`rift.players` lists the players who are in a world on this Rift process and
-queues actions for them. It works in callbacks, jobs, and (with API v2 or v3)
+`rift.players` lists the players who are in a world on this Rift process,
+queues actions for them and reads the
+[player directory](plugins.md#the-player-directory-and-languages). It works in
+callbacks, jobs, and (when `rift.config.plugins` is set)
 `on_message` and `on_http`, so a messaging handler can relay cross-server chat or
 an HTTP endpoint can kick a player. A `player` argument is a lowercase UUID
 (32 hex digits, no hyphens) or a case-insensitive name. A `server` argument
@@ -570,13 +573,31 @@ names a configured backend or service group; a group matches all its instances.
 | `rift.players.kick(player, reason)` | Boolean: a disconnect with this reason (a string or a chat component table) was queued |
 | `rift.players.transfer(player, server)` | Boolean: a transfer request was queued |
 | `rift.players.broadcast(text, server)` | Number of players a chat message (a string or a chat component table) was queued for; `server` is optional |
+| `rift.players.lookup(target)` | The directory record of a UUID, or of the name a player last joined with (case-insensitive); nil for a player Rift never saw |
+| `rift.players.search(prefix, limit)` | Array of directory records whose name starts with `prefix`, most recently seen first; `limit` is 1–100 (default 20) |
+| `rift.players.set_language(target, language)` | Boolean: the player is known and the language was stored; `language` nil goes back to the client's locale |
 
 Player tables contain `uuid`, `name`, `server` (the last committed backend),
 `connection_id` (a decimal string, matching `ctx.connection_id`), `protocol`,
 `visible_to` (the node a viewer needs to see the player, or nil; see
-[visibility](permissions.md#visibility)) and `locale`.
+[visibility](permissions.md#visibility)), `locale`, `language` (as
+`ctx.language`), `ip` (the address the player connected from) and `properties`
+(the signed profile properties of the login, a list of
+`{ name, value, signature }`; `textures` holds skin and cape).
 Players appear after their first usable Join Game and disappear when the session
 closes. Pending logins and players on other Rift processes are not listed.
+
+The directory remembers every player who joined, online or not, so `lookup`,
+`search` and `set_language` also work for offline players. A record is a table
+`{ uuid, name, first_seen, last_seen, last_ip, last_server, online, language }`:
+`first_seen` and `last_seen` are Unix seconds, `last_ip` is empty with
+[`players = { record_ip = false }`](operations.md#the-player-directory), and
+`language` is what `set_language` stored, or nil. A player has a record from
+their first join on, so `login` of a first-time player finds none.
+`set_language` takes a tag of 2–16 bytes of `a-z0-9_` (`de`, `de_de`; `de-DE`
+is normalized) and counts as an action call. Rift's own messages to that
+player then come from [`text.languages`](text.md#languages); see
+[the player directory and languages](plugins.md#the-player-directory-and-languages).
 
 `locale` is the language the player's client reported, as the client spells it
 (`en_us`; old clients send `en_US`), or nil while Rift does not know it
@@ -604,7 +625,6 @@ footer across server switches until the next call or disconnect, and
 
 ```lua
 rift.config.plugins = {
-    api_version = 3,
     join = function(ctx)
         if rift.permissions.check(ctx.uuid, "network.vip") == true then
             rift.players.tab_list(ctx.uuid, { header = { text = "VIP Lounge", color = "light_purple" } })
@@ -628,7 +648,6 @@ backend's boss bars.
 
 ```lua
 rift.config.plugins = {
-    api_version = 2,
     join = function(ctx)
         rift.players.boss_bar(ctx.uuid, "event", {
             text = { text = "Build contest: 40 of 50 entries", color = "gold" },
@@ -672,7 +691,6 @@ which Rift keeps instead of sending them to the client):
 
 ```lua
 rift.config.extensions = {
-    api_version = 2,
     commands = {
         report = {
             permission = "network.player",
@@ -718,11 +736,10 @@ theme, Rift's own message catalogue and how each client version is served.
   `rift.players.message(player, { text = "Hi", bold = true })`;
 - in [bus replies](#decisions-answered-over-the-message-bus), an object or a
   list as the `reason`, including `{"mini": "<red>Banned"}`;
-- in WebAssembly plugins, the `-json` functions of the plugin contract
-  (`players.message-json`, `action-bar-json`, `kick-json`, `broadcast-json`)
-  and the `deny-json` and `message-json` answers of its optional `decisions`
-  export (since 0.1.2), which take the component as JSON text. The SDKs
-  export `decisions` for you.
+- in WebAssembly plugins, the [`text`](plugins.md#events) type of the plugin
+  contract, which host functions and answers take: `plain(string)` or
+  `json(string)`, the component as JSON text. The SDK builders produce the
+  JSON form.
 
 Rift never reads JSON out of a plain string, so a plugin that relays what a
 player typed cannot be made to send click events. A component may be at most
@@ -780,7 +797,6 @@ rift.players.message(target.uuid, {
 })
 
 rift.config.plugins = {
-    api_version = 3,
     login = function(ctx)
         local ban = rift.store.get("bans", ctx.uuid)
         if ban then
@@ -889,13 +905,13 @@ hostname deny an account without `network.staff`.
 
 A validated reload is atomic for new accepted connections. Existing connections
 keep their source, command registrations and callback semantics for their entire
-lifetime, including future transfers. V1 keeps its UUID grants until reconnect.
-V2 uses current configured grants and runtime overrides, as described above.
+lifetime, including future transfers. Permission checks read the current
+[permission store](permissions.md).
 Administrator transfers to newly added backends still run the player's pinned
 transfer policy. Failed reloads leave the active generation intact.
 
 Host leases, queue order, storage, permission overrides and worker limits survive
-reload. Enabling/disabling extensions, changing API version, storage path or queue
-destinations/capacities requires restart. Restart clears in-memory state and job
+reload. Enabling/disabling extensions and changing the storage path or quotas or queue
+destinations/capacities require a restart. Restart clears in-memory state and job
 schedules but preserves a configured storage database. There is no automatic
 state migration or durable replay of callbacks.

@@ -35,9 +35,12 @@ published as prereleases from the same pipeline.
 
 - Validated Lua configuration (`rift.lua`), `rift check`, atomic reloads with
   history and rollback.
-- One plugin contract (`rift:plugin@0.1.5`) with script, persistent Lua,
+- One plugin contract (`rift:plugin@0.2.0`) with script, persistent Lua,
   WebAssembly and remote execution modes; login, transfer, chat and kick
-  hooks; commands with suggestions; per-plugin storage quotas.
+  hooks; commands with suggestions, aliases and a console sender; background
+  workers for slow lookups; per-plugin storage quotas.
+- A player directory (name, UUID, first and last seen, address, last server)
+  for plugins, and a per-player language that selects Rift's own messages.
 - A network-wide permission store with groups, tracks, contexts, a LuckPerms
   import and `/server` access by permission node.
 
@@ -60,14 +63,14 @@ published as prereleases from the same pipeline.
 ### Database
 
 - `rift.sqlite3` instance schema 2, service groups schema 1, bus logins
-  schema 1 and permissions schema 1. Files written by earlier development
-  builds are migrated at the first start.
+  schema 1, permissions schema 1 and player directory schema 1. Files written
+  by earlier development builds are migrated at the first start.
 
 ### SDKs
 
-- Rust `rift-plugin` 0.1.5 on [crates.io](https://crates.io/crates/rift-plugin),
-  git tag `sdk/rust/v0.1.5`.
-- Go `github.com/Jotrorox/rift/sdk/go` v0.1.5: git tag `sdk/go/v0.1.5`.
+- Rust `rift-plugin` 0.2.0 on [crates.io](https://crates.io/crates/rift-plugin),
+  git tag `sdk/rust/v0.2.0`.
+- Go `github.com/Jotrorox/rift/sdk/go` v0.2.0: git tag `sdk/go/v0.2.0`.
 - C SDK in `sdk/c` of the release tag.
 - Java `io.github.jotrorox.rift` artifacts at the proxy's version, from
   `https://jotrorox.github.io/rift/maven` and GitHub Packages.

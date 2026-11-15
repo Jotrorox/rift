@@ -10,10 +10,11 @@
 //!   text `database down`. The host rejects it as an invalid reply, applies
 //!   `on_failure` and keeps the instance running, as for a Lua error.
 //!
-//! The `chat` export is the registration of the chat hook, so it cannot follow
-//! the configuration: the `chat` feature builds the guest with it, and
+//! The `chat` hook is delivered only to a registration that lists it. The
+//! `chat` feature builds the guest that lists `Hook::Chat`:
 //! `tests/fixtures/plugins/conformance-chat-rs` is this source with that
-//! feature on, for the scenarios that handle chat.
+//! feature on, for the scenarios that handle chat. Without the feature the
+//! guest never lists it.
 use rift_plugin::{
     Action, BusMessage, ChatAttempt, ChatKind, CommandSpec, Connection, Context, Hook, HttpRequest,
     HttpResponse, Ping, Plugin, Registration, RouteDecision, StatusOverride, SuggestKind,
@@ -68,28 +69,26 @@ impl Guest {
     fn decide(&self, hook: &str) -> Action {
         if self.behave(hook).is_err() {
             // No hook accepts `message` except `command`.
-            return Action::Message("database down".into());
+            return Action::message("database down");
         }
         match &self.config["decide"][hook] {
             Value::Object(action) => match action.iter().next() {
-                Some((kind, Value::String(text))) if kind == "deny" => Action::Deny(text.clone()),
-                // A JSON text component: the `-json` form of the decision.
+                Some((kind, Value::String(text))) if kind == "deny" => Action::deny(text),
+                // A JSON text component: the `json` case of the text.
                 Some((kind, component @ (Value::Object(_) | Value::Array(_))))
                     if kind == "deny" =>
                 {
-                    Action::deny_json(component)
+                    Action::deny(component)
                 }
                 Some((kind, component @ (Value::Object(_) | Value::Array(_))))
                     if kind == "message" =>
                 {
-                    Action::message_json(component)
+                    Action::message(component)
                 }
                 Some((kind, Value::String(text))) if kind == "server" => {
                     Action::Server(text.clone())
                 }
-                Some((kind, Value::String(text))) if kind == "message" => {
-                    Action::Message(text.clone())
-                }
+                Some((kind, Value::String(text))) if kind == "message" => Action::message(text),
                 Some((kind, Value::String(text))) if kind == "queue" => Action::Queue(text.clone()),
                 _ => Action::Continue,
             },
@@ -140,6 +139,9 @@ impl Plugin for Guest {
                     .permission(command["permission"].as_str().unwrap_or_default())
                     .suggest(suggest),
             );
+        }
+        if cfg!(feature = "chat") {
+            registration = registration.hook(Hook::Chat);
         }
         if !registration.commands.is_empty() {
             registration = registration.hook(Hook::Command);
@@ -200,21 +202,18 @@ impl Plugin for Guest {
     fn command(&mut self, ctx: Context) -> Action {
         if self.behave("command").is_err() {
             // `command` accepts every decision; an empty message is invalid.
-            return Action::Message(String::new());
+            return Action::message("");
         }
         if !self.config["decide"]["command"].is_null() {
             return self.decide("command");
         }
-        Action::Message(format!("hi {}", ctx.args))
+        Action::message(format!("hi {}", ctx.args))
     }
 
     fn suggest(&mut self, _ctx: Context) -> Vec<Suggestion> {
         ["alpha", "beta", "gamma"]
             .into_iter()
-            .map(|text| Suggestion {
-                text: text.into(),
-                tooltip: None,
-            })
+            .map(Suggestion::new)
             .collect()
     }
 
@@ -222,13 +221,9 @@ impl Plugin for Guest {
         self.observe("status");
         let motd = self.config["status_motd"].as_str()?;
         Some(StatusOverride {
-            motd_json: Some(Value::from(motd).to_string()),
-            version: None,
-            protocol: None,
-            online: None,
-            max_players: None,
-            sample: None,
-            favicon: None,
+            // A JSON string: shown as written.
+            motd: Some(Value::from(motd).into()),
+            ..Default::default()
         })
     }
 
@@ -246,18 +241,17 @@ impl Plugin for Guest {
         self.observe("join");
         let rich = &self.config["rich"];
         if !rich.is_null() {
-            let rich = rich.to_string();
             let show = |result: Result<bool, String>| match result {
                 Ok(online) => online.to_string(),
                 Err(error) => format!("error({error})"),
             };
-            let message = show(players::message_json(&ctx.uuid, &rich));
-            let action_bar = show(players::action_bar_json(&ctx.uuid, &rich));
-            let broadcast = match players::broadcast_json(&rich) {
+            let message = show(players::message(&ctx.uuid, rich));
+            let action_bar = show(players::action_bar(&ctx.uuid, rich));
+            let broadcast = match players::broadcast(rich) {
                 Ok(count) => count.to_string(),
                 Err(error) => format!("error({error})"),
             };
-            let kick = show(players::kick_json(&ctx.uuid, &rich));
+            let kick = show(players::kick(&ctx.uuid, rich));
             report(&format!("rich {message} {action_bar} {broadcast} {kick}"));
         }
     }
@@ -308,7 +302,4 @@ impl Plugin for Guest {
     }
 }
 
-#[cfg(not(feature = "chat"))]
 rift_plugin::export!(Guest);
-#[cfg(feature = "chat")]
-rift_plugin::export!(Guest, chat);

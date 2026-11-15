@@ -7,7 +7,7 @@ owns the data and resolves it; backends hold replicas and answer
 `hasPermission` from memory (see the [protocol](permissions-protocol.md)).
 
 On the proxy the store answers extension commands, `ctx.has_permission`,
-the Lua `rift.permissions` module (extensions API v3), the `RiftInGroup`
+the Lua `rift.permissions` module, the `RiftInGroup`
 [BungeeCord request](bungeecord.md#rift-requests), the [dashboard](#dashboard),
 the [HTTP API](http.md#permissions-api) and the [`/perms` commands](#commands);
 backends replicate it over the [bus](#backends).
@@ -173,11 +173,10 @@ why.
 
 ### Groups as configuration
 
-Extensions with `api_version = 2` or `3` can keep groups in Lua:
+Extensions can keep groups in Lua:
 
 ```lua
 rift.config.extensions = {
-    api_version = 3,
     groups = {
         default = { permissions = { ["network.queue"] = true, ["chat.color"] = false } },
         staff = {
@@ -254,8 +253,8 @@ and nodes are lowercased; nodes cannot end in a wildcard.
 
 ## Lua API
 
-`rift.permissions` (also `require("rift.permissions")`) needs
-`extensions.api_version = 3`. Calls are synchronous, never leave the process
+`rift.permissions` (also `require("rift.permissions")`) is available to
+every configuration script. Calls are synchronous, never leave the process
 and work only in extension callbacks and jobs; writes have committed when they
 return. Calling them while the configuration loads is an error, except for the
 two registrations at the end of this section. Methods of the objects that
@@ -398,32 +397,35 @@ key through RiftPerms and hides the player locally (see
 ## Persistent plugins
 
 Persistent [plugins](plugins.md), in Lua or WebAssembly, use the store through
-the `permissions` interface of the plugin contract (`rift:plugin@0.1`). Its
-calls keep their signatures and map onto the store like this:
+the `permissions` interface of the plugin contract (`rift:plugin@0.2`). Its
+calls map onto the store like this:
 
 | Contract call | In the permission store |
 | --- | --- |
 | `has(uuid, node)` | the node in the player's current proxy contexts, like `ctx.has_permission`; undefined is false |
 | `set(uuid, node, some(value))` | sets the user's global permission node; `uuid` `*` sets it on `default` |
 | `set(uuid, node, none)` | unsets that global node |
-| `add-group(uuid, group)` | sets a global `inherit` node; returns whether anything changed |
+| `add-group(uuid, group, expires-at?)` | sets a global `inherit` node, a membership until `expires-at` (Unix seconds) when given; adding again replaces the expiry; returns whether anything changed |
 | `remove-group(uuid, group)` | unsets the global `inherit` node; returns whether anything changed |
 | `groups(uuid)` | the groups the player is in, in their current contexts: direct, inherited and `default`, in rank order |
 | `list-groups()` | every group as a JSON object keyed by name: `name`, `weight`, `display_name` and `nodes` |
-| `meta(uuid, key)` (0.1.3) | one meta value in the player's current contexts, or `none` |
-| `set-meta(uuid, key, value, contexts-json, expires-at)` (0.1.3) | sets the user's meta node in exactly those contexts (`none`: global), expiring at Unix seconds if given; a `none` value removes it; returns whether anything changed |
+| `meta(uuid, key)` | one meta value in the player's current contexts, or `none` |
+| `set-meta(uuid, key, value, contexts-json, expires-at)` | sets the user's meta node in exactly those contexts (`none`: global), expiring at Unix seconds if given; a `none` value removes it; returns whether anything changed |
 
 Writes are committed when the call returns and persist like any other store
 change. They are recorded with actor `lua:plugin:<name>`, whatever the
-plugin's engine, and the nodes carry source `plugin:<name>`. Permission and
-group nodes with contexts or expiry, tracks and group edits are not part of
-the contract; use the dashboard, `/perms` or `rift.lua` with API v3 for them.
+plugin's engine, and the nodes carry source `plugin:<name>`. Permission
+nodes with contexts or expiry, group nodes with contexts, tracks and group
+edits are not part of the contract; use the dashboard, `/perms` or `rift.lua`
+for them.
 Persistent Lua plugins also have `rift.permissions.check(uuid, node, contexts?)`
 (true, false or nil), `rift.permissions.meta(uuid, contexts?)`, as in the Lua
 API above (without contexts they use the player's current ones), and
 `rift.permissions.set_meta(uuid, key, value, options?)`, whose `value` `nil`
 removes the node and whose options are `contexts`, `expires_in` and
-`expires_at` as for API v3 writes.
+`expires_at` as for the writes above. In Lua,
+`rift.permissions.add_group(uuid, group, { expires_in?, expires_at? })` makes
+the membership end after that many seconds or at that Unix time.
 
 ## LuckPerms import and export
 
@@ -686,8 +688,10 @@ persisted and are not carried over.
 | `rift.permissions.groups(uuid)` | the `inherit` entries of `rift.permissions.user(uuid):nodes()` |
 | `extensions.permissions` | user nodes (`user(uuid):set` in a callback, or the dashboard) or `extensions.groups` |
 
-API v1 and v2 extensions keep working without `rift.permissions`: their
-commands and `ctx.has_permission` are answered by the store. Group inheritance
+Scripts written for API v1 and v2 keep working unchanged: their
+commands and `ctx.has_permission` are answered by the store, and
+`api_version` no longer selects anything, so `rift.permissions` is available
+to them too. Group inheritance
 no longer has to avoid cycles or name defined groups, and where API v2 let any
 unrelated denial win, weights now decide; give the group that should win a
 higher weight.

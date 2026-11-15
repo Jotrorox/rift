@@ -9,11 +9,11 @@
 //   `rift_plugin_defaults.c` do this for hooks you do not implement.
 // - Values you return from a handler are freed by the bindings after the
 //   host has copied them (`free()` on every non-empty string and list). They
-//   must therefore be heap-allocated: use `rift_string_dup`, `rift_string_fmt`
-//   and the `rift_action_*` and `rift_registration_*` helpers, never
-//   `rift_str("literal")`.
-// - Arguments you pass to host imports are borrowed: `rift_str("literal")` is
-//   fine there and nothing is freed.
+//   must therefore be heap-allocated: use `rift_string_dup`, `rift_string_fmt`,
+//   `rift_text_dup` and the `rift_decision_*`, `rift_suggestions_*` and
+//   `rift_registration_*` helpers, never `rift_str("literal")`.
+// - Arguments you pass to host imports are borrowed: `rift_str("literal")` and
+//   `rift_text_plain("literal")` are fine there and nothing is freed.
 // - Results the host hands back from imports (`ret` and `err` out-params) are
 //   owned by you: free them with `rift_string_free`, `rift_bytes_free` or the
 //   generated `rift_plugin_*_free` functions.
@@ -27,15 +27,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-// With RIFT_CHAT the plugin handles the chat hook (see "Chat" below): the
-// bindings in chat/ are the same ones plus the `chat` export. Build every
-// source of the plugin, and link chat/rift_plugin.c and
-// chat/rift_plugin_component_type.o, with RIFT_CHAT defined.
-#ifdef RIFT_CHAT
-#include "chat/rift_plugin.h"
-#else
 #include "rift_plugin.h"
-#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -46,13 +38,26 @@ typedef rift_plugin_string_t rift_string_t;
 typedef rift_plugin_list_u8_t rift_bytes_t;
 typedef rift_plugin_list_string_t rift_string_list_t;
 typedef rift_plugin_option_string_t rift_option_string_t;
+typedef rift_plugin_types_text_t rift_text_t;
+typedef rift_plugin_types_option_text_t rift_option_text_t;
 typedef rift_plugin_types_context_t rift_context_t;
-typedef rift_plugin_types_action_t rift_action_t;
+typedef rift_plugin_types_decision_t rift_decision_t;
 typedef rift_plugin_types_registration_t rift_registration_t;
+typedef rift_plugin_types_command_spec_t rift_command_spec_t;
 typedef rift_plugin_types_bus_message_t rift_bus_message_t;
 typedef rift_plugin_types_hook_t rift_hook_t;
 typedef rift_plugin_types_level_t rift_level_t;
 typedef rift_plugin_types_dialog_response_t rift_dialog_response_t;
+typedef rift_plugin_types_chat_attempt_t rift_chat_attempt_t;
+typedef rift_plugin_types_chat_kind_t rift_chat_kind_t;
+typedef rift_plugin_types_suggestion_t rift_suggestion_t;
+typedef exports_rift_plugin_handler_list_suggestion_t rift_suggestion_list_t;
+typedef rift_plugin_types_status_override_t rift_status_override_t;
+typedef rift_plugin_types_title_spec_t rift_title_spec_t;
+typedef rift_plugin_types_player_info_t rift_player_info_t;
+typedef rift_plugin_types_player_record_t rift_player_record_t;
+typedef rift_plugin_players_list_player_record_t rift_player_record_list_t;
+typedef exports_rift_plugin_handler_result_list_u8_string_t rift_job_outcome_t;
 
 // ---------------------------------------------------------------------------
 // Allocation
@@ -183,6 +188,16 @@ static inline rift_bytes_t rift_bytes_from_string(const rift_string_t *s) {
   return rift_bytes_view(s->ptr, s->len);
 }
 
+// An owned copy of `len` bytes, such as the result `work` returns.
+static inline rift_bytes_t rift_bytes_dup(const void *data, size_t len) {
+  rift_bytes_t out = {NULL, len};
+  if (len > 0) {
+    out.ptr = (uint8_t *)rift_alloc(len);
+    memcpy(out.ptr, data, len);
+  }
+  return out;
+}
+
 static inline void rift_bytes_free(rift_bytes_t *b) {
   if (b->len > 0) free(b->ptr);
   b->ptr = NULL;
@@ -203,133 +218,213 @@ static inline void rift_bus_message_free(rift_bus_message_t *msg) { rift_plugin_
 static inline void rift_dialog_response_free(rift_dialog_response_t *response) {
   rift_plugin_types_dialog_response_free(response);
 }
-
-// ---------------------------------------------------------------------------
-// Actions (decision hooks write into `ret`)
-
-static inline void rift_action_continue(rift_action_t *ret) {
-  memset(ret, 0, sizeof *ret);
-  ret->tag = RIFT_PLUGIN_TYPES_ACTION_CONTINUE;
-}
-
-static inline void rift_action_leave_queue(rift_action_t *ret) {
-  memset(ret, 0, sizeof *ret);
-  ret->tag = RIFT_PLUGIN_TYPES_ACTION_LEAVE_QUEUE;
-}
-
-// The payload is copied, so literals and borrowed strings are fine here.
-static inline void rift_action_with(rift_action_t *ret, uint8_t tag, const char *text) {
-  memset(ret, 0, sizeof *ret);
-  ret->tag = tag;
-  // Every payload-carrying case is a string at the same offset.
-  ret->val.deny = rift_string_dup(text);
-}
-
-static inline void rift_action_deny(rift_action_t *ret, const char *reason) {
-  rift_action_with(ret, RIFT_PLUGIN_TYPES_ACTION_DENY, reason);
-}
-static inline void rift_action_server(rift_action_t *ret, const char *server) {
-  rift_action_with(ret, RIFT_PLUGIN_TYPES_ACTION_SERVER, server);
-}
-static inline void rift_action_message(rift_action_t *ret, const char *text) {
-  rift_action_with(ret, RIFT_PLUGIN_TYPES_ACTION_MESSAGE, text);
-}
-static inline void rift_action_queue(rift_action_t *ret, const char *queue) {
-  rift_action_with(ret, RIFT_PLUGIN_TYPES_ACTION_QUEUE, queue);
-}
-
-// ---------------------------------------------------------------------------
-// Decisions with rich text (since 0.1.2)
-//
-// Define `exports_rift_plugin_decisions_<hook>` instead of
-// `exports_rift_plugin_handler_<hook>` to answer `login`, `initial_server`,
-// `before_transfer` or `command` with a JSON text component. The weak
-// defaults of the `decisions` export call your handler hooks, so a plugin
-// without rich text defines only those.
-
-typedef rift_plugin_types_decision_t rift_decision_t;
-
-// The payload is copied, so literals and borrowed strings are fine here.
-static inline void rift_decision_with(rift_decision_t *ret, uint8_t tag, const char *text) {
-  memset(ret, 0, sizeof *ret);
-  ret->tag = tag;
-  // Every payload-carrying case is a string at the same offset.
-  ret->val.deny = rift_string_dup(text);
-}
-
-// `deny-json` and `message-json`: a JSON text component of at most 32 KiB,
-// for colours, line breaks, hover text and click events.
-static inline void rift_decision_deny_json(rift_decision_t *ret, const char *reason_json) {
-  rift_decision_with(ret, RIFT_PLUGIN_TYPES_DECISION_DENY_JSON, reason_json);
-}
-static inline void rift_decision_message_json(rift_decision_t *ret, const char *text_json) {
-  rift_decision_with(ret, RIFT_PLUGIN_TYPES_DECISION_MESSAGE_JSON, text_json);
-}
-
-// A plain action as a decision; the action's payload moves into `ret`.
-static inline void rift_decision_from_action(rift_decision_t *ret, rift_action_t *action) {
-  memset(ret, 0, sizeof *ret);
-  // `action`'s cases are the first cases of `decision`, in the same order.
-  ret->tag = action->tag;
-  if (action->tag != RIFT_PLUGIN_TYPES_ACTION_CONTINUE && action->tag != RIFT_PLUGIN_TYPES_ACTION_LEAVE_QUEUE) {
-    ret->val.deny = action->val.deny;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Chat (since 0.1.5)
-//
-// `exports_rift_plugin_chat_chat` sees every chat message, and every command
-// that reaches the backend, before the backend does. It answers `continue`
-// (`rift_decision_continue`), which lets the packet through unchanged, or
-// `deny` (`rift_decision_deny`, `rift_decision_deny_json`), which drops it
-// and shows the player the text. `attempt->kind` tells a message from a
-// command; for a command `attempt->ctx.command` is the root name and
-// `attempt->ctx.args` the rest, and `attempt->text` is the whole line without
-// its slash.
-//
-// The export exists only in a plugin built with RIFT_CHAT (`RIFT_CHAT=1
-// sdk/c/build.sh ...`, or `rift_add_chat_plugin()` in CMake). It is the
-// registration: Rift asks such a plugin about every message of every player,
-// whatever its hook list says. Dropping one signed message breaks the
-// player's signature chain, so unless the proxy sets
-// `authentication.signed_chat = false`, the first deny costs that player
-// their chat signing until they reconnect. A plugin built without RIFT_CHAT
-// has no `chat` export and is never asked.
-//
-//   void exports_rift_plugin_chat_chat(rift_chat_attempt_t *attempt, rift_decision_t *ret) {
-//     if (attempt->kind == RIFT_PLUGIN_TYPES_CHAT_KIND_MESSAGE && is_muted(&attempt->ctx.uuid)) {
-//       rift_decision_deny(ret, "You are muted.");
-//     } else {
-//       rift_decision_continue(ret);
-//     }
-//     rift_chat_attempt_free(attempt);
-//   }
-
-typedef rift_plugin_types_chat_attempt_t rift_chat_attempt_t;
-typedef rift_plugin_types_chat_kind_t rift_chat_kind_t;
-
 static inline void rift_chat_attempt_free(rift_chat_attempt_t *attempt) {
   rift_plugin_types_chat_attempt_free(attempt);
 }
+static inline void rift_job_outcome_free(rift_job_outcome_t *outcome) {
+  exports_rift_plugin_handler_result_list_u8_string_free(outcome);
+}
+
+// ---------------------------------------------------------------------------
+// Text
+//
+// Everything a player reads is a `text`: plain (1..=1024 bytes, shown exactly
+// as written) or a JSON text component (at most 32 KiB, for colours, line
+// breaks, hover text and click events; see the text builders below and
+// docs/text.md).
+//
+// `rift_text_plain` and `rift_text_json` are borrowed views, like `rift_str`.
+// Pass them to host imports and to the helpers in this header, which copy
+// what they keep. Never store one in a value you return from a handler: use
+// `rift_text_dup` or `rift_text_plain_fmt` there.
+
+static inline rift_text_t rift_text_plain_n(const char *s, size_t len) {
+  rift_text_t out;
+  memset(&out, 0, sizeof out);
+  out.tag = RIFT_PLUGIN_TYPES_TEXT_PLAIN;
+  out.val.plain.ptr = (uint8_t *)s;
+  out.val.plain.len = len;
+  return out;
+}
+
+static inline rift_text_t rift_text_json_n(const char *json, size_t len) {
+  rift_text_t out;
+  memset(&out, 0, sizeof out);
+  out.tag = RIFT_PLUGIN_TYPES_TEXT_JSON;
+  out.val.json.ptr = (uint8_t *)json;
+  out.val.json.len = len;
+  return out;
+}
+
+// A view of a NUL-terminated string as plain text.
+static inline rift_text_t rift_text_plain(const char *s) { return rift_text_plain_n(s, s ? strlen(s) : 0); }
+
+// A view of a NUL-terminated JSON text component, such as a text builder
+// result.
+static inline rift_text_t rift_text_json(const char *json) {
+  return rift_text_json_n(json, json ? strlen(json) : 0);
+}
+
+// A view of a `rift_string_t`, such as `ctx->name`, as plain text.
+static inline rift_text_t rift_text_plain_string(const rift_string_t *s) {
+  return rift_text_plain_n((const char *)s->ptr, s->len);
+}
+
+// An owned copy of `text`, for values a handler returns.
+static inline rift_text_t rift_text_dup(rift_text_t text) {
+  rift_text_t out;
+  memset(&out, 0, sizeof out);
+  out.tag = text.tag;
+  // Both cases are a string at the same offset.
+  out.val.plain = rift_string_dup_n((const char *)text.val.plain.ptr, text.val.plain.len);
+  return out;
+}
+
+// Owned, printf-formatted plain text.
+static inline rift_text_t rift_text_plain_fmt(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static inline rift_text_t rift_text_plain_fmt(const char *fmt, ...) {
+  va_list args;
+  va_start(args, fmt);
+  rift_text_t out;
+  memset(&out, 0, sizeof out);
+  out.tag = RIFT_PLUGIN_TYPES_TEXT_PLAIN;
+  out.val.plain = rift_string_vfmt(fmt, args);
+  va_end(args);
+  return out;
+}
+
+static inline void rift_text_free(rift_text_t *text) {
+  rift_string_free(&text->val.plain);
+}
+
+static inline rift_option_text_t rift_some_text(rift_text_t text) {
+  rift_option_text_t out;
+  out.is_some = true;
+  out.val = text;
+  return out;
+}
+
+static inline rift_option_text_t rift_none_text(void) {
+  rift_option_text_t out;
+  memset(&out, 0, sizeof out);
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Decisions (decision hooks write into `ret`)
+//
+// `login`, `before_transfer` and `chat` accept continue and deny;
+// `initial_server` and `kick` also server; `command` accepts continue,
+// message, server, queue and leave-queue. Every payload is copied, so
+// literals and borrowed views are fine here.
 
 static inline void rift_decision_continue(rift_decision_t *ret) {
   memset(ret, 0, sizeof *ret);
   ret->tag = RIFT_PLUGIN_TYPES_DECISION_CONTINUE;
 }
 
-// `deny`: plain text of 1..=1024 bytes. The text is copied.
-static inline void rift_decision_deny(rift_decision_t *ret, const char *reason) {
-  rift_decision_with(ret, RIFT_PLUGIN_TYPES_DECISION_DENY, reason);
+static inline void rift_decision_leave_queue(rift_decision_t *ret) {
+  memset(ret, 0, sizeof *ret);
+  ret->tag = RIFT_PLUGIN_TYPES_DECISION_LEAVE_QUEUE;
+}
+
+// `rift_decision_deny(ret, rift_text_plain("You are banned."))`, or
+// `rift_text_json(json)` for a JSON text component.
+static inline void rift_decision_deny(rift_decision_t *ret, rift_text_t reason) {
+  memset(ret, 0, sizeof *ret);
+  ret->tag = RIFT_PLUGIN_TYPES_DECISION_DENY;
+  ret->val.deny = rift_text_dup(reason);
+}
+
+static inline void rift_decision_message(rift_decision_t *ret, rift_text_t text) {
+  memset(ret, 0, sizeof *ret);
+  ret->tag = RIFT_PLUGIN_TYPES_DECISION_MESSAGE;
+  ret->val.message = rift_text_dup(text);
+}
+
+static inline void rift_decision_server(rift_decision_t *ret, const char *server) {
+  memset(ret, 0, sizeof *ret);
+  ret->tag = RIFT_PLUGIN_TYPES_DECISION_SERVER;
+  ret->val.server = rift_string_dup(server);
+}
+
+static inline void rift_decision_queue(rift_decision_t *ret, const char *queue) {
+  memset(ret, 0, sizeof *ret);
+  ret->tag = RIFT_PLUGIN_TYPES_DECISION_QUEUE;
+  ret->val.queue = rift_string_dup(queue);
+}
+
+// Deny and message with printf-formatted plain text.
+static inline void rift_decision_deny_fmt(rift_decision_t *ret, const char *fmt, ...)
+    __attribute__((format(printf, 2, 3)));
+static inline void rift_decision_deny_fmt(rift_decision_t *ret, const char *fmt, ...) {
+  va_list args;
+  va_start(args, fmt);
+  memset(ret, 0, sizeof *ret);
+  ret->tag = RIFT_PLUGIN_TYPES_DECISION_DENY;
+  ret->val.deny.tag = RIFT_PLUGIN_TYPES_TEXT_PLAIN;
+  ret->val.deny.val.plain = rift_string_vfmt(fmt, args);
+  va_end(args);
+}
+
+static inline void rift_decision_message_fmt(rift_decision_t *ret, const char *fmt, ...)
+    __attribute__((format(printf, 2, 3)));
+static inline void rift_decision_message_fmt(rift_decision_t *ret, const char *fmt, ...) {
+  va_list args;
+  va_start(args, fmt);
+  memset(ret, 0, sizeof *ret);
+  ret->tag = RIFT_PLUGIN_TYPES_DECISION_MESSAGE;
+  ret->val.message.tag = RIFT_PLUGIN_TYPES_TEXT_PLAIN;
+  ret->val.message.val.plain = rift_string_vfmt(fmt, args);
+  va_end(args);
+}
+
+// Frees a decision built with the helpers above that was not returned from a
+// hook or given to `rift_background_resolve`.
+static inline void rift_decision_free(rift_decision_t *decision) {
+  rift_plugin_types_decision_free(decision);
+  rift_decision_continue(decision);
 }
 
 // ---------------------------------------------------------------------------
-// Text builders (since 0.1.4)
+// Chat and kick
 //
-// Each builder writes the JSON that the `-json` host functions, the
-// `deny-json`/`message-json` decisions, `rift_title_json` and the `styled`
-// export accept, and returns it as a malloc'd, NUL-terminated string; free
-// it with `free()`. Everything written is JSON-escaped.
+// `exports_rift_plugin_handler_chat` sees every chat message, and every
+// command that reaches the backend, before the backend does. It answers
+// `continue`, which lets the packet through unchanged, or `deny`, which drops
+// it and shows the player the text. `attempt->kind` tells a message from a
+// command; for a command `attempt->ctx.command` is the root name and
+// `attempt->ctx.args` the rest, and `attempt->text` is the whole line without
+// its slash.
+//
+// `exports_rift_plugin_handler_kick` runs when a backend kicks a player in
+// play (`ctx->server` is the backend, `ctx->reason` its reason). `continue`
+// leaves it to `network.on_kick`, `deny` disconnects the player with the
+// text, `server` moves them there.
+//
+// Rift calls either hook only when `init` lists it
+// (`RIFT_PLUGIN_TYPES_HOOK_CHAT`, `RIFT_PLUGIN_TYPES_HOOK_KICK`): an empty
+// hook list does not imply them. A plugin that lists `chat` is asked about
+// every message of every player. Dropping one signed message breaks the
+// player's signature chain, so unless the proxy sets
+// `authentication.signed_chat = false`, the first deny costs that player
+// their chat signing until they reconnect.
+//
+//   void exports_rift_plugin_handler_chat(rift_chat_attempt_t *attempt, rift_decision_t *ret) {
+//     if (attempt->kind == RIFT_PLUGIN_TYPES_CHAT_KIND_MESSAGE && is_muted(&attempt->ctx.uuid)) {
+//       rift_decision_deny(ret, rift_text_plain("You are muted."));
+//     } else {
+//       rift_decision_continue(ret);
+//     }
+//     rift_chat_attempt_free(attempt);
+//   }
+
+// ---------------------------------------------------------------------------
+// Text builders
+//
+// Each builder writes a JSON text component and returns it as a malloc'd,
+// NUL-terminated string; wrap it with `rift_text_json` and free it with
+// `free()`. Everything written is JSON-escaped.
 //
 // - `rift_mini` writes Rift markup as `{"mini": "...", "args": {...}}`; Rift
 //   turns it into a component (see docs/text.md for the tags).
@@ -344,7 +439,7 @@ static inline void rift_decision_deny(rift_decision_t *ret, const char *reason) 
 //   rift_mini_t m = rift_mini("<gold>Welcome, <player>!");
 //   rift_mini_arg(&m, "player", name);
 //   char *json = rift_mini_finish(&m);
-//   rift_message_json(&target, json);
+//   rift_message(&target, rift_text_json(json));
 //   free(json);
 
 // A growable byte buffer; `ptr` is NUL-terminated whenever it is non-NULL.
@@ -432,7 +527,7 @@ static inline void rift_text_buf_quote(rift_text_buf_t *b, const char *s) {
   rift_text_buf_quote_n(b, s, s ? strlen(s) : 0);
 }
 
-// `s` as an owned JSON string, which the `-json` fields show as written.
+// `s` as an owned JSON string, for writing JSON by hand.
 static inline rift_string_t rift_string_quote(const rift_string_t *s) {
   rift_text_buf_t b = {NULL, 0, 0};
   rift_text_buf_quote_n(&b, (const char *)s->ptr, s->len);
@@ -631,27 +726,31 @@ static inline char *rift_component_finish(rift_component_t *c) {
 }
 
 // ---------------------------------------------------------------------------
-// Rich suggestions and server-list text (since 0.1.4)
+// Suggestions and server-list text (what `suggest` and `status` return)
+
+// Appends a suggestion; `tooltip` (copied) may be NULL for none:
 //
-// Define `exports_rift_plugin_styled_suggest` or
-// `exports_rift_plugin_styled_status` instead of the handler's `suggest` or
-// `status` to answer with JSON text tooltips, version text and sample lines.
-// The weak defaults of the `styled` export call your handler hooks, so a
-// plugin without rich text defines only those. Hosts before 0.1.4 call the
-// handler hooks: define them too to support those.
-
-typedef rift_plugin_types_rich_suggestion_t rift_rich_suggestion_t;
-typedef exports_rift_plugin_styled_list_rich_suggestion_t rift_rich_suggestion_list_t;
-typedef rift_plugin_types_rich_status_override_t rift_rich_status_override_t;
-
-// Appends a suggestion; `tooltip_json` (copied) may be NULL for none.
-static inline void rift_rich_suggestions_add(rift_rich_suggestion_list_t *list, const char *text,
-                                             const char *tooltip_json) {
-  list->ptr = (rift_rich_suggestion_t *)rift_realloc(list->ptr, (list->len + 1) * sizeof(rift_rich_suggestion_t));
-  rift_rich_suggestion_t *s = &list->ptr[list->len++];
+//   rift_text_t tip = rift_text_plain("The main lobby");
+//   rift_suggestions_add(ret, "lobby", &tip);
+static inline void rift_suggestions_add(rift_suggestion_list_t *list, const char *text, const rift_text_t *tooltip) {
+  list->ptr = (rift_suggestion_t *)rift_realloc(list->ptr, (list->len + 1) * sizeof(rift_suggestion_t));
+  rift_suggestion_t *s = &list->ptr[list->len++];
   memset(s, 0, sizeof *s);
   s->text = rift_string_dup(text);
-  s->tooltip_json = tooltip_json ? rift_some(rift_string_dup(tooltip_json)) : rift_none();
+  s->tooltip = tooltip ? rift_some_text(rift_text_dup(*tooltip)) : rift_none_text();
+}
+
+// An override that replaces nothing. `status` returns true to apply it; set
+// the fields to owned values, such as
+// `ret->motd = rift_some_text(rift_text_dup(rift_text_json(json)))`.
+static inline void rift_status_override_init(rift_status_override_t *ret) { memset(ret, 0, sizeof *ret); }
+
+// Appends a sample line (copied); clients show it as `§` codes.
+static inline void rift_status_override_add_sample(rift_status_override_t *ret, rift_text_t line) {
+  rift_plugin_types_list_text_t *list = &ret->sample.val;
+  ret->sample.is_some = true;
+  list->ptr = (rift_text_t *)rift_realloc(list->ptr, (list->len + 1) * sizeof(rift_text_t));
+  list->ptr[list->len++] = rift_text_dup(line);
 }
 
 // ---------------------------------------------------------------------------
@@ -661,6 +760,8 @@ static inline void rift_registration_init(rift_registration_t *reg) {
   memset(reg, 0, sizeof *reg);
 }
 
+// An empty hook list delivers every hook except `chat` and `kick`; those two
+// are delivered only when listed.
 static inline void rift_registration_add_hook(rift_registration_t *reg, rift_hook_t hook) {
   reg->hooks.ptr = (rift_hook_t *)rift_realloc(reg->hooks.ptr, (reg->hooks.len + 1) * sizeof(rift_hook_t));
   reg->hooks.ptr[reg->hooks.len++] = hook;
@@ -669,13 +770,15 @@ static inline void rift_registration_add_hook(rift_registration_t *reg, rift_hoo
 // `suggest` is one of the payload-free `RIFT_PLUGIN_TYPES_SUGGEST_KIND_*`
 // tags (none, players, servers, dynamic). Use
 // `rift_registration_add_command_fixed` for a fixed list. `permission` is the
-// node a player needs to see and run the command; `""` or NULL (since 0.1.5)
-// opens it to every player.
-static inline rift_plugin_types_command_spec_t *rift_registration_add_command(
-    rift_registration_t *reg, const char *name, const char *permission, uint8_t suggest) {
-  reg->commands.ptr = (rift_plugin_types_command_spec_t *)rift_realloc(
-      reg->commands.ptr, (reg->commands.len + 1) * sizeof(rift_plugin_types_command_spec_t));
-  rift_plugin_types_command_spec_t *spec = &reg->commands.ptr[reg->commands.len++];
+// node a player needs to see and run the command; `""` or NULL opens it to
+// every player. The returned spec stays valid until the next command is
+// added: use it right away with `rift_command_add_alias` and
+// `rift_command_set_console`.
+static inline rift_command_spec_t *rift_registration_add_command(rift_registration_t *reg, const char *name,
+                                                                 const char *permission, uint8_t suggest) {
+  reg->commands.ptr =
+      (rift_command_spec_t *)rift_realloc(reg->commands.ptr, (reg->commands.len + 1) * sizeof(rift_command_spec_t));
+  rift_command_spec_t *spec = &reg->commands.ptr[reg->commands.len++];
   memset(spec, 0, sizeof *spec);
   spec->name = rift_string_dup(name);
   spec->permission = rift_string_dup(permission ? permission : "");
@@ -683,18 +786,36 @@ static inline rift_plugin_types_command_spec_t *rift_registration_add_command(
   return spec;
 }
 
-static inline void rift_registration_add_command_fixed(rift_registration_t *reg, const char *name,
-                                                       const char *permission,
-                                                       const char *const *choices, size_t count) {
-  rift_plugin_types_command_spec_t *spec =
+static inline rift_command_spec_t *rift_registration_add_command_fixed(rift_registration_t *reg, const char *name,
+                                                                       const char *permission,
+                                                                       const char *const *choices, size_t count) {
+  rift_command_spec_t *spec =
       rift_registration_add_command(reg, name, permission, RIFT_PLUGIN_TYPES_SUGGEST_KIND_FIXED);
   spec->suggest.val.fixed.len = count;
   spec->suggest.val.fixed.ptr = count ? (rift_string_t *)rift_alloc(count * sizeof(rift_string_t)) : NULL;
   for (size_t i = 0; i < count; i++) spec->suggest.val.fixed.ptr[i] = rift_string_dup(choices[i]);
+  return spec;
 }
+
+// Another name for the command (at most 16). The hooks always see the
+// command's own name in `ctx->command`.
+static inline void rift_command_add_alias(rift_command_spec_t *spec, const char *alias) {
+  spec->aliases.ptr =
+      (rift_string_t *)rift_realloc(spec->aliases.ptr, (spec->aliases.len + 1) * sizeof(rift_string_t));
+  spec->aliases.ptr[spec->aliases.len++] = rift_string_dup(alias);
+}
+
+// Whether operators may run the command from the console (`rift admin
+// plugins run`). The hook then sees `ctx->console`, with `ctx->name`
+// `CONSOLE`, an empty `ctx->uuid` and connection id 0.
+static inline void rift_command_set_console(rift_command_spec_t *spec, bool console) { spec->console = console; }
 
 // ---------------------------------------------------------------------------
 // Host calls
+//
+// The wrappers below log a host error at warn level and report it as false.
+// `target` is a name, a UUID or a connection id, such as `&ctx->uuid`. Every
+// other host function is the generated `rift_plugin_<interface>_<function>`.
 
 static inline void rift_log(rift_level_t level, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 static inline void rift_log(rift_level_t level, const char *fmt, ...) {
@@ -712,14 +833,79 @@ static inline void rift_log(rift_level_t level, const char *fmt, ...) {
 #define RIFT_WARN RIFT_PLUGIN_TYPES_LEVEL_WARN
 #define RIFT_ERROR RIFT_PLUGIN_TYPES_LEVEL_ERROR
 
-// Sends `text` to `target` (a name, UUID or connection id). Returns whether
-// the player was online; a host error is logged and reported as false.
-static inline bool rift_message(const rift_string_t *target, const char *text) {
-  rift_string_t t = *target, msg = rift_str(text), err = {NULL, 0};
+static inline void rift__host_error(const char *function, rift_string_t *err) {
+  rift_log(RIFT_WARN, "%s failed: " RIFT_STR_FMT, function, RIFT_STR_ARG(*err));
+  rift_string_free(err);
+}
+
+// Sends `text` to `target`. Returns whether the player was online.
+static inline bool rift_message(const rift_string_t *target, rift_text_t text) {
+  rift_string_t t = *target, err = {NULL, 0};
   bool online = false;
-  if (!rift_plugin_players_message(&t, &msg, &online, &err)) {
-    rift_log(RIFT_WARN, "players.message failed: " RIFT_STR_FMT, RIFT_STR_ARG(err));
-    rift_string_free(&err);
+  if (!rift_plugin_players_message(&t, &text, &online, &err)) {
+    rift__host_error("players.message", &err);
+    return false;
+  }
+  return online;
+}
+
+// Shows `text` above `target`'s hotbar. Returns whether the player was online.
+static inline bool rift_action_bar(const rift_string_t *target, rift_text_t text) {
+  rift_string_t t = *target, err = {NULL, 0};
+  bool online = false;
+  if (!rift_plugin_players_action_bar(&t, &text, &online, &err)) {
+    rift__host_error("players.action-bar", &err);
+    return false;
+  }
+  return online;
+}
+
+// Disconnects `target` with `reason`. Returns whether the player was online.
+static inline bool rift_kick(const rift_string_t *target, rift_text_t reason) {
+  rift_string_t t = *target, err = {NULL, 0};
+  bool online = false;
+  if (!rift_plugin_players_kick(&t, &reason, &online, &err)) {
+    rift__host_error("players.kick", &err);
+    return false;
+  }
+  return online;
+}
+
+// Sends `text` to every player. Returns how many received it.
+static inline uint32_t rift_broadcast(rift_text_t text) {
+  rift_string_t err = {NULL, 0};
+  uint32_t delivered = 0;
+  if (!rift_plugin_players_broadcast(&text, &delivered, &err)) {
+    rift__host_error("players.broadcast", &err);
+    return 0;
+  }
+  return delivered;
+}
+
+// A title spec that borrows its texts, for `rift_plugin_players_title`.
+// `title` and `subtitle` may be NULL, but not both; without `title` only the
+// subtitle is shown. Times are ticks (vanilla: 10, 70, 20).
+static inline rift_title_spec_t rift_title_spec(const rift_text_t *title, const rift_text_t *subtitle,
+                                                int32_t fade_in, int32_t stay, int32_t fade_out) {
+  rift_title_spec_t spec;
+  memset(&spec, 0, sizeof spec);
+  if (title) spec.title = rift_some_text(*title);
+  if (subtitle) spec.subtitle = rift_some_text(*subtitle);
+  spec.fade_in = fade_in;
+  spec.stay = stay;
+  spec.fade_out = fade_out;
+  return spec;
+}
+
+// Shows `target` a title; the arguments are those of `rift_title_spec`.
+// Returns whether the player was online.
+static inline bool rift_title(const rift_string_t *target, const rift_text_t *title, const rift_text_t *subtitle,
+                              int32_t fade_in, int32_t stay, int32_t fade_out) {
+  rift_string_t t = *target, err = {NULL, 0};
+  rift_title_spec_t spec = rift_title_spec(title, subtitle, fade_in, stay, fade_out);
+  bool online = false;
+  if (!rift_plugin_players_title(&t, &spec, &online, &err)) {
+    rift__host_error("players.title", &err);
     return false;
   }
   return online;
@@ -728,79 +914,167 @@ static inline bool rift_message(const rift_string_t *target, const char *text) {
 // Shows `target` a dialog given as JSON in the vanilla dialog format
 // (Minecraft 1.21.6+). Buttons whose `custom` or `dynamic/custom` action has
 // an `id` without a namespace come back to
-// `exports_rift_plugin_dialogs_dialog`. Returns whether the dialog was
+// `exports_rift_plugin_handler_dialog`. Returns whether the dialog was
 // queued: false for an offline or pre-1.21.6 player, and for an invalid
 // dialog, whose error is logged.
 static inline bool rift_show_dialog(const rift_string_t *target, const char *dialog_json) {
   rift_string_t t = *target, json = rift_str(dialog_json), err = {NULL, 0};
   bool queued = false;
   if (!rift_plugin_players_dialog(&t, &json, &queued, &err)) {
-    rift_log(RIFT_WARN, "players.dialog failed: " RIFT_STR_FMT, RIFT_STR_ARG(err));
-    rift_string_free(&err);
+    rift__host_error("players.dialog", &err);
     return false;
   }
   return queued;
 }
 
-// Like `rift_message`, with `text_json` a JSON text component of at most
-// 32 KiB, for colours, hover text and click events.
-static inline bool rift_message_json(const rift_string_t *target, const char *text_json) {
-  rift_string_t t = *target, msg = rift_str(text_json), err = {NULL, 0};
-  bool online = false;
-  if (!rift_plugin_players_message_json(&t, &msg, &online, &err)) {
-    rift_log(RIFT_WARN, "players.message-json failed: " RIFT_STR_FMT, RIFT_STR_ARG(err));
-    rift_string_free(&err);
-    return false;
-  }
-  return online;
+// ---------------------------------------------------------------------------
+// Remembered players and languages
+
+static inline void rift_player_record_free(rift_player_record_t *record) {
+  rift_plugin_types_player_record_free(record);
+  memset(record, 0, sizeof *record);
 }
 
-// Shows `target` a title (since 0.1.4). `title_json` and `subtitle_json`
-// (NULL for none) are JSON text components, such as text builder results;
-// an empty `title_json` shows only the subtitle. Times are ticks (vanilla:
-// 10, 70, 20). Returns whether the player was online; a host error is
-// logged and reported as false.
-static inline bool rift_title_json(const rift_string_t *target, const char *title_json, const char *subtitle_json,
-                                   int32_t fade_in, int32_t stay, int32_t fade_out) {
-  rift_string_t t = *target, err = {NULL, 0};
-  rift_plugin_players_title_json_spec_t spec;
-  memset(&spec, 0, sizeof spec);
-  spec.title_json = rift_str(title_json);
-  if (subtitle_json) spec.subtitle_json = rift_some(rift_str(subtitle_json));
-  spec.fade_in = fade_in;
-  spec.stay = stay;
-  spec.fade_out = fade_out;
-  bool online = false;
-  if (!rift_plugin_players_title_json(&t, &spec, &online, &err)) {
-    rift_log(RIFT_WARN, "players.title-json failed: " RIFT_STR_FMT, RIFT_STR_ARG(err));
-    rift_string_free(&err);
-    return false;
-  }
-  return online;
+static inline void rift_player_record_list_free(rift_player_record_list_t *list) {
+  rift_plugin_players_list_player_record_free(list);
+  list->ptr = NULL;
+  list->len = 0;
 }
 
-// Reads the language `target`'s client reported into `out`, as the client
-// spells it (`en_us`), and returns true (since 0.1.5). Returns false, with
-// `out` empty, while Rift does not know it: the player is offline or their
-// client has not sent its settings yet, which it does after login (during
-// configuration from 1.20.2, after Join Game before), so never in `login`.
-// A host error is logged and reported as false. Free `out` with
-// `rift_string_free`.
-static inline bool rift_locale(const rift_string_t *target, rift_string_t *out) {
+// Reads what Rift remembers about a player who joined at least once, online
+// or not, into `out`. `target` is a UUID or the name the player last joined
+// with (case-insensitive). Returns false, with `out` zeroed, for a player
+// Rift never saw. Free `out` with `rift_player_record_free`.
+static inline bool rift_player_lookup(const rift_string_t *target, rift_player_record_t *out) {
   rift_string_t t = *target, err = {NULL, 0};
-  rift_plugin_option_string_t locale;
-  memset(&locale, 0, sizeof locale);
-  out->ptr = NULL;
-  out->len = 0;
-  if (!rift_plugin_players_locale(&t, &locale, &err)) {
-    rift_log(RIFT_WARN, "players.locale failed: " RIFT_STR_FMT, RIFT_STR_ARG(err));
-    rift_string_free(&err);
+  rift_plugin_players_option_player_record_t found;
+  memset(&found, 0, sizeof found);
+  memset(out, 0, sizeof *out);
+  if (!rift_plugin_players_lookup(&t, &found, &err)) {
+    rift__host_error("players.lookup", &err);
     return false;
   }
-  if (!locale.is_some) return false;
-  *out = locale.val;
+  if (!found.is_some) return false;
+  *out = found.val;
   return true;
 }
+
+// Reads the remembered players whose name starts with `prefix` into `out`,
+// most recently seen first, at most `limit` (1..=100). Returns false, with
+// `out` empty, on a host error. Free `out` with
+// `rift_player_record_list_free`.
+static inline bool rift_player_search(const char *prefix, uint32_t limit, rift_player_record_list_t *out) {
+  rift_string_t p = rift_str(prefix), err = {NULL, 0};
+  out->ptr = NULL;
+  out->len = 0;
+  if (!rift_plugin_players_search(&p, limit, out, &err)) {
+    rift__host_error("players.search", &err);
+    out->ptr = NULL;
+    out->len = 0;
+    return false;
+  }
+  return true;
+}
+
+// Sets the language Rift's own messages use for a player, online or not: a
+// tag of 2..=16 bytes of `a-z0-9_` such as "de" or "de_de"; NULL goes back to
+// the client's locale. `target` is a UUID or a name Rift has seen. The
+// language is remembered across sessions and shows up as `ctx->language`
+// from `login` on. Returns whether the player is known.
+static inline bool rift_set_language(const rift_string_t *target, const char *language) {
+  rift_string_t t = *target, lang = rift_str(language), err = {NULL, 0};
+  bool known = false;
+  if (!rift_plugin_players_set_language(&t, language ? &lang : NULL, &known, &err)) {
+    rift__host_error("players.set-language", &err);
+    return false;
+  }
+  return known;
+}
+
+// ---------------------------------------------------------------------------
+// Permissions
+
+// Adds the user to `group`, until `expires_at` Unix seconds (replacing an
+// earlier expiry); 0 means for good. Returns whether anything changed.
+static inline bool rift_add_group(const rift_string_t *uuid, const char *group, uint64_t expires_at) {
+  rift_string_t u = *uuid, g = rift_str(group), err = {NULL, 0};
+  bool changed = false;
+  if (!rift_plugin_permissions_add_group(&u, &g, expires_at ? &expires_at : NULL, &changed, &err)) {
+    rift__host_error("permissions.add-group", &err);
+    return false;
+  }
+  return changed;
+}
+
+// ---------------------------------------------------------------------------
+// Background work
+//
+// A plugin runs one call at a time, so a slow lookup in `login` would keep
+// every other hook waiting. Instead the hook defers its answer, queues a job
+// and returns; a background worker runs the job, and the answer follows from
+// `job_done`:
+//
+// 1. In `login`, `initial_server`, `before_transfer`, `command`, `chat` or
+//    `kick`, call `rift_background_defer(&ticket)`. What the hook writes into
+//    `ret` is then ignored (still write `rift_decision_continue(ret)`).
+// 2. `rift_background_run(payload, len, &handle)` queues the job. Remember
+//    which ticket belongs to the handle.
+// 3. A worker calls `exports_rift_plugin_handler_work(payload, ret, err)`. It
+//    may block. A worker is another instance of the component with its own
+//    memory and globals: it never sees `init` or any hook, only
+//    `exports_rift_plugin_handler_work_init` once, with the configuration,
+//    and then jobs. Return the result with `rift_bytes_dup`.
+// 4. The main instance gets `exports_rift_plugin_handler_job_done(handle,
+//    outcome)` and answers with `rift_background_resolve(ticket, &decision)`.
+//
+// The hook's deadline keeps running while the job does: an answer after it
+// counts as a missed deadline. Workers need `[background] workers = N` in
+// plugin.toml; a job may take 30 s unless the manifest sets `deadlines.work`.
+
+// Defers the answer of the decision hook that is running and writes the
+// ticket for `rift_background_resolve`. False outside a decision hook or
+// when the call was deferred already.
+static inline bool rift_background_defer(uint64_t *ticket) {
+  rift_string_t err = {NULL, 0};
+  *ticket = 0;
+  if (!rift_plugin_background_defer(ticket, &err)) {
+    rift__host_error("background.defer", &err);
+    return false;
+  }
+  return true;
+}
+
+// Answers a deferred hook with `decision` and frees the decision, which is
+// `continue` afterwards. Returns false when nobody waits for the ticket any
+// more: the deadline passed, or it was answered.
+static inline bool rift_background_resolve(uint64_t ticket, rift_decision_t *decision) {
+  rift_string_t err = {NULL, 0};
+  bool waiting = false;
+  bool ok = rift_plugin_background_resolve(ticket, decision, &waiting, &err);
+  rift_decision_free(decision);
+  if (!ok) {
+    rift__host_error("background.resolve", &err);
+    return false;
+  }
+  return waiting;
+}
+
+// Queues `len` bytes of `payload` (borrowed) for a background worker and
+// writes the handle `job_done` is called with. False without workers in the
+// manifest or when 1024 jobs wait already.
+static inline bool rift_background_run(const void *payload, size_t len, uint64_t *handle) {
+  rift_bytes_t bytes = rift_bytes_view(payload, len);
+  rift_string_t err = {NULL, 0};
+  *handle = 0;
+  if (!rift_plugin_background_run(&bytes, handle, &err)) {
+    rift__host_error("background.run", &err);
+    return false;
+  }
+  return true;
+}
+
+// Whether this instance is a background worker.
+static inline bool rift_background_is_worker(void) { return rift_plugin_background_is_worker(); }
 
 // ---------------------------------------------------------------------------
 // JSON configuration

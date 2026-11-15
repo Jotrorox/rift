@@ -25,56 +25,87 @@ type OptionPlayerInfoShape struct {
 	shape [unsafe.Sizeof(cm.Option[PlayerInfo]{})]byte
 }
 
-func lower_TitleSpec(v types.TitleSpec) (f0 *uint8, f1 uint32, f2 uint32, f3 *uint8, f4 uint32, f5 uint32, f6 uint32, f7 uint32) {
-	f0, f1 = cm.LowerString(v.Title)
-	f2, f3, f4 = lower_OptionString(v.Subtitle)
-	f5 = (uint32)(v.FadeIn)
-	f6 = (uint32)(v.Stay)
-	f7 = (uint32)(v.FadeOut)
-	return
-}
-
-func lower_BossBarSpec(v types.BossBarSpec) (f0 *uint8, f1 uint32, f2 float32, f3 *uint8, f4 uint32, f5 *uint8, f6 uint32, f7 uint32, f8 uint32, f9 uint32) {
-	f0, f1 = cm.LowerString(v.TextJSON)
-	f2 = (float32)(v.Progress)
-	f3, f4 = cm.LowerString(v.Color)
-	f5, f6 = cm.LowerString(v.Style)
-	f7 = (uint32)(cm.BoolToU32(v.DarkenSky))
-	f8 = (uint32)(cm.BoolToU32(v.PlayMusic))
-	f9 = (uint32)(cm.BoolToU32(v.CreateFog))
-	return
-}
-
-func lower_OptionBossBarSpec(v cm.Option[BossBarSpec]) (f0 uint32, f1 *uint8, f2 uint32, f3 float32, f4 *uint8, f5 uint32, f6 *uint8, f7 uint32, f8 uint32, f9 uint32, f10 uint32) {
-	some := v.Some()
-	if some != nil {
-		f0 = 1
-		v1, v2, v3, v4, v5, v6, v7, v8, v9, v10 := lower_BossBarSpec(*some)
+func lower_Text(v types.Text) (f0 uint32, f1 *uint8, f2 uint32) {
+	f0 = (uint32)(v.Tag())
+	switch f0 {
+	case 0: // plain
+		v1, v2 := cm.LowerString(*cm.Case[string](&v, 0))
 		f1 = (*uint8)(v1)
 		f2 = (uint32)(v2)
-		f3 = (float32)(v3)
-		f4 = (*uint8)(v4)
-		f5 = (uint32)(v5)
-		f6 = (*uint8)(v6)
-		f7 = (uint32)(v7)
-		f8 = (uint32)(v8)
-		f9 = (uint32)(v9)
-		f10 = (uint32)(v10)
+	case 1: // json
+		v1, v2 := cm.LowerString(*cm.Case[string](&v, 1))
+		f1 = (*uint8)(v1)
+		f2 = (uint32)(v2)
 	}
 	return
 }
 
-// OptionStringShape is used for storage in variant or result types.
-type OptionStringShape struct {
-	_     cm.HostLayout
-	shape [unsafe.Sizeof(cm.Option[string]{})]byte
+func lower_OptionText(v cm.Option[types.Text]) (f0 uint32, f1 uint32, f2 *uint8, f3 uint32) {
+	some := v.Some()
+	if some != nil {
+		f0 = 1
+		v1, v2, v3 := lower_Text(*some)
+		f1 = (uint32)(v1)
+		f2 = (*uint8)(v2)
+		f3 = (uint32)(v3)
+	}
+	return
 }
 
-func lower_TitleJSONSpec(v types.TitleJSONSpec) (f0 *uint8, f1 uint32, f2 uint32, f3 *uint8, f4 uint32, f5 uint32, f6 uint32, f7 uint32) {
-	f0, f1 = cm.LowerString(v.TitleJSON)
-	f2, f3, f4 = lower_OptionString(v.SubtitleJSON)
-	f5 = (uint32)(v.FadeIn)
-	f6 = (uint32)(v.Stay)
-	f7 = (uint32)(v.FadeOut)
+func lower_TitleSpec(v types.TitleSpec) (f0 uint32, f1 uint32, f2 *uint8, f3 uint32, f4 uint32, f5 uint32, f6 *uint8, f7 uint32, f8 uint32, f9 uint32, f10 uint32) {
+	f0, f1, f2, f3 = lower_OptionText(v.Title)
+	f4, f5, f6, f7 = lower_OptionText(v.Subtitle)
+	f8 = (uint32)(v.FadeIn)
+	f9 = (uint32)(v.Stay)
+	f10 = (uint32)(v.FadeOut)
 	return
+}
+
+func lower_OptionText_(v cm.Option[Text]) (f0 uint32, f1 uint32, f2 *uint8, f3 uint32) {
+	some := v.Some()
+	if some != nil {
+		f0 = 1
+		v1, v2, v3 := lower_Text(*some)
+		f1 = (uint32)(v1)
+		f2 = (*uint8)(v2)
+		f3 = (uint32)(v3)
+	}
+	return
+}
+
+func lower_BossBarSpec(v types.BossBarSpec) (f0 uint32, f1 *uint8, f2 uint32, f3 float32, f4 *uint8, f5 uint32, f6 *uint8, f7 uint32, f8 uint32, f9 uint32, f10 uint32) {
+	f0, f1, f2 = lower_Text(v.Text)
+	f3 = (float32)(v.Progress)
+	f4, f5 = cm.LowerString(v.Color)
+	f6, f7 = cm.LowerString(v.Style)
+	f8 = (uint32)(cm.BoolToU32(v.DarkenSky))
+	f9 = (uint32)(cm.BoolToU32(v.PlayMusic))
+	f10 = (uint32)(cm.BoolToU32(v.CreateFog))
+	return
+}
+
+func lower_OptionBossBarSpec(v cm.Option[BossBarSpec]) (f0 uint32, f1 uint32, f2 *uint8, f3 uint32, f4 float32, f5 *uint8, f6 uint32, f7 *uint8, f8 uint32, f9 uint32, f10 uint32, f11 uint32) {
+	some := v.Some()
+	if some != nil {
+		f0 = 1
+		v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11 := lower_BossBarSpec(*some)
+		f1 = (uint32)(v1)
+		f2 = (*uint8)(v2)
+		f3 = (uint32)(v3)
+		f4 = (float32)(v4)
+		f5 = (*uint8)(v5)
+		f6 = (uint32)(v6)
+		f7 = (*uint8)(v7)
+		f8 = (uint32)(v8)
+		f9 = (uint32)(v9)
+		f10 = (uint32)(v10)
+		f11 = (uint32)(v11)
+	}
+	return
+}
+
+// OptionPlayerRecordShape is used for storage in variant or result types.
+type OptionPlayerRecordShape struct {
+	_     cm.HostLayout
+	shape [unsafe.Sizeof(cm.Option[PlayerRecord]{})]byte
 }

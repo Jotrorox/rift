@@ -107,6 +107,9 @@ pub struct Config {
     pub shutdown_timeout: Duration,
     /// The theme and Rift's own messages (`text = { theme, messages }`).
     pub text: std::sync::Arc<crate::text::catalog::Catalog>,
+    /// `players = { record_ip }`: whether the player directory remembers
+    /// the address a player last joined from. Default `true`.
+    pub record_ip: bool,
 }
 
 /// Protocol translation between players and backends on different Minecraft
@@ -566,6 +569,7 @@ impl Config {
             status: None,
             shutdown_timeout: Duration::from_secs(30),
             text: std::sync::Arc::default(),
+            record_ip: true,
         };
         config.validate()?;
         Ok(config)
@@ -737,6 +741,7 @@ impl Config {
                     "status",
                     "shutdown_timeout_ms",
                     "text",
+                    "players",
                 ],
                 "config",
             )?;
@@ -1064,6 +1069,10 @@ impl Config {
             }
             let network = network(&root)?;
             let authentication = authentication(&root)?;
+            let record_ip = match options(&root, "players", &["record_ip"])? {
+                Some(values) => boolean(&values, "players", "record_ip", true)?,
+                None => true,
+            };
             for plugin in &mut plugins {
                 plugin.online_mode = authentication.online_mode;
             }
@@ -1110,6 +1119,7 @@ impl Config {
                 status,
                 shutdown_timeout,
                 text,
+                record_ip,
             })
         };
         let mut config = parse().map_err(|error| invalid(format!("{name}: {error}")))?;
@@ -1202,7 +1212,7 @@ impl Config {
             }
             if extensions.legacy_grants().is_some() {
                 return Err(invalid(
-                    "extensions.permissions was removed: grant nodes with rift.permissions.user(uuid):set(node, true) in an extensions.api_version = 3 callback, with extensions.groups, or in the dashboard. Rift copies these grants into the permission store once when it starts (see docs/permissions.md); then delete the field",
+                    "extensions.permissions was removed: grant nodes with rift.permissions.user(uuid):set(node, true) in an extensions callback, with extensions.groups, or in the dashboard. Rift copies these grants into the permission store once when it starts (see docs/permissions.md); then delete the field",
                 ));
             }
             permissions::validate_groups(extensions.config_groups(), &self.permissions.limits)

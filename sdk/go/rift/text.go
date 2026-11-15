@@ -2,13 +2,67 @@ package rift
 
 import (
 	"strings"
-	"unicode"
 	"unicode/utf8"
+
+	"go.bytecodealliance.org/cm"
+
+	"github.com/Jotrorox/rift/sdk/go/gen/rift/plugin/types"
 )
 
-// Text builders write the JSON that the *JSON host functions (SendMessageJSON,
-// KickJSON, SendTitleJSON, ...), DenyJSON, MessageJSON, rich suggestion
-// tooltips and rich status text accept:
+// Text is text shown to a player: plain text, shown exactly as written, or a
+// JSON text component. Make one with Plain, JSON or a text builder's Text
+// method. The zero Text is no text: optional fields and parameters (a
+// subtitle, a tooltip, a tab list footer) take it for "none".
+type Text struct {
+	json  bool
+	value string
+}
+
+// Plain is text of 1..=1024 bytes shown exactly as written: it is never read
+// as markup, so player input cannot add tags or click events.
+func Plain(text string) Text { return Text{value: text} }
+
+// JSON is a JSON text component of at most 32 KiB written by hand, such as
+// `{"text":"Hi","color":"gold"}` or a mini or legacy authoring object (see
+// docs/text.md). Rift rejects it at the call when it is not a valid text
+// component. The builders Mini, Legacy and Component write one for you.
+func JSON(component string) Text { return Text{json: true, value: component} }
+
+// IsZero reports whether t is the zero Text, which stands for no text.
+func (t Text) IsZero() bool { return t == Text{} }
+
+// IsJSON reports whether t is a JSON text component rather than plain text.
+func (t Text) IsJSON() bool { return t.json }
+
+// JSON returns the text as JSON: the component itself, or plain text as a
+// JSON string. It makes a Text nest inside the builders.
+func (t Text) JSON() string {
+	if t.json {
+		return t.value
+	}
+	return jsonQuote(t.value)
+}
+
+// String returns the plain text or the JSON component as it was given.
+func (t Text) String() string { return t.value }
+
+func (t Text) lower() types.Text {
+	if t.json {
+		return types.TextJSON(t.value)
+	}
+	return types.TextPlain(t.value)
+}
+
+func (t Text) lowerOpt() cm.Option[types.Text] {
+	if t.IsZero() {
+		return cm.None[types.Text]()
+	}
+	return cm.Some(t.lower())
+}
+
+// Text builders write JSON text components without encoding/json, which would
+// add hundreds of kilobytes to every plugin, and escape everything they
+// write:
 //
 //   - Mini writes Rift markup as {"mini": "...", "args": {...}}; Rift turns
 //     it into a component (see docs/text.md for the tags).
@@ -17,30 +71,15 @@ import (
 //     spellings click_event and hover_event (Rift rewrites them for older
 //     clients).
 //
-// A bare string is never read as markup, so player input passed through Arg
-// or Plain cannot add tags or click events. The builders escape everything
-// they write and use no encoding/json, which would add hundreds of kilobytes
-// to every plugin.
+// Each builder's Text method returns the Text that host calls, decisions and
+// records take. Markup is only read from a Mini object, so player input
+// passed through Arg or Plain cannot add tags or click events.
 
-// TextJSON is a piece of rich text the builders nest: a builder, Plain text
-// or RawJSON.
+// TextJSON is a piece of text the builders nest: a builder or a Text.
 type TextJSON interface {
 	// JSON returns the value as JSON text.
 	JSON() string
 }
-
-// Plain is text shown exactly as written, as a JSON string.
-type Plain string
-
-// JSON returns the text as a JSON string.
-func (p Plain) JSON() string { return jsonQuote(string(p)) }
-
-// RawJSON is JSON text written by hand, inserted unchanged. Rift rejects it
-// at the call when it is not a valid text component.
-type RawJSON string
-
-// JSON returns the text unchanged.
-func (r RawJSON) JSON() string { return string(r) }
 
 type jsonField struct{ key, value string }
 
@@ -70,7 +109,7 @@ func (m *MiniText) set(name, value string) *MiniText {
 func (m *MiniText) Arg(name, text string) *MiniText { return m.set(name, jsonQuote(text)) }
 
 // ArgComponent makes <name> show a component with its own formatting, such as
-// a Component, a Legacy object or RawJSON.
+// a Component, a Legacy object or a JSON Text.
 func (m *MiniText) ArgComponent(name string, component TextJSON) *MiniText {
 	return m.set(name, component.JSON())
 }
@@ -87,6 +126,9 @@ func (m *MiniText) JSON() string {
 	b.WriteByte('}')
 	return b.String()
 }
+
+// Text returns the builder's result as a JSON Text.
+func (m *MiniText) Text() Text { return JSON(m.JSON()) }
 
 // String returns the same as JSON.
 func (m *MiniText) String() string { return m.JSON() }
@@ -113,6 +155,9 @@ func (l LegacyText) Marker(marker rune) LegacyText {
 func (l LegacyText) JSON() string {
 	return `{"legacy":` + jsonQuote(l.text) + `,"marker":` + jsonQuote(string(l.marker)) + `}`
 }
+
+// Text returns the builder's result as a JSON Text.
+func (l LegacyText) Text() Text { return JSON(l.JSON()) }
 
 // String returns the same as JSON.
 func (l LegacyText) String() string { return l.JSON() }
@@ -219,6 +264,9 @@ func (c *ComponentText) JSON() string {
 	return b.String()
 }
 
+// Text returns the builder's result as a JSON Text.
+func (c *ComponentText) Text() Text { return JSON(c.JSON()) }
+
 // String returns the same as JSON.
 func (c *ComponentText) String() string { return c.JSON() }
 
@@ -277,89 +325,6 @@ func jsonQuote(s string) string {
 	return b.String()
 }
 
-// stripMarkup is markup without its tags, for hosts without markup; arg
-// writes an argument's words.
-func stripMarkup(markup string, out *strings.Builder, arg func(name string, out *strings.Builder)) {
-	rs := []rune(markup)
-	for i := 0; i < len(rs); {
-		c := rs[i]
-		if c == '\\' && i+1 < len(rs) && (rs[i+1] == '<' || rs[i+1] == '\\') {
-			out.WriteRune(rs[i+1])
-			i += 2
-			continue
-		}
-		if c != '<' {
-			out.WriteRune(c)
-			i++
-			continue
-		}
-		// A tag runs to the first > outside quotes and has no space outside
-		// quotes; anything else is a literal <.
-		end := -1
-		var quote rune
-	scan:
-		for j := i + 1; j < len(rs); j++ {
-			switch r := rs[j]; {
-			case quote != 0:
-				if r == quote {
-					quote = 0
-				}
-			case r == '\'' || r == '"':
-				quote = r
-			case r == '>':
-				end = j
-				break scan
-			case unicode.IsSpace(r):
-				break scan
-			}
-		}
-		if end <= i+1 {
-			out.WriteRune('<')
-			i++
-			continue
-		}
-		tag := string(rs[i+1 : end])
-		name, _, hasArgs := strings.Cut(tag, ":")
-		name = strings.ToLower(name)
-		switch {
-		case name == "newline" || name == "br":
-			out.WriteByte('\n')
-		case strings.HasPrefix(name, "/") || strings.HasPrefix(name, "!") || hasArgs:
-		default:
-			arg(name, out)
-		}
-		i = end + 1
-	}
-}
-
-// stripLegacy is legacy text without its codes, for hosts without legacy
-// objects.
-func stripLegacy(text string, marker rune, out *strings.Builder) {
-	rs := []rune(text)
-	isHex := func(r rune) bool { return r >= '0' && r <= '9' || r >= 'a' && r <= 'f' || r >= 'A' && r <= 'F' }
-	for i := 0; i < len(rs); {
-		if rs[i] == marker && i+1 < len(rs) {
-			next := unicode.ToLower(rs[i+1])
-			if next == '#' && i+8 <= len(rs) {
-				hex := true
-				for _, r := range rs[i+2 : i+8] {
-					hex = hex && isHex(r)
-				}
-				if hex {
-					i += 8
-					continue
-				}
-			}
-			if strings.ContainsRune("0123456789abcdefklmnorx", next) {
-				i += 2
-				continue
-			}
-		}
-		out.WriteRune(rs[i])
-		i++
-	}
-}
-
-// Ptr returns a pointer to v, for the optional fields of RichSuggestion,
-// RichStatusOverride, TitleJSON and the other records.
+// Ptr returns a pointer to v, for the optional fields of StatusOverride and
+// the other records.
 func Ptr[T any](v T) *T { return &v }

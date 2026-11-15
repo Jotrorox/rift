@@ -35,6 +35,12 @@
 //! succeeds and the new configuration applies at the next restart.
 //! `rift.on("shutdown", fn)` receives the reason before the state closes.
 //!
+//! With `[background]` in the manifest, each worker is another state that
+//! runs the worker script (`background.entry`, default `worker.lua`) the
+//! same way and handles `rift.on("work", fn)`: jobs the plugin queues with
+//! `rift.background.run`. A worker shares no Lua values with the plugin;
+//! strings go in and out.
+//!
 //! A Lua error in a handler is a handler error; memory exhaustion, a panic
 //! or an interrupt because Rift is stopping the plugin leave the state
 //! unusable and fail the instance, which restarts per its manifest.
@@ -138,9 +144,14 @@ pub struct LuaEngine {
 impl LuaEngine {
     pub fn new(spec: &PluginSpec, services: Services) -> Result<Self, String> {
         let options = spec.manifest.lua.clone().unwrap_or_default();
-        let entry = spec
-            .entry()
-            .ok_or_else(|| "a Lua plugin needs an entry script".to_owned())?;
+        // A background worker runs the worker script instead of the entry.
+        let relative = if services.is_worker() {
+            spec.manifest.background.entry.clone()
+        } else {
+            spec.manifest.entry.clone()
+        }
+        .ok_or_else(|| "a Lua plugin needs an entry script".to_owned())?;
+        let entry = spec.folder.join(&relative);
         let lua = vm(&options)?;
         let state = Rc::new(State::new(services));
         let setup = || -> mlua::Result<()> {
@@ -156,7 +167,6 @@ impl LuaEngine {
             )
         };
         setup().map_err(|error| describe(&error))?;
-        let relative = spec.manifest.entry.clone().unwrap_or_default();
         Ok(Self {
             lua,
             state,
@@ -241,7 +251,7 @@ impl LuaEngine {
     fn context(&self, input: &Context, hook: Hook) -> mlua::Result<Table> {
         let lua = &self.lua;
         let ctx = lua.create_table()?;
-        ctx.raw_set("api_version", 2)?;
+        ctx.raw_set("api_version", crate::extensions::API_VERSION)?;
         ctx.raw_set("connection_id", input.id.to_string())?;
         ctx.raw_set("uuid", input.uuid.as_str())?;
         ctx.raw_set("name", input.name.as_str())?;
@@ -249,6 +259,9 @@ impl LuaEngine {
         ctx.raw_set("listener", input.listener.as_str())?;
         ctx.raw_set("hostname", input.hostname.as_str())?;
         ctx.raw_set("peer_ip", input.peer_ip.as_str())?;
+        ctx.raw_set("language", input.language.as_deref())?;
+        // A command the operator console runs: no player, name `CONSOLE`.
+        ctx.raw_set("console", input.console)?;
         ctx.raw_set("protocol", input.protocol)?;
         ctx.raw_set("server", input.server.as_deref())?;
         ctx.raw_set("default_server", input.default_server.as_deref())?;
@@ -440,7 +453,7 @@ impl LuaEngine {
                 match action {
                     Some(TimerAction::Job(job, callback)) => {
                         let ctx = self.lua.create_table()?;
-                        ctx.raw_set("api_version", 2)?;
+                        ctx.raw_set("api_version", crate::extensions::API_VERSION)?;
                         ctx.raw_set("job", job)?;
                         callback.call::<()>(ctx)?;
                     }
@@ -448,6 +461,24 @@ impl LuaEngine {
                     Some(TimerAction::Event) => self.all(name, handle)?,
                     // A tick of a cancelled timer.
                     None => {}
+                }
+                Reply::None
+            }
+            // The callback given to `rift.background.run`, else the
+            // `job_done` handlers: `(result, error)`, one of them nil.
+            Event::Job(handle, outcome) => {
+                let (result, error) = match &outcome {
+                    Ok(result) => (Some(self.lua.create_string(result)?), None),
+                    Err(error) => (None, Some(error.as_str())),
+                };
+                let callback = self.state.job_callbacks.borrow_mut().remove(&handle);
+                match callback {
+                    Some(callback) => callback.call::<()>((result, error))?,
+                    None => {
+                        for handler in self.state.handlers(name) {
+                            handler.call::<()>((handle, result.clone(), error))?;
+                        }
+                    }
                 }
                 Reply::None
             }
@@ -518,6 +549,46 @@ impl Engine for LuaEngine {
             }
             Err(error) => Err(error.to_string()),
         }
+    }
+
+    /// The worker script: it receives the plugin name and configuration
+    /// like the entry script, and registers `rift.on("work", fn)`.
+    fn work_init(&mut self, config_json: &str) -> Result<(), String> {
+        let config = self.decode(config_json)?;
+        let source = std::fs::read(&self.entry)
+            .map_err(|error| format!("cannot read {}: {error}", self.entry.display()))?;
+        self.state.initializing.set(true);
+        let result = self.guard(self.manifest.init_deadline(), || {
+            let config = bind::to_lua(&self.lua, &config)?;
+            self.lua
+                .load(&source)
+                .set_name(&self.chunk)
+                .call::<()>((self.name.as_str(), config))
+        });
+        self.state.initializing.set(false);
+        result.map_err(|error| error.to_string())?;
+        if self.state.handlers("work").is_empty() {
+            return Err(format!(
+                "{} registered no rift.on(\"work\", function(payload) ... end) handler",
+                self.chunk.trim_start_matches('@')
+            ));
+        }
+        Ok(())
+    }
+
+    /// One job: the first `work` handler's result, a string (nil is empty).
+    fn work(&mut self, payload: Vec<u8>) -> Result<Vec<u8>, CallError> {
+        self.guard(self.manifest.work_deadline(), || {
+            let payload = self.lua.create_string(&payload)?;
+            match self.first("work", payload)? {
+                Value::Nil => Ok(Vec::new()),
+                Value::String(result) => Ok(result.as_bytes().to_vec()),
+                other => Err(mlua::Error::runtime(format!(
+                    "work must return a string or nil, not a {}",
+                    other.type_name()
+                ))),
+            }
+        })
     }
 
     fn shutdown(&mut self, reason: &str) {

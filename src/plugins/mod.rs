@@ -175,29 +175,32 @@ impl Registrar for CommandTable {
     ) -> Result<(), String> {
         let mut claims = self.0.lock().unwrap();
         let mine = |owner: u64| owner == id || Some(owner) == replaces;
-        for command in &registration.commands {
-            if claims.script.contains(&command.name) {
+        // An alias is a claim like the name itself.
+        for name in registration
+            .commands
+            .iter()
+            .flat_map(|command| command.names())
+        {
+            if claims.script.contains(name) {
                 return Err(format!(
-                    "command /{} is already registered by the configuration script",
-                    command.name
+                    "command /{name} is already registered by the configuration script"
                 ));
             }
-            if let Some((_, owner)) = claims
-                .plugins
-                .get(&command.name)
-                .filter(|(owner, _)| !mine(*owner))
-            {
+            if let Some((_, owner)) = claims.plugins.get(name).filter(|(owner, _)| !mine(*owner)) {
                 return Err(format!(
-                    "command /{} is already registered by plugin {owner}",
-                    command.name
+                    "command /{name} is already registered by plugin {owner}"
                 ));
             }
         }
         claims.plugins.retain(|_, (owner, _)| !mine(*owner));
-        for command in &registration.commands {
+        for name in registration
+            .commands
+            .iter()
+            .flat_map(|command| command.names())
+        {
             claims
                 .plugins
-                .insert(command.name.clone(), (id, plugin.to_owned()));
+                .insert(name.to_owned(), (id, plugin.to_owned()));
         }
         Ok(())
     }
@@ -297,13 +300,13 @@ impl Host {
                 && let Some(command) = registration
                     .commands
                     .iter()
-                    .find(|command| script.commands().contains(&command.name))
+                    .flat_map(|command| command.names())
+                    .find(|name| script.commands().contains(*name))
             {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!(
-                        "command /{} is registered by plugin {} and by the configuration script",
-                        command.name,
+                        "command /{command} is registered by plugin {} and by the configuration script",
                         instance.name()
                     ),
                 ));
@@ -407,7 +410,8 @@ impl Host {
                     registration
                         .commands
                         .iter()
-                        .map(|command| command.name.clone())
+                        .flat_map(|command| command.names())
+                        .map(str::to_owned)
                         .collect()
                 }),
                 capabilities: Some(instance.spec().manifest.describe_capabilities()),
@@ -930,6 +934,51 @@ impl Host {
         }
     }
 
+    /// Run a plugin command for the operator console: `line` is the command
+    /// with its arguments, with or without a leading slash. Only commands
+    /// registered with `console` run; their `message` answer is the output.
+    pub async fn console(&self, line: &str) -> Result<crate::text::Text, String> {
+        let line = line.trim().trim_start_matches('/');
+        let (name, args) = line.split_once(' ').unwrap_or((line, ""));
+        let name = name.to_ascii_lowercase();
+        let (instance, command) = match self.command_owner(&name) {
+            Some(CommandOwner::Plugin(instance, command)) => (instance, command),
+            Some(CommandOwner::Script) => {
+                return Err(format!(
+                    "/{name} belongs to the configuration script; only persistent plugins' commands run from the console"
+                ));
+            }
+            None => return Err(format!("no plugin registered /{name}")),
+        };
+        if !command.console {
+            return Err(format!(
+                "/{name} of plugin {} is for players only (its registration does not set console)",
+                instance.name()
+            ));
+        }
+        let input = Context {
+            name: CONSOLE.into(),
+            command: Some(command.name.clone()),
+            args: args.trim().into(),
+            console: true,
+            ..Context::default()
+        };
+        match self
+            .command(&instance, input)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            Action::Continue => Ok(crate::text::Text::Plain(String::new())),
+            Action::Message(text) => Ok(text),
+            other => {
+                let other: String = format!("{other:?}").chars().take(128).collect();
+                Err(format!(
+                    "/{name} answered {other}, which needs a player; the console takes only a message"
+                ))
+            }
+        }
+    }
+
     /// The single owner of a command name, if any.
     pub(crate) fn command_owner(&self, name: &str) -> Option<CommandOwner> {
         if self.script.commands().contains(name) {
@@ -940,7 +989,7 @@ impl Host {
             let command = registration
                 .commands
                 .iter()
-                .find(|command| command.name == name)?;
+                .find(|command| command.answers_to(name))?;
             Some(CommandOwner::Plugin(instance.clone(), command.clone()))
         })
     }
@@ -1072,6 +1121,8 @@ impl Host {
 
 /// The pseudo-plugin names of the configuration script and the bus
 /// responders in [`Host::statuses`]; neither is a valid plugin name.
+/// The sender name of a command run from the operator console.
+pub const CONSOLE: &str = "CONSOLE";
 pub const SCRIPT: &str = "(script)";
 pub const REMOTE: &str = "(remote)";
 

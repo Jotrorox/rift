@@ -11,7 +11,7 @@ Four persistent plugins that behave identically, one per supported language:
 | [`vanish-lua`](vanish-lua) | Lua | nothing to build | [Visibility](../../docs/permissions.md#visibility): `/vanish` through the `rift.visible-to` meta key |
 
 The WebAssembly examples are standalone projects that build a component
-against the `plugin` world of `rift:plugin@0.1.5` (`wit/rift-plugin.wit`). A
+against the `plugin` world of `rift:plugin@0.2.0` (`wit/rift-plugin.wit`). A
 plugin directory holds a `plugin.toml` manifest and the entry it names: the
 built `.wasm`, or `init.lua`.
 
@@ -67,7 +67,7 @@ Example configuration: `{"deny":"Mallory"}`.
 ```toml
 name = "hello-rs"
 version = "0.1.0"
-api = "0.1"
+api = "0.2"
 mode = "persistent"
 engine = "wasm"
 entry = "hello_rs.wasm"
@@ -134,7 +134,7 @@ unchanged in `rift.lua`.
 crate-type = ["cdylib"]
 
 [dependencies]
-rift-plugin = "0.1"
+rift-plugin = "0.2"
 ```
 
 ```rust
@@ -160,8 +160,10 @@ rift_plugin::export!(MyPlugin);
 ```
 
 Every hook has a default; implement only the ones you list in
-`Registration::hooks`. The host API lives in `rift_plugin::{players, store,
-permissions, bus, servers, timers, log, meta}`, `rift_plugin::config::<T>`
+`Registration::hooks`. An empty list delivers every hook except `chat` and
+`kick`: a plugin registers for chat by listing the `chat` hook (`Hook::Chat`).
+The host API lives in `rift_plugin::{players, store,
+permissions, bus, servers, timers, background, log, meta}`, `rift_plugin::config::<T>`
 decodes the JSON configuration with serde, and `log::info!` (or
 `rift_plugin::log::info!`) writes to Rift's log.
 
@@ -173,7 +175,8 @@ matching against any WASI 0.2 implementation.
 ## How Rift runs a WebAssembly plugin
 
 Rift runs components on Wasmtime with Cranelift, one instance per plugin on
-the plugin's own thread, one call at a time. The host links Rift's
+the plugin's own thread, one call at a time, plus one instance per
+[background worker](../../docs/plugins.md#background-work). The host links Rift's
 interfaces, the whole WASI 0.2 command import set and `wasi:http`, so Rust,
 C and TinyGo components load alike.
 
@@ -201,13 +204,15 @@ section says otherwise:
 memory_limit_mb = 64   # 1..=4096; default 256; 0 keeps WebAssembly's 4 GiB bound
 ```
 
-`[deadlines]` bound the awaited hooks, `init`, `reload` and `shutdown`. A
+`[deadlines]` bound the awaited hooks, `init`, `reload`, `shutdown` and
+background jobs (`work`). A
 guest still running at its deadline is interrupted (within about 10 ms) and
 the instance counts as failed: Rift discards it and restarts it according to
 `[failure] restart`, because the interrupted code may have left its state
 half-changed. A trap, such as a Rust panic, does the same. `init` or `reload`
 returning an error is an ordinary failure that interrupts nothing. Observers
-(`join`, `after_transfer`, `disconnect`, `message`, `timer`, `event`) are not
+(`join`, `after_transfer`, `disconnect`, `message`, `timer`, `event`, `dialog`,
+`job_done`) are not
 awaited, but a guest still running one after 60 s is interrupted the same
 way, as in Lua; stopping or reloading Rift also interrupts a guest that does
 not return within the shutdown grace period.

@@ -79,8 +79,10 @@ impl Plan {
             .iter()
             .map(|name| CommandSpec {
                 name: (*name).into(),
+                aliases: Vec::new(),
                 permission: "test.command".into(),
                 suggest: SuggestKind::Fixed(vec!["alpha".into(), "beta".into()]),
+                console: false,
             })
             .collect();
         self
@@ -193,7 +195,7 @@ fn directory() -> PathBuf {
 
 fn spec(root: &Path, name: &str, extra: &str, config_json: &str) -> PluginSpec {
     let text =
-        format!("name = \"{name}\"\nversion = \"1\"\napi = \"0.1\"\nengine = \"lua\"\n{extra}");
+        format!("name = \"{name}\"\nversion = \"1\"\napi = \"0.2\"\nengine = \"lua\"\n{extra}");
     PluginSpec {
         name: name.into(),
         folder: root.join("plugins").join(name),
@@ -1547,7 +1549,7 @@ async fn chat_reaches_only_plugins_that_handle_it_and_accepts_continue_and_deny(
     assert!(runtime.plugins().may_handle(Hook::Chat));
     let statuses = runtime.plugins().statuses();
     assert!(!statuses[0].hooks.contains(&"chat"), "{statuses:?}");
-    assert_eq!(statuses[1].hooks, ["timer", "dialog", "chat"]);
+    assert_eq!(statuses[1].hooks, ["timer", "dialog", "chat", "job_done"]);
     let player = session(&runtime, 1);
     assert!(player.handles_chat());
     assert_eq!(
@@ -1697,7 +1699,7 @@ fn webassembly_grants_may_not_cover_the_plugin_cache_or_the_plugins_folder() {
         let mut spec = spec(&root, "probe", "", "{}");
         spec.manifest = Manifest::parse(
             &format!(
-                "name = \"probe\"\nversion = \"1\"\napi = \"0.1\"\nengine = \"wasm\"\nentry = \"probe.wasm\"\n[capabilities]\nfilesystem = [{filesystem}]\n"
+                "name = \"probe\"\nversion = \"1\"\napi = \"0.2\"\nengine = \"wasm\"\nentry = \"probe.wasm\"\n[capabilities]\nfilesystem = [{filesystem}]\n"
             ),
             "probe",
         )
@@ -1789,7 +1791,7 @@ async fn kick_asks_the_script_then_plugins_that_handle_it() {
     // The script first, then the plugins.
     assert_eq!(statuses[0].hooks, ["kick"]);
     assert!(!statuses[1].hooks.contains(&"kick"), "{statuses:?}");
-    assert_eq!(statuses[2].hooks, ["timer", "dialog", "kick"]);
+    assert_eq!(statuses[2].hooks, ["timer", "dialog", "kick", "job_done"]);
     let player = session(&runtime, 1);
     // The script answers first; the plugin is not asked.
     assert_eq!(
