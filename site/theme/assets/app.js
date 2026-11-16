@@ -218,6 +218,34 @@
     apply();
   }
 
+  // Filter box: narrows the sidebar to pages whose title or headings match.
+  const filter = document.querySelector('[data-filter]');
+  if (filter) {
+    const groups = [...document.querySelectorAll('.side-group')];
+    const empty = document.querySelector('.side-empty');
+    const run = () => {
+      const words = filter.value.toLowerCase().split(/\s+/).filter(Boolean);
+      let shown = 0;
+      for (const group of groups) {
+        let any = false;
+        for (const item of group.querySelectorAll('li')) {
+          const hit = words.every((w) => item.dataset.find.includes(w));
+          item.hidden = !hit;
+          any ||= hit;
+          shown += hit;
+        }
+        group.hidden = !any;
+        group.open = words.length ? any : group.hasAttribute('data-current');
+      }
+      if (empty) empty.hidden = shown > 0;
+    };
+    filter.addEventListener('input', run);
+    filter.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') { filter.value = ''; run(); }
+      if (e.key === 'Enter') document.querySelector('.side-group li:not([hidden]) a')?.click();
+    });
+  }
+
   // Highlight the section being read in the "On this page" column.
   const tocLinks = [...document.querySelectorAll('.toc a')];
   if (tocLinks.length) {

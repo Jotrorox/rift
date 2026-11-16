@@ -609,7 +609,7 @@ jobs:
           fi
       - name: Require the documented glibc baseline
         if: matrix.libc == 'glibc'
-        # docs/operations.md promises glibc 2.35; a newer symbol version here
+        # docs/install.md promises glibc 2.35; a newer symbol version here
         # means the executable no longer starts on such a host.
         run: |
           newest="$(objdump -T target/release/rift | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1)"
@@ -1069,7 +1069,7 @@ jobs:
   translation-matrix:
     name: Translation across versions (${{ matrix.server }})
     # Started by hand until it has proven itself on these runners; the cells
-    # pass on a developer machine (docs/translation.md).
+    # pass on a developer machine (docs/translation-internals.md).
     if: github.event_name == 'workflow_dispatch'
     needs: build-linux
     runs-on: ubuntu-24.04

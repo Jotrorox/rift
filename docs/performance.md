@@ -1,9 +1,9 @@
 # Performance against Velocity
 
-Rift and Velocity run one after the other against the same synthetic Minecraft
-backend on the same machine, under the same offered workload. The comparison
-records proxy CPU, resident memory, latency, throughput and failures. It is a
-loopback protocol benchmark, not a player capacity estimate.
+This page compares proxy CPU, resident memory, latency, throughput and
+failures of Rift and Velocity. Both run one after the other against the same
+synthetic Minecraft backend on the same machine, under the same offered
+workload. It is a loopback protocol benchmark, not a player capacity estimate.
 
 ## Results
 
@@ -11,11 +11,15 @@ Rift used less CPU and memory in every profile. Echo latency ranges overlap, so
 these runs do not rank the proxies on echo latency. Both proxies completed all
 **108,288 measured operations with zero failures**.
 
-Two outliers are worth noting. One 64-client Rift login trial had a **135.73 ms
-p99** (135.99 ms maximum) from a single slow 64-login wave. One Velocity
-64-client warmup missed **7 of 115,200** scheduled echoes; warmup is excluded
-from the tables but kept in the raw reports. These measurements cannot tell
-whether the outliers came from the proxy, the load generator or the host.
+Two outliers:
+
+- One 64-client Rift login trial had a **135.73 ms p99** (135.99 ms maximum)
+  from a single slow 64-login wave.
+- One Velocity 64-client warmup missed **7 of 115,200** scheduled echoes.
+  Warmup is excluded from the tables but kept in the raw reports.
+
+These measurements cannot tell whether the outliers came from the proxy, the
+load generator or the host.
 
 Each profile ran three trials per proxy: 2,048 warmup logins, 30 seconds of echo
 warmup, 20 seconds of measured echoes, then 2,048 measured logins in waves the
@@ -91,7 +95,7 @@ here to compare plain forwarding. See the
 
 ## Reproduce
 
-Requires Linux, Python 3.11+, the pinned Rust toolchain and Java 25. Stop other
+You need Linux, Python 3.11+, the pinned Rust toolchain and Java 25. Stop other
 builds and tests before measuring.
 
 ```sh
@@ -113,13 +117,14 @@ for clients in 16 64; do
 done
 ```
 
-`fetch_velocity.py` verifies the cached jar on every run, and the comparison
-verifies it again before starting. `--work-dir` must not exist yet; it keeps
-every process log and generated configuration.
-
-Request failures are recorded as results, not errors. Add `--require-success` to
-exit nonzero on any failed request. Infrastructure or configuration errors abort
-the run, and the renderer refuses the resulting incomplete report.
+- `fetch_velocity.py` verifies the cached jar on every run, and the comparison
+  verifies it again before starting.
+- `--work-dir` must not exist yet; it keeps every process log and generated
+  configuration.
+- Request failures are recorded as results, not errors. Add
+  `--require-success` to exit nonzero on any failed request.
+- Infrastructure or configuration errors abort the run, and the renderer
+  refuses the resulting incomplete report.
 
 CI runs the same comparison with two clients, one trial and one second each of
 warmup and measurement, and uploads its report and logs. It checks correctness
@@ -127,25 +132,16 @@ only; its numbers are not performance results.
 
 ## Reading the measurements
 
-**CPU** is proxy user plus system time from `/proc` over the measured interval.
-100% is one logical CPU. The table shows the mean for each trial, not peak.
+| Measure | How it is taken |
+| --- | --- |
+| CPU | Proxy user plus system time from `/proc` over the measured interval. 100% is one logical CPU. The table shows the mean for each trial, not peak. Counters advance in 10 ms steps. Backend and load-generator CPU are recorded separately in the raw reports. |
+| Memory | Peak sampled RSS in MiB, including JVM native memory. It includes memory retained from startup and warmup, and sampling can miss short spikes. |
+| Latency | Nearest-rank percentiles over successful operations. Echo latency runs from the scheduled send slot to the verified reply, so it includes load-generator dispatch delay; raw reports also record RTT and dispatch delay separately. Login latency runs from TCP connect to Join Game plus one verified echo. |
+| Failures | Timeouts, rejected connections, incorrect echoes and missed send slots. Each client has at most one outstanding echo, and a failed session counts all its remaining slots as failures, so offered load never drops. |
+
 Login bursts are much shorter than the 20-second echo windows, so their CPU
-figures describe short bursts. Counters advance in 10 ms steps. Backend and
-load-generator CPU are recorded separately in the raw reports.
-
-**Memory** is peak sampled RSS in MiB, including JVM native memory. It includes
-memory retained from startup and warmup, and sampling can miss short spikes.
-
-**Latency** uses nearest-rank percentiles over successful operations. Echo
-latency runs from the scheduled send slot to the verified reply, so it includes
-load-generator dispatch delay; raw reports also record RTT and dispatch delay
-separately. Login latency runs from TCP connect to Join Game plus one verified
-echo.
-
-**Failures** include timeouts, rejected connections, incorrect echoes and missed
-send slots. Each client has at most one outstanding echo, and a failed session
-counts all its remaining slots as failures, so offered load never drops. Read
-CPU alongside throughput and failures: doing less work uses less CPU.
+figures describe short bursts. Read CPU alongside throughput and failures:
+doing less work uses less CPU.
 
 Each trial starts fresh proxy and backend processes, and the proxy order
 alternates between trials. Treat the results as medians with ranges, not

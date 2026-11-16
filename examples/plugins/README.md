@@ -176,7 +176,7 @@ matching against any WASI 0.2 implementation.
 
 Rift runs components on Wasmtime with Cranelift, one instance per plugin on
 the plugin's own thread, one call at a time, plus one instance per
-[background worker](../../docs/plugins.md#background-work). The host links Rift's
+[background worker](../../docs/plugin-events.md#background-work). The host links Rift's
 interfaces, the whole WASI 0.2 command import set and `wasi:http`, so Rust,
 C and TinyGo components load alike.
 

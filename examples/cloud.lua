@@ -41,7 +41,7 @@ config.service_groups.survival = {
     storage = "persistent",
     port_range = { 25650, 25659 },
     memory_mb = 4096,
-    memory_limit = 5120, -- Enforced on Linux with a delegated cgroup; see docs/managed-servers.md.
+    memory_limit = 5120, -- Enforced on Linux with a delegated cgroup; see docs/server-limits.md.
     start_on_connect = true,
     idle_timeout_ms = 10 * 60 * 1000,
 }

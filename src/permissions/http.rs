@@ -1,5 +1,5 @@
 //! The `/api/perms` HTTP API: what the dashboard and scripts use to read and
-//! edit the permission store. `docs/http.md` lists every route with examples.
+//! edit the permission store. `docs/permissions-http.md` lists every route with examples.
 //!
 //! The routes are a thin layer over [`Authority`]: every write is one
 //! [`Authority::apply_with`] (or the import) with actor `operator:<name>`, so

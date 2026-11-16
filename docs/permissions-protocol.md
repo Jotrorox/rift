@@ -6,11 +6,41 @@ Backends keep a replica of the proxy's permission data and answer
 anything else) implements: the bus subjects, every JSON shape, the check
 algorithm a replica runs, and the revision rules that keep replicas current.
 
+## How to read this document
+
 The Rust types in `crates/rift-permissions` (`wire`, `change`, `compiled`,
-`check`) are the reference implementation. [Permissions clients](permissions-clients.md)
-covers the ready-made Rust client, the in-memory testing crate and the C ABI. Every shape below has a test case
+`check`) are the reference implementation. Every shape below has a test case
 in [`tests/fixtures/permissions`](../tests/fixtures/permissions/README.md),
-which every implementation runs.
+which every implementation runs. [Permissions clients](permissions-clients.md)
+covers the ready-made Rust client, the in-memory testing crate and the C ABI.
+
+| To | Read |
+| --- | --- |
+| Connect a backend | [Transport](#transport), [Hello](#hello) |
+| Answer a check | [Compiled subject](#compiled-subject) |
+| Keep a replica current | [Fetching subjects](#fetching-subjects), [Revisions and ordering](#revisions-and-ordering) |
+| Write from a backend | [Changes](#changes), [Commands](#commands) |
+
+## Subjects
+
+| Subject | Direction | Operation | Payload | Reply `data` |
+| --- | --- | --- | --- | --- |
+| `rift.perms.hello` | backend → proxy | REQUEST | [hello request](#hello) | [hello reply](#hello) |
+| `rift.perms.subject.get` | backend → proxy | REQUEST | `{"uuid", "server"?}` | [compiled subject](#compiled-subject) |
+| `rift.perms.subject.batch` | backend → proxy | REQUEST | `{"uuids": [...]}` | `{"revision", "subjects": [...]}` |
+| `rift.perms.groups.get` | backend → proxy | REQUEST | `{"names"?, "permissions"?}` | `{"revision", "groups": [...]}` |
+| `rift.perms.apply` | backend → proxy | REQUEST | `{"change", "actor_uuid"?, "reason"?}` | [applied](#applied) |
+| `rift.perms.command` | backend → proxy | REQUEST | `{"actor_uuid"?, "args": [...]}` | `{"revision", "component"}` |
+| `rift.perms.register` | backend → proxy | PUBLISH_ACK | `[{"node", "description"?, "default", "plugin"?}]` | none |
+| `rift.perms.context` | backend → proxy | PUBLISH | `{"uuid", "contexts"}` | none |
+| `rift.perms.update` | proxy → all | PUBLISH | [change event](#change-event) | none |
+| `rift.perms.update.<uuid>` | proxy → all | PUBLISH | [compiled subject](#compiled-subject) | none |
+| `rift.perms.update.resync` | proxy → all | PUBLISH | [resync request](#resync) | none |
+| `rift.events.permissions` | proxy → all | PUBLISH | [change event](#change-event) | none |
+| `rift.perms.changes` | proxy | retained stream | [change event](#change-event) | none |
+
+`<uuid>` in a subject is 32 lowercase hex digits, so `rift.perms.update.resync`
+never collides with a player; clients that do not know it ignore it.
 
 ## Transport
 
@@ -20,18 +50,19 @@ A backend authenticates once as its own principal, conventionally
 `server.<name>`, then uses REQUEST for request/reply subjects, PUBLISH or
 PUBLISH_ACK for one-way messages, and SUBSCRIBE for pushes.
 
-Every payload is a UTF-8 JSON document, at most 1,048,576 bytes like any bus
-payload. Readers must ignore unknown object members, so later versions can add
-fields. Integers are JSON numbers without fractions; revisions and Unix times
-fit in an unsigned 64-bit integer.
-
-An ACL denial or a malformed frame is reported by the bus itself (an ERROR
-frame, code 1 for permission), not by a JSON reply.
+- Every payload is a UTF-8 JSON document, at most 1,048,576 bytes like any bus
+  payload.
+- Readers must ignore unknown object members, so later versions can add
+  fields.
+- Integers are JSON numbers without fractions; revisions and Unix times fit in
+  an unsigned 64-bit integer.
+- An ACL denial or a malformed frame is reported by the bus itself (an ERROR
+  frame, code 1 for permission), not by a JSON reply.
 
 ### Principal permissions
 
 Give a backend principal the `backend` preset, which grants what the
-protocol needs, and the [network API](messaging.md#network-api-subjects):
+protocol needs, and the [network API](messaging-subjects.md#network-api):
 
 ```lua
 { name = "server.survival-1", token_env = "RIFT_SURVIVAL_1_TOKEN", preset = "backend" }
@@ -55,40 +86,20 @@ Written out, that is:
 }
 ```
 
-REQUEST creates its own private inbox, so no `_INBOX` grant is needed. Nothing
-a backend sends writes the store directly: `apply`, `command` and `register`
-go through the proxy's single write path with the backend (or the player it
-names) recorded as the actor.
-
-The proxy knows which principal sent each message (the QUIC listener records
-it); payloads never name the sender. A principal named `server.<name>` speaks
-for the Rift backend `<name>`: its `hello` must give `"server": "<name>"`, and
-it may act for, and report contexts of, players on that backend only. A
-principal with `control = true` may also write as itself and run console
-commands. Only the proxy publishes `rift.perms.update`, `rift.perms.update.>`
-and `rift.perms.changes`, and only control principals may subscribe to the
-request subjects, whatever the grants say.
-
-## Subjects
-
-| Subject | Direction | Operation | Payload | Reply `data` |
-| --- | --- | --- | --- | --- |
-| `rift.perms.hello` | backend → proxy | REQUEST | [hello request](#hello) | [hello reply](#hello) |
-| `rift.perms.subject.get` | backend → proxy | REQUEST | `{"uuid", "server"?}` | [compiled subject](#compiled-subject) |
-| `rift.perms.subject.batch` | backend → proxy | REQUEST | `{"uuids": [...]}` | `{"revision", "subjects": [...]}` |
-| `rift.perms.groups.get` | backend → proxy | REQUEST | `{"names"?, "permissions"?}` | `{"revision", "groups": [...]}` |
-| `rift.perms.apply` | backend → proxy | REQUEST | `{"change", "actor_uuid"?, "reason"?}` | [applied](#applied) |
-| `rift.perms.command` | backend → proxy | REQUEST | `{"actor_uuid"?, "args": [...]}` | `{"revision", "component"}` |
-| `rift.perms.register` | backend → proxy | PUBLISH_ACK | `[{"node", "description"?, "default", "plugin"?}]` | none |
-| `rift.perms.context` | backend → proxy | PUBLISH | `{"uuid", "contexts"}` | none |
-| `rift.perms.update` | proxy → all | PUBLISH | [change event](#change-event) | none |
-| `rift.perms.update.<uuid>` | proxy → all | PUBLISH | [compiled subject](#compiled-subject) | none |
-| `rift.perms.update.resync` | proxy → all | PUBLISH | [resync request](#resync) | none |
-| `rift.events.permissions` | proxy → all | PUBLISH | [change event](#change-event) | none |
-| `rift.perms.changes` | proxy | retained stream | [change event](#change-event) | none |
-
-`<uuid>` in a subject is 32 lowercase hex digits, so `rift.perms.update.resync`
-never collides with a player; clients that do not know it ignore it.
+- REQUEST creates its own private inbox, so no `_INBOX` grant is needed.
+- Nothing a backend sends writes the store directly: `apply`, `command` and
+  `register` go through the proxy's single write path with the backend (or the
+  player it names) recorded as the actor.
+- The proxy knows which principal sent each message (the QUIC listener records
+  it); payloads never name the sender.
+- A principal named `server.<name>` speaks for the Rift backend `<name>`: its
+  `hello` must give `"server": "<name>"`, and it may act for, and report
+  contexts of, players on that backend only.
+- A principal with `control = true` may also write as itself and run console
+  commands.
+- Only the proxy publishes `rift.perms.update`, `rift.perms.update.>` and
+  `rift.perms.changes`, and only control principals may subscribe to the
+  request subjects, whatever the grants say.
 
 ## Replies
 
@@ -126,47 +137,64 @@ the plain lowercase form.
 
 ### Permission node
 
-A node is a pattern made of dot-separated segments. Each segment is one or
-more of `a-z`, `0-9`, `_`, `:` and `-`; the whole node is at most 256 bytes.
-The last segment may be `*` (`essentials.*`), and `*` alone matches
-everything. `*` anywhere else is invalid, so `minecraft:*` is invalid while
-`minecraft:command.*` is fine. Pumpkin's `plugin:node` names are used as
-written.
+A node is a pattern made of dot-separated segments.
 
-Input is normalised by lowercasing ASCII letters (`Essentials.Fly` becomes
-`essentials.fly`); other characters are not changed and make the node invalid.
+- Each segment is one or more of `a-z`, `0-9`, `_`, `:` and `-`; the whole
+  node is at most 256 bytes.
+- The last segment may be `*` (`essentials.*`), and `*` alone matches
+  everything.
+- `*` anywhere else is invalid, so `minecraft:*` is invalid while
+  `minecraft:command.*` is fine.
+- Pumpkin's `plugin:node` names are used as written.
+- Input is normalised by lowercasing ASCII letters (`Essentials.Fly` becomes
+  `essentials.fly`); other characters are not changed and make the node
+  invalid.
 
-Group and track names are 1 to 64 bytes of `a-z`, `0-9`, `_`, `.` and `-`,
-also lowercased on input. Meta keys are 1 to 64 bytes of `a-z`, `0-9`, `_`,
-`.`, `:` and `-`, lowercased. Prefixes, suffixes and display names are at
-most 256 bytes and meta values at most 1024 bytes, without control characters.
+Other names and texts:
+
+| Value | Allowed | Length |
+| --- | --- | --- |
+| Group and track names | `a-z`, `0-9`, `_`, `.` and `-`; lowercased on input | 1 to 64 bytes |
+| Meta keys | `a-z`, `0-9`, `_`, `.`, `:` and `-`; lowercased | 1 to 64 bytes |
+| Prefixes, suffixes and display names | no control characters | at most 256 bytes |
+| Meta values | no control characters | at most 1024 bytes |
 
 ### Context set
 
-A set of `key=value` pairs. Keys are 1 to 64 bytes of `a-z0-9_.:-`; values
-are 1 to 256 bytes without control characters, `;` or `=`. ASCII letters in
-both are lowercased on input. JSON is an object; a key with several values
-has an array:
+A set of `key=value` pairs.
+
+| Part | Allowed | Length |
+| --- | --- | --- |
+| Key | `a-z0-9_.:-` | 1 to 64 bytes |
+| Value | no control characters, `;` or `=` | 1 to 256 bytes |
+
+ASCII letters in both are lowercased on input. JSON is an object; a key with
+several values has an array:
 
 ```json
 {"server": "survival", "region": ["market", "spawn"]}
 ```
 
-Rift fills the reserved keys `server` (the backend name), `group` (the
-backend's service group, for an instance of one), `world`, `dimension` (for
-example `minecraft:the_nether`) and `gamemode` (`survival`, `creative`,
-`adventure`, `spectator`). Each has at most one value in an active set. Other
-keys are custom. A backend fills `server` and `group` from its configuration
-and the rest from its own player state; the proxy fills `server` and `group`
-from the session's backend, and `dimension` and `gamemode` from the play
-packets it relays, never `world` (see
-[contexts on the proxy](permissions.md#contexts-on-the-proxy)). A backend
-outside any service group, and its players on the proxy, have no `group`.
+Rift fills the reserved keys. Each has at most one value in an active set.
+Other keys are custom.
 
-A node's contexts are satisfied when every one of its pairs is in the active
-set (subset test); the empty set is global and always satisfied. A node that
-names two values of a custom key needs both to be active. A node that names
-two values of a reserved key could never apply and is rejected.
+| Reserved key | Value | On a backend | On the proxy |
+| --- | --- | --- | --- |
+| `server` | the backend name | from its configuration | from the session's backend |
+| `group` | the backend's service group, for an instance of one | from its configuration | from the session's backend |
+| `world` | the world name | from its own player state | never |
+| `dimension` | for example `minecraft:the_nether` | from its own player state | from the play packets it relays |
+| `gamemode` | `survival`, `creative`, `adventure`, `spectator` | from its own player state | from the play packets it relays |
+
+A backend outside any service group, and its players on the proxy, have no
+`group`. See
+[contexts on the proxy](permissions.md#contexts-on-the-proxy).
+
+- A node's contexts are satisfied when every one of its pairs is in the active
+  set (subset test); the empty set is global and always satisfied.
+- A node that names two values of a custom key needs both to be active.
+- A node that names two values of a reserved key could never apply and is
+  rejected.
 
 The canonical string form, used in storage and logs, is the pairs sorted by
 key and then value, joined as `k=v;k2=v2`; the empty set is `""`.
@@ -185,10 +213,14 @@ A node on a user or group. The `kind` tag selects the payload fields:
 | `weight` | `weight` (i32); groups only | `weight` |
 | `display_name` | `name`; groups only | `display_name` |
 
-Every node also has `contexts` (a context set, omitted when global),
-`expires_at` (Unix seconds, omitted when permanent) and `source` (`store`,
-`config`, `import` or `plugin:<name>`, omitted when `store`). Readers apply
-those defaults when a field is missing.
+Every node also has these fields. Readers apply the default when a field is
+missing.
+
+| Field | Type | Omitted when |
+| --- | --- | --- |
+| `contexts` | a context set | global |
+| `expires_at` | Unix seconds | permanent |
+| `source` | `store`, `config`, `import` or `plugin:<name>` | `store` |
 
 ```json
 {"kind": "permission", "key": "essentials.fly", "value": true, "contexts": {"server": "survival"}, "expires_at": 1762800000}
@@ -197,13 +229,12 @@ those defaults when a field is missing.
 {"kind": "meta", "key": "homes", "value": "5", "source": "plugin:essentials"}
 ```
 
-A subject holds at most one node per slot, (kind, storage key, contexts);
-setting a node replaces the one in its slot. So a user has at most one prefix
-per priority and one value per meta key in each context. Kind codes for
-storage are `permission` 0, `inherit` 1, `prefix` 2, `suffix` 3, `meta` 4,
-`weight` 5, `display_name` 6.
-
-A node expiring at `t` applies while `now < t`.
+- A subject holds at most one node per slot, (kind, storage key, contexts);
+  setting a node replaces the one in its slot. So a user has at most one
+  prefix per priority and one value per meta key in each context.
+- Kind codes for storage are `permission` 0, `inherit` 1, `prefix` 2,
+  `suffix` 3, `meta` 4, `weight` 5, `display_name` 6.
+- A node expiring at `t` applies while `now < t`.
 
 ### Tristate
 
@@ -234,27 +265,43 @@ subject, and sends it to backends. It is the payload of
 | `revision` | The store revision the subject was built from |
 | `uuid` | The player |
 | `primary_group` | The player's primary group |
-| `entries[]` | `k`: `perm` (a permission pattern in `key`) or `group` (membership of the group named by `key`, `v` always `true`); `v`: the value; `ctx`: contexts (default `{}`); `rank`: 0 for the player's own nodes, then 1, 2, … per group; `exp`: expiry in Unix seconds, absent when permanent |
+| `entries[]` | The ranked entries; fields below |
 | `prefix[]`, `suffix[]` | `p`: priority, `t`: text, plus `ctx`, `rank`, `exp` |
 | `meta[]` | `key`, `v`: value, plus `ctx`, `rank`, `exp` |
+
+| Entry field | Meaning |
+| --- | --- |
+| `k` | `perm` (a permission pattern in `key`) or `group` (membership of the group named by `key`, `v` always `true`) |
+| `v` | The value |
+| `ctx` | Contexts (default `{}`) |
+| `rank` | 0 for the player's own nodes, then 1, 2, … per group |
+| `exp` | Expiry in Unix seconds, absent when permanent |
 
 `prefix`, `suffix` and `meta` default to `[]`. An unknown `k` is a protocol
 error: the protocol version changes before new entry kinds appear.
 
 ### How the proxy builds it
 
-Clients never compile; this is for reading compiled subjects. The player's own
-nodes get rank 0. Groups are collected from `inherit` nodes and the implicit
-edge every player has to `default`; an edge's contexts are merged into every
-node of the parent, a negated `inherit` removes that group on every path
-confined to its contexts, and a path's expiry is the earliest expiry on it.
-Groups are ranked by weight (descending), then distance from the player
-(direct parents first), then name; `default` is always last. Each way a group
-is reached adds a `group` entry followed by the group's nodes with that rank.
+Clients never compile; this is for reading compiled subjects.
 
-The primary group is the player's explicit primary group, otherwise the
-heaviest group among their own global, positive `inherit` nodes (ties by
-name), otherwise `default`.
+1. The player's own nodes get rank 0.
+2. Groups are collected from `inherit` nodes and the implicit edge every
+   player has to `default`. Along the way:
+   - an edge's contexts are merged into every node of the parent;
+   - a negated `inherit` removes that group on every path confined to its
+     contexts;
+   - a path's expiry is the earliest expiry on it.
+3. Groups are ranked by weight (descending), then distance from the player
+   (direct parents first), then name; `default` is always last.
+4. Each way a group is reached adds a `group` entry followed by the group's
+   nodes with that rank.
+
+The primary group is the first of:
+
+1. the player's explicit primary group;
+2. the heaviest group among their own global, positive `inherit` nodes (ties
+   by name);
+3. `default`.
 
 A compiled subject has at most `limits.compiled_entries` (4096) entries in all
 four lists together.
@@ -308,8 +355,13 @@ Sent once after connecting and after every reconnect.
 {"server": "survival-1", "revision": 410, "client_version": "rift-permissions-client/0.1.0"}
 ```
 
-`server` is the backend's name, the `server` context it fills; `revision` is
-the last revision its replica saw (0 when empty). Reply data:
+| Request field | Meaning |
+| --- | --- |
+| `server` | The backend's name, the `server` context it fills |
+| `revision` | The last revision its replica saw (0 when empty) |
+| `client_version` | The client's version string |
+
+Reply data:
 
 ```json
 {"revision": 412, "protocol": 1, "now": 1762790000,
@@ -318,19 +370,20 @@ the last revision its replica saw (0 when empty). Reply data:
  "external_contexts": ["region"]}
 ```
 
-A `server.<name>` principal whose `server` differs from `<name>` is refused
-with `forbidden`. The proxy remembers each backend's last `hello` (server,
-revision, client version, time) for `/perms backends`, `/perms doctor` and the
-dashboard.
+| Reply field | Meaning |
+| --- | --- |
+| `revision` | The proxy's current revision |
+| `protocol` | The protocol version; a client that does not support it stops and applies its offline policy |
+| `now` | The proxy's clock in Unix seconds, so a backend can warn about clock skew, which shifts every expiry |
+| `limits` | The store limits |
+| `external_contexts` | The custom keys a backend may report on `rift.perms.context` |
 
-`protocol` is the protocol version; a client that does not support it stops
-and applies its offline policy. `now` is the proxy's clock in Unix seconds, so
-a backend can warn about clock skew, which shifts every expiry. `limits` are
-the store limits. `external_contexts` are the custom keys a backend may
-report on `rift.perms.context`.
-
-If the reply's revision differs from the backend's (and its replica is not
-empty), every stored subject is stale: refetch them with `subject.batch`.
+- A `server.<name>` principal whose `server` differs from `<name>` is refused
+  with `forbidden`.
+- The proxy remembers each backend's last `hello` (server, revision, client
+  version, time) for `/perms backends`, `/perms doctor` and the dashboard.
+- If the reply's revision differs from the backend's (and its replica is not
+  empty), every stored subject is stale: refetch them with `subject.batch`.
 
 ## Fetching subjects
 
@@ -340,10 +393,11 @@ empty), every stored subject is stale: refetch them with `subject.batch`.
 {"uuid": "0123456789abcdef0123456789abcdef", "server": "survival-1"}
 ```
 
-Every UUID compiles, a player the proxy has never seen to just `default`, so a
-successful reply always carries a subject. Its `revision` is the revision the
-subject was built from, which can be older than the proxy's current revision
-when nothing about that player changed since.
+- Every UUID compiles, a player the proxy has never seen to just `default`, so
+  a successful reply always carries a subject.
+- Its `revision` is the revision the subject was built from, which can be
+  older than the proxy's current revision when nothing about that player
+  changed since.
 
 `rift.perms.subject.batch` returns up to `limits.batch` (256) subjects, one per
 requested UUID, in request order:
@@ -360,10 +414,14 @@ The reply's `revision` is the proxy's revision when the batch was built.
 
 ## Groups
 
-`rift.perms.groups.get` lists groups for Vault's group API, `/perms group
-list` and tab completion. `{}` returns every group without permission nodes;
-`names` (at most 64) restricts the list, and `permissions: true`, allowed only
-together with `names`, adds permission nodes:
+`rift.perms.groups.get` lists groups for Vault's group API and tab
+completion.
+
+| Request | Returns |
+| --- | --- |
+| `{}` | Every group, without permission nodes |
+| `names` (at most 64) | Only the named groups |
+| `permissions: true` | Permission nodes as well; allowed only together with `names` |
 
 ```json
 {"names": ["vip"], "permissions": true}
@@ -430,10 +488,16 @@ every node:
 | `contexts` | exactly these contexts |
 | `source` | the node source |
 
-A `patch` sets at least one of: `delete: true` (remove the node, overriding the
-rest), `value` (bool, for `permission` and `inherit` nodes only), `contexts`
-(move the node, replacing one already in the target slot), `expires_at`,
-`permanent: true` (remove the expiry), `source`.
+A `patch` sets at least one of:
+
+| Field | Effect |
+| --- | --- |
+| `delete: true` | Remove the node, overriding the rest |
+| `value` | Set the value (bool, for `permission` and `inherit` nodes only) |
+| `contexts` | Move the node, replacing one already in the target slot |
+| `expires_at` | Set the expiry |
+| `permanent: true` | Remove the expiry |
+| `source` | Set the source |
 
 ```json
 {"op": "bulk", "filter": {"kind": "permission", "key_like": "essentials.%"}, "patch": {"value": false}}
@@ -449,14 +513,16 @@ rest), `value` (bool, for `permission` and `inherit` nodes only), `contexts`
  "actor_uuid": "0123456789abcdef0123456789abcdef", "reason": "vault playerAddGroup"}
 ```
 
-With `actor_uuid` the change is made on behalf of that player: the player must
-be online on the sending backend (or have their connection forwarded there
-right now) and hold the `rift.perms.*` node for the operation, and the audit
-log records `uuid:<hex>`. Without it the change is made by the backend itself
-(`backend:<principal>`), which requires a principal with `control = true`.
-`reason` (at most 256 bytes) is stored in the audit log.
+- **With `actor_uuid`** the change is made on behalf of that player: the
+  player must be online on the sending backend (or have their connection
+  forwarded there right now) and hold the `rift.perms.*` node for the
+  operation, and the audit log records `uuid:<hex>`.
+- **Without it** the change is made by the backend itself
+  (`backend:<principal>`), which requires a principal with `control = true`.
+- `reason` (at most 256 bytes) is stored in the audit log.
 
-The node mirrors the [`/perms` verb tree](permissions.md#commands):
+The node mirrors the
+[`/perms` verb tree](permissions-commands.md#who-may-run-a-command):
 
 | Change | Node |
 | --- | --- |
@@ -486,10 +552,12 @@ The reply `data` of `apply`:
 {"revision": 413, "ops": 1, "changed_users": ["0123456789abcdef0123456789abcdef"], "changed_groups": []}
 ```
 
-`ops` counts the recorded effects; `0` means nothing changed, no revision was
-created, and `revision` is the current one. `changed_users` lists the players
-whose compiled subjects changed; `changed_groups` the groups whose own data
-changed.
+| Field | Meaning |
+| --- | --- |
+| `revision` | The new revision, or the current one when nothing changed |
+| `ops` | The number of recorded effects; `0` means nothing changed and no revision was created |
+| `changed_users` | The players whose compiled subjects changed |
+| `changed_groups` | The groups whose own data changed |
 
 ### Change event
 
@@ -514,19 +582,24 @@ After every committed write the proxy publishes the change log row on
 | `at` | Commit time, Unix seconds |
 | `actor` | `uuid:<hex>`, `operator:<name>`, `lua:<plugin>`, `backend:<name>`, `cli`, `import` or `system` (expiry sweeps, configuration mirroring, migrations) |
 | `reason` | Optional free text |
-| `ops` | The effects as before/after pairs, `null` meaning absent: `node` (a node on `subject`), `group` (`weight` and `display_name` columns of group `name`), `track` (the group list of track `name`), `primary_group` (of `user`) |
+| `ops` | The effects as before/after pairs, `null` meaning absent; kinds below |
 | `ops_truncated` | `true` when `ops` was cut short to bound the message size (large bulk edits); the full list is in the audit log. Omitted when `false` |
 | `changed` | Players whose compiled subjects changed (default `[]`) |
 | `groups` | Groups whose own data changed (default `[]`) |
+
+| `ops[].op` | `before` and `after` hold |
+| --- | --- |
+| `node` | a node on `subject` |
+| `group` | the `weight` and `display_name` columns of group `name` |
+| `track` | the group list of track `name` |
+| `primary_group` | the primary group of `user` |
 
 The expiry sweeper's removals are ordinary change events with actor `system`.
 
 ## Commands
 
 `rift.perms.command` forwards a `/perms` command typed on a backend, split
-into arguments without the command name. `actor_uuid` is the player who typed
-it, absent for the backend console (allowed only for principals with
-`control = true`):
+into arguments without the command name:
 
 ```json
 {"actor_uuid": "0123456789abcdef0123456789abcdef", "args": ["user", "Alice", "permission", "set", "fly", "true"]}
@@ -536,18 +609,24 @@ it, absent for the backend console (allowed only for principals with
 {"revision": 413, "component": {"text": "Set fly to true for Alice", "color": "green"}}
 ```
 
-`component` is Adventure component JSON to show the sender; `revision` is the
-proxy's revision after the command. A command that fails as a command
-(unknown player, bad syntax, missing permission) still replies `ok: true` with
-a component explaining it. `ok: false` is reserved for protocol failures: a
-console command (no `actor_uuid`) from a principal without `control = true`,
-or an `actor_uuid` who is not on the sending backend, is refused with
-`forbidden`.
+| Field | Meaning |
+| --- | --- |
+| `actor_uuid` | The player who typed it; absent for the backend console (allowed only for principals with `control = true`) |
+| `component` | Adventure component JSON to show the sender |
+| `revision` | The proxy's revision after the command |
+
+- A command that fails as a command (unknown player, bad syntax, missing
+  permission) still replies `ok: true` with a component explaining it.
+- `ok: false` is reserved for protocol failures: a console command (no
+  `actor_uuid`) from a principal without `control = true`, or an `actor_uuid`
+  who is not on the sending backend, is refused with `forbidden`.
 
 The proxy authorizes a player's command exactly as its own in-game `/perms`:
 each verb needs `rift.perms.<verb>` and grants need the granted node or
-`rift.perms.escalate` (see [Commands](permissions.md#commands)). Backends that
-split arguments on spaces may send quoted text in pieces
+`rift.perms.escalate` (see
+[who may run a command](permissions-commands.md#who-may-run-a-command)).
+
+Backends that split arguments on spaces may send quoted text in pieces
 (`"\"&6[VIP]"`, `"\""`); the proxy rejoins arguments that contain quotes.
 
 ## Registered permissions
@@ -561,13 +640,15 @@ dashboard. The payload is an array of at most 4096 entries:
  {"node": "myplugin:fly", "default": "op:2"}]
 ```
 
-`default` is `true`, `false`, `op`, `not_op` (Bukkit) or `op:<0-4>` (Pumpkin op
-levels). The proxy stores them under the sending principal (with `plugin` when given),
-replacing that principal's earlier registration; a REQUEST instead of
-PUBLISH_ACK gets `{"registered": <count>}`. Registered nodes are stored with
-source `plugin:<principal>` and never
-change the answer for a node that has an explicit value anywhere; they only
-supply the default the backend applies to `null`.
+`default` is `true`, `false`, `op`, `not_op` (Bukkit) or `op:<0-4>` (Pumpkin
+op levels).
+
+- The proxy stores them under the sending principal (with `plugin` when
+  given), replacing that principal's earlier registration.
+- A REQUEST instead of PUBLISH_ACK gets `{"registered": <count>}`.
+- Registered nodes are stored with source `plugin:<principal>` and never
+  change the answer for a node that has an explicit value anywhere; they only
+  supply the default the backend applies to `null`.
 
 ## Contexts reported by backends
 
@@ -578,11 +659,12 @@ sending backend, replacing that player's previous report:
 {"uuid": "0123456789abcdef0123456789abcdef", "contexts": {"region": "spawn"}}
 ```
 
-Keys must be listed in `external_contexts`; others are dropped (and logged).
-Reports are accepted only from a `server.<name>` principal for players on that
-backend, or whose connection the proxy is forwarding to it at that moment (so
-a report made at login is not lost); they are cleared when the player switches
-server, and are used by proxy-side checks as well.
+- Keys must be listed in `external_contexts`; others are dropped (and logged).
+- Reports are accepted only from a `server.<name>` principal for players on
+  that backend, or whose connection the proxy is forwarding to it at that
+  moment (so a report made at login is not lost).
+- Reports are cleared when the player switches server.
+- Proxy-side checks use them as well.
 
 ## Revisions and ordering
 

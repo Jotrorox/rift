@@ -1,13 +1,8 @@
-# Lua plugins on the shared message bus
+# Messaging from Lua
 
-Rift exposes the same broker to Rust plugins, Lua callbacks, and authenticated
-QUIC clients. The local broker exists without a network listener. Set
-`messaging = {}` to customize local limits; omit `messaging` or use `false` for
-default local limits and no UDP listener.
-
-A Lua plugin receives messages through persistent subscriptions. Rift dispatches
-each delivery asynchronously into `on_message`, with a fresh sandboxed VM.
-Payloads are binary Lua strings. Replies use the message's optional reply subject.
+Lua callbacks publish on the [message bus](messaging.md) with `rift.publish`
+and receive messages in `on_message`. The local broker exists without a
+network listener, so no QUIC setup is needed.
 
 ```lua
 return {
@@ -40,17 +35,36 @@ return {
 }
 ```
 
-`rift.publish(subject, payload, optional_reply_subject)` is available inside
-`on_route`, `on_http`, and `on_message`. It returns a table containing `delivered`
-and `slow_consumers`. Delivery counts describe enqueueing, not completed handler
-execution. Publishing never waits for receivers or disk. Subject tokens are
-separated by dots; subscriptions support `*` for one token and a terminal `>` for
-one or more remaining tokens. Queue subscribers divide matching deliveries;
-ordinary subscribers each receive a copy.
+Set `messaging = {}` to customize local limits. Omit `messaging` or use
+`false` for default local limits and no UDP listener.
 
-With [`rift.config.plugins`](extensions.md#online-players) set,
-`on_message` and `on_http` can also use `rift.players`. For example, relay chat
-published by another server to everyone on this one:
+## Lua API
+
+| Function | Available in | What it does |
+| --- | --- | --- |
+| `rift.publish(subject, payload, optional_reply_subject)` | `on_route`, `on_http`, `on_message` | Publishes; returns a table containing `delivered` and `slow_consumers` |
+| `on_message = function(message)` | Configuration | Receives each delivery of `messaging.subscriptions` |
+| `rift.on("message", function(message) ... end)` | Local Lua modules and folder-based plugins | Registers the same callback; multiple handlers run in registration order. See the [Lua API](lua.md) and [modular example](../examples/modular/rift.lua) |
+| `rift.players` | `on_message`, `on_http` | [Messages players](#message-players) |
+| `rift.servers.create(group)`, `remove(name)`, `start(name)`, `stop(name)`, `download(template)` | Wherever `rift.publish` is | Submits a [control request](messaging-subjects.md#control-subjects) and returns its reply subject |
+
+## Publish and receive
+
+Subscriptions are persistent. Rift dispatches each delivery asynchronously
+into `on_message`, with a fresh sandboxed VM.
+
+- Subject tokens are separated by dots. Wildcards and queue groups work as
+  described under [subjects and delivery](messaging.md#subjects-and-delivery).
+- Payloads are binary Lua strings. Replies use the message's optional reply
+  subject, `message.reply`.
+- Publishing never waits for receivers or disk. Delivery counts describe
+  enqueueing, not completed handler execution.
+
+## Message players
+
+With [`rift.config.plugins`](players-api.md) set, `on_message`
+and `on_http` can also use `rift.players`. For example, relay chat published
+by another server to everyone on this one:
 
 ```lua
 on_message = function(message)
@@ -60,8 +74,9 @@ on_message = function(message)
 end,
 ```
 
-`rift.servers` lets a plugin spin servers up and down through the same
-[control subjects](messaging.md#rift-control-subjects) as server plugins:
+## Start and stop servers
+
+`rift.servers` lets a plugin spin servers up and down:
 
 ```lua
 messaging = { subscriptions = { { subject = 'rift.events.instances' } } },
@@ -77,39 +92,45 @@ on_message = function(message)
 end,
 ```
 
-`rift.servers.create(group)`, `remove(name)`, `start(name)`, `stop(name)` and
-`download(template)` submit a request and return immediately, without waiting
-for the server or the download. Each accepts an optional reply subject starting
-with `_INBOX.` (otherwise Rift generates one) and returns it; subscribe to it or
-to `rift.events.instances` to learn the outcome. Requests count toward the
-messaging budget below and are available wherever `rift.publish` is.
+- Each function returns immediately, without waiting for the server or the
+  download.
+- Each accepts an optional reply subject starting with `_INBOX.`; otherwise
+  Rift generates one.
+- Subscribe to the reply subject or to `rift.events.instances` to learn the
+  outcome.
+- Requests count toward the publication limit below.
 
-Callbacks share their existing instruction, memory, and 50 ms execution limits.
-A callback may publish at most 256 messages totaling 1 MiB. HTTP and connection
-hooks retain their usual bounded worker admission, while message handlers wait
-for a message worker slot with subsequent deliveries remaining in bounded
-subscription queues. An overflowing subscription discards pending messages and
-re-subscribes; at-most-once messaging does not replay those lost messages. Handler
-errors are logged and later messages continue. Use retained streams and explicit
-acknowledgements for recoverable work.
+## Limits and state
 
-Lua globals and upvalues do not persist between deliveries. Store shared state in
-an application consumer or retained stream. `rift` is installed after evaluating
-the configuration and before invoking callbacks; refer to it inside callbacks.
-This ensures configuration validation cannot publish messages. Configuration
-reload updates `on_message` while retaining subscriptions and queued messages.
-Changing messaging settings requires a restart.
+| Limit | Value |
+| --- | --- |
+| Callback execution | 50 ms, besides the existing instruction and memory limits |
+| Publications per callback | 256 messages totaling 1 MiB |
 
-For the lowest latency, use the public Rust `Broker` directly from an async
-plugin. Lua VM creation and sandbox checks add work per callback. Neither API
-promises zero latency; benchmark the complete workload and payload sizes.
+- Message handlers wait for a message worker slot, while later deliveries
+  stay in bounded subscription queues. HTTP and connection hooks keep their
+  usual bounded worker admission.
+- An overflowing subscription discards pending messages and re-subscribes.
+  Messaging is at most once and does not replay them.
+- Handler errors are logged and later messages continue.
+- Use [retained streams](messaging.md#retained-streams) and explicit
+  acknowledgements for recoverable work.
+- Lua globals and upvalues do not persist between deliveries. Store shared
+  state in an application consumer or retained stream.
+- Refer to `rift` inside callbacks. Rift installs it after evaluating the
+  configuration, so configuration validation cannot publish messages.
+- A configuration reload updates `on_message` while retaining subscriptions
+  and queued messages. Changing messaging settings requires a restart.
+
+> [!TIP]
+> Lua VM creation and sandbox checks add work per callback. For the lowest
+> latency, use the Rust `Broker` directly from an async plugin.
 
 ## Authenticated QUIC configuration
 
-Add these fields to `messaging` to accept external server plugins. Paths are
-relative to Rift's working directory. The private key and certificate must be
-PEM files. Each principal reads its token from an environment variable at startup.
-Certificates are verified by clients; configure the matching trusted CA.
+Add these fields to `messaging` to accept external server plugins.
+[Messaging](messaging.md#accept-server-plugins-over-quic) explains TLS,
+principals and their grants.
 
 ```lua
 messaging = {
@@ -145,36 +166,28 @@ messaging = {
 }
 ```
 
-Publication and subscription ACLs are explicit and default to empty. Control
-publication also requires `control = true`, and publication on the
-[player API](messaging.md#player-api-subjects) (`rift.players.*`) requires
-`players = true`. Local Lua configuration is trusted
-and uses the local broker directly. Remote clients cannot impersonate Rift's
-`rift.events` publisher. Remote reply subjects must be authorized `_INBOX.*`
-subjects. Keep publish and subscribe grants as narrow as the plugin needs.
+| Field | Counts |
+| --- | --- |
+| `max_connections` | Authenticated connections of the configured principals |
+| `max_connections_per_principal` | One principal, so a leaked token cannot take every slot |
+| `max_connections_per_address` | One IPv4 address or IPv6 /64, including connections that have not authenticated yet |
 
-`max_connections` counts authenticated connections of the configured
-principals. `max_connections_per_principal` caps one principal, so a leaked
-token cannot take every slot, and `max_connections_per_address` caps one IPv4
-address or IPv6 /64, including connections that have not authenticated yet.
-Plugins on managed servers usually share the controller's address, so raise
-both limits above the number of servers whose plugins connect. Node agents
-never count against `max_connections` or the per-principal limit. See
-[Limits and lifecycle](messaging-protocol.md#limits-and-lifecycle).
+- Plugins on managed servers usually share the controller's address, so raise
+  the per-principal and per-address limits above the number of servers whose
+  plugins connect.
+- Node agents never count against `max_connections` or the per-principal
+  limit. See
+  [limits and lifecycle](messaging-protocol.md#limits-and-lifecycle).
+- A stream with `storage_path` stores records and durable consumer state on
+  disk; omitting the path selects bounded memory retention.
+- Stream publication is an explicit API, separate from `rift.publish`, which
+  keeps local publish/subscribe free of disk waits. The
+  [wire protocol](messaging-protocol.md) documents the QUIC operations.
 
-A stream with `storage_path` stores records and durable consumer state on disk;
-omitting the path selects bounded memory retention. Stream publication is an
-explicit API separate from ordinary `rift.publish`, keeping local pub/sub free of
-disk waits. The [wire protocol](messaging-protocol.md) documents the portable
-QUIC operations for pub/sub, requests, stream publication, replay, and acknowledgements.
+## Embed in Rust
 
 Rust embedders inject a broker with `Router::with_messaging` and
 `HttpScript::execute_with_messaging`. `MessageHandler::new` subscribes
 synchronously, `script_updates()` returns a watch sender for hot reload, and
 `run()` drives bounded asynchronous workers. Dropping the run task closes its
 subscriptions; already-running Lua jobs finish within their sandbox budget.
-
-Local Lua modules and folder-based plugins can register this callback with
-`rift.on("message", function(message) ... end)`. Multiple message handlers run
-in registration order. See the [Lua API](lua.md) and
-[modular example](../examples/modular/rift.lua).

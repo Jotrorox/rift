@@ -193,7 +193,7 @@ compatibility evidence.
 ## Chat hook with a signed-in client: NOT YET RUN
 
 **Status: not run. Nobody has done this with a real client; there are no
-results to report.** The `chat` hook ([docs/plugins.md](../docs/plugins.md#chat))
+results to report.** The `chat` hook ([docs/plugins.md](../docs/plugin-events.md#chat))
 is covered by automated tests only: the session tests drive synthetic encrypted
 clients of 1.19.3 to 26.3 with made-up signatures against a byte-level backend,
 and `tests/session_server.rs` drives a 1.8 bot through a whole Rift process.

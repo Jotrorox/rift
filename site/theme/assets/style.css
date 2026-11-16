@@ -9,6 +9,8 @@
   --accent: #0071e3;
   --accent-press: #006edb;
   --link: #0066cc;
+  --tip: #248a3d;
+  --warn: #b25000;
   --hairline: rgb(0 0 0 / 0.1);
   --thumb: #ffffff;
   --thumb-shadow: 0 3px 8px rgb(0 0 0 / 0.12), 0 3px 1px rgb(0 0 0 / 0.04);
@@ -48,6 +50,8 @@
     --accent: #0071e3;
     --accent-press: #0077ed;
     --link: #2997ff;
+    --tip: #30d158;
+    --warn: #ff9f0a;
     --hairline: rgb(255 255 255 / 0.14);
     --thumb: #636366;
     --thumb-shadow: 0 3px 8px rgb(0 0 0 / 0.3);
@@ -69,7 +73,7 @@
 }
 :root[data-theme="dark"] {
   --bg: #000000; --bg-2: #161617; --bg-3: #2c2c2e; --text: #f5f5f7; --text-2: #a1a1a6;
-  --link: #2997ff; --hairline: rgb(255 255 255 / 0.14); --thumb: #636366; --term: #000000;
+  --link: #2997ff; --tip: #30d158; --warn: #ff9f0a; --hairline: rgb(255 255 255 / 0.14); --thumb: #636366; --term: #000000;
   --bar-off: #636366; --chrome: rgb(22 22 23 / 0.72); --code-foreground: #f5f5f7;
   color-scheme: dark;
 }
@@ -227,6 +231,12 @@ code { font-family: var(--mono); font-size: 0.88em; letter-spacing: 0; }
 .chev { color: var(--text-3); font-size: 20px; line-height: 1; transition: transform 200ms cubic-bezier(.3, .7, .4, 1); }
 .guides a:hover .chev { transform: translateX(3px); color: var(--link); }
 
+/* Documentation index */
+.docs-index { padding-top: clamp(48px, 8vw, 88px); }
+.docs-index h1 { font: 700 clamp(36px, 5vw, 48px)/1.08 var(--display); letter-spacing: -0.035em; margin: 0 0 12px; }
+.docs-index .lede { margin: 0; }
+.docs-index section { margin-top: 48px; }
+
 /* Footer */
 .foot { margin-top: clamp(72px, 10vw, 112px); background: var(--bg-2); }
 .foot-in { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 24px; padding-top: 20px; padding-bottom: 20px; }
@@ -241,8 +251,19 @@ code { font-family: var(--mono); font-size: 0.88em; letter-spacing: 0; }
    links' highlight, which reaches 10px past the text. */
 .side, .toc { position: sticky; top: 48px; align-self: start; max-height: calc(100vh - 48px); overflow-y: auto; padding: 36px 10px 24px; margin: 0 -10px; }
 .side-menu > summary { display: none; }
-.side-group + .side-group { margin-top: 22px; }
-.side-group p, .toc p { margin: 0 0 6px; font-size: 12px; font-weight: 600; color: var(--text-2); letter-spacing: -0.01em; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.side-filter { display: block; margin: 0 0 18px; }
+.side-filter input { width: 100%; box-sizing: border-box; border: 0; border-radius: 8px; padding: 7px 10px; font: 14px var(--sans); letter-spacing: -0.016em; color: var(--text); background: var(--bg-2); box-shadow: inset 0 0 0 1px var(--hairline); }
+.side-filter input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.side-group + .side-group { margin-top: 6px; }
+.side-group > summary { list-style: none; cursor: pointer; display: flex; justify-content: space-between; align-items: center; padding: 5px 10px; margin-left: -10px; border-radius: 8px; font-size: 12px; font-weight: 600; color: var(--text-2); letter-spacing: -0.01em; }
+.side-group > summary::-webkit-details-marker { display: none; }
+.side-group > summary::after { content: "›"; font-size: 15px; font-weight: 400; color: var(--text-3); transition: transform 200ms; }
+.side-group[open] > summary::after { transform: rotate(90deg); }
+.side-group > summary:hover { background: var(--bg-2); }
+.side-group[open] > ul { margin-bottom: 12px; }
+.side-empty { margin: 8px 0 0; font-size: 13px; color: var(--text-2); }
+.toc p { margin: 0 0 6px; font-size: 12px; font-weight: 600; color: var(--text-2); letter-spacing: -0.01em; }
 .side ul, .toc ul { list-style: none; margin: 0; padding: 0; }
 .side a, .toc a { display: block; padding: 5px 10px; margin-left: -10px; border-radius: 8px; font-size: 14px; letter-spacing: -0.016em; color: var(--text); }
 .side a:hover, .toc a:hover { background: var(--bg-2); text-decoration: none; }
@@ -266,6 +287,13 @@ code { font-family: var(--mono); font-size: 0.88em; letter-spacing: 0; }
 .prose li + li { margin-top: 4px; }
 .prose :not(pre) > code { hyphens: none; background: var(--bg-2); padding: 0.12em 0.38em; border-radius: 6px; overflow-wrap: anywhere; }
 .prose blockquote { margin: 20px 0; padding: 2px 18px; border-left: 3px solid var(--bg-3); color: var(--text-2); }
+.callout { margin: 20px 0; padding: 12px 16px; border-radius: 12px; background: var(--bg-2); box-shadow: inset 3px 0 0 var(--callout, var(--text-3)); }
+.callout > :first-child { margin-top: 0; }
+.callout > :last-child { margin-bottom: 0; }
+.callout-label { color: var(--callout, var(--text-2)); margin-right: 4px; }
+.callout-note { --callout: var(--accent); }
+.callout-tip { --callout: var(--tip); }
+.callout-warning { --callout: var(--warn); }
 .prose hr { border: 0; height: 1px; background: var(--hairline); margin: 40px 0; }
 .code { position: relative; margin: 20px 0; }
 .code pre { margin: 0; padding: 16px 20px; overflow-x: auto; border-radius: 12px; font: 13px/1.65 var(--mono); }

@@ -1,9 +1,8 @@
-# Rift permissions clients
+# Permissions clients (Rust and C)
 
-Backends answer permission checks from a local replica of the proxy's data;
-[`permissions-protocol.md`](permissions-protocol.md) specifies the bus
-messages that keep it current. This page covers the three libraries that
-implement it, so a plugin never speaks the protocol itself:
+Backends answer permission checks from a local replica of the proxy's data.
+These three libraries keep that replica current, so a plugin never speaks the
+[permissions protocol](permissions-protocol.md) itself:
 
 | Library | For | Contents |
 | --- | --- | --- |
@@ -28,17 +27,17 @@ rift-permissions-testing = { git = "https://github.com/Jotrorox/rift", tag = "v0
 
 Each backend authenticates as its own principal `server.<name>` with the
 `backend` preset (the grants listed under
-[principal permissions](permissions-protocol.md#principal-permissions)),
-and gets the proxy's CA (or certificate) and its token through an
-environment variable. For local development, `rift dev` starts a proxy with
-such a principal and prints its token, a client configuration and the
-dashboard URL (see [`rift dev`](permissions.md#rift-dev)).
+[principal permissions](permissions-protocol.md#principal-permissions)). Give
+it the proxy's CA (or certificate) and its token through an environment
+variable.
 
-## Rust client
+For local development, `rift dev` starts a proxy with such a principal and
+prints its token, a client configuration and the dashboard URL (see
+[`rift dev`](permissions.md#rift-dev)).
 
-### Configuration
+## Configure the Rust client
 
-`Config` deserialises from a plugin's configuration file, or is built with
+`Config` deserializes from a plugin's configuration file, or is built with
 `Config::new(address, server_name, ca, token_env, server)`:
 
 ```json
@@ -60,37 +59,31 @@ dashboard URL (see [`rift dev`](permissions.md#rift-dev)).
 | `request_timeout_ms` | 5000 | How long writes, commands and group requests wait |
 | `offline_policy` | `{"mode": "deny"}` | See [offline policies](#offline-policies) |
 
-On a server Rift manages with a `messaging` block, the connection fields may
-be left out. `Client::start` fills what is unset from the variables Rift sets
-([bus logins for instances](managed-servers.md#bus-logins-for-instances)):
-`address` from `RIFT_BUS_ADDRESS`, `server_name` from `RIFT_BUS_SERVER_NAME`
-(else the host of `address`), `ca` from `RIFT_BUS_CERT`, `server` from
-`RIFT_SERVER_NAME`, `group` from `RIFT_SERVER_GROUP`, and `token_env` defaults
-to `RIFT_BUS_TOKEN`. `Config::from_environment()` builds a configuration from
-the variables alone, and `Config::with_environment()` applies the fallback
-explicitly.
+On a server Rift manages with a `messaging` block, you may leave out the
+connection fields. `Client::start` fills what is unset from the variables
+Rift sets
+([bus logins for instances](bus-logins.md)):
 
-### Lifecycle
+| Field | Filled from |
+| --- | --- |
+| `address` | `RIFT_BUS_ADDRESS` |
+| `server_name` | `RIFT_BUS_SERVER_NAME`, else the host of `address` |
+| `ca` | `RIFT_BUS_CERT` |
+| `server` | `RIFT_SERVER_NAME` |
+| `group` | `RIFT_SERVER_GROUP` |
+| `token_env` | Defaults to `RIFT_BUS_TOKEN` |
+
+`Config::from_environment()` builds a configuration from the variables alone,
+and `Config::with_environment()` applies the fallback explicitly.
+
+## Client lifecycle
 
 `Client::start(config)` must run inside a tokio runtime. It fails only on
-unusable configuration (missing token variable, unreadable CA, invalid
-fallback file); an unreachable proxy is retried in the background and the
-client serves from its replica meanwhile.
+unusable configuration: a missing token variable, an unreadable CA or an
+invalid fallback file. An unreachable proxy is retried in the background, and
+the client serves from its replica meanwhile.
 
-In the background the client connects, subscribes `rift.perms.update`,
-`rift.perms.update.>` and `rift.events.permissions`, then sends `hello`. A
-replica revision that differs from the proxy's refetches every stored
-snapshot with `subject.batch` (at most `limits.batch` per request); the group
-table is fetched on every connection. On a lost connection it reconnects with
-backoff from 0.5 s to 30 s and repeats the handshake. While disconnected it
-logs `permissions unavailable` with the stale revision once a minute. A
-`/perms sync` (`rift.perms.update.resync`) repeats the handshake and refetches
-every stored snapshot.
-
-Updates follow the protocol's ordering rules: a pushed snapshot replaces the
-stored one only when newer; a change event at the next revision refetches the
-players it lists unless their push arrives within 250 ms; a skipped revision
-refetches everything. A refetch that fails is retried every 5 s.
+Your plugin makes three calls:
 
 | Call | When |
 | --- | --- |
@@ -98,15 +91,26 @@ refetches everything. A refetch that fails is retried every 5 s.
 | `client.leave(uuid)` | At logout. The snapshot is evicted 10 minutes later unless the player returns |
 | `client.shutdown()` | On plugin disable. Disconnects and, with `last_snapshot`, writes the replica |
 
-Snapshots pushed for players who have not joined this backend (the proxy
-pushes ahead of a transfer) are kept for 10 minutes, so the following join
-needs no request.
+In the background the client connects, subscribes to `rift.perms.update`,
+`rift.perms.update.>` and `rift.events.permissions`, then sends `hello`.
 
-### The `RiftPermissions` trait
+| Event | What the client does |
+| --- | --- |
+| The replica's revision differs from the proxy's | Refetches every stored snapshot with `subject.batch` (at most `limits.batch` per request) |
+| Every connection | Fetches the group table |
+| Connection lost | Reconnects with backoff from 0.5 s to 30 s and repeats the handshake. Logs `permissions unavailable` with the stale revision once a minute |
+| `/perms sync` (`rift.perms.update.resync`) | Repeats the handshake and refetches every stored snapshot |
+| Pushed snapshot | Replaces the stored one only when newer |
+| Change event at the next revision | Refetches the players it lists unless their push arrives within 250 ms |
+| Skipped revision | Refetches everything |
+| Failed refetch | Retries every 5 s |
+| Snapshot pushed before the player joins (the proxy pushes ahead of a transfer) | Keeps it for 10 minutes, so the following join needs no request |
+
+## The `RiftPermissions` trait
 
 Plugins program against `RiftPermissions`, which `Client` and
 `TestPermissions` implement and which works as a trait object. Reads come
-from memory and never block on the network:
+from memory and never block on the network.
 
 | Method | Returns |
 | --- | --- |
@@ -119,29 +123,33 @@ from memory and never block on the network:
 | `apply(actor, change).await` | `Result<Applied, Error>` once the proxy commits; `actor` is the player acting, `None` the backend itself |
 | `revision()` | The newest revision the replica has seen |
 
-`contexts` is the player's active set; the client adds its `server` (and
-`group`, when configured) when the set names none. `Client` also has `command` (forward `/perms`), `register`
-(plugin permissions with defaults), `report_context` (custom contexts),
+`contexts` is the player's active set. The client adds its `server` (and
+`group`, when configured) when the set names none.
+
+`Client` also has `command` (forward `/perms`), `register` (plugin
+permissions with defaults), `report_context` (custom contexts),
 `fetch_groups` (groups with permission nodes), `on_snapshot` (a player's
 snapshot changed) and `replica()` for direct reads.
 
-Change listeners receive `rift.events.permissions` as it arrives; the
-replica updates from the separate `rift.perms.update` path, so a listener
-may run moments before the new snapshot of a player in `changed` is stored.
-Use `on_snapshot` to react to a player's data actually changing. Listeners
-run on the client's task: keep them short.
+Change listeners receive `rift.events.permissions` as it arrives, while the
+replica updates from the separate `rift.perms.update` path. A listener may
+therefore run moments before the new snapshot of a player in `changed` is
+stored: use `on_snapshot` to react to a player's data actually changing.
+Listeners run on the client's task, so keep them short.
 
-`Error` tells apart `Unavailable` (no connection, or nothing answers on the
-bus), `Timeout` (the write may still have been applied: compare revisions
-before retrying), `Rejected` (the proxy's error reply), `Config` and
-`Transport`.
+| `Error` | Meaning |
+| --- | --- |
+| `Unavailable` | No connection, or nothing answers on the bus |
+| `Timeout` | The write may still have been applied: compare revisions before retrying |
+| `Rejected` | The proxy's error reply |
+| `Config`, `Transport` | Unusable configuration; a failed connection |
 
-### A Pumpkin plugin
+## Use the client in a Pumpkin plugin
 
-The [Pumpkin adapter](permissions-pumpkin.md) wires the client into
-Pumpkin's permission events, so `player.has_permission` already answers from
-the replica, and offers the trait to other plugins as a service. A plugin that wants
-meta values, groups or writes holds the trait:
+The [Pumpkin adapter](permissions-pumpkin.md) already wires the client into
+Pumpkin's permission events and offers the trait to other plugins as a
+service, so `player.has_permission` answers from the replica. A plugin that
+wants meta values, groups or writes holds the trait:
 
 ```rust,ignore
 use std::sync::Arc;
@@ -185,33 +193,32 @@ impl Homes {
 }
 ```
 
-Call `client.join(uuid)` in the login event and `client.leave(uuid)` on
-quit, and `client.shutdown()` when the plugin unloads.
-
-### Offline policies
+## Offline policies
 
 The policy decides what a player gets when no snapshot came from the proxy,
 because it is unreachable or did not answer within the join timeout. Players
 whose snapshot is already in the replica keep being served from it.
 
-`{"mode": "deny"}` answers `Undefined` for everything, so plugin defaults and
-op levels apply.
+| `offline_policy` | What the player gets |
+| --- | --- |
+| `{"mode": "deny"}` | `Undefined` for everything, so plugin defaults and op levels apply |
+| `{"mode": "last_snapshot", "path": "replica.json"}` | What they had before the restart, while the proxy is away |
+| `{"mode": "fallback_file", "path": "fallback.json"}` | What a file you write for emergencies gives them; a player not listed gets `default` |
 
-`{"mode": "last_snapshot", "path": "replica.json"}` writes the replica on
-`shutdown()` and loads it on start, so players known before a restart keep
-their permissions while the proxy is away. The file is the
-`subject.batch` reply shape, `{"revision": 412, "subjects": [<compiled
-subject>, ...]}`, written atomically. A missing or unreadable file starts
-empty. Loaded snapshots are not evicted before the first successful
-connection.
+The Java client and [RiftPerms](riftperms.md#offline-policy) read and write
+both files in the same formats.
 
-`{"mode": "fallback_file", "path": "fallback.json"}` loads a file the
-operator writes for emergencies. It holds groups and users in the
-[typed node](permissions-protocol.md#typed-node) format and is compiled
-locally exactly as the proxy compiles, so inheritance, weights, contexts,
-prefixes and meta all work. A player not listed gets `default`. The file is
-validated on start, and a snapshot from the proxy always replaces a fallback
-one.
+**`last_snapshot`.** The client writes the replica on `shutdown()` and loads
+it on start. The file is the `subject.batch` reply shape,
+`{"revision": 412, "subjects": [<compiled subject>, ...]}`, written
+atomically. A missing or unreadable file starts empty. Loaded snapshots are
+not evicted before the first successful connection.
+
+**`fallback_file`.** The file holds groups and users in the
+[typed node](permissions-protocol.md#typed-node) format. The client compiles
+it locally exactly as the proxy compiles, so inheritance, weights, contexts,
+prefixes and meta all work. It validates the file on start, and a snapshot
+from the proxy always replaces a fallback one.
 
 ```json
 {"groups": [
@@ -229,15 +236,12 @@ one.
 | `groups[]` | `name`, `weight` (default 0), `display_name`?, `nodes` (default `[]`) |
 | `users[]` | `uuid`, `primary_group`?, `nodes` (default `[]`) |
 
-The Java client and RiftPerms read and write both files in these formats
-([Java offline policy](permissions-java.md#offline-policy)).
-
-## Testing crate
+## Test with `rift-permissions-testing`
 
 `TestPermissions` is an in-memory store with the same trait. It applies
 `Change`s with the proxy's semantics (one revision per effective change,
 before/after ops, atomic batches, track moves, bulk edits) and notifies
-`on_change` listeners, so a plugin's logic is tested without a proxy:
+`on_change` listeners, so you test a plugin's logic without a proxy:
 
 ```rust,ignore
 use rift_permissions::{ContextSet, Uuid};
@@ -258,23 +262,24 @@ fn vip_players_get_five_homes() {
 }
 ```
 
-Builders take `permission`, `parent`, `prefix`, `suffix`, `meta` and any
-`node(Node)`, plus `weight` and `display_name` for groups and
-`primary_group` for users; invalid input panics, as a broken fixture should.
-`server(name)` fills in the `server` context like a backend client, and
-`service_group(name)` the `group` context with it.
-`apply_now(actor, change)` is the synchronous form of `apply`, and
-`compiled(uuid)` returns the compiled subject the proxy would send. Every
-UUID compiles, a stranger to just `default`, as on the proxy.
+- Builders take `permission`, `parent`, `prefix`, `suffix`, `meta` and any
+  `node(Node)`, plus `weight` and `display_name` for groups and
+  `primary_group` for users. Invalid input panics, as a broken fixture
+  should.
+- `server(name)` fills in the `server` context like a backend client, and
+  `service_group(name)` the `group` context with it.
+- `apply_now(actor, change)` is the synchronous form of `apply`.
+- `compiled(uuid)` returns the compiled subject the proxy would send. Every
+  UUID compiles, a stranger to just `default`, as on the proxy.
 
 ## C ABI
 
 `cargo build --release -p rift-permissions-ffi` builds `librift_perms` (`.so`,
-`.dylib` or `rift_perms.dll`) in `target/release`; the header is
-[`crates/rift-permissions-ffi/include/rift_perms.h`](../crates/rift-permissions-ffi/include/rift_perms.h),
-generated by `cbindgen` (`cbindgen --config cbindgen.toml --output
-include/rift_perms.h` in that directory) and checked against the exported
-symbols by the crate's tests.
+`.dylib` or `rift_perms.dll`) in `target/release`. The header is
+[`crates/rift-permissions-ffi/include/rift_perms.h`](../crates/rift-permissions-ffi/include/rift_perms.h).
+It is generated by `cbindgen`
+(`cbindgen --config cbindgen.toml --output include/rift_perms.h` in that
+directory) and checked against the exported symbols by the crate's tests.
 
 ```c
 typedef struct rift_perms rift_perms;
@@ -290,9 +295,9 @@ void        rift_perms_leave(rift_perms *perms, const uint8_t *uuid);
 void        rift_perms_free(char *text);
 ```
 
-| Function | Behaviour |
+| Function | Behavior |
 | --- | --- |
-| `connect` | Takes the [configuration](#configuration) as JSON; the token comes from `token_env`. Returns null on unusable configuration and stores a message in `*err` (when `err` is not null; `*err` is set to null on success) |
+| `connect` | Takes the [configuration](#configure-the-rust-client) as JSON; the token comes from `token_env`. Returns null on unusable configuration and stores a message in `*err` (when `err` is not null; `*err` is set to null on success) |
 | `close` | Disconnects, writes the last snapshot under that policy, frees the handle |
 | `check` | `uuid` points to the 16 UUID bytes (big-endian, as Java's most then least significant bits); `ctx_json` is a context object such as `{"world": "nether"}`, or null. Returns 1 true, 0 false, -1 undefined (apply your default), -2 unavailable (no data for this player, or invalid arguments) |
 | `meta` | `{"prefix", "suffix", "meta", "primary_group"}`, or null without data |
@@ -302,11 +307,13 @@ void        rift_perms_free(char *text);
 | `join`, `leave` | Login and logout, as in the Rust client: `join` blocks up to the join timeout and returns 1 with a snapshot, 0 when the offline policy applies, -2 for invalid arguments |
 | `free` | Frees every string the library returns |
 
-The library owns a small tokio runtime per handle. Every function accepts
-null and malformed input, and no panic crosses the boundary. Callbacks run on
-the library's thread: return quickly and do not call `join` or `apply` from
-them. Warnings such as `permissions unavailable` go to stderr unless the host
-process installed a Rust logger.
+- The library owns a small tokio runtime per handle.
+- Every function accepts null and malformed input, and no panic crosses the
+  boundary.
+- Callbacks run on the library's thread: return quickly and do not call
+  `join` or `apply` from them.
+- Warnings such as `permissions unavailable` go to stderr unless the host
+  process installed a Rust logger.
 
 ```c
 #include <stdio.h>

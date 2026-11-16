@@ -1,11 +1,10 @@
 # Rust plugins
 
 A Rust plugin is an ordinary `cdylib` crate built for `wasm32-wasip2` with the
-SDK in [`sdk/rust`](../sdk/rust) (crate `rift-plugin`). The SDK ships the
-contract's WIT and generates the bindings, and Rust's linker for
-`wasm32-wasip2` emits a WebAssembly component directly: no `cargo component`
-and no `wasm-tools component new`. Read the [plugin overview](plugins.md) for
-how plugins are enabled, dispatched and restarted.
+SDK in [`sdk/rust`](../sdk/rust) (crate `rift-plugin`). This guide shows how
+the plugin contract looks in Rust. [Plugins](plugins.md) covers enabling and
+trust; [Plugin events and commands](plugin-events.md) says what each event and
+answer means.
 
 ## Build
 
@@ -14,6 +13,10 @@ rustup target add wasm32-wasip2
 cargo build --release --target wasm32-wasip2
 cp target/wasm32-wasip2/release/my_plugin.wasm plugins/my-plugin/
 ```
+
+The SDK ships the contract's WIT and generates the bindings, and Rust's linker
+for `wasm32-wasip2` emits a WebAssembly component directly: no
+`cargo component` and no `wasm-tools component new`.
 
 `Cargo.toml`:
 
@@ -40,12 +43,14 @@ codegen-units = 1
 strip = true
 ```
 
-[`rift-plugin`](https://crates.io/crates/rift-plugin) is versioned after the
-plugin contract (`rift:plugin@0.2.0`), not the proxy. Each published version
-has a `sdk/rust/v…` git tag, and in a Rift checkout
-`{ path = "…/sdk/rust" }` works as well. The release profile above keeps the component small. Check the result with
-`wasm-tools component wit my_plugin.wasm`: it exports
-`rift:plugin/handler@0.2.0` and imports the `rift:plugin/*` interfaces it uses.
+- [`rift-plugin`](https://crates.io/crates/rift-plugin) is versioned after the
+  plugin contract (`rift:plugin@0.2.0`), not the proxy. Each published version
+  has a `sdk/rust/v…` git tag. In a Rift checkout `{ path = "…/sdk/rust" }`
+  works as well.
+- The release profile keeps the component small.
+- Check the result with `wasm-tools component wit my_plugin.wasm`: it exports
+  `rift:plugin/handler@0.2.0` and imports the `rift:plugin/*` interfaces it
+  uses.
 
 ## A minimal plugin
 
@@ -128,9 +133,9 @@ example and the host's conformance fixture.
 
 ## Text
 
-Everything a player reads is a `Text`: `Text::Plain`, 1 to 1024 bytes shown
-exactly as written, or `Text::Json`, a JSON text component of at most 32 KiB.
-Functions, constructors and builders take `impl Into<Text>`:
+Everything a player reads is a [`Text`](plugin-events.md#text): `Text::Plain`,
+shown exactly as written, or `Text::Json`, a JSON text component. Functions,
+constructors and builders take `impl Into<Text>`:
 
 | Value | Becomes |
 | --- | --- |
@@ -169,21 +174,22 @@ let reply = Action::message(accept);
 let tip = Suggestion::new("lobby").tooltip(text::mini("<gray>The <aqua>main</aqua> lobby"));
 ```
 
-`players::message`, `action_bar`, `kick` and `broadcast` take the text
-directly; `players::tab_list` takes `Option<Text>` for header and footer (both
-`None` restores the configured tab list), and `players::title` and
-`players::boss_bar` take the records.
+- `players::message`, `action_bar`, `kick` and `broadcast` take the text
+  directly. `players::tab_list` takes `Option<Text>` for header and footer
+  (both `None` restores the configured tab list). `players::title` and
+  `players::boss_bar` take the records.
+- `text::Component` has `color`, `bold`, `italic`, `underlined`,
+  `strikethrough`, `obfuscated`, `run_command`, `suggest_command`, `open_url`,
+  `copy_to_clipboard`, `hover_text` (plain), `hover` (a component),
+  `insertion`, `extra` (a child) and `field` (any other key).
+- Every builder implements `Display` (its JSON) and converts into
+  `serde_json::Value`, so builders nest.
 
-`text::Component` has `color`, `bold`, `italic`, `underlined`,
-`strikethrough`, `obfuscated`, `run_command`, `suggest_command`, `open_url`,
-`copy_to_clipboard`, `hover_text` (plain), `hover` (a component), `insertion`,
-`extra` (a child) and `field` (any other key). Every builder implements
-`Display` (its JSON) and converts into `serde_json::Value`, so builders nest.
-
-Markup is only read from an explicit `mini` object: a string is always shown
-as written, also as JSON text (`Action::message(serde_json::json!("<red>hi"))`).
-Pass player input as plain text or as `arg`, never by formatting it into the
-markup. The tags are listed in [Text and markup](text.md).
+Rift reads markup only from an explicit `mini` object. A string is always
+shown as written, also as JSON text
+(`Action::message(serde_json::json!("<red>hi"))`). Pass player input as plain
+text or as `arg`, never by formatting it into the markup. The tags are listed
+in [Styled text](text.md).
 
 ## Commands
 
@@ -199,22 +205,25 @@ Registration::new()
     .hooks([Hook::Command])
 ```
 
-- Aliases are written like the name (1 to 64 bytes of `a-z0-9_-`), at most 16.
-  `ctx.command` is always the name, whichever was typed.
+[Commands](plugin-events.md#commands) has the rules for names, aliases and
+console runs. In Rust:
+
+- `aliases` takes at most 16 names. `ctx.command` is always the command's own
+  name, whichever was typed.
 - Without `permission`, or with an empty node, every player may see and run
   the command.
 - `console()` lets operators run the command with `rift admin plugins run`.
   `ctx.console` is then true, `ctx.connection_id` is 0, `ctx.uuid` is empty
   and `ctx.name` is `CONSOLE`; a `message` answer goes to the operator.
-  Commands without it never see the console.
 - `ctx.language` is the language Rift's own messages use for the player.
 
 ## Chat and kick
 
-`Plugin::chat` sees chat messages, and the commands that reach the backend,
-before the backend does ([the hook](plugins.md#chat)). `Plugin::kick` decides
-what happens to a player a backend kicked. Both are delivered only to a
-registration that lists them; an empty hook list does not include them.
+`Plugin::chat` handles the [`chat`](plugin-events.md#chat) event and
+`Plugin::kick` the `kick` event. Rift delivers both only to a registration that
+lists them; an empty hook list does not include them. With signed chat, the
+first deny costs that player their
+[chat signing](plugin-events.md#denying-costs-the-player-chat-signing).
 
 ```rust
 use rift_plugin::{Action, ChatAttempt, ChatKind, Context, Hook, Plugin, Registration};
@@ -247,35 +256,20 @@ impl Plugin for Mute {
 rift_plugin::export!(Mute);
 ```
 
-`attempt.text` is the message, or the command line without its slash; for a
-command, `attempt.ctx.command` is the root name and `attempt.ctx.args` the
-rest. `chat` answers `Action::Continue` or `Action::deny`. Rift asks a plugin
-that lists `Hook::Chat` about every message of every player; with signed
-chat, the first deny costs that player their
-[chat signing](plugins.md#chat).
-
-In `kick`, `ctx.server` is the backend and `ctx.reason` its reason without
-formatting. `Action::Continue` leaves the kick to `network.on_kick`,
-`Action::deny` disconnects the player with the text and `Action::server`
-moves them there.
+| Hook | Input | Answers |
+| --- | --- | --- |
+| `chat` | `attempt.text` is the message, or the command line without its slash. For a command, `attempt.ctx.command` is the root name and `attempt.ctx.args` the rest | `Action::Continue` or `Action::deny` |
+| `kick` | `ctx.server` is the backend and `ctx.reason` its reason without formatting | `Action::Continue` leaves the kick to `network.on_kick`, `Action::deny` disconnects the player with the text, `Action::server` moves them there |
 
 ## Background work
 
-A plugin runs one call at a time, so a hook that blocks holds up every other
-hook. A decision hook can defer its answer instead, hand the slow part to a
-background worker and return. Workers are further instances of the same
-component, enabled in the manifest:
+[Background work](plugin-events.md#background-work) explains the model and
+its rules. Workers need `[background]` in the manifest.
 
-```toml
-[background]
-workers = 2
-```
-
-A worker has its own memory, and its state is its own `Default` value. It
-never gets `init` or any hook: only `Plugin::work_init` once, with the plugin
-configuration, and then `Plugin::work` once per job. `work` may block (30 s
-unless the manifest sets `deadlines.work`); its result returns to the main
-instance through `Plugin::job_done`.
+In Rust a worker is another instance of the component whose state is its own
+`Default` value. It runs `Plugin::work_init` once, with the plugin
+configuration, and then `Plugin::work` once per job. The result returns to the
+main instance through `Plugin::job_done`.
 
 ```rust
 use rift_plugin::{Action, Context, Hook, Plugin, Registration, background};
@@ -327,29 +321,28 @@ impl Plugin for Bans {
 rift_plugin::export!(Bans);
 ```
 
-- `background::defer` works in `login`, `initial_server`, `before_transfer`,
-  `command`, `chat` and `kick`, once per call. A hook that does not defer
-  answers with its return value as usual.
-- The hook's deadline keeps running while the job does. An answer after it
-  counts as a missed deadline (`on_timeout`), and `background::resolve` then
-  returns `Ok(false)`.
-- `background::run` fails without workers in the manifest and when 1024 jobs
-  wait already. `job_done` gets `Err` with the error `work` returned, or the
-  host's reason. Without a `work` implementation every job fails with `this
-  plugin has no background work`.
+- `background::resolve` returns `Ok(false)` when the answer came after the
+  hook's deadline.
+- `Plugin::job_done` gets `Err` with the error `work` returned, or the host's
+  reason. Without a `work` implementation every job fails with
+  `this plugin has no background work`.
 - `background::is_worker()` tells the two kinds of instance apart in code they
-  share. `job_done` needs no entry in the hook list.
+  share.
 
 ## Players, languages and groups
 
-`players::get` and `players::list` return `PlayerInfo` with the player's
-`ip`, profile `properties`, `visible_to`, the client's `locale` and the
-`language` Rift's own messages use for them. `locale` is `None` while Rift
-does not know it: the client sends it after login, so it is unset in `login`
-and, for clients before 1.20.2, in `join`.
+[The player directory and languages](plugin-events.md#the-player-directory-and-languages)
+describes the records and the language rules. In Rust:
 
-`players::lookup` and `players::search` read what Rift remembers about every
-player who joined at least once, online or not:
+- `players::get` and `players::list` return `PlayerInfo` with the player's
+  `ip`, profile `properties`, `visible_to`, `locale` and `language`. `locale`
+  is `None` while Rift does not know it: always in `login`, and in `join` for
+  clients before 1.20.2.
+- `players::lookup` and `players::search` return `PlayerRecord` with `uuid`,
+  `name`, `first_seen`, `last_seen`, `last_ip`, `last_server`, `online` and
+  `language`.
+- `players::set_language(target, Some("de_de"))` returns whether the player
+  is known; `None` goes back to the client's locale.
 
 ```rust
 // A UUID, or the last name, case-insensitive.
@@ -360,16 +353,6 @@ if let Some(record) = players::lookup("Alex")? {
 }
 let recent = players::search("al", 10)?; // by name prefix, most recently seen first, 1..=100
 ```
-
-A `PlayerRecord` has `uuid`, `name`, `first_seen` and `last_seen` (Unix
-seconds), `last_ip` (empty when `players.record_ip` is off), `last_server`,
-`online` and `language`.
-
-`players::set_language(target, Some("de_de"))` sets the language of Rift's own
-messages for a player, online or not (a tag of 2..=16 bytes of `a-z0-9_`);
-`None` goes back to the client's locale. It returns whether the player is
-known, and is remembered across sessions, so `ctx.language` has it from
-`login` on.
 
 `permissions::add_group` takes an optional expiry in Unix seconds; a new
 expiry replaces an earlier one:
@@ -384,21 +367,19 @@ permissions::add_group(&ctx.uuid, "builder", None)?;    // until removed
 
 - **Rust's standard library imports WASI `@0.2.9`.** The component imports a
   few WASI 0.2 interfaces (stdio, environment, exit, clocks) at the patch
-  version Rust records, and Rift links them semver-compatibly against its WASI
-  0.2 implementation, so this needs no action. A host that matched WASI
-  versions exactly would refuse the component.
+  version Rust records. Rift links them semver-compatibly, so this needs no
+  action. A host that matched WASI versions exactly would refuse the
+  component.
 - **Panics trap.** A panic ends the call and marks the instance failed; Rift
   applies `on_failure` to that call and restarts the instance according to
-  `failure.restart`. Return errors from `init` and `reload` instead of
-  panicking.
+  `failure.restart`. Return errors from `init` and `reload` instead.
 - **Deadlines interrupt.** Guest code still running at its deadline is
   interrupted and the instance is restarted, because it may have left its
-  state half-changed. Keep hooks short and move slow work to
+  state half-changed. Move slow work to
   [background workers](#background-work).
 - **Single-threaded.** Do not spawn threads; the host never calls one instance
   concurrently, so `&mut self` needs no locking.
 - **List your hooks.** `Registration::hooks` should name exactly the hooks you
-  implement; an empty list delivers every hook except `chat` and `kick`,
-  which costs a call per event.
+  implement. An empty list costs a call per event.
 - **No `wasi:http` helper.** Use `rift.servers`/`bus` for Rift work; outbound
   HTTP needs `network = true` and a `wasi:http` client crate.

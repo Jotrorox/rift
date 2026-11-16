@@ -5,7 +5,7 @@ Notable changes to Rift, newest first. The format follows
 [stability policy](docs/stability.md). Every release that changes the
 `rift.sqlite3` schema says so under **Database**, because an older binary
 refuses a newer schema: see
-[upgrade and rollback](docs/operations.md#shutdown-upgrade-and-rollback).
+[upgrade and rollback](docs/upgrading.md).
 
 The SDKs are versioned on their own, after the plugin contract they implement,
 and are listed under **SDKs**.
@@ -29,6 +29,14 @@ and are listed under **SDKs**.
 
 ### Changed
 
+- The documentation is reorganized into shorter, task-focused pages (56
+  instead of 29) with a page index, collapsible navigation and a page filter
+  on the website. Long guides are split: `operations.md` into install,
+  admin CLI, deployment, monitoring, hardening and upgrading;
+  `managed-servers.md`, `http.md`, `plugins.md`, `extensions.md`,
+  `messaging.md`, `permissions.md` and `permissions-java.md` likewise. Links
+  to sections of those pages need updating; the site build now fails on a
+  broken link.
 - The example systemd unit is hardened further and delegates its cgroup so
   memory limits work.
 

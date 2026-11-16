@@ -39,7 +39,7 @@ reports we want:
   forwarding, or crashing or stalling the proxy;
 - a scoped web operator or a bus principal acting outside its grants;
 - a WebAssembly or script plugin escaping its sandbox or capabilities;
-- a managed server with [`isolation`](docs/managed-servers.md#isolation)
+- a managed server with [`isolation`](docs/server-limits.md#isolation)
   reading Rift's configuration, keys or another instance's files;
 - a node agent or controller accepting commands from the wrong peer.
 
