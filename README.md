@@ -229,7 +229,7 @@ chat, switching, ban rollback and recovery. Older clients use Join Game/Respawn
 world resets; 1.20.2+ uses the configuration phase.
 See the [protocol matrix and test scope](docs/network-protocol.md).
 
-Authenticated acceptance has a separate [Paper test matrix](tests/MANUAL_ONLINE.md)
+Authenticated acceptance has a separate Paper test matrix ([`tests/manual_online.py`](tests/manual_online.py))
 for signed chat and commands, resource-pack acceptance/refusal and transfer cleanup,
 plus pinned LuckPerms/EssentialsX and ViaVersion/ViaBackwards combinations.
 CI runs their startup and rejection preflights; full acceptance requires a signed-in
@@ -294,7 +294,7 @@ To preview the documentation site, run `npm ci` and `npm run serve` in `site/`
 
 CI also runs release tests, wire-protocol checks, real-server integration tests,
 benchmarks and packaging smoke tests. See the [CI workflow](.github/workflows/ci.yml)
-and [manual online-mode procedure](tests/MANUAL_ONLINE.md) for those checks.
+for those checks.
 
 On Linux, benchmark peers negotiate a 1460-byte TCP MSS to avoid loopback window
 stalls. Benchmark and pilot JSON reports record this cap; compare results with
