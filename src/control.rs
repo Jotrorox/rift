@@ -320,7 +320,7 @@ rift.config.backends.lobby='127.0.0.1:25566'
 rift.config.routes.public='lobby'
 rift.config.messaging={{listen='0.0.0.0:7443',certificate='c.pem',private_key='k.pem'}}
 {nodes}
-rift.config.service_groups.game={{command={{'java'}},storage='disposable',port_range={{30000,30009}},nodes={{'a'}}}}"
+rift.config.service_groups.game={{command={{'java'}},port_range={{30000,30009}},nodes={{'a'}}}}"
         )
     }
 
