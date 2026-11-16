@@ -42,6 +42,32 @@ They route, show up in `RiftServers` and support transfers, but get no dynamic
 scaling, templates, start/stop or console from Rift. Use nodes when Rift should
 start, stop and scale servers on those hosts.
 
+## Quick start: `rift node init`
+
+Run `rift node init` on the controller, next to `rift.lua`, for each new node:
+
+```sh
+rift node init node1 --address 10.0.0.11
+```
+
+It prints, and writes nothing:
+
+1. the `rift.config.nodes.node1` entry and the node's token for the
+   controller's environment (a new random token, or the one already set in
+   this shell as `RIFT_NODE_NODE1_TOKEN`);
+2. for the node: the account to create, the CA file to copy, the
+   environment file and a hardened systemd unit with `KillMode=control-group`
+   and `Delegate=memory`;
+3. checks: whether the messaging certificate is valid for the address the
+   agent dials (verified exactly as the agent will), whether the web API is
+   reachable over HTTPS, and which ports to open between the hosts.
+
+The bus address nodes dial comes from `messaging.advertise`, else
+`messaging.listen`; pass `--controller host:port` when that listens on
+`0.0.0.0`. See `rift node init --help` for `--web`, `--ca`, `--root`, `--user`
+and `--binary`. [examples/rift-node.service](../examples/rift-node.service) is
+the same unit with placeholders. The sections below explain each piece.
+
 ## Set up the controller
 
 Nodes connect to the controller's QUIC message bus, so `messaging.listen` with
@@ -119,13 +145,20 @@ refused.
 
 Agents talk to the web API over `https://` only, because the requests carry the
 node token and the SHA-256 manifest that decides which template files a node
-trusts. Plain `http://` is accepted only for loopback addresses, for an agent
-on the controller's host.
+trusts. Set `web.tls = true` to serve HTTPS with the messaging certificate,
+which agents already trust through `--ca`:
 
-Rift's web server speaks plain HTTP, so put a TLS-terminating reverse proxy
-(Caddy, nginx, ...) in front of it for remote nodes. The agent trusts the
-public CAs plus the certificates in its `--ca` file, so the proxy may use a
-certificate from the same private CA as the message bus.
+```lua
+rift.config.web = { listen = "0.0.0.0:8443", token_env = "RIFT_WEB_TOKEN", tls = true }
+```
+
+Agents then use `--web https://<controller>:8443`; the certificate must name
+that host, as it must for the bus. A TLS-terminating reverse proxy (Caddy,
+nginx, ...) in front of a plain listener works too. The agent trusts the public
+CAs plus the certificates in its `--ca` file, so the proxy may use a public
+certificate or one from the same private CA as the message bus. Plain `http://`
+is accepted only for loopback addresses, for an agent on the controller's host.
+See [Serve HTTPS](http.md#serve-https).
 
 ### The forwarding secret reaches nodes by itself
 
@@ -155,6 +188,10 @@ RIFT_NODE_TOKEN=... rift node \
   --ca /etc/rift/messaging-ca.pem --web https://rift.internal:8443 \
   --allow-program java
 ```
+
+`rift node init` prints a complete unit for this; it keeps the systemd
+defaults that matter (`KillMode=control-group`) and adds `Delegate=memory`,
+which [memory limits](server-limits.md#memory-limits) need.
 
 | Option | Meaning |
 | --- | --- |

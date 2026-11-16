@@ -3,14 +3,15 @@
 -- host runs `rift node`; this proxy stays the controller and decides what runs
 -- where. See docs/nodes.md.
 --
--- On node1 (10.0.0.11), as an unprivileged user:
+-- `rift node init node1 --controller 10.0.0.2:7443` on this host prints the
+-- node's token, systemd unit and setup checks. The agent it runs is:
 --   RIFT_NODE_TOKEN=... rift node \
 --     --controller 10.0.0.2:7443 --name node1 \
---     --root /srv/rift --ca /etc/rift/messaging-ca.pem \
---     --web https://rift.internal:8443 --allow-program java
--- --web must be https:// (a TLS reverse proxy in front of web.listen) unless
--- the agent runs on this host. Nodes receive the forwarding secret from this
--- controller, sealed with their token; they need no copy of it.
+--     --root /srv/rift --ca /etc/rift/rift-ca.pem \
+--     --web https://10.0.0.2:8443 --allow-program java
+-- --web must be https:// unless the agent runs on this host; web.tls below
+-- serves it. Nodes receive the forwarding secret from this controller, sealed
+-- with their token; they need no copy of it.
 local config = require("rift.config")
 config.listeners = { public = "0.0.0.0:25565" }
 config.routes = { public = "lobby" }
@@ -25,9 +26,9 @@ config.messaging = {
     certificate = "certs/messaging.pem",
     private_key = "certs/messaging-key.pem",
 }
--- Agents download template folders from the web API with their node token.
--- Keep it on a private network or behind TLS.
-config.web = { listen = "10.0.0.2:8080", token = "replace-with-a-long-random-secret" }
+-- Agents download template folders from the web API with their node token,
+-- over HTTPS with the messaging certificate (it must name 10.0.0.2).
+config.web = { listen = "10.0.0.2:8443", token_env = "RIFT_WEB_TOKEN", tls = true }
 
 config.nodes.node1 = { address = "10.0.0.11", memory_mb = 32768, max_instances = 40, labels = { "games" } }
 config.nodes.node2 = { address = "10.0.0.12", memory_mb = 16384, labels = { "games" } }

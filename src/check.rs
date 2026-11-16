@@ -279,6 +279,17 @@ pub fn plugins(config: &Config) -> (Vec<String>, Vec<String>) {
 pub fn strict(config: &Config, path: &Path) -> Report {
     let mut report = Report::default();
     environment(config, &mut report);
+    // Paths are relative to the working directory, as at startup.
+    if let Some((certificate, private_key)) = config.web_tls_files() {
+        match crate::web::tls_acceptor(certificate, private_key) {
+            Ok(_) => report.notes.push(format!(
+                "web.tls: {} and {} load",
+                certificate.display(),
+                private_key.display()
+            )),
+            Err(error) => report.errors.push(error.to_string()),
+        }
+    }
     report.errors.extend(
         plugins(config)
             .1
