@@ -1,6 +1,6 @@
 //! Durable instance registrations and filesystem intents, using bundled SQLite.
 use crate::{
-    config::{Config, GroupMode, GroupState, ServiceInstance},
+    config::{Config, GroupMode, GroupState, NodeSchedule, ServiceInstance},
     database::{self, Database},
     provisioning::{self, Plan},
 };
@@ -40,6 +40,14 @@ const LOGINS_SCHEMA_VERSION: u32 = 1;
 const LOGINS_V1: &str = "CREATE TABLE login_generations (
     name TEXT PRIMARY KEY NOT NULL,
     generation INTEGER NOT NULL CHECK(generation > 0)
+) STRICT;";
+
+/// Node schedules (cordon and drain) live in their own component too.
+const NODES_COMPONENT: &str = "node_schedules";
+const NODES_SCHEMA_VERSION: u32 = 1;
+const NODES_V1: &str = "CREATE TABLE node_schedules (
+    name TEXT PRIMARY KEY NOT NULL,
+    schedule TEXT NOT NULL CHECK(schedule IN ('cordoned','draining'))
 ) STRICT;";
 
 const GROUPS_V1: &str = "CREATE TABLE group_states (
@@ -190,6 +198,9 @@ impl Store {
         })?;
         database.migrate(LOGINS_COMPONENT, LOGINS_SCHEMA_VERSION, |_| {
             LOGINS_V1.to_owned()
+        })?;
+        database.migrate(NODES_COMPONENT, NODES_SCHEMA_VERSION, |_| {
+            NODES_V1.to_owned()
         })?;
         Ok(Self { database })
     }
@@ -649,6 +660,42 @@ impl Store {
                 "INSERT INTO group_states (name,suspended,mode) VALUES (?1,?2,?3)
                  ON CONFLICT(name) DO UPDATE SET suspended=excluded.suspended, mode=excluded.mode",
                 params![group, state.suspended, state.mode.as_str()],
+            )
+        };
+        result.map_err(|e| self.error(e))?;
+        Ok(())
+    }
+
+    /// Every node that is cordoned or draining.
+    pub fn node_schedules(&self) -> io::Result<BTreeMap<String, NodeSchedule>> {
+        let connection = self.database.lock();
+        let mut statement = connection
+            .prepare("SELECT name,schedule FROM node_schedules ORDER BY name")
+            .map_err(|e| self.error(e))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| self.error(e))?;
+        rows.map(|row| {
+            let (name, schedule) = row.map_err(|e| self.error(e))?;
+            let schedule = NodeSchedule::parse(&schedule)
+                .ok_or_else(|| self.error(format!("invalid schedule for node {name}")))?;
+            Ok((name, schedule))
+        })
+        .collect()
+    }
+
+    /// Record a node's schedule; `active` removes its row.
+    pub fn set_node_schedule(&self, node: &str, schedule: NodeSchedule) -> io::Result<()> {
+        let connection = self.database.lock();
+        let result = if schedule == NodeSchedule::Active {
+            connection.execute("DELETE FROM node_schedules WHERE name=?1", [node])
+        } else {
+            connection.execute(
+                "INSERT INTO node_schedules (name,schedule) VALUES (?1,?2)
+                 ON CONFLICT(name) DO UPDATE SET schedule=excluded.schedule",
+                params![node, schedule.as_str()],
             )
         };
         result.map_err(|e| self.error(e))?;

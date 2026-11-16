@@ -12,6 +12,21 @@ and are listed under **SDKs**.
 
 ## [Unreleased]
 
+### Nodes
+
+- Take a node out of service before maintenance:
+  `rift admin node cordon|drain|uncordon <node>` and
+  `POST /api/nodes/{name}/cordon|drain|uncordon`. A cordoned node gets no new
+  instances. A draining node also stops sending new players to its
+  disposable instances and retires each one once it is empty, while
+  replacements start on other nodes. Persistent instances and named servers
+  stay. `/api/nodes` reports each node's `schedule` and `drained`.
+
+### Database
+
+- New `rift.sqlite3` component: node schedules, schema 1. Older releases
+  ignore it.
+
 ## [0.1.0] - 2026-11-16
 
 The first stable release, after three release candidates (`v0.1.0-rc.1` to

@@ -674,6 +674,37 @@ fn group_states_persist_apart_from_the_instance_schema() {
 }
 
 #[test]
+fn node_schedules_persist_and_active_removes_the_row() {
+    let fixture = Fixture::new("persistent");
+    let store = fixture.store();
+    assert!(store.node_schedules().unwrap().is_empty());
+    store
+        .set_node_schedule("node1", NodeSchedule::Cordoned)
+        .unwrap();
+    store
+        .set_node_schedule("node2", NodeSchedule::Draining)
+        .unwrap();
+    store
+        .set_node_schedule("node1", NodeSchedule::Draining)
+        .unwrap();
+    drop(store);
+    let store = fixture.store();
+    let schedules = store.node_schedules().unwrap();
+    assert_eq!(schedules.len(), 2);
+    assert_eq!(schedules["node1"], NodeSchedule::Draining);
+    store
+        .set_node_schedule("node2", NodeSchedule::Active)
+        .unwrap();
+    assert_eq!(
+        store.node_schedules().unwrap().keys().collect::<Vec<_>>(),
+        ["node1"]
+    );
+    let connection = store.database().lock();
+    assert_eq!(database::version(&connection, "instances").unwrap(), 2);
+    assert_eq!(database::version(&connection, "node_schedules").unwrap(), 1);
+}
+
+#[test]
 fn every_creation_of_a_name_gets_a_new_login_generation() {
     let fixture = Fixture::new("persistent");
     let store = fixture.store();

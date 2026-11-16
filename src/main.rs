@@ -23,6 +23,7 @@ mod admission;
 mod bungee_runtime;
 mod check;
 mod control;
+mod cordon;
 mod dev;
 mod events;
 mod groups;

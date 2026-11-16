@@ -129,7 +129,8 @@ operator, the player must be on one of their servers.
 | `POST /api/groups/{name}/stop` | `servers`, scoped | Stop a whole group with `{}`: keep new players out, pause scaling and stop every empty instance now and the others once their players leave; returns `202` with the same shape |
 | `PUT /api/groups/{name}/mode` | `servers`, scoped | Set `{"mode": "dev"}` or `{"mode": "active"}`; returns `200` with `{group, suspended, mode, dev_permission}` |
 | `GET /api/operations/{id}` | `servers`, scoped | Retrieve instance or download operation state and its completed result; the scope is the operation's group |
-| `GET /api/nodes` | `read` | `{nodes: [...]}` with each [node](nodes.md)'s `state` (`online`, `unreachable`, `never_connected`), address, labels, `instances`, `max_instances`, `memory_mb`, `allocated_memory_mb`, agent `version` and `last_seen_ms` |
+| `GET /api/nodes` | `read` | `{nodes: [...]}` with each [node](nodes.md)'s `state` (`online`, `unreachable`, `never_connected`), `schedule` (`active`, `cordoned`, `draining`), `drained`, address, labels, `instances`, `max_instances`, `memory_mb`, `allocated_memory_mb`, agent `version` and `last_seen_ms` |
+| `POST /api/nodes/{name}/cordon`, `/drain`, `/uncordon` | `servers`, unrestricted operators only | [Take a node out of service](nodes.md#take-a-node-out-of-service) or return it, with `{}`; returns `200` with `{node, schedule, drained, instances}`, where each instance's `result` is `running`, `kept`, `retiring` or `draining` |
 
 A `/api/groups` entry has the group name, inclusive port range, instance
 names, template and storage policy, plus:

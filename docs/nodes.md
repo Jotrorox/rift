@@ -200,6 +200,56 @@ local instance. New instances on nodes write `server-ip=<node address>` to
 > BungeeGuard reject direct connections, but plain BungeeCord forwarding and
 > other software run offline behind Rift.
 
+## Take a node out of service
+
+Before maintenance on a node, cordon or drain it from the controller:
+
+```sh
+rift admin node drain node2      # no new instances; disposable games empty out
+rift admin nodes                 # wait for "drained": true
+# ... maintenance, agent restart, reboot ...
+rift admin node uncordon node2   # back in service
+```
+
+| Command | New instances | Disposable instances | Persistent instances and named servers |
+| --- | --- | --- | --- |
+| `node cordon <node>` | none | keep running and take players | keep running and take players |
+| `node drain <node>` | none | take no new players; each is retired (stopped and its files deleted) once it is empty | keep running and take players |
+| `node uncordon <node>` | placed again | take players again | unchanged |
+
+- Nobody is disconnected. A disposable instance with players keeps running
+  until they leave, for example at the end of a round.
+- Draining instances do not count as capacity, so a group with `scaling`
+  creates replacements on other nodes right away. Their players still count
+  toward the load.
+- Draining retires disposable instances in every group, with or without
+  `scaling` and also in [stopped groups](service-groups.md#start-stop-and-dev-mode-for-a-whole-group).
+  Groups in dev mode are left alone: switch them back to `active` or remove
+  their instances by hand.
+- Persistent instances never move, because their data is on the node. Stop
+  them yourself (`rift admin stop <instance>`) when maintenance needs it;
+  stopping them does not remove them.
+- Manual `create <group>` also skips cordoned and draining nodes. When no other
+  node fits, it fails with `no node for <group> is online, not cordoned or
+  draining, ...`.
+- `drained` in `rift admin nodes` and `GET /api/nodes` turns `true` once a
+  draining node has no disposable instances left.
+- The schedule survives reloads and, with an instance database, restarts. It
+  is forgotten when the node is removed from `rift.config.nodes`.
+
+Over HTTP, `POST /api/nodes/{name}/cordon`, `/drain` and `/uncordon` (body
+`{}`) do the same. They need the `servers` permission and an operator who is
+not restricted to groups, since a node runs instances of every group. The
+reply lists what happens to each server on the node:
+
+```json
+{"node": "node2", "schedule": "draining", "drained": false, "instances": [
+  {"name": "bedwars-7", "result": "draining", "message": "3 players; retired once they leave"},
+  {"name": "bedwars-9", "result": "retiring"},
+  {"name": "survival", "result": "kept"}
+]}
+```
+
 ## Templates and software
 
 The controller stays the source of truth for [templates](templates.md). When a
@@ -312,9 +362,9 @@ principal.
 
 | Where | What you get |
 | --- | --- |
-| Dashboard | The Servers page shows each server's node and a Nodes panel with reachability, labels, instances and allocated memory. |
-| HTTP | `GET /api/nodes`; every server in `/api/servers` has a `node` field (`local` for the controller). Server logs, console and Files work for remote servers; remote files are limited to 512 KiB through the web console. |
-| Control subject and CLI | `rift.control.nodes` and `rift admin nodes` (grant `servers`). |
+| Dashboard | The Servers page shows each server's node and a Nodes panel with reachability, labels, instances and allocated memory, and whether a node is cordoned or draining. |
+| HTTP | `GET /api/nodes`, with each node's `schedule` and `drained`; `POST /api/nodes/{name}/cordon\|drain\|uncordon`; every server in `/api/servers` has a `node` field (`local` for the controller). Server logs, console and Files work for remote servers; remote files are limited to 512 KiB through the web console. |
+| Control subject and CLI | `rift.control.nodes` and `rift admin nodes` (grant `servers`). `rift admin node cordon\|drain\|uncordon <node>` [takes a node out of service](#take-a-node-out-of-service). |
 | Java | `RiftControl.nodes()` in the `rift-control` artifact (see [control and events](messaging-subjects.md#java-control-and-events)). |
 
 ## Wire protocol

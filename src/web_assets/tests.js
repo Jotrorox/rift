@@ -151,6 +151,11 @@ async function testWebAssets(appSource, statusSource) {
     assert(nodes[0].children[0].textContent === "node1" && nodes[0].children[3].textContent === "games", "Node row missing");
     assert(nodes[0].children[5].textContent.includes("2,048") || nodes[0].children[5].textContent.includes("2048"), `Node memory missing: ${nodes[0].children[5].textContent}`);
     assert(nodes[1].children[5].textContent.includes("no limit"), "Unlimited memory not explained");
+    assert(!nodes[0].children[1].children.length, "Active node shows a schedule badge");
+    h.model.status.nodes[1].schedule = "draining";
+    await h.element("refresh-status").emit("click"); await flush();
+    const badge = h.element("nodes").children[1].children[1].children.find((child) => typeof child === "object");
+    assert(badge && badge.textContent === "Draining", "Draining badge missing");
   });
   await test("managed servers cannot be stopped from dashboard while occupied", async () => {
     const h = fixture(appSource); await flush();
