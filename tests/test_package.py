@@ -112,7 +112,7 @@ class PackageTests(unittest.TestCase):
             (directory / "examples/rift.service").write_text("[Service]")
             (directory / "docs/operations.md").write_text(
                 "[unit](../examples/rift.service#install) [missing](../examples/Dockerfile) "
-                "[repository only](../tests/MANUAL_ONLINE.md) [site](https://example.com/x) "
+                "[repository only](../tests/manual_online.py) [site](https://example.com/x) "
                 "[anchor](#first-start) [online only](performance/raw.json.gz) "
                 "[outside](../../elsewhere.md)")
             self.assertEqual(package.broken_links(directory), [

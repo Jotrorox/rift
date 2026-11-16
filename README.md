@@ -142,7 +142,8 @@ languages. Player hooks require online authentication.
   listed version. Velocity modern forwarding needs backends on 1.13 or newer;
   BungeeCord and BungeeGuard forwarding cover all of them.
 - **Paper:** signed chat, resource packs and common plugin stacks have a
-  separate [authenticated test matrix](tests/MANUAL_ONLINE.md).
+  separate authenticated test matrix
+  ([`tests/manual_online.py`](tests/manual_online.py)).
 - **BungeeCord plugins:** `rift.config.network = { bungeecord = true }` serves
   the [BungeeCord plugin channel](docs/bungeecord.md) to backend plugins.
 - **Unsupported:** Bedrock/UDP, unlisted snapshots and legacy pre-1.7 pings.

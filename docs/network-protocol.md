@@ -325,7 +325,7 @@ and a passing real-server switch/recovery run.
 | `tests/network_minecraft.py --accept-eula` and the CI compatibility matrix | The entire fixture set through lobby → survival → lobby, target-ban rollback and recovery after killing survival. Each transition checks fresh world, chunks, teleport, command tree (1.13+), game mode, border and accepted backend chat on the same compressed frontend socket. Also resource-pack cleanup, duplicate login rejection, crash recovery and terminal play bans. |
 | Rust tests | Encrypted authentication, profile forwarding (including preserving 26.2+ session UUIDs), malformed control packets and each version's command parser registry. |
 | Independent wire tests | All accepted protocols with compression disabled and thresholds 0, 64 and 256. |
-| [tests/MANUAL_ONLINE.md](../tests/MANUAL_ONLINE.md) | The authenticated Paper/client procedure, pinned to 1.21.11. Its baseline, LuckPerms/EssentialsX/EssentialsXChat and ViaVersion/ViaBackwards stacks record signed chat/command observations, resource-pack responses and UUID permission checks. |
+| `tests/manual_online.py` | The authenticated Paper/client procedure, pinned to 1.21.11. Its baseline, LuckPerms/EssentialsX/EssentialsXChat and ViaVersion/ViaBackwards stacks record signed chat/command observations, resource-pack responses and UUID permission checks. |
 
 The automated real-server test uses offline loopback servers and a protocol
 test client, with compressed and uncompressed backends behind one compressed

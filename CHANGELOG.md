@@ -12,34 +12,6 @@ and are listed under **SDKs**.
 
 ## [Unreleased]
 
-### Added
-
-- `memory_limit` on managed servers and service groups: a hard memory limit
-  on a server's whole process tree, enforced on Linux with a cgroup v2 group
-  per server and applied by node agents too. `{ mb = ..., required = true }`
-  refuses to start a server whose limit cannot be enforced.
-- `template_sources`: template folders checked out from a git repository
-  into `template_storage`, fetched on first use and updated with
-  `rift admin sync <source>` or `POST /api/template-sources/{name}/sync`.
-- `web.token_env` and `web.operators.<name>.token_env` read web tokens from
-  environment variables, so they stay out of the Lua source.
-- Releases publish a container image for `linux/amd64` and `linux/arm64` to
-  `ghcr.io/jotrorox/rift`, with build provenance.
-- `SECURITY.md` with the vulnerability reporting process.
-
-### Changed
-
-- The documentation is reorganized into shorter, task-focused pages (56
-  instead of 29) with a page index, collapsible navigation and a page filter
-  on the website. Long guides are split: `operations.md` into install,
-  admin CLI, deployment, monitoring, hardening and upgrading;
-  `managed-servers.md`, `http.md`, `plugins.md`, `extensions.md`,
-  `messaging.md`, `permissions.md` and `permissions-java.md` likewise. Links
-  to sections of those pages need updating; the site build now fails on a
-  broken link.
-- The example systemd unit is hardened further and delegates its cgroup so
-  memory limits work.
-
 ## [0.1.0] - unreleased
 
 The first tagged release. Release candidates are tagged `v0.1.0-rc.N` and
@@ -78,15 +50,31 @@ published as prereleases from the same pipeline.
   templates with downloaded server software, persistent and ephemeral instance
   storage, Landlock confinement and per-instance bus logins.
 - `rift node` agents to run game servers on more hosts.
+- `memory_limit` on managed servers and service groups: a hard memory limit
+  on a server's whole process tree, enforced on Linux with a cgroup v2 group
+  per server and applied by node agents too. `{ mb = ..., required = true }`
+  refuses to start a server whose limit cannot be enforced.
+- `template_sources`: template folders checked out from a git repository
+  into `template_storage`, fetched on first use and updated with
+  `rift admin sync <source>` or `POST /api/template-sources/{name}/sync`.
 
 ### Integration and operations
 
 - A message bus over QUIC with durable streams, shared by Rust, Lua and
   server plugins; typed Java APIs for permissions and the network.
 - An embedded web dashboard and HTTP API with scoped operator tokens and audit
-  records; a shareable status page.
-- Release archives and standalone executables for Linux x86_64, macOS aarch64
-  and Windows x86_64 with SHA-256 checksums and build provenance attestations.
+  records; a shareable status page. `web.token_env` and
+  `web.operators.<name>.token_env` read tokens from environment variables.
+- Release archives and standalone executables for Linux x86_64 and aarch64
+  (glibc and musl), macOS aarch64 and Windows x86_64 with SHA-256 checksums
+  and build provenance attestations.
+- A container image for `linux/amd64` and `linux/arm64` at
+  `ghcr.io/jotrorox/rift`, with build provenance.
+- A hardened example systemd unit that delegates its cgroup so memory limits
+  work, and `SECURITY.md` with the vulnerability reporting process.
+- Documentation in short, task-focused pages, shipped in every archive and
+  published as a website with a page index and a page filter. The site build
+  fails on a broken link.
 
 ### Database
 
