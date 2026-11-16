@@ -81,6 +81,28 @@ pub enum Command {
     Reconcile {
         servers: Vec<String>,
     },
+    /// Fill the agent's template and software caches ahead of time, so the
+    /// next `prepare` copies from disk; see [`Warm`].
+    Warm(Warm),
+}
+
+/// The templates an agent should cache now. Agents from before this command
+/// refuse it as an unknown `op`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Warm {
+    pub templates: Vec<TemplateAssets>,
+}
+
+/// One template's downloadable parts, as in [`Prepare`]: paths are relative
+/// to the controller's `template_storage`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TemplateAssets {
+    pub template: String,
+    pub software: Option<Software>,
+    pub server_jar: Option<String>,
+    pub configs: Vec<String>,
+    pub plugins: Vec<String>,
+    pub map: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

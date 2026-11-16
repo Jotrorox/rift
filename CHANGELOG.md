@@ -12,6 +12,13 @@ and are listed under **SDKs**.
 
 ## [Unreleased]
 
+### Added
+
+- `rift admin warm [template]`, `POST /api/nodes/warm` and a dashboard button
+  have every node download its groups' templates and server software ahead of
+  time, so the first instance on a new or freshly synced node starts without
+  waiting. Agents need the same version as the controller for it.
+
 ## [0.1.0] - 2026-11-16
 
 The first stable release, after three release candidates (`v0.1.0-rc.1` to

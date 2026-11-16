@@ -315,7 +315,7 @@ fn request(value: &Value, settings: &Admin, secret: &str) -> Result<Vec<String>,
     let permission = match (command.as_str(), args.get(1).map(String::as_str)) {
         (
             "start" | "stop" | "groups" | "group" | "create" | "remove" | "templates" | "download"
-            | "sync" | "nodes",
+            | "sync" | "warm" | "nodes",
             _,
         ) => "servers",
         // Restarting a plugin changes the running proxy; its log tail may
@@ -516,6 +516,126 @@ pub(crate) async fn download_template(
     Ok(json!({"template": name, "software": status}))
 }
 
+/// Templates each node needs: those of the service groups whose `nodes`
+/// selector matches it, optionally only `only`. Nodes without any are left out.
+pub(crate) fn node_templates(
+    config: &Config,
+    only: Option<&str>,
+) -> BTreeMap<String, std::collections::BTreeSet<String>> {
+    let mut plan: BTreeMap<String, std::collections::BTreeSet<String>> = BTreeMap::new();
+    for (node, definition) in &config.nodes {
+        for group in config.service_groups.values() {
+            if let (Some(selector), Some(template)) = (&group.nodes, &group.template)
+                && selector.matches(node, definition)
+                && only.is_none_or(|only| only == template)
+            {
+                plan.entry(node.clone())
+                    .or_default()
+                    .insert(template.clone());
+            }
+        }
+    }
+    plan
+}
+
+/// Have every node cache the templates (files and software) its groups use,
+/// so the first instance on a new or freshly synced node starts without
+/// waiting for downloads. Nodes work in parallel; any failure, an
+/// unreachable node included, fails the whole operation after the rest
+/// finished, with every outcome in the message.
+pub(crate) async fn warm_templates(
+    snapshot: &Snapshot,
+    only: Option<&str>,
+) -> Result<Value, String> {
+    let config = &snapshot.config;
+    if let Some(name) = only
+        && !config.templates.contains_key(name)
+    {
+        return Err(format!("unknown template {name:?}"));
+    }
+    let plan = node_templates(config, only);
+    if plan.is_empty() {
+        return Err(match only {
+            Some(name) => format!("no service group on nodes uses template {name:?}"),
+            None => "no service group with a template runs on nodes".into(),
+        });
+    }
+    // Check every template once, before anything is sent: an asset outside
+    // template_storage is a configuration problem, not a node's.
+    let mut assets = BTreeMap::new();
+    for name in plan.values().flatten() {
+        if !assets.contains_key(name) {
+            let checked = rift::provisioning::remote_template_assets(config, name)
+                .map_err(|error| error.to_string());
+            assets.insert(name.clone(), checked);
+        }
+    }
+    let mut work = JoinSet::new();
+    for (node, templates) in plan {
+        let mut results = Vec::new();
+        let mut command = Vec::new();
+        for template in templates {
+            match &assets[&template] {
+                Ok(assets) => command.push(assets.clone()),
+                Err(error) => {
+                    results.push(json!({"template": template, "ok": false, "error": error}))
+                }
+            }
+        }
+        let nodes = snapshot.nodes.clone();
+        work.spawn(async move {
+            if !command.is_empty() {
+                let warm = rift::node::protocol::Command::Warm(rift::node::protocol::Warm {
+                    templates: command,
+                });
+                match nodes.request(&node, &warm, DOWNLOAD_DEADLINE).await {
+                    Ok(reply) => results.extend(reply["templates"].as_array().cloned().unwrap_or_default()),
+                    Err(error) => {
+                        let error = if error.kind() == io::ErrorKind::InvalidInput
+                            && error.to_string().contains("unknown variant")
+                        {
+                            format!("the agent on {node} is older than the controller; upgrade it")
+                        } else {
+                            error.to_string()
+                        };
+                        return json!({"node": node, "ok": false, "error": error, "templates": results});
+                    }
+                }
+            }
+            let ok = results.iter().all(|result| result["ok"] == true);
+            json!({"node": node, "ok": ok, "templates": results})
+        });
+    }
+    let mut nodes = work.join_all().await;
+    nodes.sort_by(|a, b| a["node"].as_str().cmp(&b["node"].as_str()));
+    let mut failures = Vec::new();
+    let mut warmed = 0;
+    for node in &nodes {
+        let name = node["node"].as_str().unwrap_or_default();
+        if let Some(error) = node["error"].as_str() {
+            failures.push(format!("{name}: {error}"));
+        }
+        for template in node["templates"].as_array().into_iter().flatten() {
+            if template["ok"] == true {
+                warmed += 1;
+            } else {
+                failures.push(format!(
+                    "{name}/{}: {}",
+                    template["template"].as_str().unwrap_or_default(),
+                    template["error"].as_str().unwrap_or("failed")
+                ));
+            }
+        }
+    }
+    if !failures.is_empty() {
+        return Err(format!(
+            "warming templates failed ({warmed} cached): {}",
+            failures.join("; ")
+        ));
+    }
+    Ok(json!({"nodes": nodes, "warmed": warmed}))
+}
+
 /// The same field names as `service_groups.*.scaling` in Lua.
 pub(crate) fn scaling_values(policy: &rift::config::ServiceScaling) -> Value {
     json!({
@@ -625,6 +745,8 @@ pub(crate) async fn execute(
         [command, template] if command == "download" => download_template(&snapshot, template, false).await,
         [command, template, refresh] if command == "download" && refresh == "refresh" => download_template(&snapshot, template, true).await,
         [command, source] if command == "sync" => sync_template_source(&snapshot, source).await,
+        [command] if command == "warm" => warm_templates(&snapshot, None).await,
+        [command, template] if command == "warm" => warm_templates(&snapshot, Some(template)).await,
         [command, group] if command == "create" => {
             let (reply, receiver) = oneshot::channel();
             commands.try_send(Command::CreateInstance { group: group.clone(), reply })
@@ -698,7 +820,7 @@ pub(crate) async fn execute(
             commands.try_send(Command::Reload(reply)).map_err(|_| "administrator command queue is full or shutting down")?;
             receiver.await.map_err(|_| "proxy is shutting down".to_owned())?
         }
-        _ => Err("usage: status | servers | groups | nodes | templates | download <template> [refresh] | sync <template-source> | create <group> | remove <instance> | start <backend> | stop <backend> | group start|stop <group> | group mode <group> active|dev | maintenance on/off | drain <backend> on/off | transfer <connection-id> <backend> | plugins list | plugins status <name> | plugins logs <name> | plugins restart <name> | plugins run <command> [arguments] | perms <command> | reload | shutdown".into()),
+        _ => Err("usage: status | servers | groups | nodes | templates | download <template> [refresh] | sync <template-source> | warm [template] | create <group> | remove <instance> | start <backend> | stop <backend> | group start|stop <group> | group mode <group> active|dev | maintenance on/off | drain <backend> on/off | transfer <connection-id> <backend> | plugins list | plugins status <name> | plugins logs <name> | plugins restart <name> | plugins run <command> [arguments] | perms <command> | reload | shutdown".into()),
     }
 }
 
@@ -758,7 +880,7 @@ pub async fn serve(
                                     {
                                         deadline += server.start_timeout;
                                     }
-                                    if matches!(args.first().map(String::as_str), Some("create" | "download" | "sync")) {
+                                    if matches!(args.first().map(String::as_str), Some("create" | "download" | "sync" | "warm")) {
                                         deadline += DOWNLOAD_DEADLINE;
                                     }
                                     if let [command, name] = args.as_slice()
@@ -808,7 +930,7 @@ pub async fn client(args: &[String]) -> io::Result<()> {
     if args.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "usage: rift admin [--address 127.0.0.1:9091] status|servers|groups|create <group>|remove <instance>|start <backend>|stop <backend>|maintenance on/off|drain <backend> on/off|transfer <connection-id> <backend>|plugins list|plugins status <name>|plugins logs <name>|plugins restart <name>|plugins run <command> [arguments]|perms <command>|reload|shutdown",
+            "usage: rift admin [--address 127.0.0.1:9091] status|servers|groups|nodes|templates|download <template> [refresh]|sync <template-source>|warm [template]|create <group>|remove <instance>|start <backend>|stop <backend>|maintenance on/off|drain <backend> on/off|transfer <connection-id> <backend>|plugins list|plugins status <name>|plugins logs <name>|plugins restart <name>|plugins run <command> [arguments]|perms <command>|reload|shutdown",
         ));
     }
     let address: SocketAddr = address.parse().map_err(|_| {
@@ -843,7 +965,7 @@ pub async fn client(args: &[String]) -> io::Result<()> {
     let deadline = if args.first().is_some_and(|command| {
         matches!(
             command.as_str(),
-            "transfer" | "remove" | "create" | "download" | "sync"
+            "transfer" | "remove" | "create" | "download" | "sync" | "warm"
         )
     }) {
         Duration::from_secs(24 * 60 * 60 + 45)

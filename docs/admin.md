@@ -81,6 +81,7 @@ Prefix each command with `rift admin`.
 | `templates` | `servers` | Lists templates and git template sources with their cache and sync state |
 | `download <template> [refresh]` | `servers` | Downloads a template's [server software](templates.md#download-server-software-automatically) ahead of time; `refresh` replaces the cached jar |
 | `sync <template-source>` | `servers` | Pulls new commits of a [git template source](templates.md#template-folders-from-git) |
+| `warm [template]` | `servers` | Has every [node](nodes.md#warm-the-node-caches) download its groups' templates and server software now, or only those of one template |
 | `plugins list`, `plugins status <name>` | `status` | Shows [plugins](plugin-operations.md) with state, restarts, calls and last error |
 | `plugins logs <name>` | `logs` | Shows a plugin's last 200 log lines |
 | `plugins restart <name>` | `plugins` | Stops a persistent plugin and starts a fresh instance with its current configuration; recorded in the operator audit log with the plugin name |

@@ -128,7 +128,8 @@ operator, the player must be on one of their servers.
 | `POST /api/groups/{name}/start` | `servers`, scoped | Start a whole [service group](service-groups.md#start-stop-and-dev-mode-for-a-whole-group) with `{}`: resume it and start every instance that is not running; returns `202` with `{group, suspended, mode, instances}` |
 | `POST /api/groups/{name}/stop` | `servers`, scoped | Stop a whole group with `{}`: keep new players out, pause scaling and stop every empty instance now and the others once their players leave; returns `202` with the same shape |
 | `PUT /api/groups/{name}/mode` | `servers`, scoped | Set `{"mode": "dev"}` or `{"mode": "active"}`; returns `200` with `{group, suspended, mode, dev_permission}` |
-| `GET /api/operations/{id}` | `servers`, scoped | Retrieve instance or download operation state and its completed result; the scope is the operation's group |
+| `GET /api/operations/{id}` | `servers`, scoped | Retrieve instance, download or warm operation state and its completed result; the scope is the operation's group |
+| `POST /api/nodes/warm` | `servers`, unrestricted | Have every node [cache its groups' templates](nodes.md#warm-the-node-caches) with `{}`, or one template's with `{"template": "bedwars"}`; returns `202` with an operation to poll. The result lists each node's templates with `files`, `downloaded`, `bytes` and `software`; the operation fails if any node or template failed |
 | `GET /api/nodes` | `read` | `{nodes: [...]}` with each [node](nodes.md)'s `state` (`online`, `unreachable`, `never_connected`), address, labels, `instances`, `max_instances`, `memory_mb`, `allocated_memory_mb`, agent `version` and `last_seen_ms` |
 
 A `/api/groups` entry has the group name, inclusive port range, instance

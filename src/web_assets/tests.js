@@ -152,6 +152,32 @@ async function testWebAssets(appSource, statusSource) {
     assert(nodes[0].children[5].textContent.includes("2,048") || nodes[0].children[5].textContent.includes("2048"), `Node memory missing: ${nodes[0].children[5].textContent}`);
     assert(nodes[1].children[5].textContent.includes("no limit"), "Unlimited memory not explained");
   });
+  await test("the nodes panel warms template caches and reports failures", async () => {
+    const h = fixture(appSource);
+    let polls = 0, fail = false;
+    h.model.intercept = (path, options) => {
+      if (path === "/api/nodes/warm") { h.warmBody = options.body; return h.response({ operation_id: "op1", status: "pending", poll: "/api/operations/op1" }, 202); }
+      if (path === "/api/operations/op1") {
+        polls += 1;
+        if (polls === 1) return h.response({ status: "pending" });
+        return h.response(fail ? { status: "failed", error: "warming templates failed (1 cached): node2: node node2 is unreachable" }
+          : { status: "succeeded", result: { warmed: 2, nodes: [{ node: "node1", ok: true, templates: [{ template: "bedwars", ok: true, bytes: 1048576 }, { template: "lobby", ok: true, bytes: 0 }] }] } });
+      }
+      return null;
+    };
+    h.model.status.nodes = [{ name: "node1", state: "online", address: "10.0.0.11", labels: [], instances: 0, max_instances: 128, memory_mb: null, allocated_memory_mb: 0 }];
+    await flush();
+    await h.element("refresh-status").emit("click"); await flush();
+    assert(!h.element("nodes-warm").disabled && !h.element("nodes-warm").hidden, "Warm button unavailable");
+    await h.element("nodes-warm").emit("click"); await flush();
+    assert(h.warmBody === "{}", "Warm request incorrectly encoded");
+    await h.advance(1000);
+    assert(h.element("nodes-result").textContent === "Cached 2 templates on 1 node (1.0 MiB downloaded).", h.element("nodes-result").textContent);
+    fail = true; polls = 0;
+    await h.element("nodes-warm").emit("click"); await flush();
+    await h.advance(1000);
+    assert(h.element("nodes-result").textContent.includes("node2 is unreachable") && h.element("nodes-result").className.includes("error"), "Warm failure not shown");
+  });
   await test("managed servers cannot be stopped from dashboard while occupied", async () => {
     const h = fixture(appSource); await flush();
     h.model.status.managed_servers = [{ name: "lobby", state: "running", players: 1, reservations: 0, automatic_start: true }];
