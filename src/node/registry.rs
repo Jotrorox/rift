@@ -10,11 +10,14 @@ use bytes::Bytes;
 use serde_json::{Value, json};
 use tokio::sync::Notify;
 
-use super::protocol::{self, Command, NodeState, Resources};
+use super::protocol::{self, Command, NodeState, Requirement, Resources};
 use crate::{
-    config::{Config, NodeConfig},
+    config::{Config, ManagedServer, NodeConfig},
     messaging::Broker,
 };
+
+/// The controller's own version, which its agents should run too.
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Node agents known to this controller. Cheap to clone; every clone shares
 /// the same observations.
@@ -176,6 +179,9 @@ impl Nodes {
         drop(observed);
         if reconnect {
             log_info!("node {node} connected");
+            if let Some(warning) = mismatch(&observed_state(&self.0.observed, node)) {
+                log_warn!("node {node}: {warning}");
+            }
             lock(&self.0.reconnected).insert(node.to_owned());
             self.0.wake.notify_one();
         }
@@ -243,6 +249,62 @@ impl Nodes {
                 .find(|exit| exit.name == server)
                 .map(|exit| (exit.status.clone(), exit.success)),
         })
+    }
+
+    /// The mandatory `requirements` that the agent on `node` cannot apply.
+    /// Empty while the node has never reported, since nothing is sent then.
+    pub fn lacking(&self, node: &str, requirements: &[Requirement]) -> Vec<&'static str> {
+        let observed = lock(&self.0.observed);
+        let Some(observed) = observed.get(node) else {
+            return Vec::new();
+        };
+        requirements
+            .iter()
+            .filter(|requirement| requirement.mandatory)
+            .filter(|requirement| !supports(&observed.state, requirement.feature))
+            .map(|requirement| requirement.feature)
+            .collect()
+    }
+
+    /// Refuse a start that needs a feature the agent on `node` lacks, rather
+    /// than let the agent silently drop it. A best-effort setting it lacks
+    /// (`landlock`, a memory limit that is not `required`) only warns, as it
+    /// does for a local server on a kernel without support.
+    pub fn check_start(&self, node: &str, start: &protocol::Start) -> io::Result<()> {
+        let requirements = start.requirements();
+        let (version, skipped) = {
+            let observed = lock(&self.0.observed);
+            let Some(observed) = observed.get(node) else {
+                return Ok(());
+            };
+            let skipped: Vec<_> = requirements
+                .iter()
+                .filter(|requirement| !supports(&observed.state, requirement.feature))
+                .copied()
+                .collect();
+            (observed.state.version.clone(), skipped)
+        };
+        let (refused, warned): (Vec<_>, Vec<_>) = skipped
+            .into_iter()
+            .partition(|requirement| requirement.mandatory);
+        if !refused.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "node {node} runs an agent ({version}) that cannot apply {} for {}; upgrade rift on that node to {VERSION}",
+                    settings(&refused),
+                    start.server,
+                ),
+            ));
+        }
+        if !warned.is_empty() {
+            log_warn!(
+                "node {node} runs an agent ({version}) that cannot apply {} for {}; starting it without; upgrade rift on that node to {VERSION}",
+                settings(&warned),
+                start.server,
+            );
+        }
+        Ok(())
     }
 
     /// Send one command and wait for the agent's reply.
@@ -319,6 +381,9 @@ impl Nodes {
                             .and_then(|seen| seen.state.resources),
                         "running": seen.map(|seen| seen.state.servers.len()),
                         "version": seen.map(|seen| seen.state.version.clone()),
+                        "features": seen.map(|seen| seen.state.features.clone()),
+                        "missing_features": seen.map(|seen| missing(&seen.state)),
+                        "version_mismatch": seen.is_some_and(|seen| seen.state.version != VERSION),
                         "last_seen_ms": seen.map(|seen| seen.seen.elapsed().as_millis() as u64),
                         "connected_ms": seen
                             .filter(|_| reachability == Reachability::Online)
@@ -328,6 +393,74 @@ impl Nodes {
                 .collect(),
         )
     }
+}
+
+fn observed_state(observed: &Mutex<BTreeMap<String, Observed>>, node: &str) -> NodeState {
+    lock(observed)
+        .get(node)
+        .map(|observed| observed.state.clone())
+        .unwrap_or_default()
+}
+
+fn supports(state: &NodeState, feature: &str) -> bool {
+    state.features.iter().any(|known| known == feature)
+}
+
+/// The controller's features that this agent does not advertise.
+fn missing(state: &NodeState) -> Vec<&'static str> {
+    protocol::FEATURES
+        .iter()
+        .copied()
+        .filter(|feature| !supports(state, feature))
+        .collect()
+}
+
+/// Why an agent does not match this controller, if it does not.
+fn mismatch(state: &NodeState) -> Option<String> {
+    let missing = missing(state);
+    if !missing.is_empty() {
+        return Some(format!(
+            "agent {} lacks {}; Rift refuses to start servers there that need them and starts the rest without; upgrade rift on that node to {VERSION}",
+            state.version,
+            missing.join(", "),
+        ));
+    }
+    (state.version != VERSION).then(|| {
+        format!(
+            "agent {} differs from this controller {VERSION}; upgrade agents together with the controller",
+            state.version
+        )
+    })
+}
+
+/// The settings behind `requirements`, as an administrator wrote them.
+fn settings(requirements: &[Requirement]) -> String {
+    requirements
+        .iter()
+        .map(
+            |requirement| match (requirement.feature, requirement.mandatory) {
+                (protocol::feature::ENVIRONMENT, _) => "env/inherit_env",
+                (protocol::feature::BUS_CERTIFICATE, _) => "its bus login",
+                (protocol::feature::ISOLATION, true) => "isolation = \"required\"",
+                (protocol::feature::ISOLATION, false) => "isolation = \"landlock\"",
+                (protocol::feature::MEMORY_LIMIT, true) => "its required memory_limit",
+                (protocol::feature::MEMORY_LIMIT, false) => "its memory_limit",
+                (feature, _) => feature,
+            },
+        )
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// What a server definition needs from the agents it runs on. A bus login
+/// adds variables and a certificate to its start.
+pub fn server_requirements(server: &ManagedServer) -> Vec<Requirement> {
+    protocol::requirements(
+        server.environment != Default::default() || server.messaging.is_some(),
+        server.messaging.is_some(),
+        server.isolation.mode,
+        server.memory_limit.map(Into::into),
+    )
 }
 
 fn unreachable(node: &str) -> io::Error {
@@ -385,6 +518,7 @@ rift.config.nodes.node1={address='10.0.0.11'}",
         serde_json::to_vec(&NodeState {
             agent: agent.into(),
             version: "test".into(),
+            features: Vec::new(),
             revision,
             servers: servers
                 .iter()
@@ -433,5 +567,70 @@ rift.config.nodes.node1={address='10.0.0.11'}",
             .await
             .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::NotConnected);
+    }
+
+    #[test]
+    fn starts_are_refused_on_agents_that_would_drop_their_settings() {
+        use crate::node::protocol::{FEATURES, IsolationSpec, MemoryLimitSpec, Start};
+        let nodes = nodes();
+        let mut start = Start {
+            server: "game-1".into(),
+            command: vec!["java".into()],
+            directory: "game-1".into(),
+            port: 30000,
+            environment: Default::default(),
+            bus_certificate: None,
+            isolation: IsolationSpec::default(),
+            memory_limit: Some(MemoryLimitSpec {
+                mb: 1024,
+                required: true,
+            }),
+        };
+        // Nothing is sent to a node that never reported, so nothing to check.
+        nodes.check_start("node1", &start).unwrap();
+        // An agent from before `features` advertises none.
+        nodes.record("node1", &state("old", 1, &[])).unwrap();
+        let error = nodes.check_start("node1", &start).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert!(
+            error.to_string().contains("required memory_limit"),
+            "{error}"
+        );
+        assert_eq!(
+            nodes.lacking("node1", &start.requirements()),
+            ["memory_limit"]
+        );
+        // A best-effort limit or `landlock` starts without, as locally.
+        start.memory_limit = Some(MemoryLimitSpec {
+            mb: 1024,
+            required: false,
+        });
+        start.isolation.mode = "landlock".into();
+        nodes.check_start("node1", &start).unwrap();
+        assert!(nodes.lacking("node1", &start.requirements()).is_empty());
+        start.isolation.mode = "required".into();
+        assert!(nodes.check_start("node1", &start).is_err());
+        start.isolation.mode = "off".into();
+        start.environment.inherit = Some(vec!["PATH".into()]);
+        assert!(nodes.check_start("node1", &start).is_err());
+        let described = nodes.describe(&Config::default());
+        assert_eq!(
+            described[0]["missing_features"].as_array().unwrap().len(),
+            FEATURES.len()
+        );
+        assert_eq!(described[0]["version_mismatch"], true);
+        // A current agent gets everything.
+        let mut current: NodeState = serde_json::from_slice(&state("new", 1, &[])).unwrap();
+        current.version = VERSION.into();
+        current.features = FEATURES.iter().map(|&f| f.to_owned()).collect();
+        nodes
+            .record("node1", &serde_json::to_vec(&current).unwrap())
+            .unwrap();
+        start.isolation.mode = "required".into();
+        start.bus_certificate = Some("pem".into());
+        nodes.check_start("node1", &start).unwrap();
+        let described = nodes.describe(&Config::default());
+        assert_eq!(described[0]["missing_features"], serde_json::json!([]));
+        assert_eq!(described[0]["version_mismatch"], false);
     }
 }

@@ -141,22 +141,28 @@ async function testWebAssets(appSource, statusSource) {
     assert(rows[0].children[7].textContent === "local" && rows[1].children[7].textContent === "node1", "Node column missing");
     assert(rows[1].children[1].className.includes("unknown"), "Unknown state not styled");
     h.model.status.nodes = [
-      { name: "node1", state: "unreachable", address: "10.0.0.11", labels: ["games"], instances: 1, max_instances: 40, memory_mb: 32768, allocated_memory_mb: 2048 },
-      { name: "node2", state: "online", address: "10.0.0.12", labels: [], instances: 0, max_instances: 128, memory_mb: null, allocated_memory_mb: 0, min_free_disk_mb: 1024,
+      { name: "node1", state: "unreachable", address: "10.0.0.11", labels: ["games"], instances: 1, max_instances: 40, memory_mb: 32768, allocated_memory_mb: 2048, version: "1.0", missing_features: [], version_mismatch: false },
+      { name: "node2", state: "online", address: "10.0.0.12", labels: [], instances: 0, max_instances: 128, memory_mb: null, allocated_memory_mb: 0, version: "0.9", missing_features: ["memory_limit"], version_mismatch: true, min_free_disk_mb: 1024,
         resources: { memory_total_mb: 16384, memory_available_mb: 9216, cpus: 8, load: 9.5, disk_total_mb: 102400, disk_free_mb: 512 } },
+      { name: "node3", state: "online", address: "10.0.0.13", labels: [], instances: 0, max_instances: 128, memory_mb: null, allocated_memory_mb: 0, version: "1.1", missing_features: [], version_mismatch: true },
     ];
     await h.element("refresh-status").emit("click"); await flush();
     assert(!h.element("nodes-panel").hidden, "Nodes panel hidden with nodes");
-    assert(h.element("node-count").textContent === "1 of 2 online", "Online node count wrong");
+    assert(h.element("node-count").textContent === "2 of 3 online", "Online node count wrong");
     const nodes = h.element("nodes").children;
-    assert(nodes[0].children[0].textContent === "node1" && nodes[0].children[3].textContent === "games", "Node row missing");
-    assert(nodes[0].children[5].textContent.includes("2,048") || nodes[0].children[5].textContent.includes("2048"), `Node memory missing: ${nodes[0].children[5].textContent}`);
-    assert(nodes[1].children[5].textContent.includes("no limit"), "Unlimited memory not explained");
-    assert(nodes[0].children[6].textContent === "—" && nodes[0].children[8].textContent === "—", "Unreachable node shows host resources");
-    assert(nodes[1].children[6].textContent === "9.0 GiB free of 16.0 GiB", `Host memory wrong: ${nodes[1].children[6].textContent}`);
-    assert(nodes[1].children[7].textContent === "9.50 on 8 CPUs" && nodes[1].children[7].children[0].textContent === "busy", "Load or busy flag missing");
-    assert(nodes[1].children[8].textContent === "512 MiB free of 100 GiB", `Disk wrong: ${nodes[1].children[8].textContent}`);
-    assert(nodes[1].children[8].children[0].textContent === "no new instances", "Full disk not flagged");
+    assert(nodes[0].children[0].textContent === "node1" && nodes[0].children[4].textContent === "games", "Node row missing");
+    assert(nodes[0].children[6].textContent.includes("2,048") || nodes[0].children[6].textContent.includes("2048"), `Node memory missing: ${nodes[0].children[6].textContent}`);
+    assert(nodes[1].children[6].textContent.includes("no limit"), "Unlimited memory not explained");
+    // The agent column flags an agent that lacks features or differs in version.
+    const flag = (row) => row.children[3].children.find((child) => child.className === "tag warning");
+    assert(nodes[0].children[3].textContent === "1.0" && !flag(nodes[0]), "A matching agent is flagged");
+    assert(flag(nodes[1])?.textContent === "Outdated" && flag(nodes[1]).title.includes("memory_limit"), "An agent without memory limits is not flagged");
+    assert(flag(nodes[2])?.textContent === "Mismatch" && flag(nodes[2]).title.includes("1.0"), "A different agent version is not flagged");
+    assert(nodes[0].children[7].textContent === "—" && nodes[0].children[9].textContent === "—", "Unreachable node shows host resources");
+    assert(nodes[1].children[7].textContent === "9.0 GiB free of 16.0 GiB", `Host memory wrong: ${nodes[1].children[7].textContent}`);
+    assert(nodes[1].children[8].textContent === "9.50 on 8 CPUs" && nodes[1].children[8].children[0].textContent === "Busy", "Load or busy flag missing");
+    assert(nodes[1].children[9].textContent === "512 MiB free of 100 GiB", `Disk wrong: ${nodes[1].children[9].textContent}`);
+    assert(nodes[1].children[9].children[0].textContent === "Full" && nodes[1].children[9].children[0].title.includes("min_free_disk_mb"), "Full disk not flagged");
   });
   await test("managed servers cannot be stopped from dashboard while occupied", async () => {
     const h = fixture(appSource); await flush();
