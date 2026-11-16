@@ -49,6 +49,83 @@ pub fn principal_grants(node: &str) -> (Vec<String>, Vec<String>) {
     )
 }
 
+/// [`Start`] fields an agent applies, advertised in [`NodeState::features`].
+/// Agents ignore fields they do not know, so the controller checks this list
+/// before it sends a start. An agent from before the list advertises nothing,
+/// whatever its version says: release candidates and nightlies all report
+/// the version of the release they lead to.
+pub mod feature {
+    /// `environment`: `env` and `inherit_env`.
+    pub const ENVIRONMENT: &str = "environment";
+    /// `bus_certificate`, for servers with a bus login.
+    pub const BUS_CERTIFICATE: &str = "bus_certificate";
+    /// `isolation`.
+    pub const ISOLATION: &str = "isolation";
+    /// `memory_limit`.
+    pub const MEMORY_LIMIT: &str = "memory_limit";
+    /// Not a [`Start`] field: [`Files::offset`](super::Files::offset) and
+    /// [`Command::Upload`](super::Command::Upload), for files over
+    /// [`FILE_PART`](super::FILE_PART).
+    pub const FILE_PARTS: &str = "file_parts";
+}
+
+/// Every feature this build's agent applies and its controller may need.
+pub const FEATURES: &[&str] = &[
+    feature::ENVIRONMENT,
+    feature::BUS_CERTIFICATE,
+    feature::ISOLATION,
+    feature::MEMORY_LIMIT,
+    feature::FILE_PARTS,
+];
+
+/// A [`Start`] field that an agent without `feature` would silently drop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Requirement {
+    pub feature: &'static str,
+    /// Starting without the feature is unsafe or breaks the server, so the
+    /// controller refuses. Otherwise the server starts without it and the
+    /// controller warns, as a local server does on a kernel without support.
+    pub mandatory: bool,
+}
+
+/// What a start needs from its agent. `environment` says whether the start
+/// carries `env` or `inherit_env` other than the inherit-everything default:
+/// an agent that ignores it leaks its own environment or misses variables.
+pub fn requirements(
+    environment: bool,
+    bus_certificate: bool,
+    isolation: crate::config::IsolationMode,
+    memory_limit: Option<MemoryLimitSpec>,
+) -> Vec<Requirement> {
+    use crate::config::IsolationMode;
+    let mut requirements = Vec::new();
+    if environment {
+        requirements.push(Requirement {
+            feature: feature::ENVIRONMENT,
+            mandatory: true,
+        });
+    }
+    if bus_certificate {
+        requirements.push(Requirement {
+            feature: feature::BUS_CERTIFICATE,
+            mandatory: true,
+        });
+    }
+    if isolation != IsolationMode::Off {
+        requirements.push(Requirement {
+            feature: feature::ISOLATION,
+            mandatory: isolation == IsolationMode::Required,
+        });
+    }
+    if let Some(limit) = memory_limit {
+        requirements.push(Requirement {
+            feature: feature::MEMORY_LIMIT,
+            mandatory: limit.required,
+        });
+    }
+    requirements
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Command {
@@ -96,8 +173,9 @@ pub struct Start {
     pub directory: PathBuf,
     pub port: u16,
     /// `env` and `inherit_env` of the server. Agents from before this field
-    /// ignore it and start the server with their whole environment minus
-    /// nothing, so upgrade agents together with the controller.
+    /// ignore it and start the server with their whole environment, so the
+    /// controller refuses to start a server that sets it on an agent without
+    /// [`feature::ENVIRONMENT`].
     #[serde(default, skip_serializing_if = "Environment::is_default")]
     pub environment: Environment,
     /// The bus certificate (PEM, public) for a server with a bus login: the
@@ -107,13 +185,33 @@ pub struct Start {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bus_certificate: Option<String>,
     /// The server's `isolation`, applied by the agent on its own kernel.
-    /// Agents from before this field start the server unconfined.
+    /// Agents from before this field start the server unconfined; see
+    /// [`Start::requirements`].
     #[serde(default, skip_serializing_if = "IsolationSpec::is_off")]
     pub isolation: IsolationSpec,
     /// The server's `memory_limit`, enforced by the agent in its own cgroup.
-    /// Agents from before this field start the server without a limit.
+    /// Agents from before this field start the server without a limit; see
+    /// [`Start::requirements`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_limit: Option<MemoryLimitSpec>,
+}
+
+impl Start {
+    pub fn requirements(&self) -> Vec<Requirement> {
+        use crate::config::IsolationMode;
+        // An unknown mode is refused by the agent anyway; treat it as strict.
+        let isolation = match self.isolation.mode.as_str() {
+            "" | "off" => IsolationMode::Off,
+            "landlock" => IsolationMode::Landlock,
+            _ => IsolationMode::Required,
+        };
+        requirements(
+            !self.environment.is_default(),
+            self.bus_certificate.is_some(),
+            isolation,
+            self.memory_limit,
+        )
+    }
 }
 
 /// [`crate::config::MemoryLimit`] on the wire.
@@ -389,6 +487,9 @@ pub struct NodeState {
     /// Random per agent process: a new value means the agent restarted.
     pub agent: String,
     pub version: String,
+    /// The [`FEATURES`] this agent applies. Older agents omit it.
+    #[serde(default)]
+    pub features: Vec<String>,
     /// Increases on every process change, so stale snapshots are recognizable.
     pub revision: u64,
     pub servers: Vec<ProcessState>,

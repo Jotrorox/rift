@@ -817,20 +817,27 @@ impl ProcessBackend for Remote {
         // that does: it is scoped to this instance, the node never gets the
         // key, and every (re)start carries it, so a recovered server has it.
         let (environment, bus_certificate) = with_login(&self.logins, server, None)?;
+        let start = protocol::Start {
+            server: server.name.clone(),
+            command: server.config.command.clone(),
+            directory: server.config.directory.clone(),
+            port,
+            environment: (&environment).into(),
+            bus_certificate,
+            isolation: (&server.config.isolation).into(),
+            memory_limit: server.config.memory_limit.map(Into::into),
+        };
+        // An agent drops fields it does not know. A process it already runs
+        // is adopted as it is, so only a new one is checked.
+        let running = self
+            .nodes
+            .observe(&self.node, &server.name)
+            .is_some_and(|observation| observation.running.is_some());
+        if !running {
+            self.nodes.check_start(&self.node, &start)?;
+        }
         let result = self
-            .request(
-                protocol::Command::Start(protocol::Start {
-                    server: server.name.clone(),
-                    command: server.config.command.clone(),
-                    directory: server.config.directory.clone(),
-                    port,
-                    environment: (&environment).into(),
-                    bus_certificate,
-                    isolation: (&server.config.isolation).into(),
-                    memory_limit: server.config.memory_limit.map(Into::into),
-                }),
-                COMMAND_WAIT,
-            )
+            .request(protocol::Command::Start(start), COMMAND_WAIT)
             .await?;
         self.running = Some(result["pid"].as_u64().map(|pid| pid as u32));
         Ok(())

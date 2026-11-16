@@ -94,6 +94,14 @@ impl Nodes {
         if contents.len() > protocol::MAX_REMOTE_FILE {
             return Err(too_large());
         }
+        // Checked up front: an older agent would refuse the first part anyway,
+        // but this way the operator learns why.
+        if !self.supports(node, protocol::feature::FILE_PARTS) {
+            return Err(io::Error::new(
+                io::ErrorKind::FileTooLarge,
+                format!("the agent on node {node} only accepts files up to 512 KiB; update it"),
+            ));
+        }
         let mut random = [0u8; 16];
         aws_lc_rs::rand::fill(&mut random).map_err(|_| io::Error::other("random source failed"))?;
         let id: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
@@ -111,8 +119,7 @@ impl Nodes {
             };
             reply = self
                 .request(node, &Command::Upload(upload), PART_WAIT)
-                .await
-                .map_err(|error| outdated(node, error))?;
+                .await?;
         }
         Ok(reply)
     }
@@ -130,17 +137,4 @@ fn too_large() -> io::Error {
         io::ErrorKind::FileTooLarge,
         "files on nodes are limited to 64 MiB through the web console",
     )
-}
-
-/// An agent from before [`Command::Upload`] cannot parse it.
-fn outdated(node: &str, error: io::Error) -> io::Error {
-    if error.kind() == io::ErrorKind::InvalidInput
-        && error.to_string().contains("unknown variant `upload`")
-    {
-        return io::Error::new(
-            io::ErrorKind::FileTooLarge,
-            format!("the agent on node {node} only accepts files up to 512 KiB; update it"),
-        );
-    }
-    error
 }

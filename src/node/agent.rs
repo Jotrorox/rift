@@ -445,6 +445,7 @@ impl Agent {
         NodeState {
             agent: self.id.clone(),
             version: env!("CARGO_PKG_VERSION").into(),
+            features: protocol::FEATURES.iter().map(|&f| f.to_owned()).collect(),
             revision: self.revision.load(Ordering::Acquire),
             servers: processes
                 .iter()

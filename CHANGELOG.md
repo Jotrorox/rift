@@ -14,12 +14,22 @@ and are listed under **SDKs**.
 
 ### Nodes
 
+- The controller checks which start settings a node agent applies before it
+  starts a server there. It refuses servers whose `env`, `inherit_env`, bus
+  login, `isolation = "required"` or `required` `memory_limit` the agent would
+  silently drop, starts best-effort settings without and warns, and places new
+  group instances only on agents that can run them. Agents from 0.1.0 report
+  no such settings: upgrade them together with the controller.
+- Outdated or mismatched agents are logged on connect, flagged in the
+  dashboard's Nodes panel, reported by `GET /api/nodes` (`features`,
+  `missing_features`, `version_mismatch`) and checked by
+  `rift check --strict` against a running controller.
 - The Files page and `/api/files/servers` read and write files of up to
   64 MiB on node servers, instead of 512 KiB. Larger files cross the message
   bus in 512 KiB parts; uploads are staged beside the target and renamed into
-  place after the last part. Uploading files over 512 KiB needs an updated
-  agent; older agents refuse them with `413` rather than writing part of the
-  file.
+  place after the last part. Uploading files over 512 KiB needs an agent
+  that advertises the `file_parts` feature; the controller refuses them for
+  older agents with `413`.
 - `/api/files/` requests may take two minutes instead of ten seconds.
 
 ## [0.1.0] - 2026-11-16

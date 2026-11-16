@@ -10,5 +10,7 @@ pub mod protocol;
 mod registry;
 mod transfer;
 
-pub use registry::{DEFAULT_INSTANCE_MEMORY_MB, Nodes, Observation, Reachability, usage};
+pub use registry::{
+    DEFAULT_INSTANCE_MEMORY_MB, Nodes, Observation, Reachability, server_requirements, usage,
+};
 pub use transfer::Remote;
