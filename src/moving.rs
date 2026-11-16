@@ -195,6 +195,20 @@ pub(crate) fn check(
             snapshot.nodes.reachability(to).as_str()
         ));
     }
+    // An agent from before moves would refuse the commands as invalid, after
+    // the instance was already stopped; say so before touching anything.
+    let move_feature = [rift::node::protocol::Requirement {
+        feature: rift::node::protocol::feature::MOVE,
+        mandatory: true,
+    }];
+    for node in std::iter::once(to).chain(source_online.then_some(from.as_str())) {
+        if !snapshot.nodes.lacking(node, &move_feature).is_empty() {
+            return Err(format!(
+                "node {node} runs an agent that cannot take part in moves; upgrade rift on that node to {}",
+                env!("CARGO_PKG_VERSION")
+            ));
+        }
+    }
     if source_online && !snapshot.nodes.online(&from) {
         return Err(format!(
             "node {from} is {}, so the folder of {instance} cannot be copied from it. If the node is gone for good, restore {} on node {to} from a backup and run: rift admin move {instance} {to} --no-copy",
