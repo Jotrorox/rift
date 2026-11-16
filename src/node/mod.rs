@@ -10,5 +10,6 @@ pub mod protocol;
 mod registry;
 
 pub use registry::{
-    DEFAULT_INSTANCE_MEMORY_MB, Nodes, Observation, Reachability, identities, token, usage,
+    DEFAULT_INSTANCE_MEMORY_MB, Nodes, Observation, Reachability, identities, server_requirements,
+    token, usage,
 };

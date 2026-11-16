@@ -336,16 +336,36 @@ principal.
 - `env` and `inherit_env` travel with the start command and apply on the node
   as they would locally, against the agent's environment.
 
-> [!WARNING]
-> Upgrade agents together with the controller. An agent older than the
-> controller starts every server unconfined and without a memory limit, a
-> `required` one included, and ignores `env` and `inherit_env`.
+**Agents older than the controller**
+
+Upgrade agents together with the controller. An agent ignores start settings
+it does not know, so each agent reports the settings it applies, and the
+controller checks them before it starts a server there:
+
+| The server sets | On an agent that cannot apply it |
+| --- | --- |
+| `env` or `inherit_env`, or has a bus login | Refused |
+| `isolation = "required"` or a `required` `memory_limit` | Refused |
+| `isolation = "landlock"` or a `memory_limit` that is not `required` | Starts without it; Rift logs a warning, as it does locally on a kernel without support |
+
+A refused server shows the reason as its last error, and service groups place
+new instances only on nodes whose agent can run them. Agents from 0.1.0 and
+earlier report no settings at all, whatever their version says (release
+candidates and nightlies report the version they lead to), so they get only
+servers that need none of the above.
+
+Rift logs a warning when an outdated agent or one with a different version
+connects, the dashboard's Nodes panel flags it, `GET /api/nodes` reports
+`features`, `missing_features` and `version_mismatch`, and
+`rift check --strict` asks a running controller (over [`admin`](admin.md))
+and reports an agent that would refuse this configuration's servers as an
+error.
 
 ## Operate nodes
 
 | Where | What you get |
 | --- | --- |
-| Dashboard | The Servers page shows each server's node and a Nodes panel with reachability, labels, instances and allocated memory. |
+| Dashboard | The Servers page shows each server's node and a Nodes panel with reachability, agent version (flagged when outdated or different from the proxy), labels, instances and allocated memory. |
 | HTTP | `GET /api/nodes`; every server in `/api/servers` has a `node` field (`local` for the controller). Server logs, console and Files work for remote servers; remote files are limited to 512 KiB through the web console. |
 | Control subject and CLI | `rift.control.nodes` and `rift admin nodes` (grant `servers`). |
 | Java | `RiftControl.nodes()` in the `rift-control` artifact (see [control and events](messaging-subjects.md#java-control-and-events)). |
