@@ -2361,7 +2361,8 @@ async fn create_remote_instance(
     let name = next_instance_name(snapshot, &config, &group)?;
     config.add_instance_on(&group, &name, port, Some(&node))?;
     let next = instance_snapshot(config, snapshot)?;
-    let prepare = rift::provisioning::remote_prepare(&next.config, &name)?;
+    let mut prepare = rift::provisioning::remote_prepare(&next.config, &name)?;
+    seal_forwarding_secret(&mut prepare, &next, &node)?;
     let plan = rift::provisioning::Plan {
         directory: prepare.directory.clone(),
         marker: None,
@@ -2633,6 +2634,26 @@ async fn blocking<T: Send + 'static>(
     tokio::task::spawn_blocking(work)
         .await
         .map_err(io::Error::other)?
+}
+
+/// Hand the node the forwarding secret its Paper instance needs, sealed with
+/// the node's token, so operators need not copy it to every node.
+fn seal_forwarding_secret(
+    prepare: &mut rift::node::protocol::Prepare,
+    snapshot: &Snapshot,
+    node: &str,
+) -> io::Result<()> {
+    let (Some(_), Some(secret)) = (prepare.forwarding, &snapshot.forwarding_secret) else {
+        return Ok(());
+    };
+    let settings = snapshot
+        .config
+        .nodes
+        .get(node)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unknown node"))?;
+    let token = rift::node::token(node, &settings.token_env)?;
+    prepare.forwarding_secret = Some(rift::node::seal::seal(&token, node, secret)?);
+    Ok(())
 }
 
 /// Instance changes keep the active source, revision and bound sockets.
