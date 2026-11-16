@@ -197,7 +197,11 @@ pub fn append_upload(staged: &FsPath, offset: u64, part: &[u8]) -> io::Result<()
 
 /// Flush a complete staging file and rename it over `target`.
 pub fn finish_upload(staged: &FsPath, target: &FsPath) -> io::Result<()> {
-    fs::File::open(staged)?.sync_all()?;
+    // Windows flushes only handles opened for writing.
+    fs::OpenOptions::new()
+        .write(true)
+        .open(staged)?
+        .sync_all()?;
     refuse_folder(target)?;
     fs::rename(staged, target)
 }
