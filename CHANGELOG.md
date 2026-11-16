@@ -12,6 +12,17 @@ and are listed under **SDKs**.
 
 ## [Unreleased]
 
+### Nodes
+
+- Agents report their host's available memory, CPU count and load, and the
+  free disk below `--root` in every state snapshot. Placement skips a node
+  whose host has less available memory than an instance needs, uses the
+  smaller of unallocated `memory_mb` and real available memory to rank
+  `least_memory`, and skips a node with less free disk than its new
+  `min_free_disk_mb` (default 1024, `0` disables). `/api/nodes`,
+  `rift.control.nodes` and the dashboard's Nodes panel show the measurements,
+  and a failed placement names why each node was skipped.
+
 ## [0.1.0] - 2026-11-16
 
 The first stable release, after three release candidates (`v0.1.0-rc.1` to

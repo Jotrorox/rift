@@ -6,6 +6,7 @@
 //! proxies or proxy failover are out of scope: the broker and the player
 //! registry both live in the controller process.
 pub mod agent;
+mod host;
 pub mod protocol;
 mod registry;
 

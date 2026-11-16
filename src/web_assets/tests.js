@@ -142,7 +142,8 @@ async function testWebAssets(appSource, statusSource) {
     assert(rows[1].children[1].className.includes("unknown"), "Unknown state not styled");
     h.model.status.nodes = [
       { name: "node1", state: "unreachable", address: "10.0.0.11", labels: ["games"], instances: 1, max_instances: 40, memory_mb: 32768, allocated_memory_mb: 2048 },
-      { name: "node2", state: "online", address: "10.0.0.12", labels: [], instances: 0, max_instances: 128, memory_mb: null, allocated_memory_mb: 0 },
+      { name: "node2", state: "online", address: "10.0.0.12", labels: [], instances: 0, max_instances: 128, memory_mb: null, allocated_memory_mb: 0, min_free_disk_mb: 1024,
+        resources: { memory_total_mb: 16384, memory_available_mb: 9216, cpus: 8, load: 9.5, disk_total_mb: 102400, disk_free_mb: 512 } },
     ];
     await h.element("refresh-status").emit("click"); await flush();
     assert(!h.element("nodes-panel").hidden, "Nodes panel hidden with nodes");
@@ -151,6 +152,11 @@ async function testWebAssets(appSource, statusSource) {
     assert(nodes[0].children[0].textContent === "node1" && nodes[0].children[3].textContent === "games", "Node row missing");
     assert(nodes[0].children[5].textContent.includes("2,048") || nodes[0].children[5].textContent.includes("2048"), `Node memory missing: ${nodes[0].children[5].textContent}`);
     assert(nodes[1].children[5].textContent.includes("no limit"), "Unlimited memory not explained");
+    assert(nodes[0].children[6].textContent === "—" && nodes[0].children[8].textContent === "—", "Unreachable node shows host resources");
+    assert(nodes[1].children[6].textContent === "9.0 GiB free of 16.0 GiB", `Host memory wrong: ${nodes[1].children[6].textContent}`);
+    assert(nodes[1].children[7].textContent === "9.50 on 8 CPUs" && nodes[1].children[7].children[0].textContent === "busy", "Load or busy flag missing");
+    assert(nodes[1].children[8].textContent === "512 MiB free of 100 GiB", `Disk wrong: ${nodes[1].children[8].textContent}`);
+    assert(nodes[1].children[8].children[0].textContent === "no new instances", "Full disk not flagged");
   });
   await test("managed servers cannot be stopped from dashboard while occupied", async () => {
     const h = fixture(appSource); await flush();

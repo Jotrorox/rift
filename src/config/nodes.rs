@@ -5,6 +5,9 @@ use crate::node::protocol;
 
 const MAX_NODES: usize = 64;
 const MAX_LABELS: usize = 32;
+const MAX_MEGABYTES: usize = 16_777_216;
+/// Placement skips a node whose agent reports less free disk than this.
+pub const DEFAULT_MIN_FREE_DISK_MB: usize = 1024;
 /// Shown for servers that the controller runs itself.
 pub const LOCAL_NODE: &str = "local";
 
@@ -16,6 +19,9 @@ pub struct NodeConfig {
     /// Memory available to servers; `None` places without a memory limit.
     pub memory_mb: Option<usize>,
     pub max_instances: usize,
+    /// Placement skips the node while its agent reports less free disk below
+    /// `--root` than this; 0 disables the check.
+    pub min_free_disk_mb: usize,
     pub labels: BTreeSet<String>,
     /// Environment variable holding the agent's messaging and file token.
     pub token_env: String,
@@ -87,6 +93,7 @@ pub(super) fn parse(root: &Table) -> Result<BTreeMap<String, NodeConfig>, String
                 "address",
                 "memory_mb",
                 "max_instances",
+                "min_free_disk_mb",
                 "labels",
                 "token_env",
             ],
@@ -101,7 +108,24 @@ pub(super) fn parse(root: &Table) -> Result<BTreeMap<String, NodeConfig>, String
             .map_err(|e| e.to_string())?
         {
             Value::Nil => None,
-            _ => Some(integer(&values, &path, "memory_mb", 1, 16_777_216)?),
+            _ => Some(integer(&values, &path, "memory_mb", 1, MAX_MEGABYTES)?),
+        };
+        let min_free_disk_mb = match values
+            .raw_get::<Value>("min_free_disk_mb")
+            .map_err(|e| e.to_string())?
+        {
+            Value::Integer(0) => 0,
+            Value::Number(number) if number == 0.0 => 0,
+            _ => integer(
+                &values,
+                &path,
+                "min_free_disk_mb",
+                DEFAULT_MIN_FREE_DISK_MB,
+                MAX_MEGABYTES,
+            )
+            .map_err(|_| {
+                format!("{path}.min_free_disk_mb: expected an integer in 0..={MAX_MEGABYTES}")
+            })?,
         };
         let labels = match values
             .raw_get::<Value>("labels")
@@ -123,6 +147,7 @@ pub(super) fn parse(root: &Table) -> Result<BTreeMap<String, NodeConfig>, String
                 address,
                 memory_mb,
                 max_instances: integer(&values, &path, "max_instances", 128, 4096)?,
+                min_free_disk_mb,
                 labels,
                 token_env,
             },
@@ -311,7 +336,7 @@ rift.config.routes.public='lobby'
     #[test]
     fn nodes_parse_with_defaults_and_selectors() {
         let config = config(
-            "rift.config.nodes.node1={address='10.0.0.11',memory_mb=32768,max_instances=40,labels={'games'}}
+            "rift.config.nodes.node1={address='10.0.0.11',memory_mb=32768,max_instances=40,min_free_disk_mb=0,labels={'games'}}
 rift.config.nodes['eu-2']={address='fd00::2'}
 rift.config.service_groups.bedwars={template='bedwars',storage='disposable',port_range={30000,30099},nodes={labels={'games'}},placement='fewest_instances'}
 rift.config.service_groups.lobby2={command={'java'},port_range={30100,30109},nodes={'eu-2'}}
@@ -321,12 +346,14 @@ rift.config.templates.bedwars={server_jar='paper.jar'}",
         let node = &config.nodes["node1"];
         assert_eq!(node.memory_mb, Some(32768));
         assert_eq!(node.max_instances, 40);
+        assert_eq!(node.min_free_disk_mb, 0);
         assert_eq!(node.token_env, "RIFT_NODE_NODE1_TOKEN");
         assert_eq!(node.backend_address(30000), "10.0.0.11:30000");
         let other = &config.nodes["eu-2"];
         assert_eq!(other.token_env, "RIFT_NODE_EU_2_TOKEN");
         assert_eq!(other.max_instances, 128);
         assert_eq!(other.memory_mb, None);
+        assert_eq!(other.min_free_disk_mb, DEFAULT_MIN_FREE_DISK_MB);
         assert_eq!(other.backend_address(1), "[fd00::2]:1");
         let group = &config.service_groups["bedwars"];
         assert_eq!(
@@ -392,6 +419,10 @@ rift.config.templates.t={server_jar='paper.jar'}",
             ("rift.config.nodes.a={address='10.0.0.1:25565'}", "address"),
             ("rift.config.nodes.a={address='bad host'}", "address"),
             ("rift.config.nodes.a={address='h',memory_mb=0}", "memory_mb"),
+            (
+                "rift.config.nodes.a={address='h',min_free_disk_mb=-1}",
+                "min_free_disk_mb: expected an integer in 0..",
+            ),
             ("rift.config.nodes.a={address='h',labels={'a b'}}", "labels"),
             (
                 "rift.config.nodes.a={address='h',token_env='X'} rift.config.nodes.b={address='h',token_env='X'}",

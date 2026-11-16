@@ -10,7 +10,7 @@ use bytes::Bytes;
 use serde_json::{Value, json};
 use tokio::sync::Notify;
 
-use super::protocol::{self, Command, NodeState};
+use super::protocol::{self, Command, NodeState, Resources};
 use crate::{
     config::{Config, NodeConfig},
     messaging::Broker,
@@ -210,6 +210,16 @@ impl Nodes {
         self.reachability(node) == Reachability::Online
     }
 
+    /// The host resources from the latest snapshot of an online node; `None`
+    /// while it is unreachable or when its agent does not report them.
+    pub fn resources(&self, node: &str) -> Option<Resources> {
+        lock(&self.0.observed)
+            .get(node)
+            .filter(|observed| observed.seen.elapsed() <= self.0.unreachable_after)?
+            .state
+            .resources
+    }
+
     /// The latest report about `server`, or `None` while the node is unreachable.
     pub fn observe(&self, node: &str, server: &str) -> Option<Observation> {
         let observed = lock(&self.0.observed);
@@ -300,7 +310,13 @@ impl Nodes {
                         "memory_mb": node.memory_mb,
                         "allocated_memory_mb": memory,
                         "max_instances": node.max_instances,
+                        "min_free_disk_mb": node.min_free_disk_mb,
                         "instances": instances,
+                        // Only fresh measurements; an unreachable node's
+                        // last report would read as current.
+                        "resources": seen
+                            .filter(|_| reachability == Reachability::Online)
+                            .and_then(|seen| seen.state.resources),
                         "running": seen.map(|seen| seen.state.servers.len()),
                         "version": seen.map(|seen| seen.state.version.clone()),
                         "last_seen_ms": seen.map(|seen| seen.seen.elapsed().as_millis() as u64),
@@ -382,6 +398,7 @@ rift.config.nodes.node1={address='10.0.0.11'}",
                 status: "exit status: 1".into(),
                 success: false,
             }],
+            resources: None,
         })
         .unwrap()
     }
