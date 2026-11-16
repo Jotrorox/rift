@@ -32,6 +32,7 @@ async function build() {
 
   const href = {
     home: base,
+    docs: `${base}docs/`,
     doc: (slug) => `${base}docs/${slug}/`,
   };
   const docs = await loadDocs(root, href.doc);
@@ -47,6 +48,7 @@ async function build() {
   });
 
   await write('index.html', page(theme.home(ctx)));
+  await write('docs/index.html', page(theme.index(ctx)));
   for (const doc of docs) {
     await write(`docs/${doc.slug}/index.html`, page(theme.doc(ctx, doc)));
   }

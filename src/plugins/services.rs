@@ -600,7 +600,7 @@ impl StoreApi<'_> {
 }
 
 /// `permissions`: the contract's six calls over Rift's permission store
-/// (see docs/permissions.md#persistent-plugins). Writes are recorded with
+/// (see docs/permissions-lua.md#persistent-plugins). Writes are recorded with
 /// actor `lua:plugin:<name>` and nodes carry source `plugin:<name>`.
 pub struct PermissionsApi<'a>(&'a Arc<Inner>);
 

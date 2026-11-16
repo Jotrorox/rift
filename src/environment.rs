@@ -74,7 +74,7 @@ pub fn is_protected(name: &str) -> bool {
 ///
 /// `RIFT_DUMPABLE=1` skips it, for a debugging session or for monitoring
 /// that counts Rift's descriptors through `/proc/<pid>/fd` (see
-/// docs/operations.md). The variable is read before anything else, so it
+/// docs/hardening.md). The variable is read before anything else, so it
 /// cannot be turned on later by a reload.
 pub fn harden_process() {
     #[cfg(target_os = "linux")]

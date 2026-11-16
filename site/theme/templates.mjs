@@ -27,8 +27,8 @@ function header(ctx, current = '') {
     <a class="logo" href="${ctx.href.home}">${SITE.name}</a>
     <nav aria-label="Site">
       ${link(ctx.href.doc('overview'), 'Overview', 'overview')}
+      ${link(ctx.href.docs, 'Docs', 'docs')}
       ${link(ctx.href.doc('performance'), 'Performance', 'performance')}
-      ${link(`${ctx.href.home}#guides`, 'Guides', 'guides')}
       <a href="${SITE.repo}" class="hide-sm">GitHub</a>
       <a class="btn btn-sm" href="${SITE.releases}">Download</a>
     </nav>
@@ -113,6 +113,7 @@ function guides(ctx) {
         return `<li><a href="${ctx.href.doc(g.slug)}"><span><b>${d.title}</b><small>${g.blurb}</small></span>${chevron}</a></li>`;
       }).join('')}
     </ul>
+    <p class="note"><a href="${ctx.href.docs}">All ${ctx.docs.length} pages ›</a></p>
   </section>`;
 }
 
@@ -138,18 +139,27 @@ ${footer()}`;
   return { title: `${SITE.name} – One port. Every server.`, description: SITE.description, body, bodyClass: 'home' };
 }
 
+// One collapsible group per section; only the current page's group starts open.
+// `data-find` holds what the filter box matches: the title and the headings.
 function docNav(ctx, current) {
-  return GROUPS.map((group) => `<div class="side-group">
-      <p>${group}</p>
-      <ul>${ctx.docs.filter((d) => d.group === group).map((d) => `<li><a href="${ctx.href.doc(d.slug)}"${d.slug === current ? ' aria-current="page"' : ''}>${d.title}</a></li>`).join('')}</ul>
-    </div>`).join('');
+  const here = ctx.docs.find((d) => d.slug === current)?.group;
+  const item = (d) => {
+    const find = escapeHtml([d.title, d.heading, ...d.toc.map((t) => t.text)].join(' ').toLowerCase());
+    return `<li data-find="${find}"><a href="${ctx.href.doc(d.slug)}"${d.slug === current ? ' aria-current="page"' : ''}>${escapeHtml(d.title)}</a></li>`;
+  };
+  return `<label class="side-filter"><span class="sr">Filter pages</span><input type="search" placeholder="Filter pages" autocomplete="off" data-filter></label>
+    ${GROUPS.map((group) => `<details class="side-group"${group === here ? ' open data-current' : ''}>
+      <summary>${group}</summary>
+      <ul>${ctx.docs.filter((d) => d.group === group).map(item).join('')}</ul>
+    </details>`).join('')}
+    <p class="side-empty" hidden>No page matches.</p>`;
 }
 
 export function doc(ctx, d) {
   const { prev, next } = neighbours(ctx.docs, d);
   const toc = d.toc.filter((t) => t.depth === 2);
   const tocList = `<ul>${toc.map((t) => `<li><a href="#${t.id}">${escapeHtml(t.text)}</a></li>`).join('')}</ul>`;
-  const current = ['overview', 'performance'].includes(d.slug) ? d.slug : '';
+  const current = ['overview', 'performance'].includes(d.slug) ? d.slug : 'docs';
   const body = `${header(ctx, current)}
 <div class="doc-layout">
   <aside class="side" aria-label="Documentation">
@@ -174,6 +184,24 @@ ${footer()}`;
   return { title: `${d.title} – ${SITE.name}`, description: d.blurb, body, bodyClass: 'docpage' };
 }
 
+// The index of every page, grouped like the sidebar.
+export function index(ctx) {
+  const body = `${header(ctx, 'docs')}
+<main id="main" class="wrap docs-index">
+  <p class="eyebrow">Documentation</p>
+  <h1>Find your page.</h1>
+  <p class="lede left">New here? Read the <a href="${ctx.href.doc('overview')}">overview</a>, then <a href="${ctx.href.doc('install')}">install Rift</a>.</p>
+  ${GROUPS.map((group) => `<section aria-labelledby="group-${group.toLowerCase()}">
+    <h2 id="group-${group.toLowerCase()}" class="h3">${group}</h2>
+    <ul class="guides">
+      ${ctx.docs.filter((d) => d.group === group).map((d) => `<li><a href="${ctx.href.doc(d.slug)}"><span><b>${escapeHtml(d.title)}</b><small>${escapeHtml(d.blurb)}</small></span>${chevron}</a></li>`).join('')}
+    </ul>
+  </section>`).join('')}
+</main>
+${footer()}`;
+  return { title: `Documentation – ${SITE.name}`, description: `Every page of the ${SITE.name} documentation.`, body, bodyClass: 'docsindex' };
+}
+
 export function notFound(ctx) {
   const body = `${header(ctx)}
 <main id="main">
@@ -182,7 +210,7 @@ export function notFound(ctx) {
     <h1>Page not found.</h1>
     <p class="hero-sub">This page may have moved. The guides are a good place to start.</p>
     <div class="ctas">
-      <a class="btn" href="${ctx.href.doc('overview')}">Read the guide</a>
+      <a class="btn" href="${ctx.href.docs}">Browse the docs</a>
       <a class="more" href="${ctx.href.home}">Back to home ›</a>
     </div>
   </section>

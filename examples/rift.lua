@@ -49,7 +49,7 @@ rift.config.shutdown_timeout_ms = 30000 -- Wait for players before force-closing
 -- rift.config.metrics = "127.0.0.1:9090" -- Prometheus endpoint: /metrics
 
 -- Behind TCPShield, Cloudflare Spectrum, HAProxy or a cloud load balancer that
--- sends PROXY protocol headers, trust only those sources (see docs/operations.md).
+-- sends PROXY protocol headers, trust only those sources (see docs/hardening.md).
 -- rift.config.proxy_protocol = { trusted_proxies = { "10.0.0.0/8" } }
 
 -- Optional local administration. Export a strong RIFT_ADMIN_TOKEN before start.

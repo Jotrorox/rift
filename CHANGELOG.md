@@ -5,7 +5,7 @@ Notable changes to Rift, newest first. The format follows
 [stability policy](docs/stability.md). Every release that changes the
 `rift.sqlite3` schema says so under **Database**, because an older binary
 refuses a newer schema: see
-[upgrade and rollback](docs/operations.md#shutdown-upgrade-and-rollback).
+[upgrade and rollback](docs/upgrading.md).
 
 The SDKs are versioned on their own, after the plugin contract they implement,
 and are listed under **SDKs**.
@@ -72,6 +72,9 @@ published as prereleases from the same pipeline.
   `ghcr.io/jotrorox/rift`, with build provenance.
 - A hardened example systemd unit that delegates its cgroup so memory limits
   work, and `SECURITY.md` with the vulnerability reporting process.
+- Documentation in short, task-focused pages, shipped in every archive and
+  published as a website with a page index and a page filter. The site build
+  fails on a broken link.
 
 ### Database
 

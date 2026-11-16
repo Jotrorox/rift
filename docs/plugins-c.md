@@ -3,9 +3,10 @@
 A C (or C++) plugin is a WebAssembly component built with
 [wasi-sdk](https://github.com/WebAssembly/wasi-sdk/releases) and the SDK in
 [`sdk/c`](../sdk/c): generated bindings, weak defaults for every hook and a
-header of helpers. Read the [plugin overview](plugins.md) for how plugins are
-enabled, dispatched and restarted, and [`sdk/c/README.md`](../sdk/c/README.md)
-for the SDK's files and its CMake integration.
+header of helpers. This guide shows how the plugin contract looks in C.
+[Plugins](plugins.md) covers enabling and trust;
+[Plugin events and commands](plugin-events.md) says what each event and answer
+means.
 
 ## Build
 
@@ -17,13 +18,19 @@ $WASI_SDK_PATH/bin/clang --target=wasm32-wasip2 -mexec-model=reactor -O2 \
   sdk/c/rift_plugin.c sdk/c/rift_plugin_defaults.c sdk/c/rift_plugin_component_type.o
 ```
 
-`sdk/c/build.sh -o my_plugin.wasm my_plugin.c` runs the same line
-(`WASI_SDK_PATH` defaults to `/opt/wasi-sdk`). With CMake, configure with
-`-DCMAKE_TOOLCHAIN_FILE=$WASI_SDK_PATH/share/cmake/wasi-sdk-p2.cmake`,
-`include(sdk/c/RiftPlugin.cmake)` and call `rift_add_plugin(my_plugin my_plugin.c)`.
-`-mexec-model=reactor` builds a library without `main`; `--strip-debug` drops
-the DWARF wasi-libc ships with, which otherwise triples a small plugin's size.
-Check the result with `wasm-tools component wit my_plugin.wasm`.
+- `sdk/c/build.sh -o my_plugin.wasm my_plugin.c` runs the same line
+  (`WASI_SDK_PATH` defaults to `/opt/wasi-sdk`).
+- With CMake, configure with
+  `-DCMAKE_TOOLCHAIN_FILE=$WASI_SDK_PATH/share/cmake/wasi-sdk-p2.cmake`,
+  `include(sdk/c/RiftPlugin.cmake)` and call
+  `rift_add_plugin(my_plugin my_plugin.c)`.
+- `-mexec-model=reactor` builds a library without `main`. `--strip-debug`
+  drops the DWARF wasi-libc ships with, which otherwise triples a small
+  plugin's size.
+- Check the result with `wasm-tools component wit my_plugin.wasm`.
+
+[`sdk/c/README.md`](../sdk/c/README.md) describes the SDK's files and its
+CMake integration.
 
 ## A minimal plugin
 
@@ -74,7 +81,7 @@ Rust, Go and Lua examples.
 | `decision` | `rift_decision_continue`, `rift_decision_deny(ret, text)`, `rift_decision_message(ret, text)`, `rift_decision_server`, `rift_decision_queue`, `rift_decision_leave_queue`; `rift_decision_deny_fmt` and `rift_decision_message_fmt` format plain text. |
 | `suggest`, `status` | `rift_suggestions_add(ret, text, tooltip_or_NULL)`; `rift_status_override_init`, `rift_status_override_add_sample` and owned texts in `motd` and `version`. |
 | host functions | `rift_plugin_<interface>_<function>`, for example `rift_plugin_players_tab_list`, `rift_plugin_store_increment`, `rift_plugin_bus_publish`, `rift_plugin_timers_every`. `rift.h` wraps the common ones and logs their errors: `rift_message`, `rift_action_bar`, `rift_title`, `rift_kick`, `rift_broadcast`, `rift_show_dialog`, `rift_player_lookup`, `rift_player_search`, `rift_set_language`, `rift_add_group`, `rift_background_*`. |
-| `chat`, `kick` | `exports_rift_plugin_handler_chat` and `exports_rift_plugin_handler_kick`, delivered only when the hook list names them; see [chat and kick](#chat-and-kick). |
+| `chat`, `kick` | `exports_rift_plugin_handler_chat` and `exports_rift_plugin_handler_kick`; see [chat and kick](#chat-and-kick). |
 | `background` | `rift_background_defer`, `rift_background_resolve`, `rift_background_run`, `rift_background_is_worker`; see [background work](#background-work). |
 | `result<T, string>` | The function returns `bool` and fills a `ret` and an `err` out-parameter. |
 | `option<T>` parameters | Pointers; `NULL` is `none`. |
@@ -84,11 +91,9 @@ Rust, Go and Lua examples.
 
 ## Text
 
-Everything a player reads is a `rift_text_t`: plain text of 1..=1024 bytes,
-shown exactly as written, or a JSON text component of at most 32 KiB
-([rich text](extensions.md#rich-text)). Messages, action bars, titles, tab
-lists, boss bars, kick reasons, `deny` and `message` decisions, suggestion
-tooltips and the server-list fields all take one.
+Everything a player reads is a `rift_text_t`, the contract's
+[`text`](plugin-events.md#text): plain text shown exactly as written, or a JSON
+text component.
 
 ```c
 rift_message(&ctx->uuid, rift_text_plain("Welcome back."));
@@ -101,10 +106,12 @@ rift_title(&ctx->uuid, &title, &subtitle, 10, 70, 20);  // either may be NULL
 ```
 
 `rift_text_plain`, `rift_text_json` and `rift_text_plain_string(&ctx->name)`
-are borrowed views, like `rift_str`. Host functions borrow them and the
-`rift.h` helpers copy what they keep, so literals are fine in both places. A
-text you store yourself in a value a handler returns must be owned:
-`rift_text_dup(text)` or `rift_text_plain_fmt("%d online", n)`.
+are borrowed views, like `rift_str`.
+
+- Host functions borrow them and the `rift.h` helpers copy what they keep, so
+  literals are fine in both places.
+- A text you store yourself in a value a handler returns must be owned:
+  `rift_text_dup(text)` or `rift_text_plain_fmt("%d online", n)`.
 
 ```c
 bool exports_rift_plugin_handler_status(exports_rift_plugin_handler_ping_t *ping, rift_status_override_t *ret) {
@@ -115,6 +122,8 @@ bool exports_rift_plugin_handler_status(exports_rift_plugin_handler_ping_t *ping
   return true;
 }
 ```
+
+[Rich text builders](#rich-text-builders) write the JSON for you.
 
 ## Commands
 
@@ -128,18 +137,18 @@ rift_command_add_alias(find, "whereis");
 rift_command_set_console(find, true);
 ```
 
-The hooks always see `find` in `ctx->command`, whichever name was typed. For
-a console run `ctx->console` is true, `ctx->name` is `CONSOLE`, `ctx->uuid` is
-empty and `ctx->connection_id` is 0; a `message` decision is printed for the
-operator. The spec pointer is valid until the next command is added.
+- The spec pointer is valid until the next command is added.
+- The hooks always see `find` in `ctx->command`, whichever name was typed.
+- For a console run `ctx->console` is true, `ctx->name` is `CONSOLE`,
+  `ctx->uuid` is empty and `ctx->connection_id` is 0; a `message` decision is
+  printed for the operator ([commands](plugin-events.md#commands)).
 
 ## Chat and kick
 
-`exports_rift_plugin_handler_chat` sees chat messages, and the commands that
-reach the backend, before the backend does ([the hook](plugins.md#chat));
-`exports_rift_plugin_handler_kick` runs when a backend kicks a player in play.
-Both are delivered only to a plugin whose hook list names them: an empty list
-means every hook except these two.
+`exports_rift_plugin_handler_chat` handles the
+[`chat`](plugin-events.md#chat) event and `exports_rift_plugin_handler_kick`
+the `kick` event. Rift delivers both only when the hook list names them: an
+empty list means every hook except these two.
 
 ```c
 rift_registration_add_hook(ret, RIFT_PLUGIN_TYPES_HOOK_CHAT);
@@ -163,31 +172,24 @@ void exports_rift_plugin_handler_kick(rift_context_t *ctx, rift_decision_t *ret)
 }
 ```
 
-`attempt->text` is the message, or the command line without its slash; for a
-command, `attempt->ctx.command` is the root name and `attempt->ctx.args` the
-rest. `chat` answers `continue` or `deny`. `kick` answers `continue` (leave it
-to `network.on_kick`), `deny` (disconnect with the text) or `server`. Rift
-asks a plugin that lists `chat` about every message of every player; with
-signed chat, the first deny costs that player their
-[chat signing](plugins.md#chat).
+| Hook | Input | Answers |
+| --- | --- | --- |
+| `chat` | `attempt->text` is the message, or the command line without its slash. For a command, `attempt->ctx.command` is the root name and `attempt->ctx.args` the rest | `continue` or `deny` |
+| `kick` | `ctx->server` and `ctx->reason` | `continue` (leave it to `network.on_kick`), `deny` (disconnect with the text) or `server` |
+
+With signed chat, the first deny costs that player their
+[chat signing](plugin-events.md#denying-costs-the-player-chat-signing).
 
 ## Background work
 
-A plugin runs one call at a time, so a hook that blocks holds up every other
-hook. A decision hook can defer its answer instead, hand the slow part to a
-background worker and return. Workers are further instances of the same
-component, enabled in the manifest:
+[Background work](plugin-events.md#background-work) explains the model and
+its rules. Workers need `[background]` in the manifest.
 
-```toml
-[background]
-workers = 2
-```
-
-A worker has its own memory and globals. It never gets `init` or any hook:
-only `work_init` once, with the plugin configuration, and then one `work`
-call per job. `work` may block (30 s unless the manifest sets
-`deadlines.work`); its result returns to the main instance through
-`job_done`.
+In C a worker is another instance of the component with its own memory and
+globals: globals set in `init` are not set there. It runs `work_init` once,
+with the plugin configuration, and then one `work` call per job, so read the
+configuration again in `work_init` and pass everything a job needs in its
+payload. The result returns to the main instance through `job_done`.
 
 ```c
 #include "rift.h"
@@ -244,19 +246,17 @@ void exports_rift_plugin_handler_job_done(uint64_t handle, rift_job_outcome_t *o
 }
 ```
 
-- `rift_background_defer` works in `login`, `initial_server`,
-  `before_transfer`, `command`, `chat` and `kick`, once per call. A hook that
-  does not defer answers through `ret` as usual.
-- The hook's deadline keeps running while the job does. An answer after it
-  counts as a missed deadline (`on_timeout`), and `rift_background_resolve`
-  then returns false.
-- `rift_background_run` fails without workers in the manifest and when 1024
-  jobs wait already. `job_done` reports a failed job with `outcome->is_err`
-  and the reason in `outcome->val.err`.
+- `rift_background_resolve` returns false when the answer came after the
+  hook's deadline.
+- `job_done` reports a failed job with `outcome->is_err` and the reason in
+  `outcome->val.err`.
 - `rift_background_is_worker()` tells the two kinds of instance apart in code
-  they share. `job_done` needs no entry in the hook list.
+  they share.
 
 ## Players, languages and groups
+
+[The player directory and languages](plugin-events.md#the-player-directory-and-languages)
+describes the records and the language rules.
 
 `rift_plugin_players_get` and `_list` return `rift_player_info_t` with the
 player's `ip`, profile `properties`, `visible_to`, the client's `locale` and
@@ -277,15 +277,12 @@ if (rift_player_search("ste", 10, &found)) {    // most recently seen first
 }
 ```
 
-`rift_set_language(&ctx->uuid, "de_de")` sets the language of Rift's own
-messages for a player, online or not; `NULL` goes back to the client's
-locale. It is remembered across sessions, so `ctx->language` has it from
-`login` on. Without one, `ctx->language` is the client's locale once the
-client has sent it, which is after `login`.
-
-`rift_add_group(&ctx->uuid, "vip", expires_at)` adds the user to a group
-until `expires_at` Unix seconds, replacing an earlier expiry; `0` adds them
-for good:
+- `rift_set_language(&ctx->uuid, "de_de")` sets the language of Rift's own
+  messages for a player, online or not; `NULL` goes back to the client's
+  locale. `ctx->language` has it from `login` on.
+- `rift_add_group(&ctx->uuid, "vip", expires_at)` adds the user to a group
+  until `expires_at` Unix seconds, replacing an earlier expiry; `0` adds them
+  for good:
 
 ```c
 rift_add_group(&ctx->uuid, "vip", (uint64_t)rift_plugin_meta_time() + 30 * 86400);
@@ -326,51 +323,46 @@ rift_title(&ctx->uuid, NULL, &subtitle, 10, 70, 20);
 free(sub);
 ```
 
-The component setters are `rift_component_color`, `_bold`, `_italic`,
-`_underlined`, `_strikethrough`, `_obfuscated`, `_run_command`,
-`_suggest_command`, `_open_url`, `_copy_to_clipboard`, `_hover_text` (plain),
-`_hover` (a component as JSON), `_insertion`, `_extra` (a child as JSON),
-`_extra_text` and `_field` (any other key, raw JSON); call each at most once.
-`rift_string_quote` turns a `rift_string_t` into an owned JSON string.
+- The component setters are `rift_component_color`, `_bold`, `_italic`,
+  `_underlined`, `_strikethrough`, `_obfuscated`, `_run_command`,
+  `_suggest_command`, `_open_url`, `_copy_to_clipboard`, `_hover_text`
+  (plain), `_hover` (a component as JSON), `_insertion`, `_extra` (a child as
+  JSON), `_extra_text` and `_field` (any other key, raw JSON). Call each at
+  most once.
+- `rift_string_quote` turns a `rift_string_t` into an owned JSON string.
 
-Markup is only read from an explicit `mini` object: a bare JSON string, as in
-`rift_text_json("\"<red>hi\"")`, is shown as written, and so is all plain
+Rift reads markup only from an explicit `mini` object. A bare JSON string, as
+in `rift_text_json("\"<red>hi\"")`, is shown as written, and so is all plain
 text. Pass player input with `rift_mini_arg`, never by formatting it into the
-markup. The tags are listed in [Text and markup](text.md).
+markup. The tags are listed in [Styled text](text.md).
 
 ## Memory ownership
 
 These rules come from wit-bindgen's C generator and cause most C plugin bugs:
 
-- **Handler arguments are yours.** Free them before returning
-  (`rift_context_free`, `rift_chat_attempt_free`, `rift_bus_message_free`,
-  `rift_job_outcome_free`, or the generated `rift_plugin_types_*_free`).
-- **Values you return are freed by the bindings** with `free()`. Every
-  non-empty string or list in a return value must come from `malloc`: use
-  `rift_string_dup`, `rift_string_fmt`, `rift_text_dup`, `rift_decision_*`,
-  `rift_suggestions_add` and `rift_registration_*`. Returning
-  `rift_str("literal")` or a `rift_text_plain` view corrupts the heap.
-- **Arguments you pass to host functions are borrowed**; literals are fine.
-- **Results from host functions are yours**, including error strings: free
-  them with `rift_string_free`, `rift_bytes_free`, `rift_string_list_free`,
-  `rift_player_record_free` or the generated helpers.
+| What | Who frees it |
+| --- | --- |
+| Handler arguments | You, before returning: `rift_context_free`, `rift_chat_attempt_free`, `rift_bus_message_free`, `rift_job_outcome_free`, or the generated `rift_plugin_types_*_free` |
+| Values you return | The bindings, with `free()`. Every non-empty string or list in a return value must come from `malloc`: use `rift_string_dup`, `rift_string_fmt`, `rift_text_dup`, `rift_decision_*`, `rift_suggestions_add` and `rift_registration_*` |
+| Arguments you pass to host functions | Nobody: they are borrowed, so literals are fine |
+| Results from host functions, including error strings | You: `rift_string_free`, `rift_bytes_free`, `rift_string_list_free`, `rift_player_record_free` or the generated helpers |
+
+> [!WARNING]
+> Returning `rift_str("literal")` or a `rift_text_plain` view from a handler
+> corrupts the heap.
 
 ## Gotchas
 
-- **The bindings are generated for world `core`, not `plugin`.** wit-bindgen's
-  C generator (seen with 0.41 and 0.63) emits `*_free` helpers that silently
-  skip `option<string>`, `list<string>` and `list<u8>` fields whose types are
-  shared with WASI, which leaks memory on every hook. Generating world `core`
-  (the Rift imports and the handler export without WASI) avoids the shared
-  types; wasi-libc brings its own WASI bindings, so the built component still
-  satisfies world `plugin` and imports exactly the WASI interfaces libc uses.
-  Keep this when regenerating: `sdk/c/regenerate.sh` does it for you.
+- **The bindings are generated for world `core`, not `plugin`.** For world
+  `plugin`, wit-bindgen's C generator (seen with 0.41 and 0.63) emits `*_free`
+  helpers that silently skip `option<string>`, `list<string>` and `list<u8>`
+  fields whose types are shared with WASI, which leaks memory on every hook.
+  World `core` has no WASI, and wasi-libc brings its own WASI bindings, so the
+  built component still satisfies world `plugin`. Keep this when
+  regenerating: `sdk/c/regenerate.sh` does it for you.
 - **wasi-sdk's WASI patch version differs from Rift's.** The component imports
   WASI 0.2 at the patch version wasi-sdk targets; Rift links WASI 0.2
   semver-compatibly, so this needs no action.
-- **A worker shares no memory with the main instance.** Globals set in
-  `init` are not set in a worker; read the configuration again in
-  `work_init`, and pass everything a job needs in its payload.
 - **Traps restart the instance.** `abort()`, an out-of-bounds access or an
   allocation failure ends the call; Rift applies `on_failure` and restarts the
   instance per `failure.restart`. A hook still running at its deadline is

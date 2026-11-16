@@ -54,15 +54,17 @@ export const WORLDS = [
 
 // Guides featured on the landing page, with shorter blurbs than the docs nav.
 export const GUIDES = [
-  { slug: 'overview', blurb: 'Install, first run, auth and routing' },
+  { slug: 'install', blurb: 'Download, verify and first start' },
+  { slug: 'authentication', blurb: 'Online mode and identity forwarding' },
   { slug: 'lua', blurb: 'Settings, modules and folder plugins' },
-  { slug: 'plugins', blurb: 'Lua, Rust, C and Go plugins, and the trust model' },
-  { slug: 'extensions', blurb: 'Hooks, commands, queues and state' },
-  { slug: 'operations', blurb: 'systemd, containers, upgrades, rollback' },
-  { slug: 'managed-servers', blurb: 'Processes, scaling, templates, worlds' },
-  { slug: 'http', blurb: 'Dashboard, status site, config API' },
+  { slug: 'operations', blurb: 'Reloads, maintenance and transfers' },
+  { slug: 'deployment', blurb: 'systemd and containers' },
+  { slug: 'managed-servers', blurb: 'Processes started on demand' },
+  { slug: 'service-groups', blurb: 'Dynamic instances and scaling' },
+  { slug: 'http', blurb: 'Dashboard, status site, HTTP API' },
+  { slug: 'plugins', blurb: 'Lua, Rust, C and Go plugins' },
+  { slug: 'permissions', blurb: 'Groups, tracks and contexts for the network' },
   { slug: 'messaging', blurb: 'The subject broker and its QUIC protocol' },
-  { slug: 'bungeecord', blurb: 'Transfers for Bukkit/Paper plugins' },
   { slug: 'performance', blurb: 'CPU, memory and latency vs. Velocity' },
 ];
 

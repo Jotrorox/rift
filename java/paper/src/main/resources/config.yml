@@ -1,5 +1,5 @@
 # RiftPerms: answers permission checks from the Rift proxy's data.
-# docs/permissions-java.md in the Rift repository describes every setting.
+# docs/riftperms.md in the Rift repository describes every setting.
 
 # On a server Rift manages with a messaging block on its group or managed
 # server, delete server, group and the bus settings: Rift sets RIFT_SERVER_NAME,
@@ -37,7 +37,7 @@ request_timeout_ms: 5000
 #   deny          - nothing is set: plugin defaults and operator status apply
 #   last_snapshot - the replica saved when RiftPerms was last disabled (snapshot_file)
 #   fallback_file - groups and users in fallback_file, compiled like the proxy does;
-#                   unlisted players get "default" (format: docs/permissions-java.md)
+#                   unlisted players get "default" (format: docs/riftperms.md)
 offline_policy: deny
 snapshot_file: replica.json
 fallback_file: fallback.json

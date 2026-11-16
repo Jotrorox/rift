@@ -1,49 +1,48 @@
 # Rift
 
-A Minecraft Java Edition proxy written in Rust with embedded LuaJIT. Route
-hostnames through one port, authenticate players, switch backends, and manage
-configuration through Lua or the bundled web dashboard. No Java or separate Lua
-installation is needed to run Rift.
+Rift is a Minecraft Java Edition proxy written in Rust with embedded LuaJIT.
+It puts a network of servers behind one port: it routes hostnames,
+authenticates players, moves them between backends and can start and stop the
+servers itself. You configure it in Lua or in the bundled web dashboard.
+Running Rift needs no Java and no separate Lua installation.
 
-Rift can also supervise local Minecraft servers: start them on demand, stop
-empty servers, and operate their lifecycle from the CLI or web dashboard.
-Service groups can maintain minimum and spare capacity, scale from occupancy or
-queue pressure, and recover failed processes with bounded retries. Define
-local templates from server jars, plugins, configs and maps, then create instances
-with allocated ports and live backend registration. Like CloudNet v4, templates
-can instead name server software (Paper, Folia, Purpur, Fabric, vanilla or a
-pinned URL) that Rift downloads, verifies and caches in `local/versioncache`,
-layer template folders from `local/templates`, and place instances in
-`local/services` or `temp/services`. Spin servers up from the dashboard,
-`rift admin create`, Lua plugins (`rift.servers.create`) or `rift.control.create`
-on the message bus; the dashboard's Files page edits template and server folders.
-Template folders can come from a git repository (`template_sources`), and
-`memory_limit` caps a server's memory on Linux.
-See [examples/cloud.lua](examples/cloud.lua). Persistent worlds retain
-files after removal; disposable game instances delete their generated files on
-removal. Both retain files across stop/start. Bundled SQLite saves registrations,
-allocated ports, storage ownership and manual stops across proxy restarts in
-`rift.sqlite3` beside the config. See the
-[managed-server guide](docs/managed-servers.md), [managed-server example](examples/managed.lua),
-[service groups](examples/services.lua) and [provisioning templates](examples/templates.lua).
-Run servers on more machines with `rift node` agents that the proxy controls
-over its message bus, with label- and capacity-based placement; see
-[multiple hosts](docs/nodes.md) and [examples/nodes.lua](examples/nodes.lua).
-The dashboard provides live server logs and commands, structured group/template
-editing, server list and tab list editing, permission groups, players, tracks,
-registered nodes and their change history, configuration deployment history
-and rollback, scoped operator tokens, and retained audit records. See the [HTTP operator guide](docs/http.md).
-Managed Minecraft processes need their own Java runtime and explicit EULA acceptance.
+## Features
+
+- **[Routing](docs/lua.md):** many hostnames through one port, with
+  fallbacks, health checks and rate limits.
+- **[Authentication](docs/authentication.md):** Mojang account checks, with
+  Velocity, BungeeGuard or BungeeCord forwarding to backends.
+- **[Switching](docs/network-protocol.md):** `/server`, `/hub`, crash recovery.
+- **[Translation](docs/translation.md):** players and backends on different
+  Minecraft versions, built in.
+- **[Managed servers](docs/managed-servers.md):** Rift starts servers on
+  demand and stops empty ones, with [service groups](docs/service-groups.md),
+  [templates](docs/templates.md) and [multiple hosts](docs/nodes.md).
+- **[Plugins](docs/plugins.md):** Lua, Rust, C or Go, with login and transfer
+  decisions, chat hooks, commands, queues and timers.
+- **[Permissions](docs/permissions.md):** LuckPerms-style users, groups,
+  contexts, tracks and prefixes, with LuckPerms import.
+- **[Web dashboard](docs/http.md):** server logs and consoles, configuration
+  editing with history and rollback, operator tokens and audit records.
+- **[Message bus](docs/messaging.md):** subjects, queue groups and
+  request/reply for Lua, plugins and backend servers.
+- **[Server list and tab list](docs/server-list.md):** network MOTD and
+  favicon; tab list header, footer and network-wide players.
+- **[Styled text](docs/text.md):** markup such as
+  `<gradient:gold:red>Welcome</gradient>` in every text a player sees.
+- **[Dialogs](docs/dialogs.md):** 1.21.6+ screens with inputs and buttons.
+- **[Operations](docs/operations.md):** an [admin CLI](docs/admin.md),
+  [metrics and logs](docs/monitoring.md), live reload, and
+  [systemd and Docker setups](docs/deployment.md).
+- **[Performance](docs/performance.md):** reproducible runs against Velocity.
 
 ## Quick start
 
-Download the archive for your platform (`rift-linux-x86_64.tar.gz`,
-`rift-linux-aarch64.tar.gz`, `rift-macos-aarch64.tar.gz` or
-`rift-windows-x86_64.zip`; Linux hosts with a glibc older than 2.35 take the
-[`-musl` archive](docs/operations.md#which-linux-build)) and `SHA256SUMS` from
-[Releases](https://github.com/Jotrorox/rift/releases). Check it
-([verification](docs/operations.md#verifying-a-download)), extract it into an
-empty directory, then run:
+Download the archive for your platform and `SHA256SUMS` from
+[Releases](https://github.com/Jotrorox/rift/releases),
+[verify it](docs/install.md#verifying-a-download) and extract it into an empty
+directory. Linux hosts with a glibc older than 2.35 take the
+[`-musl` archive](docs/install.md#which-linux-build). Then run:
 
 ```sh
 ./rift init
@@ -52,19 +51,9 @@ empty directory, then run:
 ./rift
 ```
 
-On Windows, use `rift.exe`. The default listener is `0.0.0.0:25565` and the backend
-is `127.0.0.1:25566`. `rift init` refuses to overwrite existing files. With no
-arguments, Rift loads `rift.lua` from the current working directory if present
-or uses those default addresses. `rift check` and `rift --check` validate that
-same file by default. Use `rift --config path/to/custom.lua` to start with another
-configuration file.
-For a quick local run without a configuration file:
-
-```sh
-./rift 0.0.0.0:25565 127.0.0.1:25566
-```
-
-Configure a local backend in `server.properties`:
+On Windows, use `rift.exe`. The default listener is `0.0.0.0:25565` and the
+default backend is `127.0.0.1:25566`. Configure a local backend to match in
+its `server.properties`:
 
 ```properties
 server-ip=127.0.0.1
@@ -73,207 +62,110 @@ online-mode=false
 prevent-proxy-connections=false
 ```
 
-**The default configuration uses unauthenticated offline identities.** Keep
-backend ports private and enable authentication for public Paper networks as
-shown below. Offline backends should have forwarding disabled and
-`enforce-secure-profile=false`.
+> [!WARNING]
+> The default configuration uses unauthenticated offline identities. Keep
+> backend ports private, and enable authentication before you open a network
+> to the public.
+
+For a quick run without a configuration file, pass both addresses:
+`./rift 0.0.0.0:25565 127.0.0.1:25566`. [Install](docs/install.md) explains
+each step, including macOS and Windows.
 
 ## Authentication
 
-Start from [examples/online.lua](examples/online.lua), which configures an
-authenticated lobby/survival network. Enable both fields in your Lua script:
+Enable online mode and forwarding together in `rift.lua`:
 
 ```lua
 rift.config.authentication = { online_mode = true, timeout_ms = 10000 }
 rift.config.forwarding = { mode = "velocity", secret_env = "RIFT_FORWARDING_SECRET" }
 ```
 
-Set `RIFT_FORWARDING_SECRET` in Rift's environment. On each Paper backend, keep
-`online-mode=false` in `server.properties` and `settings.bungeecord=false` in
-`spigot.yml`, then configure `config/paper-global.yml`:
-
-```yaml
-proxies:
-  velocity:
-    enabled: true
-    online-mode: true
-    secret: "the same secret as RIFT_FORWARDING_SECRET"
-```
-
-Restart Paper after changing these settings. Rift verifies accounts with Mojang,
-handles client encryption, and forwards player identities to Paper. Failed
-verification never falls back to offline authentication.
-
-The plugin [`chat` hook](docs/plugins.md#chat) for mutes and filters works with
-signed chat: only a player whose message it denies loses chat signing, until
-they reconnect, and their Paper backends need `enforce-secure-profile=false`.
-`authentication.signed_chat` (default `true`) can be set to `false` to keep
-every player's chat signing keys and sessions from every backend instead. Chat
-without signing shows as not secure and cannot be reported; see
-[unsigned chat](docs/network-protocol.md#unsigned-chat).
-
-Online mode works on every supported version, 1.8.9 through 26.3. Velocity
-forwarding needs 1.13 or newer backends, so a network with older versions uses
-BungeeCord forwarding instead, which every Spigot derivative reads:
-
-```lua
-rift.config.forwarding = { mode = "bungeeguard", secret_env = "RIFT_FORWARDING_SECRET" }
-```
-
-Set `settings.bungeecord: true` in each backend's `spigot.yml` and install the
-[BungeeGuard](https://github.com/lucko/BungeeGuard) plugin with the same token
-in `allowed-tokens`. `mode = "bungeecord"` sends the same data without a token;
-anyone who can reach such a backend can join as any player, so use it only
-when backends accept connections from Rift alone. With `velocity`, clients
-older than 1.13 are turned away at login.
+Set `RIFT_FORWARDING_SECRET` in Rift's environment and the same secret in each
+Paper backend's Velocity settings. Rift then verifies accounts with Mojang and
+forwards player identities to the backends.
+[Authentication and forwarding](docs/authentication.md) has the Paper
+settings, backends older than 1.13, offline mode and signed chat.
 
 ## Routing and configuration
 
-Write an ordinary Lua script using `rift.config`; no outer return table is needed:
+`rift.lua` is an ordinary Lua script that fills in `rift.config`:
 
 ```lua
 local config = require("rift.config")
 config.listeners.public = "0.0.0.0:25565"
 config.backends.lobby = "127.0.0.1:25566"
 config.routes.public = "lobby"
-
--- Import lua/config/services.lua:
--- require("config.services")
--- Load plugins/greeting/init.lua and its lua/ modules:
--- rift.plugin("greeting")
 ```
 
-`rift.on(event, callback)` composes callbacks in registration order, and
-`rift.command(name, definition)` registers authenticated commands. Local modules
-and folder-based plugins are captured on load/reload, with paths relative to the
-configuration file. Existing `return { ... }` configurations remain supported.
-See the [Lua API](docs/lua.md) and [modular example](examples/modular/rift.lua).
-
-Generate a commented starter with `rift init`, or use the
-[network example](examples/network.lua) for hostname routing, fallback, health
-checks, rate limits and metrics. Hostname routing also works from the CLI:
-
-```sh
-./rift 0.0.0.0:25565 \
-  --route survival.example.com=127.0.0.1:25566 \
-  --route '*.games.example.com=127.0.0.1:25567' \
-  --default 127.0.0.1:25566
-```
-
-Routes prefer exact names, then the longest wildcard suffix, then the default.
 Listeners require an IP and port; backends accept IPs or DNS names with ports.
-
-Every text a player sees can be styled with markup such as
-`<gradient:gold:red>Welcome</gradient>`, from Lua, plugins, the bus and the
-configuration, and Rift's own messages can be restyled or translated; see
-[styled text](docs/text.md).
-
-Rift can also own the server-list entry and the in-game tab list: set a
-network MOTD and favicon with `server_list`, and a tab list header, footer and
-network-wide player list with `tab_list`. See the
-[operations guide](docs/operations.md#tab-list-header-footer-and-network-wide-players).
+Routes prefer exact hostnames, then the longest wildcard suffix, then the
+default. [Lua configuration](docs/lua.md) covers modules, folder plugins,
+callbacks and commands, and hostname routing also works
+[from the command line](docs/install.md#commands).
 
 Validate edits with `rift check rift.lua`. Reload with SIGHUP on Unix,
-Ctrl-Break on Windows, or `rift admin reload` when administration is configured.
-Invalid reloads retain the working configuration; existing sessions keep their
-routes. Gameplay listener changes require a restart. Ctrl-C drains active
-sessions for up to 30 seconds by default; a second Ctrl-C closes them immediately.
+Ctrl-Break on Windows, or `rift admin reload`. An invalid reload keeps the
+working configuration, and existing sessions keep their routes. Ctrl-C drains
+sessions for up to 30 seconds by default; a second Ctrl-C closes them at once.
+
+The [examples](examples) directory has a complete configuration for each
+feature, such as [online.lua](examples/online.lua) for an authenticated
+network and [nodes.lua](examples/nodes.lua) for servers on several hosts.
 
 ## Plugins
 
-One plugin system, one contract ([`wit/rift-plugin.wit`](wit/rift-plugin.wit)),
-three ways to run code:
+One plugin system and one contract
+([`wit/rift-plugin.wit`](wit/rift-plugin.wit)), with three ways to run code:
 
-- **script**: `rift.lua` and its folder plugins, sandboxed, editable from the
-  dashboard;
-- **persistent**: plugin folders installed on disk with a `plugin.toml`,
-  running trusted in their own LuaJIT state or as WebAssembly components
-  written in Rust, C or Go;
+- **script**: `rift.lua` and its folder plugins, sandboxed and editable from
+  the dashboard;
+- **persistent**: plugin folders with a `plugin.toml`, running trusted in
+  their own LuaJIT state or as WebAssembly components in Rust, C or Go;
 - **remote**: services on the message bus that answer login and transfer
   decisions.
 
-Plugins get login and transfer decisions, lifecycle events, commands with UUID
-permission checks, server queues with rank priority, durable namespaced state, timers,
-permissions, the message bus and an online-player API for messages, titles,
-action bars, tab lists, kicks, broadcasts and transfers. Messages, kicks and
-deny reasons can be rich text: colours, line breaks, hover text and click
-events, spelled for each player's client version.
-
-Permissions live in Rift's [permission store](docs/permissions.md):
-LuckPerms-style users, groups, weights, contexts, temporary nodes, tracks,
-prefixes and meta, with change events and LuckPerms import, managed with
-`/perms`, `rift admin perms`, `/api/perms` and the dashboard. `rift.lua`
-reaches it through `rift.permissions`, and
-Paper and Pumpkin backends check it through their adapters.
-
-```lua
-rift.plugin("hello-lua", { deny = "Mallory" }) -- plugins/hello-lua/plugin.toml
-```
-
-Start with the [plugin overview](docs/plugins.md), including its trust model,
-then [events, commands and policy](docs/extensions.md), [dialogs](docs/dialogs.md)
-(1.21.6+ screens with inputs and buttons, shown from the proxy) and the guides for
-[Lua](docs/plugins-lua.md), [Rust](docs/plugins-rust.md), [C](docs/plugins-c.md)
-and [Go](docs/plugins-go.md). [`examples/plugins`](examples/plugins) has the same
-plugin in all four languages, and [`examples/extensions.lua`](examples/extensions.lua)
-a survival queue and staff-only server in `rift.lua`. `rift admin plugins`, the
-dashboard and Prometheus metrics show each plugin's state, restarts and log.
-Player hooks require online authentication.
+Start with the [plugin overview](docs/plugins.md) and its trust model, then
+the guides for [Lua](docs/plugins-lua.md), [Rust](docs/plugins-rust.md),
+[C](docs/plugins-c.md) and [Go](docs/plugins-go.md).
+[`examples/plugins`](examples/plugins) has the same plugin in all four
+languages. Player hooks require online authentication.
 
 ## Compatibility
 
-Minecraft Java **1.8.9 through 26.3**, including all intervening releases, supports
-login, `/server`, `/hub`, backend switching and crash recovery. All 66 releases
-have checksum-pinned official server fixtures for joining, world/chunk delivery,
-chat, switching, ban rollback and recovery. Older clients use Join Game/Respawn
-world resets; 1.20.2+ uses the configuration phase.
-See the [protocol matrix and test scope](docs/network-protocol.md).
-
-Authenticated acceptance has a separate Paper test matrix ([`tests/manual_online.py`](tests/manual_online.py))
-for signed chat and commands, resource-pack acceptance/refusal and transfer cleanup,
-plus pinned LuckPerms/EssentialsX and ViaVersion/ViaBackwards combinations.
-CI runs their startup and rejection preflights; full acceptance requires a signed-in
-1.21.11 client and records Paper observations alongside operator confirmations.
-
-Backends can run a different version than their players. Like ViaVersion and
-ViaBackwards on other proxies, but built in, Rift translates between any two
-releases from 1.12 to 26.3 in both directions, including `/server` switches
-between backends of different versions. It is on by default and asks each
-backend for its version; `config.backends.survival = { address = "127.0.0.1:25567",
-version = "1.12.2" }` declares one, and `config.translation = false` turns it
-off. Each backend or service group can choose which client versions it takes
-(`translation = "newer"`, `{ "1.20.*", ">=1.21.4" }`, or `false`), in Lua or
-in the web interface. See [protocol translation](docs/translation.md) for what
-players on other versions see.
-Online authentication and plugin player hooks work on every listed version.
-Velocity modern forwarding needs a backend on **1.13 or newer**; BungeeCord and
-BungeeGuard forwarding cover all of them (see [Authentication](#authentication)).
-Bedrock/UDP, unlisted snapshots and legacy pre-1.7 pings are unsupported.
-
-Set `rift.config.network = { bungeecord = true }` for existing backend plugins to
-request transfers, query players/servers, forward plugin messages between servers,
-and message or kick players over the BungeeCord plugin channel. Rift also answers
-two requests of its own on that channel: running servers with their state and
-player limits, and permission group membership.
-See the [supported subchannels and configuration](docs/bungeecord.md).
+- **Versions:** Minecraft Java 1.8.9 through 26.3, all 66 releases, with
+  login, `/server`, `/hub`, backend switching and crash recovery. Each release
+  is tested against a checksum-pinned official server; see the
+  [protocol matrix](docs/network-protocol.md).
+- **Translation:** on by default between any two releases from 1.12 to 26.3,
+  in both directions; `config.translation = false` turns it off.
+- **Authentication:** online mode and plugin player hooks work on every
+  listed version. Velocity modern forwarding needs backends on 1.13 or newer;
+  BungeeCord and BungeeGuard forwarding cover all of them.
+- **Paper:** signed chat, resource packs and common plugin stacks have a
+  separate authenticated test matrix
+  ([`tests/manual_online.py`](tests/manual_online.py)).
+- **BungeeCord plugins:** `rift.config.network = { bungeecord = true }` serves
+  the [BungeeCord plugin channel](docs/bungeecord.md) to backend plugins.
+- **Unsupported:** Bedrock/UDP, unlisted snapshots and legacy pre-1.7 pings.
+- **Managed servers** need their own Java runtime and EULA acceptance.
 
 ## Documentation
 
-Read the documentation at **[jotrorox.github.io/rift](https://jotrorox.github.io/rift/)**.
-The pages are built from the Markdown in [docs/](docs), which every release archive
-also includes for offline use.
+Read the documentation at **[jotrorox.github.io/rift](https://jotrorox.github.io/rift/docs/)**.
+The pages are built from the Markdown in [docs/](docs), which every release
+archive also includes for offline use.
 
-- [Lua configuration and plugins](https://jotrorox.github.io/rift/docs/lua/): script-style settings, modules and folder plugins.
-- [Plugins](https://jotrorox.github.io/rift/docs/plugins/): execution modes, `plugin.toml`, lifecycle, trust model and operations; [events, commands and policy](https://jotrorox.github.io/rift/docs/extensions/); guides for [Lua](https://jotrorox.github.io/rift/docs/plugins-lua/), [Rust](https://jotrorox.github.io/rift/docs/plugins-rust/), [C](https://jotrorox.github.io/rift/docs/plugins-c/) and [Go](https://jotrorox.github.io/rift/docs/plugins-go/).
-- [Operations](https://jotrorox.github.io/rift/docs/operations/): installation, systemd/containers, administration and upgrades.
-- [Managed servers](https://jotrorox.github.io/rift/docs/managed-servers/): local processes, automatic start/stop and persistent worlds.
-- [Multiple hosts](https://jotrorox.github.io/rift/docs/nodes/): `rift node` agents, placement across machines and failure handling.
-- [HTTP services](https://jotrorox.github.io/rift/docs/http/): web dashboard, status, API and Lua extensions.
-- [Permissions](https://jotrorox.github.io/rift/docs/permissions/): the network permission store, LuckPerms import, the dashboard and the Lua API; the [protocol](https://jotrorox.github.io/rift/docs/permissions-protocol/) backends speak; the [Rust client, testing crate and C ABI](https://jotrorox.github.io/rift/docs/permissions-clients/); [RiftPerms for Paper](https://jotrorox.github.io/rift/docs/permissions-java/), its [network API](https://jotrorox.github.io/rift/docs/network-java/) for lobby selectors and cloud plugins, and the [Pumpkin adapter](https://jotrorox.github.io/rift/docs/permissions-pumpkin/).
-- [Messaging](https://jotrorox.github.io/rift/docs/messaging/): plugin messaging, [Lua API](https://jotrorox.github.io/rift/docs/messaging-lua/) and [QUIC protocol](https://jotrorox.github.io/rift/docs/messaging-protocol/).
-- [BungeeCord compatibility](https://jotrorox.github.io/rift/docs/bungeecord/): backend plugin transfers, queries, forwarding, messages and kicks.
-- [Network protocol](https://jotrorox.github.io/rift/docs/network-protocol/): backend switching and recovery.
-- [Performance comparison](https://jotrorox.github.io/rift/docs/performance/): CPU, memory, latency and failures against Velocity, with reproducible workloads.
+| | |
+| --- | --- |
+| **Start** | [Install](docs/install.md) · [Authentication](docs/authentication.md) |
+| **Configure** | [Lua configuration](docs/lua.md) · [Server list and tab list](docs/server-list.md) · [Styled text](docs/text.md) · [Protocol translation](docs/translation.md) · [BungeeCord compatibility](docs/bungeecord.md) |
+| **Operate** | [Day-to-day operations](docs/operations.md) · [Admin CLI](docs/admin.md) · [Deployment](docs/deployment.md) · [Monitoring and logs](docs/monitoring.md) · [Hardening](docs/hardening.md) · [Upgrade and rollback](docs/upgrading.md) |
+| **Servers** | [Managed servers](docs/managed-servers.md) · [Service groups and scaling](docs/service-groups.md) · [Templates and software](docs/templates.md) · [Servers that outlive the proxy](docs/kept-servers.md) · [Isolation and memory limits](docs/server-limits.md) · [Bus logins for servers](docs/bus-logins.md) · [Multiple hosts](docs/nodes.md) |
+| **Web** | [Web dashboard](docs/http.md) · [Status page](docs/status-page.md) · [HTTP API](docs/http-api.md) · [Lua endpoints](docs/http-lua.md) |
+| **Plugins** | [Plugins](docs/plugins.md) · [Events and commands](docs/plugin-events.md) · [Running plugins](docs/plugin-operations.md) · [Hooks in rift.lua](docs/extensions.md) · [Remote decisions](docs/remote-decisions.md) · [Server queues](docs/queues.md) · [Host services](docs/host-services.md) · [Online players API](docs/players-api.md) · [Dialogs](docs/dialogs.md) · [Lua](docs/plugins-lua.md), [Rust](docs/plugins-rust.md), [C](docs/plugins-c.md) and [Go](docs/plugins-go.md) plugins |
+| **Messaging** | [Messaging](docs/messaging.md) · [Built-in subjects](docs/messaging-subjects.md) · [Messaging from Lua](docs/messaging-lua.md) · [Network API for Java](docs/network-java.md) · [Messaging protocol](docs/messaging-protocol.md) |
+| **Permissions** | [Permissions](docs/permissions.md) · [Commands](docs/permissions-commands.md) · [Lua](docs/permissions-lua.md) · [HTTP API](docs/permissions-http.md) · [RiftPerms for Paper](docs/riftperms.md) · [Java API](docs/permissions-java.md) · [Pumpkin](docs/permissions-pumpkin.md) · [Rust and C clients](docs/permissions-clients.md) · [Protocol](docs/permissions-protocol.md) |
+| **Reference** | [Network protocol](docs/network-protocol.md) · [How translation works](docs/translation-internals.md) · [Stability and versioning](docs/stability.md) · [Performance](docs/performance.md) |
 
 ## Development
 
@@ -290,14 +182,14 @@ node src/web_assets/tests.js
 ```
 
 To preview the documentation site, run `npm ci` and `npm run serve` in `site/`
-(Node 24 or newer), then open <http://localhost:4321>.
+(Node 24 or newer), then open <http://localhost:4321>. The build fails on a
+broken link and on a page in `docs/` that `site/lib/content.mjs` does not
+list; add new pages there and to the table above.
 
-CI also runs release tests, wire-protocol checks, real-server integration tests,
-benchmarks and packaging smoke tests. See the [CI workflow](.github/workflows/ci.yml)
-for those checks.
-
-On Linux, benchmark peers negotiate a 1460-byte TCP MSS to avoid loopback window
-stalls. Benchmark and pilot JSON reports record this cap; compare results with
+[CI](.github/workflows/ci.yml) also runs release tests, wire-protocol checks,
+real-server integration tests, benchmarks and packaging smoke tests. On Linux,
+benchmark peers negotiate a 1460-byte TCP MSS to avoid loopback window stalls.
+Benchmark and pilot JSON reports record this cap, so compare results with
 matching socket settings.
 
 [BSD-2-Clause](LICENSE). Run `rift --license` for the embedded license and

@@ -3,9 +3,10 @@
 A Go plugin is a WebAssembly component built with [TinyGo](https://tinygo.org)
 and the SDK in [`sdk/go`](../sdk/go) (module
 `github.com/Jotrorox/rift/sdk/go`): plain Go types, a no-op default for every
-hook and host-call wrappers. Read the [plugin overview](plugins.md) for how
-plugins are enabled, dispatched and restarted, and
-[`sdk/go/README.md`](../sdk/go/README.md) for the SDK's details.
+hook and host-call wrappers. This guide shows how the plugin contract looks in
+Go. [Plugins](plugins.md) covers enabling and trust;
+[Plugin events and commands](plugin-events.md) says what each event and answer
+means.
 
 ## Build
 
@@ -23,11 +24,13 @@ go get github.com/Jotrorox/rift/sdk/go@v0.2.0
 tinygo build -target=wasip2 --wit-package path/to/rift/wit --wit-world plugin -no-debug -o my_plugin.wasm .
 ```
 
-`--wit-package` takes the `wit/` directory of a Rift checkout (or a packaged
-WIT from `wasm-tools component wit --wasm -o rift-plugin.wasm wit`).
-`-no-debug` strips DWARF; `-scheduler=none` shrinks the output further for a
-plugin that starts no goroutines. Check the result with
-`wasm-tools component wit my_plugin.wasm`.
+- `--wit-package` takes the `wit/` directory of a Rift checkout (or a packaged
+  WIT from `wasm-tools component wit --wasm -o rift-plugin.wasm wit`).
+- `-no-debug` strips DWARF. `-scheduler=none` shrinks the output further for a
+  plugin that starts no goroutines.
+- Check the result with `wasm-tools component wit my_plugin.wasm`.
+
+[`sdk/go/README.md`](../sdk/go/README.md) has the SDK's details.
 
 ## A minimal plugin
 
@@ -93,7 +96,7 @@ Lua examples.
 | `text` | `rift.Plain`, `rift.JSON` and the builders `rift.Mini`, `rift.Legacy`, `rift.Component`; see [text](#text). |
 | `decision` | `rift.Continue()`, `rift.Deny(text)`, `rift.Server(name)`, `rift.Message(text)`, `rift.Queue(server)`, `rift.LeaveQueue()`; `route` answers are `rift.RouteDefault()`, `rift.RouteBackend`, `rift.RouteReject`. |
 | `suggest`, `status` | `rift.OnSuggest` returns `[]rift.Suggestion{{Text, Tooltip}}`; `rift.OnStatus` returns a `*rift.StatusOverride` whose `Motd`, `Version` and `Sample` are texts, or nil. |
-| `chat`, `kick` | `rift.OnChat(func(rift.ChatAttempt) rift.Decision)` and `rift.OnKick(func(rift.Context) rift.Decision)`, delivered only when the hook list names them; see [chat and kick](#chat-and-kick). |
+| `chat`, `kick` | `rift.OnChat(func(rift.ChatAttempt) rift.Decision)` and `rift.OnKick(func(rift.Context) rift.Decision)`; see [chat and kick](#chat-and-kick). |
 | `dialog` | `rift.ShowDialog`, `rift.ClearDialog`; clicks on the plugin's [dialogs](dialogs.md) reach `rift.OnDialog(func(rift.DialogResponse))`, which needs no hook in the registration. |
 | `players` | `rift.Players`, `rift.Player`, `rift.PlayerNames`, `rift.SendMessage`, `rift.SendActionBar`, `rift.SendTitle`, `rift.SetTabList`, `rift.SetBossBar`, `rift.Kick`, `rift.Transfer`, `rift.Broadcast`, `rift.Lookup`, `rift.Search`, `rift.SetLanguage`; see [players, languages and groups](#players-languages-and-groups). |
 | `background` | `rift.Defer`, `rift.Resolve`, `rift.Run`, `rift.IsWorker` with `rift.OnWork`, `rift.OnWorkInit` and `rift.OnJobDone`; see [background work](#background-work). |
@@ -109,11 +112,9 @@ Lua examples.
 
 ## Text
 
-Everything a player reads is a `rift.Text`: plain text of 1..=1024 bytes,
-shown exactly as written, or a JSON text component of at most 32 KiB
-([rich text](extensions.md#rich-text)). Messages, action bars, titles, tab
-lists, boss bars, kick reasons, `Deny` and `Message` decisions, suggestion
-tooltips and the server-list fields all take one.
+Everything a player reads is a `rift.Text`, the contract's
+[`text`](plugin-events.md#text): plain text shown exactly as written, or a JSON
+text component.
 
 ```go
 rift.SendMessage(ctx.UUID, rift.Plain("Welcome back."))
@@ -145,15 +146,15 @@ accept := rift.Component("[Accept]").Color("green").Bold().
 return rift.Message(accept.Text())
 ```
 
-`rift.Component` has `Color`, `Bold`, `Italic`, `Underlined`, `Strikethrough`,
-`Obfuscated`, `RunCommand`, `SuggestCommand`, `OpenURL`, `CopyToClipboard`,
-`HoverText` (plain), `Hover` (a component), `Insertion`, `Extra` (children)
-and `Field` (any other key, raw JSON). Builders nest through the `TextJSON`
-interface (`JSON() string`), which `rift.Text` implements too.
-
-The zero `rift.Text{}` is "none" where text is optional: leave out a title's
-`Subtitle`, a suggestion's `Tooltip`, a tab list footer or the texts of a
-`rift.StatusOverride`.
+- `rift.Component` has `Color`, `Bold`, `Italic`, `Underlined`,
+  `Strikethrough`, `Obfuscated`, `RunCommand`, `SuggestCommand`, `OpenURL`,
+  `CopyToClipboard`, `HoverText` (plain), `Hover` (a component), `Insertion`,
+  `Extra` (children) and `Field` (any other key, raw JSON).
+- Builders nest through the `TextJSON` interface (`JSON() string`), which
+  `rift.Text` implements too.
+- The zero `rift.Text{}` is "none" where text is optional: leave out a title's
+  `Subtitle`, a suggestion's `Tooltip`, a tab list footer or the texts of a
+  `rift.StatusOverride`.
 
 ```go
 rift.OnSuggest(func(ctx rift.Context) []rift.Suggestion {
@@ -167,9 +168,9 @@ rift.OnStatus(func(ping rift.Ping) *rift.StatusOverride {
 })
 ```
 
-Markup is only read from a `mini` object: `rift.Plain("<red>hi")` is shown as
-written. Pass player input with `Arg` or `rift.Plain`, never by concatenating
-it into markup. The tags are listed in [Text and markup](text.md).
+Rift reads markup only from a `mini` object: `rift.Plain("<red>hi")` is shown
+as written. Pass player input with `Arg` or `rift.Plain`, never by
+concatenating it into markup. The tags are listed in [Styled text](text.md).
 
 ## Commands
 
@@ -183,21 +184,20 @@ rift.CommandSpec{
 }
 ```
 
-The hooks always see `find` in `ctx.Command`, whichever name was typed. For a
-console run `ctx.Console` is true, `ctx.Name` is `CONSOLE`, `ctx.UUID` is
-empty and `ctx.ConnectionID` is 0; a `rift.Message` decision is printed for
-the operator. `Suggest` is one of `rift.SuggestNone()`, `SuggestFixed(...)`,
-`SuggestPlayers()`, `SuggestServers()` and `SuggestDynamic()`, which asks
-`rift.OnSuggest`.
+- The hooks always see `find` in `ctx.Command`, whichever name was typed.
+- For a console run `ctx.Console` is true, `ctx.Name` is `CONSOLE`, `ctx.UUID`
+  is empty and `ctx.ConnectionID` is 0; a `rift.Message` decision is printed
+  for the operator ([commands](plugin-events.md#commands)).
+- `Suggest` is one of `rift.SuggestNone()`, `SuggestFixed(...)`,
+  `SuggestPlayers()`, `SuggestServers()` and `SuggestDynamic()`, which asks
+  `rift.OnSuggest`.
 
 ## Chat and kick
 
-`rift.OnChat` sees chat messages, and the commands that reach the backend,
-before the backend does ([the hook](plugins.md#chat)); `rift.OnKick` runs when
-a backend kicks a player in play. Both are delivered only to a plugin whose
-hook list names `rift.HookChat` and `rift.HookKick`: an empty list means every
-hook except these two. With `Hooks` nil the SDK lists them when the handler
-is set.
+`rift.OnChat` handles the [`chat`](plugin-events.md#chat) event and
+`rift.OnKick` the `kick` event. Rift delivers both only when the hook list
+names `rift.HookChat` and `rift.HookKick`: an empty list means every hook
+except these two. With `Hooks` nil the SDK lists them when the handler is set.
 
 ```go
 rift.OnChat(func(attempt rift.ChatAttempt) rift.Decision {
@@ -213,31 +213,23 @@ rift.OnKick(func(ctx rift.Context) rift.Decision {
 })
 ```
 
-`attempt.Text` is the message, or the command line without its slash; for a
-command (`rift.ChatCommand`), `attempt.Ctx.Command` is the root name and
-`attempt.Ctx.Args` the rest. `chat` answers `Continue` or `Deny`. `kick`
-answers `Continue` (leave it to `network.on_kick`), `Deny` (disconnect with
-the text) or `Server`. Rift asks a plugin that lists `chat` about every
-message of every player; with signed chat, the first deny costs that player
-their [chat signing](plugins.md#chat).
+| Hook | Input | Answers |
+| --- | --- | --- |
+| `chat` | `attempt.Text` is the message, or the command line without its slash. For a command (`rift.ChatCommand`), `attempt.Ctx.Command` is the root name and `attempt.Ctx.Args` the rest | `Continue` or `Deny` |
+| `kick` | `ctx.Server` and `ctx.Reason` | `Continue` (leave it to `network.on_kick`), `Deny` (disconnect with the text) or `Server` |
+
+With signed chat, the first deny costs that player their
+[chat signing](plugin-events.md#denying-costs-the-player-chat-signing).
 
 ## Background work
 
-A plugin runs one call at a time, so a hook that blocks holds up every other
-hook. A decision hook can defer its answer instead, hand the slow part to a
-background worker and return. Workers are further instances of the same
-component, enabled in the manifest:
+[Background work](plugin-events.md#background-work) explains the model and
+its rules. Workers need `[background]` in the manifest.
 
-```toml
-[background]
-workers = 2
-```
-
-A worker has its own memory and globals. Its package `init` functions run,
-so the handlers are set, but it never gets `init` or any hook: only the
-`rift.OnWorkInit` handler once, with the plugin configuration, and then the
-`rift.OnWork` handler once per job. `OnWork` may block (30 s unless the
-manifest sets `deadlines.work`); its result returns to the main instance
+In Go a worker is another instance of the component with its own memory and
+globals. Its package `init` functions run, so the handlers are set. It then
+runs the `rift.OnWorkInit` handler once, with the plugin configuration, and the
+`rift.OnWork` handler once per job. The result returns to the main instance
 through `rift.OnJobDone`.
 
 ```go
@@ -289,28 +281,29 @@ func init() {
 ```
 
 - `rift.Defer` works in `OnLogin`, `OnInitialServer`, `OnBeforeTransfer`,
-  `OnCommand`, `OnChat` and `OnKick`, once per call. A hook that does not
-  defer answers with its return value as usual.
-- The hook's deadline keeps running while the job does. An answer after it
-  counts as a missed deadline (`on_timeout`), and `rift.Resolve` then returns
-  false.
-- `rift.Run` fails without workers in the manifest and when 1024 jobs wait
-  already. `OnJobDone` reports a failed job with a `rift.JobError`: the error
-  `OnWork` returned, or the host's reason. Without an `OnWork` handler every
-  job fails with `rift.ErrNoWork`.
+  `OnCommand`, `OnChat` and `OnKick`.
+- `rift.Resolve` returns false when the answer came after the hook's
+  deadline.
+- `OnJobDone` reports a failed job with a `rift.JobError`: the error `OnWork`
+  returned, or the host's reason. Without an `OnWork` handler every job fails
+  with `rift.ErrNoWork`.
 - `rift.IsWorker()` tells the two kinds of instance apart in code they share.
-  `OnJobDone` needs no entry in the hook list.
 
 ## Players, languages and groups
 
-`rift.Player` and `rift.Players` return `rift.PlayerInfo` with the player's
-`IP`, profile `Properties`, `VisibleTo`, the client's `Locale` and the
-`Language` Rift's own messages use for them. `Locale` is nil while Rift does
-not know it: the client sends it after login, so it is unset in `OnLogin`
-and, for clients before 1.20.2, in `OnJoin`.
+[The player directory and languages](plugin-events.md#the-player-directory-and-languages)
+describes the records and the language rules. In Go:
 
-`rift.Lookup` and `rift.Search` read what Rift remembers about every player
-who joined at least once, online or not:
+- `rift.Player` and `rift.Players` return `rift.PlayerInfo` with the player's
+  `IP`, profile `Properties`, `VisibleTo`, `Locale` and `Language`. `Locale`
+  is nil while Rift does not know it: always in `OnLogin`, and in `OnJoin` for
+  clients before 1.20.2.
+- `rift.Lookup` and `rift.Search` return `rift.PlayerRecord` with `UUID`,
+  `Name`, `FirstSeen`, `LastSeen`, `LastIP`, `LastServer`, `Online` and
+  `Language`.
+- `rift.SetLanguage(target, "de_de")` sets the language of Rift's own
+  messages for a player; `""` goes back to the client's locale. `ctx.Language`
+  has it from `OnLogin` on.
 
 ```go
 record, err := rift.Lookup("Alex") // a UUID, or the last name, case-insensitive
@@ -319,15 +312,6 @@ if err == nil && record != nil && !record.Online {
 }
 recent, _ := rift.Search("al", 10) // by name prefix, most recently seen first, 1..=100
 ```
-
-A `rift.PlayerRecord` has `UUID`, `Name`, `FirstSeen` and `LastSeen` (Unix
-seconds), `LastIP` (empty when `players.record_ip` is off), `LastServer`,
-`Online` and `Language`.
-
-`rift.SetLanguage(target, "de_de")` sets the language of Rift's own messages
-for a player, online or not (a tag of 2..=16 bytes of `a-z0-9_`); `""` goes
-back to the client's locale. It is remembered across sessions, so
-`ctx.Language` has it from `OnLogin` on.
 
 `rift.AddGroup` takes an expiry in Unix seconds, `0` for none; a new expiry
 replaces an earlier one:
@@ -347,8 +331,8 @@ rift.AddGroup(ctx.UUID, "builder", 0)                          // until removed
   run, against a flat 2 MB heap with 0.42.0. CI builds with 0.42.0.
 - **The WASI CLI imports are always there.** TinyGo's `wasip2` target expects
   the WASI CLI import set even when a plugin uses none of it, which is why
-  guests build against world `plugin`. Rift links all of it; capabilities
-  decide what it can reach.
+  guests build against world `plugin`. Capabilities decide what the plugin
+  can reach.
 - **Panics trap.** A panic ends the call and marks the instance failed; Rift
   applies `on_failure` and restarts it per `failure.restart`. A hook still
   running at its deadline is interrupted the same way.

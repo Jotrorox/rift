@@ -1,6 +1,8 @@
-# Lua scripts, modules and plugins
+# Lua configuration
 
-Write `rift.lua` as an ordinary script. No outer `return { ... }` is needed:
+`rift.lua` is an ordinary Lua script that fills in `rift.config`. This page
+covers how to split it into modules and plugin folders, how to register
+callbacks and commands, and what the sandbox it runs in allows.
 
 ```lua
 local config = require("rift.config") -- Also available as rift.config.
@@ -14,46 +16,32 @@ require("config.services")
 rift.plugin("greeting")
 ```
 
-A backend may run another Minecraft version than its players (1.12 to 26.3):
-Rift asks it for its version and translates. A table,
-`{ address = "127.0.0.1:25567", version = "1.12.2" }`, declares the version
-instead, and `config.translation = false` turns translation off. A backend or
-service group can limit translation to some client versions with
-`translation = "newer"` or a list such as `{ "1.20.*", ">=1.21.4" }`; see
-[protocol translation](translation.md).
+## Write the configuration
 
 `rift` is a global, like Neovim's `vim`; `local rift = require("rift")` returns
-that same API. `rift.config` contains the existing configuration fields, with
-empty `listeners`, `backends`, `managed_servers`, `service_groups`, `templates`, `routes` and
-`limits` tables ready to edit. Other
-sections are optional; assign them before editing their fields. All existing
-schema, authentication, permission and reload checks still apply. Bare globals
-such as `listeners = ...` are ordinary Lua variables, not configuration fields.
+the same API. You can set fields in three ways and mix them:
 
-Use `rift.config.templates` to describe local provisioning assets: `server_jar`,
-optional `plugins` jar paths, a `configs` directory and a `map` directory. These
-Minecraft server assets are separate from Rift's Lua modules and folder plugins.
-Use `rift.config.service_groups` for lifecycle commands, a port range, an optional
-named `template`, and a `storage` policy (`persistent` by default, `disposable`
-for games whose generated directory should be deleted on removal, or `ephemeral`
-for games that start every run from a fresh copy deleted when the process ends).
-Disposable and ephemeral groups require a template. Routes can target the group to spread logins across
-its runtime instances, or with `balance = "fill"` to fill one instance after another. Asset paths resolve relative to the configuration file.
-Templates and group policies can change live when existing instances retain
-their process definitions and storage policy. Remove affected instances before
-changing those settings. Creating/removing instances also works live. Provisioning never accepts the Minecraft EULA automatically.
-See [service groups](managed-servers.md#service-groups-and-dynamic-instances),
-[asset templates](managed-servers.md#local-asset-templates) and the
+| Way | Behavior |
+| --- | --- |
+| `rift.config.<field> = ...` | Edits the configuration in place. `listeners`, `backends`, `managed_servers`, `templates`, `template_sources`, `service_groups`, `nodes`, `routes` and `limits` start as empty tables. Assign any other section before editing its fields. Do not replace the `rift.config` table itself. |
+| `rift.setup({ ... })` | Assigns top-level fields. It replaces each supplied field, without merging nested tables, so edit individual entries to extend a section. You can call it more than once. |
+| `return { ... }` | Still supported, but no outer `return` is needed. Returned fields override fields assigned the other two ways; event and command registrations are then applied to the result. |
+
+Bare globals such as `listeners = ...` are ordinary Lua variables, not
+configuration fields. The schema, authentication, permission and reload checks
+apply whichever way you choose.
+
+A backend may run another Minecraft version than its players (1.12 to 26.3):
+Rift asks it for its version and translates. A table such as
+`{ address = "127.0.0.1:25567", version = "1.12.2" }` declares the version
+instead, and `config.translation = false` turns translation off; see
+[protocol translation](translation.md).
+
+`rift.config.templates` and `rift.config.service_groups` describe servers that
+Rift provisions and starts itself. They are separate from the Lua modules and
+folder plugins on this page; see [templates](templates.md),
+[service groups](service-groups.md) and the
 [provisioning example](../examples/templates.lua).
-
-`rift.setup({ ... })` assigns top-level configuration fields. It replaces each
-supplied field, without recursively merging nested tables. You can call it more
-than once. Edit individual entries to extend an existing section. Do not replace
-the `rift.config` table itself.
-
-Existing files that return a configuration table remain supported. Returned
-fields override fields assigned through `rift.config` or `rift.setup`; event
-and command registrations are then applied to the resulting configuration.
 
 ## Folder layout and imports
 
@@ -77,26 +65,29 @@ my-network/
 ```
 
 Paths are relative to the configuration file's directory, not the process's
-working directory. `require("config.network")` looks for `lua/config/network.lua`
-and then `lua/config/network/init.lua`. Modules can execute settings directly,
-return functions, or return tables. Modules with no return value yield `true`.
-Like Lua's `require`, successful imports are cached by name within each VM;
-a module returning `false` is evaluated again on the next import. A module
-receives its import name as `...`.
+working directory. `require("config.network")` looks for
+`lua/config/network.lua` and then `lua/config/network/init.lua`.
 
-Use dotted names with letters, digits, `_` or `-` in each component, up to 128
-bytes. Filesystem paths, `..`, absolute paths, native libraries and `package.path`
-are not supported. Import errors identify the module and file; circular imports
-fail with an explicit diagnostic. `rift`, `rift.config`, `rift.store`, `rift.http`, `rift.permissions` and `rift.players` are reserved modules.
+- A module can execute settings directly, return a function or return a table.
+  Without a return value it yields `true`. It receives its import name as
+  `...`.
+- Successful imports are cached by name within each VM, as with Lua's
+  `require`. A module that returns `false` is evaluated again on the next
+  import.
+- Names are dotted, with letters, digits, `_` or `-` in each component, up to
+  128 bytes. Filesystem paths, `..`, absolute paths, native libraries and
+  `package.path` are not supported.
+- Import errors name the module and file. Circular imports fail with an
+  explicit diagnostic.
+- `rift`, `rift.config`, `rift.store`, `rift.http`, `rift.permissions` and
+  `rift.players` are reserved modules.
 
 ## Folder-based plugins
 
 `rift.plugin("greeting")` adds `plugins/greeting/lua/` to module lookup, then
-executes `plugins/greeting/init.lua` inside this sandbox. (A folder with a
-persistent `plugin.toml` is different; see [below](#persistent-lua-plugins).)
-Plugin names use letters, digits, `_` or `-`, up to 128 bytes. The entry script
-receives the plugin name as `...` and can use the same API as `rift.lua`. It
-needs no return value:
+executes `plugins/greeting/init.lua` inside this sandbox. The entry script
+receives the plugin name as `...`, can use the same API as `rift.lua` and needs
+no return value:
 
 ```lua
 -- plugins/greeting/init.lua
@@ -110,43 +101,45 @@ rift.on("http", function(request)
 end)
 ```
 
-Plugins load explicitly in the order you call `rift.plugin`. Repeated calls
-return the cached result and do not register the plugin twice. The result is
-the entry script's returned value, or `true` when it returns nothing. A plugin
-may therefore return a module with its own `setup` function:
+- **Names** use letters, digits, `_` or `-`, up to 128 bytes.
+- **Order.** Plugins load in the order you call `rift.plugin`. A repeated call
+  returns the cached result and does not register the plugin twice.
+- **Result.** The call returns what the entry script returned, or `true`. So a
+  plugin may return a module with its own `setup` function:
 
-```lua
-rift.plugin("my-plugin").setup({ greeting = "Welcome!" })
-```
+  ```lua
+  rift.plugin("my-plugin").setup({ greeting = "Welcome!" })
+  ```
 
-Lookup checks the configuration's `lua/` first, then each loaded plugin's `lua/`
-in import order; within each directory `name.lua` precedes `name/init.lua`.
-Already imported modules remain cached. Give plugin modules their own namespace
-(for example `greeting.format`) to avoid collisions. Copy a plugin folder into
-`plugins/` to install it; Rift does not download or auto-enable plugins.
+- **Lookup** checks the configuration's `lua/` first, then each loaded
+  plugin's `lua/` in import order; within each directory `name.lua` precedes
+  `name/init.lua`. Give plugin modules their own namespace (for example
+  `greeting.format`) to avoid collisions.
+- **Install** a plugin by copying its folder into `plugins/`. Rift does not
+  download or auto-enable plugins.
 
-## Persistent Lua plugins
-
-A plugin folder whose `plugin.toml` names `engine = "lua"` is a persistent
-plugin: `rift.plugin(name, config)` records it instead of running it here, and
-Rift runs it trusted in its own long-lived LuaJIT state, with the same `rift`
-API and the whole standard library. See [persistent Lua plugins](plugins-lua.md)
-and the [plugin overview](plugins.md).
+> [!NOTE]
+> A folder whose `plugin.toml` names `engine = "lua"` is a
+> [persistent Lua plugin](plugins-lua.md). `rift.plugin(name, config)` records
+> it instead of running it here.
 
 ## Registering callbacks and commands
 
-`rift.on(event, callback)` appends a handler. Supported events are `route`, `http`,
-`message`, `status`, `login`, `initial_server`, `join`, `disconnect`, `before_transfer`,
-`after_transfer`, `dialog` and `kick`. Arguments and results match the existing `on_route`, `on_http`,
-`on_message`, [`on_status`](operations.md#server-list-motd-favicon-and-player-count) and
-[plugin event](extensions.md) callbacks.
+`rift.on(event, callback)` appends a handler for one of these events:
 
-Handlers run in registration order. A directly configured callback runs first.
-For all events except `message`, the first non-nil result ends the chain and is
-validated by the host. Return nil to let later handlers run. This means observer
-events such as `join` must still return nil. Message handlers all run, and their
-return values are ignored. An error stops the chain and follows the existing
-event's failure policy; handlers share one execution budget.
+| Event | Same arguments and results as |
+| --- | --- |
+| `route`, `http`, `message` | `on_route`, `on_http`, `on_message` |
+| `status` | [`on_status`](server-list.md#server-list) |
+| `login`, `initial_server`, `join`, `disconnect`, `before_transfer`, `after_transfer`, `dialog`, `kick` | The [callbacks in `rift.lua`](extensions.md#callbacks-and-decisions) |
+
+- Handlers run in registration order, after a directly configured callback.
+- For every event except `message`, the first non-nil result ends the chain
+  and Rift validates it. Return nil to let later handlers run; observer events
+  such as `join` must always return nil.
+- All `message` handlers run, and their return values are ignored.
+- An error stops the chain and follows the event's failure policy. Handlers
+  share one execution budget.
 
 ```lua
 rift.on("route", function(connection)
@@ -165,20 +158,25 @@ rift.command("hello", {
 })
 ```
 
-Authenticated event and command registration creates `extensions` when absent.
-`rift.command(name, definition)` uses the existing command schema and permission
-checks, including `permission = ""` for a command open to every player. Duplicate names, including collisions with `extensions.commands`, fail
-validation. Settings and registrations belong in initialization, outside runtime
-callbacks. `rift.on`, `rift.command` and `rift.setup` reject late registration.
+`rift.command(name, definition)` uses the command schema and permission checks
+of [`extensions.commands`](extensions.md#permissions-and-commands), including
+`permission = ""` for a command open to every player.
 
-`rift.publish(subject, payload, reply?)` and `rift.enabled` remain available in
-callbacks. Imports and top-level initialization cannot publish messages. Captured
-API references, including `local publish = rift.publish`, work in callbacks.
+- Registering an authenticated event or a command creates `extensions` when it
+  is absent.
+- Duplicate names fail validation, including collisions with
+  `extensions.commands`.
+- `rift.on`, `rift.command` and `rift.setup` work only during initialization
+  and reject calls from a runtime callback.
+- `rift.publish(subject, payload, reply?)` and `rift.enabled` are for
+  callbacks: imports and top-level initialization cannot publish messages.
+  Captured references such as `local publish = rift.publish` work in
+  callbacks.
 
 ## The Lua environment
 
 Scripts run on LuaJIT (Lua 5.1 syntax) with the JIT compiler off. Only these
-globals exist; everything else in the standard library is removed:
+globals exist:
 
 | Global | Contents |
 | --- | --- |
@@ -186,90 +184,101 @@ globals exist; everything else in the standard library is removed:
 | `string` | `byte`, `char`, `format`, `len`, `lower`, `rep`, `reverse`, `sub`, `upper`; strings also have these as methods (`s:sub(1, 2)`) |
 | `table` | `concat`, `insert`, `remove`, `maxn` |
 | `math` | `abs`, `acos`, `asin`, `atan`, `atan2`, `ceil`, `cos`, `cosh`, `deg`, `exp`, `floor`, `fmod`, `frexp`, `huge`, `ldexp`, `log`, `log10`, `max`, `min`, `modf`, `pi`, `pow`, `rad`, `random`, `randomseed`, `sin`, `sinh`, `sqrt`, `tan`, `tanh` |
-| `require` | Rift's module loader, described above |
-| `rift` | The API described on this page and in the [plugin event API](extensions.md) |
+| `require` | Rift's [module loader](#folder-layout-and-imports) |
+| `rift` | The API on this page and in [Hooks in `rift.lua`](extensions.md) |
 
-Missing on purpose: `pcall`, `xpcall`, `coroutine`, `load`, `loadstring`,
-`dofile`, `loadfile`, `setmetatable`, `getmetatable`, `rawget`/`rawset`/`rawequal`,
-`collectgarbage`, `print`, `io`, `os`, `debug`, `package`, `jit`, `ffi`,
-`string.find`, `string.match`, `string.gmatch`, `string.gsub` (Lua patterns can
-run for unbounded time outside the instruction budget) and `table.sort`.
+Everything else in the standard library is removed on purpose:
+
+| Removed | Names |
+| --- | --- |
+| Error handling, coroutines | `pcall`, `xpcall`, `coroutine` |
+| Code loading | `load`, `loadstring`, `dofile`, `loadfile`, `package` |
+| Metatables, raw access | `setmetatable`, `getmetatable`, `rawget`/`rawset`/`rawequal` |
+| System and runtime | `collectgarbage`, `print`, `io`, `os`, `debug`, `jit`, `ffi` |
+| Patterns | `string.find`, `string.match`, `string.gmatch`, `string.gsub`: Lua patterns can run for unbounded time outside the instruction budget |
+| Sorting | `table.sort` |
+
 `table.insert` is reimplemented in Lua so that it counts against the budget.
-
-`rift` provides, besides configuration (`rift.config`, `rift.setup`, `rift.on`,
-`rift.command`, `rift.plugin`):
-
-- `rift.try(f, ...)` calls `f(...)` like Lua's `pcall`: it returns `true` and
-  `f`'s results, or `false` and the error value. It does not catch an exhausted
-  budget: when the instruction limit, the deadline or the memory limit is
-  reached, the error passes through and the callback fails as it would without
-  `rift.try`. Use it for errors you can handle, such as a failed
-  `rift.http.request`:
-
-  ```lua
-  local ok, response = rift.try(rift.http.request, "directory", { path = uuid })
-  if not ok then return nil end -- fall back to the default
-  ```
-
-- `rift.clock()` returns seconds, with sub-millisecond precision, from a fixed
-  point in the process's life. Subtract two readings to measure elapsed time.
-- `rift.time()` returns the current Unix time in whole seconds.
-- `rift.text` builds styled text: `rift.text.mini(markup, args)` and
-  `rift.text.legacy(text, marker)` return chat component tables, and
-  `to_legacy`, `plain`, `to_mini` and `escape` convert text. See
-  [styled text](text.md).
-- `rift.publish`, `rift.enabled` and `rift.servers` (callbacks only),
-  `rift.store`, `rift.http` and `rift.players` (extension
-  callbacks; `rift.players` also in `on_message` and `on_http`), and
-  `rift.permissions` (extension callbacks; its `on_change` and
-  `contexts.provide` registrations run during configuration, see
-  [permissions](permissions.md#lua-api)).
-
 `string.format` follows Lua 5.1: `%d`, `%i`, `%u`, `%c`, `%x`, `%X`, `%o`,
 `%e`, `%E`, `%f`, `%g`, `%G`, `%q`, `%s` and `%%`, with widths and precisions
 up to 99.
 
+Besides configuration (`rift.config`, `rift.setup`, `rift.on`, `rift.command`,
+`rift.plugin`), `rift` provides:
+
+| Name | What it does |
+| --- | --- |
+| `rift.try(f, ...)` | Calls `f(...)` like Lua's `pcall`: returns `true` and `f`'s results, or `false` and the error value |
+| `rift.clock()` | Seconds, with sub-millisecond precision, from a fixed point in the process's life. Subtract two readings to measure elapsed time |
+| `rift.time()` | The current Unix time in whole seconds |
+| `rift.text` | [Styled text](text.md): `rift.text.mini(markup, args)` and `rift.text.legacy(text, marker)` return chat component tables; `to_legacy`, `plain`, `to_mini` and `escape` convert text |
+| `rift.publish`, `rift.enabled`, `rift.servers` | Callbacks only |
+| `rift.store`, `rift.http`, `rift.players` | Extension callbacks; `rift.players` also in `on_message` and `on_http` |
+| `rift.permissions` | Extension callbacks; its `on_change` and `contexts.provide` registrations run during configuration ([permissions](permissions-lua.md#functions)) |
+
+Use `rift.try` for errors you can handle, such as a failed
+`rift.http.request`:
+
+```lua
+local ok, response = rift.try(rift.http.request, "directory", { path = uuid })
+if not ok then return nil end -- fall back to the default
+```
+
+It does not catch an exhausted budget: when the instruction limit, the
+deadline or the memory limit is reached, the callback fails as it would
+without `rift.try`.
+
 ## Reloads and execution limits
 
 Startup, validation and reload capture the entry script and all `.lua` files
-under neighboring `lua/` and `plugins/` directories. Only explicitly imported
-modules and plugins execute. Hidden entries such as `.git` are skipped; symlinks
-in these trees are rejected. Keep large assets and unrelated files elsewhere.
-The combined source limit is 256 KiB, with up to 256 module/plugin files, 1024
-directory entries and 16 directory levels. Files must contain UTF-8 Lua source;
-bytecode is not accepted.
+under the neighboring `lua/` and `plugins/` directories into one snapshot.
 
-Each callback builds a fresh VM from that immutable snapshot. Even a `require`
-inside a callback uses the saved file contents; it never reads live files.
-Modules, globals and upvalues do not persist between callbacks. A successful
-reload captures edited modules and plugins even when `rift.lua` did not change.
-Existing player sessions retain their original code. Live grants, durable
-state, jobs, HTTP integrations and online player actions are described
-in the [plugin event API](extensions.md). A failed reload preserves the active
-configuration.
+- Only explicitly imported modules and plugins execute.
+- Hidden entries such as `.git` are skipped; symlinks in these trees are
+  rejected. Keep large assets and unrelated files elsewhere.
+- Files must contain UTF-8 Lua source; bytecode is not accepted.
 
-All imports and handlers share the existing 8 MiB VM memory limit and 100,000
-instruction budget. Every callback first evaluates the configuration again;
-that evaluation has its own 100,000 instructions, and the callback then starts
-with a fresh 100,000, so a heavy configuration cannot starve the callbacks.
-On Linux aarch64 LuaJIT cannot take a memory limit, so only the instruction
-budget applies there; Rift logs one warning at startup.
-`rift check` prints how many instructions the configuration uses. Its cost is
-still paid in time on every callback, against the 50 ms deadline, and `rift
-check` warns when it uses half the budget or more. Configuration evaluation during startup, checks, reloads and
-web-editor validation/saves has a five-second wall deadline, allowing for cold VM
-setup and scheduling delays on busy hosts. Runtime callbacks retain their 50 ms
-execution deadline (v2 scheduled jobs have a five-second wall deadline). Direct
-filesystem/process I/O, native modules, arbitrary code loaders and the other
-facilities listed under [the Lua environment](#the-lua-environment) remain
-unavailable. This is a local Lua plugin API, not
-the full Neovim runtime.
+| Limit | Value |
+| --- | --- |
+| Combined source | 256 KiB |
+| Module and plugin files | 256 |
+| Directory entries | 1024 |
+| Directory levels | 16 |
+| VM memory, shared by all imports and handlers | 8 MiB |
+| Instructions for evaluating the configuration | 100,000 |
+| Instructions for the callback that follows | A fresh 100,000 |
+| Deadline of a runtime callback | 50 ms |
+| Deadline of a scheduled job | 5 s |
+| Deadline of configuration evaluation at startup, checks, reloads and web-editor validation or saves | 5 s |
 
-`rift check path/to/rift.lua`, reloads, and web-editor validation/saves resolve
-the same local module directories. `rift check --strict` also checks
-environment secrets, the instance database, extension store, port binds and
-reload compatibility; see [strict checks](operations.md#strict-checks). The web editor edits the entry script;
-edit module/plugin files on disk and reload to apply them. Rust embedders can
-use `Config::load(path)` or `Config::from_lua_at(source, path)` for local imports;
-`Config::from_lua(source, name)` has no filesystem access and only exposes the
+Every callback first evaluates the configuration again. A heavy configuration
+cannot starve the callback of instructions, but its cost is paid in time on
+every callback, against the 50 ms deadline. `rift check` prints how many
+instructions the configuration uses and warns at half the budget or more.
+
+> [!NOTE]
+> On Linux aarch64 LuaJIT cannot take a memory limit, so only the instruction
+> budget applies there. Rift logs one warning at startup.
+
+**Nothing persists between callbacks.** Each callback builds a fresh VM from
+the snapshot: a `require` inside a callback never reads live files, and
+modules, globals and upvalues are gone when it ends. Rift keeps durable state
+for you through its [host services](host-services.md).
+
+**Reloads.** A successful reload captures edited modules and plugins even when
+`rift.lua` did not change. Existing player sessions keep their original code.
+A failed reload preserves the active configuration.
+
+**Checks.** `rift check path/to/rift.lua`, reloads and web-editor validation
+and saves resolve the same local module directories.
+`rift check --strict` also checks environment secrets, the instance database,
+extension store, port binds and reload compatibility; see
+[strict checks](install.md#strict-checks).
+
+**The web editor** edits the entry script only. Edit module and plugin files
+on disk and reload to apply them.
+
+**Rust embedders** can use `Config::load(path)` or
+`Config::from_lua_at(source, path)` for local imports.
+`Config::from_lua(source, name)` has no filesystem access and exposes only the
 built-in `rift` modules.

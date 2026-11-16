@@ -3,8 +3,8 @@
 Rift can run game servers on more than one machine and manage all of them from
 the proxy: start, stop, console, logs, files, templates and scaling, the way
 CloudNet nodes work. Every extra host runs `rift node`, an agent built into the
-same binary. The proxy stays the **controller**: it decides what runs where.
-Agents only prepare server directories and run processes.
+same binary. The proxy stays the **controller** and decides what runs where;
+agents only prepare server directories and run processes.
 
 ```text
              players
@@ -20,30 +20,33 @@ Agents only prepare server directories and run processes.
                                  └─────────────┘  └─────────────┘
 ```
 
-**Out of scope: multiple proxies and proxy failover.** There is exactly one
-proxy. The message broker and the player registry both live in the proxy
-process, so running several proxies or failing over between them is a separate,
-much bigger project. Nodes add game-server capacity, not proxy redundancy.
+> [!NOTE]
+> There is exactly one proxy. The message broker and the player registry both
+> live in the proxy process, so nodes add game-server capacity, not proxy
+> redundancy. Multiple proxies and proxy failover are out of scope.
+
+[examples/nodes.lua](../examples/nodes.lua) is a complete controller
+configuration.
 
 ## Do you need nodes?
 
-If only a few servers, such as a survival world, live on other machines, you may
-not: add them as plain static backends with `health_check`. They route, show up
-in `RiftServers` and support transfers, but get no dynamic scaling, templates,
-start/stop or console from Rift.
+Maybe not. If only a few servers, such as a survival world, live on other
+machines, add them as plain static backends with `health_check`:
 
 ```lua
 rift.config.backends.survival = "10.0.0.11:25565"
 rift.config.health_check = { interval_ms = 5000, timeout_ms = 1000 }
 ```
 
-Use nodes when Rift should start, stop and scale servers on those hosts.
+They route, show up in `RiftServers` and support transfers, but get no dynamic
+scaling, templates, start/stop or console from Rift. Use nodes when Rift should
+start, stop and scale servers on those hosts.
 
 ## Set up the controller
 
-Nodes connect to the controller's QUIC message bus, so `messaging.listen` with a
-certificate is required. Each node gets its own principal named `node.<name>`;
-no `messaging.principals` entry is needed for it.
+Nodes connect to the controller's QUIC message bus, so `messaging.listen` with
+a certificate is required. Each node gets its own principal named
+`node.<name>`; it needs no `messaging.principals` entry.
 
 ```lua
 rift.config.messaging = {
@@ -68,22 +71,30 @@ rift.config.nodes.node1 = {
 | `labels` | none | Names that `service_groups.*.nodes` can select |
 | `token_env` | `RIFT_NODE_<NAME>_TOKEN` | Environment variable with the node's token (32–1024 bytes) |
 
-The node name is upper-cased and `-` becomes `_` in the default variable name,
-so `eu-2` reads `RIFT_NODE_EU_2_TOKEN`. The name `local` is reserved for servers
-on the controller itself. Adding, removing or changing nodes requires a restart,
-like other messaging changes.
+- In the default variable name the node name is upper-cased and `-` becomes
+  `_`, so `eu-2` reads `RIFT_NODE_EU_2_TOKEN`.
+- The name `local` is reserved for servers on the controller itself.
+- Adding, removing or changing nodes requires a restart, like other messaging
+  changes.
+
+### Serve templates to the nodes
 
 Agents download template folders from the controller's web API, authenticated
-with the same node token. Enable `web` on an address the nodes can reach. A node
-token can only read `/api/files/templates`; every other request is refused.
+with the same node token. Enable `web` on an address the nodes can reach. A
+node token can only read `/api/files/templates`; every other request is
+refused.
 
-Agents only talk to the web API over `https://`, because the requests carry the
+Agents talk to the web API over `https://` only, because the requests carry the
 node token and the SHA-256 manifest that decides which template files a node
-trusts. Rift's web server speaks plain HTTP, so put a TLS-terminating reverse
-proxy (Caddy, nginx, ...) in front of it for remote nodes. The agent trusts the
+trusts. Plain `http://` is accepted only for loopback addresses, for an agent
+on the controller's host.
+
+Rift's web server speaks plain HTTP, so put a TLS-terminating reverse proxy
+(Caddy, nginx, ...) in front of it for remote nodes. The agent trusts the
 public CAs plus the certificates in its `--ca` file, so the proxy may use a
-certificate from the same private CA as the message bus. Plain `http://` is
-accepted only for loopback addresses, for an agent on the controller's host.
+certificate from the same private CA as the message bus.
+
+### Give each node the forwarding secret
 
 Agents never receive the forwarding secret (the Velocity secret or BungeeGuard
 token) from the controller. If `forwarding` uses either and nodes run
@@ -115,10 +126,8 @@ RIFT_NODE_TOKEN=... RIFT_FORWARDING_SECRET=... rift node \
 | `--forwarding-secret-env` | Variable holding the Velocity forwarding secret or BungeeGuard token (default `RIFT_FORWARDING_SECRET`); required only for Paper-family templates with `velocity` or `bungeeguard` forwarding |
 | `--allow-program` | A program servers may run; repeatable (default: `java`) |
 
-The agent reconnects with backoff when the controller is unreachable. In a
-systemd unit, keep the default `KillMode=control-group`: stopping or killing the
-unit then also kills every server process the agent started (see
-[Failure behaviour](#failure-behaviour)). Below its root it keeps CloudNet's layout:
+The agent reconnects with backoff when the controller is unreachable. Below
+its root it keeps CloudNet's layout:
 
 ```text
 /srv/rift/local/services/{name}     persistent instances
@@ -129,10 +138,7 @@ unit then also kills every server process the agent started (see
 
 ## Named servers on a node
 
-A managed server with `node` runs on that node. Its backend must be the node's
-address with the server's port, and its `directory` is relative to the agent's
-`--root`. Prepare the directory on the node, or upload files through the
-dashboard's Files page.
+A [managed server](managed-servers.md) with `node` runs on that node.
 
 ```lua
 rift.config.backends.survival = "10.0.0.11:25570"
@@ -144,16 +150,17 @@ rift.config.managed_servers.survival = {
 }
 ```
 
-Start, stop, automatic start on connect, idle stops, restart retries, console
-commands and logs work exactly as for local servers. Readiness is probed from
-the proxy, since it must reach the server anyway.
+- Its backend must be the node's address with the server's port.
+- Its `directory` is relative to the agent's `--root`. Prepare the directory on
+  the node, or upload files through the dashboard's Files page.
+- Start, stop, start on connect, idle stops, restart retries, console commands
+  and logs work exactly as for local servers.
+- The proxy probes readiness, since it must reach the server anyway.
 
 ## Service groups across nodes
 
-A group with `nodes` creates its instances on matching nodes. Groups without
-`nodes` keep running on the controller. `storage = "ephemeral"` (a fresh copy
-per run) is available only on the controller; groups with `nodes` use
-`disposable` or `persistent`.
+A [service group](service-groups.md) with `nodes` creates its instances on
+matching nodes. Groups without `nodes` keep running on the controller.
 
 ```lua
 rift.config.service_groups.bedwars = {
@@ -166,121 +173,151 @@ rift.config.service_groups.bedwars = {
 ```
 
 `nodes` accepts `labels` (a node must have all of them), `names`, both, or a
-plain list of node names. A new instance goes to an online, matching node with a
-free instance slot and enough unallocated memory:
+plain list of node names. A new instance goes to an online, matching node with
+a free instance slot and enough unallocated memory:
 
 | `placement` | Picks |
 | --- | --- |
 | `least_memory` (default) | the node with the most unallocated memory |
 | `fewest_instances` | the node running the fewest instances |
 
-Allocated memory is the sum of `memory_mb` of the group instances on a node
-(1024 MiB for groups with an explicit `command`). Named servers count toward
-`max_instances` but not memory. An instance stays on its node for its lifetime;
-its node is stored in the instance database and survives restarts.
+- Allocated memory is the sum of `memory_mb` of the group instances on a node
+  (1024 MiB for groups with an explicit `command`). Named servers count toward
+  `max_instances` but not memory.
+- An instance stays on its node for its lifetime. Its node is stored in the
+  instance database and survives restarts.
+- `storage = "ephemeral"` (a fresh copy per run) is available only on the
+  controller. Groups with `nodes` use `disposable` or `persistent`.
 
 **Ports are per node.** Each node allocates from the group's whole port range,
 so `bedwars-1` on node1 and `bedwars-7` on node2 can both use port 30000. The
 backend address is the node's address plus the port, registered live like a
 local instance. New instances on nodes write `server-ip=<node address>` to
-`server.properties`. Allow these ports from the proxy only: Paper's Velocity
-forwarding and BungeeGuard reject direct connections, but plain BungeeCord
-forwarding and other software run offline behind Rift.
+`server.properties`.
+
+> [!WARNING]
+> Allow these ports from the proxy only. Paper's Velocity forwarding and
+> BungeeGuard reject direct connections, but plain BungeeCord forwarding and
+> other software run offline behind Rift.
 
 ## Templates and software
 
-The controller stays the source of truth for templates. When a node prepares a
-new instance it:
+The controller stays the source of truth for [templates](templates.md). When a
+node prepares a new instance it:
 
 1. downloads server software (Paper and others) itself, with the same version
    resolution, checksums and version cache as the controller;
 2. fetches a manifest of each template folder (`GET
    /api/files/templates/<folder>?manifest`, listing each file's path, size and
-   SHA-256) and downloads only files whose hash differs from its cache, deleting
-   cached files that were removed from the template;
-3. builds the instance with the same code as local provisioning: config layers
-   in order, `server.jar`, plugins, map, EULA, forwarding and
-   `server.properties`, staged and then published atomically.
+   SHA-256) and downloads only files whose hash differs from its cache,
+   deleting cached files that were removed from the template;
+3. builds the instance like local provisioning does: config layers in order,
+   `server.jar`, plugins, map, EULA, forwarding and `server.properties`.
 
 Template folders, plugins and jars used on nodes must live in
 `template_storage` (`local/templates` by default), since that is what the web
-API serves. Folders [checked out from git](managed-servers.md#template-folders-from-git)
-are there already, so only the controller needs `git` and repository access. Templates are not sent over the message bus: its 1 MiB payload
-limit makes it the wrong channel for files. Persistent instances are prepared
-once; later starts reuse their directory and only refresh the port and bind
-address.
+API serves. Folders
+[checked out from git](templates.md#template-folders-from-git) are there
+already, so only the controller needs `git` and repository access.
 
-## Failure behaviour
+Templates are not sent over the message bus, because of its 1 MiB payload
+limit. Persistent instances are prepared once; later starts reuse their
+directory and only refresh the port and bind address.
+
+## Failure behavior
 
 | Situation | What happens |
 | --- | --- |
 | The controller connection drops | The agent **keeps its servers running** and reconnects. On every (re)connection the controller sends its instance list: the agent stops servers no longer assigned to it and deletes unassigned disposable directories. |
-| The controller restarts or shuts down | Remote servers keep running and are **adopted** again after the restart. An administrator stop that was saved before the restart still wins. Local servers stop, as before, unless they have [`keep_running`](managed-servers.md#servers-that-outlive-the-proxy); those keep running and are adopted in the same way, without an agent. |
+| The controller restarts or shuts down | Remote servers keep running and are **adopted** again after the restart. An administrator stop saved before the restart still wins. Local servers stop, unless they have [`keep_running`](kept-servers.md). |
 | A node is unreachable (no snapshot for 10 s) | Its servers show `unknown` and refuse new players. Disposable groups create replacement capacity on other nodes and retire empty unreachable instances. **Persistent instances stay tied to their node** and never move automatically, because their data is there; persistent groups do not shrink while one of their nodes is unreachable. Recovery waits for the node instead of spending restart retries. |
 | The node comes back | Servers that are still running return to `running`. Servers that exited meanwhile are recovered with their normal restart policy. |
 | A server crashes on a node | Reported as a failure with its exit status and recovered on the same node within `restart_retries`. |
-| The agent crashes or is killed | Its servers die with it, and after the agent restarts the controller restarts them. Each server runs in its own process group, which the agent kills when it stops or kills the server. On Linux the kernel also kills each server when the agent dies, even from `SIGKILL` or the OOM killer, but a helper process a start script left behind can survive. Elsewhere, a server whose agent died that way keeps running and keeps its port, so the agent refuses to start it again until it is stopped by hand. Run agents under systemd with `KillMode=control-group` (the default) so that no server outlives its agent. |
+| The agent crashes or is killed | Its servers die with it, and after the agent restarts the controller restarts them. |
+
+Each server runs in its own process group, which the agent kills when it stops
+or kills the server. When the agent itself dies from `SIGKILL` or the OOM
+killer:
+
+- On Linux the kernel kills each server too, but a helper process that a start
+  script left behind can survive.
+- Elsewhere the server keeps running and keeps its port, so the agent refuses
+  to start it again until you stop it by hand.
+
+Run agents under systemd with `KillMode=control-group` (the default): stopping
+or killing the unit then also kills every server process the agent started, so
+no server outlives its agent.
 
 ## Security
 
-- Each node authenticates with its own token and principal. The principal may
-  only publish its state and replies and subscribe to its own command subject.
-  A node principal has **one session at a time**: a new login closes the
-  previous connection (the agent logs `replaced by a newer session of this
-  node`), so a second client can never receive the node's commands alongside
-  the real agent.
-  Rift refuses `rift.node.*` traffic from every other remote identity, so other
-  plugins cannot command agents or read their commands.
-- The agent only runs programs from its `--allow-program` list, matched exactly
+The controller is trusted. Each node authenticates with its own token and
+principal.
+
+**The node principal**
+
+- It may only publish its state and replies and subscribe to its own command
+  subject. Rift refuses `rift.node.*` traffic from every other remote
+  identity, so other plugins cannot command agents or read their commands.
+- It has **one session at a time**. A new login closes the previous connection
+  (the agent logs `replaced by a newer session of this node`), so a second
+  client never receives the node's commands alongside the real agent.
+- A stolen node token lets an attacker impersonate the node and read template
+  files, but not run commands on the node: only the controller can publish
+  node commands.
+
+**The agent**
+
+- It only runs programs from its `--allow-program` list, matched exactly
   against the first command argument.
-- The agent only touches directories below `--root`: paths must be relative,
-  without `.` or `..`, and symlinks are refused at every level.
-- The controller is trusted. A stolen node token lets an attacker impersonate
-  the node and read template files, but not run commands on the node: only the
-  controller can publish node commands.
+- It only touches directories below `--root`: paths must be relative, without
+  `.` or `..`, and symlinks are refused at every level.
+- On Linux it clears its dumpable flag at startup, like the proxy (see
+  [secrets](hardening.md#secrets-in-environment-variables)).
+
+**Secrets**
+
 - The node token only travels over TLS: the QUIC bus, and `--web`, which must
   be `https://` unless it is a loopback address. The agent does not follow
   redirects, so the token cannot be forwarded elsewhere.
-- The forwarding secret never crosses the network: Prepare commands only say
+- The forwarding secret never crosses the network. Prepare commands only say
   whether to enable forwarding and which mode, and each agent writes the secret
   from its own environment.
-- One secret does cross the bus, deliberately: a server with a
-  [bus login](managed-servers.md#bus-logins-for-instances) gets its token in
-  every start command (and so after a crash recovery or an agent restart,
-  since the controller starts it again). The token is scoped to that one
-  instance and dies with it; the key that derives tokens stays on the
-  controller. The start command also carries the bus certificate, which the
-  agent writes to `rift-bus.pem` in the server directory.
-- A server's [`isolation`](managed-servers.md#isolation) is applied by the
-  agent on the node's kernel; `rift check` on the controller cannot tell what
-  that kernel offers. Agents older than the controller start every server
-  unconfined.
-- A server's [`memory_limit`](managed-servers.md#memory-limits) is enforced
-  by the agent in its own cgroup, so the agent needs a delegated one (run it
-  from a systemd unit with `Delegate=memory`). Agents older than the
-  controller start every server without a limit, a `required` one included.
-- Servers on a node do not inherit the agent's secrets: the variables named by
+- One secret does cross the bus: a server with a
+  [bus login](bus-logins.md) gets its token in
+  every start command, also after a crash recovery or an agent restart. The
+  token is scoped to that one instance and dies with it; the key that derives
+  tokens stays on the controller.
+- The start command also carries the bus certificate, which the agent writes
+  to `rift-bus.pem` in the server directory.
+- Servers do not inherit the agent's secrets: the variables named by
   `--token-env` and `--forwarding-secret-env` are removed from every server's
-  environment. A server's `env` and `inherit_env` travel with its start
-  command and apply on the node as they would locally, against the agent's
-  environment. Agents older than the controller ignore them, so upgrade
-  agents together with the controller. On Linux the agent clears its
-  dumpable flag at startup, like the proxy (see
-  [operations](operations.md#secrets-and-the-processes-rift-starts)).
+  environment.
+
+**Server settings on a node**
+
+- [`isolation`](server-limits.md#isolation) is applied by the agent on the
+  node's kernel. `rift check` on the controller cannot tell what that kernel
+  offers.
+- [`memory_limit`](server-limits.md#memory-limits) is enforced by the agent in
+  its own cgroup, so run the agent from a systemd unit with `Delegate=memory`.
+- `env` and `inherit_env` travel with the start command and apply on the node
+  as they would locally, against the agent's environment.
+
+> [!WARNING]
+> Upgrade agents together with the controller. An agent older than the
+> controller starts every server unconfined and without a memory limit, a
+> `required` one included, and ignores `env` and `inherit_env`.
 
 ## Operate nodes
 
-- Dashboard: the Servers page shows each server's node and a Nodes panel with
-  reachability, labels, instances and allocated memory.
-- HTTP: `GET /api/nodes`; every server in `/api/servers` has a `node` field
-  (`local` for the controller). Server logs, console and Files work for remote
-  servers; remote files are limited to 512 KiB through the web console.
-- Control subject and CLI: `rift.control.nodes` and `rift admin nodes` (grant
-  `servers`).
-- Java: `RiftControl.nodes()` in the `rift-control` artifact (see
-  [control and events](messaging.md#java-control-and-events)).
+| Where | What you get |
+| --- | --- |
+| Dashboard | The Servers page shows each server's node and a Nodes panel with reachability, labels, instances and allocated memory. |
+| HTTP | `GET /api/nodes`; every server in `/api/servers` has a `node` field (`local` for the controller). Server logs, console and Files work for remote servers; remote files are limited to 512 KiB through the web console. |
+| Control subject and CLI | `rift.control.nodes` and `rift admin nodes` (grant `servers`). |
+| Java | `RiftControl.nodes()` in the `rift-control` artifact (see [control and events](messaging-subjects.md#java-control-and-events)). |
 
-### Wire protocol
+## Wire protocol
 
 Agents and the controller exchange JSON over the existing bus:
 
@@ -290,6 +327,5 @@ Agents and the controller exchange JSON over the existing bus:
 | `rift.node.<n>.state` | agent → controller | Process list every 2 s and on every change; none for 10 s makes the node `unreachable` |
 
 Logs are read on demand through `logs` commands with the same byte cursors as
-local logs, so the existing logs API and dashboard work unchanged without
-streaming every log line through the controller. See `src/node/protocol.rs` for
-the message types.
+local logs, so the logs API and the dashboard work unchanged. See
+`src/node/protocol.rs` for the message types.

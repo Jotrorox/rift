@@ -598,7 +598,7 @@ mod tests {
 
     #[test]
     fn documented_examples_load() {
-        // docs/text.md and docs/extensions.md.
+        // docs/text.md and docs/players-api.md.
         Catalog::new(
             [
                 ("accent", "<#ffaa00>"),
