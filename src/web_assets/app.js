@@ -344,10 +344,19 @@
     const nodes = status.nodes || [];
     $("nodes-panel").hidden = !nodes.length;
     text("node-count", `${nodes.filter((node) => node.state === "online").length} of ${nodes.length} online`);
-    table("nodes", nodes, 6, (tr, node) => {
+    table("nodes", nodes, 7, (tr, node) => {
       cell(tr, node.name);
       cell(tr, node.state === "never_connected" ? "never connected" : node.state, `state ${node.state === "online" ? "running" : node.state === "unreachable" ? "failed" : "stopped"}`);
       cell(tr, node.address, "address");
+      // Servers that need a missing feature are refused on this node.
+      const agent = cell(tr, node.version || "—", "address"), missing = node.missing_features || [];
+      if (missing.length || node.version_mismatch) {
+        const tag = document.createElement("span");
+        tag.className = "tag warning";
+        tag.textContent = missing.length ? "Outdated" : "Mismatch";
+        tag.title = missing.length ? `Lacks ${missing.join(", ")}: servers that need them are not started here. Upgrade rift on this node.` : `This proxy runs ${status.version || "another version"}. Upgrade agents together with the proxy.`;
+        agent.append(" ", tag);
+      }
       cell(tr, (node.labels || []).join(", ") || "—");
       cell(tr, `${count(node.instances)} of ${count(node.max_instances)}`);
       cell(tr, node.memory_mb ? `${count(node.allocated_memory_mb)} of ${count(node.memory_mb)} MiB` : `${count(node.allocated_memory_mb)} MiB, no limit`);

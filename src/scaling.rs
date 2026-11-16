@@ -254,15 +254,32 @@ fn decide(
 /// Pick the node for a new instance of `group`: an online node matching the
 /// group's selector with a free instance slot and enough unallocated memory,
 /// chosen by the group's placement policy. Ties go to the first name.
+/// Nodes whose agent cannot apply a setting the group requires are skipped.
 pub fn place(config: &Config, group: &str, nodes: &Nodes) -> Result<String, String> {
-    choose(config, group, |node| nodes.online(node))
+    let requirements = config
+        .service_groups
+        .get(group)
+        .map(|definition| rift::node::server_requirements(&definition.server))
+        .unwrap_or_default();
+    choose(
+        config,
+        group,
+        |node| nodes.online(node),
+        |node| nodes.lacking(node, &requirements),
+    )
 }
 
-fn choose(config: &Config, group: &str, online: impl Fn(&str) -> bool) -> Result<String, String> {
+fn choose(
+    config: &Config,
+    group: &str,
+    online: impl Fn(&str) -> bool,
+    lacking: impl Fn(&str) -> Vec<&'static str>,
+) -> Result<String, String> {
     let definition = config
         .service_groups
         .get(group)
         .ok_or_else(|| format!("unknown service group {group:?}"))?;
+    let mut outdated = Vec::new();
     let selector = definition
         .nodes
         .as_ref()
@@ -277,6 +294,13 @@ fn choose(config: &Config, group: &str, online: impl Fn(&str) -> bool) -> Result
             .filter(|(name, node)| selector.matches(name, node))
             .inspect(|_| matching += 1)
             .filter(|(name, _)| online(name))
+            .filter(|(name, _)| {
+                let lacking = lacking(name);
+                if !lacking.is_empty() {
+                    outdated.push(format!("{name} (lacks {})", lacking.join(", ")));
+                }
+                lacking.is_empty()
+            })
             .filter_map(|(name, node)| {
                 let (instances, allocated) = usage.get(name.as_str()).copied().unwrap_or_default();
                 let free = node.memory_mb.map(|total| total.saturating_sub(allocated));
@@ -294,6 +318,11 @@ fn choose(config: &Config, group: &str, online: impl Fn(&str) -> bool) -> Result
     chosen.map(|(name, _, _)| name.clone()).ok_or_else(|| {
         if matching == 0 {
             format!("no configured node matches service_groups.{group}.nodes")
+        } else if !outdated.is_empty() {
+            format!(
+                "no node for {group} is online with a free instance slot, {memory} MiB of unallocated memory and an agent that applies its settings; upgrade rift on {}",
+                outdated.join(", ")
+            )
         } else {
             format!(
                 "no node for {group} is online with a free instance slot and {memory} MiB of unallocated memory"
@@ -527,36 +556,51 @@ rift.config.service_groups.game={template='t',storage='disposable',memory_mb=204
 rift.config.service_groups.lobby={template='t',port_range={31000,31099},nodes={'a','b'},placement='fewest_instances'}";
         let mut config = rift::config::Config::from_lua(source, "placement.lua").unwrap();
         let all = |_: &str| true;
+        let none = |_: &str| Vec::new();
         // d has no memory limit, so it has the most unallocated memory.
-        assert_eq!(choose(&config, "game", all).unwrap(), "d");
-        assert_eq!(choose(&config, "game", |n| n != "d").unwrap(), "b");
+        assert_eq!(choose(&config, "game", all, none).unwrap(), "d");
+        assert_eq!(choose(&config, "game", |n| n != "d", none).unwrap(), "b");
         config
             .add_instance_on("game", "game-1", 30000, Some("d"))
             .unwrap();
         // d is full (max_instances = 1); c lacks the label.
-        assert_eq!(choose(&config, "game", all).unwrap(), "b");
+        assert_eq!(choose(&config, "game", all, none).unwrap(), "b");
         for (name, port) in [("game-2", 30001), ("game-3", 30002), ("game-4", 30003)] {
             config
                 .add_instance_on("game", name, port, Some("b"))
                 .unwrap();
         }
         // b has 2048 MiB left, a has 4096 MiB.
-        assert_eq!(choose(&config, "game", all).unwrap(), "a");
+        assert_eq!(choose(&config, "game", all, none).unwrap(), "a");
         // Fewest instances, restricted to the named nodes.
-        assert_eq!(choose(&config, "lobby", all).unwrap(), "a");
-        assert_eq!(choose(&config, "lobby", |n| n != "a").unwrap(), "b");
-        assert!(choose(&config, "lobby", |_| false).is_err());
+        assert_eq!(choose(&config, "lobby", all, none).unwrap(), "a");
+        assert_eq!(choose(&config, "lobby", |n| n != "a", none).unwrap(), "b");
+        assert!(choose(&config, "lobby", |_| false, none).is_err());
+        // An agent that cannot apply the group's settings gets no instance.
+        let outdated = |n: &str| {
+            if n == "a" {
+                vec!["memory_limit"]
+            } else {
+                vec![]
+            }
+        };
+        assert_eq!(choose(&config, "lobby", all, outdated).unwrap(), "b");
+        let error = choose(&config, "lobby", |n| n == "a", outdated).unwrap_err();
+        assert!(
+            error.contains("upgrade rift on a (lacks memory_limit)"),
+            "{error}"
+        );
         config
             .add_instance_on("game", "game-5", 30000, Some("a"))
             .unwrap();
         config
             .add_instance_on("game", "game-6", 30001, Some("a"))
             .unwrap();
-        assert_eq!(choose(&config, "game", all).unwrap(), "b");
+        assert_eq!(choose(&config, "game", all, none).unwrap(), "b");
         config
             .add_instance_on("game", "game-7", 30004, Some("b"))
             .unwrap();
-        let error = choose(&config, "game", all).unwrap_err();
+        let error = choose(&config, "game", all, none).unwrap_err();
         assert!(error.contains("2048 MiB"), "{error}");
     }
 
