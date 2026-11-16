@@ -9,4 +9,6 @@ pub mod agent;
 pub mod protocol;
 mod registry;
 
-pub use registry::{DEFAULT_INSTANCE_MEMORY_MB, Nodes, Observation, Reachability, usage};
+pub use registry::{
+    DEFAULT_INSTANCE_MEMORY_MB, Nodes, Observation, Reachability, server_requirements, usage,
+};

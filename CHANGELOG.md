@@ -12,8 +12,18 @@ and are listed under **SDKs**.
 
 ## [Unreleased]
 
-### Added
+### Nodes
 
+- The controller checks which start settings a node agent applies before it
+  starts a server there. It refuses servers whose `env`, `inherit_env`, bus
+  login, `isolation = "required"` or `required` `memory_limit` the agent would
+  silently drop, starts best-effort settings without and warns, and places new
+  group instances only on agents that can run them. Agents from 0.1.0 report
+  no such settings: upgrade them together with the controller.
+- Outdated or mismatched agents are logged on connect, flagged in the
+  dashboard's Nodes panel, reported by `GET /api/nodes` (`features`,
+  `missing_features`, `version_mismatch`) and checked by
+  `rift check --strict` against a running controller.
 - `rift admin warm [template]`, `POST /api/nodes/warm` and a dashboard button
   have every node download its groups' templates and server software ahead of
   time, so the first instance on a new or freshly synced node starts without

@@ -130,7 +130,7 @@ operator, the player must be on one of their servers.
 | `PUT /api/groups/{name}/mode` | `servers`, scoped | Set `{"mode": "dev"}` or `{"mode": "active"}`; returns `200` with `{group, suspended, mode, dev_permission}` |
 | `GET /api/operations/{id}` | `servers`, scoped | Retrieve instance, download or warm operation state and its completed result; the scope is the operation's group |
 | `POST /api/nodes/warm` | `servers`, unrestricted | Have every node [cache its groups' templates](nodes.md#warm-the-node-caches) with `{}`, or one template's with `{"template": "bedwars"}`; returns `202` with an operation to poll. The result lists each node's templates with `files`, `downloaded`, `bytes` and `software`; the operation fails if any node or template failed |
-| `GET /api/nodes` | `read` | `{nodes: [...]}` with each [node](nodes.md)'s `state` (`online`, `unreachable`, `never_connected`), address, labels, `instances`, `max_instances`, `memory_mb`, `allocated_memory_mb`, agent `version` and `last_seen_ms` |
+| `GET /api/nodes` | `read` | `{nodes: [...]}` with each [node](nodes.md)'s `state` (`online`, `unreachable`, `never_connected`), address, labels, `instances`, `max_instances`, `memory_mb`, `allocated_memory_mb`, agent `version`, the start settings it applies (`features`), the controller's it lacks (`missing_features`), `version_mismatch` and `last_seen_ms` |
 
 A `/api/groups` entry has the group name, inclusive port range, instance
 names, template and storage policy, plus:
