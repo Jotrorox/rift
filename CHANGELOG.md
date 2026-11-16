@@ -12,10 +12,10 @@ and are listed under **SDKs**.
 
 ## [Unreleased]
 
-## [0.1.0] - unreleased
+## [0.1.0] - 2026-11-16
 
-The first tagged release. Release candidates are tagged `v0.1.0-rc.N` and
-published as prereleases from the same pipeline.
+The first stable release, after three release candidates (`v0.1.0-rc.1` to
+`v0.1.0-rc.3`) published as prereleases from the same pipeline.
 
 ### Proxy
 
@@ -91,5 +91,5 @@ published as prereleases from the same pipeline.
 - Java `io.github.jotrorox.rift` artifacts at the proxy's version, from
   `https://jotrorox.github.io/rift/maven` and GitHub Packages.
 
-[Unreleased]: https://github.com/Jotrorox/rift/commits/master
-[0.1.0]: https://github.com/Jotrorox/rift/releases
+[Unreleased]: https://github.com/Jotrorox/rift/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Jotrorox/rift/releases/tag/v0.1.0
