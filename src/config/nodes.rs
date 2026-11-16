@@ -115,7 +115,7 @@ pub(super) fn parse(root: &Table) -> Result<BTreeMap<String, NodeConfig>, String
             .map_err(|e| e.to_string())?
         {
             Value::Integer(0) => 0,
-            Value::Number(number) if number == 0.0 => 0,
+            Value::Number(0.0) => 0,
             _ => integer(
                 &values,
                 &path,
