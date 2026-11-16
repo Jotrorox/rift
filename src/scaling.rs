@@ -90,7 +90,7 @@ impl Scaler {
             // they empty, whatever the group's scaling policy; they take no
             // new players, so they are not capacity worth keeping.
             if state.mode != GroupMode::Dev
-                && let Some(server) = retire_candidate(&members, &evacuating, &self.retirements)
+                && let Some(server) = retire_candidate(&members, evacuating, &self.retirements)
             {
                 self.retirements.insert(server.clone(), now);
                 self.last_group = Some(name.clone());

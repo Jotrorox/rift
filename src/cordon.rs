@@ -147,11 +147,9 @@ rift.config.service_groups.world={template='t',storage='persistent',port_range={
         apply(&snapshot, "node2", "drain").unwrap();
         assert!(!drained(&snapshot, "node2"));
         let mut config = snapshot.config.clone();
-        for name in ["game-2"] {
-            config.instances.remove(name);
-            config.backends.remove(name);
-            config.managed_servers.remove(name);
-        }
+        config.instances.remove("game-2");
+        config.backends.remove("game-2");
+        config.managed_servers.remove("game-2");
         let next = Snapshot::new(config, Some(&snapshot)).unwrap();
         assert!(drained(&next, "node2"), "schedule survives a new snapshot");
         // A cordoned node is never reported as drained.
