@@ -1,7 +1,7 @@
 //! `rift check --strict`: what plain `rift check` cannot see from the
 //! configuration text alone. Secrets in the environment, the instance database
-//! and extension store, port binds, and whether a running Rift could reload to
-//! this configuration.
+//! and extension store, port binds, whether a running Rift could reload to
+//! this configuration, and whether its node agents can run what it asks.
 use rift::{
     config::Config,
     extensions::ExtensionScript,
@@ -13,7 +13,10 @@ use std::{net::SocketAddr, path::Path};
 #[derive(Default)]
 pub struct Report {
     pub errors: Vec<String>,
+    pub warnings: Vec<String>,
     pub notes: Vec<String>,
+    /// A running Rift holds the instance database.
+    pub running: bool,
 }
 
 impl Report {
@@ -64,7 +67,12 @@ pub fn isolation(config: &Config) -> Vec<String> {
         if let Some(limit) = server.memory_limit {
             let megabytes = limit.megabytes;
             lines.push(if remote {
-                format!("memory_limit {path}: {megabytes} MiB in each node's cgroup, enforced by its agent")
+                let fallback = if limit.required {
+                    "Rift refuses nodes whose agent cannot enforce it"
+                } else {
+                    "an agent that cannot enforce it starts the server without"
+                };
+                format!("memory_limit {path}: {megabytes} MiB in each node's cgroup, enforced by its agent; {fallback}")
             } else {
                 match (&groups, limit.required) {
                     (Ok(description), _) => {
@@ -84,8 +92,13 @@ pub fn isolation(config: &Config) -> Vec<String> {
             continue;
         }
         let line = if remote {
+            let fallback = if mode == IsolationMode::Required {
+                "Rift refuses nodes whose agent cannot apply it"
+            } else {
+                "an agent that cannot apply it starts the server unconfined"
+            };
             format!(
-                "isolation {path}: {} on each node's kernel, applied by its agent",
+                "isolation {path}: {} on each node's kernel, applied by its agent; {fallback}",
                 mode.as_str()
             )
         } else {
@@ -325,7 +338,123 @@ pub fn strict(config: &Config, path: &Path) -> Report {
         }
     }
     reload(config, path, running, &mut report);
+    report.running = running;
     report
+}
+
+/// Ask a running Rift over `admin` which agents its nodes run, and compare
+/// them with what this configuration's servers need from them. Rift refuses
+/// to start a server on an agent that would silently drop a setting it
+/// requires, so such a pair is an error here.
+pub async fn agents(config: &Config, report: &mut Report) {
+    if config.nodes.is_empty() {
+        return;
+    }
+    let skipped = |reason: &str| format!("node agents were not checked: {reason}");
+    if !report.running {
+        report.notes.push(skipped("Rift is not running"));
+        return;
+    }
+    let Some(admin) = &config.admin else {
+        report
+            .notes
+            .push(skipped("admin is not configured; see GET /api/nodes"));
+        return;
+    };
+    let secret = match crate::admin::token(admin) {
+        Ok(secret) => secret,
+        Err(error) => {
+            report.notes.push(skipped(&error.to_string()));
+            return;
+        }
+    };
+    let data = match crate::admin::query(
+        admin.listen,
+        &secret,
+        &["nodes".to_owned()],
+        std::time::Duration::from_secs(5),
+    )
+    .await
+    {
+        Ok(data) => data,
+        Err(error) => {
+            report.notes.push(skipped(&format!("admin: {error}")));
+            return;
+        }
+    };
+    let own = env!("CARGO_PKG_VERSION");
+    for node in data["nodes"].as_array().into_iter().flatten() {
+        let (Some(name), Some(version)) = (node["name"].as_str(), node["version"].as_str()) else {
+            continue;
+        };
+        let features: Vec<&str> = node["features"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|feature| feature.as_str())
+            .collect();
+        let missing: Vec<&str> = rift::node::protocol::FEATURES
+            .iter()
+            .copied()
+            .filter(|feature| !features.contains(feature))
+            .collect();
+        let refused: Vec<String> = hosted(config, name)
+            .filter_map(|(path, server)| {
+                let lacking: Vec<_> = rift::node::server_requirements(server)
+                    .into_iter()
+                    .filter(|requirement| {
+                        requirement.mandatory && missing.contains(&requirement.feature)
+                    })
+                    .map(|requirement| requirement.feature)
+                    .collect();
+                (!lacking.is_empty()).then(|| format!("{path} ({})", lacking.join(", ")))
+            })
+            .collect();
+        if !refused.is_empty() {
+            report.errors.push(format!(
+                "node {name}: agent {version} cannot apply settings of {}, so Rift refuses to start them there; upgrade rift on {name} to {own}",
+                refused.join(", ")
+            ));
+        } else if !missing.is_empty() {
+            report.warnings.push(format!(
+                "node {name}: agent {version} lacks {}; servers that need them are refused there; upgrade rift on {name} to {own}",
+                missing.join(", ")
+            ));
+        } else if version != own {
+            report.warnings.push(format!(
+                "node {name}: agent {version} differs from this rift {own}; upgrade agents together with the controller"
+            ));
+        }
+    }
+}
+
+/// The server definitions that may run on `node`: named servers placed
+/// there and service groups whose selector matches it.
+fn hosted<'a>(
+    config: &'a Config,
+    node: &'a str,
+) -> impl Iterator<Item = (String, &'a rift::config::ManagedServer)> + 'a {
+    let definition = config.nodes.get(node);
+    config
+        .managed_servers
+        .iter()
+        .filter(move |(name, server)| {
+            !config.instances.contains_key(*name) && server.node.as_deref() == Some(node)
+        })
+        .map(|(name, server)| (format!("managed_servers.{name}"), server))
+        .chain(
+            config
+                .service_groups
+                .iter()
+                .filter(move |(_, group)| {
+                    group
+                        .nodes
+                        .as_ref()
+                        .zip(definition)
+                        .is_some_and(|(selector, definition)| selector.matches(node, definition))
+                })
+                .map(|(name, group)| (format!("service_groups.{name}"), &group.server)),
+        )
 }
 
 /// Extension commands nobody can run yet: their permission is neither

@@ -222,9 +222,13 @@ async fn start(args: Vec<String>) -> io::Result<()> {
             }
             if strict {
                 let path = fs::canonicalize(path)?;
-                let report = check::strict(&config, &path);
+                let mut report = check::strict(&config, &path);
+                check::agents(&config, &mut report).await;
                 for note in &report.notes {
                     println!("rift: strict: {note}");
+                }
+                for warning in &report.warnings {
+                    eprintln!("rift: strict: warning: {warning}");
                 }
                 for error in &report.errors {
                     eprintln!("rift: strict: error: {error}");

@@ -923,6 +923,21 @@ pub async fn client(args: &[String]) -> io::Result<()> {
     } else {
         Duration::from_secs(40)
     };
+    let data = query(address, &secret, &args, deadline).await?;
+    match data["text"].as_str() {
+        Some(text) if perms => println!("{text}"),
+        _ => println!("{}", serde_json::to_string_pretty(&data)?),
+    }
+    Ok(())
+}
+
+/// Run one admin command against a running Rift and return its `data`.
+pub async fn query(
+    address: SocketAddr,
+    secret: &str,
+    args: &[String],
+    deadline: Duration,
+) -> io::Result<Value> {
     timeout(deadline, async {
         let mut stream = timeout(Duration::from_secs(2), TcpStream::connect(address)).await??;
         timeout(
@@ -930,7 +945,7 @@ pub async fn client(args: &[String]) -> io::Result<()> {
             stream.write_all(format!("{}\n", json!({"token":secret,"args":args})).as_bytes()),
         )
         .await??;
-        let response: Value =
+        let mut response: Value =
             serde_json::from_slice(&read_line(&mut stream, 16 * 1024 * 1024).await?)
                 .map_err(io::Error::other)?;
         if response["ok"] != true {
@@ -940,11 +955,7 @@ pub async fn client(args: &[String]) -> io::Result<()> {
                     .unwrap_or("invalid admin response"),
             ));
         }
-        match response["data"]["text"].as_str() {
-            Some(text) if perms => println!("{text}"),
-            _ => println!("{}", serde_json::to_string_pretty(&response["data"])?),
-        }
-        Ok(())
+        Ok(response["data"].take())
     })
     .await?
 }
