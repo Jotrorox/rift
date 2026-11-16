@@ -8,12 +8,17 @@ use axum::{
     http::{HeaderValue, Method, StatusCode, header},
     response::{IntoResponse, Response},
 };
-use rift::node::protocol::{self, Files};
+use rift::node::{
+    Remote,
+    protocol::{self, Files},
+};
 use serde_json::json;
 use std::{fs, io, path::Path as FsPath};
 
 /// Uploads and downloads both fit comfortably in memory.
 pub(super) const MAX_FILE: usize = 64 * 1024 * 1024;
+const _: () = assert!(protocol::MAX_REMOTE_FILE == MAX_FILE);
+const REMOTE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
 enum Root {
     Templates,
@@ -69,12 +74,13 @@ async fn serve(
                         method: method.to_string(),
                         path: relative,
                         folder: query.as_deref() == Some("directory"),
-                        content: (method == Method::PUT).then(|| protocol::encode_base64(&body)),
+                        content: None,
+                        offset: None,
                     };
                     let nodes = snapshot.managed.nodes().clone();
                     let node = node.clone();
                     drop(snapshot);
-                    return remote(nodes, node, request, method, body.len()).await;
+                    return remote(nodes, node, request, method, body).await;
                 }
                 server.directory.clone()
             }
@@ -130,51 +136,45 @@ async fn serve(
     }
 }
 
-/// A server folder on a node, through its agent. Files are limited to what
-/// fits a bus message.
+/// A server folder on a node, through its agent. Files larger than one bus
+/// message move in parts.
 async fn remote(
     nodes: rift::node::Nodes,
     node: String,
     request: Files,
     method: Method,
-    size: usize,
+    body: Bytes,
 ) -> Response {
-    if size > protocol::MAX_REMOTE_FILE {
-        return error(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            "files on nodes are limited to 512 KiB through the web console",
-        );
-    }
-    let folder = request.folder;
     let segments = match segments(&request.path) {
         Ok(segments) => segments,
         Err(failure) => return failed(failure),
     };
-    let result = nodes
-        .request(
-            &node,
-            &protocol::Command::Files(request),
-            std::time::Duration::from_secs(30),
-        )
-        .await;
-    let value = match result {
-        Ok(value) => value,
-        Err(failure) => return failed(failure),
-    };
-    match (
-        &method,
-        value.get("content").and_then(|content| content.as_str()),
-    ) {
-        (&Method::GET | &Method::HEAD, Some(content)) => match protocol::decode_base64(content) {
-            Some(contents) => download(&segments, contents),
-            None => error(
-                StatusCode::BAD_GATEWAY,
-                "node returned invalid file contents",
-            ),
+    let result = match method {
+        Method::GET | Method::HEAD => match nodes.read_file(&node, request).await {
+            Ok(Remote::File(contents)) => return download(&segments, contents),
+            Ok(Remote::Folder(listing)) => Ok(super::Json(listing).into_response()),
+            Err(failure) => Err(failure),
         },
-        (&Method::PUT, _) if folder => (StatusCode::CREATED, super::Json(value)).into_response(),
-        _ => super::Json(value).into_response(),
-    }
+        Method::PUT if request.folder => nodes
+            .request(&node, &protocol::Command::Files(request), REMOTE_WAIT)
+            .await
+            .map(|value| (StatusCode::CREATED, super::Json(value)).into_response()),
+        Method::PUT => nodes
+            .write_file(
+                &node,
+                &request.server,
+                request.directory,
+                request.path,
+                &body,
+            )
+            .await
+            .map(|value| super::Json(value).into_response()),
+        _ => nodes
+            .request(&node, &protocol::Command::Files(request), REMOTE_WAIT)
+            .await
+            .map(|value| super::Json(value).into_response()),
+    };
+    result.unwrap_or_else(failed)
 }
 
 fn failed(failure: io::Error) -> Response {
@@ -186,7 +186,7 @@ fn failed(failure: io::Error) -> Response {
             io::ErrorKind::AlreadyExists | io::ErrorKind::IsADirectory => StatusCode::CONFLICT,
             io::ErrorKind::FileTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             io::ErrorKind::Unsupported => StatusCode::METHOD_NOT_ALLOWED,
-            io::ErrorKind::NotConnected => StatusCode::CONFLICT,
+            io::ErrorKind::NotConnected | io::ErrorKind::ResourceBusy => StatusCode::CONFLICT,
             io::ErrorKind::TimedOut => StatusCode::GATEWAY_TIMEOUT,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         },

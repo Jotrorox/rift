@@ -336,7 +336,10 @@ dashboard; see [Templates and server software](templates.md).
 - Rift-owned `.rift-*` files (such as the instance ownership marker) cannot be
   written or deleted.
 - Uploads are written to a temporary file and renamed into place. Downloads
-  are sent as `application/octet-stream` attachments.
+  are sent as `application/octet-stream` attachments. Both are limited to
+  64 MiB, also for servers on a [node](nodes.md), where files over 512 KiB
+  cross the message bus in parts. A download fails with `409` if the file
+  changes between parts.
 - Folder listings return at most 2000 entries.
 - Writes to a running server's directory take effect when the server reads
   them, usually on reload or restart.
@@ -365,7 +368,9 @@ remain independent of them.
 | Time for a retiring server to finish responses | Three seconds |
 
 Idle and trickling connections therefore last at most ten seconds, while a
-file upload or import on a slow link (from about 26 KiB/s) can finish.
+file upload or import on a slow link (from about 26 KiB/s) can finish. Each
+request must finish within ten seconds, except `/api/files/` transfers, which
+have two minutes.
 
 ## Development checks
 

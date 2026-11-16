@@ -313,7 +313,7 @@ principal.
 | Where | What you get |
 | --- | --- |
 | Dashboard | The Servers page shows each server's node and a Nodes panel with reachability, labels, instances and allocated memory. |
-| HTTP | `GET /api/nodes`; every server in `/api/servers` has a `node` field (`local` for the controller). Server logs, console and Files work for remote servers; remote files are limited to 512 KiB through the web console. |
+| HTTP | `GET /api/nodes`; every server in `/api/servers` has a `node` field (`local` for the controller). Server logs, console and Files work for remote servers. Files over 512 KiB cross the message bus in parts, up to the same 64 MiB as local files; uploading those needs an agent from the same release as the controller. |
 | Control subject and CLI | `rift.control.nodes` and `rift admin nodes` (grant `servers`). |
 | Java | `RiftControl.nodes()` in the `rift-control` artifact (see [control and events](messaging-subjects.md#java-control-and-events)). |
 

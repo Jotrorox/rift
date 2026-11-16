@@ -117,7 +117,25 @@ pub fn write(
     directory: bool,
     body: &[u8],
 ) -> io::Result<Value> {
-    // Create missing parents one level at a time, refusing symlinks raced in.
+    let path = segments.join("/");
+    if directory {
+        create_parents(base, segments, true)?;
+        return Ok(json!({"path": path, "type": "directory"}));
+    }
+    let mut random = [0; 8];
+    aws_lc_rs::rand::fill(&mut random).map_err(|_| io::Error::other("random source failed"))?;
+    let suffix: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
+    let staged = begin_upload(base, segments, target, &suffix)?;
+    let result = append_upload(&staged, 0, body).and_then(|_| finish_upload(&staged, target));
+    if result.is_err() {
+        let _ = fs::remove_file(&staged);
+    }
+    result?;
+    Ok(json!({"path": path, "type": "file", "size": body.len()}))
+}
+
+/// Create missing parents one level at a time, refusing symlinks raced in.
+fn create_parents(base: &FsPath, segments: &[String], directory: bool) -> io::Result<()> {
     let mut parent = base.to_path_buf();
     for segment in &segments[..segments.len() - if directory { 0 } else { 1 }] {
         parent.push(segment);
@@ -133,34 +151,55 @@ pub fn write(
             Err(error) => return Err(error),
         }
     }
-    let path = segments.join("/");
-    if directory {
-        return Ok(json!({"path": path, "type": "directory"}));
-    }
+    Ok(())
+}
+
+fn refuse_folder(target: &FsPath) -> io::Result<()> {
     if fs::symlink_metadata(target).is_ok_and(|metadata| !metadata.is_file()) {
         return Err(io::Error::new(
             io::ErrorKind::IsADirectory,
             "a folder already exists at this path",
         ));
     }
-    let mut random = [0; 8];
-    aws_lc_rs::rand::fill(&mut random).map_err(|_| io::Error::other("random source failed"))?;
-    let suffix: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
-    let staged = target.with_file_name(format!(".rift-upload-{suffix}"));
-    let result = (|| {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&staged)?;
-        io::Write::write_all(&mut file, body)?;
-        file.sync_all()?;
-        fs::rename(&staged, target)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&staged);
+    Ok(())
+}
+
+/// Start replacing `target` in parts: create its parents and an empty
+/// `.rift-upload-<id>` staging file beside it, which [`protect`] hides from
+/// the web console. The caller removes the staging file if it gives up.
+pub fn begin_upload(
+    base: &FsPath,
+    segments: &[String],
+    target: &FsPath,
+    id: &str,
+) -> io::Result<PathBuf> {
+    if segments.is_empty() {
+        return Err(invalid("choose a path inside the folder"));
     }
-    result?;
-    Ok(json!({"path": path, "type": "file", "size": body.len()}))
+    create_parents(base, segments, false)?;
+    refuse_folder(target)?;
+    let staged = target.with_file_name(format!(".rift-upload-{id}"));
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staged)?;
+    Ok(staged)
+}
+
+/// Append one part to a staging file that must hold exactly `offset` bytes.
+pub fn append_upload(staged: &FsPath, offset: u64, part: &[u8]) -> io::Result<()> {
+    let mut file = fs::OpenOptions::new().append(true).open(staged)?;
+    if file.metadata()?.len() != offset {
+        return Err(invalid("upload part does not continue the file"));
+    }
+    io::Write::write_all(&mut file, part)
+}
+
+/// Flush a complete staging file and rename it over `target`.
+pub fn finish_upload(staged: &FsPath, target: &FsPath) -> io::Result<()> {
+    fs::File::open(staged)?.sync_all()?;
+    refuse_folder(target)?;
+    fs::rename(staged, target)
 }
 
 /// Delete a file or folder below its root.

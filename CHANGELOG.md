@@ -12,6 +12,16 @@ and are listed under **SDKs**.
 
 ## [Unreleased]
 
+### Nodes
+
+- The Files page and `/api/files/servers` read and write files of up to
+  64 MiB on node servers, instead of 512 KiB. Larger files cross the message
+  bus in 512 KiB parts; uploads are staged beside the target and renamed into
+  place after the last part. Uploading files over 512 KiB needs an updated
+  agent; older agents refuse them with `413` rather than writing part of the
+  file.
+- `/api/files/` requests may take two minutes instead of ten seconds.
+
 ## [0.1.0] - 2026-11-16
 
 The first stable release, after three release candidates (`v0.1.0-rc.1` to
