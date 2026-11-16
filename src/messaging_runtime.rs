@@ -36,6 +36,7 @@ pub async fn listen(
         return Ok(None);
     };
     let nodes = snapshot.config.nodes.clone();
+    let node_logins = snapshot.nodes.logins().clone();
     let (tls, auth) = tokio::task::spawn_blocking(move || -> io::Result<_> {
         let tls = quic::tls_server_config(
             settings
@@ -48,19 +49,12 @@ pub async fn listen(
                 .ok_or_else(|| io::Error::other("missing messaging private key"))?,
         )
         .map_err(io::Error::other)?;
-        let mut identities = Vec::with_capacity(settings.principals.len() + nodes.len());
-        for (name, node) in nodes {
-            let token = node_token(&name, &node.token_env)?;
-            let (publish, subscribe) = rift::node::protocol::principal_grants(&name);
-            identities.push(quic::Identity {
-                name: rift::config::NodeConfig::principal(&name),
-                token,
-                publish,
-                subscribe,
-                control: false,
-                players: false,
-            });
-        }
+        // Node logins live apart from the principals, so a reload can
+        // change them; the server checks both sets together when it binds.
+        node_logins
+            .replace(rift::node::identities(&nodes)?)
+            .map_err(io::Error::other)?;
+        let mut identities = Vec::with_capacity(settings.principals.len());
         for principal in settings.principals {
             let token = std::env::var(&principal.token_env).map_err(|_| {
                 io::Error::new(
@@ -91,6 +85,7 @@ pub async fn listen(
             quic::AuthConfig {
                 identities,
                 dynamic: logins.map(|logins| quic::Dynamic(logins)),
+                nodes: node_logins,
                 max_connections: settings.max_connections,
                 max_connections_per_address: settings.max_connections_per_address,
                 max_connections_per_identity: settings.max_connections_per_principal,
@@ -111,23 +106,6 @@ pub async fn listen(
     )
     .map(Some)
     .map_err(io::Error::other)
-}
-
-/// A node agent's token, shared by its QUIC principal and template downloads.
-pub fn node_token(name: &str, variable: &str) -> io::Result<String> {
-    let token = std::env::var(variable).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("nodes.{name}: set {variable} to a secret of at least 32 bytes"),
-        )
-    })?;
-    if !(32..=1024).contains(&token.len()) || token.chars().any(char::is_control) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("nodes.{name}: token must contain 32..=1024 bytes without control characters"),
-        ));
-    }
-    Ok(token)
 }
 
 /// Subscribing before returning prevents a readiness race for control requests.

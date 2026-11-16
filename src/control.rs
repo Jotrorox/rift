@@ -68,9 +68,7 @@ pub fn live_compatible(config: &Config, previous: &Config) -> Result<(), String>
     if config.messaging != previous.messaging {
         return Err("messaging changes require a restart".into());
     }
-    if config.nodes != previous.nodes {
-        return Err("nodes: node changes require a restart".into());
-    }
+    nodes_compatible(config, previous)?;
     let names = config
         .managed_servers
         .keys()
@@ -115,6 +113,34 @@ pub fn live_compatible(config: &Config, previous: &Config) -> Result<(), String>
         != previous.extensions.as_ref().map(|e| &e.queues)
     {
         return Err("extension queue capacity changes require a restart".into());
+    }
+    Ok(())
+}
+
+/// Nodes may be added, removed and changed live, except that a node keeps
+/// its address while servers run on it: their backend addresses are built
+/// from it. Removing such a node already fails validation.
+fn nodes_compatible(config: &Config, previous: &Config) -> Result<(), String> {
+    for (name, node) in &previous.nodes {
+        let Some(next) = config.nodes.get(name) else {
+            continue;
+        };
+        if next.address == node.address {
+            continue;
+        }
+        let servers: Vec<&str> = previous
+            .managed_servers
+            .iter()
+            .filter(|(_, server)| server.node.as_deref() == Some(name))
+            .map(|(server, _)| server.as_str())
+            .collect();
+        if !servers.is_empty() {
+            return Err(format!(
+                "nodes.{name}.address: {} run on this node at {}; remove them first, or restart to change the address",
+                servers.join(", "),
+                node.address
+            ));
+        }
     }
     Ok(())
 }
@@ -283,6 +309,74 @@ mod tests {
         let error = reload("command={'java'}", "'java','-Xmx2G'").unwrap_err();
         assert!(
             error.contains("managed_servers.static") && error.contains("restart"),
+            "{error}"
+        );
+    }
+
+    fn nodes_source(nodes: &str) -> String {
+        format!(
+            "rift.config.listeners.public='127.0.0.1:25565'
+rift.config.backends.lobby='127.0.0.1:25566'
+rift.config.routes.public='lobby'
+rift.config.messaging={{listen='0.0.0.0:7443',certificate='c.pem',private_key='k.pem'}}
+{nodes}
+rift.config.service_groups.game={{command={{'java'}},storage='disposable',port_range={{30000,30009}},nodes={{'a'}}}}"
+        )
+    }
+
+    #[test]
+    fn nodes_change_live_but_keep_their_servers() {
+        let mut previous = Config::from_lua(
+            &nodes_source(
+                "rift.config.nodes.a={address='10.0.0.1'}
+rift.config.nodes.b={address='10.0.0.2'}",
+            ),
+            "nodes.lua",
+        )
+        .unwrap();
+        previous
+            .add_instance_on("game", "game-1", 30000, Some("a"))
+            .unwrap();
+        let reload = |nodes: &str| {
+            Config::from_lua_with_instances(&nodes_source(nodes), "nodes.lua", &previous)
+                .map_err(|error| error.to_string())
+                .and_then(|candidate| live_compatible(&candidate, &previous))
+        };
+        // Add, relabel, resize, retarget and remove nodes without servers.
+        assert_eq!(
+            reload(
+                "rift.config.nodes.a={address='10.0.0.1',labels={'games'},memory_mb=4096,max_instances=4,token_env='OTHER_A'}
+rift.config.nodes.c={address='10.0.0.3'}"
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            reload(
+                "rift.config.nodes.a={address='10.0.0.1'}
+rift.config.nodes.b={address='10.0.0.20'}"
+            ),
+            Ok(())
+        );
+        // The node of game-1 keeps its address and stays configured.
+        let error = reload(
+            "rift.config.nodes.a={address='10.0.0.10'}
+rift.config.nodes.b={address='10.0.0.2'}",
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("nodes.a.address") && error.contains("game-1"),
+            "{error}"
+        );
+        let error = Config::from_lua_with_instances(
+            &nodes_source("rift.config.nodes.b={address='10.0.0.2'}")
+                .replace("nodes={'a'}", "nodes={'b'}"),
+            "nodes.lua",
+            &previous,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("instances.game-1") && error.contains("before removing its node"),
             "{error}"
         );
     }

@@ -84,11 +84,148 @@ impl std::fmt::Debug for Dynamic {
     }
 }
 
+/// The logins of node agents (`node.<name>` principals), which a
+/// configuration reload may add, remove or change while the server runs.
+/// Cheap to clone; every clone is the same set.
+///
+/// Unlike [`AuthConfig::identities`], a principal that leaves this set, or
+/// whose token changes, loses its open session at once.
+#[derive(Clone)]
+pub struct NodeLogins(Arc<NodeLoginsInner>);
+
+struct NodeLoginsInner {
+    identities: std::sync::RwLock<Vec<Identity>>,
+    /// The fixed identities of the server this set belongs to, which node
+    /// logins must not repeat. Set when the server binds.
+    fixed: std::sync::RwLock<Vec<Identity>>,
+    revoked: tokio::sync::broadcast::Sender<String>,
+}
+
+impl Default for NodeLogins {
+    fn default() -> Self {
+        Self(Arc::new(NodeLoginsInner {
+            identities: std::sync::RwLock::default(),
+            fixed: std::sync::RwLock::default(),
+            revoked: tokio::sync::broadcast::channel(256).0,
+        }))
+    }
+}
+
+impl std::fmt::Debug for NodeLogins {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("NodeLogins").field(&self.names()).finish()
+    }
+}
+
+impl NodeLogins {
+    /// The principal names in the set.
+    pub fn names(&self) -> Vec<String> {
+        read(&self.0.identities)
+            .iter()
+            .map(|identity| identity.name.clone())
+            .collect()
+    }
+
+    /// Whether `identities` could replace the set: valid `node.*` names and
+    /// grant patterns, and names and tokens that are unique, also against
+    /// the server's fixed identities.
+    pub fn check(&self, identities: &[Identity]) -> Result<()> {
+        if let Some(identity) = identities
+            .iter()
+            .find(|identity| !identity.name.starts_with("node."))
+        {
+            return Err(invalid(format!(
+                "{:?} is not a node principal",
+                identity.name
+            )));
+        }
+        validate_identities(read(&self.0.fixed).iter().chain(identities))
+    }
+
+    /// Replace the set. Principals that left it or changed their token lose
+    /// their session; the others keep theirs. Returns the revoked names.
+    pub fn replace(&self, identities: Vec<Identity>) -> Result<Vec<String>> {
+        self.check(&identities)?;
+        let previous = std::mem::replace(&mut *write(&self.0.identities), identities.clone());
+        let revoked: Vec<String> = previous
+            .into_iter()
+            .filter(|old| {
+                !identities
+                    .iter()
+                    .any(|new| new.name == old.name && new.token == old.token)
+            })
+            .map(|old| old.name)
+            .collect();
+        // After the swap, so a connection that authenticated with the old
+        // set is either closed here or refused by its own re-check.
+        for name in &revoked {
+            let _ = self.0.revoked.send(name.clone());
+        }
+        Ok(revoked)
+    }
+
+    /// Bind time: remember the fixed identities and check the set against them.
+    fn attach(&self, fixed: &[Identity]) -> Result<()> {
+        *write(&self.0.fixed) = fixed.to_vec();
+        self.check(&read(&self.0.identities))
+    }
+
+    fn authenticate(&self, tag: &[u8]) -> Option<Identity> {
+        let mut found = None;
+        for identity in read(&self.0.identities).iter() {
+            if token_mac(&identity.token).verify_slice(tag).is_ok() {
+                found = Some(identity.clone());
+            }
+        }
+        found
+    }
+
+    /// Whether `name` still logs in with `token`.
+    fn current(&self, name: &str, token: &str) -> bool {
+        read(&self.0.identities)
+            .iter()
+            .any(|identity| identity.name == name && identity.token == token)
+    }
+}
+
+fn read<T>(lock: &std::sync::RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
+    lock.read().unwrap_or_else(|e| e.into_inner())
+}
+
+fn write<T>(lock: &std::sync::RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
+    lock.write().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Identity names and tokens must be valid, nonempty and unique, and grant
+/// patterns well formed.
+fn validate_identities<'a>(identities: impl IntoIterator<Item = &'a Identity>) -> Result<()> {
+    let mut names = HashSet::new();
+    let mut tokens = HashSet::new();
+    for identity in identities {
+        if !valid_name(&identity.name)
+            || !names.insert(&identity.name)
+            || identity.token.is_empty()
+            || identity.token.len() > MAX_STRING
+            || !tokens.insert(&identity.token)
+        {
+            return Err(invalid(
+                "identity names and tokens must be nonempty and unique",
+            ));
+        }
+        for pattern in identity.publish.iter().chain(&identity.subscribe) {
+            validate_pattern(pattern)?;
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug)]
 pub struct AuthConfig {
     pub identities: Vec<Identity>,
     /// Logins issued at runtime; see [`DynamicIdentities`].
     pub dynamic: Option<Dynamic>,
+    /// Node agents' logins, replaceable while the server runs.
+    pub nodes: NodeLogins,
     /// Authenticated connections of all identities except node agents, whose
     /// one session each never competes with plugins for a slot.
     pub max_connections: usize,
@@ -105,6 +242,7 @@ impl Default for AuthConfig {
         Self {
             identities: vec![],
             dynamic: None,
+            nodes: NodeLogins::default(),
             max_connections: 1024,
             max_connections_per_address: 256,
             max_connections_per_identity: 256,
@@ -126,24 +264,8 @@ impl AuthConfig {
         {
             return Err(invalid("invalid QUIC resource limits"));
         }
-        let mut names = HashSet::new();
-        let mut tokens = HashSet::new();
-        for identity in &self.identities {
-            if !valid_name(&identity.name)
-                || !names.insert(&identity.name)
-                || identity.token.is_empty()
-                || identity.token.len() > MAX_STRING
-                || !tokens.insert(&identity.token)
-            {
-                return Err(invalid(
-                    "identity names and tokens must be nonempty and unique",
-                ));
-            }
-            for pattern in identity.publish.iter().chain(&identity.subscribe) {
-                validate_pattern(pattern)?;
-            }
-        }
-        Ok(())
+        validate_identities(&self.identities)?;
+        self.nodes.attach(&self.identities)
     }
     fn authenticate(&self, token: &str) -> Result<Identity> {
         if let Some(Dynamic(dynamic)) = &self.dynamic
@@ -162,7 +284,10 @@ impl AuthConfig {
                 found = Some(identity.clone());
             }
         }
-        found.ok_or_else(|| denied("authentication failed"))
+        let node = self.nodes.authenticate(&tag);
+        found
+            .or(node)
+            .ok_or_else(|| denied("authentication failed"))
     }
 }
 fn token_mac(token: &str) -> Hmac<Sha256> {
@@ -380,7 +505,25 @@ impl Server {
                 }
             })
         });
+        // Likewise for a node removed or given a new token by a reload.
+        let node_revoker = {
+            let mut revocations = context.auth.nodes.0.revoked.subscribe();
+            let context = context.clone();
+            tokio::spawn(async move {
+                use tokio::sync::broadcast::error::RecvError;
+                loop {
+                    match revocations.recv().await {
+                        Ok(name) => context.revoke_node(&name),
+                        Err(RecvError::Lagged(_)) => context.revoke_stale_nodes(),
+                        Err(RecvError::Closed) => return,
+                    }
+                }
+            })
+        };
+        // Dropped with the accept loop, also when it is aborted.
+        let revokers = AbortOnDrop(revoker.into_iter().chain([node_revoker]).collect());
         let task = tokio::spawn(async move {
+            let _revokers = revokers;
             let mut tasks = JoinSet::new();
             loop {
                 tokio::select! {
@@ -411,9 +554,6 @@ impl Server {
                     _ = tasks.join_next(), if !tasks.is_empty() => {}
                 }
             }
-            if let Some(revoker) = revoker {
-                revoker.abort();
-            }
             tasks.abort_all();
             while tasks.join_next().await.is_some() {}
         });
@@ -435,6 +575,15 @@ impl Drop for Server {
     fn drop(&mut self) {
         self.endpoint.close(0u32.into(), b"server shutdown");
         self.task.abort();
+    }
+}
+/// Aborts its tasks when dropped.
+struct AbortOnDrop(Vec<JoinHandle<()>>);
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        for task in &self.0 {
+            task.abort();
+        }
     }
 }
 /// Connections still in their TLS handshake or authentication, in total and
@@ -503,6 +652,32 @@ impl Context {
             });
         }
         sessions.retain(|_, list| !list.is_empty());
+    }
+
+    /// Close the session of node principal `name`.
+    fn revoke_node(&self, name: &str) {
+        let removed = self
+            .node_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(name);
+        if let Some((_, connection)) = removed {
+            connection.close(5u32.into(), b"this login was revoked");
+        }
+    }
+
+    /// After missed revocations, close every node session that did not log
+    /// in as a fixed identity: which tokens changed is unknown, and agents
+    /// reconnect on their own.
+    fn revoke_stale_nodes(&self) {
+        let mut sessions = self.node_sessions.lock().unwrap_or_else(|e| e.into_inner());
+        sessions.retain(|name, (_, connection)| {
+            let fixed = self.auth.identities.iter().any(|i| &i.name == name);
+            if !fixed {
+                connection.close(5u32.into(), b"this login was revoked");
+            }
+            fixed
+        });
     }
 
     /// Track a dynamic identity's connection until it ends.
@@ -689,6 +864,21 @@ async fn serve_connection(connection: Connection, context: Arc<Context>, admissi
                 let node_session = session
                     .is_none()
                     .then(|| context.claim_node_session(&identity.name, &connection));
+                // A reload may have revoked this node login since it was
+                // checked, before the session above was there to close.
+                if node_session.is_some()
+                    && !context
+                        .auth
+                        .identities
+                        .iter()
+                        .any(|i| i.name == identity.name)
+                    && !context.auth.nodes.current(&identity.name, &token)
+                {
+                    let error = denied("authentication failed");
+                    let _ = write_error(&mut send, &error).await;
+                    let _ = send.finish();
+                    return Err(error);
+                }
                 let dynamic_session = context
                     .auth
                     .dynamic

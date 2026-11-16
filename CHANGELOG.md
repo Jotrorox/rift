@@ -12,6 +12,14 @@ and are listed under **SDKs**.
 
 ## [Unreleased]
 
+### Nodes
+
+- `rift.config.nodes` changes apply on reload instead of needing a restart.
+  Added nodes may log in at once, removed nodes lose their bus session, and
+  labels, `memory_mb`, `max_instances` and `token_env` change in place. A
+  reload that would remove a node still running servers, or change its
+  address under them, is refused and names the servers.
+
 ## [0.1.0] - 2026-11-16
 
 The first stable release, after three release candidates (`v0.1.0-rc.1` to
