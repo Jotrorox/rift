@@ -27,6 +27,8 @@ use rift::{
 use rustls::pki_types::PrivateKeyDer;
 
 const TOKEN: &str = "rift-node-integration-token-with-32-bytes";
+/// The second node, `node2`, for moves between nodes.
+const TOKEN2: &str = "rift-node-integration-token-for-node2-32b";
 
 /// A tiny game server, run by the agent from this test executable.
 #[test]
@@ -124,6 +126,7 @@ rift.config.backends.survival='127.0.0.1:{port}'
 rift.config.routes.public='survival'
 rift.config.messaging={{listen='127.0.0.1:0',certificate='c.pem',private_key='k.pem'}}
 rift.config.nodes.node1={{address='127.0.0.1',memory_mb=4096,labels={{'games'}}}}
+rift.config.nodes.node2={{address='127.0.0.1',memory_mb=4096,labels={{'games'}}}}
 rift.config.managed_servers.survival={{node='node1',directory='survival',
   command={{{program:?},'--exact','node_server_helper','--nocapture'}},
   messaging={{preset='backend'}},
@@ -140,20 +143,23 @@ rift.config.managed_servers.survival={{node='node1',directory='survival',
         .unwrap();
         let client_tls = quic::client_config_from_der(vec![cert.cert.der().clone()]).unwrap();
         let broker = Broker::default();
-        let (publish, subscribe) = protocol::principal_grants("node1");
+        let identity = |node: &str, token: &str| {
+            let (publish, subscribe) = protocol::principal_grants(node);
+            quic::Identity {
+                name: format!("node.{node}"),
+                token: token.into(),
+                publish,
+                subscribe,
+                control: false,
+                players: false,
+            }
+        };
         let server = quic::Server::bind(
             "127.0.0.1:0".parse().unwrap(),
             server_tls,
             broker.clone(),
             quic::AuthConfig {
-                identities: vec![quic::Identity {
-                    name: "node.node1".into(),
-                    token: TOKEN.into(),
-                    publish,
-                    subscribe,
-                    control: false,
-                    players: false,
-                }],
+                identities: vec![identity("node1", TOKEN), identity("node2", TOKEN2)],
                 ..Default::default()
             },
         )
@@ -173,13 +179,22 @@ rift.config.managed_servers.survival={{node='node1',directory='survival',
     }
 
     fn agent(&self, web: Option<String>) -> Arc<agent::Agent> {
+        self.agent_named("node1", web)
+    }
+
+    /// `node1` keeps its root in `agent`, `node2` in `agent2`.
+    fn agent_named(&self, name: &str, web: Option<String>) -> Arc<agent::Agent> {
+        let (token, root) = match name {
+            "node1" => (TOKEN, "agent"),
+            _ => (TOKEN2, "agent2"),
+        };
         agent::Agent::new(agent::Options {
             controller: self.server.local_addr().unwrap().to_string(),
             server_name: "localhost".into(),
             ca: PathBuf::new(),
-            name: "node1".into(),
-            token: TOKEN.into(),
-            root: self.root.join("agent"),
+            name: name.into(),
+            token: token.into(),
+            root: self.root.join(root),
             web,
             allowed_programs: BTreeSet::from([std::env::current_exe()
                 .unwrap()
@@ -193,11 +208,19 @@ rift.config.managed_servers.survival={{node='node1',directory='survival',
 
     /// Connect an agent; dropping the handle disconnects it.
     async fn connect(&self, agent: &Arc<agent::Agent>) -> tokio::task::JoinHandle<()> {
+        self.connect_with(agent, TOKEN).await
+    }
+
+    async fn connect_with(
+        &self,
+        agent: &Arc<agent::Agent>,
+        token: &str,
+    ) -> tokio::task::JoinHandle<()> {
         let client = quic::Client::connect(
             self.server.local_addr().unwrap(),
             "localhost",
             self.client_tls.clone(),
-            TOKEN,
+            token,
         )
         .await
         .unwrap();
@@ -851,6 +874,155 @@ async fn servers_on_a_node_start_with_their_own_bus_login() {
     // Removing the login (the instance) makes the token useless.
     logins.unregister("survival");
     assert!(logins.authenticate(token).is_none());
+    managed.stop("survival").await.unwrap();
+    managed.shutdown().await;
+    connection.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stopped_servers_folder_moves_between_agents_through_the_controller() {
+    use rift::node::transfer;
+    let fixture = Fixture::new().await;
+    let source_agent = fixture.agent_named("node1", None);
+    let target_agent = fixture.agent_named("node2", None);
+    let source_connection = fixture.connect_with(&source_agent, TOKEN).await;
+    let target_connection = fixture.connect_with(&target_agent, TOKEN2).await;
+    eventually("both nodes online", || {
+        fixture.nodes.online("node1") && fixture.nodes.online("node2")
+    })
+    .await;
+    let relative = std::path::Path::new("local/services/lobby-1");
+    let source = fixture.root.join("agent").join(relative);
+    let target = fixture.root.join("agent2").join(relative);
+    // Several chunks, so the next read overlaps the previous write.
+    let region: Vec<u8> = (0..protocol::MAX_REMOTE_FILE * 3 + 5)
+        .map(|index| (index * 7 % 256) as u8)
+        .collect();
+    fs::create_dir_all(source.join("world/region")).unwrap();
+    fs::create_dir_all(source.join("plugins/empty")).unwrap();
+    fs::write(source.join("world/region/r.0.0.mca"), &region).unwrap();
+    fs::write(source.join("world/level.dat"), b"level").unwrap();
+    fs::write(source.join("server.properties"), b"server-port=30000\n").unwrap();
+    fs::write(source.join("blank.txt"), b"").unwrap();
+    let copied = transfer::copy(&fixture.nodes, "lobby-1", "node1", "node2", relative)
+        .await
+        .unwrap();
+    assert_eq!(copied.files, 4);
+    assert_eq!(copied.folders, 4);
+    assert_eq!(copied.bytes, region.len() as u64 + 5 + 18);
+    // Staged next to the destination until the controller commits.
+    assert!(!target.exists());
+    assert!(
+        fixture
+            .root
+            .join("agent2/local/services/.rift-move-lobby-1")
+            .is_dir()
+    );
+    transfer::commit(&fixture.nodes, "lobby-1", "node2", relative)
+        .await
+        .unwrap();
+    assert_eq!(
+        fs::read(target.join("world/region/r.0.0.mca")).unwrap(),
+        region
+    );
+    assert_eq!(fs::read(target.join("world/level.dat")).unwrap(), b"level");
+    assert_eq!(fs::read(target.join("blank.txt")).unwrap(), b"");
+    assert!(target.join("plugins/empty").is_dir());
+    assert!(target.join(protocol::MOVE_MARKER).exists());
+    transfer::finish(&fixture.nodes, "lobby-1", "node2", relative)
+        .await
+        .unwrap();
+    assert!(!target.join(protocol::MOVE_MARKER).exists());
+    // A recorded folder is never replaced by another copy, and a failed
+    // copy leaves no staging folder and the source untouched.
+    let error = transfer::copy(&fixture.nodes, "lobby-1", "node1", "node2", relative)
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists, "{error}");
+    assert!(
+        !fixture
+            .root
+            .join("agent2/local/services/.rift-move-lobby-1")
+            .exists()
+    );
+    assert!(source.join("world/level.dat").exists());
+    // The old folder goes once the move is recorded; only its own server's.
+    let discard = |server: &str| Command::Discard {
+        server: server.into(),
+        directory: relative.into(),
+    };
+    let wait = Duration::from_secs(20);
+    assert!(
+        fixture
+            .nodes
+            .request("node1", &discard("lobby-2"), wait)
+            .await
+            .is_err()
+    );
+    let removed = fixture
+        .nodes
+        .request("node1", &discard("lobby-1"), wait)
+        .await
+        .unwrap();
+    assert_eq!(removed["removed"], true);
+    assert!(!source.exists());
+    assert!(target.join("world/region/r.0.0.mca").exists());
+    source_connection.abort();
+    target_connection.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_is_parked_for_a_move_and_never_starts_meanwhile() {
+    let fixture = Fixture::new().await;
+    let agent = fixture.agent(None);
+    tokio::spawn(agent.clone().monitor());
+    let connection = fixture.connect(&agent).await;
+    eventually("node online", || fixture.nodes.online("node1")).await;
+    let managed = fixture.managed();
+    managed.start("survival").await.unwrap();
+    assert_eq!(phase(&managed), Phase::Running);
+    let parked = managed.park("survival").await.unwrap();
+    assert!(parked.was_running() && parked.automatic());
+    assert_eq!(phase(&managed), Phase::Stopped);
+    assert!(managed.is_moving("survival"));
+    assert!(managed.snapshot()[0].moving);
+    // The agent no longer runs it, so its folder may be read for the move.
+    let tree = Command::Tree {
+        server: "survival".into(),
+        directory: "survival".into(),
+        offset: 0,
+    };
+    eventually("process gone on the node", || {
+        fixture
+            .nodes
+            .observe("node1", "survival")
+            .is_some_and(|o| o.running.is_none())
+    })
+    .await;
+    fixture
+        .nodes
+        .request("node1", &tree, Duration::from_secs(5))
+        .await
+        .unwrap();
+    // No start gets through while parked, and nothing else can take it.
+    assert!(managed.start("survival").await.is_err());
+    assert!(managed.request_scale_start("survival").is_err());
+    assert!(managed.ensure_running("survival").await.is_err());
+    assert!(!managed.can_connect("survival"));
+    assert!(managed.park("survival").await.is_err());
+    assert!(managed.remove("survival").await.is_err());
+    // Abandoning the move starts it again; the stop was not an
+    // administrator stop.
+    parked.resume();
+    assert!(!managed.is_moving("survival"));
+    eventually("running again", || phase(&managed) == Phase::Running).await;
+    // A running server's folder is never read for a move.
+    let error = fixture
+        .nodes
+        .request("node1", &tree, Duration::from_secs(5))
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::ResourceBusy, "{error}");
     managed.stop("survival").await.unwrap();
     managed.shutdown().await;
     connection.abort();

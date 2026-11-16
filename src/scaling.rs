@@ -72,6 +72,12 @@ impl Scaler {
                         .is_some_and(|instance| instance.group == *name)
                 })
                 .collect();
+            // A group holds still while an administrator moves one of its
+            // instances: the member is stopped on purpose, so it must not be
+            // replaced, started, stopped or retired underneath the move.
+            if members.iter().any(|server| server.moving) {
+                continue;
+            }
             // Operator state outranks the scaling policy: a stopped group
             // only winds down, and a group in dev mode is left as it is.
             let state = snapshot.control.group(name);
@@ -337,6 +343,7 @@ mod tests {
             restart_attempts: 0,
             restart_exhausted: false,
             node: None,
+            moving: false,
         }
     }
 

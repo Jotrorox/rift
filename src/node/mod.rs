@@ -8,5 +8,6 @@
 pub mod agent;
 pub mod protocol;
 mod registry;
+pub mod transfer;
 
 pub use registry::{DEFAULT_INSTANCE_MEMORY_MB, Nodes, Observation, Reachability, usage};

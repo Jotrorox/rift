@@ -29,6 +29,7 @@ mod groups;
 mod health;
 mod messaging_runtime;
 mod metrics;
+mod moving;
 mod network;
 mod operator;
 mod runtime;

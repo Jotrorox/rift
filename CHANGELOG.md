@@ -12,6 +12,17 @@ and are listed under **SDKs**.
 
 ## [Unreleased]
 
+### Added
+
+- `rift admin move <instance> <node>` moves a persistent instance to another
+  node on purpose: it stops the instance, copies its folder between the node
+  agents through the proxy with a SHA-256 check per file, records the new node
+  in the instance database and starts it again. `--no-copy` re-homes an
+  instance whose folder was restored on the new node, for example after its
+  node died; `--keep-source` keeps the old folder. Instances never move
+  automatically. Agents must be upgraded together with the controller to take
+  part in a move.
+
 ## [0.1.0] - 2026-11-16
 
 The first stable release, after three release candidates (`v0.1.0-rc.1` to

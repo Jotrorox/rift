@@ -525,6 +525,54 @@ impl Store {
         Ok(())
     }
 
+    /// Re-register a ready remote instance on another node: the commit point
+    /// of `rift admin move`. Only its node and port change; its phase,
+    /// administrator stop and login generation stay. `from` must still be
+    /// the stored node, so a concurrent change cannot be overwritten.
+    pub fn move_instance(&self, config: &Config, name: &str, from: &str) -> io::Result<()> {
+        let instance = config
+            .instances
+            .get(name)
+            .ok_or_else(|| self.error("unknown instance"))?;
+        let node = instance
+            .node
+            .clone()
+            .ok_or_else(|| self.error("instances move only between nodes"))?;
+        let record = self
+            .records()?
+            .into_iter()
+            .find(|r| r.name == name && r.phase == "ready")
+            .ok_or_else(|| self.error(format!("instances.{name}: not registered")))?;
+        if record.definition.instance.node.as_deref() != Some(from)
+            || record.definition.instance.group != instance.group
+            || record.definition.instance.storage != instance.storage
+        {
+            return Err(self.error(format!(
+                "instances.{name}: registration changed during the move"
+            )));
+        }
+        let definition = serde_json::to_string(&Definition {
+            instance: instance.clone(),
+            plan: record.definition.plan,
+        })
+        .map_err(|e| self.error(e))?;
+        let changed = self
+            .database
+            .lock()
+            .execute(
+                "UPDATE instances SET node=?1, port=?2, definition=?3
+                 WHERE name=?4 AND phase='ready' AND node=?5",
+                params![node, instance.port, definition, name, from],
+            )
+            .map_err(|e| self.error(e))?;
+        if changed != 1 {
+            return Err(self.error(format!(
+                "instances.{name}: registration changed during the move"
+            )));
+        }
+        Ok(())
+    }
+
     /// The bus login generation of instance `name`; 0 if it was never
     /// created here (a static managed server).
     pub fn login_generation(&self, name: &str) -> io::Result<u64> {
