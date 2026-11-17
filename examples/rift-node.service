@@ -1,0 +1,64 @@
+# The node agent's unit. `rift node init <name>` on the controller prints this
+# with every value filled in; see docs/nodes.md. Replace CONTROLLER (the
+# controller's messaging address), NODE (the name in rift.config.nodes) and
+# the --web URL (drop it if nodes use no templates).
+#
+# /etc/rift/node.env, owned by root with mode 0600:
+#   RIFT_NODE_TOKEN=<the controller's RIFT_NODE_<NAME>_TOKEN>
+# /etc/rift/rift-ca.pem: the CA that signs the messaging certificate (the
+# certificate itself when it is self-signed).
+[Unit]
+Description=Rift node agent
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=rift
+Group=rift
+# Creates /var/lib/rift-node owned by rift; it is the agent's --root.
+StateDirectory=rift-node
+StateDirectoryMode=0750
+WorkingDirectory=/var/lib/rift-node
+EnvironmentFile=/etc/rift/node.env
+ExecStart=/usr/local/bin/rift node --controller CONTROLLER:7443 --name NODE --root /var/lib/rift-node --ca /etc/rift/rift-ca.pem --web https://CONTROLLER:8443 --allow-program java
+Restart=on-failure
+RestartSec=5s
+# Required: stopping or killing the agent also kills every server it started,
+# so none outlives it holding its port (docs/nodes.md#failure-behavior).
+KillMode=control-group
+# Must exceed the agent's 30 second server stop grace.
+TimeoutStopSec=45s
+# Required for memory_limit: the agent puts limited servers into cgroups below
+# this unit. DelegateSubgroup needs systemd 254; older versions ignore it.
+Delegate=memory
+DelegateSubgroup=rift
+LimitNOFILE=65536
+UMask=0027
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectProc=invisible
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+LockPersonality=true
+SystemCallArchitectures=native
+RemoveIPC=true
+# Left out on purpose, as in examples/rift.service: MemoryDenyWriteExecute
+# (the JVM generates code), ProtectKernelTunables and ProtectControlGroups
+# (both make the delegated cgroup read-only) and a SystemCallFilter.
+
+[Install]
+WantedBy=multi-user.target

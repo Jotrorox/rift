@@ -357,16 +357,82 @@ struct Server {
     configured: SocketAddr,
     actual: SocketAddr,
     stop: watch::Sender<bool>,
+    /// The web service's certificate for new connections; `None` serves
+    /// plain HTTP. Replaced on reload without rebinding the socket.
+    tls: watch::Sender<Option<tokio_rustls::TlsAcceptor>>,
     task: JoinHandle<io::Result<()>>,
 }
 #[derive(Default)]
 pub struct Services {
     servers: BTreeMap<Kind, Server>,
 }
-pub type Prepared = BTreeMap<Kind, TcpListener>;
+/// New sockets and the web certificate, loaded before a configuration is
+/// committed so an unreadable certificate fails the reload, not the service.
+pub struct Prepared {
+    sockets: BTreeMap<Kind, TcpListener>,
+    web_tls: Option<tokio_rustls::TlsAcceptor>,
+}
+/// HTTPS for the web service from a PEM certificate chain and unencrypted PEM
+/// key. HTTP/1.1 only, like the server; TLS 1.3 and 1.2 with rustls defaults.
+pub fn tls_acceptor(
+    certificate: &std::path::Path,
+    private_key: &std::path::Path,
+) -> io::Result<tokio_rustls::TlsAcceptor> {
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
+    let pem = |kind: &str, path: &std::path::Path, error: rustls::pki_types::pem::Error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("web.tls: {kind} ({}): {error}", path.display()),
+        )
+    };
+    let certs = CertificateDer::pem_file_iter(certificate)
+        .and_then(|certs| certs.collect::<Result<Vec<_>, _>>())
+        .map_err(|error| pem("certificate", certificate, error))?;
+    if certs.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "web.tls: certificate ({}): no certificates found",
+                certificate.display()
+            ),
+        ));
+    }
+    let key = PrivateKeyDer::from_pem_file(private_key)
+        .map_err(|error| pem("private key", private_key, error))?;
+    let mut tls = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(io::Error::other)?
+    .with_no_client_auth()
+    .with_single_cert(certs, key)
+    .map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "web.tls: {} and {}: {error}",
+                certificate.display(),
+                private_key.display()
+            ),
+        )
+    })?;
+    tls.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Ok(tokio_rustls::TlsAcceptor::from(Arc::new(tls)))
+}
 impl Services {
     /// Reserve every new socket before changing configuration or stopping a server.
     pub async fn prepare(&self, config: &Config) -> io::Result<Prepared> {
+        let web_tls = match config.web_tls_files() {
+            Some((certificate, private_key)) => {
+                let (certificate, private_key) = (certificate.to_owned(), private_key.to_owned());
+                Some(
+                    tokio::task::spawn_blocking(move || tls_acceptor(&certificate, &private_key))
+                        .await
+                        .map_err(io::Error::other)??,
+                )
+            }
+            None => None,
+        };
         let mut sockets = BTreeMap::new();
         for kind in [Kind::Web, Kind::Status, Kind::Metrics] {
             if let Some(address) = kind.address(config) {
@@ -383,7 +449,7 @@ impl Services {
                 sockets.insert(kind, socket);
             }
         }
-        Ok(sockets)
+        Ok(Prepared { sockets, web_tls })
     }
     pub fn addresses(
         &self,
@@ -395,7 +461,7 @@ impl Services {
             if kind.address(config).is_none() {
                 continue;
             }
-            let address = match prepared.get(&kind) {
+            let address = match prepared.sockets.get(&kind) {
                 Some(s) => s.local_addr()?,
                 None => self.servers[&kind].actual,
             };
@@ -418,14 +484,21 @@ impl Services {
                 // The bounded graceful shutdown task owns the old listener and
                 // lets an HTTP save that disables itself finish its response.
             }
-            if let Some(socket) = prepared.remove(&kind) {
+            let tls = match kind {
+                Kind::Web => prepared.web_tls.take(),
+                Kind::Status | Kind::Metrics => None,
+            };
+            if let Some(socket) = prepared.sockets.remove(&kind) {
                 let actual = socket.local_addr().expect("bound socket address");
                 let (stop, mut stopped) = watch::channel(false);
                 let mut deadline_signal = stopped.clone();
                 let router = router(kind, actual, app.clone());
+                let https = if tls.is_some() { " (https)" } else { "" };
+                let (tls, certificate) = watch::channel(tls);
                 let task = tokio::spawn(async move {
                     let (force, forced) = watch::channel(false);
-                    let socket = crate::web_transport::Listener::new(socket, forced);
+                    let socket =
+                        crate::web_transport::Listener::new(socket, forced).with_tls(certificate);
                     let serve = axum::serve(socket, router).with_graceful_shutdown(async move {
                         let _ = stopped.changed().await;
                     });
@@ -434,16 +507,27 @@ impl Services {
                         _ = async move { let _ = deadline_signal.changed().await; tokio::time::sleep(Duration::from_secs(3)).await; } => { force.send_replace(true); Ok(()) }
                     }
                 });
-                log_info!("{} on {actual}", kind.name());
+                log_info!("{} on {actual}{https}", kind.name());
                 self.servers.insert(
                     kind,
                     Server {
                         configured: desired.unwrap(),
                         actual,
                         stop,
+                        tls,
                         task,
                     },
                 );
+            } else if let Some(server) = self.servers.get(&kind) {
+                // Same socket: new connections use the reloaded certificate,
+                // or plain HTTP once web.tls is removed. Open ones keep theirs.
+                let before = server.tls.borrow().is_some();
+                let after = tls.is_some();
+                server.tls.send_replace(tls);
+                if before != after {
+                    let https = if after { " (https)" } else { " (plain http)" };
+                    log_info!("{} on {}{https}", kind.name(), server.actual);
+                }
             }
         }
     }
