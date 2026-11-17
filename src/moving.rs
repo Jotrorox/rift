@@ -189,6 +189,23 @@ pub(crate) fn check(
         .get(instance)
         .map(|server| server.directory.clone())
         .ok_or_else(|| format!("{instance} has no managed server"))?;
+    let schedule = snapshot.control.node(to);
+    if !schedule.accepts_instances() {
+        return Err(format!(
+            "node {to} is {} and takes no new instances; uncordon it first",
+            schedule.as_str()
+        ));
+    }
+    let lacking = snapshot
+        .nodes
+        .lacking(to, &rift::node::server_requirements(&group.server));
+    if !lacking.is_empty() {
+        return Err(format!(
+            "node {to} runs an agent that cannot apply {} for service_groups.{group_name}; upgrade rift on that node to {}",
+            lacking.join(", "),
+            env!("CARGO_PKG_VERSION")
+        ));
+    }
     if !snapshot.nodes.online(to) {
         return Err(format!(
             "node {to} is {}; it must be online to receive {instance}",
